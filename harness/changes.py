@@ -38,7 +38,8 @@ def find_repos(root: Path, depth: int = 2) -> list[Path]:
     return found
 
 
-def workspace_changes(workspace: Path) -> dict:
+def workspace_changes(workspace: Path, base_commit: str | None = None) -> dict:
+    """`base_commit` is where a git project's session branch started; it applies to the repo at the root."""
     workspace = workspace.resolve()
     repos = []
     budget = MAX_DIFF_CHARS
@@ -54,8 +55,8 @@ def workspace_changes(workspace: Path) -> dict:
         # Show untracked files in the diff too, without staging anything for real.
         untracked = [f["path"] for f in files if f["status"] == "??" and "__pycache__/" not in f["path"]]
         # Compare against where the branch started (its upstream), so commits the agent made show up too.
-        base = ""
-        for ref in ("@{upstream}", "origin/HEAD"):
+        base = base_commit if base_commit and repo == workspace else ""
+        for ref in () if base else ("@{upstream}", "origin/HEAD"):
             base = _git(repo, "merge-base", "HEAD", ref).strip()
             if base:
                 break

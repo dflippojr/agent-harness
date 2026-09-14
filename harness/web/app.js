@@ -19,8 +19,9 @@ const STATUS_LABEL = {
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "compaction", "compacting", "error", "llm_retry", "resumed",
-  "run_finished", "queue", "notes", "model_waking", "model_ready",
+  "run_finished", "queue", "notes", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
 ];
+const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
 
 let cleanup = [];
 const onLeave = (fn) => cleanup.push(fn);
@@ -223,6 +224,7 @@ async function viewList() {
           badge(s.status),
           pending ? h("span", { class: "badge waiting_approval" }, `${pending} approval${pending > 1 ? "s" : ""}`) : null,
           s.queue_position > 0 ? h("span", {}, `#${s.queue_position} in queue`) : null,
+          s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, REVIEW_LABEL[s.review] || s.review) : null,
           h("span", {}, s.project), h("span", {}, ago(s.updated_at))),
         s.answer_preview ? h("div", { class: "preview" }, s.answer_preview) : null);
     }));
@@ -361,7 +363,7 @@ async function viewSession(sid, tab, focusApproval) {
   };
   renderHead();
 
-  if (tab === "changes") return viewChanges(sid);
+  if (tab === "changes") return viewChanges(session);
   if (tab === "info") return viewInfo(session);
 
   const feed = h("div");
@@ -443,6 +445,8 @@ async function viewSession(sid, tab, focusApproval) {
     try { args = JSON.parse(fn.arguments || "{}"); } catch (_) { args = { raw: fn.arguments }; }
     const summaryText = fn.name === "run_shell" ? args.command
       : fn.name === "git_clone" ? args.url
+        : fn.name === "prometheus_query" ? args.query
+        : args.service ? `${args.service}${args.since ? ` since ${args.since}` : ""}`
         : args.path ? `${args.path}${args.start_line ? ` :${args.start_line}` : ""}` : fn.arguments;
     const state = h("span", { class: "state" }, "…");
     const body = h("div", { class: "body" }, h("pre", {}, JSON.stringify(args, null, 2)));
@@ -469,7 +473,8 @@ async function viewSession(sid, tab, focusApproval) {
       h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
       h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
     const what = a.tool === "run_shell" ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
-      : a.tool === "git_clone" ? `git clone ${a.args.url}` : JSON.stringify(a.args, null, 2);
+      : a.tool === "git_clone" ? `git clone ${a.args.url}`
+        : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
     const card = h("div", { class: "approval", id: `approval-${a.id}` },
       h("h4", {}, `Approval needed: ${a.reason || a.tool}`),
       h("pre", {}, a.detail || what),
@@ -548,6 +553,10 @@ async function viewSession(sid, tab, focusApproval) {
     error: (e) => add(h("p", { class: "note bad" }, e.data.message)),
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
     resumed: () => add(h("p", { class: "note" }, "Daemon restarted — session resumed")),
+    workspace_ready: (e) => add(h("p", { class: "note" }, `Checked out on branch ${e.data.branch} (from ${e.data.base_branch})`)),
+    branch_saved: (e) => add(h("p", { class: "note" }, h("a", { href: `#/s/${sid}/changes` },
+      `Branch saved: ${e.data.commits.length} commit${e.data.commits.length === 1 ? "" : "s"} to review${e.data.auto_commit ? " (leftover edits committed)" : ""}`))),
+    review: (e) => add(h("p", { class: "note" }, `Review: ${e.data.detail}`)),
     model_waking: (e) => {
       wakingNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
         `The model was asleep. Waking it (about ${Math.round(e.data.expected_seconds / 60) || 1} min)`)));
@@ -587,10 +596,50 @@ async function viewSession(sid, tab, focusApproval) {
   onLeave(() => composer.remove());
 }
 
-async function viewChanges(sid) {
+function reviewCard(s) {
+  if (!s.repo_kind || !s.branch) return null;
+  const busy = !TERMINAL.has(s.status);
+  const act = (action, question) => async (ev) => {
+    if (question && !confirm(question)) return;
+    const card = ev.target.closest(".card");
+    card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    try {
+      const updated = await api(`/sessions/${s.id}/review/${action}`, { method: "POST" });
+      toast(updated.review_detail || `${action} done`, 4000);
+      route();
+    } catch (e) {
+      toast(e.message, 6000);
+      card.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+    }
+  };
+  const base = s.base_branch || "base";
+  const buttons = [];
+  if (!busy && !s.workspace_removed && s.review !== "discarded") {
+    if (s.repo_kind === "local") {
+      buttons.push(h("button", { class: "btn ok", onclick: act("merge", `Squash-merge ${s.branch} into ${base}?`) }, `Merge into ${base}`));
+    } else {
+      buttons.push(h("button", { class: "btn ok", onclick: act("push", `Push ${s.branch} to the remote?`) }, "Push branch"));
+    }
+    buttons.push(h("button", { class: "btn bad solid", onclick: act("discard", "Discard this branch and delete the workspace? This can't be undone.") }, "Discard"));
+  }
+  return h("section", { class: "card" },
+    h("h3", {}, "Review"),
+    h("div", { class: "meta" }, h("span", {}, `branch ${s.branch}`), s.base_branch ? h("span", {}, `from ${s.base_branch}`) : null,
+      s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, s.review) : null),
+    s.review_detail ? h("p", { class: "muted small" }, s.review_detail) : null,
+    busy ? h("p", { class: "muted small" }, "The agent is still working; review when the run ends.") : null,
+    buttons.length ? h("div", { class: "row end", style: "margin-top:8px" }, buttons) : null);
+}
+
+async function viewChanges(session) {
+  const sid = session.id;
   const box = h("div", {}, h("p", { class: "note" }, "Loading changes…"));
-  $app.append(box);
+  $app.append(reviewCard(session), box);
   const data = await api(`/sessions/${sid}/changes`);
+  if (data.removed) {
+    box.replaceChildren(h("p", { class: "empty" }, "This workspace was cleaned up or discarded."));
+    return;
+  }
   if (!data.repos.length) {
     box.replaceChildren(h("p", { class: "empty" }, "No git repositories in this workspace yet."));
     return;
@@ -636,8 +685,9 @@ function viewInfo(s) {
     ["Project", s.project], ["Target", s.target], ["Model", s.model],
     ["Created", new Date(s.created_at * 1000).toLocaleString()], ["Updated", new Date(s.updated_at * 1000).toLocaleString()],
     ["Model turns", t.turns || 0], ["Prompt tokens", t.prompt_tokens || 0], ["Completion tokens", t.completion_tokens || 0],
-    ["Workspace", s.workspace],
+    ["Workspace", s.workspace_removed ? `${s.workspace} (removed)` : s.workspace],
   ];
+  if (s.branch) rows.push(["Branch", `${s.branch}${s.base_branch ? ` from ${s.base_branch}` : ""}`], ["Review", s.review || "pending"]);
   $app.append(h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
     h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v))))),
   h("a", { class: "btn", href: `/sessions/${s.id}/transcript`, target: "_blank" }, "Open Markdown transcript"));
@@ -655,7 +705,7 @@ async function viewSettings() {
     h("div", { class: "card" }, h("h3", {}, "Notifications"),
       me.notify.enabled ? h("ol", {},
         h("li", {}, "Install the ntfy app from the App Store."),
-        h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password (D:\Docker\ntfy\secrets\phone-login.txt on the tower)."),
+        h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password (D:\\Docker\\ntfy\\secrets\\phone-login.txt on the tower)."),
         h("li", {}, "Settings → Default server → the same URL. Then + → topic ", h("code", {}, me.notify.topic), "."),
         h("li", {}, "Tap a notification to open the session; long-press it for Approve / Deny.")) : h("p", {}, "Disabled in config/harness.yaml."),
       me.notify.enabled ? h("button", {
@@ -664,8 +714,38 @@ async function viewSettings() {
           try { await api("/notify/test", { method: "POST" }); toast("Test notification sent"); } catch (e) { toast(e.message); }
         },
       }, "Send test notification") : null),
+    diskCard(),
     h("div", { class: "card" }, h("h3", {}, "Install"),
       h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")));
+}
+
+function diskCard() {
+  const body = h("div", {}, h("p", { class: "muted small" }, "Measuring…"));
+  const load = async () => {
+    try {
+      const u = await api("/maintenance");
+      const top = u.workspaces.slice(0, 5);
+      const mb = (n) => (n < 1 ? "<1 MB" : `${n} MB`);
+      fill(body,
+        h("p", {}, `${u.free_gb} GB free of ${u.total_gb} GB · workspaces ${mb(u.workspaces_mb)} (${u.workspaces.length}) · quota ${u.quota_mb} MB each`),
+        top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null,
+        h("p", { class: "muted small" }, `${u.containers.length} sandbox container${u.containers.length === 1 ? "" : "s"}`));
+    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
+  };
+  load();
+  return h("div", { class: "card" }, h("h3", {}, "Disk"), body,
+    h("button", {
+      class: "btn",
+      onclick: async (ev) => {
+        ev.target.disabled = true;
+        try {
+          const r = await api("/maintenance/cleanup", { method: "POST" });
+          toast(`Removed ${r.containers_removed.length} containers, ${r.workspaces_removed.length + r.orphans_removed.length} workspaces`);
+          load();
+        } catch (e) { toast(e.message); }
+        ev.target.disabled = false;
+      },
+    }, "Clean up now"));
 }
 
 // ---------- model warm-up ----------

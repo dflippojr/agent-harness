@@ -10,18 +10,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
 
-from . import compaction, llm
+from . import compaction, llm, projects
 from .bus import EventBus
 from .config import Config
 from .db import Database
+from .homelab import Homelab
 from .policy import ALLOW, ASK, Policy
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler
-from .tools import ToolError, Workspace, tool_schemas, truncate_middle, validate_args
+from .tools import ToolError, Workspace, truncate_middle, validate_args
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
 
 log = logging.getLogger("harness.runner")
@@ -33,9 +35,33 @@ Shell commands run in a Linux container with Python 3.12, pytest, and git, and n
 Work methodically: look around before editing, prefer `search` over reading large files in full, and verify changes by running the relevant command or tests. On long tasks older conversation may be condensed, so keep intermediate results and progress in `update_notes`.
 When the task is complete, reply with your final answer (or call `finish`). Don't answer until the work is done and verified. The user often reads answers on a phone, so lead with the result."""
 
+REPO_PROMPT = """Project repository: `{repo_name}` is checked out at /workspace on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
+
+HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, and ask to restart one with restart_service (the user approves restarts). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
+
 ACTIVE = ("queued", "running", "waiting_approval")
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
+QUOTA_CHECK_SECONDS = 30
+
+
+def dir_size(path: Path) -> int:
+    total = 0
+    stack = [str(path)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return total
 
 
 def new_run(carry: dict | None = None) -> dict:
@@ -70,6 +96,7 @@ class Runner:
         self.approval_events: dict[str, asyncio.Event] = {}
         self.user_cancelled: set[str] = set()
         self._sandboxes: dict[str, Sandbox] = {}
+        self._quota_checked: dict[str, float] = {}
 
     # helpers
     def sandbox(self, s: dict) -> Sandbox:
@@ -83,11 +110,17 @@ class Runner:
 
     def workspace(self, s: dict) -> Workspace:
         model = self.cfg.models[s["model"]]
-        return Workspace(Path(s["workspace"]), self.sandbox(s), self.cfg.repos_dir, model.context_tokens)
+        project = self.cfg.projects.get(s["project"])
+        homelab = Homelab(self.cfg.homelab) if project and project.homelab else None
+        return Workspace(Path(s["workspace"]), self.sandbox(s), self.cfg.repos_dir, model.context_tokens, homelab)
 
     def policy(self, s: dict) -> Policy:
         project = self.cfg.projects.get(s["project"])
-        return Policy(project.rules if project else [])
+        return Policy(project.rules if project else [], repo=bool(project and project.repo))
+
+    def quota_mb(self, s: dict) -> int:
+        project = self.cfg.projects.get(s["project"])
+        return (project.quota_mb if project and project.quota_mb else 0) or self.cfg.cleanup.workspace_quota_mb
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         with self.db.tx():
@@ -112,6 +145,7 @@ class Runner:
                 self.bus.emit(sid, "resumed", {"status": s["status"]})
                 if (s["run"].get("executing") or {}).get("name") in ("run_shell", "git_clone"):
                     await self.sandbox(s).restart()  # kill the orphaned command
+            await self._prepare_repo(s)
             if s["status"] == "waiting_approval":
                 pass  # _resolve_calls waits without holding the GPU
             else:
@@ -125,6 +159,10 @@ class Runner:
         except SandboxUnavailable as e:
             self.bus.emit(sid, "error", {"message": str(e)})
             self.set_status(sid, "failed", stop_reason=f"sandbox_unavailable: {e}")
+            await self._end_run(sid)
+        except projects.GitError as e:
+            self.bus.emit(sid, "error", {"message": str(e)})
+            self.set_status(sid, "failed", stop_reason=f"workspace_error: {e}")
             await self._end_run(sid)
         except Exception as e:  # noqa: BLE001 - a crash must not leave the session looking active
             log.exception("session %s crashed", sid)
@@ -197,7 +235,7 @@ class Runner:
                 flush()
 
         run = s["run"]
-        tools = tool_schemas(ws.read_lines)
+        tools = ws.schemas()
         completion = None
         for attempt in range(4):
             try:
@@ -309,7 +347,7 @@ class Runner:
                 continue
 
             ws = self.workspace(s)
-            schemas = {t["function"]["name"]: t for t in tool_schemas(ws.read_lines)}
+            schemas = {t["function"]["name"]: t for t in ws.schemas()}
             if name not in schemas:
                 self._bump(sid, "invalid_tool_calls")
                 self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
@@ -325,9 +363,57 @@ class Runner:
             output = await self._authorize(s, call, name, args, ws)
             if output is None:
                 output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
+                if name in ("run_shell", "git_clone", "write_file") and await self._over_quota(sid):
+                    for rest in pending[i + 1:]:
+                        self._record_result(sid, rest, rest["function"].get("name", ""),
+                                            "Not run: the workspace is over its disk quota.", ok=False)
+                    return True
             budget -= len(output)
             s = self.db.get_session(sid)
         return False
+
+    async def _over_quota(self, sid: str) -> bool:
+        """Stop the run when the workspace outgrows its quota. Shrinking is always allowed, so a follow-up run
+        can clean up."""
+        s = self.db.get_session(sid)
+        quota = self.quota_mb(s)
+        run = s["run"]
+        last = run.get("workspace_mb", 0)
+        now = time.monotonic()
+        if last < 0.8 * quota and now - self._quota_checked.get(sid, 0) < QUOTA_CHECK_SECONDS:
+            return False
+        self._quota_checked[sid] = now
+        mb = round(await asyncio.to_thread(dir_size, Path(s["workspace"])) / 2**20)
+        run["workspace_mb"] = mb
+        self.db.update_session(sid, run=run)
+        if mb <= quota or mb <= last:
+            return False
+        message = (f"The workspace is {mb} MB, over its {quota} MB quota, so the run was stopped. Send a message "
+                   "asking the agent to delete build artifacts or other large files, or raise quota_mb for the project.")
+        self.bus.emit(sid, "error", {"message": message})
+        self.set_status(sid, "failed", stop_reason=f"quota_exceeded: {mb} MB > {quota} MB")
+        return True
+
+    async def _prepare_repo(self, s: dict) -> None:
+        """Clone the project repo on the session's first run; refresh origin on later runs."""
+        project = self.cfg.projects.get(s["project"])
+        if not project or not project.repo or s["workspace_removed"]:
+            return
+        ws = Path(s["workspace"])
+        if not s["base_commit"]:
+            info = await asyncio.to_thread(projects.prepare, project, ws, s["id"])
+            s = self.db.get_session(s["id"])
+            context = s["context"]
+            context[0] = {**context[0], "content": context[0]["content"].replace("{base_branch}", info["base_branch"])}
+            with self.db.tx():
+                self.db.update_session(s["id"], context=context, **info)
+                self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
+        elif not s["run"].get("origin_refreshed"):
+            error = await asyncio.to_thread(projects.refresh_origin, ws)
+            if error:
+                self.bus.emit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
+            run = self.db.get_session(s["id"])["run"]
+            self.db.update_session(s["id"], run={**run, "origin_refreshed": True})
 
     async def _authorize(self, s: dict, call: dict, name: str, args: dict, ws: Workspace) -> str | None:
         """Apply the policy. Returns None to proceed, or the tool result to record instead of running it."""
@@ -427,7 +513,7 @@ class Runner:
         n = model.context_tokens
         cpt = s["run"].get("chars_per_token", 3.0)
         # Tool schemas are part of every prompt but not of the context list.
-        overhead = int(len(json.dumps(tool_schemas(2000))) / cpt)
+        overhead = int(len(json.dumps(self.workspace(s).schemas())) / cpt)
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
         if before < self.cfg.elide_at * n:
             return s
@@ -473,9 +559,38 @@ class Runner:
         s = self.db.get_session(sid)
         self.bus.emit(sid, "run_finished", {"status": s["status"], "stop_reason": s["stop_reason"],
                                             "answer": s["answer"], "run": s["run"]})
+        await asyncio.shield(self.sandbox(s).stop())
+        await asyncio.shield(self.save_branch(sid))
+        self.write_transcript(sid)
+
+    def write_transcript(self, sid: str) -> None:
         try:
             from .transcript import write_transcript
             write_transcript(self.db, self.cfg.transcripts_dir, sid)
         except OSError:
             log.exception("could not write transcript for %s", sid)
-        await asyncio.shield(self.sandbox(s).stop())
+
+    async def save_branch(self, sid: str) -> None:
+        """Commit leftovers on the session branch and copy it to a local source repo."""
+        s = self.db.get_session(sid)
+        project = self.cfg.projects.get(s["project"])
+        if not project or not project.repo or not s["base_commit"] or s["workspace_removed"]:
+            return
+        ws = Path(s["workspace"])
+
+        def work() -> dict:
+            committed = projects.snapshot(ws, f"Uncommitted work at the end of a run (session {sid})")
+            published = projects.publish_local(project, ws, s["branch"])
+            return {"auto_commit": committed, "published": published, "head": projects.head(ws)[:12],
+                    "commits": projects.commits_ahead(ws, s["base_commit"])}
+
+        try:
+            info = await asyncio.to_thread(work)
+        except projects.GitError as e:
+            self.bus.emit(sid, "error", {"message": f"could not save the session branch: {e}"})
+            return
+        with self.db.tx():
+            reviewed = next((e["data"] for e in reversed(self.db.events(sid)) if e["type"] == "review"), None)
+            if s["review"] and reviewed and reviewed.get("head") != info["head"]:
+                self.db.update_session(sid, review="", review_detail="")  # new work since the last review action
+            self.bus.emit(sid, "branch_saved", {"branch": s["branch"], **info})

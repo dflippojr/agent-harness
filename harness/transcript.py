@@ -79,6 +79,15 @@ def render(db: Database, sid: str) -> str:
             lines += [f"> {at} · model was asleep; waking it (about {d['expected_seconds']} s)", ""]
         elif t == "model_ready":
             lines += [f"> {at} · model ready after {d['seconds']} s", ""]
+        elif t == "workspace_ready":
+            lines += [f"> {at} · cloned `{d['repo']}` on branch `{d['branch']}` from `{d['base_branch']}` "
+                      f"({d['base_commit'][:10]})", ""]
+        elif t == "branch_saved":
+            extra = " (committed leftover changes)" if d.get("auto_commit") else ""
+            lines += [f"> {at} · branch `{d['branch']}` saved at {d['head']}, {len(d['commits'])} commit(s) "
+                      f"ahead{extra}", ""]
+        elif t == "review":
+            lines += [f"## {at} · Review: {d['action']} ({d['detail']})", ""]
         elif t == "resumed":
             lines += [f"> {at} · daemon restarted; session resumed (was {d['status']})", ""]
         elif t == "status" and d["status"] in ("done", "cancelled", "failed"):

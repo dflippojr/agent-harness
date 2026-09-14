@@ -33,6 +33,27 @@ sandbox:
   network: harness-sandbox        # internal: no route out, no container-to-container traffic
   egress_network: harness-egress  # attached only while an approved network command runs
 
+# Homelab tools for projects with `homelab: true` (harness/homelab.py). The daemon runs these on the host;
+# agents only name a service from this allowlist. Restarts always need approval.
+homelab:
+  docker_root: D:/Docker
+  prometheus_url: http://127.0.0.1:9090   # 127.0.0.1, not localhost: wslrelay holds ::1:9090
+  services:                               # name = container_name = compose service unless overridden
+    plex-webhook: {stack: plex-webhook}
+    prometheus: {stack: observability-stack}
+    grafana: {stack: observability-stack}
+    cadvisor: {stack: observability-stack}
+    ntfy: {stack: ntfy}
+    harness-demo: {stack: harness-demo}   # disposable service for exercising the restart flow
+
+# Sandbox cleanup and disk quotas (harness/maintenance.py).
+cleanup:
+  interval_minutes: 60
+  container_idle_hours: 24
+  workspace_retention_days: 14
+  workspace_quota_mb: 5000
+  min_free_gb: 20
+
 # Per run (one user message and the agent work it triggers). Hitting one ends the run; send a message to continue.
 budgets:
   max_turns: 80

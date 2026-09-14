@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS templates (
 MIGRATIONS = [
     # Secret for deciding one approval from a notification button, without a session cookie or JSON body.
     ("approvals", "token", "TEXT NOT NULL DEFAULT ''"),
+    # Phase 3: git-backed projects. `review` is '' | merged | pushed | discarded.
+    ("sessions", "branch", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "base_branch", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "base_commit", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "review", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "review_detail", "TEXT NOT NULL DEFAULT ''"),
+    # Set when cleanup deleted the workspace (or the user discarded it).
+    ("sessions", "workspace_removed", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args"}
@@ -137,8 +145,8 @@ class Database:
     def list_sessions(self, limit: int = 50) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
-                "SELECT id, project, target, model, title, status, stop_reason, created_at, updated_at, totals "
-                "FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT id, project, target, model, title, status, stop_reason, created_at, updated_at, totals, "
+                "branch, review, workspace_removed FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [_row(r) for r in rows]
 

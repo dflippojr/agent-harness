@@ -122,10 +122,11 @@ def normalize_path(path: str | None) -> str:
 
 
 class Workspace:
-    def __init__(self, root: Path, sandbox: Sandbox, repos_dir: Path, context_tokens: int):
+    def __init__(self, root: Path, sandbox: Sandbox, repos_dir: Path, context_tokens: int, homelab=None):
         self.root = resolve_path(root)
         self.sandbox = sandbox
         self.repos_dir = repos_dir
+        self.homelab = homelab  # homelab.Homelab for projects with homelab: true
         # Size reads to the context window: short pages made Qwen answer from page 1 in Phase 0.
         self.read_lines = 2000
         self.read_chars = max(8000, int(context_tokens * 0.25 * 3.5))
@@ -281,7 +282,16 @@ class Workspace:
             raise ToolError(f"git clone failed (exit {code}): {truncate_middle(output.strip(), 2000)}")
         return f"cloned {url} into {rel}"
 
+    def schemas(self) -> list[dict]:
+        extra = []
+        if self.homelab is not None:
+            from .homelab import schemas
+            extra = schemas(self.homelab.cfg)
+        return tool_schemas(self.read_lines) + extra
+
     async def call(self, name: str, args: dict) -> str:
+        if self.homelab is not None and name in self.homelab.tool_names:
+            return await self.homelab.call(name, args)
         if name in ("run_shell", "git_clone"):
             return await getattr(self, name)(**args)
         return await asyncio.to_thread(getattr(self, name), **args)

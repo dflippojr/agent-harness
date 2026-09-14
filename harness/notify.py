@@ -36,6 +36,8 @@ def describe_call(tool: str, args: dict) -> str:
         return f"{tool} {args.get('path', '')}"
     if tool == "git_clone":
         return f"git clone {args.get('url', '')}"
+    if tool == "restart_service":
+        return f"restart {args.get('service', '')}"
     return f"{tool} {args}"
 
 

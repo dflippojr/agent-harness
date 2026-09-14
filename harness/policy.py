@@ -27,6 +27,13 @@ DEFAULT_RULES: list[dict] = [
     {"tool": "git_clone", "args": {"url": r"^(local:|https://(github\.com|gitlab\.com|codeberg\.org)/)"},
      "action": ALLOW},
     {"tool": "git_clone", "action": ASK, "reason": "clone from a host that isn't on the allowlist"},
+    {"tool": "restart_service", "action": ASK, "reason": "restarts a homelab service"},
+]
+
+# Added for projects with a repo: the daemon publishes the session branch, the user reviews and merges it.
+REPO_RULES: list[dict] = [
+    {"tool": "run_shell", "args": {"command": r"\bgit\s+push\b"}, "action": DENY,
+     "reason": "the session branch is published by the harness; the user merges or pushes it from the review screen"},
 ]
 
 
@@ -91,11 +98,11 @@ def _delete_outside_scratch(command: str) -> bool:
 
 
 class Policy:
-    def __init__(self, project_rules: list[dict] | None = None):
+    def __init__(self, project_rules: list[dict] | None = None, repo: bool = False):
         for rule in project_rules or []:
             if rule.get("action") not in (ALLOW, ASK, DENY):
                 raise ValueError(f"policy rule needs action allow|ask|deny: {rule}")
-        self.rules = list(project_rules or []) + DEFAULT_RULES
+        self.rules = list(project_rules or []) + (REPO_RULES if repo else []) + DEFAULT_RULES
 
     def decide(self, name: str, args: dict) -> Decision:
         for rule in self.rules:

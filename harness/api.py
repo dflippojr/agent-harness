@@ -122,7 +122,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/projects")
     async def projects(request: Request):
         cfg = mgr(request).cfg
-        return [{"name": p.name, "description": p.description} for p in cfg.projects.values()]
+        return [{"name": p.name, "description": p.description, "repo": bool(p.repo), "homelab": p.homelab}
+                for p in cfg.projects.values()]
 
     @app.get("/models")
     async def models(request: Request):
@@ -183,6 +184,20 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/sessions/{ref}/changes")
     async def changes(ref: str, request: Request):
         return await mgr(request).changes(ref)
+
+    @app.post("/sessions/{ref}/review/{action}")
+    async def review(ref: str, action: str, request: Request):
+        """merge | push | discard the session's git branch."""
+        m = mgr(request)
+        return m.summary(await m.review(ref, action))
+
+    @app.get("/maintenance")
+    async def maintenance(request: Request):
+        return await mgr(request).maintenance.usage()
+
+    @app.post("/maintenance/cleanup")
+    async def maintenance_cleanup(request: Request):
+        return await mgr(request).maintenance.cleanup()
 
     @app.get("/sessions/{ref}/approvals")
     async def approvals(ref: str, request: Request, all: bool = False):

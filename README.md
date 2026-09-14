@@ -4,7 +4,18 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 and are driven from the phone or MacBook over Tailscale. The phased plan lives in the agent
 memory library (`categories/project-ideas/capsules/local-agent-harness.md`).
 
-## Phase 2: phone control surface (current)
+## Phase 3: tower projects and homelab tasks (current)
+
+Git-backed projects with a branch per session, allowlisted homelab tools, cleanup and quotas.
+Details and verification: `docs/phase3-results.md`.
+
+- Projects: `config/projects.yaml` (`repo`, `base_branch`, `homelab`, `quota_mb`). Review a session's branch on the
+  Changes tab: merge (local repos), push (URL repos), or discard.
+- Homelab allowlist, cleanup and quota settings: `homelab:` and `cleanup:` in `config/harness.yaml`.
+- API: `POST /sessions/{id}/review/{merge|push|discard}`, `GET /maintenance`, `POST /maintenance/cleanup`.
+- After code or config changes: `.\ops\harness\restart-daemon.ps1`.
+
+## Phase 2: phone control surface
 
 The daemon serves a mobile web app (installable PWA) and sends phone notifications through a self-hosted ntfy.
 Details, security model, and the exit-test checklist: `docs/phase2-results.md`.

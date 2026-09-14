@@ -1,4 +1,12 @@
-# Projects a session can run under. Phase 3 adds git-backed projects and per-session branches.
+# Projects a session can run under.
+#
+# repo:        a local path or URL. Each session clones it and works on branch agent/<session>. For a local path
+#              the branch is copied back into that repo after every run, and the phone's Review card squash-merges
+#              it into the base branch or discards it. A URL repo is only read; Review pushes the branch (with the
+#              tower's git credentials, never the sandbox's).
+# base_branch: branch sessions start from (default: the repo's current branch).
+# homelab:     true gives the homelab tools (config/harness.yaml `homelab`).
+# quota_mb:    workspace disk quota override (default: cleanup.workspace_quota_mb).
 #
 # Policy rules are checked in order, project rules first, then the built-in defaults (harness/policy.py).
 # The first matching rule wins. Rule fields:
@@ -13,9 +21,28 @@ projects:
   scratch:
     description: Empty workspace for each session.
 
+  homelab:
+    description: Diagnose and restart homelab services
+    homelab: true
+
+  invoice-tools:
+    description: Demo Python repo (D:/Agents/repos)
+    repo: D:/Agents/repos/invoice-tools
+
+  plex-webhook:
+    description: Plex webhook → lights service (D:/Docker)
+    repo: D:/Docker/plex-webhook
+    homelab: true
+
+  observability-stack:
+    description: Prometheus + Grafana stack (D:/Docker)
+    repo: D:/Docker/observability-stack
+    homelab: true
+
   # Example of a project with its own instructions and a sensitive-path gate:
   # memory-library:
   #   description: Personal memory library
+  #   repo: D:/Agents/repos/agent-memory-library
   #   instructions: |
   #     Search every mention of a topic before answering; the newest dated entry wins.
   #   policy:

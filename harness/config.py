@@ -39,12 +39,44 @@ class NotifyConfig:
 
 
 @dataclass
+class HomelabService:
+    name: str
+    stack: str             # compose project directory under homelab.docker_root
+    container: str = ""    # defaults to the name
+    service: str = ""      # compose service; defaults to the name
+
+
+@dataclass
+class HomelabConfig:
+    docker_root: str = "D:/Docker"
+    prometheus_url: str = "http://127.0.0.1:9090"
+    services: dict[str, HomelabService] = field(default_factory=dict)
+    # Never readable through read_service_config, matched against the path relative to docker_root.
+    deny: list[str] = field(default_factory=lambda: [
+        "*/secrets", "*/secrets/*", "*/data", "*/data/*", "*/.git", "*/.git/*", "*.env", "*/.env*", "*.token",
+        "*.key", "*.pem", "*password*", "*credential*"])
+
+
+@dataclass
+class CleanupConfig:
+    interval_minutes: int = 60
+    container_idle_hours: float = 24      # remove a finished session's stopped container after this long
+    workspace_retention_days: float = 14  # delete a finished session's workspace after this long
+    workspace_quota_mb: int = 5000        # per-session workspace limit (projects can override with quota_mb)
+    min_free_gb: float = 20               # refuse new sessions when the data drive has less free space
+
+
+@dataclass
 class Project:
     name: str
     description: str = ""
     instructions: str = ""
     rules: list[dict] = field(default_factory=list)
     sandbox: dict = field(default_factory=dict)
+    repo: str = ""          # local path or URL: each session works on its own branch of a clone
+    base_branch: str = ""   # branch sessions start from; default: the repo's current branch
+    homelab: bool = False   # give sessions the homelab tools
+    quota_mb: int = 0       # workspace quota override
 
 
 @dataclass
@@ -60,6 +92,8 @@ class Config:
     public_url: str = ""               # how the phone reaches the daemon, e.g. https://host.tailnet.ts.net
     allowed_logins: list[str] = field(default_factory=list)  # Tailscale logins allowed through `tailscale serve`
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    homelab: HomelabConfig = field(default_factory=HomelabConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -97,9 +131,19 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
             instructions=spec.get("instructions", ""),
             rules=(spec.get("policy") or {}).get("rules") or [],
             sandbox=spec.get("sandbox") or {},
+            repo=str(spec.get("repo") or ""),
+            base_branch=str(spec.get("base_branch") or ""),
+            homelab=bool(spec.get("homelab", False)),
+            quota_mb=int(spec.get("quota_mb") or 0),
         )
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
+
+    raw_homelab = dict(raw.get("homelab") or {})
+    services = {
+        name: HomelabService(name=name, **(spec or {})) for name, spec in (raw_homelab.pop("services", None) or {}).items()
+    }
+    homelab = HomelabConfig(**raw_homelab, services=services)
 
     listen = raw.get("listen") or {}
     budgets = raw.get("budgets") or {}
@@ -116,6 +160,8 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         public_url=(raw.get("public_url") or "").rstrip("/"),
         allowed_logins=list(raw.get("allowed_logins") or []),
         notify=NotifyConfig(**(raw.get("notify") or {})),
+        homelab=homelab,
+        cleanup=CleanupConfig(**(raw.get("cleanup") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),
