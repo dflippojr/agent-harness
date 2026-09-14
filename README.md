@@ -19,3 +19,12 @@ python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
 
 The agent loop in `bakeoff/agent.py` is intentionally minimal. It is the baseline the Phase 1
 daemon has to beat, and the reference point for comparing an existing harness (D1).
+
+## Always-on model server
+
+- `ops/llama-server/run-qwen.ps1` supervises Qwen3.6-35B-A3B on `127.0.0.1:8090` (restarts on exit, unloads after
+  30 idle minutes, reloads on the next request). Logs: `C:\AI\logs\`.
+- `ops/llama-server/install-task.ps1` registers the hidden per-user logon task `AgentHarness-LlamaServer`.
+- Prometheus job `llama_server` and the Grafana dashboard "Local LLM (llama-server)" live in `D:\Docker\observability-stack`.
+- The bake-off starts its own servers on port 8081 and needs the whole GPU, so stop the always-on server first:
+  `Stop-ScheduledTask AgentHarness-LlamaServer; Stop-Process -Name llama-server` (then `Start-ScheduledTask AgentHarness-LlamaServer`).
