@@ -21,18 +21,26 @@ python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
 - `--suite core` (default) is the original 13 tasks. `--suite hard` (`bakeoff/tasks_hard.py`) exists because Qwen3.6
   scored 26/26 on core. Hard tasks get 50 turns and 30 minutes each.
 
-## D1 reference harness: OpenHands
+## D1 reference harnesses: OpenHands and OpenCode
 
-`bakeoff/openhands_ref.py` runs the same tasks and local model through OpenHands CLI (pinned in
-`reference/openhands/Dockerfile`) and grades them with the same checkers.
+`bakeoff/reference.py` runs the same tasks and local model through an existing harness and grades them with the
+same checkers. Versions are pinned in `reference/<harness>/Dockerfile` (OpenHands CLI 1.16.0, OpenCode 1.18.30).
 
 ```powershell
-.\.venv\Scripts\python -m bakeoff.openhands_ref --suite hard --models qwen3.6-35b-a3b --repeats 2
+.\.venv\Scripts\python -m bakeoff.reference --harness opencode --suite hard --models qwen3.6-35b-a3b,gpt-oss-20b --repeats 2
 ```
 
-OpenHands executes commands wherever it runs, so it runs in a container on the internal Docker network
+These harnesses execute commands wherever they run, so each runs in a container on the internal Docker network
 `harness-llm`. The container's only route out is the `harness-llm-proxy` socat container, which forwards to
-llama-server on the host. Internet, LAN, and other host ports are unreachable.
+llama-server on the host. Internet, LAN, and other host ports are unreachable. OpenCode's web tools and its
+ask-the-user tool are denied in `reference/opencode/opencode.json`.
+
+Long runs can exhaust free RAM (llama-server with Qwen holds 14–19 GB) and trip a watchdog in the launching tool.
+`scripts/run-detached.ps1` runs them as a Task Scheduler job instead:
+
+```powershell
+.\scripts\run-detached.ps1 -Log runs\opencode-console.log -PythonArgs '-m bakeoff.reference --harness opencode --suite hard --models qwen3.6-35b-a3b,gpt-oss-20b --repeats 2 --no-build'
+```
 
 The agent loop in `bakeoff/agent.py` is intentionally minimal. It is the baseline the Phase 1
 daemon has to beat, and the reference point for comparing an existing harness (D1).

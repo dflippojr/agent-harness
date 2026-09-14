@@ -35,7 +35,7 @@ def main() -> None:
     baselines: dict[str, dict[str, str]] = {}
 
     for summary in summaries:
-        model_dir = args.run_dir / summary["model"].replace("openhands/", "")
+        model_dir = args.run_dir / summary["model"].split("/")[-1]  # reference runs label models "<harness>/<model>"
         for record in summary["tasks"]:
             if wanted and record["task"] not in wanted:
                 continue

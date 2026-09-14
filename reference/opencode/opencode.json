@@ -1,0 +1,35 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "provider": {
+    "llama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama-server (bake-off)",
+      "options": {
+        "baseURL": "{env:LLM_BASE_URL}",
+        "apiKey": "local"
+      },
+      "models": {
+        "qwen3.6-35b-a3b": {
+          "name": "Qwen3.6-35B-A3B",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": { "context": 32768, "output": 8192 }
+        },
+        "gpt-oss-20b": {
+          "name": "gpt-oss-20b",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": { "context": 32768, "output": 8192 }
+        }
+      }
+    }
+  },
+  "permission": {
+    "*": "allow",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "question": "deny"
+  }
+}
