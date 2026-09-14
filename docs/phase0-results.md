@@ -82,6 +82,63 @@ Checker fixes found during review (both regraded):
 Takeaway: the hard suite separates the models (gpt-oss loses 4, Qwen 1), but Qwen is still close to the ceiling.
 Qwen's typical hard task takes ~10 turns and under a minute.
 
+## D1 reference: OpenHands CLI 1.16.0 (2026-09-14)
+
+Same hard suite, models and llama-server profiles, driven by `bakeoff/reference.py --harness openhands` in a
+no-internet container. Raw output: `runs/openhands-20260914-105238/` (killed once by Claude Code's low-memory
+watchdog after 8 Qwen runs, then resumed detached).
+
+| Harness + model | Pass | Avg wall s | Median wall s |
+| --- | --- | --- | --- |
+| baseline `agent.py` + Qwen3.6 | **19/20** | 47 | 37 |
+| OpenHands + Qwen3.6 | 18/20 | 126 | 108 |
+| baseline `agent.py` + gpt-oss-20b | **16/20** | 26 | 12 |
+| OpenHands + gpt-oss-20b | 14/20 | 136 | 115 |
+
+- OpenHands is not better with either model, and is 2.7× (Qwen) to 5× (gpt-oss) slower per task. Some early Qwen
+  runs happened while the machine was paging, so part of that gap may be memory pressure, but the later runs are
+  just as slow.
+- OpenHands + Qwen misses are real model errors (`"1hm"` accepted by the duration parser; a wrong SQLite filter).
+- Several OpenHands + gpt-oss misses come from how the harness copes with the model rather than from reasoning:
+  - When gpt-oss emits a tool call llama-server can't parse (HTTP 500, "does not match the expected peg-native
+    format"), OpenHands retried at least 4 times and then quit with an empty answer. The baseline resamples at the
+    profile's temperature 1.0 and carries on. OpenHands probably sends its own lower temperature (not confirmed).
+  - One run repeated the same file view 7 times and was stopped, apparently by OpenHands' stuck detection.
+  - OpenHands' much larger prompts pushed some requests past the 32K context.
+## D1 reference: OpenCode 1.18.30 (2026-09-14)
+
+`bakeoff/reference.py --harness opencode`, same setup (web tools and ask-the-user denied). Raw output:
+`runs/opencode-20260914-130013/` (run detached; the Qwen half ran with available RAM as low as 239 MiB).
+
+| Harness + model | Pass | Avg turns | Avg wall s |
+| --- | --- | --- | --- |
+| baseline `agent.py` + Qwen3.6 | **19/20** | 10.1 | 47 |
+| OpenCode + Qwen3.6 | 18/20 (19/20 counting the compaction case below) | 8.1 | 81 |
+| OpenHands + Qwen3.6 | 18/20 | 13.5 | 126 |
+| baseline `agent.py` + gpt-oss-20b | **16/20** | 13.9 | 26 |
+| OpenCode + gpt-oss-20b | **16/20** | 13.0 | 25 |
+| OpenHands + gpt-oss-20b | 14/20 | 19.3 | 136 |
+
+- OpenCode matches the baseline's accuracy and, with gpt-oss, its speed. With Qwen it is ~1.7× slower despite fewer
+  turns: its ~7K-token system prompt is costly for Qwen's slow prompt processing (gpt-oss processes prompts ~6× faster).
+- Misses:
+  - `sqlite_report` (3): the same refund double-count / `BETWEEN` mistakes as the other harnesses.
+  - `cli_json_output` (gpt-oss): its tests fail.
+  - `log_correlation` (both models): context compaction. Qwen stated the correct answer (u0271, 233, MemoryError),
+    then OpenCode compacted twice at the 32K limit and injected "Continue if you have next steps…"; Qwen's reply
+    ("The investigation is complete…") became the final message. gpt-oss overflowed the context (39.9K tokens),
+    and after compaction answered about "media attachments". Long-running tasks at 32K context need compaction that
+    preserves the answer; this matters for Phase 1 too.
+
+## D1 decision input
+
+- Neither existing harness is "dramatically better" than the minimal baseline on these tasks and local models.
+  OpenHands is worse and much slower; OpenCode is roughly equal.
+- The model dominates: every harness fails `sqlite_report` the same way.
+- Prompt size matters on this hardware: Qwen's prompt processing (~400–900 tok/s) makes heavy system prompts slow.
+- OpenCode remains a credible building block (client/server, sessions, compaction, mobile/desktop clients) if the
+  daemon wraps it rather than reimplementing the agent loop. That choice is separate from the D1 performance check.
+
 ## Memory finding (blocks always-on inference)
 
 Every llama-server process commits roughly the model's size in system memory even when the weights live in VRAM
