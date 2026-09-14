@@ -80,9 +80,28 @@ Exit test (away from home, on cellular):
 Things to note while testing: does the approval notification get replaced by "✅ Approved"? Is the delay from
 lock to notification acceptable? Does the web app reconnect after being backgrounded?
 
+## Exit test result (2026-09-14): passed
+
+Run by the user on the iPhone, away from home on cellular, session `b9d1766e31` ("Approval demo" template):
+
+| Step | Time since the task started |
+| --- | --- |
+| first model reply and approval notification | 76 s |
+| approved from the lock screen (long-press → Approve) | 87 s |
+| "Done" notification with the report | 92 s |
+
+- User report: the approval notification arrived, long-press Approve worked, a follow-up said it was approved
+  (so the `sequence_id` replacement shows on iOS as an update), the Done notification carried the report, and
+  the app never appeared to disconnect.
+- **The slow start was the model waking up.** llama-server had unloaded Qwen after 30 idle minutes
+  (`--sleep-idle-seconds 1800`); reloading it took ~50 s, and the cold prompt was processed at ~59 tok/s. Once the
+  model was loaded, each step and notification took seconds.
+
 ## Known gaps
 
-- Nothing tested yet over real HTTPS/Tailscale from the phone (blocked on enabling Serve).
+- Cold start: ~50 s to reload the model after 30 idle minutes, with no "waking the model" indication in the app
+  or notification.
+
 - The service worker only registers over HTTPS, so offline shell caching is untested.
 - No push through the web app itself (ntfy covers notifications).
 - Templates are global, not per project.
