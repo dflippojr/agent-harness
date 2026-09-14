@@ -11,8 +11,7 @@ Details, security model, and the exit-test checklist: `docs/phase2-results.md`.
 
 - Autostart: logon task `AgentHarness-Daemon` (`ops/harness/install-task.ps1`), logs in `D:\Agents\harness\logs`.
 - Tailnet: `ops/tailscale/serve.ps1` publishes `https://tower.your-tailnet.ts.net` (daemon) and `:8443` (ntfy).
-- Notifications: `notify` in `config/harness.yaml`; ntfy lives in `D:\Docker
-tfy`.
+- Notifications: `notify` in `config/harness.yaml`; ntfy lives in `D:\Docker\ntfy`.
 - Screenshots: `node scripts/ui-shot.mjs runs/shots "list=http://127.0.0.1:8100/#/"`.
 
 ## Phase 1: harness daemon
