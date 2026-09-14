@@ -148,10 +148,13 @@ def main() -> None:
     parser.add_argument("--skip-perf", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--no-build", action="store_true", help="skip rebuilding the sandbox image")
+    parser.add_argument("--ctx-size", type=int, help="override ctx_size from models.yaml")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     config = load_config()
+    if args.ctx_size:
+        config["ctx_size"] = args.ctx_size
     suite = {"core": TASKS, "hard": HARD_TASKS, "memory": MEMORY_TASKS,
              "all": TASKS + HARD_TASKS + MEMORY_TASKS}[args.suite]
     tasks = suite if args.tasks == "all" else [t for t in suite if t.id in args.tasks.split(",")]
@@ -159,7 +162,8 @@ def main() -> None:
     if not args.no_build:
         build_image(ROOT / "sandbox")
 
-    out_dir = RUNS / (("selftest-" if args.selftest else "") + datetime.now().strftime("%Y%m%d-%H%M%S"))
+    out_dir = RUNS / (("selftest-" if args.selftest else "") + datetime.now().strftime("%Y%m%d-%H%M%S")
+                      + (f"-ctx{config['ctx_size'] // 1024}k" if args.ctx_size else ""))
     out_dir.mkdir(parents=True)
     if args.selftest:
         raise SystemExit(0 if selftest(tasks, out_dir) else 1)

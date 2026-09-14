@@ -139,6 +139,63 @@ watchdog after 8 Qwen runs, then resumed detached).
 - OpenCode remains a credible building block (client/server, sessions, compaction, mobile/desktop clients) if the
   daemon wraps it rather than reimplementing the agent loop. That choice is separate from the D1 performance check.
 
+**D1 decided (user, 2026-09-14): build our own agent loop.** OpenCode's only visible gain was offset by
+compaction/context failures, and sessions and clients are designed explicitly in our plan anyway.
+
+## Context size test (2026-09-14)
+
+`bakeoff/context_test.py`, Qwen3.6 with `--fit on`, q8_0 KV cache. Raw output: `runs/context-20260914-145812/`.
+
+| ctx | VRAM MiB | Server private MiB | Gen tok/s @ ~2K prompt | Gen tok/s @ 15.5K | Longest prompt: tokens / prompt s / gen tok/s |
+| --- | --- | --- | --- | --- | --- |
+| 32K | 14806 | 15485 | 58.1 | 68.4 | 15.5K / 19.6 s / 68.4 (earlier run: 29K / 33 s / 67) |
+| **64K** | 14712 | 15427 | 57.0 | 67.3 | 58.3K / 68.9 s / 59.6 |
+| 128K | 14697 | 15478 | 50.5 | 60.2 | 116.6K / 151.1 s / 48.4 |
+
+- Memory is flat: `--fit` keeps VRAM full and moves slightly more expert weight to RAM as the KV cache grows.
+- 64K costs ~2% decode speed versus 32K; 128K costs ~12%. Prompt processing stays ~770–850 tok/s.
+- **64K is close to free** and doubles the room for project configs and long files. A cold 58K prompt takes ~70 s,
+  so keep stable prefixes (system prompt, project config) cached.
+- The server's working set grows from ~14.6 GB to ~19.6 GB while it processes a long prompt (expert pages touched),
+  which is what drives available RAM to ~500 MiB during bake-offs.
+
+## Memory-library suite (2026-09-14)
+
+`bakeoff/tasks_memory.py`: 5 tasks on a synthetic library mirroring agent-memory-library (CLAUDE.md → AGENTS.md →
+index → category → capsules; a ~16K-token project memory file; a 2K-character single-line index summary; an inbox note
+with incidental medical and financial details). Baseline loop, 32K context, 2 repeats. Raw output:
+`runs/20260914-150953/` (regraded after two checker fixes).
+
+| Task | Qwen3.6 | gpt-oss-20b |
+| --- | --- | --- |
+| memlib_newest_entry (newer dated entry deep in the 16K-token file wins) | **0/2** | 2/2 |
+| memlib_capsule_detail (capsule beats category bullet) | 2/2 | 2/2 |
+| memlib_add_note (dated note, uncertainty kept, no other files) | 2/2 | 2/2 |
+| memlib_index_edit (change one sentence in a long one-line paragraph) | 2/2 | 1/2 |
+| memlib_promote_inbox (promote project facts, leave sensitive details out) | **0/2** | **0/2** |
+| **Total** | 6/10 | 7/10 |
+
+- `newest_entry`: Qwen paged through the file with `read_file` (400 lines per call), found the March "Zigbee" entry at
+  line 401 and answered without reaching the August "switched to Thread" entry at line 1,291. gpt-oss searched for
+  "Garden sensor" first, saw both, and read the newer one. The failure is the reading strategy, not context size:
+  `read_file`'s 400-line page limit is independent of `--ctx-size`.
+- `promote_inbox`: two runs copied the celiac diagnosis into health memory; one (Qwen) left out the diagnosis and
+  account number but still added a savings note to finance memory, beyond "project context"; one gpt-oss run died on
+  malformed tool-call JSON.
+- `index_edit` (gpt-oss): dropped the capsule pointer from the edited sentence.
+- Checker fixes (regraded): the uncertainty check now accepts any hedging wording ("still figuring out whether…"
+  was wrongly rejected, 3 runs); the index check no longer rejects mentioning "moved from planning" (1 run).
+
+Phase 1 implications:
+
+- **Search before concluding.** A library-aware project config (or tool guidance) should tell the agent to search for
+  every mention of the subject and apply "newest dated entry wins"; `read_file` could also report how many lines
+  remain more prominently.
+- **Sensitive writes need a guard, not just instructions.** Both models broke the "no sensitive details" rule. Writes to
+  sensitive categories (health, finance, relationships, identity) should require approval by policy, with the diff
+  shown on the phone.
+- Surgical edits and dated notes are already reliable; long one-line paragraphs remain fragile for gpt-oss.
+
 ## Memory finding (blocks always-on inference)
 
 Every llama-server process commits roughly the model's size in system memory even when the weights live in VRAM

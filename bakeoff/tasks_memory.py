@@ -291,7 +291,9 @@ def add_note_check(ctx: Context) -> tuple[bool, str]:
         problems.append("missing Q4 integration review")
     if "scope" not in added.lower():
         problems.append("missing next move (scope doc)")
-    if not re.search(r"seem|possibl|testing|not sure|unsure|may |might|undecided|uncertain", added, re.I):
+    # AGENTS.md's hedge phrases are examples; any wording that keeps "not decided yet" counts.
+    if not re.search(r"seem|possibl|testing|not sure|unsure|may |might|undecided|uncertain|figuring out|whether|"
+                     r"deciding|evaluat|tbd|unclear", added, re.I):
         problems.append("uncertainty not preserved")
     return not problems, "; ".join(problems) or "ok"
 
@@ -326,8 +328,11 @@ def index_check(ctx: Context) -> tuple[bool, str]:
     if not (new.startswith(prefix) and new.endswith(suffix)):
         return False, "rest of the summary paragraph was altered"
     middle = new[len(prefix):len(new) - len(suffix)]
-    ok = "boat log" in middle.lower() and "phase 1" in middle.lower() and "2026-09-14" in middle and "planning" not in middle
-    return ok, f"boat sentence now: {middle[:160]!r}"
+    low = middle.lower()
+    problems = [p for p, bad in [("still says it is in planning", "is in planning" in low),
+                                 ("missing Phase 1 / date", "phase 1" not in low or "2026-09-14" not in middle),
+                                 ("dropped the capsule pointer", "capsules/boat-log.md" not in middle)] if bad]
+    return not problems, f"{'; '.join(problems) or 'ok'}; boat sentence now: {middle[:160]!r}"
 
 
 def index_solve(ctx: Context) -> str:
