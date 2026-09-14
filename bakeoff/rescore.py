@@ -19,6 +19,7 @@ from .run import prepare, write_report
 from .sandbox import Sandbox
 from .tasks import TASKS, Context
 from .tasks_hard import HARD_TASKS
+from .tasks_memory import MEMORY_TASKS
 
 
 def main() -> None:
@@ -28,7 +29,7 @@ def main() -> None:
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    by_id = {t.id: t for t in TASKS + HARD_TASKS}
+    by_id = {t.id: t for t in TASKS + HARD_TASKS + MEMORY_TASKS}
     wanted = None if args.tasks == "all" else set(args.tasks.split(","))
     summaries_path = args.run_dir / "summaries.json"
     summaries = json.loads(summaries_path.read_text(encoding="utf-8"))

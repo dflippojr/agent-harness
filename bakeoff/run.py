@@ -23,6 +23,7 @@ from .sandbox import Sandbox, build_image
 from .server import GpuSampler, LlamaServer, load_config
 from .tasks import TASKS, Context, Task, hash_tree, materialize
 from .tasks_hard import HARD_TASKS
+from .tasks_memory import MEMORY_TASKS
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
@@ -141,7 +142,7 @@ def write_report(summaries: list[dict], out_dir: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", default="all")
-    parser.add_argument("--suite", choices=["core", "hard", "all"], default="core")
+    parser.add_argument("--suite", choices=["core", "hard", "memory", "all"], default="core")
     parser.add_argument("--tasks", default="all", help="comma-separated task ids within the suite")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--skip-perf", action="store_true")
@@ -151,7 +152,8 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     config = load_config()
-    suite = {"core": TASKS, "hard": HARD_TASKS, "all": TASKS + HARD_TASKS}[args.suite]
+    suite = {"core": TASKS, "hard": HARD_TASKS, "memory": MEMORY_TASKS,
+             "all": TASKS + HARD_TASKS + MEMORY_TASKS}[args.suite]
     tasks = suite if args.tasks == "all" else [t for t in suite if t.id in args.tasks.split(",")]
     models = list(config["models"]) if args.models == "all" else args.models.split(",")
     if not args.no_build:
