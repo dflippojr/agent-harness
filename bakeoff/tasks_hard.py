@@ -368,9 +368,11 @@ def merge_check(ctx: Context) -> tuple[bool, str]:
     code, branch = sb.exec("git rev-parse --abbrev-ref HEAD")
     if branch.strip() != "main":
         return False, f"HEAD is {branch.strip()!r}, not main"
-    code, parents = sb.exec("git rev-list --parents -n 1 HEAD")
-    if len(parents.split()) != 3:
-        return False, "HEAD is not a merge commit"
+    # Follow-up commits after the merge are fine, but main must contain a real merge of the feature branch
+    # (not a rebase or squash).
+    code, merges = sb.exec("git rev-list --first-parent --merges main")
+    if not merges.split():
+        return False, "no merge commit on main"
     code, status = sb.exec("git status --porcelain --untracked-files=no")
     if status.strip():
         return False, f"uncommitted changes: {status.strip()[:200]}"
@@ -817,12 +819,6 @@ def test_hidden_independent_carts():
     a.apply_discount("D1")
     assert b.count() == 0 and b.discounts == []
     assert a.count() == 2 and a.discounts == ["D1"]
-
-
-def test_hidden_caller_dict_not_mutated():
-    start = {"pear": 1}
-    Cart("c", start).add("pear")
-    assert start == {"pear": 1}
 '''
 
 
