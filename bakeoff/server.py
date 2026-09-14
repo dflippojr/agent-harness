@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import subprocess
 import threading
 import time
@@ -43,6 +44,61 @@ class GpuSampler:
             self._stop.wait(self.interval)
 
     def __enter__(self) -> "GpuSampler":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._thread.join()
+
+
+class _MemoryStatus(ctypes.Structure):
+    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+
+def system_memory_mib() -> tuple[int, int, int]:
+    """(available physical, committed, commit limit) in MiB, via GlobalMemoryStatusEx."""
+    status = _MemoryStatus(dwLength=ctypes.sizeof(_MemoryStatus))
+    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    mib = 1024 * 1024
+    return (status.ullAvailPhys // mib, (status.ullTotalPageFile - status.ullAvailPageFile) // mib,
+            status.ullTotalPageFile // mib)
+
+
+class MemorySampler:
+    """Logs system memory every few seconds to a CSV, so a watchdog kill leaves evidence of what the peak was."""
+
+    def __init__(self, csv_path: Path, interval: float = 5.0):
+        self.csv_path = csv_path
+        self.interval = interval
+        self.min_avail_mib: int | None = None
+        self.peak_commit_mib = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        new = not self.csv_path.exists()
+        with open(self.csv_path, "a", encoding="utf-8") as f:
+            if new:
+                f.write("time,avail_phys_mib,commit_mib,commit_limit_mib,gpu_mib\n")
+            while not self._stop.is_set():
+                avail, commit, limit = system_memory_mib()
+                try:
+                    gpu = gpu_memory_used_mib()
+                except (subprocess.SubprocessError, ValueError, OSError):
+                    gpu = -1
+                self.min_avail_mib = avail if self.min_avail_mib is None else min(self.min_avail_mib, avail)
+                self.peak_commit_mib = max(self.peak_commit_mib, commit)
+                f.write(f"{time.strftime('%H:%M:%S')},{avail},{commit},{limit},{gpu}\n")
+                f.flush()
+                self._stop.wait(self.interval)
+
+    def __enter__(self) -> "MemorySampler":
         self._thread.start()
         return self
 

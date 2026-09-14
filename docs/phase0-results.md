@@ -40,6 +40,48 @@ machine past its commit limit.
 - **Caveat:** Qwen hit the ceiling of this task set, so it can't distinguish "good" from "great". Harder, longer
   tasks are needed before comparing against an existing harness (D1).
 
+## Hard suite (2026-09-14)
+
+`bakeoff/tasks_hard.py`: 10 tasks × 2 repeats, 50 turns / 30 min each, mostly graded by hidden tests. Same baseline
+loop and model profiles as above. Raw output: `runs/20260914-102032/` (regraded with `bakeoff.rescore` after two
+checker fixes, see below).
+
+| Model | Pass | Avg turns | Invalid tool calls | Tool errors | Avg wall s | Gen tok/s | Prompt tok/s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **Qwen3.6-35B-A3B** | **19/20** | 10.1 | 0 | 1 | 47 | 74 | 416 |
+| gpt-oss-20b | 16/20 | 13.9 | 1 | 10 | 26 | 165 | 2412 |
+
+| Task | Qwen3.6 | gpt-oss |
+| --- | --- | --- |
+| multi_bug_inventory | 2/2 | 2/2 |
+| duration_parser | 2/2 | 2/2 |
+| merge_conflict | 2/2 | 1/2 |
+| log_correlation | 2/2 | 2/2 |
+| sqlite_report | 1/2 | 0/2 |
+| perf_fix | 2/2 | 2/2 |
+| compose_diagnosis | 2/2 | 2/2 |
+| flaky_shared_state | 2/2 | 2/2 |
+| cli_json_output | 2/2 | 1/2 |
+| trace_config_flow | 2/2 | 2/2 |
+
+Every failure was checked by hand and is a real model error:
+
+- `sqlite_report` (3 of 4 misses): two runs joined refunds to orders and then summed order totals, counting an order
+  once per refund; one used `BETWEEN '2026-04-01' AND '2026-06-30'`, which drops orders placed later on June 30.
+- `merge_conflict` (gpt-oss): merged, then made a follow-up commit that also omits port 80 for https, contradicting
+  the spec.
+- `cli_json_output` (gpt-oss): its own new tests call the CLI with `--file` after the subcommand and fail.
+
+Checker fixes found during review (both regraded):
+
+- `flaky_shared_state` had a hidden test requiring the caller's `items` dict not be mutated. The prompt never asked
+  for that, and Qwen's fix of the stated root cause was correct, so the test was removed (Qwen 0/2 → 2/2).
+- `merge_conflict` required HEAD itself to be the merge commit; it now accepts follow-up commits after a real merge.
+  No verdict changed.
+
+Takeaway: the hard suite separates the models (gpt-oss loses 4, Qwen 1), but Qwen is still close to the ceiling.
+Qwen's typical hard task takes ~10 turns and under a minute.
+
 ## Memory finding (blocks always-on inference)
 
 Every llama-server process commits roughly the model's size in system memory even when the weights live in VRAM

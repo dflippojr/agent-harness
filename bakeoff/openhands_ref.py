@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .run import RUNS, prepare, write_report
 from .sandbox import build_image
-from .server import GpuSampler, LlamaServer, load_config
+from .server import GpuSampler, LlamaServer, MemorySampler, load_config
 from .tasks import TASKS, Context, Task
 from .tasks_hard import HARD_TASKS
 
@@ -122,6 +122,7 @@ def main() -> None:
     parser.add_argument("--tasks", default="all")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--resume", type=Path, help="existing run dir: keep finished results and run the rest")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -132,36 +133,49 @@ def main() -> None:
         build_image(ROOT / "sandbox")
         subprocess.run(["docker", "build", "-t", IMAGE, str(ROOT / "reference/openhands")], check=True)
 
-    out_dir = RUNS / f"openhands-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    out_dir.mkdir(parents=True)
+    out_dir = args.resume or RUNS / f"openhands-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    out_dir.mkdir(parents=True, exist_ok=True)
     summaries = []
     start_proxy(config["port"])
     try:
         for model in args.models.split(","):
             label = f"openhands/{model}"
-            summary: dict = {"model": label, "tasks": []}
-            with LlamaServer(model, out_dir / model / "server.log", config) as server, GpuSampler() as gpu:
+            summary: dict = {"model": label, "tasks": [], "load_seconds": None, "peak_vram_mib": None}
+            todo = []
+            for task in tasks:
+                for r in range(args.repeats):
+                    done = out_dir / model / f"{task.id}-{r}" / "result.json"
+                    if done.is_file():
+                        summary["tasks"].append(json.loads(done.read_text(encoding="utf-8")))
+                    else:
+                        todo.append((task, r))
+            if not todo:
+                summaries.append(summary)
+                continue
+            server_log = out_dir / model / f"server-{datetime.now().strftime('%H%M%S')}.log"
+            with LlamaServer(model, server_log, config) as server, GpuSampler() as gpu, \
+                    MemorySampler(out_dir / "memory.csv") as mem:
                 summary["load_seconds"] = round(server.load_seconds or 0, 1)
-                print(f"[{label}] loaded in {summary['load_seconds']}s")
-                for task in tasks:
-                    for r in range(args.repeats):
-                        run_dir = out_dir / model / f"{task.id}-{r}"
-                        sandbox, baseline = prepare(task, run_dir / "workspace")
+                print(f"[{label}] loaded in {summary['load_seconds']}s; {len(todo)} runs to go")
+                for task, r in todo:
+                    run_dir = out_dir / model / f"{task.id}-{r}"
+                    sandbox, baseline = prepare(task, run_dir / "workspace")
+                    try:
+                        result = run_openhands(task, run_dir, model, config["port"])
                         try:
-                            result = run_openhands(task, run_dir, model, config["port"])
-                            try:
-                                passed, note = task.check(Context(run_dir / "workspace", sandbox, result["answer"], baseline))
-                            except Exception as e:
-                                passed, note = False, f"checker error: {e}"
-                        finally:
-                            sandbox.stop()
-                        record = {"task": task.id, "category": task.category, "repeat": r, "passed": passed,
-                                  "note": note, "invalid_tool_calls": 0, "median_gen_tps": None,
-                                  "median_prompt_tps": None, **result}
-                        (run_dir / "result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
-                        summary["tasks"].append(record)
-                        print(f"[{label}] {'PASS' if passed else 'fail'} {task.id}#{r} turns={result['turns']} "
-                              f"{result['wall_seconds']:.0f}s stop={result['stop_reason']} ({note})")
+                            passed, note = task.check(Context(run_dir / "workspace", sandbox, result["answer"], baseline))
+                        except Exception as e:
+                            passed, note = False, f"checker error: {e}"
+                    finally:
+                        sandbox.stop()
+                    record = {"task": task.id, "category": task.category, "repeat": r, "passed": passed,
+                              "note": note, "invalid_tool_calls": 0, "median_gen_tps": None,
+                              "median_prompt_tps": None, **result}
+                    (run_dir / "result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+                    summary["tasks"].append(record)
+                    print(f"[{label}] {'PASS' if passed else 'fail'} {task.id}#{r} turns={result['turns']} "
+                          f"{result['wall_seconds']:.0f}s stop={result['stop_reason']} ({note}) "
+                          f"min_avail={mem.min_avail_mib}MiB peak_commit={mem.peak_commit_mib}MiB")
                 summary["peak_vram_mib"] = gpu.peak_mib
             summaries.append(summary)
             (out_dir / "summaries.json").write_text(json.dumps(summaries, indent=2), encoding="utf-8")
