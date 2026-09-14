@@ -12,7 +12,7 @@ $serverArgs = @(
     '--alias', 'qwen3.6-35b-a3b',
     '--host', '127.0.0.1',            # never exposed; Prometheus reaches it via host.docker.internal
     '--port', '8090',
-    '--ctx-size', '32768',
+    '--ctx-size', '65536',             # 64K costs ~2% decode vs 32K with no extra VRAM/RAM (docs/phase0-results.md)
     '--fit', 'on',
     '--flash-attn', 'on',
     '--cache-type-k', 'q8_0',
