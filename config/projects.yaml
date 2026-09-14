@@ -1,0 +1,24 @@
+# Projects a session can run under. Phase 3 adds git-backed projects and per-session branches.
+#
+# Policy rules are checked in order, project rules first, then the built-in defaults (harness/policy.py).
+# The first matching rule wins. Rule fields:
+#   tool:    tool name, list of names, or "*"
+#   args:    {argument: regex}; every listed argument must match (re.search)
+#   path:    glob(s) matched against the workspace-relative path (file tools)
+#   network: true to match only run_shell calls that ask for network access
+#   action:  allow | ask | deny
+#   reason:  shown in the approval request
+
+projects:
+  scratch:
+    description: Empty workspace for each session.
+
+  # Example of a project with its own instructions and a sensitive-path gate:
+  # memory-library:
+  #   description: Personal memory library
+  #   instructions: |
+  #     Search every mention of a topic before answering; the newest dated entry wins.
+  #   policy:
+  #     rules:
+  #       - {tool: [write_file, edit_file], path: ["categories/health/**", "categories/finance/**"],
+  #          action: ask, reason: "write to a sensitive category"}

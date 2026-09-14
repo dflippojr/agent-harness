@@ -1,0 +1,33 @@
+# Harness daemon settings. Paths use forward slashes; they work on Windows.
+listen:
+  host: 127.0.0.1        # Phase 2 publishes it on the tailnet via `tailscale serve`; never bind wider
+  port: 8100
+
+data_dir: D:/Agents/harness   # SQLite DB, per-session workspaces, transcripts
+repos_dir: D:/Agents/repos    # git_clone "local:<name>" clones from here (host-side, no network)
+
+default_model: qwen3.6-35b-a3b
+models:
+  qwen3.6-35b-a3b:
+    base_url: http://127.0.0.1:8090   # always-on server (ops/llama-server/run-qwen.ps1)
+    context_tokens: 65536
+    max_tokens: 8192                  # Qwen can think for 600+ tokens before answering
+    sampling: {temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.0}
+
+sandbox:
+  image: agent-harness-sandbox:py312
+  memory: 2g
+  cpus: "2"
+  pids: 512
+  network: harness-sandbox        # internal: no route out, no container-to-container traffic
+  egress_network: harness-egress  # attached only while an approved network command runs
+
+# Per run (one user message and the agent work it triggers). Hitting one ends the run; send a message to continue.
+budgets:
+  max_turns: 80
+  max_completion_tokens: 200000
+
+compaction:
+  elide_at: 0.55       # fraction of context_tokens: shorten old tool outputs
+  summarize_at: 0.65   # still above this after eliding: summarize older turns
+  keep_recent: 0.20    # fraction of context kept verbatim after a summary

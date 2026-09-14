@@ -4,7 +4,28 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 and are driven from the phone or MacBook over Tailscale. The phased plan lives in the agent
 memory library (`categories/project-ideas/capsules/local-agent-harness.md`).
 
-## Phase 0: model bake-off (current)
+## Phase 1: harness daemon (current)
+
+The daemon runs agent sessions against the always-on model server, one sandbox container per session.
+Design notes and test results: `docs/phase1-results.md`.
+
+```powershell
+.\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\python -m harness                      # daemon on 127.0.0.1:8100 (config/harness.yaml)
+.\.venv\Scripts\python -m harness.cli new "Clone local:invoice-tools, fix the failing test, and report back"
+.\.venv\Scripts\python -m harness.cli list             # also: watch, send, approve, deny, cancel, transcript, queue
+.\.venv\Scripts\python -m pytest tests                 # scripted-model tests; one needs Docker, none need the GPU
+```
+
+- Data: `D:/Agents/harness` (SQLite DB, per-session workspaces, Markdown transcripts). `git_clone local:<name>`
+  clones from `D:/Agents/repos`.
+- Projects and approval rules: `config/projects.yaml`. Defaults ask before `git push`, destructive git commands,
+  network commands, and deletes outside scratch paths.
+- API: `POST /sessions`, `GET /sessions[/{id}]`, `POST /sessions/{id}/messages`, `GET /sessions/{id}/events`
+  (SSE, resume with `?after=<seq>`), `POST /sessions/{id}/approvals/{approval_id|pending}`,
+  `POST /sessions/{id}/cancel`, `GET /sessions/{id}/transcript`, `GET /queue`.
+
+## Phase 0: model bake-off
 
 - Runtime: llama.cpp `llama-server` b10950 (CUDA 13.3) at `C:\AI\llama.cpp\b10950`, models in `C:\AI\models`.
 - Profiles: `bakeoff/models.yaml`. Every server binds to 127.0.0.1.
