@@ -19,6 +19,7 @@ import yaml
 from .sandbox import Sandbox
 
 PYTEST = "python -m pytest -q -p no:cacheprovider"
+PYTEST_INI = "[pytest]\npythonpath = .\ntestpaths = tests\n"
 
 
 @dataclass
@@ -27,6 +28,11 @@ class Context:
     sandbox: Sandbox
     answer: str
     baseline: dict[str, str]  # file hashes right after setup
+
+    def __post_init__(self) -> None:
+        # Models love typographic dashes and narrow spaces ("plex‑webhook"); grade the content, not the glyphs.
+        self.answer = re.sub(r"[‐-―−]", "-", self.answer)
+        self.answer = re.sub(r"[   ]", " ", self.answer)
 
 
 @dataclass
@@ -41,6 +47,9 @@ class Task:
 
 
 def materialize(ws: Path, files: dict[str, str]) -> None:
+    # Fixtures with tests get a normal pytest config, so bare `pytest` works like in a real repo.
+    if any(rel.startswith("tests/") for rel in files) or "textutil/slug.py" in files or "bank/account.py" in files:
+        files = {"pytest.ini": PYTEST_INI, **files}
     for rel, content in files.items():
         p = ws / rel
         p.parent.mkdir(parents=True, exist_ok=True)

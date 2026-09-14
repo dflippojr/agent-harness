@@ -21,7 +21,7 @@ You act only through the provided tools. File paths are relative to the workspac
 Shell commands run in a Linux container at /workspace with Python 3.12, pytest, and git installed, and no network access.
 
 Work methodically: look around before editing, prefer `search` over reading large files in full, and verify changes by running the relevant command or tests.
-When the task is complete, call `finish` with your final answer (or a short summary of what you changed). Do not stop without calling `finish`."""
+When the task is complete, call `finish` with your final answer (or a short summary of what you changed), or reply with the answer as a plain message. Don't give a final answer until the work is actually done and verified."""
 
 TOOLS = [
     {
@@ -308,10 +308,23 @@ class Agent:
                 result.stop_reason = "wall_limit"
                 break
             result.turns += 1
-            try:
-                data = self._chat(messages, timeout=self.wall_limit - elapsed + 30)
-            except (httpx.HTTPError, RuntimeError) as e:
-                result.stop_reason = f"request_error: {e}"
+            data = None
+            for attempt in range(3):
+                try:
+                    data = self._chat(messages, timeout=self.wall_limit - elapsed + 30)
+                    break
+                except RuntimeError as e:
+                    # llama-server returns 500 when it can't parse the model's tool-call syntax.
+                    # That's a model formatting failure: count it and resample.
+                    if "HTTP 500" in str(e) and attempt < 2:
+                        result.invalid_tool_calls += 1
+                        continue
+                    result.stop_reason = f"request_error: {e}"
+                    break
+                except httpx.HTTPError as e:
+                    result.stop_reason = f"request_error: {e}"
+                    break
+            if data is None:
                 break
 
             usage = data.get("usage") or {}
@@ -333,10 +346,15 @@ class Agent:
             messages.append(assistant)
 
             if not calls:
+                # A plain reply with no tool calls is the final answer, as in mainstream harnesses.
+                if assistant["content"].strip():
+                    result.answer = assistant["content"]
+                    result.finished = True
+                    result.stop_reason = "final_message"
+                    break
                 idle_turns += 1
                 if idle_turns >= 3:
-                    result.answer = assistant["content"]
-                    result.stop_reason = "no_tool_calls"
+                    result.stop_reason = "empty_replies"
                     break
                 messages.append({
                     "role": "user",

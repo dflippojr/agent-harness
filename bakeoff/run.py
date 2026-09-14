@@ -11,6 +11,7 @@ import argparse
 import json
 import shutil
 import statistics
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -143,6 +144,7 @@ def main() -> None:
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--no-build", action="store_true", help="skip rebuilding the sandbox image")
     args = parser.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     config = load_config()
     tasks = TASKS if args.tasks == "all" else [t for t in TASKS if t.id in args.tasks.split(",")]
