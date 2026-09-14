@@ -1,0 +1,33 @@
+# llama-server profiles for the bake-off. All servers bind to localhost only.
+llama_server: C:/AI/llama.cpp/b10950/llama-server.exe
+port: 8081
+ctx_size: 32768
+
+common_args:
+  - --host
+  - 127.0.0.1
+  - --flash-attn
+  - "on"
+  - --parallel
+  - "1"
+  - --metrics
+  - --jinja
+
+models:
+  gpt-oss-20b:
+    path: C:/AI/models/gpt-oss-20b-MXFP4.gguf
+    # Fits entirely in VRAM; sliding-window attention keeps the KV cache small, so leave it f16.
+    args: [--n-gpu-layers, "99", --reasoning-effort, medium]
+    sampling: {temperature: 1.0, top_p: 1.0}
+
+  qwen3.6-35b-a3b:
+    path: C:/AI/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+    # 22.4 GB file: let --fit decide how many expert layers spill to system RAM.
+    args: [--fit, "on", --cache-type-k, q8_0, --cache-type-v, q8_0]
+    sampling: {temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.0}
+
+  devstral-small-2-24b:
+    path: C:/AI/models/Devstral-Small-2-24B-Instruct-2512-IQ4_XS.gguf
+    # Dense 24B: q8_0 KV is what lets 32K context fit next to the weights.
+    args: [--n-gpu-layers, "99", --cache-type-k, q8_0, --cache-type-v, q8_0]
+    sampling: {temperature: 0.15}
