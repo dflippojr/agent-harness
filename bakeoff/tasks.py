@@ -44,6 +44,8 @@ class Task:
     check: Callable[[Context], tuple[bool, str]]
     solve: Callable[[Context], str]
     setup: Callable[[Sandbox], None] | None = None
+    max_turns: int = 30
+    wall_limit: float = 900
 
 
 def materialize(ws: Path, files: dict[str, str]) -> None:

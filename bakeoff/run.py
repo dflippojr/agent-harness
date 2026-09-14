@@ -3,6 +3,7 @@
     python -m bakeoff.run --selftest                 # prove every checker works (no model needed)
     python -m bakeoff.run                            # all models, all tasks, with perf
     python -m bakeoff.run --models gpt-oss-20b --tasks repo_qa,fix_failing_test --skip-perf
+    python -m bakeoff.run --suite hard --models qwen3.6-35b-a3b --skip-perf
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from .agent import Agent, Workspace
 from .sandbox import Sandbox, build_image
 from .server import GpuSampler, LlamaServer, load_config
 from .tasks import TASKS, Context, Task, hash_tree, materialize
+from .tasks_hard import HARD_TASKS
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
@@ -72,7 +74,8 @@ def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir:
                 run_dir = model_dir / f"{task.id}-{r}"
                 sandbox, baseline = prepare(task, run_dir / "workspace")
                 try:
-                    agent = Agent(server.base_url, name, Workspace(run_dir / "workspace", sandbox), profile.get("sampling"))
+                    agent = Agent(server.base_url, name, Workspace(run_dir / "workspace", sandbox), profile.get("sampling"),
+                                  max_turns=task.max_turns, wall_limit=task.wall_limit)
                     result = agent.run(task.prompt)
                     try:
                         passed, note = task.check(Context(run_dir / "workspace", sandbox, result.answer, baseline))
@@ -138,7 +141,8 @@ def write_report(summaries: list[dict], out_dir: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", default="all")
-    parser.add_argument("--tasks", default="all")
+    parser.add_argument("--suite", choices=["core", "hard", "all"], default="core")
+    parser.add_argument("--tasks", default="all", help="comma-separated task ids within the suite")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--skip-perf", action="store_true")
     parser.add_argument("--selftest", action="store_true")
@@ -147,7 +151,8 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     config = load_config()
-    tasks = TASKS if args.tasks == "all" else [t for t in TASKS if t.id in args.tasks.split(",")]
+    suite = {"core": TASKS, "hard": HARD_TASKS, "all": TASKS + HARD_TASKS}[args.suite]
+    tasks = suite if args.tasks == "all" else [t for t in suite if t.id in args.tasks.split(",")]
     models = list(config["models"]) if args.models == "all" else args.models.split(",")
     if not args.no_build:
         build_image(ROOT / "sandbox")
