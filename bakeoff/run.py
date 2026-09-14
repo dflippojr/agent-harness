@@ -58,7 +58,8 @@ def selftest(tasks: list[Task], out_dir: Path) -> bool:
     return all_ok
 
 
-def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir: Path, skip_perf: bool) -> dict:
+def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir: Path, skip_perf: bool,
+              read_lines: int = 400, read_chars: int = 20000) -> dict:
     model_dir = out_dir / name
     profile = config["models"][name]
     summary: dict = {"model": name, "tasks": []}
@@ -75,7 +76,8 @@ def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir:
                 run_dir = model_dir / f"{task.id}-{r}"
                 sandbox, baseline = prepare(task, run_dir / "workspace")
                 try:
-                    agent = Agent(server.base_url, name, Workspace(run_dir / "workspace", sandbox), profile.get("sampling"),
+                    workspace = Workspace(run_dir / "workspace", sandbox, read_lines, read_chars)
+                    agent = Agent(server.base_url, name, workspace, profile.get("sampling"),
                                   max_turns=task.max_turns, wall_limit=task.wall_limit)
                     result = agent.run(task.prompt)
                     try:
@@ -149,6 +151,8 @@ def main() -> None:
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--no-build", action="store_true", help="skip rebuilding the sandbox image")
     parser.add_argument("--ctx-size", type=int, help="override ctx_size from models.yaml")
+    parser.add_argument("--read-lines", type=int, default=400, help="read_file line limit per call")
+    parser.add_argument("--read-chars", type=int, default=20000, help="read_file character limit per call")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -163,7 +167,8 @@ def main() -> None:
         build_image(ROOT / "sandbox")
 
     out_dir = RUNS / (("selftest-" if args.selftest else "") + datetime.now().strftime("%Y%m%d-%H%M%S")
-                      + (f"-ctx{config['ctx_size'] // 1024}k" if args.ctx_size else ""))
+                      + (f"-ctx{config['ctx_size'] // 1024}k" if args.ctx_size else "")
+                      + (f"-read{args.read_lines}" if args.read_lines != 400 else ""))
     out_dir.mkdir(parents=True)
     if args.selftest:
         raise SystemExit(0 if selftest(tasks, out_dir) else 1)
@@ -171,7 +176,8 @@ def main() -> None:
     summaries = []
     for name in models:
         started = time.monotonic()
-        summaries.append(run_model(name, config, tasks, args.repeats, out_dir, args.skip_perf))
+        summaries.append(run_model(name, config, tasks, args.repeats, out_dir, args.skip_perf,
+                                   args.read_lines, args.read_chars))
         (out_dir / "summaries.json").write_text(json.dumps(summaries, indent=2), encoding="utf-8")
         write_report(summaries, out_dir)
         print(f"[{name}] done in {(time.monotonic() - started) / 60:.1f} min")

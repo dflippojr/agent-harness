@@ -6,6 +6,7 @@ the moving parts few so differences between runs come from the model.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import time
@@ -136,9 +137,11 @@ class ToolError(Exception):
 class Workspace:
     """File tools run host-side against the bind-mounted workspace; shell runs in the sandbox."""
 
-    def __init__(self, root: Path, sandbox: Sandbox):
+    def __init__(self, root: Path, sandbox: Sandbox, read_lines: int = 400, read_chars: int = 20000):
         self.root = root.resolve()
         self.sandbox = sandbox
+        self.read_lines = read_lines
+        self.read_chars = read_chars
 
     def resolve(self, path: str | None) -> Path:
         path = (path or ".").strip()
@@ -178,9 +181,9 @@ class Workspace:
             raise ToolError(f"no such file: {path}")
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(1, start_line)
-        end = min(len(lines), end_line or len(lines), start + 399)
+        end = min(len(lines), end_line or len(lines), start + self.read_lines - 1)
         body = "\n".join(f"{n}\t{lines[n - 1]}" for n in range(start, end + 1))
-        body = truncate_middle(body, 20000)
+        body = truncate_middle(body, self.read_chars)
         if end < len(lines):
             body += f"\n... ({len(lines)} lines total; continue with start_line={end + 1})"
         return body or "(empty file)"
@@ -266,12 +269,17 @@ class Agent:
         self.max_turns = max_turns
         self.wall_limit = wall_limit
         self.max_tokens = max_tokens
+        self.tools = copy.deepcopy(TOOLS)
+        for tool in self.tools:
+            if tool["function"]["name"] == "read_file":
+                tool["function"]["description"] = (f"Read a text file with line numbers. Returns at most "
+                                                   f"{workspace.read_lines} lines per call.")
 
     def _chat(self, messages: list[dict], timeout: float) -> dict:
         payload = {
             "model": self.model,
             "messages": messages,
-            "tools": TOOLS,
+            "tools": self.tools,
             "tool_choice": "auto",
             "max_tokens": self.max_tokens,
             **self.sampling,

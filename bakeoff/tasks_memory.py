@@ -173,8 +173,9 @@ Offline-first logbook for the family sailboat: trips, weather, engine hours, mai
 """
 
 
-def project_ideas_memory() -> str:
-    """~14K tokens of dated entries. The garden sensor mesh switched radios mid-file; a decoy project also uses Zigbee."""
+def project_ideas_memory(day_step: int = 1) -> str:
+    """Dated entries: ~16K tokens by default (the library's project-ideas memory.md before its 2026-09-14 split), ~5.5K
+    with day_step=3 (after). The garden sensor mesh switched radios mid-file; a decoy project also uses Zigbee."""
     rng = random.Random(21)
     projects = ["Recipe scaler", "Kids' reading tracker", "Home backup rotation", "Bike trainer dashboard",
                 "Pantry inventory", "Photo deduper", "Board game night planner", "Chore rotation bot"]
@@ -207,8 +208,8 @@ def project_ideas_memory() -> str:
     }
     entries = []
     for month in range(1, 10):
-        for day in range(1, 29):  # ~250 entries, about the size of the real project-ideas memory.md
-            if month == 9 and day > 12:
+        for day in range(1, 29):
+            if (month == 9 and day > 12) or ((day - 1) % day_step and (month, day) not in special):
                 continue
             if (month, day) in special:
                 title, bullets = special[(month, day)]
@@ -233,11 +234,11 @@ INBOX_NOTES = """# Chat notes 2026-09-10 (rough, unreviewed)
 """
 
 
-def memlib_files() -> dict[str, str]:
+def memlib_files(day_step: int = 1) -> dict[str, str]:
     files = {"CLAUDE.md": CLAUDE_MD, "AGENTS.md": AGENTS_MD, "00-index.md": INDEX_MD,
              "categories/work/memory.md": WORK_MEMORY, "categories/health/memory.md": HEALTH_MEMORY,
              "categories/finance/memory.md": FINANCE_MEMORY, "categories/taste-and-media/memory.md": TASTE_MEMORY,
-             "categories/project-ideas/memory.md": project_ideas_memory(),
+             "categories/project-ideas/memory.md": project_ideas_memory(day_step),
              "categories/project-ideas/capsules/boat-log.md": BOAT_CAPSULE,
              "inbox/2026-09-10-chat-notes.md": INBOX_NOTES}
     files.update({f"categories/{c}/README.md": text for c, text in CATEGORY_READMES.items()})
@@ -377,6 +378,9 @@ MEMORY_TASKS: list[Task] = [
     Task("memlib_newest_entry", "memory",
          PREAMBLE + "Which radio protocol is my garden sensor mesh project using now, and why? Don't change any files.",
          memlib_files, newest_check, lambda ctx: "Thread, because the Zigbee routers drained batteries."),
+    Task("memlib_newest_entry_small", "memory",
+         PREAMBLE + "Which radio protocol is my garden sensor mesh project using now, and why? Don't change any files.",
+         lambda: memlib_files(day_step=3), newest_check, lambda ctx: "Thread, because the Zigbee routers drained batteries."),
     Task("memlib_capsule_detail", "memory",
          PREAMBLE + "Where does my boat log app store its data? Don't change any files.",
          memlib_files, capsule_check, lambda ctx: "SQLite on the phone, synced nightly to the NAS."),

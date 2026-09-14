@@ -159,6 +159,13 @@ compaction/context failures, and sessions and clients are designed explicitly in
 - The server's working set grows from ~14.6 GB to ~19.6 GB while it processes a long prompt (expert pages touched),
   which is what drives available RAM to ~500 MiB during bake-offs.
 
+**GPU "SW Power Cap" (2026-09-14):** the Grafana GPU board showed this reason during bake-offs at 70–80% utilization,
+<140 W and <60 °C. 100 ms nvidia-smi sampling during a Qwen request: the limit is 285 W (default; range 100–305 W);
+the flag was active in 4 of 257 samples, all during one transient where instantaneous draw hit 185 W while the 1 s
+average read 84 W during a P-state step. Total capping time rose ~145 ms for the whole request; HW slowdown, thermal
+slowdown and power braking counters are all zero. Split CPU/GPU MoE inference is bursty (median 22% utilization,
+29 W), so brief spikes trip the driver's power-management flag. It is harmless and unrelated to voltage.
+
 ## Memory-library suite (2026-09-14)
 
 `bakeoff/tasks_memory.py`: 5 tasks on a synthetic library mirroring agent-memory-library (CLAUDE.md → AGENTS.md →
@@ -186,11 +193,24 @@ with incidental medical and financial details). Baseline loop, 32K context, 2 re
 - Checker fixes (regraded): the uncertainty check now accepts any hedging wording ("still figuring out whether…"
   was wrongly rejected, 3 runs); the index check no longer rejects mentioning "moved from planning" (1 run).
 
+Follow-up on `newest_entry` (2026-09-14), Qwen only, 3 repeats each:
+
+| Setup | Big file (~16K tokens) | Small file (~6K tokens, like the library after its split) |
+| --- | --- | --- |
+| 32K context, `read_file` 400 lines / 20K chars | 0/2 | 0/3 |
+| **64K context, `read_file` 2,000 lines / 90K chars** | **3/3** | **3/3** |
+
+Raw output: `runs/20260914-152732/`, `runs/20260914-153113-ctx64k-read2000/`. With the default limits, every run read
+page 1, got "(524 lines total; continue with start_line=401)", and answered without continuing; the 20K-character cap
+also cut the middle of the page. With the larger limits Qwen read the whole file in one call and picked the newer
+entry by itself (25–65 s per question). Shrinking the file alone did not help, because the relevant entry was still
+past the first page.
+
 Phase 1 implications:
 
-- **Search before concluding.** A library-aware project config (or tool guidance) should tell the agent to search for
-  every mention of the subject and apply "newest dated entry wins"; `read_file` could also report how many lines
-  remain more prominently.
+- **Size `read_file` to the context window.** At 64K, return whole files up to a token budget (~20K tokens) instead
+  of 400-line pages; Qwen does not reliably follow "continue with start_line" hints. Keep search for anything larger,
+  and have library project configs say "search every mention; newest dated entry wins".
 - **Sensitive writes need a guard, not just instructions.** Both models broke the "no sensitive details" rule. Writes to
   sensitive categories (health, finance, relationships, identity) should require approval by policy, with the diff
   shown on the phone.
