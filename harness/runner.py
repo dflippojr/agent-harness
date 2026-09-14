@@ -22,6 +22,7 @@ from .policy import ALLOW, ASK, Policy
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler
 from .tools import ToolError, Workspace, tool_schemas, truncate_middle, validate_args
+from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
 
 log = logging.getLogger("harness.runner")
 
@@ -58,8 +59,10 @@ def unresolved_calls(context: list[dict]) -> list[dict]:
 
 
 class Runner:
-    def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat):
+    def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat,
+                 warmer: ModelWarmer | None = None):
         self.cfg = cfg
+        self.warmer = warmer or ModelWarmer()
         self.db = db
         self.bus = bus
         self.scheduler = scheduler
@@ -177,7 +180,18 @@ class Runner:
                     buffer[kind] = ""
             last_flush[0] = time.monotonic()
 
+        # A sleeping model takes about a minute to reload; tell the user instead of looking stuck.
+        waking_since = None
+        if await self.warmer.state(model) in (SLEEPING, WAKING):
+            waking_since = time.monotonic()
+            self.bus.emit(sid, "model_waking", {"model": model.name, "expected_seconds": EXPECTED_WAKE_SECONDS})
+
         async def on_delta(kind: str, text: str) -> None:
+            nonlocal waking_since
+            if waking_since is not None:
+                self.bus.emit(sid, "model_ready", {"model": model.name,
+                                                   "seconds": round(time.monotonic() - waking_since)})
+                waking_since = None
             buffer[kind] += text
             if time.monotonic() - last_flush[0] > 0.25:
                 flush()

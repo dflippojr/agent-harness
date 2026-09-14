@@ -125,6 +125,10 @@ def watch(sid: str, args, after: int = 0) -> int:
                 print(f"{DIM}context compacted ({d['tier']}): ~{d['tokens_before']} → ~{d['tokens_after']} tokens{RESET}")
             elif t in ("error", "llm_retry"):
                 print(f"{RED}{t}: {d.get('message') or d.get('error')}{RESET}")
+            elif t == "model_waking":
+                print(f"{YELLOW}model is asleep; waking it (about {d['expected_seconds']} s)...{RESET}")
+            elif t == "model_ready":
+                print(f"{DIM}model ready after {d['seconds']} s{RESET}")
             elif t == "resumed":
                 print(f"{YELLOW}daemon restarted; session resumed{RESET}")
             elif t == "status":

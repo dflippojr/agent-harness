@@ -75,6 +75,10 @@ def render(db: Database, sid: str) -> str:
                 lines += ["<details><summary>Summary</summary>", "", d["summary"].strip(), "", "</details>", ""]
         elif t in ("error", "llm_retry"):
             lines += [f"> {at} · {t}: {d.get('message') or d.get('error')}", ""]
+        elif t == "model_waking":
+            lines += [f"> {at} · model was asleep; waking it (about {d['expected_seconds']} s)", ""]
+        elif t == "model_ready":
+            lines += [f"> {at} · model ready after {d['seconds']} s", ""]
         elif t == "resumed":
             lines += [f"> {at} · daemon restarted; session resumed (was {d['status']})", ""]
         elif t == "status" and d["status"] in ("done", "cancelled", "failed"):

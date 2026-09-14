@@ -21,7 +21,7 @@ from .db import Database
 
 log = logging.getLogger("harness.notify")
 
-WATCHED = {"approval_requested", "approval_decided", "run_finished"}
+WATCHED = {"approval_requested", "approval_decided", "run_finished", "model_waking"}
 
 
 def _short(text: str, limit: int) -> str:
@@ -137,6 +137,11 @@ class Notifier:
                      "url": self.link(f"/a/{approval['token']}/deny")},
                 ]
             return payload
+
+        if event["type"] == "model_waking":
+            return {**base, "title": f"Waking the model: {title}", "priority": 2, "tags": ["hourglass"],
+                    "message": f"The model was asleep; the first step takes about {d['expected_seconds']} s.",
+                    "click": self.link(f"/#/s/{sid}")}
 
         if event["type"] == "approval_decided":
             approval = self.db.get_approval(d["id"])

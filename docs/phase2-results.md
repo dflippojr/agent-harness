@@ -97,10 +97,26 @@ Run by the user on the iPhone, away from home on cellular, session `b9d1766e31` 
   (`--sleep-idle-seconds 1800`); reloading it took ~50 s, and the cold prompt was processed at ~59 tok/s. Once the
   model was loaded, each step and notification took seconds.
 
+## Cold-start follow-up (2026-09-14, user asked for options 1 and 2)
+
+- **Indication:** before each model call, the runner checks llama-server's `/props` `is_sleeping` (polling it
+  doesn't wake the server, verified). If the model is asleep or already loading, the session gets a
+  `model_waking` event ("The model was asleep. Waking it (about 1 min)") plus a low-priority ntfy notification, and
+  a `model_ready` event with the seconds taken when the first token arrives.
+- **Warm-up:** `POST /models/warm` sends a one-token request to load the default model. The web app calls it
+  when it opens and when it comes back to the foreground (at most once a minute). The New task screen shows the
+  model state every 3 s (loaded / asleep, loading now / loading / unreachable). `GET /models/status` reports it.
+- **Verified live** with a temporary 40 s idle timeout: asleep → warm → ready in ~40 s; a task started while the
+  model was asleep showed "model is asleep; waking it", "model ready after 58 s", the answer, and both ntfy
+  notifications; the New task screen showed "Model is loading" after opening it on a sleeping model. The normal
+  30-minute server was restored afterwards.
+- `ops/check-stack.ps1`: read-only post-reboot check (XMP speed, page file, tasks, llama-server, Docker, ntfy,
+  daemon, tailscale serve, Grafana/Prometheus).
+
 ## Known gaps
 
-- Cold start: ~50 s to reload the model after 30 idle minutes, with no "waking the model" indication in the app
-  or notification.
+- Opening the app loads the model (~12 GB VRAM) even if you only look at the session list; it unloads again
+  after 30 idle minutes.
 
 - The service worker only registers over HTTPS, so offline shell caching is untested.
 - No push through the web app itself (ntfy covers notifications).

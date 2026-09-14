@@ -130,6 +130,19 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return [{"name": m.name, "context_tokens": m.context_tokens, "default": m.name == cfg.default_model}
                 for m in cfg.models.values()]
 
+    @app.get("/models/status")
+    async def models_status(request: Request):
+        m = mgr(request)
+        return [{"name": mc.name, "state": await m.warmer.state(mc), "waking_seconds": m.warmer.waking_for(mc)}
+                for mc in m.cfg.models.values()]
+
+    @app.post("/models/warm")
+    async def models_warm(request: Request):
+        """Load the default model if it's asleep. The web app calls this when it opens."""
+        m = mgr(request)
+        model = m.cfg.models[m.cfg.default_model]
+        return {"name": model.name, "state": await m.warmer.warm(model)}
+
     @app.get("/queue")
     async def queue(request: Request):
         positions = mgr(request).scheduler.positions()

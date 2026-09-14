@@ -113,3 +113,35 @@ def test_templates_rerun_and_changes(tmp_path):
         again = client.post(f"/sessions/{s['id']}/rerun").json()
         assert again["id"] != s["id"] and again["title"] == s["title"]
         assert m.original_prompt(again["id"]) == "make a file"
+
+
+def test_sleeping_model_is_announced_and_warmed(tmp_path):
+    from harness.warmup import READY, SLEEPING
+
+    client, m, sent = make_client(tmp_path, [Completion(content="hello")])
+    states = {"now": SLEEPING}
+    warmed = []
+
+    async def fake_state(model):
+        return states["now"]
+
+    async def fake_wake(model):
+        warmed.append(model.name)
+        states["now"] = READY
+
+    m.warmer.state = fake_state
+    m.warmer._wake = fake_wake
+    with client:
+        assert client.get("/models/status").json()[0]["state"] == SLEEPING
+        assert client.post("/models/warm").json()["state"] == SLEEPING
+        wait_for(lambda: warmed == ["fake"])
+        assert client.get("/models/status").json()[0]["state"] == READY
+
+        states["now"] = SLEEPING  # asleep again when the task starts
+        sid = client.post("/sessions", json={"prompt": "hi"}).json()["id"]
+        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        types = [e["type"] for e in m.db.events(sid)]
+        assert types.index("model_waking") < types.index("model_ready") < types.index("assistant")
+        note = wait_for(lambda: next((p for p in sent if p["title"].startswith("Waking the model")), None))
+        assert note["priority"] == 2 and note["click"].endswith(f"/#/s/{sid}")
+        assert "model ready after" in client.get(f"/sessions/{sid}/transcript").text

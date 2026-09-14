@@ -19,7 +19,7 @@ const STATUS_LABEL = {
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "compaction", "compacting", "error", "llm_retry", "resumed",
-  "run_finished", "queue", "notes",
+  "run_finished", "queue", "notes", "model_waking", "model_ready",
 ];
 
 let cleanup = [];
@@ -251,6 +251,27 @@ async function viewNew() {
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   const prompt = h("textarea", { placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
   const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
+  const modelState = h("div", { class: "muted small", style: "margin-top:6px" });
+  const MODEL_STATE = {
+    ready: "✓ Model loaded",
+    sleeping: "Model is asleep; loading it now (about a minute)",
+    waking: "Model is loading (about a minute); you can start the task anyway",
+    unreachable: "Model server isn't answering",
+  };
+  const pollModel = async () => {
+    try {
+      const status = await api("/models/status");
+      const current = status.find((s) => s.name === model.value) || status[0];
+      if (current) {
+        modelState.textContent = MODEL_STATE[current.state] || current.state;
+        modelState.classList.toggle("dots", current.state === "waking" || current.state === "sleeping");
+      }
+    } catch (_) { /* offline: the form's own errors cover it */ }
+  };
+  warmModel(true);
+  pollModel();
+  const modelTimer = setInterval(pollModel, 3000);
+  onLeave(() => clearInterval(modelTimer));
   const draftKey = "harness.draft";
   try { prompt.value = localStorage.getItem(draftKey) || ""; } catch (_) { /* private mode */ }
   prompt.addEventListener("input", () => { try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ } });
@@ -282,7 +303,7 @@ async function viewNew() {
   templates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project,
-  h("label", {}, "Model"), model,
+  h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
   h("div", { class: "row", style: "margin-top:18px" },
     h("button", {
@@ -294,7 +315,8 @@ async function viewNew() {
         try {
           await api("/templates", { method: "POST", body: { name, project: project.value, model: model.value, prompt: prompt.value } });
           toast("Template saved");
-          route();
+          warmModel();
+route();
         } catch (err) { toast(err.message); }
       },
     }, "Save as template"),
@@ -310,7 +332,8 @@ async function viewNew() {
             onclick: async () => {
               if (!confirm(`Delete template “${t.name}”?`)) return;
               await api(`/templates/${t.id}`, { method: "DELETE" });
-              route();
+              warmModel();
+route();
             },
           }, "Delete")),
         h("div", { class: "preview" }, `${t.project} · ${t.prompt}`)))));
@@ -402,6 +425,7 @@ async function viewSession(sid, tab, focusApproval) {
   let live = null;           // streaming bubble
   let lastSeq = 0;
   let lastContent = "";
+  let wakingNote = null;
 
   const liveBubble = () => {
     if (live) return live;
@@ -524,6 +548,15 @@ async function viewSession(sid, tab, focusApproval) {
     error: (e) => add(h("p", { class: "note bad" }, e.data.message)),
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
     resumed: () => add(h("p", { class: "note" }, "Daemon restarted — session resumed")),
+    model_waking: (e) => {
+      wakingNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
+        `The model was asleep. Waking it (about ${Math.round(e.data.expected_seconds / 60) || 1} min)`)));
+    },
+    model_ready: (e) => {
+      if (wakingNote) fill(wakingNote, `Model woke up in ${e.data.seconds} s`);
+      else add(h("p", { class: "note" }, `Model woke up in ${e.data.seconds} s`));
+      wakingNote = null;
+    },
     queue: (e) => { session.queue_position = e.data.position; renderHead(); },
     status: (e) => {
       session.status = e.data.status;
@@ -635,8 +668,19 @@ async function viewSettings() {
       h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")));
 }
 
+// ---------- model warm-up ----------
+// Loading the model takes about a minute after it has slept, so start as soon as the app is opened.
+let lastWarm = 0;
+async function warmModel(force = false) {
+  if (!force && Date.now() - lastWarm < 60_000) return;
+  lastWarm = Date.now();
+  try { await api("/models/warm", { method: "POST" }); } catch (_) { /* offline */ }
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") warmModel(); });
+
 // ---------- boot ----------
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
+warmModel();
 route();

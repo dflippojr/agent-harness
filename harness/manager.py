@@ -11,6 +11,7 @@ from pathlib import Path
 from .bus import EventBus
 from .changes import workspace_changes
 from .notify import Notifier
+from .warmup import ModelWarmer
 from .config import Config
 from .db import Database
 from .runner import ACTIVE, SYSTEM_PROMPT, Runner, new_run
@@ -38,7 +39,8 @@ class Manager:
         self.db = db or Database(cfg.db_path)
         self.bus = EventBus(self.db)
         self.scheduler = GpuScheduler(self._queue_changed)
-        self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat)
+        self.warmer = ModelWarmer()
+        self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer)
         self.tasks: dict[str, asyncio.Task] = {}
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
