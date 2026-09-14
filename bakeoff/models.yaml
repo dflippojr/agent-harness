@@ -28,6 +28,8 @@ models:
 
   devstral-small-2-24b:
     path: C:/AI/models/Devstral-Small-2-24B-Instruct-2512-IQ4_XS.gguf
-    # Dense 24B: q8_0 KV is what lets 32K context fit next to the weights.
-    args: [--n-gpu-layers, "99", --cache-type-k, q8_0, --cache-type-v, q8_0]
+    # Dense 24B: q8_0 KV is what lets 32K context fit next to the weights. Forcing every layer onto
+    # the GPU (15.6 GB used) spilled into shared system memory and exhausted Windows' commit limit, so
+    # let --fit keep a safety margin instead.
+    args: [--fit, "on", --cache-type-k, q8_0, --cache-type-v, q8_0]
     sampling: {temperature: 0.15}
