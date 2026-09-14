@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101418" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Agents">
+  <title>Agents</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icon-180.png">
+  <link rel="icon" href="/static/icon-192.png">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header id="bar">
+    <button id="back" class="icon" aria-label="Back" hidden>‹</button>
+    <h1 id="title">Agents</h1>
+    <span id="conn" class="conn" title="Live connection"></span>
+    <a id="settings" class="icon" href="#/settings" aria-label="Settings">⚙</a>
+  </header>
+  <main id="app"></main>
+  <div id="toast" role="status" hidden></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

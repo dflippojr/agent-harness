@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -49,7 +50,22 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at REAL
 );
 CREATE INDEX IF NOT EXISTS approvals_session ON approvals(session_id, status);
+CREATE TABLE IF NOT EXISTS templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    project TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    prompt TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
+
+# Columns added after a table first shipped: (table, column, definition).
+MIGRATIONS = [
+    # Secret for deciding one approval from a notification button, without a session cookie or JSON body.
+    ("approvals", "token", "TEXT NOT NULL DEFAULT ''"),
+]
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args"}
 
@@ -73,6 +89,10 @@ class Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        for table, column, definition in MIGRATIONS:
+            existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         self.lock = threading.RLock()
 
     def close(self) -> None:
@@ -156,11 +176,17 @@ class Database:
     def insert_approval(self, a: dict) -> None:
         with self.lock:
             self.conn.execute(
-                "INSERT INTO approvals (id, session_id, tool_call_id, tool, args, reason, detail, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                "INSERT INTO approvals (id, session_id, tool_call_id, tool, args, reason, detail, status, created_at, "
+                "token) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
                 (a["id"], a["session_id"], a["tool_call_id"], a["tool"], json.dumps(a["args"]),
-                 a["reason"], a.get("detail", ""), time.time()),
+                 a["reason"], a.get("detail", ""), time.time(), secrets.token_urlsafe(24)),
             )
+
+    def approval_by_token(self, token: str) -> dict | None:
+        if not token:
+            return None
+        with self.lock:
+            return _row(self.conn.execute("SELECT * FROM approvals WHERE token = ?", (token,)).fetchone())
 
     def get_approval(self, aid: str) -> dict | None:
         with self.lock:
@@ -181,6 +207,37 @@ class Database:
             params = (sid,)
         with self.lock:
             return [_row(r) for r in self.conn.execute(query + " ORDER BY created_at", params).fetchall()]
+
+    def approvals(self, sid: str) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM approvals WHERE session_id = ? ORDER BY created_at", (sid,)).fetchall()
+        return [_row(r) for r in rows]
+
+    # templates
+    def list_templates(self) -> list[dict]:
+        with self.lock:
+            return [dict(r) for r in self.conn.execute("SELECT * FROM templates ORDER BY name").fetchall()]
+
+    def get_template(self, tid: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM templates WHERE id = ?", (tid,)).fetchone()
+        return dict(row) if row else None
+
+    def upsert_template(self, t: dict) -> None:
+        now = time.time()
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO templates (id, name, project, model, prompt, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, "
+                "project = excluded.project, model = excluded.model, prompt = excluded.prompt, "
+                "updated_at = excluded.updated_at",
+                (t["id"], t["name"], t["project"], t.get("model") or "", t["prompt"], now, now),
+            )
+
+    def delete_template(self, tid: str) -> bool:
+        with self.lock:
+            return self.conn.execute("DELETE FROM templates WHERE id = ?", (tid,)).rowcount == 1
 
     def decide_approval(self, aid: str, status: str, note: str = "") -> bool:
         with self.lock:

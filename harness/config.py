@@ -31,6 +31,14 @@ class SandboxConfig:
 
 
 @dataclass
+class NotifyConfig:
+    enabled: bool = False
+    server: str = "http://127.0.0.1:8095"  # where the daemon publishes (local)
+    topic: str = "agent-harness"
+    token_file: str = ""                   # file holding an ntfy access token with write access to the topic
+
+
+@dataclass
 class Project:
     name: str
     description: str = ""
@@ -49,6 +57,9 @@ class Config:
     models: dict[str, ModelConfig]
     sandbox: SandboxConfig
     projects: dict[str, Project]
+    public_url: str = ""               # how the phone reaches the daemon, e.g. https://host.tailnet.ts.net
+    allowed_logins: list[str] = field(default_factory=list)  # Tailscale logins allowed through `tailscale serve`
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -102,6 +113,9 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         models=models,
         sandbox=SandboxConfig(**(raw.get("sandbox") or {})),
         projects=projects,
+        public_url=(raw.get("public_url") or "").rstrip("/"),
+        allowed_logins=list(raw.get("allowed_logins") or []),
+        notify=NotifyConfig(**(raw.get("notify") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

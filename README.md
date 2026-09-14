@@ -4,7 +4,18 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 and are driven from the phone or MacBook over Tailscale. The phased plan lives in the agent
 memory library (`categories/project-ideas/capsules/local-agent-harness.md`).
 
-## Phase 1: harness daemon (current)
+## Phase 2: phone control surface (current)
+
+The daemon serves a mobile web app (installable PWA) and sends phone notifications through a self-hosted ntfy.
+Details, security model, and the exit-test checklist: `docs/phase2-results.md`.
+
+- Autostart: logon task `AgentHarness-Daemon` (`ops/harness/install-task.ps1`), logs in `D:\Agents\harness\logs`.
+- Tailnet: `ops/tailscale/serve.ps1` publishes `https://tower.your-tailnet.ts.net` (daemon) and `:8443` (ntfy).
+- Notifications: `notify` in `config/harness.yaml`; ntfy lives in `D:\Docker
+tfy`.
+- Screenshots: `node scripts/ui-shot.mjs runs/shots "list=http://127.0.0.1:8100/#/"`.
+
+## Phase 1: harness daemon
 
 The daemon runs agent sessions against the always-on model server, one sandbox container per session.
 Design notes and test results: `docs/phase1-results.md`.

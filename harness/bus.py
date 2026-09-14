@@ -15,20 +15,32 @@ class Subscription:
 
 
 class EventBus:
+    """Subscribers register per session id, or under "*" for every session (the session list, notifications)."""
+
     def __init__(self, db: Database):
         self.db = db
         self._subs: dict[str, set[Subscription]] = {}
+        self._listeners: list = []
+
+    def add_listener(self, fn) -> None:
+        """fn(event) is called synchronously for every persisted event. It must not block."""
+        self._listeners.append(fn)
 
     def emit(self, sid: str, type_: str, data: dict) -> dict:
         event = self.db.insert_event(sid, type_, data)
         self._publish(sid, event)
+        for fn in self._listeners:
+            fn(event)
         return event
 
     def ephemeral(self, sid: str, type_: str, data: dict) -> None:
         self._publish(sid, {"seq": None, "session_id": sid, "type": type_, "data": data})
 
     def _publish(self, sid: str, event: dict) -> None:
-        for sub in list(self._subs.get(sid, ())):
+        subs = list(self._subs.get(sid, ()))
+        if event["seq"] is not None or event["type"] == "queue":  # token deltas stay per-session
+            subs += list(self._subs.get("*", ()))
+        for sub in subs:
             try:
                 sub.queue.put_nowait(event)
             except asyncio.QueueFull:

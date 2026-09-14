@@ -120,6 +120,12 @@ def test_split_keeps_tool_results_with_their_call():
     assert sum(1 for m in again if (m.get("content") or "").startswith(compaction.SUMMARY_TAG)) == 1
 
 
+def test_resolve_path_strips_extended_prefix(monkeypatch):
+    from harness import tools
+    monkeypatch.setattr(tools.Path, "resolve", lambda self: tools.Path(r"\\?\C:\ws\a.txt"))
+    assert str(tools.resolve_path(tools.Path("x"))) == r"C:\ws\a.txt"
+
+
 def test_scheduler_fifo():
     async def body():
         order = []

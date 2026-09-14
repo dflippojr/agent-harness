@@ -106,6 +106,14 @@ def truncate_middle(text: str, limit: int) -> str:
     return f"{text[:half]}\n... [{len(text) - limit} characters truncated] ...\n{text[-half:]}"
 
 
+def resolve_path(p: Path) -> Path:
+    r"""Path.resolve() that never returns Windows' extended-length form. Python 3.10 sometimes yields
+    `\\?\C:\...` while a directory in the path is being created, which breaks containment checks."""
+    resolved = p.resolve()
+    text = str(resolved)
+    return Path(text[4:]) if text.startswith("\\\\?\\") else resolved
+
+
 def normalize_path(path: str | None) -> str:
     path = (path or ".").strip().replace("\\", "/")
     if path.startswith("/workspace"):
@@ -115,7 +123,7 @@ def normalize_path(path: str | None) -> str:
 
 class Workspace:
     def __init__(self, root: Path, sandbox: Sandbox, repos_dir: Path, context_tokens: int):
-        self.root = root.resolve()
+        self.root = resolve_path(root)
         self.sandbox = sandbox
         self.repos_dir = repos_dir
         # Size reads to the context window: short pages made Qwen answer from page 1 in Phase 0.
@@ -125,7 +133,7 @@ class Workspace:
 
     def resolve(self, path: str | None) -> Path:
         rel = normalize_path(path)
-        candidate = (self.root / rel).resolve()
+        candidate = resolve_path(self.root / rel)
         if candidate != self.root and not candidate.is_relative_to(self.root):
             raise ToolError(f"path escapes the workspace: {path}")
         return candidate

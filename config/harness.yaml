@@ -1,7 +1,18 @@
 # Harness daemon settings. Paths use forward slashes; they work on Windows.
 listen:
-  host: 127.0.0.1        # Phase 2 publishes it on the tailnet via `tailscale serve`; never bind wider
+  host: 127.0.0.1        # published on the tailnet by `tailscale serve` (ops/tailscale/serve.ps1); never bind wider
   port: 8100
+
+# The phone reaches the daemon here. Used for notification links and to check the Origin of browser requests.
+public_url: https://tower.your-tailnet.ts.net
+# Requests arriving through `tailscale serve` carry the caller's login; anyone else is refused.
+allowed_logins: [you@example.com]
+
+notify:
+  enabled: true
+  server: http://127.0.0.1:8095                  # ntfy container (D:/Docker/ntfy), published at :8443 on the tailnet
+  topic: agent-harness
+  token_file: D:/Docker/ntfy/secrets/harness-publisher.token
 
 data_dir: D:/Agents/harness   # SQLite DB, per-session workspaces, transcripts
 repos_dir: D:/Agents/repos    # git_clone "local:<name>" clones from here (host-side, no network)

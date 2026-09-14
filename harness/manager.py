@@ -6,8 +6,11 @@ import asyncio
 import logging
 import time
 import uuid
+from pathlib import Path
 
 from .bus import EventBus
+from .changes import workspace_changes
+from .notify import Notifier
 from .config import Config
 from .db import Database
 from .runner import ACTIVE, SYSTEM_PROMPT, Runner, new_run
@@ -17,6 +20,10 @@ from . import llm
 log = logging.getLogger("harness.manager")
 
 TARGETS = ("tower", "macbook")
+
+
+def public_approval(a: dict | None) -> dict | None:
+    return a and {k: v for k, v in a.items() if k != "token"}
 
 
 class HarnessError(Exception):
@@ -33,6 +40,8 @@ class Manager:
         self.scheduler = GpuScheduler(self._queue_changed)
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat)
         self.tasks: dict[str, asyncio.Task] = {}
+        self.notifier = Notifier(cfg, self.db)
+        self.bus.add_listener(self.notifier.listener)
 
     def _queue_changed(self, positions: dict[str, int]) -> None:
         for sid, position in positions.items():
@@ -40,6 +49,7 @@ class Manager:
 
     # lifecycle
     async def start(self) -> None:
+        self.notifier.start()
         for s in self.db.sessions_with_status(*ACTIVE):
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
@@ -50,6 +60,7 @@ class Manager:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self.notifier.stop()
 
     def _spawn(self, sid: str, recovered: bool = False) -> None:
         task = asyncio.create_task(self.runner.run(sid, recovered=recovered), name=f"session-{sid}")
@@ -128,6 +139,30 @@ class Manager:
             self._spawn(sid)
         return self.db.get_session(sid)
 
+    def original_prompt(self, sid: str) -> str:
+        for e in self.db.events(sid):
+            if e["type"] == "user_message":
+                return e["data"]["content"]
+        return self.db.get_session(sid)["context"][1]["content"]
+
+    def rerun(self, ref: str) -> dict:
+        """Start a fresh session with the same task, project, and model."""
+        s = self.get(ref)
+        return self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
+                           model=s["model"] if s["model"] in self.cfg.models else None, title=s["title"])
+
+    async def changes(self, ref: str) -> dict:
+        s = self.get(ref)
+        return await asyncio.to_thread(workspace_changes, Path(s["workspace"]))
+
+    def decide_by_token(self, token: str, approve: bool) -> dict:
+        approval = self.db.approval_by_token(token)
+        if approval is None:
+            raise HarnessError(404, "unknown approval link")
+        if approval["status"] != "pending":
+            return public_approval(approval)  # a repeated button press is harmless
+        return self.decide(approval["session_id"], approval["id"], approve, note="")
+
     def decide(self, ref: str, approval_id: str | None, approve: bool, note: str = "") -> dict:
         sid = self.resolve_id(ref)
         pending = self.db.pending_approvals(sid)
@@ -147,7 +182,7 @@ class Manager:
         event = self.runner.approval_events.get(approval_id)
         if event:
             event.set()
-        return self.db.get_approval(approval_id)
+        return public_approval(self.db.get_approval(approval_id))
 
     async def cancel(self, ref: str) -> dict:
         sid = self.resolve_id(ref)
@@ -168,5 +203,5 @@ class Manager:
         out["queue_position"] = self.scheduler.positions().get(s["id"])
         out["last_event_seq"] = self.db.last_event_seq(s["id"])
         if s["status"] == "waiting_approval":
-            out["pending_approvals"] = self.db.pending_approvals(s["id"])
+            out["pending_approvals"] = [public_approval(a) for a in self.db.pending_approvals(s["id"])]
         return out
