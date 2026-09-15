@@ -1,0 +1,200 @@
+# Phase 8a design: Claude Code, Codex and Cursor as session backends
+
+Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **design, not built**. Written
+2026-09-15 from the CLIs installed on the tower: Claude Code 2.1.272, Codex CLI (Plus plan, models `gpt-6-astra`,
+`gpt-5.6-sol`, ...), and Cursor Agent (`cursor-agent`, models incl. `cursor-grok-4.6-high`). The terms and billing
+background and the promises made to app builders are in `docs/app-api.md` → "Subscription backends".
+
+## Requirements (user decisions)
+
+1. The unmodified CLI runs inside a harness sandbox under the user's own subscription login. The daemon never reads,
+   copies or relays tokens, and login completes through the provider's own flow.
+2. Only the daemon talks to the CLI. Apps reach it through `/api/v1` sessions, context and tools.
+3. Usage is labeled as programmatic (`claude -p`, `codex exec`/app-server, `agent -p`) and never disguised.
+4. CLI permission prompts become ordinary harness approvals, so any client can decide them: app API, web app, ntfy.
+   Tailscale and ntfy stay optional.
+5. The daemon reports rate limits and keeps a usage/cost tally. It warns when programmatic usage is billed from
+   separate credits instead of subscription limits, and stays quiet otherwise.
+6. API keys can be configured, supplied by the user or the app builder, as the default or as the fallback when
+   limits are hit.
+7. `GET /api/v1` serves a short per-backend notice (terms, billing status, API-key option) for apps to show.
+
+## What the CLIs offer (checked on the tower)
+
+### Claude Code
+
+- `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages` is a
+  bidirectional JSONL session on stdin/stdout. It's the same transport the Agent SDK uses.
+- `--permission-prompts host` (the default with `--print`) sends every permission decision to the host process as a
+  `control_request` (subtype `can_use_tool`). The host answers with a `control_response` (allow, optionally with
+  updated input, or deny with a message). **The daemon is the host**, so no MCP shim is needed.
+  `--permission-prompt-tool` exists as the MCP alternative.
+- `--permission-mode default|acceptEdits|plan|...`, `--model`, `--append-system-prompt` (app context),
+  `--resume <session_id>` (follow-up messages after a daemon restart), `--max-turns`, and `--mcp-config` (to expose
+  harness daemon tools such as web_search, memory or app tools later).
+- Events seen in a real run:
+  - `system/init`: session_id, tools, model
+  - **`rate_limit_event`**: `rate_limit_info` with `status` (e.g. `allowed_warning`), `rateLimitType`,
+    `utilization`, `resetsAt`, `isUsingOverage`, `surpassedThreshold`, and `unifiedWindows.five_hour` /
+    `seven_day` utilization and reset times
+  - `assistant`: content blocks, including tool_use
+  - `user`: tool results
+  - **`result`**: subtype, `total_cost_usd`, `usage` (input, cache, output and thinking tokens), `modelUsage`,
+    `permission_denials`, `terminal_reason`
+- **Billing check (2026-09-15):** a `-p` run moved the same `seven_day` utilization as interactive use (0.78), so
+  programmatic use still counts against subscription limits, consistent with Anthropic's pause.
+  `total_cost_usd` is reported even on a subscription, so it's an estimate, not a bill.
+- **Auth:** `claude auth login` (`--claudeai` subscription, or `--console` API billing) runs an interactive browser
+  flow. `ANTHROPIC_API_KEY` in the environment selects API billing.
+
+### Codex CLI
+
+- `codex exec --json` streams JSONL events. Session logs carry `rate_limits` (`primary`/`secondary` windows with
+  `used_percent`, `window_minutes`, `resets_at`, plus `plan_type` and `credits`). On Plus there's only a weekly
+  window.
+- `codex app-server` (experimental) speaks JSON-RPC over stdio and can generate its own schema
+  (`codex app-server generate-json-schema`). It's the protocol with **approval requests** for commands and file
+  changes, so it's the bridge target. `codex exec` only offers fixed policies (`--sandbox`, `--approve-for-me`).
+- `-m`, `-c model_reasoning_effort=high`, `-C <dir>`, and `codex exec resume <id>`.
+- **Auth:** `codex login` (browser, or `--device-auth` on headless machines, which shows a URL and a user code) and
+  `--with-api-key`.
+
+### Cursor Agent CLI
+
+- `agent -p --output-format stream-json --stream-partial-output`, `--model`, `--resume [chatId]`, `--mode plan|ask`,
+  `--sandbox enabled|disabled`, `--trust`, `--workspace`.
+- **No host approval protocol in `-p`:** print mode "has access to all tools, including write and shell". Without
+  `--force` it refuses commands that would need approval. `--auto-review` has a Cursor-side classifier decide.
+- **Auth:** `agent login` (browser; `NO_OPEN_BROWSER=1` prints the URL) or `CURSOR_API_KEY`, which Cursor
+  documents for automation. The terms don't say whether key usage draws from the plan.
+- Usage and limits aren't exposed in the stream or the status line.
+
+## Architecture
+
+```
+app / web app / ntfy
+        │  /api/v1 sessions, approvals, events (unchanged)
+Harness daemon ── Session(backend = local | claude | codex | cursor)
+        │                         │
+  Runner (Qwen, GPU slot)   CliRunner (no GPU slot; per-backend concurrency limit)
+                                  │ stdio JSONL / JSON-RPC
+                     docker exec -i <session sandbox> claude -p ... | codex app-server | agent -p ...
+                                  │
+                 workspace mount + provider login volume + egress proxy (provider domains only)
+```
+
+### Sessions
+
+- New session field `backend` (default `local`), chosen in New task, templates, jobs and
+  `POST /api/v1/sessions {"backend": ...}`. Also new: `backend_session_id` (for resume), plus `usage` and
+  `rate_limits` snapshots in `run`.
+- `CliRunner` implements the same lifecycle as `Runner`: queued → running → waiting_approval → done/failed/cancelled.
+  It keeps branches and review, transcripts, the quote check, notifications and search. It skips the GPU scheduler
+  and the GPU guard, and compaction is the CLI's job.
+- Follow-up messages are written to the live stdin stream. After a daemon restart, the harness respawns with
+  `--resume <backend_session_id>` and replays nothing (the CLI keeps its own history). A tool call that was running
+  during the restart is reported like `INTERRUPTED` today.
+
+### Sandbox and network
+
+- One image, `agent-harness-cli:<ver>`: the sandbox base plus node, `@anthropic-ai/claude-code`, the Codex CLI and
+  the Cursor agent, pinned versions, installed unmodified from the official packages.
+- Per-provider login volumes (`harness-auth-claude` → `/home/agent/.claude`, `harness-auth-codex` →
+  `~/.codex`, `harness-auth-cursor` → `~/.cursor`) are mounted only into that backend's sessions. **The daemon
+  never mounts or reads these volumes on the host side.**
+- Network: sandboxes are offline today, and a CLI backend needs its provider API. Add an **egress proxy container**
+  (e.g. tinyproxy or squid with a domain allowlist per backend: `api.anthropic.com`, `claude.ai`,
+  `statsig.anthropic.com`, ... / `api.openai.com`, `chatgpt.com` / `api2.cursor.sh`, ...) and set
+  `HTTPS_PROXY` in the container. Everything else stays blocked, and the harness `network: true` approval still
+  applies to the agent's own commands. The exact domain lists get verified with the proxy's deny log during the
+  build.
+- The CLI's own sandbox stays enabled where it has one (Codex `workspace-write`, Cursor `--sandbox enabled`), inside
+  the container.
+
+### Login (requirement 1)
+
+- **Codex:** `codex login --device-auth` inside the auth volume. The daemon shows the URL and the *user code* on the
+  phone. That code is meant to be displayed, and it isn't a credential. The login finishes on OpenAI's site.
+- **Cursor:** `agent login` with `NO_OPEN_BROWSER=1`. The daemon shows the login URL, and the login finishes on
+  Cursor's site.
+- **Claude:** `claude auth login` has the user paste a code from the browser back into the CLI. Relaying that paste
+  through the daemon would put a credential in the daemon's hands, which is exactly what Anthropic's terms rule
+  out. **Proposal:** a one-time terminal step on the machine, `ops/backends/login.ps1 claude`, which runs
+  `docker run -it` with the volume. The app shows the command to run until `claude auth status` in the container
+  reports a subscription login. If Claude Code gains a device-style flow later, switch to it.
+
+### Approvals (requirement 4)
+
+| Backend | Bridge |
+| --- | --- |
+| Claude | `can_use_tool` control request → harness policy first (project rules, defaults; e.g. Read/Grep/Glob allow, Edit/Write inside the workspace allow, Bash asks unless it matches the allow patterns, WebFetch asks) → `ALLOW` answers at once, `ASK` creates a normal approval (card, `approval_requested` event, ntfy), `DENY` answers with the reason. The decision note goes back as the deny message. |
+| Codex | app-server approval requests (command, file change) → the same path. Fallback if app-server proves unstable: `codex exec --sandbox workspace-write` with approvals off, contained by the Docker sandbox plus branch review. |
+| Cursor | **Needs a user decision.** No host approvals exist. Options: (a) `-p` without `--force`, so commands needing approval are refused and the agent works around them; (b) `--force` inside the Docker sandbox with the egress allowlist, with changes reviewed on the session branch; (c) `--auto-review`, where Cursor's classifier decides. |
+
+Policy rules gain CLI tool names (`Bash`, `Edit`, `Write`, `WebFetch`, `mcp__*`, Codex `exec_command` /
+`apply_patch`), so the existing project rules format keeps working.
+
+### Usage, limits and billing (requirement 5)
+
+- **Per event:**
+  - Claude `rate_limit_event` → `backend_usage` state (the latest per backend: windows, utilization, resets,
+    status, isUsingOverage), plus a `rate_limit` session event.
+  - Claude `result.total_cost_usd` and `usage` → `usage` rows (backend, session, app, day, tokens, cost estimate).
+  - Codex `rate_limits` updates → the same state.
+  - Cursor: none. The tally counts requests and tokens where the stream has them.
+- **Surfaces:**
+  - `GET /api/v1/backends`: per backend, whether it's available and logged in, auth mode, billing mode, limits,
+    today's and this week's tally, and the notice text.
+  - A Settings card, and a line in the session header ("Claude · 7d 78%").
+  - Prometheus: `harness_backend_utilization{backend,window}` and `harness_backend_cost_usd_total`.
+- **Billing mode:** config `backends.<name>.billing: subscription | credits` (no API exists to read it). A warning
+  shows when it's `credits`, **or automatically when `isUsingOverage` is true** or status reports billing from
+  credits.
+  - The warning appears on New task, on jobs using that backend, in the notice from `GET /api/v1`, and as a
+    `billing_warning` event.
+  - While usage counts toward the subscription (today), no warning is shown.
+- **Limits:**
+  - At a `rejected` status or a hard rate-limit error, the session pauses as `waiting_limit` with the reset time.
+  - With `fallback: api_key` configured, it resumes on the API key instead and notes that in the transcript and
+    tally.
+  - Configurable soft stop: `stop_at_utilization` (off by default).
+
+### API keys (requirement 6)
+
+- `backends.<name>.auth: subscription | api_key | subscription_then_api_key`.
+- Keys live in `D:\Agents\harness\secrets\<backend>-api-key` (the user's own), or come per app:
+  `POST /keys` app tokens get an optional stored provider key, set by the app builder from Settings → Apps. They're
+  injected as `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CURSOR_API_KEY` into that session's container
+  environment only, and never logged or shown back.
+- A per-app key is the app builder's own API key. That's the terms-clean path for anything that runs unattended at
+  volume.
+
+### App API changes
+
+- `POST /api/v1/sessions`: `backend`, optional `model`, and `effort` where the backend supports it.
+- New events: `rate_limit`, `billing_warning`, `backend_auth_required`.
+- `GET /api/v1`: `backends: [{name, available, logged_in, auth, billing, notice}]`.
+- `GET /api/v1/backends`: details and tally (scope `sessions`).
+- New status `waiting_limit`.
+
+## Build order
+
+1. **CLI image + egress proxy + login script** (Claude first). Exit: `claude auth status` in the container shows
+   the subscription login, and the proxy log shows only allowlisted domains.
+2. **Claude `CliRunner`:** stream-json session, event mapping, `can_use_tool` bridge, resume after restart, branch
+   and review, quote check. Scripted tests with a fake CLI that speaks the JSONL protocol. Exit: from the phone, a
+   Claude session fixes invoice-tools, asks once for a Bash command, and survives a daemon restart.
+3. **Usage and limits:** `backend_usage`, tally, `/api/v1/backends`, notices, Settings card, metrics, billing
+   warning, `waiting_limit`, API-key fallback. Exit: the tally matches `result` costs; forcing `billing: credits`
+   shows warnings.
+4. **Codex** via app-server (schema from `generate-json-schema`), device-auth login from the phone. Exit: same task
+   with `gpt-5.6-sol` high.
+5. **Cursor** after the approval decision. Exit: same task with `cursor-grok-4.6-high`.
+
+## Open questions for the user
+
+1. **Cursor approvals:** (a) refuse without `--force`, (b) `--force` inside the Docker sandbox with branch review,
+   or (c) Cursor's `--auto-review`?
+2. **Claude login:** is a one-time terminal step on the PC acceptable, instead of logging in from the phone?
+3. **Egress proxy:** fine to add a small proxy container so backend sandboxes reach only their provider's domains?
+4. **Concurrency:** how many subscription sessions may run at once per backend (proposed default 2)?
