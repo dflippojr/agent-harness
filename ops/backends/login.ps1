@@ -37,9 +37,17 @@ if ((docker inspect -f '{{.State.Running}}' "harness-egress-$Backend" 2>$null) -
 docker volume create $volume | Out-Null
 
 $command = if ($Status) { $spec.State } elseif ($Logout) { $spec.Out } else { $spec.Login }
-$envArgs = @('-e', "HTTPS_PROXY=$proxy", '-e', "HTTP_PROXY=$proxy", '-e', 'NO_PROXY=localhost,127.0.0.1')
-foreach ($e in $spec.Env) { $envArgs += @('-e', $e) }
-$tty = if ($Status) { @() } else { @('-it') }
 
-docker run --rm @tty --network harness-cli @envArgs -v "${volume}:$($spec.Dir)" $Image @command
+# Build one flat argument list. (Don't assign `if (...) { @('-it') }` to a variable and splat it: PowerShell unwraps a
+# one-element array to a string, and splatting a string passes its characters one by one.)
+$dockerArgs = [System.Collections.Generic.List[string]]::new()
+$dockerArgs.AddRange([string[]]@('run', '--rm'))
+if (-not $Status) { $dockerArgs.Add('-it') }
+$dockerArgs.AddRange([string[]]@('--network', 'harness-cli', '-e', "HTTPS_PROXY=$proxy", '-e', "HTTP_PROXY=$proxy",
+                                 '-e', 'NO_PROXY=localhost,127.0.0.1'))
+foreach ($e in $spec.Env) { $dockerArgs.AddRange([string[]]@('-e', $e)) }
+$dockerArgs.AddRange([string[]]@('-v', "${volume}:$($spec.Dir)", $Image))
+$dockerArgs.AddRange([string[]]$command)
+
+& docker @dockerArgs
 exit $LASTEXITCODE
