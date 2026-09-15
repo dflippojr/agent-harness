@@ -17,7 +17,7 @@ from .config import ModelConfig
 
 log = logging.getLogger("harness.warmup")
 
-SLEEPING, WAKING, READY, UNREACHABLE = "sleeping", "waking", "ready", "unreachable"
+SLEEPING, WAKING, READY, UNREACHABLE, PAUSED = "sleeping", "waking", "ready", "unreachable", "paused"
 EXPECTED_WAKE_SECONDS = 60  # Qwen reloads took 13-57 s in Phase 0 and ~50 s in the Phase 2 exit test
 
 
@@ -25,8 +25,11 @@ class ModelWarmer:
     def __init__(self) -> None:
         self._waking: dict[str, asyncio.Task] = {}
         self._wake_started: dict[str, float] = {}
+        self.blocked = lambda: False  # the GPU guard has the model server stopped; don't wake it
 
     async def state(self, model: ModelConfig) -> str:
+        if self.blocked():
+            return PAUSED
         if model.name in self._waking and not self._waking[model.name].done():
             return WAKING
         try:

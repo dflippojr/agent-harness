@@ -185,6 +185,26 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         model = m.cfg.models[m.cfg.default_model]
         return {"name": model.name, "state": await m.warmer.warm(model)}
 
+    # GPU contention guard
+    @app.get("/gpu")
+    async def gpu(request: Request):
+        m = mgr(request)
+        return m.guard.status() if m.guard else {"enabled": False, "state": "clear", "signals": []}
+
+    @app.post("/gpu/{action}")
+    async def gpu_action(action: str, request: Request):
+        """pause: hold the GPU for other uses until resumed. resume: reload now, ignoring the current triggers."""
+        m = mgr(request)
+        if m.guard is None:
+            raise HarnessError(400, "the GPU guard is disabled in config/harness.yaml")
+        if action == "pause":
+            m.guard.pause()
+        elif action == "resume":
+            m.guard.resume()
+        else:
+            raise HarnessError(404, "unknown action")
+        return m.guard.status()
+
     @app.get("/queue")
     async def queue(request: Request):
         positions = mgr(request).scheduler.positions()

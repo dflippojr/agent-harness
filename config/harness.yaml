@@ -73,3 +73,13 @@ compaction:
   elide_at: 0.55       # fraction of context_tokens: shorten old tool outputs
   summarize_at: 0.65   # still above this after eliding: summarize older turns
   keep_recent: 0.20    # fraction of context kept verbatim after a summary
+
+# GPU contention guard (harness/gpu_guard.py). While a game runs (Steam/Epic/GOG/Xbox library folders, or Sunshine's
+# Steam Big Picture app) or Plex hardware-transcodes, the queue pauses after the current model turn, llama-server is
+# stopped, and it's restarted once the GPU has been clear for resume_after_seconds. Desktop streaming alone is fine.
+gpu_guard:
+  enabled: true
+  poll_seconds: 10
+  resume_after_seconds: 180
+  drain_timeout_seconds: 300
+  pause_flag: C:/AI/llama-server.paused   # also in ops/llama-server/run-qwen.ps1

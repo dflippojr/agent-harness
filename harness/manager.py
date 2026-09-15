@@ -51,6 +51,19 @@ class Manager:
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
         self.maintenance = Maintenance(cfg, self.db, self.runner)
+        self.guard = None
+        if cfg.gpu_guard.enabled:
+            from .gpu_guard import GpuGuard
+            self.guard = GpuGuard(cfg.gpu_guard, cfg.models[cfg.default_model], self.scheduler,
+                                  busy=lambda: bool(self.runner.generating), on_pause=self._gpu_paused,
+                                  on_resume=self.runner.gpu_resumed)
+            self.runner.guard = self.guard
+            self.warmer.blocked = lambda: self.guard.active
+
+    def _gpu_paused(self, reasons: list[dict]) -> None:
+        for s in self.db.sessions_with_status(*ACTIVE):
+            if s["status"] != "waiting_approval":  # they don't need the GPU until the user decides
+                self.runner.note_gpu_pause(s["id"])
 
     def _keep_awake(self, target: str) -> bool:
         """A runner holds off idle sleep while one of its sessions is actually running."""
@@ -65,6 +78,8 @@ class Manager:
         self.notifier.start()
         if maintenance:
             self.maintenance.start()
+        if self.guard is not None:
+            self.guard.start()
         for s in self.db.sessions_with_status(*ACTIVE):
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
@@ -78,6 +93,8 @@ class Manager:
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.notifier.stop()
         await self.maintenance.stop()
+        if self.guard is not None:
+            await self.guard.stop()
 
     def _spawn(self, sid: str, recovered: bool = False) -> None:
         task = asyncio.create_task(self.runner.run(sid, recovered=recovered), name=f"session-{sid}")

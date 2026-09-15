@@ -90,6 +90,11 @@ class Runner:
         self.user_cancelled: set[str] = set()
         self._sandboxes: dict[str, Sandbox] = {}
         self._quota_checked: dict[str, float] = {}
+        self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
+        self.generating: set[str] = set()       # sessions with a model call in flight (the guard waits for them)
+        self.gpu_paused_sessions: set[str] = set()
+        self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
+        self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
 
     # helpers
     def sandbox(self, s: dict) -> Sandbox | RemoteSandbox:
@@ -127,14 +132,52 @@ class Runner:
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
 
-    async def _acquire(self, sid: str) -> None:
+    async def _acquire(self, sid: str, front: bool = False) -> None:
         if self.scheduler.holder == sid:
             return
         s = self.db.get_session(sid)
         if s["status"] != "queued":
             self.set_status(sid, "queued")
-        await self.scheduler.acquire(sid)
+        if self.guard is not None and self.guard.active:
+            self.note_gpu_pause(sid)
+        await self.scheduler.acquire(sid, front=front)
         self.set_status(sid, "running")
+
+    # GPU contention (gpu_guard.py)
+    def note_gpu_pause(self, sid: str) -> None:
+        """Tell a session (and the phone) that the GPU is paused. Once per pause."""
+        if sid in self.gpu_paused_sessions or self.guard is None:
+            return
+        from .gpu_guard import describe
+        self.gpu_paused_sessions.add(sid)
+        self.bus.emit(sid, "gpu_paused", {"reason": describe(self.guard.reasons), "reasons": self.guard.reasons,
+                                          "resume_after_seconds": self.guard.cfg.resume_after_seconds})
+
+    def gpu_resumed(self, seconds: float) -> None:
+        for sid in sorted(self.gpu_paused_sessions):
+            self.bus.emit(sid, "gpu_resumed", {"seconds": round(seconds)})
+        self.gpu_paused_sessions.clear()
+
+    async def _gpu_gate(self, sid: str) -> None:
+        """Before a model call: while the guard has the GPU paused, step aside and wait first in line."""
+        while self.guard is not None and self.guard.active:
+            self.scheduler.release(sid)
+            await self._acquire(sid, front=True)
+
+    async def _model_call(self, sid: str, *args, **kwargs) -> llm.Completion:
+        """self.chat, gated on the GPU guard. A call cut off because the guard stopped the model server (a game
+        started and the turn outlasted the drain timeout) is retried after the pause instead of failing."""
+        while True:
+            await self._gpu_gate(sid)
+            self.generating.add(sid)
+            try:
+                return await self.chat(*args, **kwargs)
+            except llm.LLMError as e:
+                if self.guard is None or not self.guard.active:
+                    raise
+                self.bus.emit(sid, "llm_retry", {"attempt": 0, "error": f"model server paused for the GPU: {e}"[:500]})
+            finally:
+                self.generating.discard(sid)
 
     # runner targets (the MacBook)
     async def _wait_for_target(self, sid: str) -> None:
@@ -304,7 +347,7 @@ class Runner:
         completion = None
         for attempt in range(4):
             try:
-                completion = await self.chat(model, s["context"], tools, on_delta, on_progress=reading)
+                completion = await self._model_call(sid, model, s["context"], tools, on_delta, on_progress=reading)
                 break
             except llm.LLMError as e:
                 flush()
@@ -337,6 +380,8 @@ class Runner:
         context = s["context"] + [msg]
         totals = self._add_totals(s["totals"], completion)
         event["totals"] = totals
+        self.last_completion = {"model": model.name, "prompt_tps": completion.prompt_tps, "gen_tps": completion.gen_tps,
+                                "at": time.time()}
 
         final = not completion.tool_calls and completion.content.strip() and completion.finish_reason != "length"
         with self.db.tx():
@@ -637,7 +682,7 @@ class Runner:
 
                 reading = self._progress_reporter(sid, "compacting", {"phase": "reading"})
                 try:
-                    summary = await self.chat(model, request, None, writing, max_tokens=4096,
+                    summary = await self._model_call(sid, model, request, None, writing, max_tokens=4096,
                                               extra={"chat_template_kwargs": {"enable_thinking": False}},
                                               on_progress=reading)
                 except llm.LLMError as e:

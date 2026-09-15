@@ -3,6 +3,8 @@
 A session holds the slot for its whole run, not per generation. With a single llama-server slot, interleaving
 sessions would evict the prompt cache, and re-reading a long prompt costs over a minute on Qwen. A session
 gives the slot up while it waits for an approval.
+
+While the GPU guard has paused the queue (a game or a Plex transcode needs the GPU), nobody is granted the slot.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import Callable
 class GpuScheduler:
     def __init__(self, on_change: Callable[[dict[str, int]], None] | None = None):
         self.holder: str | None = None
+        self.paused = False
         self._waiters: OrderedDict[str, asyncio.Future] = OrderedDict()
         self._on_change = on_change
 
@@ -28,15 +31,18 @@ class GpuScheduler:
         if self._on_change:
             self._on_change(self.positions())
 
-    async def acquire(self, sid: str) -> None:
+    async def acquire(self, sid: str, front: bool = False) -> None:
+        """Wait for the slot. `front` puts the session first in line (it had the slot and stepped aside)."""
         if self.holder == sid:
             return
-        if self.holder is None and not self._waiters:
+        if self.holder is None and not self._waiters and not self.paused:
             self.holder = sid
             self._changed()
             return
         fut = asyncio.get_running_loop().create_future()
         self._waiters[sid] = fut
+        if front:
+            self._waiters.move_to_end(sid, last=False)
         self._changed()
         try:
             await fut
@@ -53,10 +59,21 @@ class GpuScheduler:
                 self._changed()
             return
         self.holder = None
+        self._grant_next()
+        self._changed()
+
+    def set_paused(self, paused: bool) -> None:
+        self.paused = paused
+        if not paused and self.holder is None:
+            self._grant_next()
+        self._changed()
+
+    def _grant_next(self) -> None:
+        if self.paused:
+            return
         while self._waiters:
             nxt, fut = self._waiters.popitem(last=False)
             if not fut.done():
                 self.holder = nxt
                 fut.set_result(None)
                 break
-        self._changed()

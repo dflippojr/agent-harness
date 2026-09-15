@@ -67,6 +67,46 @@ class CleanupConfig:
 
 
 @dataclass
+class GpuGuardConfig:
+    """Pause the queue and unload the model while a game or a Plex hardware transcode needs the GPU (gpu_guard.py)."""
+    enabled: bool = False
+    poll_seconds: float = 10
+    resume_after_seconds: float = 180     # the GPU must stay clear this long before the model is reloaded
+    drain_timeout_seconds: float = 300    # longest wait for the current model turn before the server is stopped
+    # The model server's supervisor (ops/llama-server/run-qwen.ps1) doesn't restart the server while this file exists.
+    pause_flag: str = "C:/AI/llama-server.paused"
+    # A running executable whose path contains one of these (case-insensitive) is a game ...
+    game_dirs: list[str] = field(default_factory=lambda: [
+        "\\steamapps\\common\\", "\\Epic Games\\", "\\GOG Galaxy\\Games\\", "\\XboxGames\\"])
+    # ... unless its path also contains one of these (tools that live in game folders).
+    ignore_paths: list[str] = field(default_factory=lambda: ["\\wallpaper_engine\\", "\\Steamworks Shared\\"])
+    game_processes: list[str] = field(default_factory=list)  # extra executable names, e.g. [Game.exe]
+    # A visible window with one of these titles (Sunshine's "Steam Big Picture" app) also counts.
+    window_titles: list[str] = field(default_factory=lambda: ["Steam Big Picture Mode"])
+    plex_url: str = "http://127.0.0.1:32400"  # hardware transcodes; the token is read from Plex's registry key
+    plex: bool = True
+
+
+@dataclass
+class BackupConfig:
+    """Nightly copy of the session database and transcripts (maintenance.py)."""
+    enabled: bool = False
+    dir: str = "D:/My Backups/agent-harness"
+    at: str = "03:30"        # local time
+    keep_days: int = 14
+
+
+@dataclass
+class MemoryLibraryConfig:
+    """Read-only access to the user's memory library for agents (memory_library.py)."""
+    enabled: bool = False
+    repo: str = ""                      # git URL or path; the daemon keeps its own clone and never writes to it
+    clone_dir: str = "D:/Agents/memory-library"
+    refresh_minutes: float = 10         # `git pull` at most this often, when an agent uses the tools
+    categories: list[str] = field(default_factory=list)  # readable categories; everything else is invisible
+
+
+@dataclass
 class RunnerConfig:
     """A machine that runs tool calls for sessions targeting it (Phase 4: the MacBook). The model stays on the tower."""
     name: str
@@ -87,6 +127,7 @@ class Project:
     homelab: bool = False   # give sessions the homelab tools
     quota_mb: int = 0       # workspace quota override
     target: str = "tower"   # where tools run: tower, or a runner name such as macbook (repo is then a path there)
+    memory_library: bool = True  # give sessions the memory-library tools (when memory_library is enabled)
 
 
 @dataclass
@@ -105,6 +146,9 @@ class Config:
     homelab: HomelabConfig = field(default_factory=HomelabConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     runners: dict[str, RunnerConfig] = field(default_factory=dict)
+    gpu_guard: GpuGuardConfig = field(default_factory=GpuGuardConfig)
+    backup: BackupConfig = field(default_factory=BackupConfig)
+    memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -156,6 +200,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
             homelab=bool(spec.get("homelab", False)),
             quota_mb=int(spec.get("quota_mb") or 0),
             target=str(spec.get("target") or "tower"),
+            memory_library=bool(spec.get("memory_library", True)),
         )
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
@@ -185,6 +230,9 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         homelab=homelab,
         cleanup=CleanupConfig(**(raw.get("cleanup") or {})),
         runners=runners,
+        gpu_guard=GpuGuardConfig(**(raw.get("gpu_guard") or {})),
+        backup=BackupConfig(**(raw.get("backup") or {})),
+        memory_library=MemoryLibraryConfig(**(raw.get("memory_library") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

@@ -33,7 +33,19 @@ if (-not $mutex.WaitOne(0)) { exit 0 }
 
 function Log($msg) { "$(Get-Date -Format s) $msg" | Add-Content $supervisorLog }
 
+# The harness daemon's GPU guard (harness/gpu_guard.py) creates this file and stops the server while a game or a
+# Plex hardware transcode needs the GPU. Don't restart the server until the file is gone. Keep in sync with
+# gpu_guard.pause_flag in config/harness.yaml.
+$pauseFlag = 'C:\AI\llama-server.paused'
+$loggedPause = $false
+
 while ($true) {
+    if (Test-Path $pauseFlag) {
+        if (-not $loggedPause) { Log 'paused by the harness GPU guard; waiting for the pause flag to go'; $loggedPause = $true }
+        Start-Sleep -Seconds 5
+        continue
+    }
+    if ($loggedPause) { Log 'pause flag removed'; $loggedPause = $false }
     if (Test-Path $serverLog) { Move-Item $serverLog "$serverLog.prev" -Force }
     Log 'starting llama-server'
     $proc = Start-Process $exe -ArgumentList $serverArgs -WindowStyle Hidden -PassThru -RedirectStandardError $serverLog

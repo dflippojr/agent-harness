@@ -22,7 +22,7 @@ from .db import Database
 log = logging.getLogger("harness.notify")
 
 WATCHED = {"approval_requested", "approval_decided", "run_finished", "model_waking", "target_waiting",
-           "target_online"}
+           "target_online", "gpu_paused", "gpu_resumed"}
 
 
 def _short(text: str, limit: int) -> str:
@@ -39,6 +39,8 @@ def describe_call(tool: str, args: dict) -> str:
         return f"git clone {args.get('url', '')}"
     if tool == "restart_service":
         return f"restart {args.get('service', '')}"
+    if tool == "rebuild_service":
+        return f"rebuild and restart {args.get('service', '')}"
     return f"{tool} {args}"
 
 
@@ -158,6 +160,21 @@ class Notifier:
             return {**base, "sequence_id": f"target-{sid}", "title": f"Resumed on the {d['target']}: {title}",
                     "priority": 2 if seconds >= 60 else 1, "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
                     "message": f"The {d['target']} is back after {waited}; the task is running again."}
+
+        if event["type"] == "gpu_paused":
+            # Replaced by the "resumed" notification through the same sequence id.
+            minutes = round(d.get("resume_after_seconds", 180) / 60)
+            return {**base, "sequence_id": f"gpu-{sid}", "title": f"Paused for the GPU: {title}", "priority": 3,
+                    "tags": ["video_game"], "click": self.link(f"/#/s/{sid}"),
+                    "message": f"{d['reason']} needs the GPU, so the model was unloaded. The task continues "
+                               f"{minutes} min after it's done (or resume from Settings)."}
+
+        if event["type"] == "gpu_resumed":
+            seconds = d.get("seconds", 0)
+            waited = f"{round(seconds / 60)} min" if seconds >= 90 else f"{seconds} s"
+            return {**base, "sequence_id": f"gpu-{sid}", "title": f"Resumed: {title}", "priority": 2,
+                    "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
+                    "message": f"The GPU is free again after {waited}; the model is loading and the task continues."}
 
         if event["type"] == "approval_decided":
             approval = self.db.get_approval(d["id"])
