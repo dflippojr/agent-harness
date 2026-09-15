@@ -118,6 +118,9 @@ web:
   page_chars: 15000
   max_bytes: 5242880
   timeout_seconds: 20
+  # Final answers whose quotes don't appear in anything the agent read get one request to fix them, and any that
+  # remain are flagged on the answer (harness/grounding.py). Applies to every session, not only web research.
+  quote_check: true
 
 # Full-text search over past sessions (harness/search.py): the app's search box, GET /search, and the agent tools
 # session_search / session_read. The index lives in the session database. Projects opt out with `session_search: false`.

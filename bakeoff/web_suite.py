@@ -76,23 +76,7 @@ TASKS = [
 ]
 
 
-def _norm(text: str) -> str:
-    # Letters and digits only: PDF text layers break spacing and subscripts ("df f = 2048" for d_ff = 2048), and
-    # models add Markdown to quotes.
-    return re.sub(r"[^a-z0-9]", "", text.lower())
-
-
-def ungrounded_quotes(answer: str, tool_outputs: list[str], min_chars: int = 25) -> list[str]:
-    """Quoted passages in the answer that don't appear in anything the agent's tools returned (a made-up citation).
-    A quote with an ellipsis counts as grounded when each part appears."""
-    source = _norm("\n".join(tool_outputs))
-    quotes = re.findall(r'["“]([^"”\n]{%d,400})["”]' % min_chars, answer)
-    missing = []
-    for q in quotes:
-        parts = [_norm(x) for x in re.split(r"\.\.\.|…", q) if len(_norm(x)) >= 12]
-        if parts and not all(part in source for part in parts):
-            missing.append(q)
-    return missing
+from harness.grounding import ungrounded_quotes  # noqa: E402
 
 
 async def record(fixture: Path, fetch_top: int) -> None:

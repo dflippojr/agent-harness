@@ -24,6 +24,7 @@ const SESSION_EVENT_TYPES = [
   "approval_requested", "approval_decided", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
   "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "app_context", "app_tool_call", "app_tool_result",
+  "quote_check", "ungrounded_quotes",
 ];
 const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
 const fmtElapsed = (ms) => {
@@ -795,6 +796,14 @@ async function viewSession(sid, tab, focusApproval) {
     },
     notes: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Agent saved notes"), h("div", { class: "text" }, e.data.notes))),
     error: (e) => add(h("p", { class: "note bad" }, e.data.message)),
+    quote_check: (e) => add(h("details", { class: "thinking ev" },
+      h("summary", {}, `Asked the agent to fix ${e.data.quotes.length} quote${e.data.quotes.length === 1 ? "" : "s"} not found in anything it read`),
+      h("div", { class: "text" }, e.data.quotes.map((q) => `“${q}”`).join("
+")))),
+    ungrounded_quotes: (e) => add(h("div", { class: "note bad" },
+      h("p", {}, `⚠ ${e.data.quotes.length === 1 ? "This quote" : "These quotes"} in the answer didn't appear in anything the agent read, so ${e.data.quotes.length === 1 ? "it" : "they"} may be made up:`),
+      h("div", { class: "text", style: "white-space:pre-wrap" }, e.data.quotes.map((q) => `“${q}”`).join("
+")))),
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
     resumed: () => add(h("p", { class: "note" }, "Daemon restarted — session resumed")),
     workspace_ready: (e) => add(h("p", { class: "note" }, `Checked out on branch ${e.data.branch} (from ${e.data.base_branch})`)),

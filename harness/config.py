@@ -120,6 +120,7 @@ class WebConfig:
     fixture_dir: str = ""            # replay recorded searches and pages instead of the network (web_fixture.py)
     timeout_seconds: float = 20
     user_agent: str = "agent-harness/1.0 (personal research agent)"
+    quote_check: bool = True         # final answers: quotes must appear in something the agent read (grounding.py)
 
 
 @dataclass

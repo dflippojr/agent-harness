@@ -209,6 +209,9 @@ class Notifier:
             else:
                 return None  # cancelled by the user: they already know
             body = d.get("answer") or d.get("stop_reason") or status
+            if d.get("ungrounded_quotes"):
+                head, tags = f"{head} (check quotes)", ["warning"]
+                body = f"⚠ {len(d['ungrounded_quotes'])} quote(s) not found in anything the agent read.\n{body}"
             return {**base, "title": f"{head}: {title}", "message": _short(body, 400), "priority": prio,
                     "tags": tags, "click": self.link(f"/#/s/{sid}")}
         return None

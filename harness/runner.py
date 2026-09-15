@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import compaction, llm, projects
+from . import compaction, grounding, llm, projects
 from .bus import EventBus
 from .config import Config
 from .db import Database
@@ -414,6 +414,9 @@ class Runner:
                                 "at": time.time()}
 
         final = not completion.tool_calls and completion.content.strip() and completion.finish_reason != "length"
+        quotes = self._quote_check(s, run, completion.content) if final else []
+        if quotes:
+            final = False
         with self.db.tx():
             if final:
                 run["idle"] = 0
@@ -423,7 +426,10 @@ class Runner:
                 self.bus.emit(sid, "status", {"status": "done", "stop_reason": "final_message",
                                               "answer": completion.content})
                 return True
-            if not completion.tool_calls:
+            if quotes:
+                context.append({"role": "user", "content": grounding.nudge(quotes)})
+                self.bus.emit(sid, "quote_check", {"quotes": quotes})
+            elif not completion.tool_calls:
                 run["idle"] += 1
                 if completion.finish_reason == "length":
                     nudge = "Your reply was cut off by the output limit. Continue, using the tools if needed."
@@ -474,6 +480,17 @@ class Runner:
 
             if name == "finish":
                 answer = str(args.get("answer", ""))
+                run = self.db.get_session(sid)["run"]
+                quotes = self._quote_check(s, run, answer)
+                if quotes:
+                    with self.db.tx():
+                        self.db.update_session(sid, run=run)
+                        self.bus.emit(sid, "quote_check", {"quotes": quotes})
+                    self._record_result(sid, call, name, "Not finished yet. " + grounding.nudge(quotes), ok=False)
+                    for rest in pending[i + 1:]:
+                        self._record_result(sid, rest, rest["function"].get("name", ""),
+                                            "Not run: fix the quotes first.", ok=False)
+                    return False
                 self._record_result(sid, call, name, "Task finished.", ok=True)
                 for rest in pending[i + 1:]:
                     self._record_result(sid, rest, rest["function"].get("name", ""),
@@ -759,6 +776,16 @@ class Runner:
             self.bus.emit(sid, "compaction", data)
         return self.db.get_session(sid)
 
+    def _quote_check(self, s: dict, run: dict, answer: str) -> list[str]:
+        """Quotes in a final answer that nothing the agent read contains. The agent gets one chance per run to fix
+        them (returns them and marks `run`); after that the answer is accepted and _end_run flags what's left."""
+        if run.get("quote_check") or not self.cfg.web.quote_check:
+            return []
+        quotes = grounding.ungrounded_quotes(answer, grounding.session_sources(s["context"], self.db.events(s["id"])))
+        if quotes:
+            run["quote_check"] = 1
+        return quotes
+
     # run end
     def _record_cancel(self, sid: str) -> None:
         s = self.db.get_session(sid)
@@ -779,6 +806,15 @@ class Runner:
             job_status, reason = parse_status(s["answer"]) if s["status"] == "done" else ("", "")
             self.db.update_session(sid, job_status=job_status)
             extra = {"job_id": s["job_id"], "job_status": job_status, "job_reason": reason}
+        if s["status"] == "done" and s["answer"] and self.cfg.web.quote_check:
+            quotes = grounding.ungrounded_quotes(s["answer"],
+                                                 grounding.session_sources(s["context"], self.db.events(sid)))
+            if quotes:
+                with self.db.tx():
+                    self.db.update_session(sid, run={**s["run"], "ungrounded_quotes": quotes})
+                    self.bus.emit(sid, "ungrounded_quotes", {"quotes": quotes})
+                s = self.db.get_session(sid)
+                extra["ungrounded_quotes"] = quotes
         self.bus.emit(sid, "run_finished", {"status": s["status"], "stop_reason": s["stop_reason"],
                                             "answer": s["answer"], "run": s["run"], **extra})
         await asyncio.shield(self.sandbox(s).stop())
