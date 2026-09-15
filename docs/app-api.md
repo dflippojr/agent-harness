@@ -129,21 +129,21 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 > billing change, so check the sources at the end.
 
 A harness will be able to run a session on the user's own Claude, ChatGPT or Cursor subscription instead of a local
-model. The daemon runs the unmodified `claude`, `codex` or Cursor `agent` CLI inside the session sandbox. The user signs in once, on their
-own machine, through the provider's own login flow.
+model. The daemon runs the unmodified `claude`, `codex` or Cursor `agent` CLI inside the session sandbox. The user
+signs in once, on their own machine, through the provider's own login flow.
 
 ### What the daemon guarantees
 
 - **Only the daemon talks to the CLI.** Apps never launch it, never see its credentials, and can't reach its login.
   An app that needs particular agent context sends it to the daemon (`context`, `tools`), which sets up the session.
-- **The CLI is never modified.** It runs as published by Anthropic or OpenAI.
+- **The CLI is never modified.** It runs as published by Anthropic, OpenAI or Cursor.
 - **Programmatic use is labeled as programmatic.** Sessions run in the CLI's non-interactive mode (`claude -p`,
   `codex exec`, `agent -p`). The daemon never drives the interactive terminal UI to look like a person typing.
 - **Each user's usage is billed to that user.** A harness serves its owner. It must not route other people's apps or
   users through one person's subscription.
 - **Usage is visible.** The daemon reports rate-limit state, and a running tally of programmatic usage, through this
   API and the web app. It warns when that usage is billed from separate credits instead of subscription limits.
-- **API keys are optional and configurable.** An Anthropic or OpenAI API key, supplied by the user or by the app
+- **API keys are optional and configurable.** An Anthropic, OpenAI or Cursor API key, supplied by the user or by the app
   builder, can be the default backend or the fallback when subscription limits are hit.
 
 ### Why this is a grey area
@@ -181,7 +181,7 @@ The harness can't control how apps present this, so these are strong recommendat
 - **Offer an API-key path** for users who don't want to risk their subscription, and use it for anything that
   runs unattended at volume.
 - **Don't** ask users for provider credentials or tokens, bundle or patch the CLIs, or run one harness for many users.
-- If you plan to distribute an app widely, **ask Anthropic or OpenAI** about your use case first. Anthropic's terms
+- If you plan to distribute an app widely, **ask the provider** about your use case first. Anthropic's terms
   page points to its sales team for questions about permitted authentication.
 
 ### Sources
