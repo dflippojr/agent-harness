@@ -27,8 +27,10 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash agent \
     && mkdir -p /home/agent/.claude /home/agent/.codex /home/agent/.cursor /home/agent/.local/bin \
     && chown -R agent:agent /home/agent /workspace
 USER agent
+# NODE_USE_ENV_PROXY: Node's fetch ignores HTTPS_PROXY without it, and the sandbox has no route out except the
+# egress proxy (found when `claude auth login` hung exchanging its code).
 ENV HOME=/home/agent PATH=/home/agent/.local/bin:$PATH \
-    DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 NODE_USE_ENV_PROXY=1
 
 # Cursor publishes only an install script (no pinned packages); it installs into ~/.local/bin.
 RUN curl -fsS https://cursor.com/install | bash \
