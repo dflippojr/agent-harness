@@ -85,6 +85,12 @@ def render(db: Database, sid: str) -> str:
             lines += [f"> {at} · waiting for the {d['target']} (offline or asleep)", ""]
         elif t == "target_online":
             lines += [f"> {at} · {d['target']} back after {d['seconds']} s", ""]
+        elif t == "app_context":
+            lines += [f"## {at} · Context from app", "", d["content"], ""]
+        elif t == "app_tool_call":
+            lines += [f"> {at} · waiting for the app to run `{d['name']}`", ""]
+        elif t == "app_tool_result":
+            lines += [f"> {at} · app returned {'a result' if d['ok'] else 'an error'} ({d['chars']} characters)", ""]
         elif t == "gpu_paused":
             lines += [f"> {at} · paused: {d['reason']} needs the GPU, so the model was unloaded", ""]
         elif t == "gpu_resumed":

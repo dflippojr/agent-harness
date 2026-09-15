@@ -424,3 +424,97 @@ def test_images_api_and_tool_only_for_tower_sessions(tmp_path):
         mac = {**tower, "project": "mac", "target": "macbook"}
         assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(tower)}
         assert all("generate_image" not in k.tool_names for k in m.runner.daemon_toolkits(mac))
+
+
+# 6e: app API
+def app_client(tmp_path, steps):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+    cfg = make_cfg(tmp_path)
+    m = Manager(cfg, chat=Script(steps))
+    return TestClient(create_app(m)), m
+
+
+def wait_for(fn, timeout=10.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        value = fn()
+        if value:
+            return value
+        time.sleep(0.03)
+    raise AssertionError("condition not met in time")
+
+
+def test_app_session_with_context_and_app_tool(tmp_path):
+    steps = [Completion(tool_calls=[call("lookup_order", 0, order_id="A-17")]),
+             Completion(content="Order A-17 ships Friday.")]
+    client, m = app_client(tmp_path, steps)
+    with client:
+        app_key = client.post("/keys", json={"name": "shop-bot", "kind": "app", "scopes": ["sessions"]}).json()
+        assert app_key["key"].startswith("ha-") and app_key["scopes"] == "sessions"
+        auth = {"Authorization": f"Bearer {app_key['key']}"}
+        assert client.get("/api/v1").json()["features"]["app_tools"] is True
+
+        bad = client.post("/api/v1/sessions", headers=auth, json={"prompt": "x", "tools": [
+            {"name": "run_shell", "description": "clash"}]})
+        assert bad.status_code == 400 and "already taken" in bad.json()["detail"]
+
+        s = client.post("/api/v1/sessions", headers=auth, json={
+            "prompt": "When does order A-17 ship?", "metadata": {"ticket": 991},
+            "context": [{"title": "Customer", "content": "Dana, premium plan"}],
+            "tools": [{"name": "lookup_order", "description": "Look up an order by id",
+                       "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}},
+                                      "required": ["order_id"]}}]}).json()
+        sid = s["id"]
+        assert s["app_tools"] == ["lookup_order"] and s["metadata"] == {"ticket": 991}
+        system = m.db.get_session(sid)["context"][0]["content"]
+        assert 'Context from the app "shop-bot"' in system and "Dana, premium plan" in system
+
+        pending = wait_for(lambda: client.get(f"/api/v1/sessions/{sid}/tool_calls", headers=auth).json())
+        assert pending[0]["name"] == "lookup_order" and pending[0]["args"] == {"order_id": "A-17"}
+        wait_for(lambda: client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["status"] == "waiting_app", 15)
+        assert m.scheduler.holder is None  # the GPU slot is free while the app works
+        r = client.post(f"/api/v1/sessions/{sid}/tool_calls/{pending[0]['call_id']}", headers=auth,
+                        json={"output": "ships Friday"})
+        assert r.status_code == 200
+        assert client.post(f"/api/v1/sessions/{sid}/tool_calls/{pending[0]['call_id']}", headers=auth,
+                           json={"output": "again"}).status_code == 409
+        done = wait_for(lambda: (lambda d: d if d["status"] == "done" else None)(
+            client.get(f"/api/v1/sessions/{sid}", headers=auth).json()))
+        assert done["answer"] == "Order A-17 ships Friday."
+        tool_msg = [c for c in m.db.get_session(sid)["context"] if c["role"] == "tool"][0]
+        assert tool_msg["content"] == "ships Friday"
+
+        text = client.get(f"/api/v1/sessions/{sid}/events?follow=false", headers=auth).text
+        assert "event: app_tool_call" in text and "event: app_tool_result" in text
+
+        # context mid-session, delivered as its own event
+        client.post(f"/api/v1/sessions/{sid}/context", headers=auth,
+                    json={"context": [{"title": "Update", "content": "carrier changed"}]})
+        assert any(e["type"] == "app_context" for e in m.db.events(sid))
+
+
+def test_app_scopes_and_isolation(tmp_path):
+    client, m = app_client(tmp_path, [Completion(content="hi")])
+    with client:
+        a = client.post("/keys", json={"name": "a", "kind": "app", "scopes": ["sessions"]}).json()["key"]
+        b = client.post("/keys", json={"name": "b", "kind": "app", "scopes": ["sessions"]}).json()["key"]
+        device = client.post("/keys", json={"name": "zed"}).json()["key"]  # inference only
+        reader = client.post("/keys", json={"name": "dash", "kind": "app", "scopes": ["sessions:all"]}).json()["key"]
+        assert client.post("/keys", json={"name": "x", "scopes": ["root"]}).status_code == 400
+        H = lambda k: {"Authorization": f"Bearer {k}"}  # noqa: E731
+
+        sid = client.post("/api/v1/sessions", headers=H(a), json={"prompt": "hello"}).json()["id"]
+        own = client.post("/sessions", json={"prompt": "the user's own task"}).json()
+        assert client.post("/api/v1/sessions", headers=H(device), json={"prompt": "x"}).status_code == 403
+        assert client.get(f"/api/v1/sessions/{sid}", headers=H(b)).status_code == 404
+        assert client.get(f"/api/v1/sessions/{own['id']}", headers=H(a)).status_code == 404
+        assert [s["id"] for s in client.get("/api/v1/sessions", headers=H(a)).json()] == [sid]
+        assert client.get(f"/api/v1/sessions/{own['id']}", headers=H(reader)).status_code == 200
+        assert client.post("/api/v1/sessions", headers=H(reader), json={"prompt": "x"}).status_code == 403
+        assert client.post(f"/api/v1/sessions/{sid}/approvals/pending", headers=H(a),
+                           json={"decision": "approve"}).status_code == 403
+        assert client.get("/api/v1/sessions", headers={"Authorization": "Bearer nope"}).status_code == 401
+        # app tokens without the inference scope can't use the model endpoint
+        m.cfg.endpoint.enabled = True
+        assert client.post("/v1/chat/completions", headers=H(a), json={"messages": []}).status_code == 401

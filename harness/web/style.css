@@ -103,7 +103,7 @@ main { max-width: 760px; margin: 0 auto; padding: 12px 16px 120px; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--panel-2); color: var(--muted); }
 .badge.running, .badge.queued { background: var(--info-bg); color: var(--accent); }
 .badge.waiting_approval { background: var(--warn-bg); color: var(--warn); }
-.badge.waiting_target { background: var(--warn-bg); color: var(--warn); }
+.badge.waiting_target, .badge.waiting_app { background: var(--warn-bg); color: var(--warn); }
 .badge.done { background: var(--ok-bg); color: var(--ok); }
 .badge.failed { background: var(--bad-bg); color: var(--bad); }
 .badge.running::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 5px; vertical-align: 1px; animation: pulse 1.2s infinite; }

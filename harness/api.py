@@ -126,8 +126,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=WEB), name="static")
 
-    from . import endpoint
+    from . import apps, endpoint
     endpoint.register(app, mgr)
+    apps.register(app, mgr)
 
     # API
     @app.get("/health")

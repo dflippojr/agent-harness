@@ -14,7 +14,7 @@ const $back = document.getElementById("back");
 const $conn = document.getElementById("conn");
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 const STATUS_LABEL = {
-  queued: "queued", running: "running", waiting_approval: "needs approval", waiting_target: "waiting for Mac",
+  queued: "queued", running: "running", waiting_approval: "needs approval", waiting_target: "waiting for Mac", waiting_app: "waiting for app",
   done: "done", failed: "failed", cancelled: "cancelled",
 };
 const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };
@@ -22,7 +22,7 @@ const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
-  "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed",
+  "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "app_context", "app_tool_call", "app_tool_result",
 ];
 const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
 const fmtElapsed = (ms) => {
@@ -633,6 +633,9 @@ async function viewSession(sid, tab, focusApproval) {
 
   const handlers = {
     user_message: (e) => { add(h("div", { class: "ev msg user" }, e.data.content)); },
+    app_context: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Context from the app"), h("div", { class: "text" }, e.data.content))),
+    app_tool_call: (e) => add(h("p", { class: "note" }, `Asked the app to run ${e.data.name}`)),
+    app_tool_result: (e) => add(h("p", { class: "note" }, `The app returned ${e.data.ok ? "a result" : "an error"} (${e.data.chars} characters)`)),
     prompt_progress: (e) => {
       const b = liveBubble();
       const d = e.data;
@@ -1035,6 +1038,7 @@ async function viewSettings() {
       }, "Send test notification") : null),
     gpuCard(),
     endpointCard(me),
+    appsCard(me),
     diskCard(),
     h("div", { class: "card" }, h("h3", {}, "Install"),
       h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")));
@@ -1090,7 +1094,7 @@ function endpointCard(me) {
   const load = async () => {
     try {
       const keys = await api("/keys");
-      const active = keys.filter((k) => !k.revoked_at);
+      const active = keys.filter((k) => !k.revoked_at && k.kind !== "app");
       fill(body,
         h("p", { class: "small" }, "OpenAI-compatible base URL: ", h("code", {}, `${base}/v1`)),
         h("p", { class: "small" }, "Anthropic-compatible base URL: ", h("code", {}, base)),
@@ -1123,6 +1127,63 @@ function endpointCard(me) {
   };
   load();
   return h("div", { class: "card" }, h("h3", {}, "Inference endpoint"), body);
+}
+
+const APP_SCOPES = {
+  sessions: "Start and follow its own sessions (with context and tools)",
+  "sessions:all": "Read all sessions",
+  approvals: "Approve or deny in its own sessions",
+  images: "Generate images",
+  inference: "Use the inference endpoint",
+};
+
+function appsCard(me) {
+  const base = me.public_url || location.origin;
+  const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
+  const load = async () => {
+    try {
+      const apps = (await api("/keys")).filter((k) => k.kind === "app" && !k.revoked_at);
+      fill(body,
+        h("p", { class: "small" }, "App API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md · Python SDK: sdk/harness_client.py"),
+        apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("button", {
+            class: "btn small bad",
+            onclick: async () => {
+              if (!confirm(`Revoke the app “${k.name}”? It can no longer start or read sessions.`)) return;
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+            },
+          }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
+        h("button", {
+          class: "btn",
+          onclick: () => {
+            const name = h("input", { type: "text", placeholder: "App name" });
+            const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
+              h("input", { type: "checkbox", value: scope, checked: scope === "sessions" }), ` ${label} (${scope})`));
+            fill(body, h("label", {}, "Name"), name, h("label", {}, "Allowed"), boxes,
+              h("div", { class: "row", style: "margin-top:10px" },
+                h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
+                h("button", {
+                  class: "btn primary",
+                  onclick: async () => {
+                    const scopes = boxes.map((b) => b.querySelector("input")).filter((i) => i.checked).map((i) => i.value);
+                    if (!name.value.trim() || !scopes.length) return toast("Name the app and allow at least one thing");
+                    try {
+                      const k = await api("/keys", { method: "POST", body: { name: name.value, kind: "app", scopes } });
+                      const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
+                      fill(body, h("p", { class: "small" }, `Token for ${k.name}. Copy it now; it isn't shown again.`), field,
+                        h("div", { class: "row", style: "margin-top:8px" },
+                          h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                          h("button", { class: "btn", onclick: load }, "Done")));
+                    } catch (e) { toast(e.message); }
+                  },
+                }, "Create")));
+          },
+        }, "New app"));
+    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
+  };
+  load();
+  return h("div", { class: "card" }, h("h3", {}, "Apps"), body);
 }
 
 function diskCard() {

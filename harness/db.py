@@ -73,6 +73,18 @@ CREATE TABLE IF NOT EXISTS endpoint_requests (
     ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS endpoint_requests_ts ON endpoint_requests(ts);
+CREATE TABLE IF NOT EXISTS app_tool_calls (    -- agent calls to app-registered tools (apps.py)
+    session_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    args TEXT NOT NULL,
+    status TEXT NOT NULL,           -- pending | done | expired
+    output TEXT NOT NULL DEFAULT '',
+    ok INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    finished_at REAL,
+    PRIMARY KEY (session_id, call_id)
+);
 CREATE TABLE IF NOT EXISTS images (    -- image generation jobs (images.py)
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL DEFAULT '',
@@ -114,9 +126,15 @@ MIGRATIONS = [
     ("sessions", "review_detail", "TEXT NOT NULL DEFAULT ''"),
     # Set when cleanup deleted the workspace (or the user discarded it).
     ("sessions", "workspace_removed", "INTEGER NOT NULL DEFAULT 0"),
+    # Phase 6e: sessions created through the app API, their registered tools and metadata; key scopes.
+    ("sessions", "app_id", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "app_tools", "TEXT NOT NULL DEFAULT '[]'"),
+    ("sessions", "app_metadata", "TEXT NOT NULL DEFAULT '{}'"),
+    ("api_keys", "scopes", "TEXT NOT NULL DEFAULT 'inference'"),
+    ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
 ]
 
-JSON_COLUMNS = {"context", "run", "totals", "inbox", "args"}
+JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -187,7 +205,7 @@ class Database:
         with self.lock:
             rows = self.conn.execute(
                 "SELECT id, project, target, model, title, status, stop_reason, created_at, updated_at, totals, "
-                "branch, review, workspace_removed FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,)
+                "branch, review, workspace_removed, app_id FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [_row(r) for r in rows]
 
@@ -315,15 +333,45 @@ class Database:
         return [dict(r) for r in rows]
 
     # inference endpoint keys and request log
-    def create_api_key(self, name: str) -> tuple[dict, str]:
+    def create_api_key(self, name: str, scopes: str = "inference", kind: str = "device") -> tuple[dict, str]:
         import hashlib
-        key = "hk-" + secrets.token_urlsafe(32)
-        row = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": key[:10], "created_at": time.time()}
+        key = ("ha-" if kind == "app" else "hk-") + secrets.token_urlsafe(32)
+        row = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": key[:10], "created_at": time.time(),
+               "scopes": scopes, "kind": kind}
         with self.lock:
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at) VALUES (?, ?, ?, ?, ?)",
+            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?)",
                               (row["id"], name, row["prefix"], hashlib.sha256(key.encode()).hexdigest(),
-                               row["created_at"]))
+                               row["created_at"], scopes, kind))
         return row, key
+
+    # app tool calls
+    def insert_app_tool_call(self, sid: str, call_id: str, name: str, args: dict) -> None:
+        with self.lock:
+            self.conn.execute("INSERT OR IGNORE INTO app_tool_calls (session_id, call_id, name, args, status, "
+                              "created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+                              (sid, call_id, name, json.dumps(args), time.time()))
+
+    def get_app_tool_call(self, sid: str, call_id: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM app_tool_calls WHERE session_id = ? AND call_id = ?",
+                                    (sid, call_id)).fetchone()
+        return _row(row)
+
+    def app_tool_calls(self, sid: str, status: str | None = None) -> list[dict]:
+        query, params = "SELECT * FROM app_tool_calls WHERE session_id = ?", [sid]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        with self.lock:
+            return [_row(r) for r in self.conn.execute(query + " ORDER BY created_at", params).fetchall()]
+
+    def finish_app_tool_call(self, sid: str, call_id: str, status: str, output: str, ok: bool) -> bool:
+        with self.lock:
+            return self.conn.execute(
+                "UPDATE app_tool_calls SET status = ?, output = ?, ok = ?, finished_at = ? "
+                "WHERE session_id = ? AND call_id = ? AND status = 'pending'",
+                (status, output, int(ok), time.time(), sid, call_id)).rowcount == 1
 
     def api_key_by_secret(self, key: str) -> dict | None:
         import hashlib
@@ -337,7 +385,7 @@ class Database:
     def list_api_keys(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
-                "SELECT k.id, k.name, k.prefix, k.created_at, k.last_used_at, k.revoked_at, "
+                "SELECT k.id, k.name, k.prefix, k.kind, k.scopes, k.created_at, k.last_used_at, k.revoked_at, "
                 "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
                 "FROM api_keys k ORDER BY k.created_at").fetchall()
         return [dict(r) for r in rows]

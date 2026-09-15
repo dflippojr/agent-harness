@@ -49,7 +49,7 @@ MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the wor
 
 HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, ask to restart one with restart_service, and, after a code or Dockerfile change has been merged into a stack, ask to rebuild it with rebuild_service (the user approves restarts and rebuilds). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
 
-ACTIVE = ("queued", "running", "waiting_approval", "waiting_target")
+ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app")
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
 QUOTA_CHECK_SECONDS = 30
@@ -96,6 +96,7 @@ class Runner:
         self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
         self.images = None                      # images.ImageService, set by the manager when enabled
+        self.app_tools = None                   # apps.AppToolBroker, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
 
@@ -137,6 +138,8 @@ class Runner:
         for kit in self.daemon_toolkits(s):
             module = memory_library if kit is self.memory else web_tools if kit is self.web else images
             schemas = schemas + module.schemas(kit.cfg)
+        if self.app_tools is not None and s.get("app_tools"):
+            schemas = schemas + self.app_tools.schemas(s)
         return schemas
 
     def policy(self, s: dict) -> Policy:
@@ -622,7 +625,13 @@ class Runner:
         ok = True
         try:
             kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
-            if kit is not None and kit is self.images:
+            if self.app_tools is not None and name in self.app_tools.names(s):
+                def waiting() -> None:  # the app works on it: give the GPU to other sessions meanwhile
+                    self.scheduler.release(sid)
+                    self.set_status(sid, "waiting_app")
+                output = await self.app_tools.call(s, call["id"], name, args, on_wait=waiting,
+                                                   on_resume=lambda: self._acquire(sid))
+            elif kit is not None and kit is self.images:
                 output = await kit.call(name, {**args, "_session": sid}, workspace_root=Path(s["workspace"]))
             elif kit is not None:
                 output = await kit.call(name, args)  # daemon-side for every target

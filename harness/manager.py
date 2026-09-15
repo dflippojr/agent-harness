@@ -61,6 +61,9 @@ class Manager:
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
         self.maintenance = Maintenance(cfg, self.db, self.runner)
+        from .apps import AppToolBroker
+        self.app_tools = AppToolBroker(self.db, self.bus)
+        self.runner.app_tools = self.app_tools
         if cfg.memory_library.enabled:
             from .memory_library import MemoryLibrary
             self.runner.memory = MemoryLibrary(cfg.memory_library)
@@ -153,7 +156,8 @@ class Manager:
 
     # operations
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
-               title: str | None = None) -> dict:
+               title: str | None = None, app: dict | None = None, app_context: str = "", app_tools: list | None = None,
+               app_metadata: dict | None = None) -> dict:
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
         if project not in self.cfg.projects:
@@ -211,6 +215,19 @@ class Manager:
             system += "\n\n" + MEMORY_PROMPT
         if self.runner.web is not None and spec.web:
             system += "\n\n" + WEB_PROMPT
+        tools = []
+        if app_tools:
+            from .apps import validate_tools
+            from . import homelab, images, memory_library, web_tools
+            from .tools import tool_schemas
+            reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS) | set(images.TOOLS)
+                        | set(memory_library.TOOLS) | set(web_tools.TOOLS))
+            try:
+                tools = validate_tools(app_tools, reserved)
+            except ValueError as e:
+                raise HarnessError(400, str(e))
+        if app_context:
+            system += "\n\n" + app_context
         instructions = spec.instructions.strip()
         if instructions:
             system += f"\n\nProject instructions ({project}):\n{instructions}"
@@ -222,15 +239,18 @@ class Manager:
             "status": "queued", "workspace": str(workspace), "created_at": now, "updated_at": now,
             "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             "run": new_run(), "totals": {}, "inbox": [], "branch": branch,
+            "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
         }
         with self.db.tx():
             self.db.insert_session(session)
-            self.bus.emit(sid, "session_created", {k: session[k] for k in ("project", "target", "model", "title")})
+            self.bus.emit(sid, "session_created", {**{k: session[k] for k in ("project", "target", "model", "title")},
+                                                   **({"app": app["name"], "app_tools": [t["name"] for t in tools]}
+                                                      if app else {})})
             self.bus.emit(sid, "user_message", {"content": prompt})
         self._spawn(sid)
         return self.db.get_session(sid)
 
-    async def send(self, ref: str, content: str) -> dict:
+    async def send(self, ref: str, content: str, kind: str = "user_message") -> dict:
         sid = self.resolve_id(ref)
         if not content.strip():
             raise HarnessError(400, "message is empty")
@@ -242,7 +262,7 @@ class Manager:
             await asyncio.gather(task, return_exceptions=True)  # a finished run still wrapping up
             s = self.db.get_session(sid)
         with self.db.tx():
-            self.bus.emit(sid, "user_message", {"content": content})
+            self.bus.emit(sid, kind, {"content": content})
             if s["status"] in ACTIVE:
                 # Delivered before the agent's next model call.
                 self.db.update_session(sid, inbox=s["inbox"] + [content])
