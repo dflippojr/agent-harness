@@ -381,7 +381,7 @@ class Runner:
                 event = await cli.receive(timeout=0.05)
                 if event is None:
                     continue
-                if await self._handle_cli_event(sid, cli, event, tool_names):
+                if await self._handle_cli_event(sid, cli, event, tool_names, recovered=recovered):
                     await self._end_run(sid)
                     return
 
@@ -418,7 +418,7 @@ class Runner:
         return "\n".join(x for x in parts if x)
 
     async def _handle_cli_event(self, sid: str, cli: ClaudeSession, event: dict,
-                                tool_names: dict[str, str]) -> bool:
+                                tool_names: dict[str, str], recovered: bool = False) -> bool:
         """Map one Claude stream-json record. Returns true when the run is complete."""
         type_ = event.get("type")
         if type_ == "system" and event.get("subtype") == "init":
@@ -459,7 +459,8 @@ class Runner:
             request = event["request"]
             call_id = str(request.get("tool_use_id") or event.get("request_id") or "")
             tool_names[call_id] = str(request.get("tool_name") or "")
-            await self._authorize_cli(sid, cli, str(event.get("request_id") or ""), request)
+            await self._authorize_cli(sid, cli, str(event.get("request_id") or ""), request,
+                                      recovered=recovered)
             return False
         if type_ == "user":
             message = event.get("message") or {}
@@ -492,12 +493,21 @@ class Runner:
             return True
         return False
 
-    async def _authorize_cli(self, sid: str, cli: ClaudeSession, request_id: str, request: dict) -> None:
+    async def _authorize_cli(self, sid: str, cli: ClaudeSession, request_id: str, request: dict,
+                             recovered: bool = False) -> None:
         name = str(request.get("tool_name") or "")
         args = request.get("input") if isinstance(request.get("input"), dict) else {}
         call_id = str(request.get("tool_use_id") or request_id)
         s = self.db.get_session(sid)
         existing = self.db.approval_for_call(sid, call_id)
+        if existing is None and recovered and s["status"] == "waiting_approval":
+            # Claude regenerates the interrupted tool request with a new
+            # tool_use_id after --resume. Bind it to the one durable approval
+            # with identical semantics so the user sees and decides it once.
+            matches = [approval for approval in self.db.approvals(sid)
+                       if approval["tool"] == name and approval["args"] == args]
+            if len(matches) == 1:
+                existing = matches[0]
         if existing is None:
             decision = self.policy(s).decide(name, args)
             self.bus.emit(sid, "tool_call", {"id": call_id, "name": name, "args": args,

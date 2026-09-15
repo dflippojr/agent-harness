@@ -1,7 +1,7 @@
 # Phase 8a design: Claude Code, Codex and Cursor as session backends
 
-Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **steps 1-2 built and reviewed; Claude scripted
-exit passed, and the subscription login is ready for the live exit**. Written 2026-09-15 from the CLIs installed on the tower:
+Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **steps 1-2 complete, including the live
+Claude restart exit; step 3 is next**. Written 2026-09-15 from the CLIs installed on the tower:
 Claude Code 2.1.272, Codex CLI (Plus plan, models `gpt-6-astra`,
 `gpt-5.6-sol`, ...), and Cursor Agent (`cursor-agent`, models incl. `cursor-grok-4.6-high`). The terms and billing
 background and the promises made to app builders are in `docs/app-api.md` → "Subscription backends".
@@ -20,8 +20,13 @@ background and the promises made to app builders are in `docs/app-api.md` → "S
   the newest user message when resuming a completed session. Reader threads retain their process reference during
   cancellation. Provider proxies now use separate internal networks, so a sandbox cannot select another backend's
   allowlist. Regression coverage also proves the per-backend semaphore. Full suite: **141 passed, 1 skipped**.
-- **Live exit pending:** enable `backends.claude`, restart the daemon with no session active, and start the invoice-tools
-  phone task. It should ask once for Bash and continue through a daemon restart.
+- **Live exit passed:** session `c5554a0a0c` edited invoice-tools, kept one Bash approval pending across a daemon
+  restart, resumed through the same Claude session, and saved its branch. The requested `python -m unittest` correctly
+  reported zero tests because the suite is pytest-style; a follow-up `pytest -q` collected and passed all 4 tests.
+  Live testing found two more recovery bugs: a force-stopped daemon can leave its named Docker container behind, and
+  Claude regenerates an interrupted tool request with a new tool-use ID. Startup now removes only that session's
+  orphan container and rebinds the regenerated request to the one persisted approval. Full suite: **142 passed,
+  1 skipped**. Claude is enabled in the checked-in config.
 
 ## Requirements (user decisions)
 

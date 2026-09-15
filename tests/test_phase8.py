@@ -271,6 +271,7 @@ import time
 
 mode = sys.argv[1]
 state = pathlib.Path(sys.argv[2])
+call_id = sys.argv[3] if len(sys.argv) > 3 else "tool-1"
 
 def read():
     line = sys.stdin.readline()
@@ -304,14 +305,14 @@ else:
     args = {"file_path": "/workspace/a.txt"} if tool == "Read" else {"command": "python build.py"}
     send({"type": "assistant", "message": {"role": "assistant", "content": [
         {"type": "text", "text": "Checking."},
-        {"type": "tool_use", "id": "tool-1", "name": tool, "input": args}]}})
+        {"type": "tool_use", "id": call_id, "name": tool, "input": args}]}})
     send({"type": "control_request", "request_id": "permission-1", "request": {
         "subtype": "can_use_tool", "tool_name": tool, "display_name": tool, "input": args,
-        "description": "test command", "permission_suggestions": [], "tool_use_id": "tool-1"}})
+        "description": "test command", "permission_suggestions": [], "tool_use_id": call_id}})
     response = read()
     behavior = response["response"]["response"]["behavior"]
     send({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result",
-          "tool_use_id": "tool-1", "content": behavior, "is_error": behavior == "deny"}]}})
+          "tool_use_id": call_id, "content": behavior, "is_error": behavior == "deny"}]}})
     send({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning",
           "rateLimitType": "seven_day", "utilization": 0.8, "resetsAt": 1234567890}})
     send({"type": "result", "subtype": "success", "result": behavior,
@@ -332,7 +333,8 @@ def _claude_manager(tmp_path, mode: str, state=None, max_sessions=2):
 
     def factory(**kwargs):
         made.append(kwargs)
-        return ClaudeSession(**kwargs, command=[sys.executable, "-u", str(fake), mode, str(state)])
+        call_id = "tool-2" if kwargs.get("backend_session_id") else "tool-1"
+        return ClaudeSession(**kwargs, command=[sys.executable, "-u", str(fake), mode, str(state), call_id])
 
     manager.runner.cli_factory = factory
     return manager, made, state
@@ -353,6 +355,32 @@ def test_claude_docker_command_is_sandboxed_and_resumable(tmp_path):
                  ["--permission-mode", "default"], ["--model", "claude-test"], ["--resume", "resume-me"]):
         assert any(command[at:at + 2] == pair for at in range(len(command) - 1))
     assert not any("bypass" in arg or "skip-permissions" in arg for arg in command)
+
+
+def test_claude_start_removes_restart_orphan_before_reusing_name(tmp_path, monkeypatch):
+    import harness.cli_backends as cli_backends
+    calls = []
+
+    async def fake_run_cmd(command, timeout):
+        calls.append(("rm", command))
+        return 1, "", "not found"
+
+    def fake_popen(command, **kwargs):
+        calls.append(("popen", command))
+        return cli_backends.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+
+    monkeypatch.setattr(cli_backends, "run_cmd", fake_run_cmd)
+
+    async def body():
+        cli = ClaudeSession(session_id="orphan", workspace=tmp_path, backend=BackendConfig(enabled=True),
+                            sandbox=SandboxConfig(), system_prompt="system", popen=fake_popen)
+        await cli.start()
+        await cli.stop()
+
+    asyncio.run(body())
+    assert calls[0] == ("rm", ["docker", "rm", "-f", "harness-orphan-claude"])
+    assert calls[1][0] == "popen"
+    assert calls[-1] == calls[0]
 
 
 def test_claude_cli_allow_maps_events_usage_and_limits(tmp_path):
@@ -488,6 +516,8 @@ def test_claude_cli_restart_resumes_and_keeps_pending_approval(tmp_path):
         m2.decide(sid, aid, approve=True)
         s = await wait_status(m2, sid, "done")
         assert s["answer"] == "allow"
+        approvals = m2.db.approvals(sid)
+        assert len(approvals) == 1 and approvals[0]["tool_call_id"] == "tool-1"
         sent = state.read_text(encoding="utf-8")
         assert "The harness restarted; continue the task." in sent
         await m2.stop()

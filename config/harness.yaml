@@ -38,7 +38,7 @@ sandbox:
 # `ops/backends/login.ps1 claude`; credentials remain in the Docker volume and are never read by the daemon.
 backends:
   claude:
-    enabled: false
+    enabled: true
     image: agent-harness-cli:1
     model: claude-opus-5
     effort: high

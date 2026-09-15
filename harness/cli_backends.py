@@ -79,6 +79,11 @@ class ClaudeSession:
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
+        if self._command_override is None:
+            # The Windows daemon restart script force-stops Python. That skips
+            # our finally block and can leave `docker run`'s container behind.
+            # Remove only this session's deterministic container before reuse.
+            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
         process = self._popen(
             self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
