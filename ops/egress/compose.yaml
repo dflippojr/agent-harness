@@ -1,7 +1,8 @@
 # Egress allowlist proxies for subscription-backend sandboxes (docs/phase8a-design.md).
 #   docker compose -f ops/egress/compose.yaml up -d --build
-# Backend sandboxes join `harness-cli` (internal: no route out) and set HTTPS_PROXY=http://harness-egress-<backend>:8888.
-# Each proxy also joins `harness-egress`, the only network with a route out, and allows its provider's domains only.
+# Backend sandboxes join their provider's internal `harness-cli-<backend>` network and set
+# HTTPS_PROXY=http://harness-egress-<backend>:8888. Separate networks prevent one backend from selecting another
+# provider's proxy. Each proxy also joins `harness-egress`, the only network with a route out.
 name: harness-egress
 
 x-proxy: &proxy
@@ -10,7 +11,6 @@ x-proxy: &proxy
   restart: unless-stopped
   read_only: true
   tmpfs: [/run, /var/run/tinyproxy, /var/log/tinyproxy]
-  networks: [harness-cli, harness-egress]
   mem_limit: 64m
 
 services:
@@ -18,18 +18,27 @@ services:
     <<: *proxy
     container_name: harness-egress-claude
     volumes: ["./filters/claude.txt:/etc/tinyproxy/filter:ro"]
+    networks: [harness-cli-claude, harness-egress]
   codex:
     <<: *proxy
     container_name: harness-egress-codex
     volumes: ["./filters/codex.txt:/etc/tinyproxy/filter:ro"]
+    networks: [harness-cli-codex, harness-egress]
   cursor:
     <<: *proxy
     container_name: harness-egress-cursor
     volumes: ["./filters/cursor.txt:/etc/tinyproxy/filter:ro"]
+    networks: [harness-cli-cursor, harness-egress]
 
 networks:
-  harness-cli:
-    name: harness-cli
+  harness-cli-claude:
+    name: harness-cli-claude
+    internal: true
+  harness-cli-codex:
+    name: harness-cli-codex
+    internal: true
+  harness-cli-cursor:
+    name: harness-cli-cursor
     internal: true
   harness-egress:
     name: harness-egress

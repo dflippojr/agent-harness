@@ -48,7 +48,7 @@ backends:
     auth: subscription
     proxy: http://harness-egress-claude:8888
     volume: harness-auth-claude
-    network: harness-cli
+    network: harness-cli-claude
 
 # Homelab tools for projects with `homelab: true` (harness/homelab.py). The daemon runs these on the host;
 # agents only name a service from this allowlist. Restarts always need approval.

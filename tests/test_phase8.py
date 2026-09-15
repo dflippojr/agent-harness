@@ -294,6 +294,9 @@ if mode == "inbox":
     followup = read()
     send({"type": "result", "subtype": "success", "result": followup["message"]["content"],
           "total_cost_usd": 0.0, "usage": {"input_tokens": 1, "output_tokens": 1}, "num_turns": 1})
+elif mode == "echo":
+    send({"type": "result", "subtype": "success", "result": user["message"]["content"],
+          "total_cost_usd": 0.0, "usage": {"input_tokens": 1, "output_tokens": 1}, "num_turns": 1})
 elif mode == "cancel":
     time.sleep(60)
 else:
@@ -317,13 +320,13 @@ else:
 '''
 
 
-def _claude_manager(tmp_path, mode: str, state=None):
+def _claude_manager(tmp_path, mode: str, state=None, max_sessions=2):
     tmp_path.mkdir(parents=True, exist_ok=True)
     fake = tmp_path / "fake_claude.py"
     fake.write_text(FAKE_CLAUDE, encoding="utf-8")
     state = state or tmp_path / "fake-state.jsonl"
     cfg = make_cfg(tmp_path)
-    cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5")
+    cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", max_sessions=max_sessions)
     manager = Manager(cfg)
     made = []
 
@@ -343,11 +346,12 @@ def test_claude_docker_command_is_sandboxed_and_resumable(tmp_path):
     command = cli.command()
     assert command[:6] == ["docker", "run", "--rm", "-i", "--name", "harness-abc-claude"]
     for pair in (["--network", "cli-net"], ["-e", "HTTPS_PROXY=http://proxy:8888"],
+                 ["-e", "HTTP_PROXY=http://proxy:8888"], ["-e", "NO_PROXY=localhost,127.0.0.1"],
+                 ["-e", "NODE_USE_ENV_PROXY=1"],
                  ["-v", "auth-volume:/home/agent/.claude"], ["--memory", "3g"],
                  ["--cpus", "1.5"], ["--pids-limit", "321"], ["--permission-prompt-tool", "stdio"],
                  ["--permission-mode", "default"], ["--model", "claude-test"], ["--resume", "resume-me"]):
-        at = command.index(pair[0])
-        assert command[at:at + 2] == pair
+        assert any(command[at:at + 2] == pair for at in range(len(command) - 1))
     assert not any("bypass" in arg or "skip-permissions" in arg for arg in command)
 
 
@@ -406,6 +410,28 @@ def test_claude_cli_inbox_message(tmp_path):
         await m.send(sid, "the follow-up")
         s = await wait_status(m, sid, "done")
         assert s["answer"] == "the follow-up" and s["inbox"] == []
+        records = [json.loads(line[3:]) for line in (tmp_path / "fake-state.jsonl").read_text().splitlines()]
+        assert all(item.get("session_id", "") == "" for item in records if item.get("type") == "user")
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_claude_cli_completed_session_followup_sends_latest_message(tmp_path):
+    async def body():
+        m, made, state = _claude_manager(tmp_path, "echo")
+        await m.start()
+        sid = m.create("the original prompt", backend="claude")["id"]
+        await wait_status(m, sid, "done")
+        await asyncio.gather(*m.tasks.values())
+        await m.send(sid, "the later follow-up")
+        s = await wait_status(m, sid, "done")
+        await asyncio.gather(*m.tasks.values())
+        assert s["answer"] == "the later follow-up"
+        assert len(made) == 2 and made[1]["backend_session_id"] == "claude-session-1"
+        users = [json.loads(line[3:]) for line in state.read_text().splitlines()
+                 if json.loads(line[3:]).get("type") == "user"]
+        assert [item["message"]["content"] for item in users] == ["the original prompt", "the later follow-up"]
+        assert all(item["session_id"] == "" for item in users)
         await m.stop()
     asyncio.run(body())
 
@@ -418,6 +444,23 @@ def test_claude_cli_cancel_kills_process(tmp_path):
         await wait_status(m, sid, "running")
         s = await m.cancel(sid)
         assert s["status"] == "cancelled" and sid not in m.runner._cli_sessions
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_claude_backend_semaphore_limits_live_processes(tmp_path):
+    async def body():
+        m, made, _ = _claude_manager(tmp_path, "cancel", max_sessions=1)
+        await m.start()
+        first = m.create("first", backend="claude")["id"]
+        second = m.create("second", backend="claude")["id"]
+        await wait_status(m, first, "running")
+        await asyncio.sleep(0.1)
+        assert len(made) == 1 and m.get(second)["status"] == "queued"
+        await m.cancel(first)
+        await wait_status(m, second, "running")
+        assert len(made) == 2
+        await m.cancel(second)
         await m.stop()
     asyncio.run(body())
 

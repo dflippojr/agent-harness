@@ -372,7 +372,7 @@ class Runner:
             self._cli_sessions[sid] = cli
             await cli.start()
             prompt = ("The harness restarted; continue the task." if recovered else
-                      next((m["content"] for m in s["context"][1:]
+                      next((m["content"] for m in reversed(s["context"][1:])
                             if m.get("role") == "user" and isinstance(m.get("content"), str)), ""))
             await cli.initialize(prompt)
             tool_names: dict[str, str] = {}

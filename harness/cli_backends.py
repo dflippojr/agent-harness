@@ -53,6 +53,11 @@ class ClaudeSession:
             "--label", f"agent-harness.session={self.session_id}",
             "--network", self.backend.network,
             "-e", f"HTTPS_PROXY={self.backend.proxy}",
+            "-e", f"HTTP_PROXY={self.backend.proxy}",
+            "-e", "NO_PROXY=localhost,127.0.0.1",
+            # Keep this at runtime as well as in cli.Dockerfile so sessions still
+            # work if the daemon is briefly paired with an older cached image.
+            "-e", "NODE_USE_ENV_PROXY=1",
             "-e", "CLAUDE_CONFIG_DIR=/home/agent/.claude",
             "-v", f"{self.backend.volume}:/home/agent/.claude",
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
@@ -74,23 +79,24 @@ class ClaudeSession:
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        self.process = self._popen(
+        process = self._popen(
             self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=os.environ.copy(),
         )
+        self.process = process
 
         def stdout_reader() -> None:
-            assert self.process is not None and self.process.stdout is not None
+            assert process.stdout is not None
             try:
-                for line in self.process.stdout:
+                for line in process.stdout:
                     loop.call_soon_threadsafe(self._events.put_nowait, line)
             finally:
                 loop.call_soon_threadsafe(self._events.put_nowait, None)
 
         def stderr_reader() -> None:
-            assert self.process is not None and self.process.stderr is not None
-            self._stderr.extend(self.process.stderr)
+            assert process.stderr is not None
+            self._stderr.extend(process.stderr)
 
         self._threads = [threading.Thread(target=stdout_reader, daemon=True),
                          threading.Thread(target=stderr_reader, daemon=True)]
@@ -129,11 +135,16 @@ class ClaudeSession:
     async def initialize(self, prompt: str) -> None:
         await self.send({"type": "control_request", "request_id": "init-1",
                          "request": {"subtype": "initialize"}})
+        reply = await self.receive(timeout=30)
+        response = (reply or {}).get("response") or {}
+        if (not reply or reply.get("type") != "control_response" or response.get("subtype") != "success"
+                or response.get("request_id") != "init-1"):
+            raise CliBackendError(f"Claude CLI returned an invalid initialize response: {reply!r}"[:500])
         await self.send(self.user_message(prompt))
 
     def user_message(self, content: str) -> dict:
         return {"type": "user", "message": {"role": "user", "content": content},
-                "parent_tool_use_id": None, "session_id": self.backend_session_id}
+                "parent_tool_use_id": None, "session_id": ""}
 
     async def respond_permission(self, request_id: str, behavior: str, args: dict,
                                  message: str = "") -> None:

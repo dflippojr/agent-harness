@@ -29,6 +29,7 @@ $spec = @{
 
 $volume = "harness-auth-$Backend"
 $proxy = "http://harness-egress-${Backend}:8888"
+$network = "harness-cli-$Backend"
 
 if (-not (docker image inspect $Image 2>$null)) { throw "image $Image not found; build it first (see the top of this script)" }
 if ((docker inspect -f '{{.State.Running}}' "harness-egress-$Backend" 2>$null) -ne 'true') {
@@ -43,7 +44,7 @@ $command = if ($Status) { $spec.State } elseif ($Logout) { $spec.Out } else { $s
 $dockerArgs = [System.Collections.Generic.List[string]]::new()
 $dockerArgs.AddRange([string[]]@('run', '--rm'))
 if (-not $Status) { $dockerArgs.Add('-it') }
-$dockerArgs.AddRange([string[]]@('--network', 'harness-cli', '-e', "HTTPS_PROXY=$proxy", '-e', "HTTP_PROXY=$proxy",
+$dockerArgs.AddRange([string[]]@('--network', $network, '-e', "HTTPS_PROXY=$proxy", '-e', "HTTP_PROXY=$proxy",
                                  '-e', 'NO_PROXY=localhost,127.0.0.1'))
 foreach ($e in $spec.Env) { $dockerArgs.AddRange([string[]]@('-e', $e)) }
 $dockerArgs.AddRange([string[]]@('-v', "${volume}:$($spec.Dir)", $Image))

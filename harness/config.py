@@ -43,7 +43,7 @@ class BackendConfig:
     auth: str = "subscription"
     proxy: str = "http://harness-egress-claude:8888"
     volume: str = "harness-auth-claude"
-    network: str = "harness-cli"
+    network: str = "harness-cli-claude"
 
 
 @dataclass
