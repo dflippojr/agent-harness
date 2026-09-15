@@ -518,3 +518,18 @@ def test_app_scopes_and_isolation(tmp_path):
         # app tokens without the inference scope can't use the model endpoint
         m.cfg.endpoint.enabled = True
         assert client.post("/v1/chat/completions", headers=H(a), json={"messages": []}).status_code == 401
+
+
+def test_setup_config_writes_a_loadable_config(tmp_path, capsys):
+    from harness import config, setup_config
+    args = ["--config-dir", str(tmp_path / "cfg"), "--data-dir", str(tmp_path / "data"), "--model", "gpt-oss",
+            "--port", "8200", "--pause-flag", str(tmp_path / "paused")]
+    assert setup_config.main(args) == 0
+    cfg = config.load(tmp_path / "cfg")
+    assert cfg.default_model == "gpt-oss-20b" and cfg.port == 8200 and cfg.endpoint.enabled and not cfg.web.enabled
+    assert cfg.models["gpt-oss-20b"].context_tokens == 32768 and list(cfg.projects) == ["scratch"]
+    (tmp_path / "cfg" / "projects.yaml").write_text("projects:\n  mine: {}\n")
+    setup_config.main(args)  # keeps edited files unless --force
+    assert "mine" in config.load(tmp_path / "cfg").projects
+    setup_config.main(args + ["--force"])
+    assert "mine" not in config.load(tmp_path / "cfg").projects

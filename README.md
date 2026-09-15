@@ -4,6 +4,17 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 and are driven from the phone or MacBook over Tailscale. The phased plan lives in the agent
 memory library (`categories/project-ideas/capsules/local-agent-harness.md`).
 
+## Install
+
+Windows 10/11 with an NVIDIA GPU (12 GB+), Docker Desktop and Git:
+
+```powershell
+git clone https://github.com/dflippojr/agent-harness; cd agent-harness
+powershell -ExecutionPolicy Bypass -File install\install.ps1
+```
+
+No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`).
+
 ## Phase 6: extensions (current)
 
 Built as mini-phases: 6a Hermes Agent study (`docs/phase6a-hermes-study.md`), 6b web search (`docs/phase6b-results.md`),
@@ -18,6 +29,8 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
 - Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`)
   and Qwen-Image-2512 (`quality`), both Apache 2.0. A batch unloads the language model, generates, and restores it.
   Phone: Images screen; agents: `generate_image` (tower sessions).
+- Distributable (`docs/phase6e-results.md`): app API `/api/v1` with scoped tokens, context, app-registered tools and
+  events (`harness/apps.py`, `sdk/harness_client.py`); installer, uninstaller and `python -m harness.doctor`.
 
 ## Phase 5: operations hardening
 
