@@ -939,6 +939,7 @@ async function viewSettings() {
         },
       }, "Send test notification") : null),
     gpuCard(),
+    endpointCard(me),
     diskCard(),
     h("div", { class: "card" }, h("h3", {}, "Install"),
       h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")));
@@ -986,6 +987,47 @@ function gpuCard() {
   const timer = setInterval(load, 5000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "card" }, h("h3", {}, "GPU"), body);
+}
+
+function endpointCard(me) {
+  const base = me.public_url || location.origin;
+  const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
+  const load = async () => {
+    try {
+      const keys = await api("/keys");
+      const active = keys.filter((k) => !k.revoked_at);
+      fill(body,
+        h("p", { class: "small" }, "OpenAI-compatible base URL: ", h("code", {}, `${base}/v1`)),
+        h("p", { class: "small" }, "Anthropic-compatible base URL: ", h("code", {}, base)),
+        h("p", { class: "muted small" }, "Any model name works; unknown names use the default model. Requests go ahead of the next agent turn."),
+        active.length ? h("ul", { class: "small" }, active.map((k) => h("li", {},
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.requests} request${k.requests === 1 ? "" : "s"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("button", {
+            class: "btn small bad",
+            onclick: async () => {
+              if (!confirm(`Revoke the key “${k.name}”? Tools using it stop working.`)) return;
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+            },
+          }, "Revoke")))) : h("p", { class: "muted small" }, "No keys yet."),
+        h("button", {
+          class: "btn",
+          onclick: async () => {
+            const name = window.prompt("Key name (the device or app that will use it)");
+            if (!name) return;
+            try {
+              const k = await api("/keys", { method: "POST", body: { name } });
+              const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
+              fill(body, h("p", { class: "small" }, `Key for ${k.name}. Copy it now; it isn't shown again.`), field,
+                h("div", { class: "row", style: "margin-top:8px" },
+                  h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                  h("button", { class: "btn", onclick: load }, "Done")));
+            } catch (e) { toast(e.message); }
+          },
+        }, "New key"));
+    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
+  };
+  load();
+  return h("div", { class: "card" }, h("h3", {}, "Inference endpoint"), body);
 }
 
 function diskCard() {

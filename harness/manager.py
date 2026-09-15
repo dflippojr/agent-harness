@@ -55,6 +55,8 @@ class Manager:
         self.warmer = ModelWarmer()
         self.hub = RunnerHub(cfg.runners, keep_awake=self._keep_awake)
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
+        self.runner.gate.max_waiting = cfg.endpoint.max_waiting
+        self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
         self.tasks: dict[str, asyncio.Task] = {}
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
@@ -69,7 +71,8 @@ class Manager:
         if cfg.gpu_guard.enabled:
             from .gpu_guard import GpuGuard
             self.guard = GpuGuard(cfg.gpu_guard, cfg.models[cfg.default_model], self.scheduler,
-                                  busy=lambda: bool(self.runner.generating), on_pause=self._gpu_paused,
+                                  busy=lambda: bool(self.runner.generating) or self.runner.gate.busy,
+                                  on_pause=self._gpu_paused,
                                   on_resume=self.runner.gpu_resumed)
             self.runner.guard = self.guard
             self.warmer.blocked = lambda: self.guard.active

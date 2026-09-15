@@ -12,6 +12,9 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
 - Web (`web:` in `config/harness.yaml`): `web_search` via SearXNG (`D:\Docker\searxng`, 127.0.0.1:8888) and `web_fetch`
   (public addresses only, redirects re-checked, 15K characters per call, `find` for passages). No approval needed;
   projects opt out with `web: false`.
+- Inference endpoint (`endpoint:`; `docs/phase6c-results.md`): OpenAI- and Anthropic-compatible proxy to the tower's
+  model at `https://<tower>/v1` with per-device keys (Settings → Inference endpoint). Requests go ahead of the next
+  agent turn; 503 while the GPU guard has the model unloaded.
 
 ## Phase 5: operations hardening
 

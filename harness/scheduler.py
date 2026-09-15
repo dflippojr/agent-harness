@@ -10,6 +10,7 @@ While the GPU guard has paused the queue (a game or a Plex transcode needs the G
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import OrderedDict
 from typing import Callable
 
@@ -77,3 +78,89 @@ class GpuScheduler:
                 self.holder = nxt
                 fut.set_result(None)
                 break
+
+
+class QueueFull(Exception):
+    pass
+
+
+class InferenceGate:
+    """Orders individual model calls between agent turns and requests to the inference endpoint (endpoint.py).
+
+    The GPU slot above belongs to sessions; this gate sits under it, per call. Endpoint requests (an editor or a
+    script waiting on an answer) go ahead of the next agent turn: they wait only for the agent call already in
+    flight, and several can run at once (llama-server queues them itself). An agent call waits while any endpoint
+    request is waiting or running, except that once an agent call has waited `fair_seconds`, new endpoint requests
+    line up behind it, so a busy editor can't stall a task forever.
+    """
+
+    def __init__(self, max_waiting: int = 4, fair_seconds: float = 90):
+        self.max_waiting = max_waiting
+        self.fair_seconds = fair_seconds
+        self.agent_active = 0
+        self.endpoint_active = 0
+        self.endpoint_waiting = 0
+        self._agent_waiting_since: list[float] = []
+        self._cond = asyncio.Condition()
+
+    def _agent_starved(self) -> bool:
+        return bool(self._agent_waiting_since) and time.monotonic() - min(self._agent_waiting_since) >= self.fair_seconds
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.agent_active or self.endpoint_active)
+
+    async def agent_turn(self):
+        since = time.monotonic()
+        async with self._cond:
+            self._agent_waiting_since.append(since)
+            try:
+                # Endpoint requests that are only waiting because this agent call is starved don't block it.
+                while self.endpoint_active or (self.endpoint_waiting and not self._agent_starved()):
+                    try:
+                        await asyncio.wait_for(self._cond.wait(), timeout=5)  # re-check fairness periodically
+                    except asyncio.TimeoutError:
+                        pass
+            finally:
+                self._agent_waiting_since.remove(since)
+            self.agent_active += 1
+        return _Release(self, "agent")
+
+    async def endpoint_request(self):
+        async with self._cond:
+            if self.endpoint_waiting >= self.max_waiting:
+                raise QueueFull()
+            self.endpoint_waiting += 1
+            try:
+                while self.agent_active or self._agent_starved():
+                    try:
+                        await asyncio.wait_for(self._cond.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        pass
+            finally:
+                self.endpoint_waiting -= 1
+                self._cond.notify_all()
+            self.endpoint_active += 1
+        return _Release(self, "endpoint")
+
+
+class _Release:
+    def __init__(self, gate: InferenceGate, kind: str):
+        self.gate, self.kind, self.done = gate, kind, False
+
+    async def release(self) -> None:
+        if self.done:
+            return
+        self.done = True
+        async with self.gate._cond:
+            if self.kind == "agent":
+                self.gate.agent_active -= 1
+            else:
+                self.gate.endpoint_active -= 1
+            self.gate._cond.notify_all()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.release()

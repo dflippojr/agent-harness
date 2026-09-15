@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 
 import httpx
 import pytest
@@ -156,4 +157,129 @@ def test_web_tools_reach_sessions_and_projects_can_opt_out(tmp_path):
                                                                        m.runner.workspace(m.db.get_session(offline["id"])))}
         assert "web_search" not in names
         await m.stop()
+    asyncio.run(body())
+
+
+# 6c: inference endpoint
+def endpoint_client(tmp_path, handler, **endpoint):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+    from harness.config import EndpointConfig
+
+    cfg = make_cfg(tmp_path)
+    cfg.endpoint = EndpointConfig(enabled=True, model_aliases={"claude-*": "fake"}, **endpoint)
+    m = Manager(cfg, chat=Script([Completion(content="done")]))
+    m.endpoint_transport = httpx.MockTransport(handler)
+    return TestClient(create_app(m)), m
+
+
+def test_endpoint_auth_models_and_passthrough(tmp_path):
+    seen = []
+
+    def llama(request: httpx.Request):
+        body = request.read()
+        seen.append((request.url.path, body))
+        if request.url.path == "/v1/messages" and json.loads(body).get("stream"):
+            sse = (b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":21}}}\n\n'
+                   b'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n'
+                   b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n')
+            return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json={"id": "x", "choices": [{"message": {"content": "hello"}}],
+                                         "usage": {"prompt_tokens": 12, "completion_tokens": 3}})
+
+    client, m = endpoint_client(tmp_path, llama)
+    with client:
+        assert client.post("/v1/chat/completions", json={"model": "x"}).status_code == 401
+        created = client.post("/keys", json={"name": "macbook-zed"}).json()
+        key = created["key"]
+        assert key.startswith("hk-") and "key" not in client.get("/keys").json()[0]
+        auth = {"Authorization": f"Bearer {key}"}
+
+        models = client.get("/v1/models", headers=auth).json()
+        assert models["data"][0]["id"] == "fake" and models["data"][0]["type"] == "model"
+        assert client.get("/v1/capabilities", headers=auth).json()["features"]["tool_calls"] is True
+
+        r = client.post("/v1/chat/completions", headers=auth, json={"model": "gpt-4o", "messages": []})
+        assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "hello"
+        assert json.loads(seen[-1][1])["model"] == "fake"  # unknown names go to the default model
+
+        with client.stream("POST", "/v1/messages", headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+                           json={"model": "claude-sonnet-5", "stream": True, "messages": []}) as s:
+            text = b"".join(s.iter_bytes())
+        assert b"message_delta" in text and seen[-1][0] == "/v1/messages"
+
+        rows = m.db.conn.execute("SELECT route, model, stream, status, prompt_tokens, completion_tokens "
+                                 "FROM endpoint_requests ORDER BY id").fetchall()
+        assert [tuple(r) for r in rows] == [("/v1/chat/completions", "fake", 0, 200, 12, 3),
+                                            ("/v1/messages", "fake", 1, 200, 21, 7)]
+        from harness.metrics import render
+        assert 'harness_endpoint_tokens_total{key="macbook-zed",kind="completion"} 10' in render(m)
+
+        assert client.delete(f"/keys/{created['id']}").status_code == 204
+        r = client.post("/v1/messages", headers={"x-api-key": key}, json={"model": "x", "messages": []})
+        assert r.status_code == 401 and r.json()["type"] == "error"  # Anthropic error shape
+
+
+def test_endpoint_refuses_while_gpu_guard_paused(tmp_path):
+    client, m = endpoint_client(tmp_path, lambda r: httpx.Response(200, json={"input_tokens": 3}))
+
+    class Paused:
+        active, state = True, "paused"
+
+        async def stop(self):
+            pass
+
+        def start(self):
+            pass
+
+    with client:
+        key = client.post("/keys", json={"name": "script"}).json()["key"]
+        m.guard = Paused()
+        r = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json={"messages": []})
+        assert r.status_code == 503 and r.headers["retry-after"] == "180"
+        assert client.post("/v1/messages/count_tokens", headers={"x-api-key": key}, json={}).status_code == 200
+        m.guard = None
+
+
+def test_inference_gate_endpoint_first_with_fairness():
+    from harness.scheduler import InferenceGate, QueueFull
+
+    async def body():
+        gate = InferenceGate(max_waiting=2, fair_seconds=0.3)
+        order = []
+        agent = await gate.agent_turn()  # a turn in flight
+
+        async def endpoint(name):
+            slot = await gate.endpoint_request()
+            order.append(name)
+            await asyncio.sleep(0.05)
+            await slot.release()
+
+        async def next_agent():
+            slot = await gate.agent_turn()
+            order.append("agent")
+            await slot.release()
+
+        e1 = asyncio.create_task(endpoint("e1"))
+        await asyncio.sleep(0.01)
+        a2 = asyncio.create_task(next_agent())
+        await asyncio.sleep(0.01)
+        e2 = asyncio.create_task(endpoint("e2"))
+        await asyncio.sleep(0.01)
+        with pytest.raises(QueueFull):
+            await gate.endpoint_request()
+        await agent.release()
+        await asyncio.wait_for(asyncio.gather(e1, e2, a2), 10)
+        assert order[:2] == ["e1", "e2"] and order[-1] == "agent"  # endpoint requests jumped the waiting agent
+
+        # fairness: an agent call that has waited fair_seconds goes before newly arriving endpoint requests
+        order.clear()
+        busy = await gate.endpoint_request()
+        a3 = asyncio.create_task(next_agent())
+        await asyncio.sleep(0.35)
+        e3 = asyncio.create_task(endpoint("e3"))
+        await asyncio.sleep(0.01)
+        await busy.release()
+        await asyncio.wait_for(asyncio.gather(a3, e3), 10)
+        assert order == ["agent", "e3"]
     asyncio.run(body())

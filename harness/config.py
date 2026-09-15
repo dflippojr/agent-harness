@@ -118,6 +118,17 @@ class WebConfig:
 
 
 @dataclass
+class EndpointConfig:
+    """OpenAI/Anthropic-compatible inference endpoint for other tools (endpoint.py)."""
+    enabled: bool = False
+    default_model: str = ""                 # model for unknown names; default: the harness default model
+    model_aliases: dict[str, str] = field(default_factory=dict)  # fnmatch pattern -> configured model
+    max_waiting: int = 4                    # endpoint requests waiting for the GPU before new ones get 429
+    agent_fair_seconds: float = 90          # after an agent turn waits this long, new endpoint requests queue behind it
+    request_timeout_seconds: float = 1800
+
+
+@dataclass
 class RunnerConfig:
     """A machine that runs tool calls for sessions targeting it (Phase 4: the MacBook). The model stays on the tower."""
     name: str
@@ -162,6 +173,7 @@ class Config:
     backup: BackupConfig = field(default_factory=BackupConfig)
     memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    endpoint: EndpointConfig = field(default_factory=EndpointConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -248,6 +260,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         backup=BackupConfig(**(raw.get("backup") or {})),
         memory_library=MemoryLibraryConfig(**(raw.get("memory_library") or {})),
         web=WebConfig(**(raw.get("web") or {})),
+        endpoint=EndpointConfig(**(raw.get("endpoint") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

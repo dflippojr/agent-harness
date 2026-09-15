@@ -50,6 +50,29 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_at REAL
 );
 CREATE INDEX IF NOT EXISTS approvals_session ON approvals(session_id, status);
+CREATE TABLE IF NOT EXISTS api_keys (   -- inference endpoint keys, one per device or app (endpoint.py)
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    prefix TEXT NOT NULL,           -- first characters, shown to tell keys apart
+    hash TEXT NOT NULL UNIQUE,      -- sha256 of the key; the key itself is shown once and never stored
+    created_at REAL NOT NULL,
+    last_used_at REAL,
+    revoked_at REAL
+);
+CREATE TABLE IF NOT EXISTS endpoint_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id TEXT NOT NULL,
+    route TEXT NOT NULL,
+    model TEXT NOT NULL,
+    stream INTEGER NOT NULL,
+    status INTEGER NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    wait_ms INTEGER NOT NULL DEFAULT 0,       -- time spent waiting for the GPU
+    total_ms INTEGER NOT NULL DEFAULT 0,
+    ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS endpoint_requests_ts ON endpoint_requests(ts);
 CREATE TABLE IF NOT EXISTS templates (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -246,6 +269,48 @@ class Database:
     def delete_template(self, tid: str) -> bool:
         with self.lock:
             return self.conn.execute("DELETE FROM templates WHERE id = ?", (tid,)).rowcount == 1
+
+    # inference endpoint keys and request log
+    def create_api_key(self, name: str) -> tuple[dict, str]:
+        import hashlib
+        key = "hk-" + secrets.token_urlsafe(32)
+        row = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": key[:10], "created_at": time.time()}
+        with self.lock:
+            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at) VALUES (?, ?, ?, ?, ?)",
+                              (row["id"], name, row["prefix"], hashlib.sha256(key.encode()).hexdigest(),
+                               row["created_at"]))
+        return row, key
+
+    def api_key_by_secret(self, key: str) -> dict | None:
+        import hashlib
+        if not key:
+            return None
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM api_keys WHERE hash = ? AND revoked_at IS NULL",
+                                    (hashlib.sha256(key.encode()).hexdigest(),)).fetchone()
+        return dict(row) if row else None
+
+    def list_api_keys(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT k.id, k.name, k.prefix, k.created_at, k.last_used_at, k.revoked_at, "
+                "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
+                "FROM api_keys k ORDER BY k.created_at").fetchall()
+        return [dict(r) for r in rows]
+
+    def revoke_api_key(self, kid: str) -> bool:
+        with self.lock:
+            return self.conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                                     (time.time(), kid)).rowcount == 1
+
+    def log_endpoint_request(self, r: dict) -> None:
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO endpoint_requests (key_id, route, model, stream, status, prompt_tokens, "
+                "completion_tokens, wait_ms, total_ms, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (r["key_id"], r["route"], r["model"], int(r["stream"]), r["status"], r.get("prompt_tokens", 0),
+                 r.get("completion_tokens", 0), r.get("wait_ms", 0), r.get("total_ms", 0), time.time()))
+            self.conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (time.time(), r["key_id"]))
 
     def decide_approval(self, aid: str, status: str, note: str = "") -> bool:
         with self.lock:

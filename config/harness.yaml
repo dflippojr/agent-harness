@@ -112,3 +112,14 @@ web:
   page_chars: 15000
   max_bytes: 5242880
   timeout_seconds: 20
+
+# OpenAI/Anthropic-compatible inference endpoint for other tools (harness/endpoint.py): /v1/chat/completions,
+# /v1/completions, /v1/responses, /v1/messages, /v1/models, /v1/capabilities. Per-device keys from Settings or POST /keys.
+# Requests go ahead of the next agent turn (user decision, Phase 6c); an agent turn that has waited agent_fair_seconds
+# goes first. Refused with 503 while the GPU guard has the model unloaded.
+endpoint:
+  enabled: true
+  model_aliases: {}          # e.g. {"claude-*": qwen3.6-35b-a3b}; unknown names use the default model anyway
+  max_waiting: 4
+  agent_fair_seconds: 90
+  request_timeout_seconds: 1800

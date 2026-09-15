@@ -23,7 +23,7 @@ from .homelab import Homelab
 from .policy import ALLOW, ASK, Policy
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
-from .scheduler import GpuScheduler
+from .scheduler import GpuScheduler, InferenceGate
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
 from .tools import ToolError, Workspace, truncate_middle, validate_args
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
@@ -96,6 +96,7 @@ class Runner:
         self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
+        self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
 
     # helpers
     def sandbox(self, s: dict) -> Sandbox | RemoteSandbox:
@@ -188,6 +189,7 @@ class Runner:
         started and the turn outlasted the drain timeout) is retried after the pause instead of failing."""
         while True:
             await self._gpu_gate(sid)
+            turn = await self.gate.agent_turn()  # endpoint requests (an editor, a script) go first
             self.generating.add(sid)
             try:
                 return await self.chat(*args, **kwargs)
@@ -197,6 +199,7 @@ class Runner:
                 self.bus.emit(sid, "llm_retry", {"attempt": 0, "error": f"model server paused for the GPU: {e}"[:500]})
             finally:
                 self.generating.discard(sid)
+                await turn.release()
 
     # runner targets (the MacBook)
     async def _wait_for_target(self, sid: str) -> None:
