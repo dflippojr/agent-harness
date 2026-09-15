@@ -1,0 +1,7 @@
+^api\.anthropic\.com$
+^claude\.ai$
+^([a-z0-9-]+\.)?claude\.ai$
+^console\.anthropic\.com$
+^platform\.claude\.com$
+^statsig\.anthropic\.com$
+^([a-z0-9-]+\.)?claude\.com$

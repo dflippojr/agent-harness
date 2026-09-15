@@ -1,0 +1,36 @@
+# Egress allowlist proxies for subscription-backend sandboxes (docs/phase8a-design.md).
+#   docker compose -f ops/egress/compose.yaml up -d --build
+# Backend sandboxes join `harness-cli` (internal: no route out) and set HTTPS_PROXY=http://harness-egress-<backend>:8888.
+# Each proxy also joins `harness-egress`, the only network with a route out, and allows its provider's domains only.
+name: harness-egress
+
+x-proxy: &proxy
+  build: .
+  image: agent-harness-egress:1
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/run, /var/run/tinyproxy, /var/log/tinyproxy]
+  networks: [harness-cli, harness-egress]
+  mem_limit: 64m
+
+services:
+  claude:
+    <<: *proxy
+    container_name: harness-egress-claude
+    volumes: ["./filters/claude.txt:/etc/tinyproxy/filter:ro"]
+  codex:
+    <<: *proxy
+    container_name: harness-egress-codex
+    volumes: ["./filters/codex.txt:/etc/tinyproxy/filter:ro"]
+  cursor:
+    <<: *proxy
+    container_name: harness-egress-cursor
+    volumes: ["./filters/cursor.txt:/etc/tinyproxy/filter:ro"]
+
+networks:
+  harness-cli:
+    name: harness-cli
+    internal: true
+  harness-egress:
+    name: harness-egress
+    external: true
