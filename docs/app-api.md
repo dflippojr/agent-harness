@@ -20,6 +20,7 @@ Create a token in **Settings → Apps** (or `POST /keys` from the PC:
 | `approvals` | approve or deny tool calls in the app's own sessions (normally the user approves from the phone) |
 | `images` | generate and download images |
 | `inference` | use the OpenAI/Anthropic-compatible endpoint under `/v1` |
+| `remote_control` | start and stop Claude Code Remote Control servers in project folders |
 
 Apps see only the sessions they created, unless they hold `sessions:all`. Errors are `{"detail": "..."}`, with 401
 (bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual.
@@ -121,6 +122,16 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 `{"prompt": "...", "model": "fast" | "quality", "aspect_ratio": "1:1"}` queues a job; poll the job until `status` is
 `done`, then download the PNG. While images generate, the language model is unloaded for a few minutes.
 
+### `GET /api/v1/remote-control`, `POST /api/v1/remote-control/{project}`, `POST /api/v1/remote-control/{project}/stop`  (scope `remote_control`)
+Starts the unmodified `claude remote-control --spawn worktree` in a tower project's folder, so the user can work there
+from the Claude mobile app or claude.ai/code under their own Claude login. Those sessions don't go through the
+harness: no queue, sandbox or harness approvals, and Claude Code asks for permission in the Claude app. The list
+shows each eligible project with `trusted`, `running`, `pairing_url` (open it to pair), `session_urls` and
+`active_sessions`. Starting returns the same object once the server is connected (up to 30 s), with
+`already_running: true` if it was. It fails with 400 when the folder hasn't been trusted in Claude Code yet (the
+user runs `claude` there once) or isn't a git repository. Servers keep running until stopped, including across
+daemon restarts.
+
 ## Subscription backends (Claude Code, Codex, Cursor): terms and billing
 
 > **Status: planned (Phase 8a, [issue #20](https://github.com/dflippojr/agent-harness/issues/20)).** Nothing below is
@@ -205,3 +216,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | Version | Date | Changes |
 | --- | --- | --- |
 | 1.0 | 2026-09-15 | First release: sessions, context, app tools, events, approvals, images, scoped tokens |
+| 1.1 | 2026-09-15 | `remote_control` scope and endpoints; `ungrounded_quotes` in `run_finished` and as an event |

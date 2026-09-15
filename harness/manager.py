@@ -88,6 +88,11 @@ class Manager:
                                        ServerControl(cfg.gpu_guard, cfg.models[cfg.default_model]),
                                        notify=self._image_finished)
             self.runner.images = self.images
+        self.remote_control = None
+        if cfg.remote_control.enabled:
+            from .remote_control import RemoteControl
+            self.remote_control = RemoteControl(cfg, cfg.remote_control, notify=self._remote_control_ready)
+            self.runner.remote_control = self.remote_control
         self.jobs = None
         if cfg.jobs.enabled:
             from .jobs import JobScheduler
@@ -108,6 +113,9 @@ class Manager:
         for s in self.db.sessions_with_status(*ACTIVE):
             if s["status"] != "waiting_approval":  # they don't need the GPU until the user decides
                 self.runner.note_gpu_pause(s["id"])
+
+    def _remote_control_ready(self, payload: dict) -> None:
+        self.notifier.send({"topic": self.cfg.notify.topic, **payload})
 
     def _image_finished(self, job: dict) -> None:
         ok = job["status"] == "done"
@@ -253,10 +261,11 @@ class Manager:
         tools = []
         if app_tools:
             from .apps import validate_tools
-            from . import homelab, images, memory_library, search, web_tools
+            from . import homelab, images, memory_library, remote_control, search, web_tools
             from .tools import tool_schemas
             reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS) | set(images.TOOLS)
-                        | set(memory_library.TOOLS) | set(web_tools.TOOLS) | set(search.TOOLS))
+                        | set(memory_library.TOOLS) | set(web_tools.TOOLS) | set(search.TOOLS)
+                        | set(remote_control.TOOLS))
             try:
                 tools = validate_tools(app_tools, reserved)
             except ValueError as e:

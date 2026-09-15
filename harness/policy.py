@@ -43,6 +43,7 @@ REPO_RULES: list[dict] = [
 ALWAYS_ASK: dict[str, str] = {
     "memory_edit": "changes your memory library",
     "memory_write": "changes your memory library",
+    "open_claude_remote_control": "starts Claude Code Remote Control in a project folder on this PC",
 }
 
 

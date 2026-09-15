@@ -266,6 +266,36 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             raise HarnessError(404, "unknown action")
         return m.guard.status()
 
+    # Claude Code Remote Control servers (remote_control.py)
+    def remote_control(m):
+        if m.remote_control is None:
+            raise HarnessError(400, "Remote Control launches are disabled (remote_control.enabled in harness.yaml)")
+        return m.remote_control
+
+    @app.get("/remote-control")
+    async def rc_status(request: Request):
+        m = mgr(request)
+        if m.remote_control is None:
+            return {"enabled": False, "projects": []}
+        return {"enabled": True, "projects": m.remote_control.status()}
+
+    @app.post("/remote-control/{project}")
+    async def rc_launch(project: str, request: Request):
+        from .fileops import ToolError
+        rc = remote_control(mgr(request))
+        try:
+            return await rc.launch(project, started_by=request.headers.get("tailscale-user-login") or "web app")
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
+    @app.post("/remote-control/{project}/stop")
+    async def rc_stop(project: str, request: Request):
+        from .fileops import ToolError
+        try:
+            return await remote_control(mgr(request)).stop(project)
+        except ToolError as e:
+            raise HarnessError(404, str(e))
+
     @app.get("/queue")
     async def queue(request: Request):
         positions = mgr(request).scheduler.positions()

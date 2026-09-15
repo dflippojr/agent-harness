@@ -145,3 +145,112 @@ def test_github_falls_back_to_html_when_api_fails():
     web = WebTools(WebConfig(enabled=True), resolver=resolver({}), transport=httpx.MockTransport(handler))
     out = asyncio.run(web.web_fetch("https://github.com/o/r"))
     assert "HTML page." in out and "github.com/o/r" in seen
+
+
+# web app: a syntax error in app.js blanks the whole phone app, and nothing else would catch it
+def test_web_app_js_parses():
+    import shutil
+    import subprocess
+    from pathlib import Path
+    import pytest
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node isn't installed")
+    app_js = Path(__file__).resolve().parent.parent / "harness" / "web" / "app.js"
+    result = subprocess.run([node, "--check", "--input-type=module"], input=app_js.read_text(encoding="utf-8"),
+                            capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+
+
+# Claude Code Remote Control launches (8b)
+import json as _json  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+from harness.config import Project, RemoteControlConfig  # noqa: E402
+from harness.fileops import ToolError  # noqa: E402
+from harness.policy import ASK, Policy  # noqa: E402
+from harness.remote_control import RemoteControl, parse_log  # noqa: E402
+
+FAKE_LOG = ("· Connecting · repo · HEAD\n\x1b[1A\x1b[J· Connected · repo · HEAD\n    Capacity: 1/4 · New sessions\n"
+            "    \x1b]8;;https://claude.ai/code/session_01AbC?from=cli\x07demo\x1b]8;;\x07\n"
+            "Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01XyZ\n")
+
+
+def test_parse_log():
+    info = parse_log(FAKE_LOG)
+    assert info["pairing_url"] == "https://claude.ai/code?environment=env_01XyZ"
+    assert info["session_urls"] == ["https://claude.ai/code/session_01AbC"] and info["active_sessions"] == 1
+    assert parse_log("Error: Workspace not trusted. Please run `claude` in X first")["error"].startswith("Error: Workspace")
+
+
+def _rc_setup(tmp_path, trusted=True, script=None):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    claude_json = tmp_path / "claude.json"
+    claude_json.write_text(_json.dumps({"projects": {str(repo).replace("\\", "/"): {"hasTrustDialogAccepted": trusted}}}))
+    fake = tmp_path / "fake_claude.py"
+    fake.write_text("import sys, time\nsys.stdout.reconfigure(encoding='utf-8')\n" + (script or (
+        f"sys.stdout.write({FAKE_LOG!r}); sys.stdout.flush()\n"
+        "time.sleep(60)\n")), encoding="utf-8")
+    cfg = make_cfg(tmp_path)
+    cfg.projects["repo"] = Project(name="repo", repo=str(repo))
+    cfg.projects["remote"] = Project(name="remote", repo="https://github.com/o/r")
+    notes = []
+    rc = RemoteControl(cfg, RemoteControlConfig(enabled=True, claude_path=_sys.executable), notify=notes.append,
+                       claude_json=claude_json)
+    rc._command = lambda: [_sys.executable, str(fake)]  # stands in for `claude remote-control ...`
+    return rc, repo, notes
+
+
+def test_remote_control_launch_status_stop(tmp_path):
+    rc, repo, notes = _rc_setup(tmp_path)
+
+    async def body():
+        assert rc.eligible() == ["repo"]  # scratch has no folder, remote is a URL
+        view = await rc.launch("repo", started_by="test")
+        assert view["running"] and view["pairing_url"].endswith("env_01XyZ") and view["active_sessions"] == 1
+        assert notes and notes[0]["click"] == view["pairing_url"]
+        again = await rc.launch("repo")
+        assert again["already_running"] and again["pid"] == view["pid"]
+        # a new RemoteControl (the daemon restarted) still finds and stops it
+        fresh = RemoteControl(rc.cfg, rc.rc, claude_json=rc.claude_json)
+        assert fresh.status()[0]["running"]
+        await fresh.stop("repo")
+        assert not fresh.status()[0]["running"]
+    asyncio.run(body())
+
+
+def test_remote_control_refuses_untrusted_and_reports_failures(tmp_path):
+    rc, repo, _ = _rc_setup(tmp_path, trusted=False)
+
+    async def body():
+        try:
+            await rc.launch("repo")
+            raise AssertionError("launched an untrusted folder")
+        except ToolError as e:
+            assert "run `claude` once" in str(e)
+        for name in ("remote", "nope"):
+            try:
+                await rc.launch(name)
+                raise AssertionError(name)
+            except ToolError:
+                pass
+    asyncio.run(body())
+
+    rc2, _, _ = _rc_setup(tmp_path / "b", script="print('Error: something broke'); raise SystemExit(1)\n")
+
+    async def failing():
+        try:
+            await rc2.launch("repo")
+            raise AssertionError("should fail")
+        except ToolError as e:
+            assert "something broke" in str(e)
+        assert not rc2.status()[0]["running"]
+    asyncio.run(failing())
+
+
+def test_remote_control_tool_always_asks():
+    assert Policy().decide("open_claude_remote_control", {"project": "x", "reason": "y"}).action == ASK
+    assert Policy([{"tool": "*", "action": "allow"}]).decide("open_claude_remote_control", {}).action == ASK

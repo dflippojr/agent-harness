@@ -97,6 +97,7 @@ class Runner:
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
         self.images = None                      # images.ImageService, set by the manager when enabled
         self.sessions = None                    # search.SessionSearch, set by the manager when enabled
+        self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
@@ -134,6 +135,8 @@ class Runner:
             kits.append(self.images)
         if self.sessions is not None and (project is None or project.session_search):
             kits.append(self.sessions)
+        if self.remote_control is not None and s["target"] == "tower" and s.get("app_id") is None:
+            kits.append(self.remote_control)  # not for app sessions: apps launch through /api/v1/remote-control
         return kits
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:

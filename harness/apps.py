@@ -30,13 +30,14 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.0"
+API_VERSION = "1.1"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
     "approvals": "approve or deny tool calls in the app's own sessions",
     "images": "generate images and read them",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
+    "remote_control": "start and stop Claude Code Remote Control servers in project folders",
 }
 TOOL_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{2,48}$")
 MAX_CONTEXT_CHARS = 60_000
@@ -216,7 +217,8 @@ def register(app: FastAPI, mgr) -> None:
                              for p in m.cfg.projects.values()],
                 "models": list(m.cfg.models), "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
-                    "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled}}
+                    "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
+                    "remote_control": m.remote_control is not None}}
 
     @app.post("/api/v1/sessions", status_code=201)
     async def create_session(body: CreateAppSession, request: Request):
@@ -349,6 +351,35 @@ def register(app: FastAPI, mgr) -> None:
         except ToolError as e:
             raise HarnessError(400, str(e))
         return {**job, "url": f"/api/v1/images/{job['id']}.png"}
+
+    @app.get("/api/v1/remote-control")
+    async def app_rc_status(request: Request):
+        m = mgr(request)
+        auth(request, "remote_control")
+        return {"enabled": m.remote_control is not None,
+                "projects": m.remote_control.status() if m.remote_control else []}
+
+    @app.post("/api/v1/remote-control/{project}")
+    async def app_rc_launch(project: str, request: Request):
+        m = mgr(request)
+        key = auth(request, "remote_control")
+        if m.remote_control is None:
+            raise HarnessError(400, "Remote Control launches are disabled on this harness")
+        try:
+            return await m.remote_control.launch(project, started_by=f"app:{key['name']}")
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
+    @app.post("/api/v1/remote-control/{project}/stop")
+    async def app_rc_stop(project: str, request: Request):
+        m = mgr(request)
+        auth(request, "remote_control")
+        if m.remote_control is None:
+            raise HarnessError(400, "Remote Control launches are disabled on this harness")
+        try:
+            return await m.remote_control.stop(project)
+        except ToolError as e:
+            raise HarnessError(404, str(e))
 
     @app.get("/api/v1/images/{iid}")
     async def app_image_status(iid: str, request: Request):

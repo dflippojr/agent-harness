@@ -124,6 +124,17 @@ class WebConfig:
 
 
 @dataclass
+class RemoteControlConfig:
+    """`remote_control` in harness.yaml."""
+    enabled: bool = False
+    claude_path: str = ""                 # default: `claude` on PATH (the npm shim is fine)
+    spawn: str = "worktree"               # worktree | same-dir | session (see `claude remote-control --help`)
+    permission_mode: str = "default"      # for sessions opened from the phone
+    capacity: int = 4                     # max concurrent sessions per server
+    projects: list[str] | None = None     # which projects may be launched; default: every tower project with a local repo
+
+
+@dataclass
 class JobsConfig:
     """Scheduled jobs (jobs.py): recurring agent tasks on cron schedules, managed from the app."""
     enabled: bool = False
@@ -211,6 +222,7 @@ class Config:
     images: ImagesConfig = field(default_factory=ImagesConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     jobs: JobsConfig = field(default_factory=JobsConfig)
+    remote_control: RemoteControlConfig = field(default_factory=RemoteControlConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -303,6 +315,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         images=ImagesConfig(**(raw.get("images") or {})),
         search=SearchConfig(**(raw.get("search") or {})),
         jobs=JobsConfig(**(raw.get("jobs") or {})),
+        remote_control=RemoteControlConfig(**(raw.get("remote_control") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

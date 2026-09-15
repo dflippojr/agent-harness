@@ -798,12 +798,10 @@ async function viewSession(sid, tab, focusApproval) {
     error: (e) => add(h("p", { class: "note bad" }, e.data.message)),
     quote_check: (e) => add(h("details", { class: "thinking ev" },
       h("summary", {}, `Asked the agent to fix ${e.data.quotes.length} quote${e.data.quotes.length === 1 ? "" : "s"} not found in anything it read`),
-      h("div", { class: "text" }, e.data.quotes.map((q) => `“${q}”`).join("
-")))),
+      h("div", { class: "text" }, e.data.quotes.map((q) => `“${q}”`).join("\n")))),
     ungrounded_quotes: (e) => add(h("div", { class: "note bad" },
       h("p", {}, `⚠ ${e.data.quotes.length === 1 ? "This quote" : "These quotes"} in the answer didn't appear in anything the agent read, so ${e.data.quotes.length === 1 ? "it" : "they"} may be made up:`),
-      h("div", { class: "text", style: "white-space:pre-wrap" }, e.data.quotes.map((q) => `“${q}”`).join("
-")))),
+      h("div", { class: "text", style: "white-space:pre-wrap" }, e.data.quotes.map((q) => `“${q}”`).join("\n")))),
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
     resumed: () => add(h("p", { class: "note" }, "Daemon restarted — session resumed")),
     workspace_ready: (e) => add(h("p", { class: "note" }, `Checked out on branch ${e.data.branch} (from ${e.data.base_branch})`)),
@@ -1217,6 +1215,7 @@ async function viewSettings() {
         },
       }, "Send test notification") : null),
     gpuCard(),
+    remoteControlCard(),
     memoryCard(),
     endpointCard(me),
     appsCard(me),
@@ -1267,6 +1266,46 @@ function gpuCard() {
   const timer = setInterval(load, 5000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "card" }, h("h3", {}, "GPU"), body);
+}
+
+function remoteControlCard() {
+  const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
+  let busy = "";
+  const act = async (project, stop) => {
+    busy = project;
+    load();
+    try {
+      const r = await api(`/remote-control/${encodeURIComponent(project)}${stop ? "/stop" : ""}`, { method: "POST" });
+      toast(stop ? `Stopped Remote Control for ${project}` : r.already_running ? "Already running" : "Remote Control is ready");
+    } catch (e) { toast(e.message); }
+    busy = "";
+    load();
+  };
+  const row = (p) => {
+    const state = busy === p.project ? h("span", { class: "dots" }, "working")
+      : p.running ? `running${p.active_sessions ? ` · ${p.active_sessions} session${p.active_sessions === 1 ? "" : "s"}` : ""} · started ${ago(p.started_at)}`
+      : !p.trusted ? "not trusted yet: run claude once in this folder" : "stopped";
+    return h("div", { class: "rc-row" },
+      h("p", {}, h("strong", {}, p.project), " ", h("span", { class: `muted small${!p.running && !p.trusted ? " bad" : ""}` }, state)),
+      h("p", { class: "muted small" }, p.path),
+      h("div", { class: "row" },
+        p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
+        p.running ? h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop")
+          : h("button", { class: "btn", disabled: !!busy || !p.trusted, onclick: () => act(p.project, false) }, "Start")));
+  };
+  const load = async () => {
+    try {
+      const r = await api("/remote-control");
+      if (!r.enabled) return fill(body, h("p", { class: "muted small" }, "Disabled in config/harness.yaml (remote_control)."));
+      fill(body,
+        h("p", { class: "muted small" }, "Starts Claude Code Remote Control in a project folder so you can work there from the Claude app. Each session gets its own git worktree, and Claude asks you in the app before edits and commands. These sessions use your Claude subscription and don't go through the harness."),
+        r.projects.length ? r.projects.map(row) : h("p", { class: "muted small" }, "No tower projects with a local folder."));
+    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
+  };
+  load();
+  const timer = setInterval(() => { if (!busy) load(); }, 10000);
+  onLeave(() => clearInterval(timer));
+  return h("div", { class: "card" }, h("h3", {}, "Claude Remote Control"), body);
 }
 
 function memoryCard() {
