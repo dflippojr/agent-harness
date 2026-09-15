@@ -1,0 +1,160 @@
+# Roadmap items mirrored to GitHub issues by scripts/sync_backlog_issues.py.
+#
+# key:    stable id; written into the issue body as <!-- backlog: key --> so reruns never file duplicates
+# kind:   check (verify something already built) | deferred (part of a built phase) | feature (not scheduled)
+# phase:  optional; the phase an item is planned for
+#
+# The script only creates missing issues. It never edits or closes existing ones.
+
+items:
+  - key: gpu-guard-real-game
+    kind: check
+    title: "GPU guard: verify with a real game, Big Picture and a Plex hardware transcode"
+    body: |
+      Phase 5 was tested with a fake game executable only. Still to verify live:
+      - a real game launched from a Steam/Epic/GOG/Xbox library
+      - the `Steam Big Picture Mode` window title (e.g. started from Moonlight)
+      - a real Plex hardware video transcode
+
+      Check: start a task, launch the game, confirm the pause event and the Settings → GPU card, quit, and confirm the queue resumes about 3 minutes later.
+
+  - key: mac-lid-closed-retest
+    kind: check
+    title: "MacBook runner: retest the wait path with the Mac actually asleep"
+    body: |
+      In the Phase 4 lid-closed test the runner kept polling, so the Mac never slept (probably clamshell mode or a sleep assertion) and the `waiting_target` path never ran.
+
+      Retest with no external display, sleep via Apple menu → Sleep before starting the task, and run `pmset -g assertions` if it still stays awake.
+
+  - key: merge-conflict-ui
+    kind: deferred
+    title: "Review card: help with merge conflicts"
+    body: |
+      When a session branch no longer merges cleanly, the only option today is to ask the agent to merge `origin/<base>` itself. Add conflict handling to the Review card (at least show the conflicting files and offer "ask the agent to resolve").
+
+  - key: private-url-push-test
+    kind: check
+    title: "Test pushing a session branch from a private URL project"
+    body: |
+      Review → push uses the host's git credentials. It has only been exercised with local and public repos; verify with a private repository URL.
+
+  - key: runner-generate-image
+    kind: deferred
+    title: "generate_image for runner (MacBook) sessions"
+    body: |
+      `generate_image` only works in tower sessions, because the runner protocol has no binary file transfer. Add a transfer path so generated images land in the Mac workspace.
+
+  - key: endpoint-from-mac
+    kind: check
+    title: "Inference endpoint: test from the MacBook"
+    body: |
+      The OpenAI/Anthropic-compatible endpoint was only tested from the tower. Try a coding tool on the Mac against it over the tailnet (streaming and tool calls).
+
+  - key: gpt-oss-secondary
+    kind: feature
+    title: "gpt-oss-20b as a secondary model for summaries, compaction and cheap subtasks"
+    body: |
+      Phase 0 picked gpt-oss-20b as the fast secondary model, but only Qwen is served. Wiring in a second model is also a prerequisite for smart approvals. Memory is the constraint: both models don't fit in 32 GB RAM / 16 GB VRAM at once, so it needs a swap policy or a small context.
+
+  - key: flag-unsupported-quotes
+    kind: deferred
+    phase: 8
+    title: "Flag quotes in answers that don't appear in fetched text"
+    body: |
+      In the Phase 7e web suite, Qwen sometimes gave a correct answer with a made-up quote attributed to a page it fetched. The benchmark suite now fails such answers, but live sessions don't flag them. Check quoted passages in final answers against the text fetched during the session and mark unsupported ones.
+
+  - key: github-page-extraction
+    kind: deferred
+    phase: 8
+    title: "web_fetch: better extraction of GitHub repository pages"
+    body: |
+      Trafilatura extracts GitHub repository pages poorly (navigation noise, README cut short). Special-case github.com URLs, e.g. fetch the raw README and repository metadata.
+
+  - key: embeddings-route
+    kind: feature
+    title: "Inference endpoint: /v1/embeddings"
+    body: |
+      The endpoint has chat, messages and responses routes but no embeddings route.
+
+  - key: endpoint-load-test
+    kind: check
+    title: "Inference endpoint: load-test the fairness rule and the 429 limit"
+    body: |
+      The GPU-sharing rule (endpoint requests wait only for the agent call in flight; an agent call waiting 90 s gets priority) and the 429 above 4 waiting requests are covered by unit tests only. Verify under real concurrent load.
+
+  - key: images-extras
+    kind: feature
+    title: "Images: backups, upscaling and inpainting"
+    body: |
+      Not included in Phase 6d: backing up generated images, opt-in upscaling, and inpainting/photo editing workflows.
+
+  - key: images-more-models
+    kind: feature
+    title: "Images: more workflows (Qwen-Image Lightning LoRA, FLUX.2 [klein] 9B)"
+    body: |
+      - Qwen-Image Lightning 4-step LoRA as a faster quality mode.
+      - FLUX.2 [klein] 9B (gated on Hugging Face; non-commercial license).
+
+  - key: installer-clean-machine
+    kind: check
+    title: "Installer: test on a clean machine, including the model download and a 12 GB GPU"
+    body: |
+      `install/install.ps1` was tested on a machine that already had a model server. Untested: a clean Windows machine, the llama.cpp/model download plus the `run-server.ps1` supervisor, and 12 GB GPUs.
+
+  - key: installer-other-platforms
+    kind: feature
+    title: "Installer: Linux and macOS"
+    body: |
+      The distributable daemon is Windows + NVIDIA only. Add Linux (NVIDIA) and macOS (Apple Silicon) installs.
+
+  - key: mac-client-package
+    kind: feature
+    title: "Mac client package: harness CLI, runner installer and pairing code"
+    body: |
+      Today the runner is deployed from the tower over SSH, and the CLI/SDK need a clone plus `httpx`. One installable piece on the Mac:
+      - install script: venv under `~/.agent-harness`, a `harness` command on PATH, runner + launchd agent install/update
+      - pairing with a one-time code from Settings instead of SSH and token copying
+      - `harness new/list/watch/approve`, `harness projects add ~/Projects/<repo>`, `harness runner status/restart/logs`
+      - same sandbox, repo roots and approval flow
+
+  - key: agent-written-skills
+    kind: feature
+    title: "Agent-written skills with background review"
+    body: |
+      Hermes-style skills that agents write for themselves, reviewed in the background only when the GPU queue is idle, with every write approved.
+
+  - key: smart-approvals
+    kind: feature
+    title: "Smart approvals: rate commands with an auxiliary model"
+    body: |
+      Have a small model rate risky vs. routine commands so fewer approvals need a human. Needs a second model (see the gpt-oss secondary issue).
+
+  - key: remote-control-launch
+    kind: feature
+    phase: 8
+    title: "Launch native Claude Code Remote Control sessions on demand"
+    body: |
+      Start a detached, unmodified `claude` process with Remote Control in a chosen project directory, so it can be paired from the Claude app within seconds. It rides on Anthropic's own pairing rather than the harness session model, so it needs its own registry: list, stop, and clean up orphaned processes.
+
+  - key: subscription-backends
+    kind: feature
+    phase: 8
+    title: "Claude Code and Codex CLI as session backends (personal use)"
+    body: |
+      Run the unmodified `claude` / `codex` CLI inside the session sandbox under the user's own subscription login, as an alternative to local models.
+      - login happens inside a backend container through the provider's own flow; the daemon never reads or stores tokens
+      - CLI permission prompts become ordinary harness approvals, so any client (app API, web app, ntfy) can decide them
+      - personal use only: the app API must not route other people's apps or users through one person's subscription
+      - warn when programmatic usage is billed from separate credits instead of subscription limits
+
+  - key: colibri-big-brain
+    kind: feature
+    title: "Big-brain tool: queue questions for a very large MoE model streamed from SSD"
+    body: |
+      An asynchronous tool that sends a question (e.g. "review this plan overnight") to a very large MoE model run with Colibri, which streams experts from disk. Decode is around 1 tok/s on this hardware, so it only suits overnight jobs. Benchmark first and check SSD space.
+
+  - key: session-list-machine-filter
+    kind: feature
+    title: "Session list: filter by machine"
+    body: |
+      New task already has a Tower/MacBook switch; the session list doesn't.
