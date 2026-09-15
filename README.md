@@ -15,6 +15,9 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
 - Inference endpoint (`endpoint:`; `docs/phase6c-results.md`): OpenAI- and Anthropic-compatible proxy to the tower's
   model at `https://<tower>/v1` with per-device keys (Settings → Inference endpoint). Requests go ahead of the next
   agent turn; 503 while the GPU guard has the model unloaded.
+- Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`)
+  and Qwen-Image-2512 (`quality`), both Apache 2.0. A batch unloads the language model, generates, and restores it.
+  Phone: Images screen; agents: `generate_image` (tower sessions).
 
 ## Phase 5: operations hardening
 

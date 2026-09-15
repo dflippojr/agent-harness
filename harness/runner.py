@@ -95,6 +95,7 @@ class Runner:
         self.gpu_paused_sessions: set[str] = set()
         self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
+        self.images = None                      # images.ImageService, set by the manager when enabled
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
 
@@ -126,13 +127,15 @@ class Runner:
             kits.append(self.memory)
         if self.web is not None and (project is None or project.web):
             kits.append(self.web)
+        if self.images is not None and s["target"] == "tower" and (project is None or project.images):
+            kits.append(self.images)
         return kits
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:
-        from . import memory_library, web_tools
+        from . import images, memory_library, web_tools
         schemas = ws.schemas()
         for kit in self.daemon_toolkits(s):
-            module = memory_library if kit is self.memory else web_tools
+            module = memory_library if kit is self.memory else web_tools if kit is self.web else images
             schemas = schemas + module.schemas(kit.cfg)
         return schemas
 
@@ -619,7 +622,9 @@ class Runner:
         ok = True
         try:
             kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
-            if kit is not None:
+            if kit is not None and kit is self.images:
+                output = await kit.call(name, {**args, "_session": sid}, workspace_root=Path(s["workspace"]))
+            elif kit is not None:
                 output = await kit.call(name, args)  # daemon-side for every target
             elif isinstance(ws, RemoteWorkspace):
                 await self._wait_for_target(sid)

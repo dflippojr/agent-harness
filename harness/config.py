@@ -129,6 +129,19 @@ class EndpointConfig:
 
 
 @dataclass
+class ImagesConfig:
+    """Local image generation with ComfyUI (images.py). The language model is unloaded while jobs run."""
+    enabled: bool = False
+    comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
+    port: int = 8188
+    work_dir: str = "D:/Agents/harness/images-work"  # ComfyUI output/temp and the harness's PNGs (images/)
+    log_dir: str = "D:/Agents/harness/logs"
+    linger_seconds: float = 60                 # keep ComfyUI loaded this long for more jobs before restoring Qwen
+    start_timeout_seconds: float = 180
+    job_timeout_seconds: float = 1200
+
+
+@dataclass
 class RunnerConfig:
     """A machine that runs tool calls for sessions targeting it (Phase 4: the MacBook). The model stays on the tower."""
     name: str
@@ -151,6 +164,7 @@ class Project:
     target: str = "tower"   # where tools run: tower, or a runner name such as macbook (repo is then a path there)
     memory_library: bool = True  # give sessions the memory-library tools (when memory_library is enabled)
     web: bool = True             # give sessions web_search / web_fetch (when web is enabled)
+    images: bool = True          # give tower sessions generate_image (when images is enabled)
 
 
 @dataclass
@@ -174,6 +188,7 @@ class Config:
     memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
     web: WebConfig = field(default_factory=WebConfig)
     endpoint: EndpointConfig = field(default_factory=EndpointConfig)
+    images: ImagesConfig = field(default_factory=ImagesConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -227,6 +242,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
             target=str(spec.get("target") or "tower"),
             memory_library=bool(spec.get("memory_library", True)),
             web=bool(spec.get("web", True)),
+            images=bool(spec.get("images", True)),
         )
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
@@ -261,6 +277,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         memory_library=MemoryLibraryConfig(**(raw.get("memory_library") or {})),
         web=WebConfig(**(raw.get("web") or {})),
         endpoint=EndpointConfig(**(raw.get("endpoint") or {})),
+        images=ImagesConfig(**(raw.get("images") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

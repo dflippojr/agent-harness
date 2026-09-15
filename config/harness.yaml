@@ -123,3 +123,13 @@ endpoint:
   max_waiting: 4
   agent_fair_seconds: 90
   request_timeout_seconds: 1800
+
+# Local image generation with ComfyUI (harness/images.py). Jobs stop llama-server (same pause flag as the GPU guard),
+# start ComfyUI from C:/AI/ComfyUI, and restore the language model after linger_seconds without new jobs.
+# Models in C:/AI/comfy-models: fast = Z-Image-Turbo, quality = Qwen-Image-2512 (both Apache 2.0).
+images:
+  enabled: true
+  comfy_dir: C:/AI/ComfyUI
+  port: 8188
+  work_dir: D:/Agents/harness/images-work
+  linger_seconds: 60

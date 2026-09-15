@@ -57,6 +57,13 @@ class RunnerResult(BaseModel):
     kind: str = "internal"
 
 
+class ImageRequest(BaseModel):
+    prompt: str
+    model: str = "fast"
+    aspect_ratio: str = "1:1"
+    seed: int | None = None
+
+
 class Template(BaseModel):
     name: str
     project: str = "scratch"
@@ -193,6 +200,39 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = mgr(request)
         model = m.cfg.models[m.cfg.default_model]
         return {"name": model.name, "state": await m.warmer.warm(model)}
+
+    # image generation
+    def images_service(request: Request):
+        m = mgr(request)
+        if m.images is None:
+            raise HarnessError(400, "image generation is disabled in config/harness.yaml")
+        return m.images
+
+    @app.get("/images")
+    async def list_images(request: Request, limit: int = 60):
+        svc = images_service(request)
+        return {"status": svc.status(), "images": svc.db.list_images(limit=limit)}
+
+    @app.post("/images", status_code=201)
+    async def create_image(body: ImageRequest, request: Request):
+        from .fileops import ToolError
+        svc = images_service(request)
+        try:
+            return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio, seed=body.seed)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
+    @app.get("/images/{iid}")
+    async def get_image(iid: str, request: Request):
+        svc = images_service(request)
+        job = svc.db.get_image(iid.removesuffix(".png"))
+        if job is None:
+            raise HarnessError(404, "no such image")
+        if iid.endswith(".png"):
+            if job["status"] != "done" or not svc.path(job).exists():
+                raise HarnessError(404, "image not ready")
+            return FileResponse(svc.path(job), media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+        return {**job, "service": svc.status()}
 
     # GPU contention guard
     @app.get("/gpu")

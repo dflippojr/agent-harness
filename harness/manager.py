@@ -67,6 +67,14 @@ class Manager:
         if cfg.web.enabled:
             from .web_tools import WebTools
             self.runner.web = WebTools(cfg.web)
+        self.images = None
+        if cfg.images.enabled:
+            from .gpu_guard import ServerControl
+            from .images import ImageService
+            self.images = ImageService(cfg.images, self.db, self.runner,
+                                       ServerControl(cfg.gpu_guard, cfg.models[cfg.default_model]),
+                                       notify=self._image_finished)
+            self.runner.images = self.images
         self.guard = None
         if cfg.gpu_guard.enabled:
             from .gpu_guard import GpuGuard
@@ -75,12 +83,21 @@ class Manager:
                                   on_pause=self._gpu_paused,
                                   on_resume=self.runner.gpu_resumed)
             self.runner.guard = self.guard
-            self.warmer.blocked = lambda: self.guard.active
+            self.warmer.blocked = lambda: self.guard.active or bool(self.images and self.images.gpu_taken)
+        elif self.images is not None:
+            self.warmer.blocked = lambda: self.images.gpu_taken
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
         for s in self.db.sessions_with_status(*ACTIVE):
             if s["status"] != "waiting_approval":  # they don't need the GPU until the user decides
                 self.runner.note_gpu_pause(s["id"])
+
+    def _image_finished(self, job: dict) -> None:
+        ok = job["status"] == "done"
+        self.notifier.send({"topic": self.cfg.notify.topic, "title": "Image ready" if ok else "Image failed",
+                            "message": (job["prompt"][:200] if ok else job["error"][:300]), "priority": 2 if ok else 3,
+                            "tags": ["frame_with_picture" if ok else "x"],
+                            "click": self.notifier.link(f"/#/images/{job['id']}")})
 
     def _keep_awake(self, target: str) -> bool:
         """A runner holds off idle sleep while one of its sessions is actually running."""
@@ -97,6 +114,8 @@ class Manager:
             self.maintenance.start()
         if self.guard is not None:
             self.guard.start()
+        if self.images is not None:
+            self.images.start()
         for s in self.db.sessions_with_status(*ACTIVE):
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
@@ -112,6 +131,8 @@ class Manager:
         await self.maintenance.stop()
         if self.guard is not None:
             await self.guard.stop()
+        if self.images is not None:
+            await self.images.stop()
 
     def _spawn(self, sid: str, recovered: bool = False) -> None:
         task = asyncio.create_task(self.runner.run(sid, recovered=recovered), name=f"session-{sid}")

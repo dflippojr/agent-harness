@@ -27,7 +27,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .scheduler import QueueFull
+from .scheduler import GpuExclusive, QueueFull
 
 log = logging.getLogger("harness.endpoint")
 
@@ -110,7 +110,7 @@ def register(app: FastAPI, mgr) -> None:
                         "default": mc.name == (m.cfg.endpoint.default_model or m.cfg.default_model)}
                        for mc in m.cfg.models.values()],
             "features": {"streaming": True, "tool_calls": True, "reasoning": True, "embeddings": False,
-                         "images": False},
+                         "images": bool(m.images)},
             "model_aliases": m.cfg.endpoint.model_aliases,
             "gpu": {"shared_with_agents": True, "guard_state": m.guard.state if m.guard else "clear"},
         }
@@ -156,6 +156,10 @@ def register(app: FastAPI, mgr) -> None:
         if gpu:
             try:
                 slot = await m.runner.gate.endpoint_request()
+            except GpuExclusive:
+                finish(503)
+                return error(flavor, 503, "overloaded_error", "the GPU is generating images; the language model is "
+                             "unloaded for a minute or two", headers={"Retry-After": "60"})
             except QueueFull:
                 finish(429)
                 return error(flavor, 429, "rate_limit_error", "too many requests are waiting for the GPU",

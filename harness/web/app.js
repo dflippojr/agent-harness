@@ -6,6 +6,7 @@
 //   #/s/<id>/changes         diff viewer
 //   #/s/<id>/info            session details
 //   #/settings               identity, notifications, install help
+//   #/images[/<id>]          image generation and gallery
 
 const $app = document.getElementById("app");
 const $title = document.getElementById("title");
@@ -200,6 +201,7 @@ async function route() {
     if (parts.length === 0) await viewList();
     else if (parts[0] === "new") await viewNew();
     else if (parts[0] === "settings") await viewSettings();
+    else if (parts[0] === "images") await (parts[1] ? viewImage(parts[1]) : viewImages());
     else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
     else location.hash = "#/";
   } catch (e) {
@@ -217,7 +219,8 @@ async function viewList() {
   $title.textContent = "Agents";
   const list = h("div");
   const queueNote = h("p", { class: "note" });
-  $app.append(queueNote, list);
+  $app.append(h("div", { class: "row", style: "justify-content:flex-end;margin:4px 0 8px" },
+    h("a", { class: "btn small", href: "#/images" }, "🖼 Images")), queueNote, list);
   document.body.append(h("a", { class: "btn primary fab", href: "#/new" }, "+ New task"));
 
   const render = async () => {
@@ -915,6 +918,98 @@ function viewInfo(s) {
   $app.append(h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
     h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v))))),
   h("a", { class: "btn", href: `/sessions/${s.id}/transcript`, target: "_blank" }, "Open Markdown transcript"));
+}
+
+// ---------- images ----------
+const IMAGE_PHASE = {
+  idle: "", waiting: "Waiting for the GPU (a game or transcode is using it)…", switching: "Unloading the language model…",
+  starting: "Starting ComfyUI…", generating: "Generating…", lingering: "Done; keeping the image model loaded for another minute",
+  restoring: "Reloading the language model…",
+};
+
+function imageCard(img) {
+  const ready = img.status === "done";
+  return h("a", { class: "card image-card", href: `#/images/${img.id}` },
+    ready ? h("img", { src: `/images/${img.id}.png`, alt: img.prompt, loading: "lazy" })
+      : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" ? "failed" : h("span", { class: "dots" }, img.status)),
+    h("div", { class: "preview small" }, img.prompt));
+}
+
+async function viewImages() {
+  $title.textContent = "Images";
+  let data;
+  try { data = await api("/images"); } catch (e) { $app.append(h("p", { class: "note bad" }, e.message)); return; }
+  const prompt = h("textarea", { placeholder: "Describe the image…" });
+  const draftKey = "harness.imageDraft";
+  try { prompt.value = localStorage.getItem(draftKey) || ""; } catch (_) { /* private mode */ }
+  prompt.addEventListener("input", () => { try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ } });
+  const model = h("select", {}, Object.entries(data.status.models).map(([k, label]) => h("option", { value: k }, label)));
+  const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
+  const phase = h("p", { class: "note" });
+  const grid = h("div", { class: "image-grid" });
+  const render = (d) => {
+    const s = d.status;
+    const text = s.phase in IMAGE_PHASE ? IMAGE_PHASE[s.phase] : s.phase;
+    fill(phase, text ? h("span", { class: s.phase === "lingering" ? "" : "dots" },
+      `${text}${s.progress && s.progress.seconds ? ` ${s.progress.seconds} s` : ""}${s.queued ? ` · ${s.queued} queued` : ""}`) : "");
+    fill(grid, d.images.map(imageCard));
+  };
+  render(data);
+  const go = h("button", { class: "btn primary", type: "submit" }, "Generate");
+  $app.append(
+    h("form", {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        if (!prompt.value.trim()) return toast("Describe the image first");
+        go.disabled = true;
+        try {
+          await api("/images", { method: "POST", body: { prompt: prompt.value, model: model.value, aspect_ratio: aspect.value } });
+          try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
+          render(await api("/images"));
+        } catch (err) { toast(err.message); }
+        go.disabled = false;
+      },
+    },
+    h("label", {}, "Prompt"), prompt,
+    h("div", { class: "row" }, h("div", { style: "flex:2" }, h("label", {}, "Model"), model),
+      h("div", { style: "flex:1" }, h("label", {}, "Aspect"), aspect)),
+    h("p", { class: "muted small" }, "The language model is unloaded while images generate; running tasks pause for a few minutes."),
+    h("div", { class: "row", style: "margin-top:12px" }, h("span", { class: "spacer" }), go)),
+    phase, grid);
+  const timer = setInterval(async () => { try { render(await api("/images")); } catch (_) { /* offline */ } }, 4000);
+  onLeave(() => clearInterval(timer));
+}
+
+async function viewImage(id) {
+  $title.textContent = "Image";
+  const load = async () => {
+    const img = await api(`/images/${id}`);
+    const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
+    fill($app,
+      img.status === "done" ? h("a", { href: `/images/${id}.png`, target: "_blank" }, h("img", { class: "image-full", src: `/images/${id}.png`, alt: img.prompt }))
+        : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : h("span", { class: "dots" }, IMAGE_PHASE[img.service.phase] || img.status)),
+      h("div", { class: "card" },
+        h("p", {}, img.prompt),
+        h("p", { class: "muted small" }, `${img.model} · ${img.width}×${img.height} · seed ${img.seed} · ${img.source}${img.seconds ? ` · ${Math.round(img.seconds)} s` : ""} · ${when}`),
+        h("div", { class: "row" },
+          h("button", {
+            class: "btn",
+            onclick: async () => {
+              try {
+                const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio } });
+                location.hash = `#/images/${again.id}`;
+              } catch (e) { toast(e.message); }
+            },
+          }, "Another one"),
+          img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null)));
+    return img;
+  };
+  let img = await load();
+  const timer = setInterval(async () => {
+    if (img.status === "done" || img.status === "failed") return clearInterval(timer);
+    try { img = await load(); } catch (_) { /* offline */ }
+  }, 3000);
+  onLeave(() => clearInterval(timer));
 }
 
 // ---------- settings ----------

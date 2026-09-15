@@ -106,6 +106,19 @@ def render(m: Manager) -> str:
     out.metric("harness_endpoint_active", "gauge", "Endpoint requests running and waiting now.",
                [({"state": "running"}, gate.endpoint_active), ({"state": "waiting"}, gate.endpoint_waiting)])
 
+    if m.images is not None:
+        with db.lock:
+            images = db.conn.execute("SELECT model, source, status, COUNT(*), COALESCE(SUM(seconds), 0) FROM images "
+                                     "GROUP BY 1, 2, 3").fetchall()
+        out.metric("harness_images_total", "counter", "Image generation jobs by model, source and status.",
+                   [({"model": mo, "source": so, "status": st}, n) for mo, so, st, n, _ in images])
+        out.metric("harness_images_seconds_total", "counter", "Time spent generating images (ComfyUI execution).",
+                   [({"model": mo}, sum(s for mo2, _, st, _, s in images if mo2 == mo and st == "done"))
+                    for mo in sorted({row[0] for row in images})])
+        out.metric("harness_images_gpu_taken", "gauge", "1 while image generation has the GPU (language model unloaded).",
+                   [({}, 1 if m.images.gpu_taken else 0)])
+        out.metric("harness_images_queued", "gauge", "Image jobs waiting.", [({}, m.images.queue.qsize())])
+
     hub = m.hub.status()
     out.metric("harness_runner_online", "gauge", "1 while a runner (the MacBook) is connected.",
                [({"runner": r["name"]}, 1 if r["online"] else 0) for r in hub])

@@ -73,6 +73,24 @@ CREATE TABLE IF NOT EXISTS endpoint_requests (
     ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS endpoint_requests_ts ON endpoint_requests(ts);
+CREATE TABLE IF NOT EXISTS images (    -- image generation jobs (images.py)
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,           -- phone | agent
+    prompt TEXT NOT NULL,
+    model TEXT NOT NULL,
+    aspect_ratio TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    seed INTEGER NOT NULL,
+    status TEXT NOT NULL,           -- queued | running | done | failed
+    error TEXT NOT NULL DEFAULT '',
+    bytes INTEGER NOT NULL DEFAULT 0,
+    seconds REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    started_at REAL,
+    finished_at REAL
+);
 CREATE TABLE IF NOT EXISTS templates (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -269,6 +287,32 @@ class Database:
     def delete_template(self, tid: str) -> bool:
         with self.lock:
             return self.conn.execute("DELETE FROM templates WHERE id = ?", (tid,)).rowcount == 1
+
+    # images
+    def insert_image(self, job: dict) -> None:
+        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "width", "height", "seed"]
+        with self.lock:
+            self.conn.execute(f"INSERT INTO images ({','.join(cols)}, status, created_at) VALUES "
+                              f"({','.join('?' * len(cols))}, 'queued', ?)", [job[c] for c in cols] + [time.time()])
+
+    def update_image(self, iid: str, **fields) -> None:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self.lock:
+            self.conn.execute(f"UPDATE images SET {sets} WHERE id = ?", [*fields.values(), iid])
+
+    def get_image(self, iid: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM images WHERE id = ?", (iid,)).fetchone()
+        return dict(row) if row else None
+
+    def list_images(self, limit: int = 60, status: tuple = ()) -> list[dict]:
+        query, params = "SELECT * FROM images", []
+        if status:
+            query += f" WHERE status IN ({','.join('?' * len(status))})"
+            params = list(status)
+        with self.lock:
+            rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
+        return [dict(r) for r in rows]
 
     # inference endpoint keys and request log
     def create_api_key(self, name: str) -> tuple[dict, str]:

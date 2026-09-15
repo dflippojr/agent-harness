@@ -45,6 +45,14 @@ Check 'SearXNG :8888' {
     $r = Get-Json 'http://127.0.0.1:8888/search?q=test&format=json'
     "$(@($r.results).Count) results for a test query"
 }
+Check 'Image generation' {
+    $s = (Get-Json 'http://127.0.0.1:8100/images?limit=1').status
+    $files = 'diffusion_models\z_image_turbo_bf16.safetensors', 'diffusion_models\qwen_image_2512_fp8_e4m3fn.safetensors' |
+        Where-Object { -not (Test-Path (Join-Path 'C:\AI\comfy-models' $_)) }
+    if ($files) { throw "missing models: $($files -join ', ')" }
+    if (-not (Test-Path 'C:\AI\ComfyUI\python_embeded\python.exe')) { throw 'ComfyUI portable missing at C:\AI\ComfyUI' }
+    "phase $($s.phase); models present; ComfyUI starts on demand"
+}
 Check 'Harness daemon :8100' {
     $null = Get-Json 'http://127.0.0.1:8100/health'
     $m = Get-Json 'http://127.0.0.1:8100/models/status'

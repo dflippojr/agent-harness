@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import time
 
 import httpx
 import pytest
@@ -283,3 +284,143 @@ def test_inference_gate_endpoint_first_with_fairness():
         await asyncio.wait_for(asyncio.gather(a3, e3), 10)
         assert order == ["agent", "e3"]
     asyncio.run(body())
+
+
+# 6d: image generation
+PNG = b"\x89PNG\r\n\x1a\nfake"
+
+
+class FakeServer:
+    """Stands in for gpu_guard.ServerControl (the language model server)."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def stop(self):
+        self.calls.append("stop")
+
+    async def start(self):
+        self.calls.append("start")
+
+    async def healthy(self):
+        return True
+
+
+def fake_comfy(fail_prompts=()):
+    state = {"graphs": []}
+
+    def handler(request: httpx.Request):
+        if request.url.path == "/prompt":
+            graph = json.loads(request.read())["prompt"]
+            state["graphs"].append(graph)
+            return httpx.Response(200, json={"prompt_id": f"p{len(state['graphs'])}"})
+        if request.url.path.startswith("/history/"):
+            pid = request.url.path.rsplit("/", 1)[1]
+            graph = state["graphs"][int(pid[1:]) - 1]
+            text = next(n["inputs"]["text"] for n in graph.values() if n["class_type"] == "CLIPTextEncode")
+            if text in fail_prompts:
+                return httpx.Response(200, json={pid: {"status": {"status_str": "error", "completed": False, "messages": [
+                    ["execution_error", {"exception_message": "CUDA out of memory"}]]}}})
+            return httpx.Response(200, json={pid: {"status": {"status_str": "success", "completed": True},
+                                                   "outputs": {"9": {"images": [{"filename": "x.png", "subfolder": "harness",
+                                                                                  "type": "output"}]}}}})
+        if request.url.path == "/view":
+            return httpx.Response(200, content=PNG)
+        return httpx.Response(404)
+    return handler, state
+
+
+def image_manager(tmp_path, steps=None, fail_prompts=()):
+    from harness.config import ImagesConfig
+    cfg = make_cfg(tmp_path)
+    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2)
+    m = Manager(cfg, chat=Script(steps or [Completion(content="done")]))
+    server = FakeServer()
+    m.images.control = server
+    handler, state = fake_comfy(fail_prompts)
+    m.images.transport = httpx.MockTransport(handler)
+
+    async def no_process():
+        return None
+    m.images.comfy.start = no_process
+    m.images.comfy.stop = no_process
+    return m, server, state
+
+
+def test_image_batch_takes_gpu_and_gives_it_back(tmp_path):
+    from harness.scheduler import GpuExclusive
+
+    async def body():
+        m, server, state = image_manager(tmp_path, fail_prompts=("broken",))
+        await m.start(maintenance=False)
+        a = m.images.submit("a lighthouse at dusk", model="fast", aspect_ratio="16:9")
+        b = m.images.submit("broken", model="quality")
+        c = m.images.submit("a red bicycle", model="quality", aspect_ratio="3:4")
+        for _ in range(100):
+            if m.images.gpu_taken and m.runner.gate.exclusive_active:
+                break
+            await asyncio.sleep(0.01)
+        with pytest.raises(GpuExclusive):
+            await m.runner.gate.endpoint_request()
+        done = [await m.images.wait(j["id"]) for j in (a, b, c)]
+        assert [j["status"] for j in done] == ["done", "failed", "done"]
+        assert "CUDA out of memory" in done[1]["error"]
+        assert (done[0]["width"], done[0]["height"]) == (1344, 768) and (done[2]["width"], done[2]["height"]) == (1104, 1472)
+        assert m.images.path(done[0]).read_bytes() == PNG
+        steps = [next(n["inputs"]["steps"] for n in g.values() if n["class_type"] == "KSampler") for g in state["graphs"]]
+        assert steps == [8, 50, 50]  # fast = Z-Image-Turbo, quality = Qwen-Image-2512
+        for _ in range(100):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.02)
+        assert server.calls == ["stop", "start"]  # one hand-over for the whole batch
+        assert not m.runner.gate.exclusive and await m.warmer.state(m.cfg.models["fake"]) != "paused"
+        slot = await m.runner.gate.endpoint_request()
+        await slot.release()
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_agent_generate_image_tool_saves_into_workspace(tmp_path):
+    steps = [Completion(tool_calls=[call("generate_image", 0, prompt="app icon", filename="assets/icon")]),
+             Completion(content="made the icon")]
+
+    async def body():
+        m, server, _ = image_manager(tmp_path, steps=steps)
+        await m.start(maintenance=False)
+        s = m.create("make an icon")
+        await wait_status(m, s["id"], "done", timeout=20)
+        result = events(m, s["id"], "tool_result")[0]
+        assert result["ok"] and "assets/icon.png" in result["output"]
+        assert (tmp_path / "data" / "workspaces" / s["id"] / "assets" / "icon.png").read_bytes() == PNG
+        job = m.db.list_images()[0]
+        assert job["source"] == "agent" and job["session_id"] == s["id"]
+        bad = await m.runner.images.call("generate_image", {"prompt": "x", "filename": "../../escape.png"},
+                                         workspace_root=tmp_path / "data" / "workspaces" / s["id"])
+        await m.stop()
+    with pytest.raises(ToolError, match="escapes the workspace"):
+        asyncio.run(body())
+
+
+def test_images_api_and_tool_only_for_tower_sessions(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+    from harness.config import Project
+
+    m, server, _ = image_manager(tmp_path)
+    m.cfg.projects["mac"] = Project(name="mac", target="macbook")
+    with TestClient(create_app(m)) as client:
+        assert client.post("/images", json={"prompt": "x", "model": "huge"}).status_code == 400
+        job = client.post("/images", json={"prompt": "a cat", "aspect_ratio": "1:1"}).json()
+        for _ in range(200):
+            if client.get(f"/images/{job['id']}").json()["status"] == "done":
+                break
+            time.sleep(0.02)
+        r = client.get(f"/images/{job['id']}.png")
+        assert r.status_code == 200 and r.content == PNG and r.headers["content-type"] == "image/png"
+        listing = client.get("/images").json()
+        assert listing["images"][0]["id"] == job["id"] and "fast" in listing["status"]["models"]
+        tower = {"id": "t", "project": "scratch", "target": "tower", "model": "fake", "workspace": str(tmp_path)}
+        mac = {**tower, "project": "mac", "target": "macbook"}
+        assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(tower)}
+        assert all("generate_image" not in k.tool_names for k in m.runner.daemon_toolkits(mac))

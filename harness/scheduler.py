@@ -84,6 +84,10 @@ class QueueFull(Exception):
     pass
 
 
+class GpuExclusive(Exception):
+    """The GPU is handed over to something else (image generation) for now."""
+
+
 class InferenceGate:
     """Orders individual model calls between agent turns and requests to the inference endpoint (endpoint.py).
 
@@ -92,6 +96,10 @@ class InferenceGate:
     flight, and several can run at once (llama-server queues them itself). An agent call waits while any endpoint
     request is waiting or running, except that once an agent call has waited `fair_seconds`, new endpoint requests
     line up behind it, so a busy editor can't stall a task forever.
+
+    `exclusive()` hands the whole GPU to something else (image generation, which needs the model server stopped): it
+    waits for model calls in flight, then agent turns wait and endpoint requests are refused (GpuExclusive) until it's
+    released.
     """
 
     def __init__(self, max_waiting: int = 4, fair_seconds: float = 90):
@@ -101,6 +109,8 @@ class InferenceGate:
         self.endpoint_active = 0
         self.endpoint_waiting = 0
         self._agent_waiting_since: list[float] = []
+        self.exclusive_active = False
+        self.exclusive_waiting = 0
         self._cond = asyncio.Condition()
 
     def _agent_starved(self) -> bool:
@@ -110,13 +120,28 @@ class InferenceGate:
     def busy(self) -> bool:
         return bool(self.agent_active or self.endpoint_active)
 
+    @property
+    def exclusive(self) -> bool:
+        return self.exclusive_active or bool(self.exclusive_waiting)
+
+    async def acquire_exclusive(self):
+        async with self._cond:
+            self.exclusive_waiting += 1
+            try:
+                while self.agent_active or self.endpoint_active or self.exclusive_active:
+                    await self._cond.wait()
+            finally:
+                self.exclusive_waiting -= 1
+            self.exclusive_active = True
+        return _Release(self, "exclusive")
+
     async def agent_turn(self):
         since = time.monotonic()
         async with self._cond:
             self._agent_waiting_since.append(since)
             try:
                 # Endpoint requests that are only waiting because this agent call is starved don't block it.
-                while self.endpoint_active or (self.endpoint_waiting and not self._agent_starved()):
+                while self.exclusive or self.endpoint_active or (self.endpoint_waiting and not self._agent_starved()):
                     try:
                         await asyncio.wait_for(self._cond.wait(), timeout=5)  # re-check fairness periodically
                     except asyncio.TimeoutError:
@@ -128,6 +153,8 @@ class InferenceGate:
 
     async def endpoint_request(self):
         async with self._cond:
+            if self.exclusive:
+                raise GpuExclusive()
             if self.endpoint_waiting >= self.max_waiting:
                 raise QueueFull()
             self.endpoint_waiting += 1
@@ -155,6 +182,8 @@ class _Release:
         async with self.gate._cond:
             if self.kind == "agent":
                 self.gate.agent_active -= 1
+            elif self.kind == "exclusive":
+                self.gate.exclusive_active = False
             else:
                 self.gate.endpoint_active -= 1
             self.gate._cond.notify_all()

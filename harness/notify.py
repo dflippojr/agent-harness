@@ -71,6 +71,14 @@ class Notifier:
             except asyncio.QueueFull:
                 log.warning("notification queue full; dropping %s", event["type"])
 
+    def send(self, payload: dict) -> None:
+        """Queue a ready-made notification that isn't about a session event (e.g. a finished image)."""
+        if self.enabled:
+            try:
+                self.queue.put_nowait({"payload": payload})
+            except asyncio.QueueFull:
+                log.warning("notification queue full; dropping %s", payload.get("title"))
+
     def start(self) -> None:
         if self.enabled and self._task is None:
             self._task = asyncio.create_task(self._run(), name="notifier")
@@ -86,7 +94,7 @@ class Notifier:
             while True:
                 event = await self.queue.get()
                 try:
-                    payload = self.build(event)
+                    payload = event.get("payload") or self.build(event)
                     if payload:
                         await self.publish(client, payload)
                 except Exception:  # noqa: BLE001 - a failed notification must not stop later ones
