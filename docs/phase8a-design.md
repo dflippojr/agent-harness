@@ -29,6 +29,18 @@ background and the promises made to app builders are in `docs/app-api.md` → "S
   `control_request` (subtype `can_use_tool`). The host answers with a `control_response` (allow, optionally with
   updated input, or deny with a message). **The daemon is the host**, so no MCP shim is needed.
   `--permission-prompt-tool` exists as the MCP alternative.
+- **Verified protocol (2026-09-15, probe with a Write call):**
+  - Needs **`--permission-prompt-tool stdio`**. Without it, `-p` denies anything that would prompt (a
+    `system/permission_denied` event plus an error tool_result) and never asks the host.
+  - Host → CLI first: `{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}`. The
+    reply lists commands, models and so on.
+  - User turn: `{"type":"user","message":{"role":"user","content":"..."},"parent_tool_use_id":null,"session_id":""}`.
+  - CLI → host:
+    `{"type":"control_request","request_id":"<uuid>","request":{"subtype":"can_use_tool","tool_name":"Write","display_name":"Write","input":{...},"description":"probe.txt","permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"toolu_..."}}`.
+  - Host → CLI, allow:
+    `{"type":"control_response","response":{"subtype":"success","request_id":"<uuid>","response":{"behavior":"allow","updatedInput":{...}}}}`.
+  - Host → CLI, deny: `... "response":{"behavior":"deny","message":"why"}`.
+  - Read-only commands (`echo`, Read/Grep/Glob) never produce a request in `default` mode.
 - `--permission-mode default|acceptEdits|plan|...`, `--model`, `--append-system-prompt` (app context),
   `--resume <session_id>` (follow-up messages after a daemon restart), `--max-turns`, and `--mcp-config` (to expose
   harness daemon tools such as web_search, memory or app tools later).
