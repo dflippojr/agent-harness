@@ -129,7 +129,7 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
 | --- | --- |
 | Claude | `can_use_tool` control request → harness policy first (project rules, defaults; e.g. Read/Grep/Glob allow, Edit/Write inside the workspace allow, Bash asks unless it matches the allow patterns, WebFetch asks) → `ALLOW` answers at once, `ASK` creates a normal approval (card, `approval_requested` event, ntfy), `DENY` answers with the reason. The decision note goes back as the deny message. |
 | Codex | app-server approval requests (command, file change) → the same path. Fallback if app-server proves unstable: `codex exec --sandbox workspace-write` with approvals off, contained by the Docker sandbox plus branch review. |
-| Cursor | **Needs a user decision.** No host approvals exist. Options: (a) `-p` without `--force`, so commands needing approval are refused and the agent works around them; (b) `--force` inside the Docker sandbox with the egress allowlist, with changes reviewed on the session branch; (c) `--auto-review`, where Cursor's classifier decides. |
+| Cursor | No host approvals exist. **Decided:** `--force` inside the Docker sandbox (egress allowlist: Cursor's domains only), with changes landing only through branch review. |
 
 Policy rules gain CLI tool names (`Bash`, `Edit`, `Write`, `WebFetch`, `mcp__*`, Codex `exec_command` /
 `apply_patch`), so the existing project rules format keeps working.
@@ -189,12 +189,14 @@ Policy rules gain CLI tool names (`Bash`, `Edit`, `Write`, `WebFetch`, `mcp__*`,
    shows warnings.
 4. **Codex** via app-server (schema from `generate-json-schema`), device-auth login from the phone. Exit: same task
    with `gpt-5.6-sol` high.
-5. **Cursor** after the approval decision. Exit: same task with `cursor-grok-4.6-high`.
+5. **Cursor** with `--force` in the sandbox. Exit: same task with `cursor-grok-4.6-high`.
 
-## Open questions for the user
+## Decisions (user, 2026-09-15)
 
-1. **Cursor approvals:** (a) refuse without `--force`, (b) `--force` inside the Docker sandbox with branch review,
-   or (c) Cursor's `--auto-review`?
-2. **Claude login:** is a one-time terminal step on the PC acceptable, instead of logging in from the phone?
-3. **Egress proxy:** fine to add a small proxy container so backend sandboxes reach only their provider's domains?
-4. **Concurrency:** how many subscription sessions may run at once per backend (proposed default 2)?
+1. **Cursor approvals:** `--force` inside the Docker sandbox, whose egress reaches only Cursor's domains. Changes
+   land only through the session branch Review card.
+2. **Claude login:** a one-time terminal step on the PC (`ops/backends/login.ps1 claude`). The app shows the command
+   until `claude auth status` in the auth volume reports a subscription login.
+3. **Network:** an egress allowlist proxy container, with a domain list per backend. Everything else stays blocked,
+   and the agent's own network commands still ask.
+4. **Concurrency:** 2 subscription sessions at a time per backend (`backends.<name>.max_sessions`, default 2).
