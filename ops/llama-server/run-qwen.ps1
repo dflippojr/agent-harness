@@ -20,7 +20,9 @@ $serverArgs = @(
     '--parallel', '1',
     '--jinja',
     '--metrics',
-    '--sleep-idle-seconds', '1800'    # unload after 30 idle minutes; next request reloads it
+    # Unload after 30 idle minutes; the next request reloads it. If you change this, also change the
+    # sleep_after constant in the Grafana "Local LLM (llama-server)" dashboard (observability-stack repo).
+    '--sleep-idle-seconds', '1800'
 )
 
 New-Item -ItemType Directory -Force $logDir | Out-Null
