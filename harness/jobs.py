@@ -26,9 +26,11 @@ from datetime import datetime, timedelta
 log = logging.getLogger("harness.jobs")
 
 NOTIFY_MODES = ("attention", "low", "always")  # OK results: no notification / low priority / normal priority
-STATUS_PROMPT = ("This is a scheduled job, so the user isn't watching. Do the check, then end your final answer with "
-                 "one last line: `STATUS: OK` if nothing needs the user's attention, or `STATUS: ATTENTION: <why>` if "
-                 "something does. Don't make changes that need approval unless the task says to.")
+STATUS_PROMPT = ("This is a scheduled job, so the user isn't watching, and an OK result is barely shown to them. Do the "
+                 "check, then end your final answer with one last line: `STATUS: OK` only if everything the task "
+                 "expects is true, or `STATUS: ATTENTION: <one-line reason>` if anything isn't, even when there may be "
+                 "a harmless explanation (say what it might be; the user decides). Don't make changes that need "
+                 "approval unless the task says to.")
 STATUS_RE = re.compile(r"^\W*STATUS:\s*(OK|ATTENTION)\b[:\s-]*(.*)$", re.IGNORECASE | re.MULTILINE)
 DOW_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
 MONTH_NAMES = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
@@ -50,7 +52,7 @@ def _field(text: str, lo: int, hi: int, names: dict | None = None) -> set[int]:
                 raise CronError(f"bad step in {text!r}")
             step = int(step_text)
         if part in ("*", ""):
-            start, end = lo, hi
+            start, end = lo, (6 if hi == 7 else hi)  # * in day-of-week: 0-6
         elif "-" in part:
             a, b = part.split("-", 1)
             start, end = _value(a, lo, hi, names), _value(b, lo, hi, names)
@@ -69,8 +71,6 @@ def _value(text: str, lo: int, hi: int, names: dict | None) -> int:
     if not text.isdigit():
         raise CronError(f"{text!r} isn't a number")
     n = int(text)
-    if hi == 6 and n == 7:  # day-of-week 7 = Sunday
-        return 0
     if not lo <= n <= hi:
         raise CronError(f"{n} is outside {lo}-{hi}")
     return n
@@ -86,10 +86,9 @@ class Cron:
         self.hours = _field(parts[1], 0, 23)
         self.days = _field(parts[2], 1, 31)
         self.months = _field(parts[3], 1, 12, MONTH_NAMES)
-        self.weekdays = _field(parts[4], 0, 7 if parts[4] == "*" else 6, DOW_NAMES) if parts[4] != "*" else set(range(7))
+        self.weekdays = {d % 7 for d in _field(parts[4], 0, 7, DOW_NAMES)}  # 0 and 7 are both Sunday
         # Standard cron: when both day fields are restricted, either one matching is enough.
         self.day_any = parts[2] != "*" and parts[4] != "*"
-        self.dom_star, self.dow_star = parts[2] == "*", parts[4] == "*"
 
     def _day_ok(self, d: datetime) -> bool:
         dom = d.day in self.days
@@ -128,7 +127,21 @@ def parse_status(answer: str) -> tuple[str, str]:
     if not matches:
         return "", ""
     m = matches[-1]
-    return m.group(1).lower(), m.group(2).strip()
+    return m.group(1).lower(), m.group(2).strip().rstrip("*_` ").strip()
+
+
+def summary(answer: str, limit: int = 300) -> str:
+    """A notification-sized summary of a job's answer: the last prose paragraph before the STATUS line (agents
+    usually put their verdict there), skipping tables, headings and code."""
+    text = STATUS_RE.sub("", answer or "").strip()
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    for p in reversed(paragraphs):
+        lines = [line for line in p.splitlines() if not re.match(r"\s*(\||#|```|---)", line)]
+        prose = " ".join(" ".join(lines).split())
+        if len(prose) >= 20:
+            return prose if len(prose) <= limit else prose[: limit - 1] + "…"
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 def validate(job: dict, projects: dict, models: dict) -> dict:

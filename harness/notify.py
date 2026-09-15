@@ -195,6 +195,9 @@ class Notifier:
                     "message": _short(describe_call(approval["tool"], approval["args"]), 300),
                     "priority": 2, "click": self.link(f"/#/s/{sid}")}
 
+        if event["type"] == "run_finished" and d.get("job_id"):
+            return self._job_finished(sid, title, d, base)
+
         if event["type"] == "run_finished":
             status = d["status"]
             if status == "done":
@@ -209,3 +212,27 @@ class Notifier:
             return {**base, "title": f"{head}: {title}", "message": _short(body, 400), "priority": prio,
                     "tags": tags, "click": self.link(f"/#/s/{sid}")}
         return None
+
+    def _job_finished(self, sid: str, title: str, d: dict, base: dict) -> dict | None:
+        """Scheduled jobs are quiet unless something needs attention (user decision, Phase 7d)."""
+        job = self.db.get_job(d["job_id"]) or {}
+        name = _short(job.get("name") or title, 60)
+        click = self.link(f"/#/s/{sid}")
+        if d["status"] == "cancelled":
+            return None
+        if d["status"] == "failed":
+            return {**base, "title": f"Job failed: {name}", "message": _short(d.get("stop_reason") or "failed", 400),
+                    "priority": 4, "tags": ["x"], "click": click}
+        from .jobs import summary
+        answer = summary(d.get("answer") or "") or d.get("stop_reason") or ""
+        if d.get("job_status") == "ok":
+            mode = job.get("notify", "low")
+            if mode == "attention":
+                return None
+            return {**base, "title": f"OK: {name}", "message": _short(answer, 300), "tags": ["white_check_mark"],
+                    "priority": 2 if mode == "low" else 3, "click": click}
+        if d.get("job_status") == "attention":
+            return {**base, "title": f"Needs attention: {name}", "priority": 4, "tags": ["warning"], "click": click,
+                    "message": _short(d.get("job_reason") or answer, 400)}
+        return {**base, "title": f"Done (no status line): {name}", "message": _short(answer, 400), "priority": 3,
+                "tags": ["grey_question"], "click": click}

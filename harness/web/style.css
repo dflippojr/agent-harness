@@ -219,3 +219,4 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .image-placeholder.failed { color: var(--bad); }
 .image-card .preview { -webkit-line-clamp: 2; margin-top: 6px; }
 .image-full { width: 100%; height: auto; border-radius: 10px; display: block; margin-bottom: 12px; }
+.small.bad, .preview.bad { color: var(--bad); }

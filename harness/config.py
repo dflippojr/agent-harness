@@ -116,6 +116,8 @@ class WebConfig:
     searxng_url: str = "http://127.0.0.1:8888"
     page_chars: int = 15000          # characters per web_fetch call (~4K tokens)
     max_bytes: int = 5 * 2**20       # refuse larger downloads
+    max_document_bytes: int = 25 * 2**20  # PDFs and Word documents
+    fixture_dir: str = ""            # replay recorded searches and pages instead of the network (web_fixture.py)
     timeout_seconds: float = 20
     user_agent: str = "agent-harness/1.0 (personal research agent)"
 

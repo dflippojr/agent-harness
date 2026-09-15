@@ -15,7 +15,24 @@ powershell -ExecutionPolicy Bypass -File install\install.ps1
 
 No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`).
 
-## Phase 6: extensions (current)
+## Phase 7: memory, search, schedules, documents (current)
+
+Built as mini-phases (`docs/phase7a-results.md`, `phase7b-results.md` for 7b+7c, `phase7d-results.md`,
+`phase7e-results.md`).
+
+- Session search (`search:`): SQLite FTS5 over every session's messages, tool calls and output. Search box on the
+  session list (`GET /search`); agents get `session_search` and `session_read`.
+- Memory writes (`memory_library.writes`): `memory_edit` / `memory_write` in the readable categories. Every change asks,
+  with the diff on the phone; once approved, the daemon's clone commits and pushes. Sensitive categories stay invisible.
+- Agent profile (`memory_library.profile_path`, `agent-profile.md` in the library): a short curated file put into each
+  new session's system prompt once, so the prompt prefix stays cacheable. Settings → Memory library shows it.
+- Scheduled jobs (`jobs:`): cron schedules for agent tasks, managed under ⏰ Jobs. Runs end with `STATUS: OK` or
+  `STATUS: ATTENTION`; OK is quiet or low-priority per job, ATTENTION notifies normally.
+- Documents and a recorded web (`web:`): `web_fetch` reads PDFs (page-marked) and Word `.docx`, not only HTML and text.
+  `harness/web_fixture.py` records real searches and pages; `web.fixture_dir` replays them without the network, and
+  `python -m bakeoff.web_suite` runs research tasks on that recording.
+
+## Phase 6: extensions
 
 Built as mini-phases: 6a Hermes Agent study (`docs/phase6a-hermes-study.md`), 6b web search (`docs/phase6b-results.md`),
 then 6c inference endpoint, 6d image generation, 6e distributable daemon.

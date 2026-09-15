@@ -1,4 +1,5 @@
-"""Phase 7 tests: session search (7a). Scripted model, no GPU or Docker."""
+"""Phase 7 tests: session search (7a), memory writes (7b), agent profile (7c), scheduled jobs (7d).
+Scripted model, no GPU or Docker; memory tests use a local bare git repo."""
 
 from __future__ import annotations
 
@@ -320,3 +321,295 @@ def test_memory_api(tmp_path):
         data = wait_until(lambda: (lambda d: d if d.get("profile") else None)(client.get("/memory").json()))
         assert data["enabled"] and data["writes"] and "Prefers short answers." in data["profile"]
         assert data["profile_max_chars"] == 300
+
+
+# 7d: scheduled jobs
+from datetime import datetime  # noqa: E402
+
+from harness.config import JobsConfig  # noqa: E402
+from harness.jobs import Cron, CronError, JobScheduler, parse_status  # noqa: E402
+from harness.notify import Notifier  # noqa: E402
+
+
+def ts(*parts) -> float:
+    return datetime(*parts).timestamp()
+
+
+@pytest.mark.parametrize("expr,after,expected", [
+    ("0 8 * * *", (2026, 9, 15, 7, 59, 30), (2026, 9, 15, 8, 0)),
+    ("0 8 * * *", (2026, 9, 15, 8, 0, 0), (2026, 9, 16, 8, 0)),
+    ("*/15 * * * *", (2026, 9, 15, 8, 1), (2026, 9, 15, 8, 15)),
+    ("0 9 * * mon-fri", (2026, 9, 18, 10, 0), (2026, 9, 21, 9, 0)),   # Friday after 9 -> Monday
+    ("0 10 * * 7", (2026, 9, 15, 0, 0), (2026, 9, 20, 10, 0)),        # 7 = Sunday
+    ("30 6 1 * *", (2026, 9, 15, 0, 0), (2026, 10, 1, 6, 30)),
+    ("0 8 13 * fri", (2026, 9, 15, 0, 0), (2026, 9, 18, 8, 0)),       # both day fields: either matches
+    ("0 0 29 2 *", (2026, 3, 1, 0, 0), (2028, 2, 29, 0, 0)),          # leap day
+    ("@weekly", (2026, 9, 15, 0, 0), (2026, 9, 20, 0, 0)),
+])
+def test_cron_next(expr, after, expected):
+    assert Cron(expr).next_after(ts(*after)) == ts(*expected)
+
+
+@pytest.mark.parametrize("bad", ["61 * * * *", "* * *", "0 8 * * funday", "5-1 * * * *", "*/0 * * * *", "0 0 31 2 *"])
+def test_cron_rejects(bad):
+    with pytest.raises(CronError):
+        Cron(bad).next_after(ts(2026, 1, 1, 0, 0))
+
+
+def test_parse_status():
+    assert parse_status("All six services up.\nSTATUS: OK") == ("ok", "")
+    assert parse_status("x\n**STATUS: ATTENTION: ntfy is down**") == ("attention", "ntfy is down")
+    assert parse_status("STATUS: ATTENTION earlier\n...\nSTATUS: OK") == ("ok", "")
+    assert parse_status("no status here") == ("", "")
+    from harness.jobs import summary
+    report = "## Services\n| name | state |\n|---|---|\n| ntfy | up |\n\nAll 6 services are running with 0 restarts.\n\nSTATUS: OK"
+    assert summary(report) == "All 6 services are running with 0 restarts."
+    assert summary("x" * 500).endswith("…") and len(summary("x" * 500)) == 300
+
+
+def jobs_cfg(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.jobs = JobsConfig(enabled=True, poll_seconds=3600)  # tests drive tick() themselves
+    return cfg
+
+
+def add_job(m, **fields):
+    from harness.jobs import new_job_id, validate
+    job = validate({"name": "Morning check", "prompt": "check things", "cron": "0 8 * * *", **fields},
+                   m.cfg.projects, m.cfg.models)
+    job["id"] = new_job_id()
+    job["next_run_at"] = fields.get("next_run_at", time.time() - 5)
+    m.db.insert_job(job)
+    return m.db.get_job(job["id"])
+
+
+def test_due_job_runs_once_skips_overlap_and_records_status(tmp_path):
+    cfg = jobs_cfg(tmp_path)
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(content="All services running.\nSTATUS: OK")]))
+        await m.start(maintenance=False)
+        job = add_job(m)
+        now = time.time()
+        started = m.jobs.tick(now)
+        assert len(started) == 1
+        s = m.db.get_session(started[0])
+        assert s["job_id"] == job["id"] and s["title"].startswith("⏰ Morning check")
+        assert "STATUS: OK" in s["context"][1]["content"]
+        after = m.db.get_job(job["id"])
+        assert after["last_session_id"] == s["id"] and after["next_run_at"] > now
+        assert m.jobs.tick(now) == []  # not due again
+        done = await wait_status(m, s["id"], "done")
+        assert done["job_status"] == "ok"
+        finished = events(m, s["id"], "run_finished")[0]
+        assert finished["job_status"] == "ok" and finished["job_id"] == job["id"]
+
+        # overlap: a due job whose last run is still active skips the slot
+        m.db.update_job(job["id"], next_run_at=time.time() - 1)
+        m.db.update_session(s["id"], status="running")
+        assert m.jobs.tick(time.time()) == []
+        skipped = m.db.get_job(job["id"])
+        assert "still going" in skipped["last_skip"] and skipped["next_run_at"] > time.time()
+        m.db.update_session(s["id"], status="done")
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_catch_up_after_downtime(tmp_path):
+    cfg = jobs_cfg(tmp_path)
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(content="ok\nSTATUS: OK")]))
+        recent = add_job(m, name="recent", next_run_at=time.time() - 600, catch_up_minutes=60)
+        stale = add_job(m, name="stale", next_run_at=time.time() - 86400, catch_up_minutes=60)
+        await m.start(maintenance=False)  # start() runs the catch-up pass
+        assert m.db.get_job(stale["id"])["next_run_at"] > time.time()
+        assert "missed" in m.db.get_job(stale["id"])["last_skip"]
+        started = m.jobs.tick(time.time())
+        assert [m.db.get_session(sid)["job_id"] for sid in started] == [recent["id"]]
+        for sid in started:
+            await wait_status(m, sid, "done")
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_job_notifications_quiet_unless_attention(tmp_path):
+    cfg = jobs_cfg(tmp_path)
+    cfg.notify.enabled = True
+    m = Manager(cfg, chat=Script([Completion(content="x")]))
+    n = Notifier(cfg, m.db)
+    quiet = add_job(m, name="quiet", notify="attention")
+    low = add_job(m, name="low", notify="low")
+    loud = add_job(m, name="loud", notify="always")
+    sid = "s1"
+    m.db.insert_session({"id": sid, "project": "scratch", "target": "tower", "model": "fake", "title": "t",
+                         "status": "done", "workspace": "", "created_at": 0, "updated_at": 0, "context": []})
+
+    def build(job, **data):
+        return n.build({"session_id": sid, "type": "run_finished",
+                        "data": {"status": "done", "stop_reason": "final_message", "answer": "fine", "job_id": job["id"],
+                                 "job_status": "ok", "job_reason": "", **data}})
+
+    assert build(quiet) is None
+    assert build(low)["priority"] == 2 and build(loud)["priority"] == 3
+    attention = build(quiet, job_status="attention", job_reason="ntfy is down")
+    assert attention["priority"] == 4 and attention["title"] == "Needs attention: quiet" and attention["message"] == "ntfy is down"
+    assert build(quiet, job_status="")["title"].startswith("Done (no status line)")
+    assert build(quiet, status="failed", stop_reason="internal_error")["priority"] == 4
+    assert build(quiet, status="cancelled") is None
+
+
+def test_jobs_api(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+
+    cfg = jobs_cfg(tmp_path)
+    m = Manager(cfg, chat=Script([Completion(content="checked\nSTATUS: ATTENTION: disk nearly full")]))
+    with TestClient(create_app(m)) as client:
+        assert client.get("/jobs/preview", params={"cron": "0 8 * * *"}).json()["ok"]
+        assert "outside" in client.get("/jobs/preview", params={"cron": "99 8 * * *"}).json()["error"]
+        bad = client.post("/jobs", json={"name": "x", "prompt": "y", "cron": "nope"})
+        assert bad.status_code == 400
+        assert client.post("/jobs", json={"name": "x", "prompt": "y", "cron": "0 8 * * *", "project": "nope"}).status_code == 400
+        job = client.post("/jobs", json={"name": "Disk check", "prompt": "check disk", "cron": "0 8 * * *",
+                                         "notify": "attention"}).json()
+        assert job["enabled"] is True and job["next_run_at"] > time.time()
+        s = client.post(f"/jobs/{job['id']}/run").json()
+        assert client.post(f"/jobs/{job['id']}/run").status_code in (201, 409)
+        wait_until(lambda: client.get(f"/sessions/{s['id']}").json()["status"] == "done")
+        detail = wait_until(lambda: (lambda d: d if d["recent"] and d["recent"][-1]["job_status"] else None)(
+            client.get(f"/jobs/{job['id']}").json()))
+        assert detail["recent"][-1]["job_status"] == "attention"
+        assert detail["next_run_at"] == job["next_run_at"]  # run now doesn't move the schedule
+        listed = client.get("/sessions").json()
+        assert any(x.get("job_status") == "attention" for x in listed)
+        updated = client.put(f"/jobs/{job['id']}", json={"name": "Disk check", "prompt": "check disk",
+                                                         "cron": "0 9 * * 1-5", "enabled": False}).json()
+        assert updated["cron"] == "0 9 * * 1-5" and updated["enabled"] is False
+        assert client.delete(f"/jobs/{job['id']}").status_code == 204
+        assert client.get(f"/jobs/{job['id']}").status_code == 404
+
+
+# 7e: documents and the web fixture
+import io  # noqa: E402
+import zipfile  # noqa: E402
+
+import httpx  # noqa: E402
+
+from harness.config import WebConfig  # noqa: E402
+from harness.fileops import ToolError  # noqa: E402
+from harness.web_fixture import Fixture  # noqa: E402
+from harness.web_tools import WebTools  # noqa: E402
+
+
+def make_pdf(pages: list[str]) -> bytes:
+    """A minimal PDF with one line of Helvetica text per page (no PDF library needed)."""
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>", None, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    kids = []
+    for text in pages:
+        stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+        objects.append(f"<< /Length {len(stream)} >>\nstream\n{stream.decode()}\nendstream")
+        content_id = len(objects)
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {content_id} 0 R "
+                       "/Resources << /Font << /F1 3 0 R >> >> >>")
+        kids.append(f"{len(objects)} 0 R")
+    objects[1] = f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(pages)} >>"
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n{obj}\nendobj\n".encode()
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    out += "".join(f"{o:010d} 00000 n \n" for o in offsets).encode()
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return bytes(out)
+
+
+def make_docx(paragraphs: list[tuple[str, str]], table: list[list[str]]) -> bytes:
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    body = ""
+    for style, text in paragraphs:
+        ppr = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
+        body += f"<w:p>{ppr}<w:r><w:t>{text}</w:t></w:r></w:p>"
+    body += "<w:tbl>" + "".join("<w:tr>" + "".join(f"<w:tc><w:p><w:r><w:t>{c}</w:t></w:r></w:p></w:tc>" for c in row)
+                                + "</w:tr>" for row in table) + "</w:tbl>"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml", f"<w:document {w}><w:body>{body}</w:body></w:document>")
+        z.writestr("docProps/core.xml", '<cp:coreProperties xmlns:cp="x" xmlns:dc="y"><dc:title>Rink schedule</dc:title>'
+                                        "</cp:coreProperties>")
+    return buf.getvalue()
+
+
+def public(host, port):
+    async def resolve(h, p):
+        return ["93.184.216.34"]
+    return resolve(host, port)
+
+
+def test_fetch_reads_pdf_and_docx(tmp_path):
+    pdf = make_pdf(["Transformer base model uses 8 attention heads", "d_model is 512 on page two"])
+    docx = make_docx([("Heading1", "Open skate"), ("", "Sundays 10:00 at the Kent rink")], [["Day", "Time"], ["Sun", "10:00"]])
+    blank = make_pdf(["", ""])
+
+    def handler(request):
+        if request.url.path == "/paper":
+            return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
+        if request.url.path == "/scan":
+            return httpx.Response(200, content=blank, headers={"content-type": "application/pdf"})
+        if request.url.path == "/octet":  # a PDF served with a generic type
+            return httpx.Response(200, content=pdf, headers={"content-type": "application/octet-stream"})
+        if request.url.path == "/schedule.docx":
+            return httpx.Response(200, content=docx, headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"})
+        return httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+
+    web = WebTools(WebConfig(enabled=True, max_bytes=100, max_document_bytes=10**6), resolver=public,
+                   transport=httpx.MockTransport(handler))
+
+    async def body():
+        text = await web.web_fetch("https://example.com/paper")
+        assert "--- page 1 of 2 ---" in text and "8 attention heads" in text and "d_model is 512" in text
+        found = await web.web_fetch("https://example.com/paper", find="d_model")
+        assert "page 2 of 2" in found
+        assert "8 attention heads" in await web.web_fetch("https://example.com/octet")
+        with pytest.raises(ToolError, match="no text layer"):
+            await web.web_fetch("https://example.com/scan")
+        doc = await web.web_fetch("https://example.com/schedule.docx")
+        assert "# Rink schedule" in doc and "# Open skate" in doc and "Sundays 10:00" in doc and "Sun | 10:00" in doc
+        with pytest.raises(ToolError, match="only HTML, text, PDF"):
+            await web.web_fetch("https://example.com/logo.png")
+    asyncio.run(body())
+
+
+def test_fixture_records_and_replays_without_network(tmp_path):
+    root = tmp_path / "fixture"
+    fx = Fixture(root)
+    fx.add_search("llama.cpp sleep idle seconds", {"results": [
+        {"url": "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md", "title": "llama.cpp server",
+         "content": "HTTP server", "score": 2}]})
+    fx.add_page("https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md",
+                "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md", "text/plain",
+                b"--sleep-idle-seconds: /health, /props, /models and /metrics don't wake the server")
+    fx.add_page("https://arxiv.org/pdf/1706.03762", "https://arxiv.org/pdf/1706.03762v7", "application/pdf",
+                make_pdf(["Attention Is All You Need", "h = 8 parallel attention layers"]))
+    fx.save()
+
+    def no_network(request):
+        raise AssertionError(f"network used: {request.url}")
+
+    web = WebTools(WebConfig(enabled=True, fixture_dir=str(root)))
+    assert web.transport is not None and web.fixture is not None
+
+    async def body():
+        out = await web.web_search("llama.cpp server sleep idle")   # not recorded verbatim: closest query
+        assert "llama.cpp server" in out
+        assert "No results" in await web.web_search("best pizza in akron")
+        page = await web.web_fetch("https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md")
+        assert "/metrics don't wake" in page
+        pdf = await web.web_fetch("https://arxiv.org/pdf/1706.03762")  # redirect recorded
+        assert "final URL: https://arxiv.org/pdf/1706.03762v7" in pdf and "h = 8" in pdf
+        with pytest.raises(ToolError, match="HTTP 404"):
+            await web.web_fetch("https://example.org/not-recorded")
+    asyncio.run(body())
+    assert web.fixture.misses == ["search: best pizza in akron", "fetch: https://example.org/not-recorded"]

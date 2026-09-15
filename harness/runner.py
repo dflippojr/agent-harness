@@ -773,8 +773,14 @@ class Runner:
 
     async def _end_run(self, sid: str) -> None:
         s = self.db.get_session(sid)
+        extra = {}
+        if s.get("job_id"):  # scheduled job: the answer's last STATUS line decides how loudly to notify (jobs.py)
+            from .jobs import parse_status
+            job_status, reason = parse_status(s["answer"]) if s["status"] == "done" else ("", "")
+            self.db.update_session(sid, job_status=job_status)
+            extra = {"job_id": s["job_id"], "job_status": job_status, "job_reason": reason}
         self.bus.emit(sid, "run_finished", {"status": s["status"], "stop_reason": s["stop_reason"],
-                                            "answer": s["answer"], "run": s["run"]})
+                                            "answer": s["answer"], "run": s["run"], **extra})
         await asyncio.shield(self.sandbox(s).stop())
         await asyncio.shield(self.save_branch(sid))
         self.write_transcript(sid)

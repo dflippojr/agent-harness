@@ -7,6 +7,7 @@
 //   #/s/<id>/info            session details
 //   #/settings               identity, notifications, install help
 //   #/images[/<id>]          image generation and gallery
+//   #/jobs[/new|/<id>]       scheduled jobs
 
 const $app = document.getElementById("app");
 const $title = document.getElementById("title");
@@ -202,6 +203,7 @@ async function route() {
     else if (parts[0] === "new") await viewNew();
     else if (parts[0] === "settings") await viewSettings();
     else if (parts[0] === "images") await (parts[1] ? viewImage(parts[1]) : viewImages());
+    else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
     else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
     else location.hash = "#/";
   } catch (e) {
@@ -228,7 +230,8 @@ async function viewList() {
   const queueNote = h("p", { class: "note" });
   const search = h("input", { type: "search", placeholder: "Search past sessions", value: searchQuery, class: "search" });
   $app.append(h("div", { class: "row", style: "margin:4px 0 8px;flex-wrap:nowrap" }, search,
-    h("a", { class: "btn small", href: "#/images" }, "🖼 Images")), queueNote, results, list);
+    h("a", { class: "btn small", href: "#/jobs", title: "Scheduled jobs" }, "⏰ Jobs"),
+    h("a", { class: "btn small", href: "#/images", title: "Images" }, "🖼")), queueNote, results, list);
   document.body.append(h("a", { class: "btn primary fab", href: "#/new" }, "+ New task"));
 
   const runSearch = async () => {
@@ -276,6 +279,7 @@ async function viewList() {
           pending ? h("span", { class: "badge waiting_approval" }, `${pending} approval${pending > 1 ? "s" : ""}`) : null,
           s.queue_position > 0 ? h("span", {}, `#${s.queue_position} in queue`) : null,
           s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, REVIEW_LABEL[s.review] || s.review) : null,
+          s.job_status ? jobStatusBadge(s.job_status) : null,
           s.target !== "tower" ? h("span", {}, `💻 ${TARGET_LABEL[s.target] || s.target}`) : null,
           h("span", {}, s.project), h("span", {}, ago(s.updated_at))),
         s.answer_preview ? h("div", { class: "preview" }, s.answer_preview) : null);
@@ -1052,6 +1056,134 @@ async function viewImage(id) {
     try { img = await load(); } catch (_) { /* offline */ }
   }, 3000);
   onLeave(() => clearInterval(timer));
+}
+
+// ---------- scheduled jobs ----------
+const JOB_NOTIFY = {
+  attention: "Only when something needs attention",
+  low: "Quietly when OK (low-priority notification)",
+  always: "Every run",
+};
+const CRON_PRESETS = [
+  ["0 8 * * *", "Every day at 8:00"], ["0 7 * * 1-5", "Weekdays at 7:00"], ["0 * * * *", "Every hour"],
+  ["*/30 * * * *", "Every 30 minutes"], ["0 10 * * 0", "Sundays at 10:00"], ["0 9 1 * *", "Monthly, on the 1st at 9:00"],
+];
+const jobStatusBadge = (st) => h("span", { class: `badge ${st === "ok" ? "done" : "waiting_approval"}` }, st === "ok" ? "OK" : "⚠ attention");
+const fmtWhen = (ts) => new Date(ts * 1000).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const whenText = (ts) => {
+  if (!ts) return "—";
+  const s = ts - Date.now() / 1000;
+  const rel = s < 0 ? "due" : s < 3600 ? `in ${Math.max(1, Math.round(s / 60))} min` : s < 86400 ? `in ${Math.round(s / 3600)} h` : `in ${Math.round(s / 86400)} d`;
+  return `${fmtWhen(ts)} (${rel})`;
+};
+const cronLabel = (cron) => (CRON_PRESETS.find(([c]) => c === cron) || [null, cron])[1];
+
+async function viewJobs() {
+  $title.textContent = "Scheduled jobs";
+  const jobs = await api("/jobs");
+  document.body.append(h("a", { class: "btn primary fab", href: "#/jobs/new" }, "+ New job"));
+  if (!jobs.length) {
+    $app.append(h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
+    return;
+  }
+  $app.append(...jobs.map((j) => {
+    const last = j.recent[0];
+    return h("a", { class: "card", href: `#/jobs/${j.id}` },
+      h("h3", {}, `${j.enabled ? "" : "⏸ "}${j.name}`),
+      h("div", { class: "meta" }, h("span", {}, cronLabel(j.cron)), h("span", {}, j.project),
+        j.enabled ? h("span", {}, `next ${whenText(j.next_run_at)}`) : h("span", {}, "paused")),
+      last ? h("div", { class: "meta", style: "margin-top:4px" }, h("span", {}, `last run ${ago(last.created_at)}`),
+        badge(last.status), last.job_status ? jobStatusBadge(last.job_status) : null) : null,
+      j.last_error ? h("div", { class: "preview bad" }, `Couldn't start: ${j.last_error}`) : null);
+  }));
+}
+
+async function viewJob(id) {
+  const isNew = id === "new";
+  $title.textContent = isNew ? "New job" : "Job";
+  const [projects, models, job] = await Promise.all([api("/projects"), api("/models"), isNew ? null : api(`/jobs/${id}`)]);
+  const j = job || {
+    name: "", prompt: "", cron: "0 8 * * *", model: "", notify: "low", enabled: true,
+    project: projects.some((p) => p.name === "homelab") ? "homelab" : "scratch",
+  };
+  const name = h("input", { type: "text", value: j.name, placeholder: "e.g. Morning homelab check" });
+  const prompt = h("textarea", { placeholder: "e.g. Check that every homelab service is running and nothing restarted overnight. Look at the logs of anything that isn't healthy." });
+  prompt.value = j.prompt;
+  const custom = !CRON_PRESETS.some(([c]) => c === j.cron);
+  const preset = h("select", {}, CRON_PRESETS.map(([c, label]) => h("option", { value: c, selected: c === j.cron }, label)),
+    h("option", { value: "", selected: custom }, "Custom (cron)"));
+  const cron = h("input", { type: "text", value: j.cron, placeholder: "minute hour day month weekday", style: "font-family:var(--mono)" });
+  const cronNote = h("div", { class: "muted small", style: "margin-top:6px" });
+  const project = h("select", {}, projects.filter((p) => p.target === "tower" || p.name === j.project)
+    .map((p) => h("option", { value: p.name, selected: p.name === j.project }, p.description ? `${p.name} — ${p.description}` : p.name)));
+  const model = h("select", {}, h("option", { value: "" }, "Default model"),
+    models.map((m) => h("option", { value: m.name, selected: m.name === j.model }, m.name)));
+  const notify = h("select", {}, Object.entries(JOB_NOTIFY).map(([k, label]) => h("option", { value: k, selected: k === j.notify }, label)));
+  const enabled = h("input", { type: "checkbox", checked: j.enabled });
+  let previewTimer = null;
+  const preview = () => {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      try {
+        const r = await api(`/jobs/preview?cron=${encodeURIComponent(cron.value)}`);
+        cronNote.classList.toggle("bad", !r.ok);
+        cronNote.textContent = r.ok ? `Next: ${r.next.map(fmtWhen).join(" · ")}` : r.error;
+      } catch (_) { /* offline */ }
+    }, 250);
+  };
+  preset.addEventListener("change", () => { if (preset.value) { cron.value = preset.value; preview(); } else cron.focus(); });
+  cron.addEventListener("input", () => {
+    const match = CRON_PRESETS.find(([c]) => c === cron.value.trim());
+    preset.value = match ? match[0] : "";
+    preview();
+  });
+  preview();
+  const body = () => ({ name: name.value, prompt: prompt.value, cron: cron.value, project: project.value, model: model.value, notify: notify.value, enabled: enabled.checked });
+  const save = h("button", { class: "btn primary", type: "submit" }, isNew ? "Create" : "Save");
+  $app.append(h("form", {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      save.disabled = true;
+      try {
+        const saved = await api(isNew ? "/jobs" : `/jobs/${id}`, { method: isNew ? "POST" : "PUT", body: body() });
+        toast(`Saved · next run ${whenText(saved.next_run_at)}`, 3500);
+        if (isNew) location.hash = `#/jobs/${saved.id}`; else route();
+      } catch (err) { toast(err.message, 5000); }
+      save.disabled = false;
+    },
+  },
+  h("label", {}, "Name"), name,
+  h("label", {}, "Task"), prompt,
+  h("p", { class: "muted small" }, "The agent is asked to end with STATUS: OK or STATUS: ATTENTION, which decides how loudly you're notified. Approvals always notify."),
+  h("label", {}, "Schedule (tower time)"), preset, h("div", { style: "margin-top:8px" }, cron), cronNote,
+  h("label", {}, "Project"), project,
+  h("label", {}, "Model"), model,
+  h("label", {}, "Notify me"), notify,
+  h("label", { class: "row", style: "font-weight:500" }, enabled, "Enabled"),
+  h("div", { class: "row", style: "margin-top:18px" },
+    !isNew ? h("button", {
+      class: "btn bad", type: "button",
+      onclick: async () => {
+        if (!confirm(`Delete the job “${j.name}”? Its past sessions stay.`)) return;
+        try { await api(`/jobs/${id}`, { method: "DELETE" }); location.hash = "#/jobs"; } catch (err) { toast(err.message); }
+      },
+    }, "Delete") : null,
+    h("span", { class: "spacer" }),
+    !isNew ? h("button", {
+      class: "btn", type: "button",
+      onclick: async () => {
+        try { const s = await api(`/jobs/${id}/run`, { method: "POST" }); location.hash = `#/s/${s.id}`; } catch (err) { toast(err.message); }
+      },
+    }, "Run now") : null,
+    save)));
+  if (job) {
+    $app.append(h("h3", { style: "margin-top:28px" }, "Recent runs"),
+      job.last_skip ? h("p", { class: "muted small" }, `Last skipped: ${job.last_skip}`) : null,
+      job.last_error ? h("p", { class: "small bad" }, `Last start failed: ${job.last_error}`) : null,
+      job.recent.length ? job.recent.map((s) => h("a", { class: "card", href: `#/s/${s.id}` },
+        h("div", { class: "meta" }, badge(s.status), s.job_status ? jobStatusBadge(s.job_status) : null, h("span", {}, ago(s.created_at))),
+        s.answer ? h("div", { class: "preview" }, s.answer) : null)) : h("p", { class: "muted small" }, "No runs yet."));
+  }
 }
 
 // ---------- settings ----------

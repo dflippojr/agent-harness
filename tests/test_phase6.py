@@ -105,7 +105,7 @@ def test_fetch_extracts_pages_and_strips_images():
         assert "2 matches" in found and "tail marker" in found and len(found) < 3000
         assert "No matches" in await web.web_fetch("https://example.com/big", find="nothing-like-this")
         assert "[IMAGE: logo] hello" in await web.web_fetch("https://example.com/small")
-        with pytest.raises(ToolError, match="only HTML and text"):
+        with pytest.raises(ToolError, match="couldn't open the PDF"):  # a broken PDF (real ones: test_phase7)
             await web.web_fetch("https://example.com/pdf")
         small = WebTools(WebConfig(enabled=True, max_bytes=1000), resolver=resolver({}),
                          transport=httpx.MockTransport(handler))

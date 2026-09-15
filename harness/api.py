@@ -64,6 +64,17 @@ class ImageRequest(BaseModel):
     seed: int | None = None
 
 
+class Job(BaseModel):
+    name: str
+    prompt: str
+    cron: str
+    project: str = "scratch"
+    model: str = ""
+    notify: str = "low"          # OK results: attention (no notification) | low | always
+    enabled: bool = True
+    catch_up_minutes: int = 360
+
+
 class Template(BaseModel):
     name: str
     project: str = "scratch"
@@ -366,6 +377,92 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def get_transcript(ref: str, request: Request):
         m = mgr(request)
         return transcript.render(m.db, m.resolve_id(ref))
+
+    # scheduled jobs (jobs.py)
+    def jobs_on(request: Request) -> Manager:
+        m = mgr(request)
+        if m.jobs is None:
+            raise HarnessError(400, "scheduled jobs are disabled in config/harness.yaml")
+        return m
+
+    def job_view(m: Manager, job: dict, runs: int = 1) -> dict:
+        recent = m.db.job_sessions(job["id"], limit=runs)
+        return {**job, "enabled": bool(job["enabled"]), "recent": recent}
+
+    @app.get("/jobs")
+    async def list_jobs(request: Request):
+        m = jobs_on(request)
+        return [job_view(m, j) for j in m.db.list_jobs()]
+
+    @app.get("/jobs/preview")
+    async def preview_cron(cron: str, request: Request, count: int = 3):
+        """The next few run times of a schedule, or why it's invalid."""
+        import time as _time
+        from .jobs import Cron, CronError
+        try:
+            c = Cron(cron)
+        except CronError as e:
+            return {"ok": False, "error": str(e)}
+        times, t = [], _time.time()
+        for _ in range(max(1, min(count, 10))):
+            t = c.next_after(t)
+            times.append(t)
+        return {"ok": True, "cron": c.expr, "next": times}
+
+    @app.post("/jobs", status_code=201)
+    async def create_job(body: Job, request: Request):
+        import time as _time
+        from .jobs import Cron, CronError, new_job_id, validate
+        m = jobs_on(request)
+        try:
+            job = validate(body.model_dump(), m.cfg.projects, m.cfg.models)
+        except (ValueError, CronError) as e:
+            raise HarnessError(400, str(e))
+        job["id"] = new_job_id()
+        job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
+        m.db.insert_job(job)
+        return job_view(m, m.db.get_job(job["id"]))
+
+    @app.get("/jobs/{jid}")
+    async def get_job(jid: str, request: Request):
+        m = jobs_on(request)
+        job = m.db.get_job(jid)
+        if job is None:
+            raise HarnessError(404, "no such job")
+        return job_view(m, job, runs=15)
+
+    @app.put("/jobs/{jid}")
+    async def update_job(jid: str, body: Job, request: Request):
+        import time as _time
+        from .jobs import Cron, CronError, validate
+        m = jobs_on(request)
+        old = m.db.get_job(jid)
+        if old is None:
+            raise HarnessError(404, "no such job")
+        try:
+            job = validate(body.model_dump(), m.cfg.projects, m.cfg.models)
+        except (ValueError, CronError) as e:
+            raise HarnessError(400, str(e))
+        job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
+        m.db.update_job(jid, **job)
+        return job_view(m, m.db.get_job(jid), runs=15)
+
+    @app.delete("/jobs/{jid}", status_code=204)
+    async def delete_job(jid: str, request: Request):
+        if not jobs_on(request).db.delete_job(jid):
+            raise HarnessError(404, "no such job")
+
+    @app.post("/jobs/{jid}/run", status_code=201)
+    async def run_job(jid: str, request: Request):
+        """Run a job now, outside its schedule (the next scheduled run is unchanged)."""
+        m = jobs_on(request)
+        job = m.db.get_job(jid)
+        if job is None:
+            raise HarnessError(404, "no such job")
+        if job["last_session_id"] and m._is_active(job["last_session_id"]):
+            raise HarnessError(409, "the previous run is still going")
+        sid = m.jobs.run(job, manual=True)
+        return m.summary(m.db.get_session(sid))
 
     # templates
     @app.get("/templates")
