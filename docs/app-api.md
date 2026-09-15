@@ -121,6 +121,72 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 `{"prompt": "...", "model": "fast" | "quality", "aspect_ratio": "1:1"}` queues a job; poll the job until `status` is
 `done`, then download the PNG. While images generate, the language model is unloaded for a few minutes.
 
+## Subscription backends (Claude Code, Codex): terms and billing
+
+> **Status: planned (Phase 8a, [issue #20](https://github.com/dflippojr/agent-harness/issues/20)).** Nothing below is
+> built yet. This section describes the rules the backends will follow, so apps can be designed with them in mind.
+> It's the harness author's reading of the providers' published terms as of 2026-09-15, not legal advice. Terms and
+> billing change, so check the sources at the end.
+
+A harness will be able to run a session on the user's own Claude or ChatGPT subscription instead of a local model.
+The daemon runs the unmodified `claude` or `codex` CLI inside the session sandbox. The user signs in once, on their
+own machine, through the provider's own login flow.
+
+### What the daemon guarantees
+
+- **Only the daemon talks to the CLI.** Apps never launch it, never see its credentials, and can't reach its login.
+  An app that needs particular agent context sends it to the daemon (`context`, `tools`), which sets up the session.
+- **The CLI is never modified.** It runs as published by Anthropic or OpenAI.
+- **Programmatic use is labeled as programmatic.** Sessions run in the CLI's non-interactive mode (`claude -p`,
+  `codex exec`). The daemon never drives the interactive terminal UI to look like a person typing.
+- **Each user's usage is billed to that user.** A harness serves its owner. It must not route other people's apps or
+  users through one person's subscription.
+- **Usage is visible.** The daemon reports rate-limit state, and a running tally of programmatic usage, through this
+  API and the web app. It warns when that usage is billed from separate credits instead of subscription limits.
+- **API keys are optional and configurable.** An Anthropic or OpenAI API key, supplied by the user or by the app
+  builder, can be the default backend or the fallback when subscription limits are hit.
+
+### Why this is a grey area
+
+- **Allowed:** Anthropic's terms permit an end user signing in to the unmodified Claude Code binary with their own
+  subscription, including where a platform hosts it, as long as each user authenticates and is billed themselves.
+  OpenAI supports ChatGPT-plan sign-in for Codex on headless machines and has said it wants subscriptions used widely.
+- **Restricted:** Anthropic says subscription (OAuth) login is designed for "ordinary use of Claude Code and other
+  native Anthropic applications". Developers building products on Claude "should use API key authentication" and may
+  not offer Claude.ai login in their own apps, "route requests through Free, Pro, or Max plan credentials on behalf
+  of their users", or collect or store Claude.ai credentials or session tokens. An app that sends prompts through a
+  user's daemon can be read either way.
+- **Billing:** Anthropic announced that Agent SDK, `claude -p` and third-party app usage would draw from a separate
+  monthly credit, with overage at API rates, instead of subscription limits. As of 2026-09-15 that change is
+  **paused**, but it may return. Usage limits also assume "ordinary, individual usage".
+- **Enforcement** is at the provider's discretion, may happen without notice, and lands on the **user's account**,
+  not on the app.
+
+### What app builders should do
+
+The harness can't control how apps present this, so these are strong recommendations:
+
+- **Tell users before their subscription is used.** Say that the app runs agent sessions on their own subscription
+  through their harness, that this counts as programmatic usage, and that the provider may meter or limit it. Suggested
+  wording:
+
+  > This app runs AI tasks through your Agent Harness, using the Claude or ChatGPT subscription you signed in to
+  > there. That usage counts against your plan's limits, and your provider may bill it separately or restrict it.
+  > You can switch to your own API key in the harness settings.
+
+- **Show the daemon's usage and rate-limit information** instead of hiding it, and pass on its credit warnings.
+- **Offer an API-key path** for users who don't want to risk their subscription, and use it for anything that
+  runs unattended at volume.
+- **Don't** ask users for provider credentials or tokens, bundle or patch the CLIs, or run one harness for many users.
+- If you plan to distribute an app widely, **ask Anthropic or OpenAI** about your use case first. Anthropic's terms
+  page points to its sales team for questions about permitted authentication.
+
+### Sources
+
+- Anthropic, [Claude Code: Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
+- Anthropic, [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+- OpenAI, [Codex authentication](https://learn.chatgpt.com/docs/auth) and [Using Codex with your ChatGPT plan](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan)
+
 ## GPU sharing
 
 The harness has one GPU. Sessions queue for it (`queue_position` in the session). Requests to the inference endpoint

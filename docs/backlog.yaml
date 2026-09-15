@@ -149,6 +149,7 @@ items:
       - surface rate limits through the app API and web app, with a credit warning and running tally for programmatic usage
       - configurable API keys (from the app builder or the user) as a fallback when limits are hit, or as the default
       - the CLI is never modified, and programmatic use is never disguised as interactive use
+      - serve a short usage notice per backend from `GET /api/v1` (terms, billing status, API-key option) so apps can show users current wording; the long form is in docs/app-api.md
 
   - key: colibri-big-brain
     kind: feature
