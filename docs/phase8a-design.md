@@ -1,9 +1,25 @@
 # Phase 8a design: Claude Code, Codex and Cursor as session backends
 
-Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **design, not built**. Written
-2026-09-15 from the CLIs installed on the tower: Claude Code 2.1.272, Codex CLI (Plus plan, models `gpt-6-astra`,
+Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **steps 1-2 built; Claude scripted exit
+passed, live exit awaits the user's subscription login**. Written 2026-09-15 from the CLIs installed on the tower:
+Claude Code 2.1.272, Codex CLI (Plus plan, models `gpt-6-astra`,
 `gpt-5.6-sol`, ...), and Cursor Agent (`cursor-agent`, models incl. `cursor-grok-4.6-high`). The terms and billing
 background and the promises made to app builders are in `docs/app-api.md` → "Subscription backends".
+
+## Implementation status (2026-09-15)
+
+- **Step 1 complete:** `agent-harness-cli:1`, provider egress proxies and the login script are built. Claude remains
+  disabled in the checked-in config until the user logs in.
+- **Step 2 implementation complete:** `harness/cli_backends.py` runs the unmodified Claude CLI over stream-json;
+  `Runner` maps text, assistant/tool, result and rate-limit events, bridges `can_use_tool` through normal approvals,
+  forwards live inbox messages, resumes from `backend_session_id`, uses a per-backend semaphore instead of the GPU
+  scheduler, and preserves branch review, transcripts and the quote flag.
+- **Scripted exit:** a real fake JSONL subprocess covers the Docker command, immediate allow, ask/approve, ask/deny,
+  follow-up inbox delivery, cancellation, restart/resume with a pending approval, persisted rate limits and usage,
+  backend validation, policy aliases, and both session APIs. Full suite: **139 passed, 1 skipped**.
+- **Live exit pending:** the user must run `ops\backends\login.ps1 claude`, enable `backends.claude`, and start the
+  invoice-tools phone task. It should ask once for Bash and continue through a daemon restart. No provider login was
+  performed by the implementation agent.
 
 ## Requirements (user decisions)
 

@@ -30,6 +30,7 @@ class CreateSession(BaseModel):
     prompt: str
     project: str = "scratch"
     target: str | None = None  # default: the project's target
+    backend: str = "local"
     model: str | None = None
     title: str | None = None
 
@@ -336,7 +337,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.post("/sessions", status_code=201)
     async def create_session(body: CreateSession, request: Request):
         m = mgr(request)
-        s = m.create(body.prompt, project=body.project, target=body.target, model=body.model, title=body.title)
+        s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
+                     model=body.model, title=body.title)
         return m.summary(s)
 
     @app.get("/sessions/{ref}")

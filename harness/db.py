@@ -162,6 +162,8 @@ MIGRATIONS = [
     # Phase 7d: sessions started by a scheduled job, and the STATUS the job's answer ended with (ok | attention).
     ("sessions", "job_id", "TEXT NOT NULL DEFAULT ''"),
     ("sessions", "job_status", "TEXT NOT NULL DEFAULT ''"),
+    # Phase 8a: local inference or a hosted CLI session backend.
+    ("sessions", "backend", "TEXT NOT NULL DEFAULT 'local'"),
 ]
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata"}
@@ -235,7 +237,7 @@ class Database:
     def list_sessions(self, limit: int = 50) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
-                "SELECT id, project, target, model, title, status, stop_reason, created_at, updated_at, totals, "
+                "SELECT id, project, target, model, backend, title, status, stop_reason, created_at, updated_at, totals, "
                 "branch, review, workspace_removed, app_id, job_id, job_status FROM sessions "
                 "ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()

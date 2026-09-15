@@ -188,6 +188,7 @@ class Manager:
 
     # operations
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
+               backend: str = "local",
                title: str | None = None, app: dict | None = None, app_context: str = "", app_tools: list | None = None,
                app_metadata: dict | None = None, job_id: str = "") -> dict:
         if not prompt.strip():
@@ -201,9 +202,24 @@ class Manager:
             raise HarnessError(400, f"target must be one of {TARGETS}")
         if target != spec.target:
             raise HarnessError(400, f"project {project} runs on the {spec.target}, not the {target}")
-        model = model or self.cfg.default_model
-        if model not in self.cfg.models:
-            raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
+        if backend == "local":
+            model = model or self.cfg.default_model
+            if model not in self.cfg.models:
+                raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
+        else:
+            backend_cfg = self.cfg.backends.get(backend)
+            if backend_cfg is None:
+                raise HarnessError(400, f"unknown backend {backend!r}; known: local"
+                                        + (f", {', '.join(self.cfg.backends)}" if self.cfg.backends else ""))
+            if not backend_cfg.enabled:
+                raise HarnessError(400, f"backend {backend!r} is disabled")
+            if backend != "claude":
+                raise HarnessError(400, f"backend {backend!r} is not built yet")
+            if target != "tower":
+                raise HarnessError(400, f"backend {backend!r} only runs on the tower")
+            model = model or backend_cfg.model
+            if not model:
+                raise HarnessError(400, f"backend {backend!r} has no model configured")
         remote = target != "tower"
         if remote:
             free_gb = self.hub.state[target].info.get("free_gb")
@@ -278,7 +294,7 @@ class Manager:
         now = time.time()
         first_line = prompt.strip().splitlines()[0]
         session = {
-            "id": sid, "project": project, "target": target, "model": model,
+            "id": sid, "project": project, "target": target, "model": model, "backend": backend,
             "title": title or (first_line[:80] + ("…" if len(first_line) > 80 else "")),
             "status": "queued", "workspace": str(workspace), "created_at": now, "updated_at": now,
             "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
@@ -288,7 +304,8 @@ class Manager:
         }
         with self.db.tx():
             self.db.insert_session(session)
-            self.bus.emit(sid, "session_created", {**{k: session[k] for k in ("project", "target", "model", "title")},
+            self.bus.emit(sid, "session_created", {**{k: session[k] for k in
+                                                       ("project", "target", "model", "backend", "title")},
                                                    **({"app": app["name"], "app_tools": [t["name"] for t in tools]}
                                                       if app else {}), **({"job_id": job_id} if job_id else {})})
             self.bus.emit(sid, "user_message", {"content": prompt})
@@ -328,8 +345,10 @@ class Manager:
     def rerun(self, ref: str) -> dict:
         """Start a fresh session with the same task, project, and model."""
         s = self.get(ref)
+        backend = s.get("backend", "local")
+        model = s["model"] if backend != "local" or s["model"] in self.cfg.models else None
         return self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
-                           model=s["model"] if s["model"] in self.cfg.models else None, title=s["title"])
+                           model=model, backend=backend, title=s["title"])
 
     async def remote(self, s: dict, op: str, params: dict, timeout: float = 300):
         """A request to a session's runner from a user action: fails fast instead of waiting for a sleeping Mac."""

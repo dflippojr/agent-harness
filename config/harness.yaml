@@ -34,6 +34,22 @@ sandbox:
   network: harness-sandbox        # internal: no route out, no container-to-container traffic
   egress_network: harness-egress  # attached only while an approved network command runs
 
+# Hosted CLI session backends (Phase 8a). Claude stays disabled until the user runs
+# `ops/backends/login.ps1 claude`; credentials remain in the Docker volume and are never read by the daemon.
+backends:
+  claude:
+    enabled: false
+    image: agent-harness-cli:1
+    model: claude-opus-5
+    effort: high
+    permission_mode: default
+    max_sessions: 2
+    billing: subscription
+    auth: subscription
+    proxy: http://harness-egress-claude:8888
+    volume: harness-auth-claude
+    network: harness-cli
+
 # Homelab tools for projects with `homelab: true` (harness/homelab.py). The daemon runs these on the host;
 # agents only name a service from this allowlist. Restarts always need approval.
 homelab:

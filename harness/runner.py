@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import compaction, grounding, llm, projects
 from .bus import EventBus
+from .cli_backends import ClaudeSession, CliBackendError
 from .config import Config
 from .db import Database
 from .homelab import Homelab
@@ -60,7 +61,7 @@ def new_run(carry: dict | None = None) -> dict:
     """Counters for one run. Notes and the token calibration belong to the session, so they carry over."""
     run = {"turns": 0, "tool_calls": 0, "invalid_tool_calls": 0, "tool_errors": 0, "prompt_tokens": 0,
            "completion_tokens": 0, "idle": 0, "executing": None, "started_at": time.time()}
-    for key in ("notes", "chars_per_token"):
+    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits"):
         if carry and key in carry:
             run[key] = carry[key]
     return run
@@ -89,6 +90,10 @@ class Runner:
         self.approval_events: dict[str, asyncio.Event] = {}
         self.user_cancelled: set[str] = set()
         self._sandboxes: dict[str, Sandbox] = {}
+        self._cli_sessions: dict[str, ClaudeSession] = {}
+        self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
+                               for name, backend in cfg.backends.items()}
+        self.cli_factory = ClaudeSession
         self._quota_checked: dict[str, float] = {}
         self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
         self.generating: set[str] = set()       # sessions with a model call in flight (the guard waits for them)
@@ -278,6 +283,9 @@ class Runner:
     async def run(self, sid: str, recovered: bool = False) -> None:
         try:
             s = self.db.get_session(sid)
+            if s.get("backend", "local") != "local":
+                await self._run_cli(sid, recovered=recovered)
+                return
             if recovered:
                 self.bus.emit(sid, "resumed", {"status": s["status"]})
                 if (s["run"].get("executing") or {}).get("name") in ("run_shell", "git_clone"):
@@ -295,7 +303,7 @@ class Runner:
                 self._record_cancel(sid)
                 await self._end_run(sid)
             raise
-        except SandboxUnavailable as e:
+        except (SandboxUnavailable, CliBackendError) as e:
             self.bus.emit(sid, "error", {"message": str(e)})
             self.set_status(sid, "failed", stop_reason=f"sandbox_unavailable: {e}")
             await self._end_run(sid)
@@ -309,6 +317,7 @@ class Runner:
             self.set_status(sid, "failed", stop_reason=f"internal_error: {type(e).__name__}: {e}")
             await self._end_run(sid)
         finally:
+            await asyncio.shield(self._stop_cli(sid))
             self.scheduler.release(sid)
             self.user_cancelled.discard(sid)
 
@@ -340,6 +349,213 @@ class Runner:
             if await self._generate(s):
                 await self._end_run(sid)
                 return
+
+    # hosted CLI backends
+    async def _run_cli(self, sid: str, recovered: bool = False) -> None:
+        s = self.db.get_session(sid)
+        backend_name = s["backend"]
+        backend = self.cfg.backends[backend_name]
+        if backend_name != "claude":
+            raise CliBackendError(f"backend {backend_name!r} is not implemented")
+        if recovered:
+            self.bus.emit(sid, "resumed", {"status": s["status"]})
+        await self._prepare_repo(s)
+        slot = self._backend_slots[backend_name]
+        async with slot:
+            s = self.db.get_session(sid)
+            if s["status"] != "waiting_approval":
+                self.set_status(sid, "running")
+            backend_session_id = str(s["run"].get("backend_session_id") or "")
+            cli = self.cli_factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
+                                   sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
+                                   model=s["model"], backend_session_id=backend_session_id)
+            self._cli_sessions[sid] = cli
+            await cli.start()
+            prompt = ("The harness restarted; continue the task." if recovered else
+                      next((m["content"] for m in s["context"][1:]
+                            if m.get("role") == "user" and isinstance(m.get("content"), str)), ""))
+            await cli.initialize(prompt)
+            tool_names: dict[str, str] = {}
+            while True:
+                await self._send_cli_inbox(sid, cli)
+                event = await cli.receive(timeout=0.05)
+                if event is None:
+                    continue
+                if await self._handle_cli_event(sid, cli, event, tool_names):
+                    await self._end_run(sid)
+                    return
+
+    async def _send_cli_inbox(self, sid: str, cli: ClaudeSession) -> None:
+        """Forward messages received during a CLI run without racing a newer inbox append."""
+        queued = list(self.db.get_session(sid)["inbox"])
+        if not queued:
+            return
+        for content in queued:
+            await cli.send(cli.user_message(content))
+        with self.db.tx():
+            current = self.db.get_session(sid)["inbox"]
+            remaining = current[len(queued):] if current[:len(queued)] == queued else current
+            self.db.update_session(sid, inbox=remaining)
+
+    @staticmethod
+    def _cli_text(content) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return "" if content is None else json.dumps(content, ensure_ascii=False)
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                value = block.get("text")
+                if isinstance(value, str):
+                    parts.append(value)
+                elif isinstance(block.get("content"), str):
+                    parts.append(block["content"])
+                elif isinstance(block.get("content"), list):
+                    parts.append(Runner._cli_text(block["content"]))
+        return "\n".join(x for x in parts if x)
+
+    async def _handle_cli_event(self, sid: str, cli: ClaudeSession, event: dict,
+                                tool_names: dict[str, str]) -> bool:
+        """Map one Claude stream-json record. Returns true when the run is complete."""
+        type_ = event.get("type")
+        if type_ == "system" and event.get("subtype") == "init":
+            backend_session_id = str(event.get("session_id") or "")
+            if backend_session_id:
+                s = self.db.get_session(sid)
+                run = {**s["run"], "backend_session_id": backend_session_id}
+                self.db.update_session(sid, run=run)
+                cli.backend_session_id = backend_session_id
+            return False
+        if type_ == "stream_event":
+            delta = (event.get("event") or {}).get("delta") or {}
+            text = delta.get("text")
+            if isinstance(text, str) and text:
+                kind = "reasoning" if delta.get("type") in ("thinking_delta", "reasoning_delta") else "content"
+                self.bus.ephemeral(sid, "delta", {"kind": kind, "text": text})
+            return False
+        if type_ == "assistant":
+            message = event.get("message") or {}
+            content = message.get("content") or []
+            blocks = content if isinstance(content, list) else []
+            calls = []
+            for block in blocks:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                call_id = str(block.get("id") or "")
+                name = str(block.get("name") or "")
+                args = block.get("input") if isinstance(block.get("input"), dict) else {}
+                tool_names[call_id] = name
+                calls.append({"id": call_id, "type": "function",
+                              "function": {"name": name, "arguments": json.dumps(args)}})
+            self.bus.emit(sid, "assistant", {"content": self._cli_text(content), "reasoning": "",
+                                               "tool_calls": calls, "finish_reason": "",
+                                               "prompt_tokens": 0, "completion_tokens": 0,
+                                               "prompt_tps": 0, "gen_tps": 0})
+            return False
+        if type_ == "control_request" and (event.get("request") or {}).get("subtype") == "can_use_tool":
+            request = event["request"]
+            call_id = str(request.get("tool_use_id") or event.get("request_id") or "")
+            tool_names[call_id] = str(request.get("tool_name") or "")
+            await self._authorize_cli(sid, cli, str(event.get("request_id") or ""), request)
+            return False
+        if type_ == "user":
+            message = event.get("message") or {}
+            content = message.get("content") or []
+            blocks = content if isinstance(content, list) else []
+            for block in blocks:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                call_id = str(block.get("tool_use_id") or "")
+                output = self._cli_text(block.get("content"))
+                ok = not bool(block.get("is_error"))
+                with self.db.tx():
+                    run = self.db.get_session(sid)["run"]
+                    run["tool_calls"] = run.get("tool_calls", 0) + 1
+                    if not ok:
+                        run["tool_errors"] = run.get("tool_errors", 0) + 1
+                    self.db.update_session(sid, run=run)
+                    self.bus.emit(sid, "tool_result", {"id": call_id, "name": tool_names.get(call_id, ""),
+                                                        "ok": ok, "seconds": 0,
+                                                        "output": truncate_middle(output, 20000)})
+            return False
+        if type_ == "rate_limit_event":
+            rate_limits = event.get("rate_limit_info") or {}
+            s = self.db.get_session(sid)
+            self.db.update_session(sid, run={**s["run"], "rate_limits": rate_limits})
+            self.bus.emit(sid, "rate_limit", rate_limits)
+            return False
+        if type_ == "result":
+            self._finish_cli_result(sid, event)
+            return True
+        return False
+
+    async def _authorize_cli(self, sid: str, cli: ClaudeSession, request_id: str, request: dict) -> None:
+        name = str(request.get("tool_name") or "")
+        args = request.get("input") if isinstance(request.get("input"), dict) else {}
+        call_id = str(request.get("tool_use_id") or request_id)
+        s = self.db.get_session(sid)
+        existing = self.db.approval_for_call(sid, call_id)
+        if existing is None:
+            decision = self.policy(s).decide(name, args)
+            self.bus.emit(sid, "tool_call", {"id": call_id, "name": name, "args": args,
+                                             "decision": decision.action, "reason": decision.reason})
+            if decision.action == ALLOW:
+                await cli.respond_permission(request_id, "allow", args)
+                return
+            if decision.action != ASK:
+                reason = decision.reason or "not allowed"
+                await cli.respond_permission(request_id, "deny", args,
+                                             f"Blocked by harness policy: {reason}. Don't retry this.")
+                return
+            existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call_id,
+                        "tool": name, "args": args, "reason": decision.reason,
+                        "detail": str(request.get("description") or "")}
+            with self.db.tx():
+                self.db.insert_approval(existing)
+                self.bus.emit(sid, "approval_requested", {k: existing[k] for k in
+                                                          ("id", "tool_call_id", "tool", "args", "reason", "detail")})
+            existing["status"] = "pending"
+        if existing["status"] == "pending":
+            self.set_status(sid, "waiting_approval")
+            existing = await self._wait_approval(existing["id"])
+        if existing["status"] == "approved":
+            self.set_status(sid, "running")
+            await cli.respond_permission(request_id, "allow", args)
+            return
+        note = f" User note: {existing['note']}" if existing.get("note") else ""
+        self.set_status(sid, "running")
+        await cli.respond_permission(request_id, "deny", args, f"The user denied this {name} call.{note}")
+
+    def _finish_cli_result(self, sid: str, result: dict) -> None:
+        s = self.db.get_session(sid)
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        prompt_tokens = sum(int(usage.get(key) or 0) for key in
+                            ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        completion_tokens = int(usage.get("output_tokens") or 0)
+        turns = int(result.get("num_turns") or 0)
+        cost = float(result.get("total_cost_usd") or 0)
+        run = {**s["run"], "turns": turns, "prompt_tokens": prompt_tokens,
+               "completion_tokens": completion_tokens, "usage": usage, "total_cost_usd": cost,
+               "executing": None}
+        totals = dict(s["totals"])
+        totals["turns"] = totals.get("turns", 0) + turns
+        totals["prompt_tokens"] = totals.get("prompt_tokens", 0) + prompt_tokens
+        totals["completion_tokens"] = totals.get("completion_tokens", 0) + completion_tokens
+        totals["total_cost_usd"] = round(float(totals.get("total_cost_usd", 0)) + cost, 10)
+        answer = str(result.get("result") or "")
+        failed = bool(result.get("is_error")) or result.get("subtype") in ("error", "failed")
+        status, reason = ("failed", str(result.get("subtype") or "cli_error")) if failed else ("done", "final_message")
+        with self.db.tx():
+            self.db.update_session(sid, run=run, totals=totals, status=status, stop_reason=reason, answer=answer)
+            self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})
+
+    async def _stop_cli(self, sid: str) -> None:
+        cli = self._cli_sessions.pop(sid, None)
+        if cli is not None:
+            await cli.stop()
 
     # model turn
     async def _generate(self, s: dict) -> bool:
@@ -820,7 +1036,10 @@ class Runner:
                 extra["ungrounded_quotes"] = quotes
         self.bus.emit(sid, "run_finished", {"status": s["status"], "stop_reason": s["stop_reason"],
                                             "answer": s["answer"], "run": s["run"], **extra})
-        await asyncio.shield(self.sandbox(s).stop())
+        if s.get("backend", "local") == "local":
+            await asyncio.shield(self.sandbox(s).stop())
+        else:
+            await asyncio.shield(self._stop_cli(sid))
         await asyncio.shield(self.save_branch(sid))
         self.write_transcript(sid)
 

@@ -31,6 +31,22 @@ class SandboxConfig:
 
 
 @dataclass
+class BackendConfig:
+    """A hosted CLI used as a session backend (Phase 8a)."""
+    enabled: bool = False
+    image: str = "agent-harness-cli:1"
+    model: str = "claude-opus-5"
+    effort: str = "high"
+    permission_mode: str = "default"
+    max_sessions: int = 2
+    billing: str = "subscription"
+    auth: str = "subscription"
+    proxy: str = "http://harness-egress-claude:8888"
+    volume: str = "harness-auth-claude"
+    network: str = "harness-cli"
+
+
+@dataclass
 class NotifyConfig:
     enabled: bool = False
     server: str = "http://127.0.0.1:8095"  # where the daemon publishes (local)
@@ -208,6 +224,7 @@ class Config:
     models: dict[str, ModelConfig]
     sandbox: SandboxConfig
     projects: dict[str, Project]
+    backends: dict[str, BackendConfig] = field(default_factory=dict)
     public_url: str = ""               # how the phone reaches the daemon, e.g. https://host.tailnet.ts.net
     allowed_logins: list[str] = field(default_factory=list)  # Tailscale logins allowed through `tailscale serve`
     notify: NotifyConfig = field(default_factory=NotifyConfig)
@@ -289,6 +306,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     homelab = HomelabConfig(**raw_homelab, services=services)
 
     runners = {name: RunnerConfig(name=name, **(spec or {})) for name, spec in (raw.get("runners") or {}).items()}
+    backends = {name: BackendConfig(**(spec or {})) for name, spec in (raw.get("backends") or {}).items()}
     listen = raw.get("listen") or {}
     budgets = raw.get("budgets") or {}
     compaction = raw.get("compaction") or {}
@@ -301,6 +319,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         models=models,
         sandbox=SandboxConfig(**(raw.get("sandbox") or {})),
         projects=projects,
+        backends=backends,
         public_url=(raw.get("public_url") or "").rstrip("/"),
         allowed_logins=list(raw.get("allowed_logins") or []),
         notify=NotifyConfig(**(raw.get("notify") or {})),

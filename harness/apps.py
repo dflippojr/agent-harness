@@ -61,6 +61,7 @@ class AppTool(BaseModel):
 class CreateAppSession(BaseModel):
     prompt: str
     project: str = "scratch"
+    backend: str = "local"
     model: str | None = None
     title: str | None = None
     context: list[ContextBlock] = []
@@ -227,7 +228,7 @@ def register(app: FastAPI, mgr) -> None:
         blocks = [b.model_dump() for b in body.context]
         if sum(len(b["content"]) for b in blocks) > MAX_CONTEXT_CHARS:
             raise HarnessError(413, f"context is larger than {MAX_CONTEXT_CHARS} characters")
-        s = m.create(body.prompt, project=body.project, model=body.model, title=body.title, app=key,
+        s = m.create(body.prompt, project=body.project, backend=body.backend, model=body.model, title=body.title, app=key,
                      app_context=context_text(key["name"], blocks) if blocks else "", app_tools=body.tools,
                      app_metadata=body.metadata)
         return view(m, s)
