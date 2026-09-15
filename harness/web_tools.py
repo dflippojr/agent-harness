@@ -11,19 +11,24 @@ metadata. Every redirect hop is checked again, and the request goes to the IP th
 SNI keep the original name), so a DNS answer can't change between the check and the connection. Patterns follow
 Hermes Agent's tools/url_safety.py and web_tools_truncate.py (MIT); see docs/phase6a-hermes-study.md.
 
+GitHub repository and file pages extract badly as HTML (navigation noise, a truncated README), so they're read through
+GitHub's public API and raw file host instead (github_sources / github_text), falling back to the HTML on any error.
+
 What a page says is untrusted data; results say so to the model.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
+import json
 import logging
 import re
 import socket
 import time
 from collections import OrderedDict
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -195,6 +200,82 @@ def docx_to_text(body: bytes) -> tuple[str, str]:
     return title, "\n".join(lines)
 
 
+# ---------- GitHub ----------
+GITHUB_RESERVED = {"about", "apps", "collections", "customer-stories", "enterprise", "events", "explore", "features",
+                   "login", "marketplace", "notifications", "orgs", "pricing", "search", "security", "settings",
+                   "site", "sponsors", "topics", "trending", "users"}
+
+
+def github_sources(url: str) -> dict | None:
+    """API/raw URLs that describe a github.com repository, folder or file page, or None for any other URL."""
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("http", "https") or (parts.hostname or "").lower() not in ("github.com", "www.github.com"):
+        return None
+    segs = [s for s in parts.path.split("/") if s]
+    if len(segs) < 2 or segs[0].lower() in GITHUB_RESERVED:
+        return None
+    owner, name = segs[0], segs[1].removesuffix(".git")
+    api = f"https://api.github.com/repos/{owner}/{name}"
+    rest = segs[2:]
+    if not rest:
+        return {"kind": "repo", "repo": f"{owner}/{name}", "path": "", "ref": "",
+                "urls": {"meta": api, "readme": f"{api}/readme", "contents": f"{api}/contents"}}
+    if rest[0] == "tree" and len(rest) >= 2:
+        # A branch name with slashes can't be told apart from a path here; the API answers 404 and we fall back.
+        ref, path = rest[1], "/".join(rest[2:])
+        q = f"?ref={quote(ref, safe='')}"
+        return {"kind": "repo", "repo": f"{owner}/{name}", "path": path, "ref": ref,
+                "urls": {"meta": api, "readme": f"{api}/readme/{quote(path)}{q}" if path else f"{api}/readme{q}",
+                         "contents": f"{api}/contents/{quote(path)}{q}"}}
+    if rest[0] in ("blob", "raw") and len(rest) >= 3:
+        path = "/".join(rest[2:])
+        return {"kind": "file", "repo": f"{owner}/{name}", "path": path, "ref": rest[1],
+                "urls": {"raw": f"https://raw.githubusercontent.com/{owner}/{name}/{rest[1]}/{path}"}}
+    return None  # issues, pulls, releases, wiki, ...: the HTML is fine
+
+
+def github_text(info: dict, bodies: dict[str, bytes]) -> tuple[str, str]:
+    """(title, text) for a github_sources() page from the downloaded API/raw bodies."""
+    if info["kind"] == "file":
+        text = bodies["raw"].decode("utf-8", errors="replace")
+        return f"{info['repo']}: {info['path']}", f"File {info['path']} at {info['ref']} in {info['repo']}\n\n{text}"
+    meta = json.loads(bodies["meta"])
+    lines = []  # web_fetch already prints the repository name as the heading
+    if meta.get("description"):
+        lines.append(meta["description"])
+    lic = meta.get("license") or {}
+    facts = [
+        ("License", f"{lic.get('name')} ({lic.get('spdx_id')})" if lic.get("name") else "none detected"),
+        ("Language", meta.get("language")),
+        ("Stars", meta.get("stargazers_count")), ("Forks", meta.get("forks_count")),
+        ("Open issues", meta.get("open_issues_count")),
+        ("Topics", ", ".join(meta.get("topics") or []) or None),
+        ("Default branch", meta.get("default_branch")), ("Homepage", meta.get("homepage") or None),
+        ("Created", (meta.get("created_at") or "")[:10] or None),
+        ("Last push", (meta.get("pushed_at") or "")[:10] or None),
+        ("Archived", "yes" if meta.get("archived") else None),
+        ("Fork of", (meta.get("parent") or {}).get("full_name")),
+    ]
+    lines += [f"- {k}: {v}" for k, v in facts if v not in (None, "")]
+    if bodies.get("contents"):
+        try:
+            entries = json.loads(bodies["contents"])
+        except ValueError:
+            entries = []
+        if isinstance(entries, list) and entries:
+            names = sorted((e.get("type") != "dir", e.get("name", "")) for e in entries)
+            listing = "  ".join(n if is_file else f"{n}/" for is_file, n in names)
+            where = info["path"] or "the repository root"
+            lines += ["", f"## Files in {where}" + (f" ({info['ref']})" if info["ref"] else ""), listing]
+    if bodies.get("readme"):
+        readme = json.loads(bodies["readme"])
+        content = readme.get("content") or ""
+        if readme.get("encoding") == "base64":
+            content = base64.b64decode(content).decode("utf-8", errors="replace")
+        lines += ["", f"## {readme.get('path') or 'README'}", "", content]
+    return info["repo"], "\n".join(lines)
+
+
 class WebTools:
     tool_names = TOOLS
 
@@ -320,6 +401,11 @@ class WebTools:
         hit = self._pages.get(url)
         if hit and time.time() - hit[0] < CACHE_SECONDS:
             return url, hit[1], hit[2]
+        github = await self._github(url)
+        if github:
+            entry = (time.time(), *github)
+            self._remember(self._pages, url, entry)
+            return url, entry[1], entry[2]
         try:
             final, ctype, body = await self._download(url)
         except httpx.HTTPError as e:
@@ -341,6 +427,26 @@ class WebTools:
         entry = (time.time(), title, f"(final URL: {final})\n\n{text}" if final != url else text)
         self._remember(self._pages, url, entry)
         return url, entry[1], entry[2]
+
+    async def _github(self, url: str) -> tuple[str, str] | None:
+        """(title, text) of a GitHub repository/folder/file page via the API and raw host, or None to use the HTML.
+        The README and file listing are optional; the repository metadata (or the raw file) is not."""
+        info = github_sources(url)
+        if info is None:
+            return None
+        bodies: dict[str, bytes] = {}
+        for key, source in info["urls"].items():
+            try:
+                _, _, bodies[key] = await self._download(source)
+            except (ToolError, httpx.HTTPError) as e:
+                if key in ("meta", "raw"):
+                    log.info("GitHub API unavailable for %s (%s); using the HTML page", url, e)
+                    return None
+        try:
+            return github_text(info, bodies)
+        except (ValueError, KeyError, TypeError) as e:
+            log.info("unexpected GitHub API answer for %s (%s); using the HTML page", url, e)
+            return None
 
     async def web_fetch(self, url: str, start: int = 0, find: str = "") -> str:
         url = url.strip()

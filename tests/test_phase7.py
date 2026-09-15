@@ -588,8 +588,9 @@ def test_fixture_records_and_replays_without_network(tmp_path):
     fx.add_search("llama.cpp sleep idle seconds", {"results": [
         {"url": "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md", "title": "llama.cpp server",
          "content": "HTTP server", "score": 2}]})
-    fx.add_page("https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md",
-                "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md", "text/plain",
+    # GitHub file pages are read from the raw host (Phase 8c); the recorder stores that URL too
+    fx.add_page("https://raw.githubusercontent.com/ggml-org/llama.cpp/master/tools/server/README.md",
+                "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/tools/server/README.md", "text/plain",
                 b"--sleep-idle-seconds: /health, /props, /models and /metrics don't wake the server")
     fx.add_page("https://arxiv.org/pdf/1706.03762", "https://arxiv.org/pdf/1706.03762v7", "application/pdf",
                 make_pdf(["Attention Is All You Need", "h = 8 parallel attention layers"]))

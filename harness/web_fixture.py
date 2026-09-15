@@ -131,7 +131,13 @@ async def record(root: Path, queries: list[str], urls: list[str], fetch_top: int
             fixture.add_search(q, {"results": results[:20]})
             print(f"search {q!r}: {len(results)} results")
             to_fetch += [r["url"] for r in results[:fetch_top] if r.get("url")]
-    for url in dict.fromkeys(to_fetch):
+    from .web_tools import github_sources
+    expanded = []
+    for url in to_fetch:  # GitHub pages are read through the API and raw host (web_tools.github_sources)
+        info = github_sources(url)
+        expanded += list(info["urls"].values()) if info else []
+        expanded.append(url)  # the HTML too, for the fallback
+    for url in dict.fromkeys(expanded):
         try:
             final, ctype, body = await web._download(url)
         except Exception as e:  # noqa: BLE001 - record what can be recorded
