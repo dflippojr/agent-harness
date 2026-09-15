@@ -126,6 +126,9 @@ class WebTools:
         self._pages: OrderedDict[str, tuple[float, str, str]] = OrderedDict()
         self._searches: OrderedDict[tuple, tuple[float, str]] = OrderedDict()
 
+    def schemas(self) -> list[dict]:
+        return schemas(self.cfg)
+
     def _client(self, timeout: float) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10), follow_redirects=False, trust_env=False,
                                  transport=self.transport, headers={"User-Agent": self.cfg.user_agent})

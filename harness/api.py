@@ -271,6 +271,15 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             out.append(item)
         return out
 
+    @app.get("/search")
+    async def search_sessions(request: Request, q: str = "", project: str = "", limit: int = 20):
+        """Full-text search over past sessions. Passages mark matches with \\u0002 ... \\u0003."""
+        from . import search
+        m = mgr(request)
+        if not m.cfg.search.enabled:
+            raise HarnessError(400, "session search is disabled in config/harness.yaml")
+        return await asyncio.to_thread(search.search, m.db, q, project, max(1, min(limit, 50)))
+
     @app.post("/sessions", status_code=201)
     async def create_session(body: CreateSession, request: Request):
         m = mgr(request)

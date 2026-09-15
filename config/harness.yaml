@@ -113,6 +113,11 @@ web:
   max_bytes: 5242880
   timeout_seconds: 20
 
+# Full-text search over past sessions (harness/search.py): the app's search box, GET /search, and the agent tools
+# session_search / session_read. The index lives in the session database. Projects opt out with `session_search: false`.
+search:
+  enabled: true
+
 # OpenAI/Anthropic-compatible inference endpoint for other tools (harness/endpoint.py): /v1/chat/completions,
 # /v1/completions, /v1/responses, /v1/messages, /v1/models, /v1/capabilities. Per-device keys from Settings or POST /keys.
 # Requests go ahead of the next agent turn (user decision, Phase 6c); an agent turn that has waited agent_fair_seconds

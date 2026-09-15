@@ -215,13 +215,45 @@ $back.addEventListener("click", () => {
 window.addEventListener("hashchange", route);
 
 // ---------- session list ----------
+let searchQuery = "";  // kept while navigating, so Back from a result returns to the results
+
+// Search passages mark matches with  … ; everything else is escaped.
+const markPassage = (text) => escapeHtml(text).replace(//g, "<mark>").replace(//g, "</mark>");
+const PASSAGE_KIND = { title: "title", message: "you", assistant: "agent", tool: "tool output", answer: "answer", context: "app context" };
+
 async function viewList() {
   $title.textContent = "Agents";
   const list = h("div");
+  const results = h("div", { hidden: true });
   const queueNote = h("p", { class: "note" });
-  $app.append(h("div", { class: "row", style: "justify-content:flex-end;margin:4px 0 8px" },
-    h("a", { class: "btn small", href: "#/images" }, "🖼 Images")), queueNote, list);
+  const search = h("input", { type: "search", placeholder: "Search past sessions", value: searchQuery, class: "search" });
+  $app.append(h("div", { class: "row", style: "margin:4px 0 8px;flex-wrap:nowrap" }, search,
+    h("a", { class: "btn small", href: "#/images" }, "🖼 Images")), queueNote, results, list);
   document.body.append(h("a", { class: "btn primary fab", href: "#/new" }, "+ New task"));
+
+  const runSearch = async () => {
+    const q = search.value.trim();
+    searchQuery = search.value;
+    results.hidden = !q;
+    list.hidden = !!q;
+    queueNote.hidden = !!q;
+    if (!q) return;
+    try {
+      const data = await api(`/search?q=${encodeURIComponent(q)}`);
+      if (search.value.trim() !== q) return;  // a newer query is on its way
+      fill(results,
+        data.mode === "any" && data.results.length ? h("p", { class: "muted small" }, "No session matches every word; showing partial matches.") : null,
+        data.results.length ? data.results.map((r) => h("a", { class: "card", href: `#/s/${r.id}` },
+          h("h3", {}, r.title),
+          h("div", { class: "meta" }, badge(r.status), h("span", {}, r.project), h("span", {}, ago(r.created_at)),
+            h("span", {}, `${r.hits} match${r.hits === 1 ? "" : "es"}`)),
+          r.passages.map((p) => h("div", { class: "passage small" }, h("span", { class: "muted" }, `${PASSAGE_KIND[p.kind] || p.kind}: `),
+            h("span", { html: markPassage(p.text) }))))) : h("p", { class: "empty" }, `Nothing matches “${q}”.`));
+    } catch (e) { fill(results, h("p", { class: "note bad" }, e.message)); }
+  };
+  let searchTimer = null;
+  search.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
+  if (searchQuery.trim()) runSearch();
 
   const render = async () => {
     const [sessions, queue, gpu] = await Promise.all([api("/sessions"), api("/queue"), api("/gpu").catch(() => null)]);

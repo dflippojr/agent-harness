@@ -199,6 +199,9 @@ class ImageService:
         self.images_dir = Path(cfg.work_dir) / "images"
         self.transport = None          # tests inject a fake ComfyUI
 
+    def schemas(self) -> list[dict]:
+        return schemas(self.cfg)
+
     @property
     def gpu_taken(self) -> bool:
         return self.phase in ("switching", "starting", "generating", "lingering", "restoring")

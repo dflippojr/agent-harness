@@ -61,6 +61,9 @@ class MemoryLibrary:
         self._lock = asyncio.Lock()
         self.refresh_error = ""
 
+    def schemas(self) -> list[dict]:
+        return schemas(self.cfg)
+
     # sync
     async def refresh(self, force: bool = False) -> None:
         async with self._lock:

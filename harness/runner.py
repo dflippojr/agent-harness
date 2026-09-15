@@ -96,6 +96,7 @@ class Runner:
         self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
         self.images = None                      # images.ImageService, set by the manager when enabled
+        self.sessions = None                    # search.SessionSearch, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
@@ -121,7 +122,8 @@ class Runner:
         return Workspace(Path(s["workspace"]), self.sandbox(s), self.cfg.repos_dir, model.context_tokens, homelab)
 
     def daemon_toolkits(self, s: dict) -> list:
-        """Tools that run in the daemon for every target (memory library, web), as enabled for the project."""
+        """Tools that run in the daemon for every target (memory library, web, session search), as enabled for the
+        project."""
         project = self.cfg.projects.get(s["project"])
         kits = []
         if self.memory is not None and (project is None or project.memory_library):
@@ -130,14 +132,14 @@ class Runner:
             kits.append(self.web)
         if self.images is not None and s["target"] == "tower" and (project is None or project.images):
             kits.append(self.images)
+        if self.sessions is not None and (project is None or project.session_search):
+            kits.append(self.sessions)
         return kits
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:
-        from . import images, memory_library, web_tools
         schemas = ws.schemas()
         for kit in self.daemon_toolkits(s):
-            module = memory_library if kit is self.memory else web_tools if kit is self.web else images
-            schemas = schemas + module.schemas(kit.cfg)
+            schemas = schemas + kit.schemas()
         if self.app_tools is not None and s.get("app_tools"):
             schemas = schemas + self.app_tools.schemas(s)
         return schemas
@@ -633,6 +635,8 @@ class Runner:
                                                    on_resume=lambda: self._acquire(sid))
             elif kit is not None and kit is self.images:
                 output = await kit.call(name, {**args, "_session": sid}, workspace_root=Path(s["workspace"]))
+            elif kit is not None and getattr(kit, "wants_session", False):
+                output = await kit.call(name, args, session=s)
             elif kit is not None:
                 output = await kit.call(name, args)  # daemon-side for every target
             elif isinstance(ws, RemoteWorkspace):

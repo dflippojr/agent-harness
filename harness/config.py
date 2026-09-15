@@ -118,6 +118,12 @@ class WebConfig:
 
 
 @dataclass
+class SearchConfig:
+    """Full-text search over past sessions (search.py): the app's search box and the session_search tools."""
+    enabled: bool = False
+
+
+@dataclass
 class EndpointConfig:
     """OpenAI/Anthropic-compatible inference endpoint for other tools (endpoint.py)."""
     enabled: bool = False
@@ -165,6 +171,7 @@ class Project:
     memory_library: bool = True  # give sessions the memory-library tools (when memory_library is enabled)
     web: bool = True             # give sessions web_search / web_fetch (when web is enabled)
     images: bool = True          # give tower sessions generate_image (when images is enabled)
+    session_search: bool = True  # give sessions session_search / session_read (when search is enabled)
 
 
 @dataclass
@@ -189,6 +196,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     endpoint: EndpointConfig = field(default_factory=EndpointConfig)
     images: ImagesConfig = field(default_factory=ImagesConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -243,6 +251,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
             memory_library=bool(spec.get("memory_library", True)),
             web=bool(spec.get("web", True)),
             images=bool(spec.get("images", True)),
+            session_search=bool(spec.get("session_search", True)),
         )
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
@@ -278,6 +287,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         web=WebConfig(**(raw.get("web") or {})),
         endpoint=EndpointConfig(**(raw.get("endpoint") or {})),
         images=ImagesConfig(**(raw.get("images") or {})),
+        search=SearchConfig(**(raw.get("search") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

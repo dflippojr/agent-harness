@@ -112,6 +112,15 @@ CREATE TABLE IF NOT EXISTS templates (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+-- Session search (search.py): one row per indexed event.
+CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+    text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED,
+    tokenize = 'porter unicode61 remove_diacritics 2'
+);
 """
 
 # Columns added after a table first shipped: (table, column, definition).
@@ -161,6 +170,7 @@ class Database:
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         self.lock = threading.RLock()
+        self._build_search_index()
 
     def close(self) -> None:
         self.conn.close()
@@ -225,7 +235,56 @@ class Database:
                 "INSERT INTO events (session_id, ts, type, data) VALUES (?, ?, ?, ?)",
                 (sid, ts, type_, json.dumps(data)),
             )
+            self._index_event(sid, cur.lastrowid, ts, type_, data)
         return {"seq": cur.lastrowid, "session_id": sid, "ts": ts, "type": type_, "data": data}
+
+    # session search (search.py)
+    def _index_event(self, sid: str, seq: int, ts: float, type_: str, data: dict) -> None:
+        from .search import event_text
+        item = event_text(type_, data)
+        if item and item[1].strip():
+            self.conn.execute("INSERT INTO search_index (text, session_id, seq, kind, ts) VALUES (?, ?, ?, ?, ?)",
+                              (item[1], sid, seq, item[0], ts))
+
+    def _build_search_index(self) -> None:
+        """Index events written before search existed (or by an older index version). Runs once."""
+        from .search import INDEX_VERSION
+        with self.lock:
+            row = self.conn.execute("SELECT value FROM meta WHERE key = 'search_index'").fetchone()
+            if row and row["value"] == INDEX_VERSION:
+                return
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute("DELETE FROM search_index")
+                for r in self.conn.execute("SELECT seq, session_id, ts, type, data FROM events ORDER BY seq").fetchall():
+                    self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]))
+                self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('search_index', ?)", (INDEX_VERSION,))
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+            self.conn.execute("COMMIT")
+
+    def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600) -> list[dict]:
+        sql = ("SELECT session_id, seq, kind, ts, bm25(search_index) AS rank, "
+               "snippet(search_index, 0, char(2), char(3), '…', 16) AS snippet "
+               "FROM search_index WHERE search_index MATCH ?")
+        params: list = [fts_query]
+        if exclude:
+            sql += " AND session_id != ?"
+            params.append(exclude)
+        with self.lock:
+            try:
+                rows = self.conn.execute(sql + " ORDER BY rank LIMIT ?", [*params, max_rows]).fetchall()
+            except sqlite3.OperationalError:  # a query FTS5 can't parse despite the quoting: no results
+                return []
+        return [dict(r) for r in rows]
+
+    def session_brief(self, sid: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT id, project, target, title, status, created_at, updated_at, branch, "
+                                    "review, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?",
+                                    (sid,)).fetchone()
+        return dict(row) if row else None
 
     def events(self, sid: str, after: int = 0) -> list[dict]:
         with self.lock:
