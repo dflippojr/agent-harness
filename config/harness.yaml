@@ -102,3 +102,13 @@ memory_library:
   clone_dir: D:/Agents/memory-library
   refresh_minutes: 10
   categories: [project-ideas, work, home-and-pets, sport, taste-and-media, communication-preferences]
+
+# web_search / web_fetch for agents (harness/web_tools.py), run by the daemon without approval (user decision,
+# Phase 6b). Fetches refuse non-public addresses (loopback, private, CGNAT/tailnet, link-local, metadata), re-check
+# every redirect, and connect to the checked IP. SearXNG lives in D:/Docker/searxng. Projects opt out with `web: false`.
+web:
+  enabled: true
+  searxng_url: http://127.0.0.1:8888
+  page_chars: 15000
+  max_bytes: 5242880
+  timeout_seconds: 20

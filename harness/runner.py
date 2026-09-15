@@ -94,6 +94,7 @@ class Runner:
         self.generating: set[str] = set()       # sessions with a model call in flight (the guard waits for them)
         self.gpu_paused_sessions: set[str] = set()
         self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
+        self.web = None                         # web_tools.WebTools, set by the manager when enabled
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
 
     # helpers
@@ -116,12 +117,22 @@ class Runner:
         homelab = Homelab(self.cfg.homelab) if project and project.homelab else None
         return Workspace(Path(s["workspace"]), self.sandbox(s), self.cfg.repos_dir, model.context_tokens, homelab)
 
-    def tool_schemas(self, s: dict, ws) -> list[dict]:
-        schemas = ws.schemas()
+    def daemon_toolkits(self, s: dict) -> list:
+        """Tools that run in the daemon for every target (memory library, web), as enabled for the project."""
         project = self.cfg.projects.get(s["project"])
+        kits = []
         if self.memory is not None and (project is None or project.memory_library):
-            from .memory_library import schemas as memory_schemas
-            schemas = schemas + memory_schemas(self.memory.cfg)
+            kits.append(self.memory)
+        if self.web is not None and (project is None or project.web):
+            kits.append(self.web)
+        return kits
+
+    def tool_schemas(self, s: dict, ws) -> list[dict]:
+        from . import memory_library, web_tools
+        schemas = ws.schemas()
+        for kit in self.daemon_toolkits(s):
+            module = memory_library if kit is self.memory else web_tools
+            schemas = schemas + module.schemas(kit.cfg)
         return schemas
 
     def policy(self, s: dict) -> Policy:
@@ -604,8 +615,9 @@ class Runner:
         started = time.monotonic()
         ok = True
         try:
-            if self.memory is not None and name in self.memory.tool_names:
-                output = await self.memory.call(name, args)  # daemon-side for every target
+            kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
+            if kit is not None:
+                output = await kit.call(name, args)  # daemon-side for every target
             elif isinstance(ws, RemoteWorkspace):
                 await self._wait_for_target(sid)
                 output = await self._remote_call(sid, ws, name, args)

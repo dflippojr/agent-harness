@@ -107,6 +107,17 @@ class MemoryLibraryConfig:
 
 
 @dataclass
+class WebConfig:
+    """web_search / web_fetch for agents (web_tools.py). Both run in the daemon; the sandbox stays offline."""
+    enabled: bool = False
+    searxng_url: str = "http://127.0.0.1:8888"
+    page_chars: int = 15000          # characters per web_fetch call (~4K tokens)
+    max_bytes: int = 5 * 2**20       # refuse larger downloads
+    timeout_seconds: float = 20
+    user_agent: str = "agent-harness/1.0 (personal research agent)"
+
+
+@dataclass
 class RunnerConfig:
     """A machine that runs tool calls for sessions targeting it (Phase 4: the MacBook). The model stays on the tower."""
     name: str
@@ -128,6 +139,7 @@ class Project:
     quota_mb: int = 0       # workspace quota override
     target: str = "tower"   # where tools run: tower, or a runner name such as macbook (repo is then a path there)
     memory_library: bool = True  # give sessions the memory-library tools (when memory_library is enabled)
+    web: bool = True             # give sessions web_search / web_fetch (when web is enabled)
 
 
 @dataclass
@@ -149,6 +161,7 @@ class Config:
     gpu_guard: GpuGuardConfig = field(default_factory=GpuGuardConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
+    web: WebConfig = field(default_factory=WebConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -201,6 +214,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
             quota_mb=int(spec.get("quota_mb") or 0),
             target=str(spec.get("target") or "tower"),
             memory_library=bool(spec.get("memory_library", True)),
+            web=bool(spec.get("web", True)),
         )
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
@@ -233,6 +247,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         gpu_guard=GpuGuardConfig(**(raw.get("gpu_guard") or {})),
         backup=BackupConfig(**(raw.get("backup") or {})),
         memory_library=MemoryLibraryConfig(**(raw.get("memory_library") or {})),
+        web=WebConfig(**(raw.get("web") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

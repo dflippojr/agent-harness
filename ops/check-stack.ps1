@@ -41,6 +41,10 @@ Check 'ntfy :8095' {
     if (-not $h.healthy) { throw 'unhealthy' }
     'healthy'
 }
+Check 'SearXNG :8888' {
+    $r = Get-Json 'http://127.0.0.1:8888/search?q=test&format=json'
+    "$(@($r.results).Count) results for a test query"
+}
 Check 'Harness daemon :8100' {
     $null = Get-Json 'http://127.0.0.1:8100/health'
     $m = Get-Json 'http://127.0.0.1:8100/models/status'

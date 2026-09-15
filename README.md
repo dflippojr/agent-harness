@@ -4,7 +4,16 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 and are driven from the phone or MacBook over Tailscale. The phased plan lives in the agent
 memory library (`categories/project-ideas/capsules/local-agent-harness.md`).
 
-## Phase 5: operations hardening (current)
+## Phase 6: extensions (current)
+
+Built as mini-phases: 6a Hermes Agent study (`docs/phase6a-hermes-study.md`), 6b web search (`docs/phase6b-results.md`),
+then 6c inference endpoint, 6d image generation, 6e distributable daemon.
+
+- Web (`web:` in `config/harness.yaml`): `web_search` via SearXNG (`D:\Docker\searxng`, 127.0.0.1:8888) and `web_fetch`
+  (public addresses only, redirects re-checked, 15K characters per call, `find` for passages). No approval needed;
+  projects opt out with `web: false`.
+
+## Phase 5: operations hardening
 
 GPU contention guard, metrics and dashboard, nightly backups, read-only memory library for agents.
 Details and verification: `docs/phase5-results.md`.
