@@ -1,0 +1,3 @@
+# Files copied to the MacBook must keep LF endings (Git for Windows defaults to autocrlf=true).
+*.sh text eol=lf
+macrunner/** text eol=lf

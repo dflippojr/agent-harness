@@ -21,7 +21,8 @@ from .db import Database
 
 log = logging.getLogger("harness.notify")
 
-WATCHED = {"approval_requested", "approval_decided", "run_finished", "model_waking"}
+WATCHED = {"approval_requested", "approval_decided", "run_finished", "model_waking", "target_waiting",
+           "target_online"}
 
 
 def _short(text: str, limit: int) -> str:
@@ -144,6 +145,19 @@ class Notifier:
             return {**base, "title": f"Waking the model: {title}", "priority": 2, "tags": ["hourglass"],
                     "message": f"The model was asleep; the first step takes about {d['expected_seconds']} s.",
                     "click": self.link(f"/#/s/{sid}")}
+
+        if event["type"] == "target_waiting":
+            # Replaced by the "back online" notification through the same sequence id.
+            return {**base, "sequence_id": f"target-{sid}", "title": f"Waiting for the {d['target']}: {title}",
+                    "priority": 3, "tags": ["zzz"], "click": self.link(f"/#/s/{sid}"),
+                    "message": f"The {d['target']} is offline or asleep. The task continues when it wakes."}
+
+        if event["type"] == "target_online":
+            seconds = d.get("seconds", 0)
+            waited = f"{round(seconds / 60)} min" if seconds >= 90 else f"{seconds} s"
+            return {**base, "sequence_id": f"target-{sid}", "title": f"Resumed on the {d['target']}: {title}",
+                    "priority": 2 if seconds >= 60 else 1, "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
+                    "message": f"The {d['target']} is back after {waited}; the task is running again."}
 
         if event["type"] == "approval_decided":
             approval = self.db.get_approval(d["id"])

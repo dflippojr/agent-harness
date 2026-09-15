@@ -16,13 +16,16 @@ from .notify import Notifier
 from .warmup import ModelWarmer
 from .config import Config
 from .db import Database
-from .runner import ACTIVE, HOMELAB_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner, new_run
+from .remote import RunnerError, RunnerHub, RunnerOffline
+from .runner import (ACTIVE, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner,
+                     new_run)
 from .scheduler import GpuScheduler
 from . import llm, projects
 
 log = logging.getLogger("harness.manager")
 
 TARGETS = ("tower", "macbook")
+REMOTE_WORKSPACE_ROOT = "~/.agent-harness/workspaces"  # where runners keep session workspaces (display only)
 
 
 def public_approval(a: dict | None) -> dict | None:
@@ -42,11 +45,16 @@ class Manager:
         self.bus = EventBus(self.db)
         self.scheduler = GpuScheduler(self._queue_changed)
         self.warmer = ModelWarmer()
-        self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer)
+        self.hub = RunnerHub(cfg.runners, keep_awake=self._keep_awake)
+        self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
         self.maintenance = Maintenance(cfg, self.db, self.runner)
+
+    def _keep_awake(self, target: str) -> bool:
+        """A runner holds off idle sleep while one of its sessions is actually running."""
+        return any(s["target"] == target for s in self.db.sessions_with_status("running"))
 
     def _queue_changed(self, positions: dict[str, int]) -> None:
         for sid, position in positions.items():
@@ -63,6 +71,7 @@ class Manager:
 
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
+        self.hub.close()
         tasks = list(self.tasks.values())
         for task in tasks:
             task.cancel()
@@ -88,38 +97,57 @@ class Manager:
         return self.db.get_session(self.resolve_id(ref))
 
     # operations
-    def create(self, prompt: str, project: str = "scratch", target: str = "tower", model: str | None = None,
+    def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
                title: str | None = None) -> dict:
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
         if project not in self.cfg.projects:
             raise HarnessError(400, f"unknown project {project!r}; known: {', '.join(self.cfg.projects)}")
+        spec = self.cfg.projects[project]
+        # A project's repo is a path on one machine, so the project decides where its sessions run.
+        target = target or spec.target
         if target not in TARGETS:
             raise HarnessError(400, f"target must be one of {TARGETS}")
-        if target != "tower":
-            raise HarnessError(501, "the macbook target arrives in Phase 4")
+        if target != spec.target:
+            raise HarnessError(400, f"project {project} runs on the {spec.target}, not the {target}")
         model = model or self.cfg.default_model
         if model not in self.cfg.models:
             raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
-        self.cfg.workspaces_dir.mkdir(parents=True, exist_ok=True)
-        free_gb = shutil.disk_usage(self.cfg.workspaces_dir).free / 2**30
-        if free_gb < self.cfg.cleanup.min_free_gb:
-            raise HarnessError(507, f"only {free_gb:.1f} GB free on the data drive "
-                                    f"(minimum {self.cfg.cleanup.min_free_gb} GB); run cleanup first")
+        remote = target != "tower"
+        if remote:
+            free_gb = self.hub.state[target].info.get("free_gb")
+            minimum = self.cfg.runners[target].min_free_gb
+            if free_gb is not None and free_gb < minimum:
+                raise HarnessError(507, f"only {free_gb:.1f} GB free on the {target} (minimum {minimum} GB)")
+        else:
+            self.cfg.workspaces_dir.mkdir(parents=True, exist_ok=True)
+            free_gb = shutil.disk_usage(self.cfg.workspaces_dir).free / 2**30
+            if free_gb < self.cfg.cleanup.min_free_gb:
+                raise HarnessError(507, f"only {free_gb:.1f} GB free on the data drive "
+                                        f"(minimum {self.cfg.cleanup.min_free_gb} GB); run cleanup first")
 
         sid = uuid.uuid4().hex[:10]
-        workspace = self.cfg.workspaces_dir / sid
-        workspace.mkdir(parents=True, exist_ok=False)
-        spec = self.cfg.projects[project]
-        system = SYSTEM_PROMPT
+        if remote:
+            workspace = f"{target}:{REMOTE_WORKSPACE_ROOT}/{sid}"
+        else:
+            workspace = self.cfg.workspaces_dir / sid
+            workspace.mkdir(parents=True, exist_ok=False)
+        system = MAC_SYSTEM_PROMPT if remote else SYSTEM_PROMPT
         branch = ""
         if spec.repo:
             branch = projects.branch_name(sid)
             repo_name = spec.repo.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".git")
             # The base branch is filled in once the repo is cloned (runner._prepare_repo).
-            system += "\n\n" + REPO_PROMPT.format(repo_name=repo_name, branch=branch, base_branch="{base_branch}")
+            system += "\n\n" + (MAC_REPO_PROMPT if remote else REPO_PROMPT).format(
+                repo_name=repo_name, branch=branch, base_branch="{base_branch}")
         if spec.homelab:
             system += "\n\n" + HOMELAB_PROMPT
+            if not spec.repo:
+                repos = [p.name for p in self.cfg.projects.values() if p.repo and p.target == "tower"]
+                system += ("\n\nThis project has no repository, so you can't change files on the server (the workspace "
+                           "is an empty scratch directory the services never see). If the fix needs a code or config "
+                           "change, don't look for a way around that: finish with the diagnosis, the exact change, and "
+                           "which project to run it in" + (f" ({', '.join(repos)})" if repos else "") + ".")
         instructions = spec.instructions.strip()
         if instructions:
             system += f"\n\nProject instructions ({project}):\n{instructions}"
@@ -175,10 +203,22 @@ class Manager:
         return self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
                            model=s["model"] if s["model"] in self.cfg.models else None, title=s["title"])
 
+    async def remote(self, s: dict, op: str, params: dict, timeout: float = 300):
+        """A request to a session's runner from a user action: fails fast instead of waiting for a sleeping Mac."""
+        try:
+            return await self.hub.call(s["target"], op, {"session": s["id"], **params}, timeout=timeout,
+                                       wait_if_offline=False)
+        except RunnerOffline as e:
+            raise HarnessError(503, f"{e}; try again when it's awake") from None
+        except RunnerError as e:
+            raise HarnessError(e.status, str(e)) from None
+
     async def changes(self, ref: str) -> dict:
         s = self.get(ref)
         if s["workspace_removed"]:
             return {"repos": [], "removed": True}
+        if s["target"] != "tower":
+            return await self.remote(s, "changes", {"base_commit": s["base_commit"]}, timeout=120)
         return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None)
 
     # review of a git project's session branch
@@ -198,6 +238,8 @@ class Manager:
             raise HarnessError(409, "the session's workspace is gone")
         if not s["base_commit"]:
             raise HarnessError(409, "the repository was never checked out")
+        if s["target"] != "tower":
+            return await self._review_remote(sid, s, project, action)
         ws = Path(s["workspace"])
         try:
             if action == "merge":
@@ -222,6 +264,31 @@ class Manager:
         with self.db.tx():
             self.db.update_session(sid, review=state, review_detail=detail)
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail, "head": head[:12]})
+        self.runner.write_transcript(sid)
+        return self.db.get_session(sid)
+
+    async def _review_remote(self, sid: str, s: dict, project, action: str) -> dict:
+        if action not in ("merge", "push", "discard"):
+            raise HarnessError(404, f"unknown review action {action!r}")
+        params = {"repo": project.repo, "branch": s["branch"], "base_branch": s["base_branch"], "title": s["title"]}
+        try:
+            result = await self.remote(s, action, params, timeout=600)
+        except HarnessError as e:
+            self.bus.emit(sid, "error", {"message": f"{action} failed: {e}"})
+            raise
+        if action == "merge":
+            state, detail = ("merged" if result["merged"] else ""), result["message"]
+        elif action == "push":
+            state, detail = "pushed", result["message"]
+        else:
+            state, detail = "discarded", "branch deleted and workspace removed"
+        with self.db.tx():
+            fields = {"review": state, "review_detail": detail}
+            if action == "discard":
+                fields["workspace_removed"] = 1
+            self.db.update_session(sid, **fields)
+            self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail,
+                                          "head": result.get("head", "")[:12]})
         self.runner.write_transcript(sid)
         return self.db.get_session(sid)
 
@@ -271,10 +338,15 @@ class Manager:
     def summary(self, s: dict) -> dict:
         out = {k: v for k, v in s.items() if k not in ("context", "inbox")}
         out["queue_position"] = self.scheduler.positions().get(s["id"])
+        model = self.cfg.models.get(s["model"])
+        out["context_used"] = (s.get("run") or {}).get("context_tokens", 0)
+        out["context_limit"] = model.context_tokens if model else 0
         out["last_event_seq"] = self.db.last_event_seq(s["id"])
         project = self.cfg.projects.get(s["project"])
         out["repo_kind"] = ("" if not project or not project.repo else
                             "url" if projects.is_url(project.repo) else "local")
+        if s["target"] != "tower":
+            out["target_online"] = self.hub.online(s["target"])
         if s["status"] == "waiting_approval":
             out["pending_approvals"] = [public_approval(a) for a in self.db.pending_approvals(s["id"])]
         return out

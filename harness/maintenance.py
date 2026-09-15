@@ -6,7 +6,9 @@ Runs every `cleanup.interval_minutes` and on demand (POST /maintenance/cleanup):
 - deletes the workspaces of finished sessions after `workspace_retention_days`. The branch of a local git project
   was already saved into the source repository at the end of each run, so only the checkout goes. A URL project
   with commits that were never pushed is kept;
-- deletes workspace directories that belong to no session.
+- deletes workspace directories that belong to no session;
+- asks runners (the MacBook) to delete their finished sessions' workspaces after the same retention, saving the
+  branch into the Mac's source repository first. A runner that's offline is simply asked again next time.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from pathlib import Path
 from . import projects
 from .config import Config
 from .db import Database
+from .remote import RunnerError
 from .runner import ACTIVE, Runner, dir_size
 from .sandbox import run_cmd
 
@@ -74,6 +77,7 @@ class Maintenance:
                       "kept": []}
             await self._containers(now, report)
             await asyncio.to_thread(self._workspaces, now, report)
+            await self._remote_workspaces(now, report)
             self.last_report = report
             if any(report[k] for k in ("containers_removed", "workspaces_removed", "orphans_removed")):
                 log.info("cleanup: %s", {k: v for k, v in report.items() if k != "at"})
@@ -124,6 +128,32 @@ class Maintenance:
             self.remove_workspace(s["id"])
             report["workspaces_removed"].append(s["id"])
 
+    async def _remote_workspaces(self, now: float, report: dict) -> None:
+        retention = self.cfg.cleanup.workspace_retention_days * 86400
+        hub = self.runner.hub
+        for s in self.db.sessions_with_status("done", "failed", "cancelled"):
+            target = s["target"]
+            if target == "tower" or s["workspace_removed"] or now - s["updated_at"] < retention:
+                continue
+            if not hub.online(target):
+                continue
+            project = self.cfg.projects.get(s["project"])
+            try:
+                result = await hub.call(target, "cleanup_workspace", {
+                    "session": s["id"], "repo": project.repo if project else "", "branch": s["branch"],
+                    "base_commit": s["base_commit"], "review": s["review"]}, timeout=300, wait_if_offline=False)
+            except RunnerError as e:
+                report["kept"].append({"session": s["id"], "reason": str(e)})
+                continue
+            except Exception as e:  # noqa: BLE001 - offline between the check and the call
+                report["kept"].append({"session": s["id"], "reason": f"{type(e).__name__}: {e}"})
+                continue
+            if result.get("removed"):
+                self.db.update_session(s["id"], workspace_removed=1)
+                report["workspaces_removed"].append(s["id"])
+            else:
+                report["kept"].append({"session": s["id"], "reason": result.get("reason", "kept by the runner")})
+
     def unsaved_work(self, s: dict) -> str:
         """Why deleting this workspace would lose work, or ''."""
         project = self.cfg.projects.get(s["project"])
@@ -167,5 +197,6 @@ class Maintenance:
         out["containers"] = [dict(zip(("name", "state", "size"), line.split("\t")))
                              for line in text.splitlines()] if code == 0 else []
         out["quota_mb"] = self.cfg.cleanup.workspace_quota_mb
+        out["runners"] = self.runner.hub.status()
         out["last_cleanup"] = self.last_report
         return out

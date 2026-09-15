@@ -31,6 +31,9 @@ class Completion:
 
 
 DeltaCallback = Callable[[str, str], Awaitable[None]]  # (kind: "content" | "reasoning", text)
+# (processed, total, cache): prompt tokens evaluated so far (cached prefix included), the whole prompt, and the
+# cached prefix (-1 if the server doesn't say)
+ProgressCallback = Callable[[int, int, int], Awaitable[None]]
 
 
 async def chat(
@@ -41,6 +44,7 @@ async def chat(
     max_tokens: int | None = None,
     extra: dict | None = None,
     timeout: float = 1800,
+    on_progress: ProgressCallback | None = None,
 ) -> Completion:
     payload = {
         "model": model.name,
@@ -54,6 +58,8 @@ async def chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if on_progress:
+        payload["return_progress"] = True  # llama-server streams prompt_progress chunks while reading the prompt
 
     out = Completion()
     calls: dict[int, dict] = {}
@@ -75,6 +81,10 @@ async def chat(
                     chunk = json.loads(data)
                     if "error" in chunk:
                         raise LLMError(f"stream error: {json.dumps(chunk['error'])[:500]}", retryable=True)
+                    progress = chunk.get("prompt_progress")
+                    if progress and on_progress:
+                        await on_progress(int(progress.get("processed", 0)), int(progress.get("total", 0)),
+                                          int(progress.get("cache", -1)))
                     if chunk.get("usage"):
                         out.prompt_tokens = chunk["usage"].get("prompt_tokens", 0)
                         out.completion_tokens = chunk["usage"].get("completion_tokens", 0)

@@ -4,7 +4,23 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 and are driven from the phone or MacBook over Tailscale. The phased plan lives in the agent
 memory library (`categories/project-ideas/capsules/local-agent-harness.md`).
 
-## Phase 3: tower projects and homelab tasks (current)
+## Phase 4: MacBook target (current)
+
+Projects with `target: macbook` run their tools on the MacBook; the model and agent loop stay on the tower.
+Details and verification: `docs/phase4-results.md`.
+
+- Runner: `macrunner/` (stdlib-only Python 3.9, launchd agent). It connects out to the daemon over the tailnet and
+  long-polls `POST /runners/macbook/poll` with a bearer token. Shell commands run natively under `sandbox-exec`
+  (`macrunner/sandbox.sb`): writes limited to the workspace, temp and build caches; credentials and personal
+  folders unreadable; no network unless the command was approved with `network: true`.
+- Install or update from the tower: `.\ops\macbook\deploy.ps1 -MacHost <host> -MacUser <user>` (needs Remote Login
+  on the Mac while deploying). Daemon side: `runners:` in `config/harness.yaml`; runner side:
+  `~/.agent-harness/runner/config.json` (`repo_roots` limits which Mac repos projects may use).
+- Sessions for an offline or sleeping Mac wait (`waiting_target`) without holding the GPU, notify, and resume when
+  the runner reconnects. While a Mac session runs, the runner holds `caffeinate -i`.
+- `GET /runners` shows runner state; so does the Settings screen's Disk card.
+
+## Phase 3: tower projects and homelab tasks
 
 Git-backed projects with a branch per session, allowlisted homelab tools, cleanup and quotas.
 Details and verification: `docs/phase3-results.md`.

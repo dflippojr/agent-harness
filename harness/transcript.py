@@ -79,6 +79,12 @@ def render(db: Database, sid: str) -> str:
             lines += [f"> {at} · model was asleep; waking it (about {d['expected_seconds']} s)", ""]
         elif t == "model_ready":
             lines += [f"> {at} · model ready after {d['seconds']} s", ""]
+        elif t == "compaction_started":
+            lines += [f"> {at} · summarizing {d['messages']} older messages to free context", ""]
+        elif t == "target_waiting":
+            lines += [f"> {at} · waiting for the {d['target']} (offline or asleep)", ""]
+        elif t == "target_online":
+            lines += [f"> {at} · {d['target']} back after {d['seconds']} s", ""]
         elif t == "workspace_ready":
             lines += [f"> {at} · cloned `{d['repo']}` on branch `{d['branch']}` from `{d['base_branch']}` "
                       f"({d['base_commit'][:10]})", ""]

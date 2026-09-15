@@ -13,15 +13,27 @@ const $back = document.getElementById("back");
 const $conn = document.getElementById("conn");
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 const STATUS_LABEL = {
-  queued: "queued", running: "running", waiting_approval: "needs approval",
+  queued: "queued", running: "running", waiting_approval: "needs approval", waiting_target: "waiting for Mac",
   done: "done", failed: "failed", cancelled: "cancelled",
 };
+const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
+  "target_waiting", "target_online", "compaction_started", "prompt_progress",
 ];
 const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
+const fmtElapsed = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+};
+const fmtTokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : `${n || 0}`);
+// llama-server's prompt progress counts the cached prefix as processed; the bar covers only the part being read.
+const readFraction = (d) => (d.total > d.cached ? (d.processed - d.cached) / (d.total - d.cached) : null);
+const readingText = (what, d) => `${what} ${fmtTokens(Math.max(0, d.processed - d.cached))} of ${fmtTokens(d.total - d.cached)} new tokens${d.cached ? ` (${fmtTokens(d.cached)} cached)` : ""}`;
+const progressBar = (fraction) => h("div", { class: `progress${fraction === null ? " indeterminate" : ""}` },
+  h("span", { style: fraction === null ? "" : `width:${Math.max(2, Math.min(100, fraction * 100)).toFixed(1)}%` }));
 
 let cleanup = [];
 const onLeave = (fn) => cleanup.push(fn);
@@ -225,6 +237,7 @@ async function viewList() {
           pending ? h("span", { class: "badge waiting_approval" }, `${pending} approval${pending > 1 ? "s" : ""}`) : null,
           s.queue_position > 0 ? h("span", {}, `#${s.queue_position} in queue`) : null,
           s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, REVIEW_LABEL[s.review] || s.review) : null,
+          s.target !== "tower" ? h("span", {}, `💻 ${TARGET_LABEL[s.target] || s.target}`) : null,
           h("span", {}, s.project), h("span", {}, ago(s.updated_at))),
         s.answer_preview ? h("div", { class: "preview" }, s.answer_preview) : null);
     }));
@@ -249,7 +262,22 @@ async function viewNew() {
   const tplSelect = h("select", {},
     h("option", { value: "" }, templates.length ? "— none —" : "No templates yet"),
     templates.map((t) => h("option", { value: t.id }, t.name)));
-  const project = h("select", {}, projects.map((p) => h("option", { value: p.name }, p.description ? `${p.name} — ${p.description}` : p.name)));
+  const project = h("select", {}, projects.map((p) => h("option", { value: p.name },
+    (p.target !== "tower" ? `💻 ` : "") + (p.description ? `${p.name} — ${p.description}` : p.name))));
+  const targetState = h("div", { class: "muted small", style: "margin-top:6px" });
+  const showTarget = async () => {
+    const p = projects.find((x) => x.name === project.value);
+    if (!p || p.target === "tower") { targetState.textContent = ""; return; }
+    try {
+      const r = (await api("/runners")).find((x) => x.name === p.target);
+      const label = TARGET_LABEL[p.target] || p.target;
+      targetState.textContent = r && r.online
+        ? `Runs on the ${label} (online${r.info.free_gb !== undefined ? `, ${r.info.free_gb} GB free` : ""})`
+        : `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
+    } catch (_) { /* offline */ }
+  };
+  project.addEventListener("change", showTarget);
+  showTarget();
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   const prompt = h("textarea", { placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
   const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
@@ -282,6 +310,7 @@ async function viewNew() {
     const t = templates.find((x) => x.id === tplSelect.value);
     if (!t) return;
     project.value = t.project;
+    showTarget();
     if (t.model) model.value = t.model;
     prompt.value = t.prompt;
   });
@@ -304,7 +333,7 @@ async function viewNew() {
   },
   templates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
-  h("label", {}, "Project"), project,
+  h("label", {}, "Project"), project, targetState,
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
   h("div", { class: "row", style: "margin-top:18px" },
@@ -354,12 +383,22 @@ async function viewSession(sid, tab, focusApproval) {
       onclick: () => { location.hash = name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`; },
     }, name[0].toUpperCase() + name.slice(1))));
   const head = h("div", { class: "row small" });
-  $app.append(head, tabs);
+  const usage = h("div", { class: "row small usage" });
+  $app.append(head, usage, tabs);
+  let totals = session.totals || {};
+  let ctxUsed = session.context_used || 0;
+  const ctxLimit = session.context_limit || 0;
 
   const renderHead = () => {
     fill(head, badge(session.status),
       session.queue_position > 0 ? h("span", { class: "muted" }, `#${session.queue_position} in GPU queue`) : null,
-      h("span", { class: "muted" }, `${session.project} · ${session.model}`));
+      h("span", { class: "muted" }, `${session.project}${session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : ""} · ${session.model}`));
+    const pct = ctxLimit && ctxUsed ? Math.round((100 * ctxUsed) / ctxLimit) : null;
+    fill(usage,
+      h("span", { class: "muted", title: "Cumulative tokens for this session (prompt tokens in, generated tokens out)" },
+        `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`),
+      pct === null ? null : h("span", { class: `ctx${pct >= 55 ? " high" : ""}`, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up.` },
+        progressBar(pct / 100), `${pct}% context`));
   };
   renderHead();
 
@@ -415,11 +454,50 @@ async function viewSession(sid, tab, focusApproval) {
   renderActions();
 
   // transcript rendering
-  const nearBottom = () => window.innerHeight + window.scrollY >= document.body.scrollHeight - 160;
+  // Follow new output only while the reader is at the bottom. Any upward scroll (wheel, finger, momentum) stops
+  // following, however small; reaching the bottom again resumes it. A generous "near the bottom" margin used to
+  // snap slow upward scrolls back down on every streamed token.
+  let follow = true;
+  let touching = false;
+  let lastY = window.scrollY;
+  const pageHeight = () => document.documentElement.scrollHeight;
+  const atBottom = () => window.innerHeight + window.scrollY >= pageHeight() - 2;
+  const jump = h("button", { class: "btn small jump", hidden: true, onclick: () => { follow = true; jump.hidden = true; scrollDown(true); } }, "↓ Latest");
+  document.body.append(jump);
+  const scrollDown = (force = false) => {
+    if (!force && (!follow || touching)) return;
+    window.scrollTo(0, pageHeight());
+    lastY = window.scrollY;
+  };
+  const onScroll = () => {
+    const y = window.scrollY;
+    if (y < lastY - 0.5 && !atBottom()) follow = false; // content shrinking at the bottom also moves y; ignore that
+    else if (atBottom()) follow = true;
+    lastY = y;
+    if (follow) jump.hidden = true;
+  };
+  const stopFollowing = () => { follow = false; };
+  const onWheel = (e) => { if (e.deltaY < 0) stopFollowing(); };
+  const onTouchStart = () => { touching = true; };
+  const onTouchEnd = () => { touching = false; };
+  window.addEventListener("scroll", onScroll, { passive: true });
+  window.addEventListener("wheel", onWheel, { passive: true });
+  window.addEventListener("touchstart", onTouchStart, { passive: true });
+  window.addEventListener("touchend", onTouchEnd, { passive: true });
+  window.addEventListener("touchcancel", onTouchEnd, { passive: true });
+  onLeave(() => {
+    window.removeEventListener("scroll", onScroll);
+    window.removeEventListener("wheel", onWheel);
+    window.removeEventListener("touchstart", onTouchStart);
+    window.removeEventListener("touchend", onTouchEnd);
+    window.removeEventListener("touchcancel", onTouchEnd);
+    jump.remove();
+  });
+  const grew = () => { if (follow && !touching) scrollDown(); else jump.hidden = false; };
   const add = (el) => {
-    const stick = nearBottom();
     feed.append(el);
-    if (stick) window.scrollTo(0, document.body.scrollHeight);
+    if (live && live.el !== el) feed.append(live.el); // the in-progress turn always stays last
+    grew();
     return el;
   };
   const calls = new Map();   // tool call id -> {el, state, body}
@@ -428,16 +506,48 @@ async function viewSession(sid, tab, focusApproval) {
   let lastSeq = 0;
   let lastContent = "";
   let wakingNote = null;
+  let targetNote = null;
+  let compactNote = null;    // {el, label, bar, detail, elapsed, start} while older context is being summarized
+  let lastEventAt = Date.now();  // server time of the latest persisted event: when the current step began
+  let prevEventAt = Date.now();
+  const pendingCalls = new Set();  // tool calls of the last assistant turn without a result yet
 
   const liveBubble = () => {
     if (live) return live;
     const thinkText = h("div", { class: "text" });
-    const think = h("details", { class: "thinking" }, h("summary", { class: "dots" }, "Thinking"), thinkText);
+    const label = h("span", { class: "dots" }, "Thinking");
+    const elapsed = h("span", { class: "elapsed" });
+    const think = h("details", { class: "thinking" }, h("summary", {}, label, elapsed), thinkText);
     const content = h("div", { class: "msg assistant", style: "white-space:pre-wrap", hidden: true });
     const el = add(h("div", { class: "ev" }, think, content));
-    live = { el, think, thinkText, content, chars: 0 };
+    live = { el, think, thinkText, content, label, elapsed, start: lastEventAt, frozen: false, chars: 0, reading: null };
+    tick();
     return live;
   };
+  // A model turn has started when the session is running and nothing is waiting on a tool.
+  const maybeThinking = () => {
+    if (session.status === "running" && pendingCalls.size === 0 && !compactNote) liveBubble();
+  };
+
+  const compacting = () => {
+    if (compactNote) return compactNote;
+    const label = h("span", { class: "dots" }, "Condensing older context");
+    const elapsed = h("span", { class: "elapsed" });
+    const bar = h("div");
+    const detail = h("div", { class: "muted small" }, "Summarizing older messages so the agent can keep going");
+    fill(bar, progressBar(null));
+    const el = add(h("div", { class: "note compacting ev" }, h("div", { class: "row between" }, label, elapsed), bar, detail));
+    compactNote = { el, label, bar, detail, elapsed, start: lastEventAt };
+    tick();
+    return compactNote;
+  };
+  function tick() {
+    const now = Date.now();
+    if (live && !live.frozen) live.elapsed.textContent = ` ${fmtElapsed(now - live.start)}`;
+    if (compactNote) compactNote.elapsed.textContent = fmtElapsed(now - compactNote.start);
+  }
+  const ticker = setInterval(tick, 1000);
+  onLeave(() => clearInterval(ticker));
 
   const toolEl = (call) => {
     const fn = call.function || {};
@@ -490,26 +600,46 @@ async function viewSession(sid, tab, focusApproval) {
 
   const handlers = {
     user_message: (e) => { add(h("div", { class: "ev msg user" }, e.data.content)); },
+    prompt_progress: (e) => {
+      const b = liveBubble();
+      const d = e.data;
+      if (!b.reading) {
+        b.reading = h("div", { class: "reading small muted" });
+        b.el.prepend(b.reading);
+      }
+      fill(b.reading, readingText("Reading context", d), progressBar(readFraction(d)));
+      grew();
+    },
     delta: (e) => {
       const b = liveBubble();
+      if (b.reading) { b.reading.remove(); b.reading = null; }
       if (e.data.kind === "reasoning") {
         b.thinkText.textContent += e.data.text;
         b.chars += e.data.text.length;
       } else {
         b.content.hidden = false;
         b.content.textContent += e.data.text;
-        b.think.querySelector("summary").classList.remove("dots");
-        b.think.querySelector("summary").textContent = "Thought";
+        if (!b.frozen) {
+          tick();
+          b.frozen = true;
+          b.label.classList.remove("dots");
+          b.label.textContent = "Thought for";
+        }
       }
-      if (nearBottom()) window.scrollTo(0, document.body.scrollHeight);
+      if (follow && !touching) scrollDown();
     },
     assistant: (e) => {
       const d = e.data;
+      if (d.totals) totals = d.totals;
+      if (d.prompt_tokens) ctxUsed = d.prompt_tokens + d.completion_tokens;
+      renderHead();
       live?.el.remove();
       live = null;
+      const took = e.ts ? fmtElapsed(e.ts * 1000 - prevEventAt) : "";
+      for (const call of d.tool_calls || []) pendingCalls.add(call.id);
       const wrap = h("div", { class: "ev" });
       if (d.reasoning) {
-        wrap.append(h("details", { class: "thinking" }, h("summary", {}, `Thought (${d.completion_tokens} tokens · ${d.gen_tps} tok/s)`),
+        wrap.append(h("details", { class: "thinking" }, h("summary", {}, `Thought${took ? ` for ${took}` : ""} (${d.completion_tokens} tokens · ${d.gen_tps} tok/s)`),
           h("div", { class: "text" }, d.reasoning)));
       }
       if (d.content && d.content.trim()) {
@@ -526,9 +656,8 @@ async function viewSession(sid, tab, focusApproval) {
     approval_requested: (e) => {
       const card = approvalCard(e.data);
       const c = calls.get(e.data.tool_call_id);
-      const stick = nearBottom();
       if (c) c.slot.append(card); else feed.append(h("div", { class: "ev" }, card));
-      if (stick && focusApproval !== e.data.id) window.scrollTo(0, document.body.scrollHeight);
+      if (focusApproval !== e.data.id) grew();
     },
     approval_decided: (e) => {
       const a = approvals.get(e.data.id);
@@ -540,6 +669,7 @@ async function viewSession(sid, tab, focusApproval) {
         e.data.status + (e.data.note ? `: ${e.data.note}` : "")));
     },
     tool_result: (e) => {
+      pendingCalls.delete(e.data.id);
       const c = calls.get(e.data.id);
       const out = h("pre", {}, e.data.output);
       if (!c) { add(h("details", { class: "tool ev" }, h("summary", {}, e.data.name), out)); return; }
@@ -547,8 +677,43 @@ async function viewSession(sid, tab, focusApproval) {
       c.state.className = `state ${e.data.ok ? "ok" : "err"}`;
       c.body.append(out);
     },
-    compacting: () => add(h("p", { class: "note" }, "Condensing older context…")),
-    compaction: (e) => add(h("p", { class: "note" }, `Context condensed (${e.data.tier}): ~${e.data.tokens_before} → ~${e.data.tokens_after} tokens`)),
+    compaction_started: (e) => {
+      if (live && !live.thinkText.textContent && !live.content.textContent) { live.el.remove(); live = null; }
+      const c = compacting();
+      c.detail.textContent = `Summarizing ${e.data.messages} older messages (~${fmtTokens(e.data.tokens_before)} tokens in context) so the agent can keep going`;
+    },
+    compacting: (e) => {
+      const c = compacting();
+      const d = e.data;
+      if (d.phase === "reading") {
+        fill(c.label, readingText("Condensing older context · step 1 of 2: reading", d));
+        fill(c.bar, progressBar(readFraction(d)));
+      } else if (d.phase === "writing") {
+        fill(c.label, `Condensing older context · step 2 of 2: writing the summary (${d.tokens} tokens)`);
+        fill(c.bar, progressBar(null));
+      }
+    },
+    compaction: (e) => {
+      const d = e.data;
+      if (d.totals) totals = d.totals;
+      if (d.tokens_after) ctxUsed = d.tokens_after;
+      renderHead();
+      const text = d.tier === "summary"
+        ? `Context condensed: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens (${d.summarized_messages} messages summarized)`
+        : `Trimmed old tool output: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens`;
+      if (compactNote) {
+        const c = compactNote;
+        compactNote = null;
+        if (e.ts) c.elapsed.textContent = `took ${fmtElapsed(e.ts * 1000 - c.start)}`;
+        c.label.classList.remove("dots");
+        fill(c.label, d.tier === "summary" ? text : `${text} (the summary failed; see the error above)`);
+        fill(c.bar, progressBar(1));
+        fill(c.detail, d.summary ? h("details", {}, h("summary", {}, "Show summary"), h("div", { class: "text", style: "white-space:pre-wrap" }, d.summary)) : "");
+        c.el.classList.add("done");
+      } else if (d.tokens_before - d.tokens_after >= 1000) {
+        add(h("p", { class: "note" }, text)); // small trims happen every turn near the limit; only the meter shows those
+      }
+    },
     notes: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Agent saved notes"), h("div", { class: "text" }, e.data.notes))),
     error: (e) => add(h("p", { class: "note bad" }, e.data.message)),
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
@@ -566,13 +731,28 @@ async function viewSession(sid, tab, focusApproval) {
       else add(h("p", { class: "note" }, `Model woke up in ${e.data.seconds} s`));
       wakingNote = null;
     },
+    target_waiting: (e) => {
+      targetNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
+        `Waiting for the ${TARGET_LABEL[e.data.target] || e.data.target}: it's offline or asleep. The task continues when it wakes`)));
+    },
+    target_online: (e) => {
+      const text = `${TARGET_LABEL[e.data.target] || e.data.target} is back after ${e.data.seconds < 90 ? `${e.data.seconds} s` : `${Math.round(e.data.seconds / 60)} min`}`;
+      if (targetNote) fill(targetNote, text);
+      else add(h("p", { class: "note" }, text));
+      targetNote = null;
+    },
     queue: (e) => { session.queue_position = e.data.position; renderHead(); },
     status: (e) => {
       session.status = e.data.status;
       if (e.data.status !== "queued") session.queue_position = null;
       renderHead();
       renderActions();
+      if (e.data.status !== "running" && live && !live.thinkText.textContent && !live.content.textContent) {
+        live.el.remove(); // queued, waiting for an approval or the Mac: not thinking
+        live = null;
+      }
       if (TERMINAL.has(e.data.status)) {
+        pendingCalls.clear();
         live?.el.remove();
         live = null;
         const answer = (e.data.answer || "").trim();
@@ -585,11 +765,15 @@ async function viewSession(sid, tab, focusApproval) {
   const tracked = {};
   for (const type of SESSION_EVENT_TYPES) {
     tracked[type] = (e) => {
-      if (e.seq !== null && e.seq !== undefined) {
+      const persisted = e.seq !== null && e.seq !== undefined;
+      if (persisted) {
         if (e.seq <= lastSeq) return;
         lastSeq = e.seq;
+        if (e.ts) { prevEventAt = lastEventAt; lastEventAt = e.ts * 1000; }
       }
       handlers[type]?.(e);
+      const finalAnswer = type === "assistant" && !(e.data.tool_calls || []).length && (e.data.content || "").trim();
+      if (persisted && !finalAnswer && !TERMINAL.has(session.status)) maybeThinking();
     };
   }
   onLeave(openStream(() => `/sessions/${sid}/events?after=${lastSeq}`, tracked));
@@ -729,7 +913,11 @@ function diskCard() {
       fill(body,
         h("p", {}, `${u.free_gb} GB free of ${u.total_gb} GB · workspaces ${mb(u.workspaces_mb)} (${u.workspaces.length}) · quota ${u.quota_mb} MB each`),
         top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null,
-        h("p", { class: "muted small" }, `${u.containers.length} sandbox container${u.containers.length === 1 ? "" : "s"}`));
+        h("p", { class: "muted small" }, `${u.containers.length} sandbox container${u.containers.length === 1 ? "" : "s"}`),
+        (u.runners || []).map((r) => h("p", { class: "small" },
+          `💻 ${TARGET_LABEL[r.name] || r.name}: `,
+          r.online ? `online · ${r.info.free_gb} GB free · runner ${r.info.version} · macOS ${r.info.macos}`
+            : `offline${r.last_seen_seconds !== null ? ` (last seen ${Math.round(r.last_seen_seconds / 60)} min ago)` : " (not connected since the daemon started)"}`)));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();

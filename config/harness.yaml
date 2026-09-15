@@ -47,6 +47,15 @@ homelab:
     ntfy: {stack: ntfy}
     harness-demo: {stack: harness-demo}   # disposable service for exercising the restart flow
 
+# Machines that run tool calls for projects with `target: <name>` (harness/remote.py). The model stays here; the
+# runner (macrunner/, installed with ops/macbook/deploy.ps1) connects out to this daemon and authenticates with
+# the token in token_file. Its sandbox and allowed project directories are set on the runner itself.
+runners:
+  macbook:
+    token_file: D:/Agents/harness/secrets/runner-macbook.token
+    min_free_gb: 10          # the Mac's disk is nearly full; refuse new workspaces below this
+    workspace_quota_mb: 3000
+
 # Sandbox cleanup and disk quotas (harness/maintenance.py).
 cleanup:
   interval_minutes: 60

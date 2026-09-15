@@ -1,16 +1,25 @@
-"""Tools v1. File tools run host-side against the bind-mounted workspace; commands run in the sandbox."""
+"""Tools v1. File tools run host-side against the bind-mounted workspace; commands run in the sandbox.
+MacBook sessions use the same schemas through harness.remote.RemoteWorkspace."""
 
 from __future__ import annotations
 
 import asyncio
-import difflib
 import re
 import shlex
 from pathlib import Path
 
+from .fileops import (FILE_TOOLS, SKIP_DIRS, FileOps, ToolError, dir_size, normalize_path, resolve_path,  # noqa: F401
+                      truncate_middle)
 from .sandbox import Sandbox, run_cmd
 
-SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
+SHELL_DESCRIPTIONS = {
+    "tower": ("Run a shell command in the Linux sandbox at /workspace and return exit code and output. "
+              "There is no network unless network is true, which needs the user's approval "
+              "(use it for package installs or fetching)."),
+    "macbook": ("Run a bash command natively on the user's MacBook (macOS, Apple silicon) in the workspace directory "
+                "and return exit code and output. It runs in a sandbox: writes are limited to the workspace, temp and "
+                "build caches, and there is no network unless network is true, which needs the user's approval."),
+}
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
@@ -20,7 +29,9 @@ def _fn(name: str, description: str, properties: dict, required: list[str] | Non
     }}
 
 
-def tool_schemas(read_lines: int) -> list[dict]:
+def tool_schemas(read_lines: int, target: str = "tower") -> list[dict]:
+    clone = ("Clone a git repository into the workspace. url is an https URL, or local:<name> for a repository "
+             "hosted on this machine." if target == "tower" else "Clone a git repository (https URL) into the workspace.")
     return [
         _fn("list_files", "List files and directories under a workspace path.", {
             "path": {"type": "string", "description": "Directory relative to the workspace root. Default '.'"},
@@ -42,15 +53,12 @@ def tool_schemas(read_lines: int) -> list[dict]:
         _fn("edit_file", "Replace an exact snippet in a file. old_text must appear exactly once.", {
             "path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"},
         }, ["path", "old_text", "new_text"]),
-        _fn("run_shell", "Run a shell command in the Linux sandbox at /workspace and return exit code and output. "
-                         "There is no network unless network is true, which needs the user's approval "
-                         "(use it for package installs or fetching).", {
+        _fn("run_shell", SHELL_DESCRIPTIONS[target], {
             "command": {"type": "string"},
             "timeout": {"type": "integer", "description": "Seconds. Default 120, max 1800."},
             "network": {"type": "boolean", "description": "Allow internet access for this command. Default false."},
         }, ["command"]),
-        _fn("git_clone", "Clone a git repository into the workspace. url is an https URL, or local:<name> for a "
-                         "repository hosted on this machine.", {
+        _fn("git_clone", clone, {
             "url": {"type": "string"},
             "dest": {"type": "string", "description": "Target directory in the workspace. Default: the repo name."},
             "branch": {"type": "string"},
@@ -64,10 +72,6 @@ def tool_schemas(read_lines: int) -> list[dict]:
             "answer": {"type": "string"},
         }, ["answer"]),
     ]
-
-
-class ToolError(Exception):
-    pass
 
 
 def validate_args(schema: dict, args: dict) -> dict:
@@ -99,155 +103,44 @@ def validate_args(schema: dict, args: dict) -> dict:
     return out
 
 
-def truncate_middle(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    half = limit // 2
-    return f"{text[:half]}\n... [{len(text) - limit} characters truncated] ...\n{text[-half:]}"
-
-
-def resolve_path(p: Path) -> Path:
-    r"""Path.resolve() that never returns Windows' extended-length form. Python 3.10 sometimes yields
-    `\\?\C:\...` while a directory in the path is being created, which breaks containment checks."""
-    resolved = p.resolve()
-    text = str(resolved)
-    return Path(text[4:]) if text.startswith("\\\\?\\") else resolved
-
-
-def normalize_path(path: str | None) -> str:
-    path = (path or ".").strip().replace("\\", "/")
-    if path.startswith("/workspace"):
-        path = path[len("/workspace"):]
-    return path.lstrip("/") or "."
+def shell_result(code: int, output: str, network: bool, output_chars: int) -> str:
+    text = f"exit code {code}\n{truncate_middle(output, output_chars)}"
+    if code != 0 and not network and re.search(r"Temporary failure in name resolution|Could not resolve host|"
+                                               r"Network is unreachable|nodename nor servname", output):
+        text += "\n[hint: the sandbox has no network; rerun with network: true to request access]"
+    return text
 
 
 class Workspace:
+    """Tools for a tower session: file tools run host-side on the bind-mounted workspace, commands in Docker."""
+
+    target = "tower"
+
     def __init__(self, root: Path, sandbox: Sandbox, repos_dir: Path, context_tokens: int, homelab=None):
-        self.root = resolve_path(root)
+        self.files = FileOps(root, context_tokens)
+        self.root = self.files.root
         self.sandbox = sandbox
         self.repos_dir = repos_dir
         self.homelab = homelab  # homelab.Homelab for projects with homelab: true
-        # Size reads to the context window: short pages made Qwen answer from page 1 in Phase 0.
-        self.read_lines = 2000
-        self.read_chars = max(8000, int(context_tokens * 0.25 * 3.5))
+        self.read_lines = self.files.read_lines
         self.output_chars = max(8000, int(context_tokens * 0.08 * 3.5))
 
     def resolve(self, path: str | None) -> Path:
-        rel = normalize_path(path)
-        candidate = resolve_path(self.root / rel)
-        if candidate != self.root and not candidate.is_relative_to(self.root):
-            raise ToolError(f"path escapes the workspace: {path}")
-        return candidate
+        return self.files.resolve(path)
 
     def rel(self, p: Path) -> str:
-        return p.relative_to(self.root).as_posix() or "."
+        return self.files.rel(p)
 
-    # host-side file tools (sync; the runner calls them in a thread)
-    def list_files(self, path: str = ".", max_depth: int = 2) -> str:
-        base = self.resolve(path)
-        if not base.is_dir():
-            raise ToolError(f"not a directory: {path}")
-        entries: list[str] = []
+    async def preview(self, name: str, args: dict) -> str:
+        return await asyncio.to_thread(self.files.preview_diff, name, args)
 
-        def walk(d: Path, depth: int) -> None:
-            for child in sorted(d.iterdir()):
-                if child.name in SKIP_DIRS or len(entries) >= 500:
-                    continue
-                entries.append(self.rel(child) + ("/" if child.is_dir() else ""))
-                if child.is_dir() and depth < max_depth:
-                    walk(child, depth + 1)
-
-        walk(base, 1)
-        suffix = "\n... (listing truncated at 500 entries)" if len(entries) >= 500 else ""
-        return "\n".join(entries) + suffix if entries else "(empty directory)"
-
-    def read_file(self, path: str, start_line: int = 1, end_line: int | None = None) -> str:
-        p = self.resolve(path)
-        if not p.is_file():
-            raise ToolError(f"no such file: {path}")
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        start = max(1, start_line)
-        end = min(len(lines), end_line or len(lines), start + self.read_lines - 1)
-        body, shown_end = [], start - 1
-        size = 0
-        for n in range(start, end + 1):
-            line = f"{n}\t{lines[n - 1]}"
-            if size + len(line) > self.read_chars and body:
-                break
-            body.append(line)
-            size += len(line) + 1
-            shown_end = n
-        text = "\n".join(body)
-        if shown_end < len(lines):
-            text += f"\n... ({len(lines)} lines total; continue with start_line={shown_end + 1})"
-        return text or "(empty file)"
-
-    def search(self, pattern: str, path: str = ".") -> str:
-        try:
-            regex = re.compile(pattern)
-        except re.error:
-            regex = re.compile(re.escape(pattern))
-        base = self.resolve(path)
-        files = [base] if base.is_file() else sorted(
-            f for f in base.rglob("*") if f.is_file() and not SKIP_DIRS.intersection(f.relative_to(base).parts)
-        )
-        matches: list[str] = []
-        for f in files:
-            try:
-                text = f.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            for n, line in enumerate(text.splitlines(), 1):
-                if regex.search(line):
-                    matches.append(f"{self.rel(f)}:{n}: {line[:300]}")
-                    if len(matches) >= 200:
-                        return "\n".join(matches) + "\n... (stopped at 200 matches)"
-        return "\n".join(matches) or "no matches"
-
-    def write_file(self, path: str, content: str) -> str:
-        p = self.resolve(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "w", encoding="utf-8", newline="") as f:
-            f.write(content)
-        return f"wrote {len(content)} characters to {self.rel(p)}"
-
-    def edit_file(self, path: str, old_text: str, new_text: str) -> str:
-        p = self.resolve(path)
-        if not p.is_file():
-            raise ToolError(f"no such file: {path}")
-        text = p.read_text(encoding="utf-8")
-        count = text.count(old_text)
-        if count != 1:
-            raise ToolError(f"old_text must appear exactly once, found {count} occurrences")
-        with open(p, "w", encoding="utf-8", newline="") as f:
-            f.write(text.replace(old_text, new_text))
-        return f"edited {self.rel(p)}"
-
-    def preview_diff(self, name: str, args: dict) -> str:
-        """Unified diff of what a write/edit would change, for approval requests."""
-        try:
-            p = self.resolve(args.get("path"))
-            old = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
-        except ToolError:
-            return ""
-        if name == "write_file":
-            new = args.get("content", "")
-        elif name == "edit_file" and old.count(args.get("old_text", "")) == 1:
-            new = old.replace(args["old_text"], args.get("new_text", ""))
-        else:
-            return ""
-        rel = normalize_path(args.get("path"))
-        diff = difflib.unified_diff(old.splitlines(), new.splitlines(), f"a/{rel}", f"b/{rel}", lineterm="")
-        return truncate_middle("\n".join(diff), 12000)
+    async def size_bytes(self) -> int:
+        return await asyncio.to_thread(dir_size, self.root)
 
     # sandbox tools (async)
     async def run_shell(self, command: str, timeout: int = 120, network: bool = False) -> str:
         code, output = await self.sandbox.exec(command, timeout=max(1, min(int(timeout), 1800)), network=network)
-        text = f"exit code {code}\n{truncate_middle(output, self.output_chars)}"
-        if code != 0 and not network and re.search(r"Temporary failure in name resolution|Could not resolve host|"
-                                                   r"Network is unreachable", output):
-            text += "\n[hint: the sandbox has no network; rerun with network: true to request access]"
-        return text
+        return shell_result(code, output, network, self.output_chars)
 
     async def git_clone(self, url: str, dest: str | None = None, branch: str | None = None) -> str:
         url = url.strip()
@@ -294,4 +187,4 @@ class Workspace:
             return await self.homelab.call(name, args)
         if name in ("run_shell", "git_clone"):
             return await getattr(self, name)(**args)
-        return await asyncio.to_thread(getattr(self, name), **args)
+        return await asyncio.to_thread(getattr(self.files, name), **args)

@@ -23,12 +23,13 @@ log = logging.getLogger("harness.api")
 WEB = Path(__file__).parent / "web"
 # Session-list stream: status-level events only, no tool output or token deltas.
 GLOBAL_TYPES = {"session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"}
+RUNNER_BODY_LIMIT = 16 * 2**20  # a result carries at most a capped command output or file read
 
 
 class CreateSession(BaseModel):
     prompt: str
     project: str = "scratch"
-    target: str = "tower"
+    target: str | None = None  # default: the project's target
     model: str | None = None
     title: str | None = None
 
@@ -40,6 +41,20 @@ class SendMessage(BaseModel):
 class Decision(BaseModel):
     decision: str  # approve | deny
     note: str = ""
+
+
+class RunnerPoll(BaseModel):
+    instance: str
+    inflight: list[str] = []
+    info: dict = {}
+
+
+class RunnerResult(BaseModel):
+    id: str
+    ok: bool
+    value: object = None
+    error: str = ""
+    kind: str = "internal"
 
 
 class Template(BaseModel):
@@ -122,8 +137,34 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/projects")
     async def projects(request: Request):
         cfg = mgr(request).cfg
-        return [{"name": p.name, "description": p.description, "repo": bool(p.repo), "homelab": p.homelab}
-                for p in cfg.projects.values()]
+        return [{"name": p.name, "description": p.description, "repo": bool(p.repo), "homelab": p.homelab,
+                 "target": p.target} for p in cfg.projects.values()]
+
+    # runners (the MacBook): outbound long-polling, authenticated with a per-runner bearer token
+    def runner_auth(request: Request, name: str) -> Manager:
+        m = mgr(request)
+        if name not in m.hub.state:
+            raise HarnessError(404, "unknown runner")
+        if not m.hub.authorized(name, request.headers.get("authorization")):
+            log.warning("refused runner %s request from %s", name, request.client.host if request.client else "?")
+            raise HarnessError(401, "bad runner token")
+        return m
+
+    @app.get("/runners")
+    async def runners(request: Request):
+        return mgr(request).hub.status()
+
+    @app.post("/runners/{name}/poll")
+    async def runner_poll(name: str, body: RunnerPoll, request: Request):
+        m = runner_auth(request, name)
+        return await m.hub.poll(name, body.instance, body.inflight, body.info)
+
+    @app.post("/runners/{name}/results")
+    async def runner_result(name: str, body: RunnerResult, request: Request):
+        m = runner_auth(request, name)
+        if int(request.headers.get("content-length") or 0) > RUNNER_BODY_LIMIT:
+            raise HarnessError(413, "result too large")
+        return {"accepted": m.hub.result(name, body.id, body.ok, body.value, body.error, body.kind)}
 
     @app.get("/models")
     async def models(request: Request):

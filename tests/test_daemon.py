@@ -41,8 +41,12 @@ class Script:
         self.steps = steps
         self.requests: list[list[dict]] = []
 
-    async def __call__(self, model, messages, tools, on_delta=None, max_tokens=None, extra=None, timeout=0):
+    async def __call__(self, model, messages, tools, on_delta=None, max_tokens=None, extra=None, timeout=0,
+                       on_progress=None):
         self.requests.append(messages)
+        if on_progress:  # llama-server's prompt_progress chunks: cached prefix first, then the rest
+            await on_progress(0, 20000, 0)
+            await on_progress(20000, 20000, 0)
         if tools is None:
             return Completion(content="SUMMARY: did things", prompt_tokens=100, completion_tokens=10)
         n = sum(1 for m in messages if m["role"] == "assistant")
@@ -348,6 +352,12 @@ def test_compaction_summarizes_long_context(tmp_path):
         s = await wait_status(m, m.create("long task")["id"], "done", timeout=20)
         comp = events(m, s["id"], "compaction")
         assert any(c["tier"] == "summary" for c in comp)
+        started = events(m, s["id"], "compaction_started")
+        assert started and started[0]["messages"] > 0 and started[0]["context_tokens"] == 8000
+        summarized = [c for c in comp if c["tier"] == "summary"][-1]
+        # summaries count toward the session's cumulative tokens (the fake summarizer reports 100 in / 10 out)
+        assert summarized["prompt_tokens"] == 100 and summarized["totals"]["completion_tokens"] >= 10
+        assert m.summary(m.db.get_session(s["id"]))["context_limit"] == 8000
         assert any((x.get("content") or "").startswith(compaction.SUMMARY_TAG) for x in s["context"])
         assert s["context"][1]["content"] == "long task"
         await m.stop()

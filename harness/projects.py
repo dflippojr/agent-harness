@@ -6,6 +6,8 @@ credentials (Git Credential Manager for URL repos) and paths outside the workspa
 - A local source (a path on the tower) gets the session branch fetched into it after every run, so the work is
   visible there as `agent/<session>` and survives workspace cleanup. Merge squashes it into the base branch.
 - A URL source is only read (clone and fetch). Publishing the branch is an explicit push the user asks for.
+
+Stdlib only and Python 3.9 compatible: the MacBook runner runs these same functions on the Mac.
 """
 
 from __future__ import annotations
@@ -15,8 +17,10 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .config import Project
+if TYPE_CHECKING:  # the MacBook runner imports this module without the daemon's config (or PyYAML)
+    from .config import Project
 
 AGENT_NAME = "Agent (agent-harness)"
 AGENT_EMAIL = "agent@agent-harness.local"
@@ -73,15 +77,16 @@ def _is_bare(repo: Path) -> bool:
     return git(repo, "rev-parse", "--is-bare-repository").out.strip() == "true"
 
 
-def prepare(project: Project, workspace: Path, sid: str) -> dict:
-    """Clone the project into the (empty) workspace and create the session branch."""
+def prepare(project: Project, workspace: Path, sid: str, shared: bool = False) -> dict:
+    """Clone the project into the (empty) workspace and create the session branch. `shared` (local sources only)
+    borrows the source's objects through git alternates instead of copying them."""
     src = project.repo
     if not is_url(src) and not Path(src).is_dir():
         raise GitError(f"project {project.name}: repository {src} doesn't exist", 400)
     workspace.mkdir(parents=True, exist_ok=True)
     if any(workspace.iterdir()):
         raise GitError(f"workspace {workspace} is not empty")
-    args = ["clone", "--no-hardlinks", "--config", "core.autocrlf=false"]  # LF checkout for the Linux sandbox
+    args = ["clone", "--shared" if shared else "--no-hardlinks", "--config", "core.autocrlf=false"]  # LF checkout
     if project.base_branch:
         args += ["--branch", project.base_branch]
     result = git(None, *args, "--", src, str(workspace), check=False)

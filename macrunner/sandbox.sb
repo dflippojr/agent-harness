@@ -1,0 +1,67 @@
+;; Sandbox for the agent's shell commands on the MacBook (sandbox-exec; deprecated by Apple but still enforced).
+;; The runner replaces the network placeholder at the end and passes WORKSPACE and HOME as parameters.
+;; In SBPL the last matching rule wins, so the order below matters.
+(version 1)
+(allow default)
+
+;; Writes: only the workspace, temp and build caches.
+(deny file-write*)
+(allow file-write*
+  (subpath (param "WORKSPACE"))
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders")
+  (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom")
+  (literal "/dev/dtracehelper")
+  (regex #"^/dev/tty") (regex #"^/dev/fd/")
+  (subpath (string-append (param "HOME") "/Library/Caches"))
+  (subpath (string-append (param "HOME") "/Library/Developer/Xcode/DerivedData"))
+  (subpath (string-append (param "HOME") "/.cache"))
+  (subpath (string-append (param "HOME") "/.npm"))
+  (subpath (string-append (param "HOME") "/.m2"))
+  (subpath (string-append (param "HOME") "/.gradle")))
+
+;; The runner commits, saves and merges the branch outside the sandbox. Git config and hooks decide what git
+;; executes, so the agent may not change them (nor swap out the .git directory or its object alternates).
+(deny file-write*
+  (literal (string-append (param "WORKSPACE") "/.git"))
+  (literal (string-append (param "WORKSPACE") "/.git/config"))
+  (literal (string-append (param "WORKSPACE") "/.git/objects/info/alternates"))
+  (subpath (string-append (param "WORKSPACE") "/.git/hooks"))
+  (subpath (string-append (param "WORKSPACE") "/.git/info")))
+
+;; Credentials and personal data: neither readable nor writable.
+(deny file-read* file-write*
+  (subpath (string-append (param "HOME") "/.agent-harness/runner"))
+  (subpath (string-append (param "HOME") "/.ssh"))
+  (subpath (string-append (param "HOME") "/.aws"))
+  (subpath (string-append (param "HOME") "/.gnupg"))
+  (subpath (string-append (param "HOME") "/.docker"))
+  (subpath (string-append (param "HOME") "/.kube"))
+  (subpath (string-append (param "HOME") "/.config/gh"))
+  (literal (string-append (param "HOME") "/.netrc"))
+  (literal (string-append (param "HOME") "/.git-credentials"))
+  (literal (string-append (param "HOME") "/.npmrc"))
+  (literal (string-append (param "HOME") "/.pypirc"))
+  (literal (string-append (param "HOME") "/.zsh_history"))
+  (literal (string-append (param "HOME") "/.bash_history"))
+  (subpath (string-append (param "HOME") "/Documents"))
+  (subpath (string-append (param "HOME") "/Desktop"))
+  (subpath (string-append (param "HOME") "/Downloads"))
+  (subpath (string-append (param "HOME") "/Pictures"))
+  (subpath (string-append (param "HOME") "/Library/Keychains"))
+  (subpath (string-append (param "HOME") "/Library/Messages"))
+  (subpath (string-append (param "HOME") "/Library/Mail"))
+  (subpath (string-append (param "HOME") "/Library/Safari"))
+  (subpath (string-append (param "HOME") "/Library/Cookies"))
+  (subpath (string-append (param "HOME") "/Library/Mobile Documents"))
+  (subpath (string-append (param "HOME") "/Library/Group Containers"))
+  (subpath (string-append (param "HOME") "/Library/Containers"))
+  (subpath (string-append (param "HOME") "/Library/Application Support/Google"))
+  (subpath (string-append (param "HOME") "/Library/Application Support/Microsoft Edge"))
+  (subpath (string-append (param "HOME") "/Library/Application Support/Firefox"))
+  (subpath (string-append (param "HOME") "/Library/Application Support/BraveSoftware")))
+
+;; Keychain items (e.g. git's osxkeychain credentials) are served by securityd, not read from files.
+(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc"))
+
+{{NETWORK}}

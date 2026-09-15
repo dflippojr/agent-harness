@@ -51,6 +51,13 @@ Check 'Tailscale serve' {
     if ($status -notmatch '8100' -or $status -notmatch '8095') { throw "serve config missing: $status" }
     'https :443 -> daemon, :8443 -> ntfy'
 }
+Check 'MacBook runner' {
+    # Informational: the Mac is often asleep or away, which isn't a tower problem.
+    $r = (Get-Json 'http://127.0.0.1:8100/runners') | Where-Object { $_.name -eq 'macbook' }
+    if (-not $r) { 'not configured' }
+    elseif ($r.online) { "online; runner $($r.info.version), $($r.info.free_gb) GB free on the Mac" }
+    else { 'offline or asleep (sessions for it wait until it connects)' }
+}
 Check 'Grafana / Prometheus' {
     $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:9090/-/ready' -TimeoutSec 5
     $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:3000/api/health' -TimeoutSec 5

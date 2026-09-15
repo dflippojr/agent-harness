@@ -67,6 +67,15 @@ class CleanupConfig:
 
 
 @dataclass
+class RunnerConfig:
+    """A machine that runs tool calls for sessions targeting it (Phase 4: the MacBook). The model stays on the tower."""
+    name: str
+    token_file: str = ""        # shared secret the runner sends as a bearer token
+    min_free_gb: float = 10     # refuse new workspaces when the runner's disk has less free space
+    workspace_quota_mb: int = 3000
+
+
+@dataclass
 class Project:
     name: str
     description: str = ""
@@ -77,6 +86,7 @@ class Project:
     base_branch: str = ""   # branch sessions start from; default: the repo's current branch
     homelab: bool = False   # give sessions the homelab tools
     quota_mb: int = 0       # workspace quota override
+    target: str = "tower"   # where tools run: tower, or a runner name such as macbook (repo is then a path there)
 
 
 @dataclass
@@ -94,6 +104,7 @@ class Config:
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     homelab: HomelabConfig = field(default_factory=HomelabConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    runners: dict[str, RunnerConfig] = field(default_factory=dict)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -144,6 +155,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
             base_branch=str(spec.get("base_branch") or ""),
             homelab=bool(spec.get("homelab", False)),
             quota_mb=int(spec.get("quota_mb") or 0),
+            target=str(spec.get("target") or "tower"),
         )
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
@@ -154,6 +166,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     }
     homelab = HomelabConfig(**raw_homelab, services=services)
 
+    runners = {name: RunnerConfig(name=name, **(spec or {})) for name, spec in (raw.get("runners") or {}).items()}
     listen = raw.get("listen") or {}
     budgets = raw.get("budgets") or {}
     compaction = raw.get("compaction") or {}
@@ -171,6 +184,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         notify=NotifyConfig(**(raw.get("notify") or {})),
         homelab=homelab,
         cleanup=CleanupConfig(**(raw.get("cleanup") or {})),
+        runners=runners,
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),
@@ -179,4 +193,10 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     )
     if cfg.default_model not in cfg.models:
         raise ValueError(f"default_model {cfg.default_model!r} is not in models")
+    for project in cfg.projects.values():
+        if project.target != "tower":
+            if project.target not in cfg.runners:
+                raise ValueError(f"project {project.name}: target {project.target!r} is not in runners")
+            if project.homelab:
+                raise ValueError(f"project {project.name}: homelab tools only run on the tower")
     return cfg

@@ -21,8 +21,10 @@ from .config import Config
 from .db import Database
 from .homelab import Homelab
 from .policy import ALLOW, ASK, Policy
+from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler
+from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
 from .tools import ToolError, Workspace, truncate_middle, validate_args
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
 
@@ -37,31 +39,21 @@ When the task is complete, reply with your final answer (or call `finish`). Don'
 
 REPO_PROMPT = """Project repository: `{repo_name}` is checked out at /workspace on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
 
+MAC_SYSTEM_PROMPT = """You are a software agent working in a project workspace on the user's MacBook (macOS, Apple silicon). You run on the user's home server and act only through the provided tools, which run on the MacBook.
+File paths are relative to the workspace root. Shell commands run natively with bash in the workspace directory, using the Mac's own toolchains (git, Python 3.9 from the Command Line Tools, Swift, Java; check before assuming anything else is installed). They run in a sandbox: writes are limited to the workspace, temp directories and build caches, personal folders and credentials are unreadable, and there is no network access. Commands that need the network (package installs, downloads) must set network: true; the user approves those, and may also be asked to approve pushes and deletions. If the user denies an action, don't retry it: find another way or explain what you need. The MacBook can go to sleep; if a tool call takes a while to start, it's waiting for the Mac to wake.
+
+Work methodically: look around before editing, prefer `search` over reading large files in full, and verify changes by running the relevant command or tests. On long tasks older conversation may be condensed, so keep intermediate results and progress in `update_notes`.
+When the task is complete, reply with your final answer (or call `finish`). Don't answer until the work is done and verified. The user often reads answers on a phone, so lead with the result."""
+
+MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the workspace (a separate clone of the user's repository, so their own checkout is never touched) on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches, don't change git config, and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
+
 HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, and ask to restart one with restart_service (the user approves restarts). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
 
-ACTIVE = ("queued", "running", "waiting_approval")
+ACTIVE = ("queued", "running", "waiting_approval", "waiting_target")
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
 QUOTA_CHECK_SECONDS = 30
-
-
-def dir_size(path: Path) -> int:
-    total = 0
-    stack = [str(path)]
-    while stack:
-        try:
-            with os.scandir(stack.pop()) as it:
-                for entry in it:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(entry.path)
-                        else:
-                            total += entry.stat(follow_symlinks=False).st_size
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-    return total
+PROGRESS_MIN_TOKENS = 4000   # show prompt-reading progress only when this much of the prompt isn't cached
 
 
 def new_run(carry: dict | None = None) -> dict:
@@ -86,8 +78,9 @@ def unresolved_calls(context: list[dict]) -> list[dict]:
 
 class Runner:
     def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat,
-                 warmer: ModelWarmer | None = None):
+                 warmer: ModelWarmer | None = None, hub: RunnerHub | None = None):
         self.cfg = cfg
+        self.hub = hub or RunnerHub(cfg.runners)
         self.warmer = warmer or ModelWarmer()
         self.db = db
         self.bus = bus
@@ -99,7 +92,9 @@ class Runner:
         self._quota_checked: dict[str, float] = {}
 
     # helpers
-    def sandbox(self, s: dict) -> Sandbox:
+    def sandbox(self, s: dict) -> Sandbox | RemoteSandbox:
+        if s["target"] != "tower":
+            return RemoteSandbox(self.hub, s["target"], s["id"])
         if s["id"] not in self._sandboxes:
             project = self.cfg.projects.get(s["project"])
             sb_cfg = self.cfg.sandbox
@@ -108,8 +103,10 @@ class Runner:
             self._sandboxes[s["id"]] = Sandbox(s["id"], Path(s["workspace"]), sb_cfg)
         return self._sandboxes[s["id"]]
 
-    def workspace(self, s: dict) -> Workspace:
+    def workspace(self, s: dict) -> Workspace | RemoteWorkspace:
         model = self.cfg.models[s["model"]]
+        if s["target"] != "tower":
+            return RemoteWorkspace(self.hub, s["target"], s["id"], model.context_tokens)
         project = self.cfg.projects.get(s["project"])
         homelab = Homelab(self.cfg.homelab) if project and project.homelab else None
         return Workspace(Path(s["workspace"]), self.sandbox(s), self.cfg.repos_dir, model.context_tokens, homelab)
@@ -120,7 +117,9 @@ class Runner:
 
     def quota_mb(self, s: dict) -> int:
         project = self.cfg.projects.get(s["project"])
-        return (project.quota_mb if project and project.quota_mb else 0) or self.cfg.cleanup.workspace_quota_mb
+        default = (self.cfg.runners[s["target"]].workspace_quota_mb if s["target"] in self.cfg.runners
+                   else self.cfg.cleanup.workspace_quota_mb)
+        return (project.quota_mb if project and project.quota_mb else 0) or default
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         with self.db.tx():
@@ -137,6 +136,68 @@ class Runner:
         await self.scheduler.acquire(sid)
         self.set_status(sid, "running")
 
+    # runner targets (the MacBook)
+    async def _wait_for_target(self, sid: str) -> None:
+        """Hold a session whose target is offline in `waiting_target`, without the GPU, until it's back."""
+        s = self.db.get_session(sid)
+        target = s["target"]
+        if target == "tower" or self.hub.online(target):
+            return
+        grace = self.hub.startup_grace()
+        if grace > 0:  # just after a daemon restart the runner hasn't had a chance to reconnect yet
+            try:
+                await asyncio.wait_for(self.hub.wait_online(target), timeout=grace)
+                return
+            except asyncio.TimeoutError:
+                pass
+        held = self.scheduler.holder == sid
+        previous = s["status"]
+        self.scheduler.release(sid)
+        since = time.monotonic()
+        with self.db.tx():
+            self.db.update_session(sid, status="waiting_target")
+            self.bus.emit(sid, "status", {"status": "waiting_target"})
+            self.bus.emit(sid, "target_waiting", {"target": target})
+        await self.hub.wait_online(target)
+        status = "waiting_approval" if previous == "waiting_approval" else "queued"
+        with self.db.tx():
+            self.db.update_session(sid, status=status)
+            self.bus.emit(sid, "status", {"status": status})
+            self.bus.emit(sid, "target_online", {"target": target, "seconds": round(time.monotonic() - since)})
+        if held:
+            await self._acquire(sid)
+
+    async def _remote_call(self, sid: str, ws: RemoteWorkspace, name: str, args: dict) -> str:
+        """A runner call that may outlive the runner's connection (the lid closed mid-command): once the runner
+        is offline the session gives up the GPU and shows as waiting; the call itself keeps waiting for its result."""
+        task = asyncio.create_task(ws.call(name, args))
+        waiting_since = None
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=5)
+                if done:
+                    return task.result()
+                offline = not self.hub.online(ws.target)
+                if offline and waiting_since is None:
+                    waiting_since = time.monotonic()
+                    self.scheduler.release(sid)
+                    self.set_status(sid, "waiting_target")
+                    self.bus.emit(sid, "target_waiting", {"target": ws.target, "during": name})
+                elif not offline and waiting_since is not None:
+                    self.bus.emit(sid, "target_online", {"target": ws.target,
+                                                         "seconds": round(time.monotonic() - waiting_since)})
+                    waiting_since = None
+                    await self._acquire(sid)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if waiting_since is not None:
+                self.bus.emit(sid, "target_online", {"target": ws.target,
+                                                     "seconds": round(time.monotonic() - waiting_since)})
+                if not task.cancelled():
+                    await self._acquire(sid)
+
     # main entry
     async def run(self, sid: str, recovered: bool = False) -> None:
         try:
@@ -145,6 +206,8 @@ class Runner:
                 self.bus.emit(sid, "resumed", {"status": s["status"]})
                 if (s["run"].get("executing") or {}).get("name") in ("run_shell", "git_clone"):
                     await self.sandbox(s).restart()  # kill the orphaned command
+            await self._wait_for_target(sid)
+            s = self.db.get_session(sid)
             await self._prepare_repo(s)
             if s["status"] == "waiting_approval":
                 pass  # _resolve_calls waits without holding the GPU
@@ -160,7 +223,7 @@ class Runner:
             self.bus.emit(sid, "error", {"message": str(e)})
             self.set_status(sid, "failed", stop_reason=f"sandbox_unavailable: {e}")
             await self._end_run(sid)
-        except projects.GitError as e:
+        except (projects.GitError, RunnerError) as e:
             self.bus.emit(sid, "error", {"message": str(e)})
             self.set_status(sid, "failed", stop_reason=f"workspace_error: {e}")
             await self._end_run(sid)
@@ -234,12 +297,14 @@ class Runner:
             if time.monotonic() - last_flush[0] > 0.25:
                 flush()
 
+        reading = self._progress_reporter(sid, "prompt_progress", {})
+
         run = s["run"]
         tools = ws.schemas()
         completion = None
         for attempt in range(4):
             try:
-                completion = await self.chat(model, s["context"], tools, on_delta)
+                completion = await self.chat(model, s["context"], tools, on_delta, on_progress=reading)
                 break
             except llm.LLMError as e:
                 flush()
@@ -271,6 +336,7 @@ class Runner:
                  "prompt_tps": round(completion.prompt_tps, 1), "gen_tps": round(completion.gen_tps, 1)}
         context = s["context"] + [msg]
         totals = self._add_totals(s["totals"], completion)
+        event["totals"] = totals
 
         final = not completion.tool_calls and completion.content.strip() and completion.finish_reason != "length"
         with self.db.tx():
@@ -299,9 +365,10 @@ class Runner:
         return False
 
     @staticmethod
-    def _add_totals(totals: dict, c: llm.Completion) -> dict:
+    def _add_totals(totals: dict, c: llm.Completion, turn: bool = True) -> dict:
+        """Cumulative tokens for the session, compaction summaries included (they aren't turns)."""
         totals = dict(totals)
-        totals["turns"] = totals.get("turns", 0) + 1
+        totals["turns"] = totals.get("turns", 0) + (1 if turn else 0)
         totals["prompt_tokens"] = totals.get("prompt_tokens", 0) + c.prompt_tokens
         totals["completion_tokens"] = totals.get("completion_tokens", 0) + c.completion_tokens
         return totals
@@ -383,7 +450,10 @@ class Runner:
         if last < 0.8 * quota and now - self._quota_checked.get(sid, 0) < QUOTA_CHECK_SECONDS:
             return False
         self._quota_checked[sid] = now
-        mb = round(await asyncio.to_thread(dir_size, Path(s["workspace"])) / 2**20)
+        try:
+            mb = round(await self.workspace(s).size_bytes() / 2**20)
+        except (ToolError, RunnerError):
+            return False
         run["workspace_mb"] = mb
         self.db.update_session(sid, run=run)
         if mb <= quota or mb <= last:
@@ -400,8 +470,13 @@ class Runner:
         if not project or not project.repo or s["workspace_removed"]:
             return
         ws = Path(s["workspace"])
+        remote = s["target"] != "tower"
         if not s["base_commit"]:
-            info = await asyncio.to_thread(projects.prepare, project, ws, s["id"])
+            if remote:
+                info = await self.hub.call(s["target"], "prepare", {"session": s["id"], "repo": project.repo,
+                                                                    "base_branch": project.base_branch}, timeout=900)
+            else:
+                info = await asyncio.to_thread(projects.prepare, project, ws, s["id"])
             s = self.db.get_session(s["id"])
             context = s["context"]
             context[0] = {**context[0], "content": context[0]["content"].replace("{base_branch}", info["base_branch"])}
@@ -409,7 +484,8 @@ class Runner:
                 self.db.update_session(s["id"], context=context, **info)
                 self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
         elif not s["run"].get("origin_refreshed"):
-            error = await asyncio.to_thread(projects.refresh_origin, ws)
+            error = (await self.hub.call(s["target"], "refresh_origin", {"session": s["id"]}, timeout=400) if remote
+                     else await asyncio.to_thread(projects.refresh_origin, ws))
             if error:
                 self.bus.emit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
             run = self.db.get_session(s["id"])["run"]
@@ -431,7 +507,7 @@ class Runner:
                 return output
             existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call["id"],
                         "tool": name, "args": args, "reason": decision.reason,
-                        "detail": ws.preview_diff(name, args) if name in ("write_file", "edit_file") else ""}
+                        "detail": await ws.preview(name, args) if name in ("write_file", "edit_file") else ""}
             with self.db.tx():
                 self.db.insert_approval(existing)
                 self.bus.emit(sid, "approval_requested", {k: existing[k] for k in
@@ -475,7 +551,11 @@ class Runner:
         started = time.monotonic()
         ok = True
         try:
-            output = await ws.call(name, args)
+            if isinstance(ws, RemoteWorkspace):
+                await self._wait_for_target(sid)
+                output = await self._remote_call(sid, ws, name, args)
+            else:
+                output = await ws.call(name, args)
         except (ToolError, OSError, UnicodeError) as e:
             ok = False
             output = f"Error: {e}"
@@ -506,6 +586,23 @@ class Runner:
                                                "seconds": round(seconds, 2),
                                                "output": truncate_middle(output, 20000)})
 
+    def _progress_reporter(self, sid: str, event: str, base: dict):
+        """on_progress callback that sends throttled ephemeral progress events for long prompts."""
+        state = {"first": None, "last": 0.0}
+
+        async def report(processed: int, total: int, cache: int = -1) -> None:
+            if state["first"] is None:
+                state["first"] = cache if cache >= 0 else processed  # the first chunk covers the cached prefix
+            if total - state["first"] < PROGRESS_MIN_TOKENS:
+                return
+            now = time.monotonic()
+            if processed < total and now - state["last"] < 0.5:
+                return
+            state["last"] = now
+            self.bus.ephemeral(sid, event, {**base, "processed": processed, "total": total,
+                                            "cached": state["first"]})
+        return report
+
     # compaction
     async def _maybe_compact(self, s: dict) -> dict:
         sid = s["id"]
@@ -524,20 +621,39 @@ class Runner:
             split = compaction.split_for_summary(context, keep_chars=int(self.cfg.keep_recent * n * cpt))
             if split:
                 start, end = split
-                self.bus.ephemeral(sid, "compacting", {"messages": end - start})
+                # Persisted, so a client that opens the session mid-summary still shows it.
+                self.bus.emit(sid, "compaction_started", {"messages": end - start, "tokens_before": before,
+                                                          "context_tokens": n})
                 request = compaction.summary_request(context, start, end, max_chars=int(0.45 * n * cpt))
+                written = {"tokens": 0, "last": 0.0}
+
+                async def writing(kind: str, text: str) -> None:
+                    written["tokens"] += 1  # one streamed chunk is about one token
+                    now = time.monotonic()
+                    if now - written["last"] >= 0.5:
+                        written["last"] = now
+                        self.bus.ephemeral(sid, "compacting", {"phase": "writing", "tokens": written["tokens"],
+                                                               "max_tokens": 4096})
+
+                reading = self._progress_reporter(sid, "compacting", {"phase": "reading"})
                 try:
-                    summary = await self.chat(model, request, None, None, max_tokens=4096,
-                                              extra={"chat_template_kwargs": {"enable_thinking": False}})
+                    summary = await self.chat(model, request, None, writing, max_tokens=4096,
+                                              extra={"chat_template_kwargs": {"enable_thinking": False}},
+                                              on_progress=reading)
                 except llm.LLMError as e:
                     self.bus.emit(sid, "error", {"message": f"compaction summary failed: {e}"})
                 else:
+                    totals = self._add_totals(self.db.get_session(sid)["totals"], summary, turn=False)
+                    self.db.update_session(sid, totals=totals)
+                    data.update(prompt_tokens=summary.prompt_tokens, completion_tokens=summary.completion_tokens,
+                                totals=totals)
                     if summary.content.strip():
                         context = compaction.apply_summary(context, start, end, summary.content,
                                                            notes=s["run"].get("notes", ""))
                         after = compaction.estimate_tokens(context, cpt) + overhead
                         data.update(tier="summary", tokens_after=after, summarized_messages=end - start,
                                     summary=summary.content)
+        data["context_tokens"] = n
         with self.db.tx():
             self.db.update_session(sid, context=context)
             self.bus.emit(sid, "compaction", data)
@@ -585,8 +701,17 @@ class Runner:
                     "commits": projects.commits_ahead(ws, s["base_commit"])}
 
         try:
-            info = await asyncio.to_thread(work)
-        except projects.GitError as e:
+            if s["target"] != "tower":
+                if not self.hub.online(s["target"]):
+                    self.bus.emit(sid, "error", {"message": f"the {s['target']} is offline, so the branch wasn't "
+                                                            "saved yet; review saves it when it's back"})
+                    return
+                info = await self.hub.call(s["target"], "save_branch", {
+                    "session": sid, "repo": project.repo, "branch": s["branch"], "base_commit": s["base_commit"]},
+                    timeout=300)
+            else:
+                info = await asyncio.to_thread(work)
+        except (projects.GitError, RunnerError) as e:
             self.bus.emit(sid, "error", {"message": f"could not save the session branch: {e}"})
             return
         with self.db.tx():
