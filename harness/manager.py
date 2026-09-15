@@ -111,7 +111,7 @@ class Manager:
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
         for s in self.db.sessions_with_status(*ACTIVE):
-            if s["status"] != "waiting_approval":  # they don't need the GPU until the user decides
+            if s.get("backend", "local") == "local" and s["status"] != "waiting_approval":
                 self.runner.note_gpu_pause(s["id"])
 
     def _remote_control_ready(self, payload: dict) -> None:

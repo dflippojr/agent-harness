@@ -134,6 +134,24 @@ CREATE TABLE IF NOT EXISTS jobs (       -- scheduled jobs (jobs.py)
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS backend_usage (
+    backend TEXT PRIMARY KEY,
+    data TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    backend TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    app_id TEXT NOT NULL DEFAULT '',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    requests INTEGER NOT NULL DEFAULT 1,
+    billing TEXT NOT NULL DEFAULT 'subscription',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_backend_time ON usage(backend, created_at);
 -- Session search (search.py): one row per indexed event.
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED,
@@ -164,9 +182,11 @@ MIGRATIONS = [
     ("sessions", "job_status", "TEXT NOT NULL DEFAULT ''"),
     # Phase 8a: local inference or a hosted CLI session backend.
     ("sessions", "backend", "TEXT NOT NULL DEFAULT 'local'"),
+    ("jobs", "backend", "TEXT NOT NULL DEFAULT 'local'"),
+    ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
 ]
 
-JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata"}
+JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -364,6 +384,34 @@ class Database:
                 "SELECT * FROM approvals WHERE session_id = ? ORDER BY created_at", (sid,)).fetchall()
         return [_row(r) for r in rows]
 
+    # hosted backend usage and limits
+    def set_backend_usage(self, backend: str, data: dict) -> None:
+        with self.lock:
+            self.conn.execute("INSERT INTO backend_usage (backend, data, updated_at) VALUES (?, ?, ?) "
+                              "ON CONFLICT(backend) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+                              (backend, json.dumps(data), time.time()))
+
+    def get_backend_usage(self, backend: str) -> dict:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM backend_usage WHERE backend = ?", (backend,)).fetchone()
+        return _row(row) or {"backend": backend, "data": {}, "updated_at": None}
+
+    def record_usage(self, backend: str, sid: str, app_id: str, prompt_tokens: int,
+                     completion_tokens: int, cost_usd: float, billing: str) -> None:
+        with self.lock:
+            self.conn.execute("INSERT INTO usage (backend, session_id, app_id, prompt_tokens, completion_tokens, "
+                              "cost_usd, billing, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                              (backend, sid, app_id, prompt_tokens, completion_tokens, cost_usd, billing, time.time()))
+
+    def usage_tally(self, backend: str, since: float) -> dict:
+        with self.lock:
+            row = self.conn.execute("SELECT COALESCE(SUM(requests),0) requests, "
+                                    "COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
+                                    "COALESCE(SUM(completion_tokens),0) completion_tokens, "
+                                    "COALESCE(SUM(cost_usd),0) cost_usd FROM usage "
+                                    "WHERE backend = ? AND created_at >= ?", (backend, since)).fetchone()
+        return dict(row)
+
     # scheduled jobs
     def list_jobs(self) -> list[dict]:
         with self.lock:
@@ -413,11 +461,12 @@ class Database:
         now = time.time()
         with self.lock:
             self.conn.execute(
-                "INSERT INTO templates (id, name, project, model, prompt, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, "
-                "project = excluded.project, model = excluded.model, prompt = excluded.prompt, "
+                "INSERT INTO templates (id, name, project, backend, model, prompt, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, "
+                "project = excluded.project, backend = excluded.backend, model = excluded.model, prompt = excluded.prompt, "
                 "updated_at = excluded.updated_at",
-                (t["id"], t["name"], t["project"], t.get("model") or "", t["prompt"], now, now),
+                (t["id"], t["name"], t["project"], t.get("backend") or "local", t.get("model") or "",
+                 t["prompt"], now, now),
             )
 
     def delete_template(self, tid: str) -> bool:

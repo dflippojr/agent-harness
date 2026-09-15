@@ -12,7 +12,8 @@ import time
 from .manager import Manager
 from .runner import ACTIVE
 
-STATUSES = ("queued", "running", "waiting_approval", "waiting_target", "done", "failed", "cancelled")
+STATUSES = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit",
+            "done", "failed", "cancelled")
 
 
 def _esc(value) -> str:
@@ -84,6 +85,20 @@ def render(m: Manager) -> str:
                [({"status": st}, secs) for st, _, secs in approvals if st != "pending"])
     out.metric("harness_approvals_pending", "gauge", "Approvals waiting now.",
                [({}, sum(n for st, n, _ in approvals if st == "pending"))])
+    backend_limits, backend_costs = [], []
+    for name in m.cfg.backends:
+        state = db.get_backend_usage(name)["data"]
+        windows = state.get("unifiedWindows") or {}
+        if state.get("rateLimitType") and state.get("utilization") is not None:
+            windows = {**windows, state["rateLimitType"]: {"utilization": state["utilization"]}}
+        for window, value in windows.items():
+            if isinstance(value, dict) and value.get("utilization") is not None:
+                backend_limits.append(({"backend": name, "window": window}, value["utilization"]))
+        backend_costs.append(({"backend": name}, db.usage_tally(name, 0)["cost_usd"]))
+    out.metric("harness_backend_utilization", "gauge", "Latest hosted-backend utilization from 0 to 1.",
+               backend_limits)
+    out.metric("harness_backend_cost_usd_total", "counter", "Hosted-backend reported cost estimate.",
+               backend_costs)
 
     with db.lock:
         endpoint = db.conn.execute(

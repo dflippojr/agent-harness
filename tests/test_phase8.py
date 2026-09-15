@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import sys
+import time
 
 import httpx
 import pytest
@@ -291,7 +292,11 @@ send({"type": "control_response", "response": {"subtype": "success", "request_id
 user = read()
 send({"type": "system", "subtype": "init", "session_id": "claude-session-1", "model": "claude-opus-5"})
 
-if mode == "inbox":
+if mode == "limit":
+    send({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected",
+          "rateLimitType": "seven_day", "utilization": 1.0, "resetsAt": time.time() + 60}})
+    time.sleep(60)
+elif mode == "inbox":
     followup = read()
     send({"type": "result", "subtype": "success", "result": followup["message"]["content"],
           "total_cost_usd": 0.0, "usage": {"input_tokens": 1, "output_tokens": 1}, "num_turns": 1})
@@ -355,6 +360,10 @@ def test_claude_docker_command_is_sandboxed_and_resumable(tmp_path):
                  ["--permission-mode", "default"], ["--model", "claude-test"], ["--resume", "resume-me"]):
         assert any(command[at:at + 2] == pair for at in range(len(command) - 1))
     assert not any("bypass" in arg or "skip-permissions" in arg for arg in command)
+    keyed = ClaudeSession(session_id="keyed", workspace=tmp_path, backend=backend, sandbox=sandbox,
+                          system_prompt="system", api_key="secret-value").command()
+    assert ["-e", "ANTHROPIC_API_KEY"] == keyed[keyed.index("ANTHROPIC_API_KEY") - 1:keyed.index("ANTHROPIC_API_KEY") + 1]
+    assert "secret-value" not in keyed
 
 
 def test_claude_start_removes_restart_orphan_before_reusing_name(tmp_path, monkeypatch):
@@ -551,3 +560,73 @@ def test_web_and_app_session_apis_accept_backend(tmp_path):
         app = client.post("/api/v1/sessions", headers={"Authorization": f"Bearer {token}"},
                           json={"prompt": "app", "backend": "claude"})
         assert app.status_code == 201 and app.json()["backend"] == "claude"
+
+
+def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
+    from harness import backend_state
+    from harness.metrics import render
+
+    monkeypatch.setattr(backend_state, "_subscription_status", lambda name, cfg: True)
+
+    async def body():
+        m, _, _ = _claude_manager(tmp_path, "allow")
+        await m.start()
+        s = await wait_status(m, m.create("read it", backend="claude")["id"], "done")
+        await asyncio.gather(*m.tasks.values())
+        assert m.db.get_backend_usage("claude")["data"]["utilization"] == 0.8
+        tally = m.db.usage_tally("claude", 0)
+        assert tally == {"requests": 1, "prompt_tokens": 15, "completion_tokens": 4, "cost_usd": 0.42}
+        metrics = render(m)
+        assert 'harness_backend_utilization{backend="claude",window="seven_day"} 0.8' in metrics
+        assert 'harness_backend_cost_usd_total{backend="claude"} 0.42' in metrics
+        await m.stop()
+        with TestClient(create_app(m)) as client:
+            public = client.get("/backends").json()[1]
+            assert public["logged_in"] and public["model"] == "claude-opus-5"
+            assert public["today"]["requests"] == 1
+            token = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()["key"]
+            headers = {"Authorization": f"Bearer {token}"}
+            assert client.get("/api/v1/backends", headers=headers).json()[0]["week"]["cost_usd"] == 0.42
+            assert client.get("/api/v1").json()["backends"][0]["notice"]
+    asyncio.run(body())
+
+
+def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
+    async def waiting():
+        m, _, _ = _claude_manager(tmp_path / "waiting", "limit")
+        m.cfg.backends["claude"].billing = "credits"
+        await m.start()
+        sid = m.create("hit the limit", backend="claude")["id"]
+        s = await wait_status(m, sid, "waiting_limit")
+        assert events(m, sid, "billing_warning")
+        assert events(m, sid, "limit_waiting")[0]["resets_at"] > time.time()
+        await m.cancel(sid)
+        await m.stop()
+
+    async def fallback():
+        root = tmp_path / "fallback"
+        m, made, state = _claude_manager(root, "limit")
+        key_file = root / "claude.key"
+        key_file.write_text("api-secret", encoding="utf-8")
+        backend = m.cfg.backends["claude"]
+        backend.auth = "subscription_then_api_key"
+        backend.api_key_file = str(key_file)
+
+        def factory(**kwargs):
+            made.append(kwargs)
+            mode = "echo" if kwargs.get("api_key") else "limit"
+            return ClaudeSession(**kwargs, command=[sys.executable, "-u", str(root / "fake_claude.py"),
+                                                    mode, str(state), "tool-1"])
+
+        m.runner.cli_factory = factory
+        await m.start()
+        sid = m.create("fall back", backend="claude")["id"]
+        s = await wait_status(m, sid, "done")
+        assert len(made) == 2 and made[1]["api_key"] == "api-secret"
+        assert events(m, sid, "backend_fallback") and events(m, sid, "billing_warning")
+        rows = m.db.conn.execute("SELECT billing FROM usage WHERE session_id = ?", (sid,)).fetchall()
+        assert [row[0] for row in rows] == ["api_key"]
+        await m.stop()
+
+    asyncio.run(waiting())
+    asyncio.run(fallback())

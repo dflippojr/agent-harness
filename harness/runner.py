@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 from . import compaction, grounding, llm, projects
+from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError
 from .config import Config
@@ -30,6 +31,11 @@ from .tools import ToolError, Workspace, truncate_middle, validate_args
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
 
 log = logging.getLogger("harness.runner")
+
+
+class CliLimitError(Exception):
+    def __init__(self, reset_at: float = 0):
+        self.reset_at = reset_at
 
 SYSTEM_PROMPT = """You are a software agent working in a project workspace on the user's home server.
 You act only through the provided tools. File paths are relative to the workspace root (/workspace in the sandbox).
@@ -50,7 +56,7 @@ MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the wor
 
 HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, ask to restart one with restart_service, and, after a code or Dockerfile change has been merged into a stack, ask to rebuild it with rebuild_service (the user approves restarts and rebuilds). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
 
-ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app")
+ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit")
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
 QUOTA_CHECK_SECONDS = 30
@@ -361,29 +367,77 @@ class Runner:
             self.bus.emit(sid, "resumed", {"status": s["status"]})
         await self._prepare_repo(s)
         slot = self._backend_slots[backend_name]
-        async with slot:
+        while True:
             s = self.db.get_session(sid)
-            if s["status"] != "waiting_approval":
-                self.set_status(sid, "running")
+            if s["status"] == "waiting_limit":
+                delay = max(0, float(s["run"].get("limit_resets_at") or 0) - time.time())
+                if delay:
+                    await asyncio.sleep(delay)
+                self.set_status(sid, "queued")
             backend_session_id = str(s["run"].get("backend_session_id") or "")
-            cli = self.cli_factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
-                                   sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
-                                   model=s["model"], backend_session_id=backend_session_id)
-            self._cli_sessions[sid] = cli
-            await cli.start()
-            prompt = ("The harness restarted; continue the task." if recovered else
-                      next((m["content"] for m in reversed(s["context"][1:])
-                            if m.get("role") == "user" and isinstance(m.get("content"), str)), ""))
-            await cli.initialize(prompt)
-            tool_names: dict[str, str] = {}
-            while True:
-                await self._send_cli_inbox(sid, cli)
-                event = await cli.receive(timeout=0.05)
-                if event is None:
+            use_api_key = backend.auth == "api_key" or s["run"].get("backend_auth") == "api_key"
+            api_key = self._backend_api_key(s) if use_api_key else ""
+            if use_api_key and not api_key:
+                self.bus.emit(sid, "backend_auth_required", {"backend": backend_name, "auth": "api_key"})
+                raise CliBackendError(f"{backend_name} API-key auth is configured but no key is available")
+            try:
+                async with slot:
+                    s = self.db.get_session(sid)
+                    if s["status"] != "waiting_approval":
+                        self.set_status(sid, "running")
+                    run = {**s["run"], "billing_mode": "api_key" if use_api_key else backend.billing}
+                    self.db.update_session(sid, run=run)
+                    warning = billing_warning(backend, run.get("rate_limits"), using_api_key=use_api_key)
+                    if warning and not run.get("billing_warned"):
+                        run["billing_warned"] = True
+                        self.db.update_session(sid, run=run)
+                        self.bus.emit(sid, "billing_warning", {"backend": backend_name, "message": warning})
+                    cli = self.cli_factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
+                                           sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
+                                           model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
+                    self._cli_sessions[sid] = cli
+                    await cli.start()
+                    prompt = ("The harness restarted; continue the task." if recovered else
+                              next((m["content"] for m in reversed(s["context"][1:])
+                                    if m.get("role") == "user" and isinstance(m.get("content"), str)), ""))
+                    await cli.initialize(prompt)
+                    tool_names: dict[str, str] = {}
+                    while True:
+                        await self._send_cli_inbox(sid, cli)
+                        event = await cli.receive(timeout=0.05)
+                        if event is None:
+                            continue
+                        if await self._handle_cli_event(sid, cli, event, tool_names, recovered=recovered):
+                            await self._end_run(sid)
+                            return
+            except CliLimitError as limit:
+                await self._stop_cli(sid)
+                s = self.db.get_session(sid)
+                key = self._backend_api_key(s)
+                if backend.auth == "subscription_then_api_key" and key and not use_api_key:
+                    run = {**s["run"], "backend_auth": "api_key"}
+                    self.db.update_session(sid, run=run)
+                    self.bus.emit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
+                    recovered = True
                     continue
-                if await self._handle_cli_event(sid, cli, event, tool_names, recovered=recovered):
-                    await self._end_run(sid)
-                    return
+                reset = limit.reset_at or time.time() + 300
+                run = {**s["run"], "limit_resets_at": reset}
+                self.db.update_session(sid, run=run)
+                self.set_status(sid, "waiting_limit")
+                self.bus.emit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
+                recovered = True
+
+    def _backend_api_key(self, s: dict) -> str:
+        backend = self.cfg.backends[s["backend"]]
+        if s.get("app_id"):
+            value = self.db.provider_key(s["app_id"], s["backend"])
+            if value:
+                return value
+        path = Path(backend.api_key_file) if backend.api_key_file else None
+        try:
+            return path.read_text(encoding="utf-8").strip() if path and path.is_file() else ""
+        except OSError:
+            return ""
 
     async def _send_cli_inbox(self, sid: str, cli: ClaudeSession) -> None:
         """Forward messages received during a CLI run without racing a newer inbox append."""
@@ -486,9 +540,22 @@ class Runner:
             rate_limits = event.get("rate_limit_info") or {}
             s = self.db.get_session(sid)
             self.db.update_session(sid, run={**s["run"], "rate_limits": rate_limits})
+            self.db.set_backend_usage(s["backend"], rate_limits)
             self.bus.emit(sid, "rate_limit", rate_limits)
+            warning = billing_warning(self.cfg.backends[s["backend"]], rate_limits,
+                                      using_api_key=s["run"].get("billing_mode") == "api_key")
+            if warning:
+                self.bus.emit(sid, "billing_warning", {"backend": s["backend"], "message": warning})
+            utilization = float(rate_limits.get("utilization") or 0)
+            stop = float(self.cfg.backends[s["backend"]].stop_at_utilization or 0)
+            if rate_limits.get("status") == "rejected" or (stop and utilization >= stop):
+                raise CliLimitError(float(rate_limits.get("resetsAt") or 0))
             return False
         if type_ == "result":
+            text = str(event.get("result") or "").lower()
+            if (event.get("is_error") or event.get("subtype") in ("error", "failed")) and "rate limit" in text:
+                latest = self.db.get_session(sid)["run"].get("rate_limits") or {}
+                raise CliLimitError(float(latest.get("resetsAt") or 0))
             self._finish_cli_result(sid, event)
             return True
         return False
@@ -560,6 +627,8 @@ class Runner:
         status, reason = ("failed", str(result.get("subtype") or "cli_error")) if failed else ("done", "final_message")
         with self.db.tx():
             self.db.update_session(sid, run=run, totals=totals, status=status, stop_reason=reason, answer=answer)
+            self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
+                                 str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing))
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})
 
     async def _stop_cli(self, sid: str) -> None:

@@ -70,6 +70,7 @@ class Job(BaseModel):
     prompt: str
     cron: str
     project: str = "scratch"
+    backend: str = "local"
     model: str = ""
     notify: str = "low"          # OK results: attention (no notification) | low | always
     enabled: bool = True
@@ -79,6 +80,7 @@ class Job(BaseModel):
 class Template(BaseModel):
     name: str
     project: str = "scratch"
+    backend: str = "local"
     model: str = ""
     prompt: str
 
@@ -200,6 +202,16 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         cfg = mgr(request).cfg
         return [{"name": m.name, "context_tokens": m.context_tokens, "default": m.name == cfg.default_model}
                 for m in cfg.models.values()]
+
+    @app.get("/backends")
+    async def backends(request: Request):
+        m = mgr(request)
+        from .backend_state import view as backend_view
+        local = {"name": "local", "available": True, "logged_in": True, "auth": "local", "billing": "local",
+                 "model": m.cfg.default_model,
+                 "limits": {}, "today": {}, "week": {}, "notice": "Runs the local model on this server.",
+                 "billing_warning": ""}
+        return [local] + [await asyncio.to_thread(backend_view, m, name) for name in m.cfg.backends]
 
     @app.get("/models/status")
     async def models_status(request: Request):
@@ -447,7 +459,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         from .jobs import Cron, CronError, new_job_id, validate
         m = jobs_on(request)
         try:
-            job = validate(body.model_dump(), m.cfg.projects, m.cfg.models)
+            job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
         except (ValueError, CronError) as e:
             raise HarnessError(400, str(e))
         job["id"] = new_job_id()
@@ -472,7 +484,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         if old is None:
             raise HarnessError(404, "no such job")
         try:
-            job = validate(body.model_dump(), m.cfg.projects, m.cfg.models)
+            job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
         except (ValueError, CronError) as e:
             raise HarnessError(400, str(e))
         job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
@@ -522,7 +534,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             raise HarnessError(400, "name and prompt are required")
         if body.project not in m.cfg.projects:
             raise HarnessError(400, f"unknown project {body.project!r}")
-        if body.model and body.model not in m.cfg.models:
+        if body.backend != "local" and (body.backend not in m.cfg.backends or not m.cfg.backends[body.backend].enabled):
+            raise HarnessError(400, f"unknown or disabled backend {body.backend!r}")
+        if body.backend == "local" and body.model and body.model not in m.cfg.models:
             raise HarnessError(400, f"unknown model {body.model!r}")
         m.db.upsert_template({"id": tid, **body.model_dump()})
         return m.db.get_template(tid)

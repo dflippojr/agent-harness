@@ -213,13 +213,22 @@ def register(app: FastAPI, mgr) -> None:
     @app.get("/api/v1")
     async def api_root(request: Request):
         m = mgr(request)
+        from .backend_state import view as backend_view
+        backends = [await asyncio.to_thread(backend_view, m, name) for name in m.cfg.backends]
         return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
                 "projects": [{"name": p.name, "description": p.description, "target": p.target}
                              for p in m.cfg.projects.values()],
-                "models": list(m.cfg.models), "features": {
+                "models": list(m.cfg.models), "backends": backends, "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
                     "remote_control": m.remote_control is not None}}
+
+    @app.get("/api/v1/backends")
+    async def backends(request: Request):
+        m = mgr(request)
+        auth(request, "sessions")
+        from .backend_state import view as backend_view
+        return [await asyncio.to_thread(backend_view, m, name) for name in m.cfg.backends]
 
     @app.post("/api/v1/sessions", status_code=201)
     async def create_session(body: CreateAppSession, request: Request):

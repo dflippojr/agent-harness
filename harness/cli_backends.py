@@ -28,7 +28,7 @@ class ClaudeSession:
 
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
-                 popen: Callable = subprocess.Popen, command: list[str] | None = None):
+                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None):
         self.session_id = session_id
         self.workspace = workspace.resolve()
         self.backend = backend
@@ -36,6 +36,7 @@ class ClaudeSession:
         self.system_prompt = system_prompt
         self.model = model or backend.model
         self.backend_session_id = backend_session_id
+        self.api_key = api_key
         self.container = f"harness-{session_id}-claude"
         self._popen = popen
         self._command_override = command
@@ -75,6 +76,9 @@ class ClaudeSession:
         ]
         if self.backend_session_id:
             args += ["--resume", self.backend_session_id]
+        if self.api_key:
+            at = args.index(self.backend.image)
+            args[at:at] = ["-e", "ANTHROPIC_API_KEY"]
         return args
 
     async def start(self) -> None:
@@ -84,10 +88,13 @@ class ClaudeSession:
             # our finally block and can leave `docker run`'s container behind.
             # Remove only this session's deterministic container before reuse.
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+        child_env = os.environ.copy()
+        if self.api_key:
+            child_env["ANTHROPIC_API_KEY"] = self.api_key
         process = self._popen(
             self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=os.environ.copy(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=child_env,
         )
         self.process = process
 

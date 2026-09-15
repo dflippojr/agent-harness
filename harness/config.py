@@ -44,6 +44,8 @@ class BackendConfig:
     proxy: str = "http://harness-egress-claude:8888"
     volume: str = "harness-auth-claude"
     network: str = "harness-cli-claude"
+    api_key_file: str = "D:/Agents/harness/secrets/claude-api-key"
+    stop_at_utilization: float = 0.0
 
 
 @dataclass

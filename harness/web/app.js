@@ -15,7 +15,7 @@ const $back = document.getElementById("back");
 const $conn = document.getElementById("conn");
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 const STATUS_LABEL = {
-  queued: "queued", running: "running", waiting_approval: "needs approval", waiting_target: "waiting for Mac", waiting_app: "waiting for app",
+  queued: "queued", running: "running", waiting_approval: "needs approval", waiting_target: "waiting for Mac", waiting_app: "waiting for app", waiting_limit: "waiting for limit",
   done: "done", failed: "failed", cancelled: "cancelled",
 };
 const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };
@@ -302,7 +302,8 @@ async function viewList() {
 // ---------- new task ----------
 async function viewNew() {
   $title.textContent = "New task";
-  const [projects, models, allTemplates] = await Promise.all([api("/projects"), api("/models"), api("/templates")]);
+  const [projects, models, allTemplates, backends] = await Promise.all([
+    api("/projects"), api("/models"), api("/templates"), api("/backends")]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
   const targetKey = "harness.target";
@@ -346,9 +347,30 @@ async function viewNew() {
   project.addEventListener("change", showTarget);
   showTarget();
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
+  let localModel = model.value;
+  model.addEventListener("change", () => { localModel = model.value; });
+  const backend = h("select", {}, backends.filter((b) => b.available).map((b) =>
+    h("option", { value: b.name }, b.name === "local" ? "Local model" : b.name)));
+  const backendState = h("div", { class: "muted small", style: "margin-top:6px" });
+  const modelState = h("div", { class: "muted small", style: "margin-top:6px" });
+  const showBackend = () => {
+    const b = backends.find((x) => x.name === backend.value);
+    const isLocal = backend.value === "local";
+    if (isLocal) {
+      fill(model, models.map((m) => h("option", { value: m.name, selected: m.name === localModel }, m.name)));
+    } else {
+      if (models.some((m) => m.name === model.value)) localModel = model.value;
+      fill(model, h("option", { value: b?.model || "" }, b?.model || `${backend.value} default`));
+    }
+    model.disabled = !isLocal;
+    modelState.hidden = !isLocal;
+    backendState.textContent = b?.billing_warning || b?.notice || "";
+    backendState.classList.toggle("bad", !!b?.billing_warning);
+  };
+  backend.addEventListener("change", showBackend);
+  showBackend();
   const prompt = h("textarea", { placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
   const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
-  const modelState = h("div", { class: "muted small", style: "margin-top:6px" });
   const MODEL_STATE = {
     ready: "✓ Model loaded",
     sleeping: "Model is asleep; loading it now (about a minute)",
@@ -357,6 +379,7 @@ async function viewNew() {
     paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Settings → GPU)",
   };
   const pollModel = async () => {
+    if (backend.value !== "local") return;
     try {
       const status = await api("/models/status");
       const current = status.find((s) => s.name === model.value) || status[0];
@@ -378,8 +401,10 @@ async function viewNew() {
     const t = templates.find((x) => x.id === tplSelect.value);
     if (!t) return;
     project.value = t.project;
+    if ((t.backend || "local") === "local" && t.model) localModel = t.model;
+    backend.value = t.backend || "local";
+    showBackend();
     showTarget();
-    if (t.model) model.value = t.model;
     prompt.value = t.prompt;
   });
 
@@ -390,7 +415,8 @@ async function viewNew() {
       if (!prompt.value.trim()) return toast("Write a prompt first");
       start.disabled = true;
       try {
-        const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value, model: model.value, title: title.value || null } });
+        const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
+          backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null } });
         try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
         location.hash = `#/s/${s.id}`;
       } catch (err) {
@@ -403,6 +429,7 @@ async function viewNew() {
   allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState,
+  h("label", {}, "Backend"), backend, backendState,
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
   h("div", { class: "row", style: "margin-top:18px" },
@@ -413,7 +440,8 @@ async function viewNew() {
         const name = window.prompt("Template name");
         if (!name) return;
         try {
-          await api("/templates", { method: "POST", body: { name, project: project.value, model: model.value, prompt: prompt.value } });
+          await api("/templates", { method: "POST", body: { name, project: project.value, backend: backend.value,
+            model: backend.value === "local" ? model.value : "", prompt: prompt.value } });
           toast("Template saved");
           warmModel();
 route();
@@ -459,9 +487,12 @@ async function viewSession(sid, tab, focusApproval) {
   const ctxLimit = session.context_limit || 0;
 
   const renderHead = () => {
+    const limits = session.run?.rate_limits || {};
+    const backendUsage = session.backend && session.backend !== "local" && limits.utilization !== undefined
+      ? ` · ${String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h")} ${Math.round(limits.utilization * 100)}%` : "";
     fill(head, badge(session.status),
       session.queue_position > 0 ? h("span", { class: "muted" }, `#${session.queue_position} in GPU queue`) : null,
-      h("span", { class: "muted" }, `${session.project}${session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : ""} · ${session.model}`));
+      h("span", { class: "muted" }, `${session.project}${session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : ""} · ${session.backend || "local"}${backendUsage} · ${session.model}`));
     const pct = ctxLimit && ctxUsed ? Math.round((100 * ctxUsed) / ctxLimit) : null;
     fill(usage,
       h("span", { class: "muted", title: "Cumulative tokens for this session (prompt tokens in, generated tokens out)" },
@@ -680,6 +711,9 @@ async function viewSession(sid, tab, focusApproval) {
     app_context: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Context from the app"), h("div", { class: "text" }, e.data.content))),
     app_tool_call: (e) => add(h("p", { class: "note" }, `Asked the app to run ${e.data.name}`)),
     app_tool_result: (e) => add(h("p", { class: "note" }, `The app returned ${e.data.ok ? "a result" : "an error"} (${e.data.chars} characters)`)),
+    billing_warning: (e) => add(h("p", { class: "note bad" }, e.data.message)),
+    limit_waiting: (e) => add(h("p", { class: "note" }, `Rate limit reached; waiting until ${new Date(e.data.resets_at * 1000).toLocaleString()}`)),
+    backend_fallback: (e) => add(h("p", { class: "note bad" }, `Rate limit reached; continuing ${e.data.backend} with an API key`)),
     prompt_progress: (e) => {
       const b = liveBubble();
       const d = e.data;
@@ -962,7 +996,7 @@ function viewInfo(s) {
   const t = s.totals || {};
   const rows = [
     ["Session", s.id], ["Status", `${s.status}${s.stop_reason ? ` (${s.stop_reason})` : ""}`],
-    ["Project", s.project], ["Target", s.target], ["Model", s.model],
+    ["Project", s.project], ["Target", s.target], ["Backend", s.backend || "local"], ["Model", s.model],
     ["Created", new Date(s.created_at * 1000).toLocaleString()], ["Updated", new Date(s.updated_at * 1000).toLocaleString()],
     ["Model turns", t.turns || 0], ["Prompt tokens", t.prompt_tokens || 0], ["Completion tokens", t.completion_tokens || 0],
     ["Workspace", s.workspace_removed ? `${s.workspace} (removed)` : s.workspace],
@@ -1108,9 +1142,10 @@ async function viewJobs() {
 async function viewJob(id) {
   const isNew = id === "new";
   $title.textContent = isNew ? "New job" : "Job";
-  const [projects, models, job] = await Promise.all([api("/projects"), api("/models"), isNew ? null : api(`/jobs/${id}`)]);
+  const [projects, models, backends, job] = await Promise.all([
+    api("/projects"), api("/models"), api("/backends"), isNew ? null : api(`/jobs/${id}`)]);
   const j = job || {
-    name: "", prompt: "", cron: "0 8 * * *", model: "", notify: "low", enabled: true,
+    name: "", prompt: "", cron: "0 8 * * *", backend: "local", model: "", notify: "low", enabled: true,
     project: projects.some((p) => p.name === "homelab") ? "homelab" : "scratch",
   };
   const name = h("input", { type: "text", value: j.name, placeholder: "e.g. Morning homelab check" });
@@ -1125,6 +1160,27 @@ async function viewJob(id) {
     .map((p) => h("option", { value: p.name, selected: p.name === j.project }, p.description ? `${p.name} — ${p.description}` : p.name)));
   const model = h("select", {}, h("option", { value: "" }, "Default model"),
     models.map((m) => h("option", { value: m.name, selected: m.name === j.model }, m.name)));
+  let localModel = (j.backend || "local") === "local" ? j.model : "";
+  model.addEventListener("change", () => { localModel = model.value; });
+  const backend = h("select", {}, backends.filter((b) => b.available).map((b) =>
+    h("option", { value: b.name, selected: b.name === (j.backend || "local") }, b.name === "local" ? "Local model" : b.name)));
+  const backendNote = h("div", { class: "muted small", style: "margin-top:6px" });
+  const showBackend = () => {
+    const b = backends.find((x) => x.name === backend.value);
+    const isLocal = backend.value === "local";
+    if (isLocal) {
+      fill(model, h("option", { value: "", selected: !localModel }, "Default model"),
+        models.map((m) => h("option", { value: m.name, selected: m.name === localModel }, m.name)));
+    } else {
+      if (!model.disabled) localModel = model.value;
+      fill(model, h("option", { value: b?.model || "" }, b?.model || `${backend.value} default`));
+    }
+    model.disabled = !isLocal;
+    backendNote.textContent = b?.billing_warning || (backend.value === "local" ? "" : b?.notice || "");
+    backendNote.classList.toggle("bad", !!b?.billing_warning);
+  };
+  backend.addEventListener("change", showBackend);
+  showBackend();
   const notify = h("select", {}, Object.entries(JOB_NOTIFY).map(([k, label]) => h("option", { value: k, selected: k === j.notify }, label)));
   const enabled = h("input", { type: "checkbox", checked: j.enabled });
   let previewTimer = null;
@@ -1145,7 +1201,8 @@ async function viewJob(id) {
     preview();
   });
   preview();
-  const body = () => ({ name: name.value, prompt: prompt.value, cron: cron.value, project: project.value, model: model.value, notify: notify.value, enabled: enabled.checked });
+  const body = () => ({ name: name.value, prompt: prompt.value, cron: cron.value, project: project.value,
+    backend: backend.value, model: backend.value === "local" ? model.value : "", notify: notify.value, enabled: enabled.checked });
   const save = h("button", { class: "btn primary", type: "submit" }, isNew ? "Create" : "Save");
   $app.append(h("form", {
     onsubmit: async (e) => {
@@ -1164,6 +1221,7 @@ async function viewJob(id) {
   h("p", { class: "muted small" }, "The agent is asked to end with STATUS: OK or STATUS: ATTENTION, which decides how loudly you're notified. Approvals always notify."),
   h("label", {}, "Schedule (tower time)"), preset, h("div", { style: "margin-top:8px" }, cron), cronNote,
   h("label", {}, "Project"), project,
+  h("label", {}, "Backend"), backend, backendNote,
   h("label", {}, "Model"), model,
   h("label", {}, "Notify me"), notify,
   h("label", { class: "row", style: "font-weight:500" }, enabled, "Enabled"),
@@ -1216,12 +1274,33 @@ async function viewSettings() {
       }, "Send test notification") : null),
     gpuCard(),
     remoteControlCard(),
+    backendsCard(),
     memoryCard(),
     endpointCard(me),
     appsCard(me),
     diskCard(),
     h("div", { class: "card" }, h("h3", {}, "Install"),
       h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")));
+}
+
+function backendsCard() {
+  const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
+  const load = async () => {
+    try {
+      const rows = (await api("/backends")).filter((b) => b.name !== "local");
+      fill(body, rows.length ? rows.map((b) => {
+        const limits = b.limits || {};
+        const usage = limits.utilization === undefined ? "limits not reported yet"
+          : `${String(limits.rateLimitType || "limit").replace("seven_day", "7d")} ${Math.round(limits.utilization * 100)}%`;
+        return h("div", { style: "margin-bottom:12px" },
+          h("strong", {}, b.name), ` · ${b.logged_in ? "signed in" : "sign-in/key needed"} · ${usage}`,
+          h("p", { class: `small ${b.billing_warning ? "bad" : "muted"}` }, b.billing_warning || b.notice),
+          h("p", { class: "muted small" }, `Today: ${b.today.requests || 0} requests, $${Number(b.today.cost_usd || 0).toFixed(4)} estimate · 7d: ${b.week.requests || 0} requests, $${Number(b.week.cost_usd || 0).toFixed(4)}`));
+      }) : h("p", { class: "muted small" }, "No hosted backends configured."));
+    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
+  };
+  load();
+  return h("div", { class: "card" }, h("h3", {}, "Hosted backends"), body);
 }
 
 function backupLine(b) {

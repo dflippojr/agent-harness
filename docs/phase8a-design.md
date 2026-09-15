@@ -1,7 +1,7 @@
 # Phase 8a design: Claude Code, Codex and Cursor as session backends
 
-Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **steps 1-2 complete, including the live
-Claude restart exit; step 3 is next**. Written 2026-09-15 from the CLIs installed on the tower:
+Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **steps 1-3 complete, including the live
+Claude restart exit; step 4 is next**. Written 2026-09-15 from the CLIs installed on the tower:
 Claude Code 2.1.272, Codex CLI (Plus plan, models `gpt-6-astra`,
 `gpt-5.6-sol`, ...), and Cursor Agent (`cursor-agent`, models incl. `cursor-grok-4.6-high`). The terms and billing
 background and the promises made to app builders are in `docs/app-api.md` → "Subscription backends".
@@ -27,6 +27,11 @@ background and the promises made to app builders are in `docs/app-api.md` → "S
   Claude regenerates an interrupted tool request with a new tool-use ID. Startup now removes only that session's
   orphan container and rebinds the regenerated request to the one persisted approval. Full suite: **142 passed,
   1 skipped**. Claude is enabled in the checked-in config.
+- **Step 3 complete:** Claude limit events and result usage persist to backend state and usage tallies; the web and
+  app APIs, Settings, session header and Prometheus expose them. Billing warnings, configurable soft stops,
+  `waiting_limit`, and subscription-to-user-key fallback are implemented. New tasks, templates and jobs select a
+  backend; their Model field shows the backend's pinned model (currently `claude-opus-5`) instead of a stale local
+  model. Full suite: **144 passed, 1 skipped**.
 
 ## Requirements (user decisions)
 
@@ -197,12 +202,11 @@ Policy rules gain CLI tool names (`Bash`, `Edit`, `Write`, `WebFetch`, `mcp__*`,
 ### API keys (requirement 6)
 
 - `backends.<name>.auth: subscription | api_key | subscription_then_api_key`.
-- Keys live in `D:\Agents\harness\secrets\<backend>-api-key` (the user's own), or come per app:
-  `POST /keys` app tokens get an optional stored provider key, set by the app builder from Settings → Apps. They're
-  injected as `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CURSOR_API_KEY` into that session's container
-  environment only, and never logged or shown back.
-- A per-app key is the app builder's own API key. That's the terms-clean path for anything that runs unattended at
-  volume.
+- User keys live in `D:\Agents\harness\secrets\<backend>-api-key` and are injected as `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` / `CURSOR_API_KEY` into the session container environment only, never command arguments, logs or
+  API responses.
+- Per-app provider keys remain a planned extension, pending explicit approval of the credential-ingestion and
+  storage design. No app-facing credential endpoint or plaintext provider-key database field is included in step 3.
 
 ### App API changes
 

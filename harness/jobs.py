@@ -144,7 +144,7 @@ def summary(answer: str, limit: int = 300) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
-def validate(job: dict, projects: dict, models: dict) -> dict:
+def validate(job: dict, projects: dict, models: dict, backends: dict | None = None) -> dict:
     name = (job.get("name") or "").strip()
     prompt = (job.get("prompt") or "").strip()
     if not name or not prompt:
@@ -154,12 +154,16 @@ def validate(job: dict, projects: dict, models: dict) -> dict:
     if project not in projects:
         raise ValueError(f"unknown project {project!r}")
     model = job.get("model") or ""
-    if model and model not in models:
+    backend = job.get("backend") or "local"
+    if backend != "local" and (backend not in (backends or {}) or not backends[backend].enabled):
+        raise ValueError(f"unknown or disabled backend {backend!r}")
+    if backend == "local" and model and model not in models:
         raise ValueError(f"unknown model {model!r}")
     notify = job.get("notify") or "low"
     if notify not in NOTIFY_MODES:
         raise ValueError(f"notify must be one of {', '.join(NOTIFY_MODES)}")
-    return {"name": name[:80], "prompt": prompt, "cron": cron.expr, "project": project, "model": model,
+    return {"name": name[:80], "prompt": prompt, "cron": cron.expr, "project": project, "backend": backend,
+            "model": model,
             "notify": notify, "enabled": bool(job.get("enabled", True)),
             "catch_up_minutes": max(0, int(job.get("catch_up_minutes", 360)))}
 
@@ -222,7 +226,8 @@ class JobScheduler:
         now = now or time.time()
         prompt = f"{job['prompt'].strip()}\n\n{STATUS_PROMPT}"
         stamp = time.strftime("%b %d %H:%M", time.localtime(now))
-        s = self.create(prompt, project=job["project"], model=job["model"] or None,
+        s = self.create(prompt, project=job["project"], backend=job.get("backend") or "local",
+                        model=job["model"] or None,
                         title=f"⏰ {job['name']} · {stamp}", job_id=job["id"])
         self.db.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="",
                            **({} if manual else {"next_run_at": Cron(job["cron"]).next_after(now)}))
