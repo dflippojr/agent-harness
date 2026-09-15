@@ -1,0 +1,229 @@
+"""Scheduled jobs: recurring agent tasks on a cron schedule (Phase 7d).
+
+A job is a prompt, a project and a model plus a five-field cron expression in the tower's local time
+(minute hour day-of-month month day-of-week; `*`, lists, ranges, steps, and names like `mon-fri`). The daemon checks
+every 30 s and starts an ordinary session for each due job, so jobs queue for the GPU, ask for approvals, and pause
+for games like any other task.
+
+Notifications (user decision: quiet unless attention): the job prompt asks the agent to end its answer with
+`STATUS: OK` or `STATUS: ATTENTION`. ATTENTION (or a missing status line, or a failed run) notifies like a normal
+task; OK sends a low-priority notification, or none when the job's `notify` is `attention`. Approval requests always
+notify.
+
+Runs don't pile up: a job whose previous session is still active skips that slot. After downtime, a job whose last
+slot was missed by less than `catch_up_minutes` runs once when the daemon starts; older misses are skipped.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import time
+import uuid
+from datetime import datetime, timedelta
+
+log = logging.getLogger("harness.jobs")
+
+NOTIFY_MODES = ("attention", "low", "always")  # OK results: no notification / low priority / normal priority
+STATUS_PROMPT = ("This is a scheduled job, so the user isn't watching. Do the check, then end your final answer with "
+                 "one last line: `STATUS: OK` if nothing needs the user's attention, or `STATUS: ATTENTION: <why>` if "
+                 "something does. Don't make changes that need approval unless the task says to.")
+STATUS_RE = re.compile(r"^\W*STATUS:\s*(OK|ATTENTION)\b[:\s-]*(.*)$", re.IGNORECASE | re.MULTILINE)
+DOW_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+MONTH_NAMES = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
+                                           "nov", "dec"], 1)}
+PRESETS = {"@hourly": "0 * * * *", "@daily": "0 0 * * *", "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *"}
+
+
+class CronError(ValueError):
+    pass
+
+
+def _field(text: str, lo: int, hi: int, names: dict | None = None) -> set[int]:
+    values: set[int] = set()
+    for part in text.lower().split(","):
+        step = 1
+        if "/" in part:
+            part, step_text = part.split("/", 1)
+            if not step_text.isdigit() or int(step_text) < 1:
+                raise CronError(f"bad step in {text!r}")
+            step = int(step_text)
+        if part in ("*", ""):
+            start, end = lo, hi
+        elif "-" in part:
+            a, b = part.split("-", 1)
+            start, end = _value(a, lo, hi, names), _value(b, lo, hi, names)
+        else:
+            start = _value(part, lo, hi, names)
+            end = hi if step > 1 else start
+        if start > end:
+            raise CronError(f"range {part!r} runs backwards")
+        values.update(range(start, end + 1, step))
+    return values
+
+
+def _value(text: str, lo: int, hi: int, names: dict | None) -> int:
+    if names and text[:3] in names:
+        return names[text[:3]]
+    if not text.isdigit():
+        raise CronError(f"{text!r} isn't a number")
+    n = int(text)
+    if hi == 6 and n == 7:  # day-of-week 7 = Sunday
+        return 0
+    if not lo <= n <= hi:
+        raise CronError(f"{n} is outside {lo}-{hi}")
+    return n
+
+
+class Cron:
+    def __init__(self, expr: str):
+        self.expr = PRESETS.get(expr.strip().lower(), expr.strip())
+        parts = self.expr.split()
+        if len(parts) != 5:
+            raise CronError("a schedule needs 5 fields: minute hour day-of-month month day-of-week")
+        self.minutes = _field(parts[0], 0, 59)
+        self.hours = _field(parts[1], 0, 23)
+        self.days = _field(parts[2], 1, 31)
+        self.months = _field(parts[3], 1, 12, MONTH_NAMES)
+        self.weekdays = _field(parts[4], 0, 7 if parts[4] == "*" else 6, DOW_NAMES) if parts[4] != "*" else set(range(7))
+        # Standard cron: when both day fields are restricted, either one matching is enough.
+        self.day_any = parts[2] != "*" and parts[4] != "*"
+        self.dom_star, self.dow_star = parts[2] == "*", parts[4] == "*"
+
+    def _day_ok(self, d: datetime) -> bool:
+        dom = d.day in self.days
+        dow = (d.weekday() + 1) % 7 in self.weekdays
+        if self.day_any:
+            return dom or dow
+        return dom and dow
+
+    def next_after(self, t: float) -> float:
+        """The first matching minute strictly after timestamp t (local time)."""
+        d = datetime.fromtimestamp(t).replace(second=0, microsecond=0) + timedelta(minutes=1)
+        limit = d + timedelta(days=366 * 5)
+        while d < limit:
+            if d.month not in self.months:
+                d = (d.replace(day=1, hour=0, minute=0) + timedelta(days=32)).replace(day=1)
+                continue
+            if not self._day_ok(d):
+                d = d.replace(hour=0, minute=0) + timedelta(days=1)
+                continue
+            if d.hour not in self.hours:
+                d = d.replace(minute=0) + timedelta(hours=1)
+                continue
+            if d.minute not in self.minutes:
+                d += timedelta(minutes=1)
+                continue
+            return d.timestamp()
+        raise CronError(f"{self.expr!r} never matches")
+
+    def describe(self) -> str:
+        return self.expr
+
+
+def parse_status(answer: str) -> tuple[str, str]:
+    """('ok' | 'attention' | '', reason) from a job's final answer. The last STATUS line wins."""
+    matches = list(STATUS_RE.finditer(answer or ""))
+    if not matches:
+        return "", ""
+    m = matches[-1]
+    return m.group(1).lower(), m.group(2).strip()
+
+
+def validate(job: dict, projects: dict, models: dict) -> dict:
+    name = (job.get("name") or "").strip()
+    prompt = (job.get("prompt") or "").strip()
+    if not name or not prompt:
+        raise ValueError("name and prompt are required")
+    cron = Cron(job.get("cron") or "")
+    project = job.get("project") or "scratch"
+    if project not in projects:
+        raise ValueError(f"unknown project {project!r}")
+    model = job.get("model") or ""
+    if model and model not in models:
+        raise ValueError(f"unknown model {model!r}")
+    notify = job.get("notify") or "low"
+    if notify not in NOTIFY_MODES:
+        raise ValueError(f"notify must be one of {', '.join(NOTIFY_MODES)}")
+    return {"name": name[:80], "prompt": prompt, "cron": cron.expr, "project": project, "model": model,
+            "notify": notify, "enabled": bool(job.get("enabled", True)),
+            "catch_up_minutes": max(0, int(job.get("catch_up_minutes", 360)))}
+
+
+class JobScheduler:
+    """Starts sessions for due jobs. `create` is Manager.create; `active` tells whether a session is still running."""
+
+    def __init__(self, db, create, active, poll_seconds: float = 30):
+        self.db = db
+        self.create = create
+        self.active = active
+        self.poll_seconds = poll_seconds
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._catch_up(time.time())
+            self._task = asyncio.create_task(self._loop(), name="jobs")
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+            self._task = None
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                self.tick(time.time())
+            except Exception:  # noqa: BLE001 - keep scheduling
+                log.exception("job tick failed")
+            await asyncio.sleep(self.poll_seconds)
+
+    def _catch_up(self, now: float) -> None:
+        """At start: jobs whose slot passed while the daemon was down run once if the miss is recent, else skip."""
+        for job in self.db.list_jobs():
+            if not job["enabled"] or not job["next_run_at"] or job["next_run_at"] > now:
+                continue
+            if now - job["next_run_at"] <= job["catch_up_minutes"] * 60:
+                continue  # tick() runs it
+            self._reschedule(job, now, skipped="missed while the tower or daemon was down")
+
+    def tick(self, now: float) -> list[str]:
+        started = []
+        for job in self.db.list_jobs():
+            if not job["enabled"] or not job["next_run_at"] or job["next_run_at"] > now:
+                continue
+            if job["last_session_id"] and self.active(job["last_session_id"]):
+                self._reschedule(job, now, skipped="the previous run was still going")
+                continue
+            try:
+                sid = self.run(job, now)
+                started.append(sid)
+            except Exception as e:  # noqa: BLE001 - a broken job must not block the others
+                log.warning("job %s could not start: %s", job["id"], e)
+                self._reschedule(job, now, error=str(e)[:300])
+        return started
+
+    def run(self, job: dict, now: float | None = None, manual: bool = False) -> str:
+        now = now or time.time()
+        prompt = f"{job['prompt'].strip()}\n\n{STATUS_PROMPT}"
+        stamp = time.strftime("%b %d %H:%M", time.localtime(now))
+        s = self.create(prompt, project=job["project"], model=job["model"] or None,
+                        title=f"⏰ {job['name']} · {stamp}", job_id=job["id"])
+        self.db.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="",
+                           **({} if manual else {"next_run_at": Cron(job["cron"]).next_after(now)}))
+        log.info("job %s started session %s%s", job["id"], s["id"], " (run now)" if manual else "")
+        return s["id"]
+
+    def _reschedule(self, job: dict, now: float, skipped: str = "", error: str = "") -> None:
+        fields = {"next_run_at": Cron(job["cron"]).next_after(now)}
+        if skipped:
+            fields["last_skip"] = f"{time.strftime('%b %d %H:%M', time.localtime(now))}: {skipped}"
+        if error:
+            fields["last_error"] = error
+        self.db.update_job(job["id"], **fields)
+
+
+def new_job_id() -> str:
+    return "j-" + uuid.uuid4().hex[:8]

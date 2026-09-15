@@ -116,6 +116,24 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS jobs (       -- scheduled jobs (jobs.py)
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    cron TEXT NOT NULL,             -- five fields, tower local time
+    project TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    notify TEXT NOT NULL DEFAULT 'low',   -- OK results: attention (none) | low | always
+    enabled INTEGER NOT NULL DEFAULT 1,
+    catch_up_minutes INTEGER NOT NULL DEFAULT 360,
+    next_run_at REAL,
+    last_run_at REAL,
+    last_session_id TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_skip TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 -- Session search (search.py): one row per indexed event.
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED,
@@ -141,6 +159,9 @@ MIGRATIONS = [
     ("sessions", "app_metadata", "TEXT NOT NULL DEFAULT '{}'"),
     ("api_keys", "scopes", "TEXT NOT NULL DEFAULT 'inference'"),
     ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
+    # Phase 7d: sessions started by a scheduled job, and the STATUS the job's answer ended with (ok | attention).
+    ("sessions", "job_id", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "job_status", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata"}
@@ -215,7 +236,8 @@ class Database:
         with self.lock:
             rows = self.conn.execute(
                 "SELECT id, project, target, model, title, status, stop_reason, created_at, updated_at, totals, "
-                "branch, review, workspace_removed, app_id FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,)
+                "branch, review, workspace_removed, app_id, job_id, job_status FROM sessions "
+                "ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [_row(r) for r in rows]
 
@@ -339,6 +361,41 @@ class Database:
             rows = self.conn.execute(
                 "SELECT * FROM approvals WHERE session_id = ? ORDER BY created_at", (sid,)).fetchall()
         return [_row(r) for r in rows]
+
+    # scheduled jobs
+    def list_jobs(self) -> list[dict]:
+        with self.lock:
+            return [dict(r) for r in self.conn.execute("SELECT * FROM jobs ORDER BY name").fetchall()]
+
+    def get_job(self, jid: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone()
+        return dict(row) if row else None
+
+    def insert_job(self, job: dict) -> None:
+        now = time.time()
+        row = {**job, "created_at": now, "updated_at": now}
+        with self.lock:
+            self.conn.execute(f"INSERT INTO jobs ({','.join(row)}) VALUES ({','.join('?' * len(row))})",
+                              [int(v) if isinstance(v, bool) else v for v in row.values()])
+
+    def update_job(self, jid: str, **fields) -> None:
+        fields["updated_at"] = time.time()
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self.lock:
+            self.conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?",
+                              [*(int(v) if isinstance(v, bool) else v for v in fields.values()), jid])
+
+    def delete_job(self, jid: str) -> bool:
+        with self.lock:
+            return self.conn.execute("DELETE FROM jobs WHERE id = ?", (jid,)).rowcount == 1
+
+    def job_sessions(self, jid: str, limit: int = 10) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT id, title, status, stop_reason, job_status, created_at, updated_at, "
+                                     "substr(answer, 1, 300) AS answer FROM sessions WHERE job_id = ? "
+                                     "ORDER BY created_at DESC LIMIT ?", (jid, limit)).fetchall()
+        return [dict(r) for r in rows]
 
     # templates
     def list_templates(self) -> list[dict]:

@@ -92,9 +92,12 @@ backup:
   at: "03:30"
   keep_days: 14
 
-# Read-only memory library for agents (harness/memory_library.py). The daemon keeps its own clone and pulls it at
-# most every refresh_minutes. Only these categories are visible; sensitive ones (health, emotions, feelings,
-# finance, relationships, identity) and the top-level index, inbox, and cross-category capsules are not.
+# Memory library for agents (harness/memory_library.py). The daemon keeps its own clone and pulls it at most every
+# refresh_minutes. Only these categories are visible; sensitive ones (health, emotions, feelings, finance,
+# relationships, identity) and the top-level index, inbox, and cross-category capsules are not.
+# writes: agents propose changes (memory_edit / memory_write) in the visible categories and the profile; every one
+# needs approval with the diff (user decision, Phase 7b), then the clone commits and pushes.
+# profile_path: a short curated file put in every new session's system prompt once (Phase 7c).
 # Projects can opt out with `memory_library: false`. Set repo in harness.local.yaml.
 memory_library:
   enabled: true
@@ -102,6 +105,9 @@ memory_library:
   clone_dir: D:/Agents/memory-library
   refresh_minutes: 10
   categories: [project-ideas, work, home-and-pets, sport, taste-and-media, communication-preferences]
+  writes: true
+  profile_path: agent-profile.md
+  profile_max_chars: 6000
 
 # web_search / web_fetch for agents (harness/web_tools.py), run by the daemon without approval (user decision,
 # Phase 6b). Fetches refuse non-public addresses (loopback, private, CGNAT/tailnet, link-local, metadata), re-check
@@ -117,6 +123,13 @@ web:
 # session_search / session_read. The index lives in the session database. Projects opt out with `session_search: false`.
 search:
   enabled: true
+
+# Scheduled jobs (harness/jobs.py): recurring agent tasks on cron schedules (tower local time), managed in the app
+# under Jobs. Each run is an ordinary session. Jobs end with STATUS: OK or ATTENTION; OK stays quiet or low-priority
+# (per job), ATTENTION and failures notify normally (user decision, Phase 7d).
+jobs:
+  enabled: true
+  poll_seconds: 30
 
 # OpenAI/Anthropic-compatible inference endpoint for other tools (harness/endpoint.py): /v1/chat/completions,
 # /v1/completions, /v1/responses, /v1/messages, /v1/models, /v1/capabilities. Per-device keys from Settings or POST /keys.

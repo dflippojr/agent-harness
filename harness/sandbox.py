@@ -8,6 +8,7 @@ approved network command temporarily attaches an egress network.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 
@@ -18,12 +19,14 @@ class SandboxUnavailable(Exception):
     """Docker isn't reachable or the container can't be started."""
 
 
-async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = None) -> tuple[int, str, str]:
-    """subprocess.run that can be cancelled: cancelling the awaiting task kills the process."""
+async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = None,
+                  env: dict | None = None) -> tuple[int, str, str]:
+    """subprocess.run that can be cancelled: cancelling the awaiting task kills the process. `env` is merged over
+    the daemon's environment."""
     proc = subprocess.Popen(
         args, stdin=subprocess.PIPE if input_ is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env={**os.environ, **env} if env else None,
     )
     try:
         out, err = await asyncio.to_thread(proc.communicate, input_, timeout)

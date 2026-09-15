@@ -41,6 +41,8 @@ def describe_call(tool: str, args: dict) -> str:
         return f"restart {args.get('service', '')}"
     if tool == "rebuild_service":
         return f"rebuild and restart {args.get('service', '')}"
+    if tool in ("memory_edit", "memory_write"):
+        return f"{args.get('summary', '')} ({args.get('path', '')})"
     return f"{tool} {args}"
 
 

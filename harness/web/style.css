@@ -164,6 +164,8 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .approval h4 { margin: 0 0 6px; font-size: 15px; }
 .approval pre { background: var(--code-bg); padding: 8px; border-radius: 8px; overflow: auto; max-height: 50vh; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; }
 .approval input { margin: 8px 0; }
+.approval-diff { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; max-height: 50vh; overflow: auto; font-size: 12.5px; }
+.diff.approval-diff div { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .note { font-size: 13px; color: var(--muted); text-align: center; margin: 12px 0; }
 .note.bad { color: var(--bad); }

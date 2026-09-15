@@ -271,6 +271,18 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             out.append(item)
         return out
 
+    @app.get("/memory")
+    async def memory(request: Request):
+        """The agent profile new sessions get, and the latest change agents saved to the memory library."""
+        m = mgr(request)
+        lib, cfg = m.runner.memory, m.cfg.memory_library
+        if lib is None:
+            return {"enabled": False}
+        profile = await asyncio.to_thread(lib.profile_text)
+        return {"enabled": True, "writes": cfg.writes, "categories": cfg.categories, "profile_path": cfg.profile_path,
+                "profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
+                "last_commit": lib.last_commit, "refresh_error": lib.refresh_error}
+
     @app.get("/search")
     async def search_sessions(request: Request, q: str = "", project: str = "", limit: int = 20):
         """Full-text search over past sessions. Passages mark matches with \\u0002 ... \\u0003."""

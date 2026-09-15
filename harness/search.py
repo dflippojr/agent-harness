@@ -19,7 +19,7 @@ import time
 from .fileops import ToolError
 
 TOOLS = ("session_search", "session_read")
-INDEX_VERSION = "1"
+INDEX_VERSION = "2"
 TOOL_OUTPUT_CHARS = 6000       # indexed prefix of a tool result
 READ_PAGE_CHARS = 12000
 KIND_WEIGHT = {"title": 3.0, "answer": 2.0, "message": 1.5, "assistant": 1.2, "context": 1.0, "tool": 0.8}
@@ -71,6 +71,8 @@ def event_text(type_: str, data: dict) -> tuple[str, str] | None:
         text = "\n".join(p for p in parts if p.strip())
         return ("assistant", text) if text else None
     if type_ == "tool_result":
+        if data.get("name") in TOOLS:  # earlier search results would only echo other sessions back
+            return None
         return "tool", f"{data.get('name', '')}: {(data.get('output') or '')[:TOOL_OUTPUT_CHARS]}"
     if type_ == "status" and data.get("answer"):
         return "answer", data["answer"]
@@ -263,5 +265,5 @@ class SessionSearch:
                 if end < len(text) else "")
         return head + text[start:end] + foot
 
-    async def call(self, name: str, args: dict, session: dict | None = None) -> str:
+    async def call(self, name: str, args: dict, session: dict | None = None, call_id: str = "") -> str:
         return await asyncio.to_thread(getattr(self, name), **args, _session=(session or {}).get("id", ""))

@@ -98,12 +98,15 @@ class BackupConfig:
 
 @dataclass
 class MemoryLibraryConfig:
-    """Read-only access to the user's memory library for agents (memory_library.py)."""
+    """The user's memory library for agents (memory_library.py): reads, approved writes, and the agent profile."""
     enabled: bool = False
-    repo: str = ""                      # git URL or path; the daemon keeps its own clone and never writes to it
+    repo: str = ""                      # git URL or path; the daemon keeps its own clone
     clone_dir: str = "D:/Agents/memory-library"
     refresh_minutes: float = 10         # `git pull` at most this often, when an agent uses the tools
     categories: list[str] = field(default_factory=list)  # readable categories; everything else is invisible
+    writes: bool = False                # memory_edit / memory_write: every change needs approval, then commit + push
+    profile_path: str = ""              # e.g. agent-profile.md: put in every new session's prompt; readable/writable
+    profile_max_chars: int = 6000       # about 1.5K tokens
 
 
 @dataclass
@@ -115,6 +118,13 @@ class WebConfig:
     max_bytes: int = 5 * 2**20       # refuse larger downloads
     timeout_seconds: float = 20
     user_agent: str = "agent-harness/1.0 (personal research agent)"
+
+
+@dataclass
+class JobsConfig:
+    """Scheduled jobs (jobs.py): recurring agent tasks on cron schedules, managed from the app."""
+    enabled: bool = False
+    poll_seconds: float = 30
 
 
 @dataclass
@@ -197,6 +207,7 @@ class Config:
     endpoint: EndpointConfig = field(default_factory=EndpointConfig)
     images: ImagesConfig = field(default_factory=ImagesConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    jobs: JobsConfig = field(default_factory=JobsConfig)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -288,6 +299,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         endpoint=EndpointConfig(**(raw.get("endpoint") or {})),
         images=ImagesConfig(**(raw.get("images") or {})),
         search=SearchConfig(**(raw.get("search") or {})),
+        jobs=JobsConfig(**(raw.get("jobs") or {})),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

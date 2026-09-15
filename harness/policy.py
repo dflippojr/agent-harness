@@ -38,6 +38,14 @@ REPO_RULES: list[dict] = [
 ]
 
 
+# Always asked, whatever the project rules say (a project rule can still deny them). The memory library also refuses
+# these writes without an approved approval, so the policy isn't the only gate.
+ALWAYS_ASK: dict[str, str] = {
+    "memory_edit": "changes your memory library",
+    "memory_write": "changes your memory library",
+}
+
+
 @dataclass
 class Decision:
     action: str
@@ -108,7 +116,11 @@ class Policy:
     def decide(self, name: str, args: dict) -> Decision:
         for rule in self.rules:
             if _matches(rule, name, args):
+                if name in ALWAYS_ASK and rule["action"] != DENY:
+                    break
                 return Decision(rule["action"], rule.get("reason", ""))
+        if name in ALWAYS_ASK:
+            return Decision(ASK, ALWAYS_ASK[name])
         if name == "run_shell" and _delete_outside_scratch(args.get("command", "")):
             return Decision(ASK, "deletes files outside the scratch area")
         return Decision(ALLOW)

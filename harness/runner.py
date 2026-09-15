@@ -580,9 +580,21 @@ class Runner:
                 output = f"Error: blocked by policy ({decision.reason or 'not allowed'}). Don't retry this."
                 self._record_result(sid, call, name, output, ok=False)
                 return output
+            reason, detail = decision.reason, ""
+            if name in ("write_file", "edit_file"):
+                detail = await ws.preview(name, args)
+            else:
+                kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names and hasattr(k, "preview")), None)
+                if kit is not None:
+                    try:
+                        detail, warning = await kit.preview(name, args)
+                    except ToolError as e:  # can't be applied as proposed: tell the agent, don't bother the user
+                        output = f"Error: {e}"
+                        self._record_result(sid, call, name, output, ok=False)
+                        return output
+                    reason = f"{reason} {warning}".strip()
             existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call["id"],
-                        "tool": name, "args": args, "reason": decision.reason,
-                        "detail": await ws.preview(name, args) if name in ("write_file", "edit_file") else ""}
+                        "tool": name, "args": args, "reason": reason, "detail": detail}
             with self.db.tx():
                 self.db.insert_approval(existing)
                 self.bus.emit(sid, "approval_requested", {k: existing[k] for k in
@@ -636,7 +648,7 @@ class Runner:
             elif kit is not None and kit is self.images:
                 output = await kit.call(name, {**args, "_session": sid}, workspace_root=Path(s["workspace"]))
             elif kit is not None and getattr(kit, "wants_session", False):
-                output = await kit.call(name, args, session=s)
+                output = await kit.call(name, args, session=s, call_id=call["id"])
             elif kit is not None:
                 output = await kit.call(name, args)  # daemon-side for every target
             elif isinstance(ws, RemoteWorkspace):

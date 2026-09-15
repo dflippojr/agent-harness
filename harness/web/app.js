@@ -650,9 +650,16 @@ async function viewSession(sid, tab, focusApproval) {
     const what = a.tool === "run_shell" ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
       : a.tool === "git_clone" ? `git clone ${a.args.url}`
         : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
+    // Memory library changes carry "summary\n\n<unified diff>"; file writes carry just the diff.
+    const memory = a.tool === "memory_edit" || a.tool === "memory_write";
+    const [summary, diff] = memory && a.detail.includes("\n\n") ? [a.detail.slice(0, a.detail.indexOf("\n\n")), a.detail.slice(a.detail.indexOf("\n\n") + 2)] : ["", a.detail || ""];
+    const diffView = /^@@ /m.test(diff) ? h("div", { class: "diff approval-diff" }, diff.split("\n")
+      .filter((line) => !/^(---|\+\+\+) /.test(line))
+      .map((line) => h("div", { class: line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "" }, line))) : null;
     const card = h("div", { class: "approval", id: `approval-${a.id}` },
       h("h4", {}, `Approval needed: ${a.reason || a.tool}`),
-      h("pre", {}, a.detail || what),
+      summary ? h("p", { style: "margin:4px 0 8px" }, summary) : null,
+      diffView || h("pre", {}, a.detail || what),
       a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args.path || ""}`) : null,
       note, buttons);
     approvals.set(a.id, { card, buttons, note });
@@ -1069,6 +1076,7 @@ async function viewSettings() {
         },
       }, "Send test notification") : null),
     gpuCard(),
+    memoryCard(),
     endpointCard(me),
     appsCard(me),
     diskCard(),
@@ -1118,6 +1126,26 @@ function gpuCard() {
   const timer = setInterval(load, 5000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "card" }, h("h3", {}, "GPU"), body);
+}
+
+function memoryCard() {
+  const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
+  (async () => {
+    try {
+      const mem = await api("/memory");
+      if (!mem.enabled) return fill(body, h("p", { class: "muted small" }, "The memory library is disabled in config/harness.yaml."));
+      const c = mem.last_commit || {};
+      fill(body,
+        h("p", { class: "small" }, `Agents can read ${mem.categories.join(", ")}. `,
+          mem.writes ? "They can propose changes there; every change asks you first." : "Read-only."),
+        c.head ? h("p", { class: "small" }, `Last saved change: ${c.summary} (${c.path}, ${c.head}, ${ago(c.at)})`) : null,
+        mem.refresh_error ? h("p", { class: "small bad" }, `Couldn't refresh the library: ${mem.refresh_error}`) : null,
+        mem.profile ? h("details", {}, h("summary", { class: "small" }, `Agent profile: ${mem.profile_chars} of ${mem.profile_max_chars} characters, given to every new session`),
+          h("div", { class: "msg assistant small", style: "margin-top:8px", html: md(mem.profile) }))
+          : h("p", { class: "muted small" }, `No agent profile yet (${mem.profile_path || "profile_path not set"}).`));
+    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
+  })();
+  return h("div", { class: "card" }, h("h3", {}, "Memory library"), body);
 }
 
 function endpointCard(me) {
