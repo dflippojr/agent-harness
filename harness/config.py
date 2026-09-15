@@ -116,6 +116,15 @@ class Config:
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
     raw = yaml.safe_load((config_dir / "harness.yaml").read_text(encoding="utf-8")) or {}
+    # Machine-specific values (tailnet URL, logins) live in an untracked harness.local.yaml; its top-level
+    # sections are merged over harness.yaml's (one level deep).
+    local_file = config_dir / "harness.local.yaml"
+    if local_file.exists():
+        for key, value in (yaml.safe_load(local_file.read_text(encoding="utf-8")) or {}).items():
+            if isinstance(value, dict) and isinstance(raw.get(key), dict):
+                raw[key] = {**raw[key], **value}
+            else:
+                raw[key] = value
     projects_file = config_dir / "projects.yaml"
     raw_projects = (yaml.safe_load(projects_file.read_text(encoding="utf-8")) or {}) if projects_file.exists() else {}
 
