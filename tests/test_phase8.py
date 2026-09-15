@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from harness.api import create_app
-from harness.cli_backends import ClaudeSession
+from harness.cli_backends import ClaudeSession, CodexSession
 from harness.config import BackendConfig, SandboxConfig, WebConfig
 from harness.grounding import ungrounded_quotes
 from harness.llm import Completion
@@ -630,3 +630,230 @@ def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
 
     asyncio.run(waiting())
     asyncio.run(fallback())
+
+
+# Codex app-server JSON-RPC backend (8a step 4)
+
+FAKE_CODEX = r'''import json
+import pathlib
+import sys
+import time
+
+mode = sys.argv[1]
+state = pathlib.Path(sys.argv[2])
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(0)
+    item = json.loads(line)
+    with state.open("a", encoding="utf-8") as f:
+        f.write("IN " + json.dumps(item, sort_keys=True) + "\n")
+    return item
+
+def send(item):
+    print(json.dumps(item), flush=True)
+
+init = read()
+send({"id": init["id"], "result": {"serverInfo": {"name": "fake-codex", "version": "1"}}})
+read()  # initialized notification
+thread_request = read()
+resumed = thread_request["method"] == "thread/resume"
+thread_id = thread_request["params"].get("threadId") or "codex-thread-1"
+send({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
+send({"id": thread_request["id"], "result": {"thread": {"id": thread_id}}})
+turn = read()
+send({"id": turn["id"], "result": {"turn": {"id": "turn-1", "status": "inProgress", "items": []}}})
+
+if mode == "inbox":
+    followup = read()
+    assert followup["method"] == "turn/steer"
+    send({"id": followup["id"], "result": {"turn": {"id": "turn-2", "status": "inProgress", "items": []}}})
+    answer = followup["params"]["input"][0]["text"]
+elif mode == "cancel":
+    time.sleep(60)
+    raise SystemExit(0)
+else:
+    item_id = "item-2" if resumed else "item-1"
+    if mode == "file":
+        item = {"id": item_id, "type": "fileChange", "status": "inProgress",
+                "changes": [{"path": "src/a.py", "kind": "update", "diff": "+ok"}]}
+        method = "item/fileChange/requestApproval"
+        params = {"itemId": item_id, "threadId": thread_id, "turnId": "turn-1",
+                  "startedAtMs": 1, "reason": "edit source"}
+    else:
+        item = {"id": item_id, "type": "commandExecution", "status": "inProgress",
+                "command": "pytest -q", "commandActions": [], "cwd": "/workspace"}
+        method = "item/commandExecution/requestApproval"
+        params = {"itemId": item_id, "threadId": thread_id, "turnId": "turn-1",
+                  "startedAtMs": 1, "command": "pytest -q", "cwd": "/workspace"}
+    send({"method": "item/started", "params": {"threadId": thread_id, "turnId": "turn-1",
+          "startedAtMs": 1, "item": item}})
+    send({"id": 100, "method": method, "params": params})
+    approval = read()
+    answer = approval["result"]["decision"]
+    item["status"] = "completed" if answer == "accept" else "declined"
+    if item["type"] == "commandExecution":
+        item["aggregatedOutput"] = "4 passed"
+        item["exitCode"] = 0 if answer == "accept" else None
+        item["durationMs"] = 50
+    send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": "turn-1",
+          "completedAtMs": 2, "item": item}})
+
+send({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+      "planType": "plus", "primary": {"usedPercent": 28, "windowDurationMins": 10080,
+      "resetsAt": 1234567890}, "secondary": None}}})
+send({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": "turn-1",
+      "itemId": "msg-1", "delta": answer}})
+send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": "turn-1",
+      "completedAtMs": 3, "item": {"id": "msg-1", "type": "agentMessage", "text": answer}}})
+send({"method": "thread/tokenUsage/updated", "params": {"threadId": thread_id, "turnId": "turn-1",
+      "tokenUsage": {"last": {"inputTokens": 12, "cachedInputTokens": 3, "outputTokens": 4,
+      "reasoningOutputTokens": 2, "totalTokens": 16}, "total": {"inputTokens": 12,
+      "cachedInputTokens": 3, "outputTokens": 4, "reasoningOutputTokens": 2, "totalTokens": 16}}}})
+send({"method": "turn/completed", "params": {"threadId": thread_id,
+      "turn": {"id": "turn-1", "status": "completed", "items": []}}})
+'''
+
+
+def _codex_manager(tmp_path, mode: str, state=None, max_sessions=2):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fake = tmp_path / "fake_codex.py"
+    fake.write_text(FAKE_CODEX, encoding="utf-8")
+    state = state or tmp_path / "fake-codex-state.jsonl"
+    cfg = make_cfg(tmp_path)
+    cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-5.6-sol", effort="high",
+                                           permission_mode="on-request",
+                                           max_sessions=max_sessions)
+    if mode == "command":
+        cfg.projects["scratch"].rules = [{"tool": "exec_command", "action": "ask",
+                                          "reason": "exercise Codex approval bridge"}]
+    manager = Manager(cfg)
+    made = []
+
+    def factory(**kwargs):
+        made.append(kwargs)
+        return CodexSession(**kwargs, command=[sys.executable, "-u", str(fake), mode, str(state)])
+
+    manager.runner.codex_factory = factory
+    return manager, made, state
+
+
+def test_codex_docker_command_is_sandboxed(tmp_path):
+    backend = BackendConfig(enabled=True, proxy="http://proxy:8888", volume="codex-auth", network="codex-net",
+                            model="gpt-5.6-sol", effort="high")
+    cli = CodexSession(session_id="abc", workspace=tmp_path, backend=backend,
+                       sandbox=SandboxConfig(memory="3g", cpus="1.5", pids=321), system_prompt="system",
+                       backend_session_id="resume-me")
+    command = cli.command()
+    assert command[:6] == ["docker", "run", "--rm", "-i", "--name", "harness-abc-codex"]
+    for pair in (["--network", "codex-net"], ["-e", "HTTPS_PROXY=http://proxy:8888"],
+                 ["-e", "CODEX_HOME=/home/agent/.codex"], ["-v", "codex-auth:/home/agent/.codex"],
+                 ["--memory", "3g"], ["--cpus", "1.5"], ["--pids-limit", "321"]):
+        assert any(command[at:at + 2] == pair for at in range(len(command) - 1))
+    assert command[-3:] == ["codex", "app-server", "--stdio"]
+    assert ["--security-opt", "seccomp=unconfined"] == command[
+        command.index("seccomp=unconfined") - 1:command.index("seccomp=unconfined") + 1]
+    assert not any("bypass" in arg or "danger-full-access" in arg for arg in command)
+    keyed = CodexSession(session_id="keyed", workspace=tmp_path, backend=backend, sandbox=SandboxConfig(),
+                         system_prompt="system", api_key="secret-value").command()
+    assert ["-e", "OPENAI_API_KEY"] == keyed[keyed.index("OPENAI_API_KEY") - 1:keyed.index("OPENAI_API_KEY") + 1]
+    assert "secret-value" not in keyed
+
+
+def test_codex_file_approval_auto_allows_and_maps_events(tmp_path):
+    async def body():
+        m, made, state = _codex_manager(tmp_path, "file")
+        await m.start()
+        s = await wait_status(m, m.create("edit it", backend="codex")["id"], "done")
+        await asyncio.gather(*m.tasks.values())
+        assert s["answer"] == "accept" and s["run"]["backend_session_id"] == "codex-thread-1"
+        assert s["run"]["rate_limits"]["utilization"] == 0.28
+        assert s["run"]["rate_limits"]["rateLimitType"] == "seven_day"
+        assert s["totals"] == {"turns": 1, "prompt_tokens": 12, "completion_tokens": 4,
+                                "total_cost_usd": 0.0}
+        assert events(m, s["id"], "tool_result")[0]["name"] == "apply_patch"
+        sent = state.read_text(encoding="utf-8")
+        assert '"method": "thread/start"' in sent and '"decision": "accept"' in sent
+        assert '"sandbox": "workspace-write"' in sent and '"effort": "high"' in sent
+        assert '"approvalPolicy": "on-request"' in sent
+        assert made[0]["model"] == "gpt-5.6-sol"
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_codex_command_approval_and_restart_recovery(tmp_path):
+    async def body():
+        m1, _, state = _codex_manager(tmp_path, "command")
+        await m1.start()
+        sid = m1.create("test it", backend="codex")["id"]
+        await wait_status(m1, sid, "waiting_approval")
+        pending = m1.db.pending_approvals(sid)
+        assert len(pending) == 1 and pending[0]["tool"] == "exec_command"
+        aid = pending[0]["id"]
+        await m1.stop()
+        m1.db.close()
+
+        m2, made, _ = _codex_manager(tmp_path, "command", state=state)
+        await m2.start()
+        for _ in range(500):
+            if made:
+                break
+            await asyncio.sleep(0.02)
+        assert made
+        await wait_status(m2, sid, "waiting_approval")
+        assert made[0]["backend_session_id"] == "codex-thread-1"
+        assert m2.db.pending_approvals(sid)[0]["id"] == aid
+        m2.decide(sid, aid, approve=True)
+        s = await wait_status(m2, sid, "done")
+        assert s["answer"] == "accept" and len(m2.db.approvals(sid)) == 1
+        sent = state.read_text(encoding="utf-8")
+        assert '"method": "thread/resume"' in sent
+        assert "The harness restarted; continue the task." in sent
+        await m2.stop()
+    asyncio.run(body())
+
+
+def test_codex_command_denial_reaches_app_server(tmp_path):
+    async def body():
+        m, _, state = _codex_manager(tmp_path, "command")
+        await m.start()
+        sid = m.create("test it", backend="codex")["id"]
+        await wait_status(m, sid, "waiting_approval")
+        approval = m.db.pending_approvals(sid)[0]
+        m.decide(sid, approval["id"], approve=False, note="skip tests")
+        s = await wait_status(m, sid, "done")
+        assert s["answer"] == "decline"
+        assert '"decision": "decline"' in state.read_text(encoding="utf-8")
+        assert m.db.approvals(sid)[0]["note"] == "skip tests"
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_codex_inbox_cancel_and_policy(tmp_path):
+    async def inbox():
+        m, _, _ = _codex_manager(tmp_path / "inbox", "inbox")
+        await m.start()
+        sid = m.create("wait", backend="codex")["id"]
+        await wait_status(m, sid, "running")
+        await m.send(sid, "follow up")
+        s = await wait_status(m, sid, "done")
+        assert s["answer"] == "follow up" and s["inbox"] == []
+        await m.stop()
+
+    async def cancel():
+        m, _, _ = _codex_manager(tmp_path / "cancel", "cancel")
+        await m.start()
+        sid = m.create("wait", backend="codex")["id"]
+        await wait_status(m, sid, "running")
+        assert (await m.cancel(sid))["status"] == "cancelled"
+        assert sid not in m.runner._cli_sessions
+        await m.stop()
+
+    asyncio.run(inbox())
+    asyncio.run(cancel())
+    assert Policy().decide("exec_command", {"command": "pytest -q"}).action == ALLOW
+    assert Policy().decide("exec_command", {"command": "curl https://example.com", "network": True}).action == ASK
+    assert Policy(repo=True).decide("exec_command", {"command": "git push origin main"}).action != ALLOW
+    assert Policy().decide("apply_patch", {"file_paths": ["/workspace/a.py"]}).action == ALLOW
+    assert Policy().decide("apply_patch", {"file_paths": ["/workspace/a.py", "/etc/passwd"]}).action == ASK

@@ -213,7 +213,7 @@ class Manager:
                                         + (f", {', '.join(self.cfg.backends)}" if self.cfg.backends else ""))
             if not backend_cfg.enabled:
                 raise HarnessError(400, f"backend {backend!r} is disabled")
-            if backend != "claude":
+            if backend not in ("claude", "codex"):
                 raise HarnessError(400, f"backend {backend!r} is not built yet")
             if target != "tower":
                 raise HarnessError(400, f"backend {backend!r} only runs on the tower")

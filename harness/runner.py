@@ -18,7 +18,7 @@ from pathlib import Path
 from . import compaction, grounding, llm, projects
 from .backend_state import billing_warning
 from .bus import EventBus
-from .cli_backends import ClaudeSession, CliBackendError
+from .cli_backends import ClaudeSession, CliBackendError, CodexSession
 from .config import Config
 from .db import Database
 from .homelab import Homelab
@@ -96,10 +96,11 @@ class Runner:
         self.approval_events: dict[str, asyncio.Event] = {}
         self.user_cancelled: set[str] = set()
         self._sandboxes: dict[str, Sandbox] = {}
-        self._cli_sessions: dict[str, ClaudeSession] = {}
+        self._cli_sessions: dict[str, ClaudeSession | CodexSession] = {}
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
         self.cli_factory = ClaudeSession
+        self.codex_factory = CodexSession
         self._quota_checked: dict[str, float] = {}
         self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
         self.generating: set[str] = set()       # sessions with a model call in flight (the guard waits for them)
@@ -361,7 +362,7 @@ class Runner:
         s = self.db.get_session(sid)
         backend_name = s["backend"]
         backend = self.cfg.backends[backend_name]
-        if backend_name != "claude":
+        if backend_name not in ("claude", "codex"):
             raise CliBackendError(f"backend {backend_name!r} is not implemented")
         if recovered:
             self.bus.emit(sid, "resumed", {"status": s["status"]})
@@ -392,15 +393,20 @@ class Runner:
                         run["billing_warned"] = True
                         self.db.update_session(sid, run=run)
                         self.bus.emit(sid, "billing_warning", {"backend": backend_name, "message": warning})
-                    cli = self.cli_factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
-                                           sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
-                                           model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
+                    factory = self.cli_factory if backend_name == "claude" else self.codex_factory
+                    cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
+                                  sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
+                                  model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
                     self._cli_sessions[sid] = cli
                     await cli.start()
                     prompt = ("The harness restarted; continue the task." if recovered else
                               next((m["content"] for m in reversed(s["context"][1:])
                                     if m.get("role") == "user" and isinstance(m.get("content"), str)), ""))
                     await cli.initialize(prompt)
+                    if cli.backend_session_id and cli.backend_session_id != backend_session_id:
+                        s = self.db.get_session(sid)
+                        self.db.update_session(sid, run={**s["run"],
+                                                       "backend_session_id": cli.backend_session_id})
                     tool_names: dict[str, str] = {}
                     while True:
                         await self._send_cli_inbox(sid, cli)
@@ -439,7 +445,7 @@ class Runner:
         except OSError:
             return ""
 
-    async def _send_cli_inbox(self, sid: str, cli: ClaudeSession) -> None:
+    async def _send_cli_inbox(self, sid: str, cli: ClaudeSession | CodexSession) -> None:
         """Forward messages received during a CLI run without racing a newer inbox append."""
         queued = list(self.db.get_session(sid)["inbox"])
         if not queued:
@@ -471,9 +477,11 @@ class Runner:
                     parts.append(Runner._cli_text(block["content"]))
         return "\n".join(x for x in parts if x)
 
-    async def _handle_cli_event(self, sid: str, cli: ClaudeSession, event: dict,
-                                tool_names: dict[str, str], recovered: bool = False) -> bool:
-        """Map one Claude stream-json record. Returns true when the run is complete."""
+    async def _handle_cli_event(self, sid: str, cli: ClaudeSession | CodexSession, event: dict,
+                                 tool_names: dict[str, str], recovered: bool = False) -> bool:
+        """Map one hosted-CLI record. Returns true when the run is complete."""
+        if isinstance(cli, CodexSession):
+            return await self._handle_codex_event(sid, cli, event, tool_names, recovered=recovered)
         type_ = event.get("type")
         if type_ == "system" and event.get("subtype") == "init":
             backend_session_id = str(event.get("session_id") or "")
@@ -560,8 +568,185 @@ class Runner:
             return True
         return False
 
-    async def _authorize_cli(self, sid: str, cli: ClaudeSession, request_id: str, request: dict,
-                             recovered: bool = False) -> None:
+    @staticmethod
+    def _codex_rate_limits(snapshot: dict) -> dict:
+        """Translate app-server's percent windows into the shared 0..1 shape."""
+        windows: dict[str, dict] = {}
+        ranked: list[tuple[int, str, float, float]] = []
+        for slot in ("primary", "secondary"):
+            value = snapshot.get(slot)
+            if not isinstance(value, dict) or value.get("usedPercent") is None:
+                continue
+            minutes = int(value.get("windowDurationMins") or 0)
+            if minutes == 300:
+                name = "five_hour"
+            elif minutes == 10080:
+                name = "seven_day"
+            else:
+                name = f"{minutes}_minute" if minutes else slot
+            utilization = float(value["usedPercent"]) / 100
+            window = {"utilization": utilization}
+            if value.get("resetsAt") is not None:
+                window["resetsAt"] = value["resetsAt"]
+            windows[name] = window
+            ranked.append((minutes, name, utilization, float(value.get("resetsAt") or 0)))
+        longest = max(ranked, default=(0, "", 0.0, 0.0))
+        reached = snapshot.get("rateLimitReachedType") or ("spend_control" if snapshot.get("spendControlReached") else "")
+        result = {**snapshot, "status": "rejected" if reached else "allowed",
+                  "unifiedWindows": windows}
+        if longest[1]:
+            result.update({"rateLimitType": longest[1], "utilization": longest[2],
+                           "resetsAt": longest[3]})
+        return result
+
+    @staticmethod
+    def _codex_file_args(item: dict) -> dict:
+        changes = item.get("changes") if isinstance(item.get("changes"), list) else []
+        paths, patches = [], []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            raw = str(change.get("path") or "").replace("\\", "/")
+            path = raw if raw.startswith("/") else "/workspace/" + raw.lstrip("/")
+            if raw:
+                paths.append(path)
+            if change.get("diff"):
+                patches.append(str(change["diff"]))
+        return {"file_paths": paths, "patch": "\n".join(patches)}
+
+    async def _handle_codex_event(self, sid: str, cli: CodexSession, event: dict,
+                                  tool_names: dict[str, str], recovered: bool = False) -> bool:
+        """Map Codex app-server v2 JSON-RPC messages into harness events."""
+        method = str(event.get("method") or "")
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        if not method:  # response to turn/start (or another fire-and-continue request)
+            return False
+        if method == "thread/started":
+            thread = params.get("thread") if isinstance(params.get("thread"), dict) else {}
+            thread_id = str(thread.get("id") or "")
+            if thread_id:
+                cli.backend_session_id = thread_id
+                s = self.db.get_session(sid)
+                self.db.update_session(sid, run={**s["run"], "backend_session_id": thread_id})
+            return False
+        if method == "turn/started":
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            cli.active_turn_id = str(turn.get("id") or cli.active_turn_id)
+            return False
+        if method in ("item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta"):
+            text = params.get("delta")
+            if isinstance(text, str) and text:
+                kind = "content" if method == "item/agentMessage/delta" else "reasoning"
+                self.bus.ephemeral(sid, "delta", {"kind": kind, "text": text})
+            return False
+        if method == "item/started":
+            item = params.get("item") if isinstance(params.get("item"), dict) else {}
+            item_id, kind = str(item.get("id") or ""), str(item.get("type") or "")
+            if item_id:
+                cli.items[item_id] = item
+            if kind == "commandExecution":
+                name = "exec_command"
+                args = {"command": str(item.get("command") or ""), "cwd": str(item.get("cwd") or "")}
+            elif kind == "fileChange":
+                name, args = "apply_patch", self._codex_file_args(item)
+            else:
+                return False
+            tool_names[item_id] = name
+            self.bus.emit(sid, "assistant", {"content": "", "reasoning": "", "tool_calls": [{
+                "id": item_id, "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args)}}], "finish_reason": "",
+                "prompt_tokens": 0, "completion_tokens": 0, "prompt_tps": 0, "gen_tps": 0})
+            return False
+        if method == "item/completed":
+            item = params.get("item") if isinstance(params.get("item"), dict) else {}
+            item_id, kind = str(item.get("id") or ""), str(item.get("type") or "")
+            if item_id:
+                cli.items[item_id] = item
+            if kind == "agentMessage":
+                cli.last_answer = str(item.get("text") or "")
+                self.bus.emit(sid, "assistant", {"content": cli.last_answer, "reasoning": "", "tool_calls": [],
+                                                   "finish_reason": "", "prompt_tokens": 0,
+                                                   "completion_tokens": 0, "prompt_tps": 0, "gen_tps": 0})
+                return False
+            if kind not in ("commandExecution", "fileChange"):
+                return False
+            name = "exec_command" if kind == "commandExecution" else "apply_patch"
+            tool_names[item_id] = name
+            status = str(item.get("status") or "")
+            output = (str(item.get("aggregatedOutput") or "") if kind == "commandExecution"
+                      else "\n".join(str(c.get("diff") or "") for c in item.get("changes", [])
+                                     if isinstance(c, dict)))
+            ok = status == "completed"
+            with self.db.tx():
+                run = self.db.get_session(sid)["run"]
+                run["tool_calls"] = run.get("tool_calls", 0) + 1
+                if not ok:
+                    run["tool_errors"] = run.get("tool_errors", 0) + 1
+                self.db.update_session(sid, run=run)
+                self.bus.emit(sid, "tool_result", {"id": item_id, "name": name, "ok": ok,
+                                                    "seconds": float(item.get("durationMs") or 0) / 1000,
+                                                    "output": truncate_middle(output, 20000)})
+            return False
+        if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+            item_id = str(params.get("itemId") or event.get("id") or "")
+            item = cli.items.get(item_id, {})
+            if method == "item/commandExecution/requestApproval":
+                name = "exec_command"
+                command = params.get("command") if params.get("command") is not None else item.get("command")
+                args = {"command": str(command or ""), "cwd": str(params.get("cwd") or item.get("cwd") or "")}
+                if params.get("networkApprovalContext"):
+                    args["network"] = True
+            else:
+                name, args = "apply_patch", self._codex_file_args(item)
+                if params.get("grantRoot") and not args["file_paths"]:
+                    args["file_paths"] = [str(params["grantRoot"])]
+            tool_names[item_id] = name
+            request = {"tool_name": name, "input": args, "tool_use_id": item_id,
+                       "description": str(params.get("reason") or params.get("command") or "")}
+            await self._authorize_cli(sid, cli, event.get("id"), request, recovered=recovered)
+            return False
+        if method == "thread/tokenUsage/updated":
+            usage = params.get("tokenUsage")
+            if isinstance(usage, dict):
+                cli.token_usage = usage
+            return False
+        if method == "account/rateLimits/updated":
+            snapshot = params.get("rateLimits") if isinstance(params.get("rateLimits"), dict) else {}
+            limits = self._codex_rate_limits(snapshot)
+            s = self.db.get_session(sid)
+            self.db.update_session(sid, run={**s["run"], "rate_limits": limits})
+            self.db.set_backend_usage(s["backend"], limits)
+            self.bus.emit(sid, "rate_limit", limits)
+            stop = float(self.cfg.backends[s["backend"]].stop_at_utilization or 0)
+            if limits.get("status") == "rejected" or (stop and float(limits.get("utilization") or 0) >= stop):
+                raise CliLimitError(float(limits.get("resetsAt") or 0))
+            return False
+        if method == "turn/completed":
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            status = str(turn.get("status") or "")
+            cli.active_turn_id = ""
+            error = turn.get("error")
+            error_text = json.dumps(error, ensure_ascii=False) if error else ""
+            if status == "failed" and any(x in error_text.lower() for x in ("ratelimit", "rate_limit", "usage limit")):
+                latest = self.db.get_session(sid)["run"].get("rate_limits") or {}
+                raise CliLimitError(float(latest.get("resetsAt") or 0))
+            usage = cli.token_usage.get("last") if isinstance(cli.token_usage.get("last"), dict) else {}
+            result = {"subtype": "success" if status == "completed" else status or "failed",
+                      "is_error": status != "completed", "result": cli.last_answer or error_text,
+                      "total_cost_usd": 0, "num_turns": 1, "usage": {
+                          "input_tokens": int(usage.get("inputTokens") or 0),
+                          "output_tokens": int(usage.get("outputTokens") or 0),
+                          "cached_input_tokens": int(usage.get("cachedInputTokens") or 0),
+                          "reasoning_output_tokens": int(usage.get("reasoningOutputTokens") or 0)}}
+            self._finish_cli_result(sid, result)
+            return True
+        if method == "error":
+            error = params.get("error") or params
+            raise CliBackendError(f"Codex app-server error: {error}")
+        return False
+
+    async def _authorize_cli(self, sid: str, cli: ClaudeSession | CodexSession, request_id, request: dict,
+                              recovered: bool = False) -> None:
         name = str(request.get("tool_name") or "")
         args = request.get("input") if isinstance(request.get("input"), dict) else {}
         call_id = str(request.get("tool_use_id") or request_id)

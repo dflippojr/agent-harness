@@ -21,10 +21,12 @@ SCRATCH_GLOBS = ["/tmp", "/tmp/*", "scratch", "scratch/*", "*__pycache__*", "*.p
                  "*/.pytest_cache*", "build", "build/*", "dist", "dist/*", "*.egg-info", "*.egg-info/*"]
 
 DEFAULT_RULES: list[dict] = [
-    {"tool": ["run_shell", "Bash"], "network": True, "action": ASK, "reason": "command needs network access"},
-    {"tool": ["run_shell", "Bash"], "args": {"command": r"\bgit\s+push\b"}, "action": ASK,
+    {"tool": ["run_shell", "Bash", "exec_command"], "network": True, "action": ASK,
+     "reason": "command needs network access"},
+    {"tool": ["run_shell", "Bash", "exec_command"], "args": {"command": r"\bgit\s+push\b"}, "action": ASK,
      "reason": "git push"},
-    {"tool": ["run_shell", "Bash"], "args": {"command": r"\bgit\s+(reset\s+--hard|clean\s+-\w*f)"}, "action": ASK,
+    {"tool": ["run_shell", "Bash", "exec_command"],
+     "args": {"command": r"\bgit\s+(reset\s+--hard|clean\s+-\w*f)"}, "action": ASK,
      "reason": "discards uncommitted work"},
     {"tool": ["Read", "Glob", "Grep", "LS"], "action": ALLOW},
     {"tool": ["Edit", "Write", "MultiEdit", "NotebookEdit"],
@@ -33,6 +35,9 @@ DEFAULT_RULES: list[dict] = [
      "reason": "changes a file outside /workspace or uses an unrecognized path"},
     {"tool": ["WebFetch", "WebSearch"], "action": ASK, "reason": "uses Claude Code web access"},
     {"tool": "Bash", "action": ASK, "reason": "runs a Claude Code shell command"},
+    {"tool": "apply_patch", "workspace_paths": "file_paths", "action": ALLOW},
+    {"tool": "apply_patch", "action": ASK,
+     "reason": "changes a file outside /workspace or uses an unrecognized path"},
     {"tool": "git_clone", "args": {"url": r"^(local:|https://(github\.com|gitlab\.com|codeberg\.org)/)"},
      "action": ALLOW},
     {"tool": "git_clone", "action": ASK, "reason": "clone from a host that isn't on the allowlist"},
@@ -42,7 +47,7 @@ DEFAULT_RULES: list[dict] = [
 
 # Added for projects with a repo: the daemon publishes the session branch, the user reviews and merges it.
 REPO_RULES: list[dict] = [
-    {"tool": ["run_shell", "Bash"], "args": {"command": r"\bgit\s+push\b"}, "action": DENY,
+    {"tool": ["run_shell", "Bash", "exec_command"], "args": {"command": r"\bgit\s+push\b"}, "action": DENY,
      "reason": "the session branch is published by the harness; the user merges or pushes it from the review screen"},
 ]
 
@@ -65,7 +70,7 @@ class Decision:
 def _matches(rule: dict, name: str, args: dict) -> bool:
     tools = rule.get("tool", "*")
     tools = [tools] if isinstance(tools, str) else tools
-    aliases = {name, "run_shell"} if name == "Bash" else {name}
+    aliases = {name, "run_shell"} if name in ("Bash", "exec_command") else {name}
     if "*" not in tools and not aliases.intersection(tools):
         return False
     if "network" in rule and bool(args.get("network", False)) != bool(rule["network"]):
@@ -85,6 +90,15 @@ def _matches(rule: dict, name: str, args: dict) -> bool:
         normalized = posixpath.normpath(raw)
         if normalized != "/workspace" and not normalized.startswith("/workspace/"):
             return False
+    if "workspace_paths" in rule:
+        values = args.get(rule["workspace_paths"])
+        if not isinstance(values, list) or not values:
+            return False
+        for value in values:
+            raw = str(value).strip().replace("\\", "/")
+            normalized = posixpath.normpath(raw)
+            if normalized != "/workspace" and not normalized.startswith("/workspace/"):
+                return False
     return True
 
 
@@ -137,6 +151,6 @@ class Policy:
                 return Decision(rule["action"], rule.get("reason", ""))
         if name in ALWAYS_ASK:
             return Decision(ASK, ALWAYS_ASK[name])
-        if name in ("run_shell", "Bash") and _delete_outside_scratch(args.get("command", "")):
+        if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
             return Decision(ASK, "deletes files outside the scratch area")
         return Decision(ALLOW)
