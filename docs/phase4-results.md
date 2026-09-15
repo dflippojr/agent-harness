@@ -1,7 +1,9 @@
 # Phase 4: MacBook target
 
 Built 2026-09-14. The MacBook is a 2021 M1 Pro (16 GB) on macOS 27.0, with the Command Line Tools (git, Python
-3.9.6, Swift 6.4, clang) and OpenJDK 23, but no full Xcode, Homebrew or Node. Its disk was 98% full (26 GB free).
+3.9.6, Swift 6.4, clang), Homebrew (python3 is Homebrew's 3.13) and OpenJDK 23, but no full Xcode. Its disk was 98% full
+(26 GB free). (An early SSH check reported no Homebrew because a non-login SSH shell's PATH lacks /opt/homebrew/bin;
+the runner's PATH puts it first.)
 
 ## Decisions (user, 2026-09-14)
 

@@ -132,7 +132,11 @@ class Manager:
         else:
             workspace = self.cfg.workspaces_dir / sid
             workspace.mkdir(parents=True, exist_ok=False)
-        system = MAC_SYSTEM_PROMPT if remote else SYSTEM_PROMPT
+        if remote:
+            root = self.hub.state[target].info.get("workspaces") or REMOTE_WORKSPACE_ROOT
+            system = MAC_SYSTEM_PROMPT.replace("{workspace}", f"{root}/{sid}")
+        else:
+            system = SYSTEM_PROMPT
         branch = ""
         if spec.repo:
             branch = projects.branch_name(sid)
