@@ -139,9 +139,10 @@ items:
   - key: subscription-backends
     kind: feature
     phase: 8
-    title: "Claude Code and Codex CLI as session backends"
+    title: "Claude Code, Codex and Cursor Agent CLIs as session backends"
     body: |
-      Run the unmodified `claude` / `codex` CLI inside the session sandbox under the user's own subscription login, as an alternative to local models.
+      Run the unmodified `claude` / `codex` / Cursor `agent` CLI inside the session sandbox under the user's own subscription login, as an alternative to local models.
+      - Cursor: `agent -p --output-format stream-json`; login via `agent login` in the container, or a Cursor user API key (`CURSOR_API_KEY`), which Cursor documents for automation and CI. Without `--force`, print mode only proposes changes, so check how approvals can be bridged.
       - login happens inside a backend container through the provider's own flow; the daemon never reads or stores tokens
       - CLI permission prompts become ordinary harness approvals, so any client (app API, web app, ntfy) can decide them
       - the daemon is the only thing that talks to the CLI; apps send any agent context to the daemon, which sets up the session
