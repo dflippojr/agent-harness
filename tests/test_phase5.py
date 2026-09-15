@@ -228,3 +228,99 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
         assert events(m, sid, "gpu_resumed")
         await m.stop()
     asyncio.run(body())
+
+
+# metrics and backups
+def test_metrics_and_backup(tmp_path):
+    import sqlite3
+    import zipfile
+    from harness.config import BackupConfig
+    from harness.metrics import render
+
+    cfg = make_cfg(tmp_path)
+    cfg.backup = BackupConfig(enabled=False, dir=str(tmp_path / "backups"), keep_days=14)
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(tool_calls=[call("write_file", 0, path="a.txt", content="x")],
+                                                 prompt_tokens=50, completion_tokens=5, gen_tps=70.0),
+                                      Completion(content="done", prompt_tokens=60, completion_tokens=6)]))
+        await m.start(maintenance=False)
+        s = m.create("write")
+        await wait_status(m, s["id"], "done")
+        await asyncio.gather(*list(m.tasks.values()), return_exceptions=True)
+        text = render(m)
+        assert 'harness_sessions{status="done"} 1' in text
+        assert 'harness_tokens_total{model="fake",kind="completion"} 11' in text
+        assert 'harness_tool_calls_total{tool="write_file",ok="true"} 1' in text
+        assert "harness_queue_depth 0" in text
+
+        old = tmp_path / "backups" / "2020-01-01"
+        old.mkdir(parents=True)
+        result = await m.maintenance.backup()
+        dest = tmp_path / "backups" / result["path"].replace("\\", "/").rsplit("/", 1)[-1]
+        assert not old.exists() and result["removed"] == ["2020-01-01"]
+        with sqlite3.connect(dest / "harness.sqlite3") as conn:
+            assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert zipfile.ZipFile(dest / "transcripts.zip").namelist()
+        assert "harness_backup_last_success_timestamp_seconds" in render(m)
+        await m.stop()
+    asyncio.run(body())
+
+
+# memory library
+def test_memory_library_only_exposes_allowed_categories(tmp_path):
+    import pytest
+    from harness.config import MemoryLibraryConfig
+    from harness.memory_library import MemoryLibrary
+    from harness.tools import ToolError
+
+    root = tmp_path / "lib"
+    for rel, text in {
+        "00-index.md": "# Index\n- categories/health/capsules/secret.md\n",
+        "categories/work/memory.md": "# Work\n### 2026-09-01\n- Prefers Python\n",
+        "categories/project-ideas/capsules/harness.md": "# Harness\nQwen default\n",
+        "categories/health/memory.md": "# Health\nPrefers Python secretly\n",
+        "memory-capsules/cross.md": "# Cross\nPython\n",
+    }.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    (root / ".git").mkdir()
+    lib = MemoryLibrary(MemoryLibraryConfig(enabled=True, clone_dir=str(root), categories=["work", "project-ideas"]))
+    lib._refreshed = 1e18  # skip git
+
+    index = lib.memory_index()
+    assert "categories/work/memory.md — Work" in index and "health" not in index and "Index" not in index
+    assert lib.memory_search("python").splitlines() == ["categories/work/memory.md:3: - Prefers Python"]
+    assert "Qwen default" in lib.memory_read("categories/project-ideas/capsules/harness.md")
+    for bad in ("categories/health/memory.md", "00-index.md", "memory-capsules/cross.md",
+                "categories/work/../health/memory.md", "../lib/categories/health/memory.md"):
+        with pytest.raises(ToolError):
+            lib.memory_read(bad)
+
+
+def test_memory_tools_reach_sessions_and_rebuild_asks(tmp_path):
+    from harness.config import MemoryLibraryConfig
+    from harness.policy import ASK, Policy
+
+    assert Policy().decide("rebuild_service", {"service": "plex-webhook"}).action == ASK
+    root = tmp_path / "lib" / "categories" / "work"
+    root.mkdir(parents=True)
+    (root / "memory.md").write_text("# Work\nThe user's editor is Helix.\n")
+    (tmp_path / "lib" / ".git").mkdir()
+    cfg = make_cfg(tmp_path)
+    cfg.memory_library = MemoryLibraryConfig(enabled=True, clone_dir=str(tmp_path / "lib"), categories=["work"],
+                                             refresh_minutes=1e9)
+
+    async def body():
+        script = Script([Completion(tool_calls=[call("memory_search", 0, pattern="editor")]),
+                         Completion(content="Helix")])
+        m = Manager(cfg, chat=script)
+        m.runner.memory._refreshed = 1e18
+        await m.start(maintenance=False)
+        s = m.create("which editor?")
+        await wait_status(m, s["id"], "done")
+        result = events(m, s["id"], "tool_result")[0]
+        assert result["ok"] and "Helix" in result["output"]
+        assert "memory_index" in m.db.get_session(s["id"])["context"][0]["content"]
+        await m.stop()
+    asyncio.run(body())

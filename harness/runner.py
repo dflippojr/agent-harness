@@ -47,7 +47,7 @@ When the task is complete, reply with your final answer (or call `finish`). Don'
 
 MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the workspace (a separate clone of the user's repository, so their own checkout is never touched) on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches, don't change git config, and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
 
-HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, and ask to restart one with restart_service (the user approves restarts). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
+HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, ask to restart one with restart_service, and, after a code or Dockerfile change has been merged into a stack, ask to rebuild it with rebuild_service (the user approves restarts and rebuilds). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
 
 ACTIVE = ("queued", "running", "waiting_approval", "waiting_target")
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
@@ -115,6 +115,14 @@ class Runner:
         project = self.cfg.projects.get(s["project"])
         homelab = Homelab(self.cfg.homelab) if project and project.homelab else None
         return Workspace(Path(s["workspace"]), self.sandbox(s), self.cfg.repos_dir, model.context_tokens, homelab)
+
+    def tool_schemas(self, s: dict, ws) -> list[dict]:
+        schemas = ws.schemas()
+        project = self.cfg.projects.get(s["project"])
+        if self.memory is not None and (project is None or project.memory_library):
+            from .memory_library import schemas as memory_schemas
+            schemas = schemas + memory_schemas(self.memory.cfg)
+        return schemas
 
     def policy(self, s: dict) -> Policy:
         project = self.cfg.projects.get(s["project"])
@@ -343,7 +351,7 @@ class Runner:
         reading = self._progress_reporter(sid, "prompt_progress", {})
 
         run = s["run"]
-        tools = ws.schemas()
+        tools = self.tool_schemas(s, ws)
         completion = None
         for attempt in range(4):
             try:
@@ -459,7 +467,7 @@ class Runner:
                 continue
 
             ws = self.workspace(s)
-            schemas = {t["function"]["name"]: t for t in ws.schemas()}
+            schemas = {t["function"]["name"]: t for t in self.tool_schemas(s, ws)}
             if name not in schemas:
                 self._bump(sid, "invalid_tool_calls")
                 self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
@@ -596,7 +604,9 @@ class Runner:
         started = time.monotonic()
         ok = True
         try:
-            if isinstance(ws, RemoteWorkspace):
+            if self.memory is not None and name in self.memory.tool_names:
+                output = await self.memory.call(name, args)  # daemon-side for every target
+            elif isinstance(ws, RemoteWorkspace):
                 await self._wait_for_target(sid)
                 output = await self._remote_call(sid, ws, name, args)
             else:
@@ -655,7 +665,7 @@ class Runner:
         n = model.context_tokens
         cpt = s["run"].get("chars_per_token", 3.0)
         # Tool schemas are part of every prompt but not of the context list.
-        overhead = int(len(json.dumps(self.workspace(s).schemas())) / cpt)
+        overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
         if before < self.cfg.elide_at * n:
             return s

@@ -85,6 +85,10 @@ def render(db: Database, sid: str) -> str:
             lines += [f"> {at} · waiting for the {d['target']} (offline or asleep)", ""]
         elif t == "target_online":
             lines += [f"> {at} · {d['target']} back after {d['seconds']} s", ""]
+        elif t == "gpu_paused":
+            lines += [f"> {at} · paused: {d['reason']} needs the GPU, so the model was unloaded", ""]
+        elif t == "gpu_resumed":
+            lines += [f"> {at} · GPU free again after {d['seconds']} s; model reloading", ""]
         elif t == "workspace_ready":
             lines += [f"> {at} · cloned `{d['repo']}` on branch `{d['branch']}` from `{d['base_branch']}` "
                       f"({d['base_commit'][:10]})", ""]

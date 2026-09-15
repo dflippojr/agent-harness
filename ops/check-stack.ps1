@@ -46,6 +46,23 @@ Check 'Harness daemon :8100' {
     $m = Get-Json 'http://127.0.0.1:8100/models/status'
     "up; model state: $($m[0].state)"
 }
+Check 'GPU guard' {
+    $g = Get-Json 'http://127.0.0.1:8100/gpu'
+    $flag = Test-Path 'C:\AI\llama-server.paused'
+    $detail = "state $($g.state); triggers: $((@($g.signals) | ForEach-Object { $_.detail }) -join ', ')"
+    if ($flag -and $g.state -eq 'clear') { throw "pause flag C:\AI\llama-server.paused exists but the guard is clear; $detail" }
+    $detail
+}
+Check 'Backup' {
+    $b = (Get-Json 'http://127.0.0.1:8100/maintenance').backup
+    if (-not $b.enabled) { 'disabled' }
+    elseif (-not $b.ok_at) { throw "no backup yet $($b.error)" }
+    else {
+        $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $b.ok_at
+        if ($age -gt 93600) { throw ("last good backup {0:N0} h ago; {1}" -f ($age / 3600), $b.error) }
+        "{0:N0} h ago, {1:N1} MB in {2}" -f ($age / 3600), ($b.bytes / 1MB), $b.path
+    }
+}
 Check 'Tailscale serve' {
     $status = & 'C:\Program Files\Tailscale\tailscale.exe' serve status 2>&1 | Out-String
     if ($status -notmatch '8100' -or $status -notmatch '8095') { throw "serve config missing: $status" }
@@ -61,5 +78,8 @@ Check 'MacBook runner' {
 Check 'Grafana / Prometheus' {
     $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:9090/-/ready' -TimeoutSec 5
     $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:3000/api/health' -TimeoutSec 5
-    'both ready'
+    $t = (Get-Json 'http://127.0.0.1:9090/api/v1/targets?state=active').data.activeTargets |
+        Where-Object { $_.labels.job -eq 'agent_harness' }
+    if (-not $t -or $t.health -ne 'up') { throw "Prometheus agent_harness target: $($t.health) $($t.lastError)" }
+    'both ready; agent_harness target up'
 }

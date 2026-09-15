@@ -48,17 +48,119 @@ class Maintenance:
         self.runner = runner
         self._task: asyncio.Task | None = None
         self.last_report: dict = {}
+        self.last_backup: dict = self._read_backup_status()
         self._lock = asyncio.Lock()
+        self._backup_task: asyncio.Task | None = None
 
     def start(self) -> None:
         if self._task is None and self.cfg.cleanup.interval_minutes > 0:
             self._task = asyncio.create_task(self._loop(), name="maintenance")
+        if self._backup_task is None and self.cfg.backup.enabled:
+            self._backup_task = asyncio.create_task(self._backup_loop(), name="backup")
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
+        for task in (self._task, self._backup_task):
+            if task:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self._task = self._backup_task = None
+
+    # backups
+    @property
+    def _backup_status_file(self) -> Path:
+        return self.cfg.data_dir / "backup-status.json"
+
+    def _read_backup_status(self) -> dict:
+        try:
+            return json.loads(self._backup_status_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def next_backup_at(self, now: float) -> float:
+        hour, minute = (int(x) for x in self.cfg.backup.at.split(":"))
+        t = time.localtime(now)
+        target = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, hour, minute, 0, 0, 0, -1))
+        return target if target > now else time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, hour, minute, 0, 0, 0, -1))
+
+    async def _backup_loop(self) -> None:
+        # Catch up at start if the last good backup is more than a day old (the tower was off at backup time).
+        if time.time() - self.last_backup.get("ok_at", 0) > 26 * 3600:
+            await asyncio.sleep(300)
+            await self._backup_logged()
+        while True:
+            await asyncio.sleep(max(1.0, self.next_backup_at(time.time()) - time.time()))
+            await self._backup_logged()
+
+    async def _backup_logged(self) -> None:
+        try:
+            await self.backup()
+        except Exception as e:  # noqa: BLE001 - keep the loop alive; the failure is in the status and metrics
+            log.exception("backup failed")
+            self.last_backup = {**self.last_backup, "error": f"{type(e).__name__}: {e}", "error_at": time.time()}
+            self._write_backup_status()
+
+    def _write_backup_status(self) -> None:
+        try:
+            self._backup_status_file.write_text(json.dumps(self.last_backup, indent=2), encoding="utf-8")
+        except OSError:
+            log.warning("could not write %s", self._backup_status_file)
+
+    async def backup(self) -> dict:
+        """Online copy of the SQLite database plus transcripts and project config into backup.dir/<date>, then
+        delete dated folders older than keep_days."""
+        result = await asyncio.to_thread(self._backup_sync, time.time())
+        self.last_backup = result
+        self._write_backup_status()
+        log.info("backup written to %s (%d bytes)", result["path"], result["bytes"])
+        return result
+
+    def _backup_sync(self, now: float) -> dict:
+        import sqlite3
+        import zipfile
+        from .config import ROOT
+
+        root = Path(self.cfg.backup.dir)
+        dest = root / time.strftime("%Y-%m-%d", time.localtime(now))
+        tmp = root / (dest.name + ".partial")
+        remove_tree(tmp)
+        tmp.mkdir(parents=True)
+        db_copy = tmp / "harness.sqlite3"
+        source = sqlite3.connect(str(self.cfg.db_path))
+        target = sqlite3.connect(str(db_copy))
+        try:
+            source.backup(target)  # consistent snapshot while the daemon keeps writing (WAL)
+            check = target.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            target.close()
+            source.close()
+        if check != "ok":
+            raise RuntimeError(f"backup copy failed its integrity check: {check}")
+        with zipfile.ZipFile(tmp / "transcripts.zip", "w", zipfile.ZIP_DEFLATED) as z:
+            if self.cfg.transcripts_dir.is_dir():
+                for f in sorted(self.cfg.transcripts_dir.rglob("*")):
+                    if f.is_file():
+                        z.write(f, f.relative_to(self.cfg.transcripts_dir).as_posix())
+        config = tmp / "config"
+        config.mkdir()
+        for name in ("harness.yaml", "harness.local.yaml", "projects.yaml"):
+            if (ROOT / "config" / name).exists():
+                shutil.copy2(ROOT / "config" / name, config / name)
+        remove_tree(dest)
+        tmp.rename(dest)
+
+        removed = []
+        cutoff = now - self.cfg.backup.keep_days * 86400
+        for old in sorted(root.iterdir()):
+            if old.is_dir() and old != dest and len(old.name) >= 10 and old.name[:4].isdigit():
+                try:
+                    stamp = time.mktime(time.strptime(old.name[:10], "%Y-%m-%d"))
+                except ValueError:
+                    continue
+                if stamp < cutoff:
+                    remove_tree(old)
+                    removed.append(old.name)
+        size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
+        return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": ""}
 
     async def _loop(self) -> None:
         await asyncio.sleep(120)  # let resumed sessions settle after a restart
@@ -199,4 +301,5 @@ class Maintenance:
         out["quota_mb"] = self.cfg.cleanup.workspace_quota_mb
         out["runners"] = self.runner.hub.status()
         out["last_cleanup"] = self.last_report
+        out["backup"] = {**self.last_backup, "enabled": self.cfg.backup.enabled, "dir": self.cfg.backup.dir}
         return out

@@ -4,7 +4,23 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 and are driven from the phone or MacBook over Tailscale. The phased plan lives in the agent
 memory library (`categories/project-ideas/capsules/local-agent-harness.md`).
 
-## Phase 4: MacBook target (current)
+## Phase 5: operations hardening (current)
+
+GPU contention guard, metrics and dashboard, nightly backups, read-only memory library for agents.
+Details and verification: `docs/phase5-results.md`.
+
+- GPU guard (`gpu_guard:` in `config/harness.yaml`): while a game (Steam/Epic/GOG/Xbox library executable, or the
+  Steam Big Picture window) or a Plex hardware transcode runs, the queue pauses after the current model turn and
+  llama-server is stopped (pause flag `C:\AI\llama-server.paused`, honored by `ops/llama-server/run-qwen.ps1`). It
+  reloads after 3 min clear. Settings → GPU pauses or resumes by hand. API: `GET /gpu`, `POST /gpu/{pause|resume}`.
+- Metrics: `GET /metrics`, scraped as Prometheus job `agent_harness`; Grafana dashboard "Agent Harness".
+- Backups (`backup:`): nightly to `D:/My Backups/agent-harness/<date>`, 14 days; `POST /maintenance/backup`.
+- Memory library (`memory_library:`; repo URL in `harness.local.yaml`): tools `memory_index`, `memory_search`,
+  `memory_read` over allowlisted categories of a daemon-owned clone. Projects opt out with `memory_library: false`.
+- Homelab: `rebuild_service` (`docker compose up -d --build`, always asks).
+- After changing `run-qwen.ps1`, restart the whole `AgentHarness-LlamaServer` task (the supervisor reads the script once).
+
+## Phase 4: MacBook target
 
 Projects with `target: macbook` run their tools on the MacBook; the model and agent loop stay on the tower.
 Details and verification: `docs/phase4-results.md`.

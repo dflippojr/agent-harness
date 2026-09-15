@@ -21,7 +21,7 @@ const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
-  "target_waiting", "target_online", "compaction_started", "prompt_progress",
+  "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed",
 ];
 const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
 const fmtElapsed = (ms) => {
@@ -221,9 +221,13 @@ async function viewList() {
   document.body.append(h("a", { class: "btn primary fab", href: "#/new" }, "+ New task"));
 
   const render = async () => {
-    const [sessions, queue] = await Promise.all([api("/sessions"), api("/queue")]);
+    const [sessions, queue, gpu] = await Promise.all([api("/sessions"), api("/queue"), api("/gpu").catch(() => null)]);
     const waiting = queue.filter((q) => q.position > 0).length;
-    queueNote.textContent = waiting ? `${waiting} waiting for the GPU` : "";
+    const paused = gpu && gpu.state !== "clear";
+    queueNote.replaceChildren(
+      paused ? h("a", { href: "#/settings" }, `⏸ ${gpuText(gpu)}`) : "",
+      paused && waiting ? " · " : "",
+      waiting ? `${waiting} waiting for the GPU` : "");
     if (!sessions.length) {
       list.replaceChildren(h("p", { class: "empty" }, "No sessions yet. Start one with “New task”."));
       return;
@@ -258,12 +262,35 @@ async function viewList() {
 // ---------- new task ----------
 async function viewNew() {
   $title.textContent = "New task";
-  const [projects, models, templates] = await Promise.all([api("/projects"), api("/models"), api("/templates")]);
-  const tplSelect = h("select", {},
-    h("option", { value: "" }, templates.length ? "— none —" : "No templates yet"),
-    templates.map((t) => h("option", { value: t.id }, t.name)));
-  const project = h("select", {}, projects.map((p) => h("option", { value: p.name },
-    (p.target !== "tower" ? `💻 ` : "") + (p.description ? `${p.name} — ${p.description}` : p.name))));
+  const [projects, models, allTemplates] = await Promise.all([api("/projects"), api("/models"), api("/templates")]);
+  // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
+  const targets = [...new Set(projects.map((p) => p.target))];
+  const targetKey = "harness.target";
+  let target = "tower";
+  try { target = localStorage.getItem(targetKey) || "tower"; } catch (_) { /* private mode */ }
+  if (!targets.includes(target)) target = targets[0] || "tower";
+  const projectTarget = (name) => (projects.find((p) => p.name === name) || {}).target || "tower";
+  let templates = [];
+  const tplSelect = h("select", {});
+  const project = h("select", {});
+  const fillChoices = () => {
+    templates = allTemplates.filter((t) => projectTarget(t.project) === target);
+    fill(tplSelect, h("option", { value: "" }, templates.length ? "— none —" : "No templates for this machine"),
+      templates.map((t) => h("option", { value: t.id }, t.name)));
+    fill(project, projects.filter((p) => p.target === target).map((p) => h("option", { value: p.name },
+      p.description ? `${p.name} — ${p.description}` : p.name)));
+  };
+  fillChoices();
+  const targetSwitch = targets.length > 1 ? h("div", { class: "row" }, targets.map((name) => h("button", {
+    type: "button", class: `btn small${name === target ? " primary" : ""}`,
+    onclick: (ev) => {
+      target = name;
+      try { localStorage.setItem(targetKey, name); } catch (_) { /* ignore */ }
+      for (const b of ev.currentTarget.parentNode.children) b.classList.toggle("primary", b === ev.currentTarget);
+      fillChoices();
+      showTarget();
+    },
+  }, name === "tower" ? "🖥 Tower" : `💻 ${TARGET_LABEL[name] || name}`))) : null;
   const targetState = h("div", { class: "muted small", style: "margin-top:6px" });
   const showTarget = async () => {
     const p = projects.find((x) => x.name === project.value);
@@ -287,6 +314,7 @@ async function viewNew() {
     sleeping: "Model is asleep; loading it now (about a minute)",
     waking: "Model is loading (about a minute); you can start the task anyway",
     unreachable: "Model server isn't answering",
+    paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Settings → GPU)",
   };
   const pollModel = async () => {
     try {
@@ -331,7 +359,8 @@ async function viewNew() {
       }
     },
   },
-  templates.length ? [h("label", {}, "Template"), tplSelect] : null,
+  targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
+  allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState,
   h("label", {}, "Model"), model, modelState,
@@ -354,9 +383,9 @@ route();
     h("span", { class: "spacer" }), start));
   $app.append(form);
 
-  if (templates.length) {
+  if (allTemplates.length) {
     $app.append(h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),
-      templates.map((t) => h("div", { class: "card" },
+      allTemplates.map((t) => h("div", { class: "card" },
         h("div", { class: "row" }, h("strong", {}, t.name), h("span", { class: "spacer" }),
           h("button", {
             class: "btn small bad",
@@ -506,6 +535,7 @@ async function viewSession(sid, tab, focusApproval) {
   let lastSeq = 0;
   let lastContent = "";
   let wakingNote = null;
+  let gpuNote = null;
   let targetNote = null;
   let compactNote = null;    // {el, label, bar, detail, elapsed, start} while older context is being summarized
   let lastEventAt = Date.now();  // server time of the latest persisted event: when the current step began
@@ -731,6 +761,16 @@ async function viewSession(sid, tab, focusApproval) {
       else add(h("p", { class: "note" }, `Model woke up in ${e.data.seconds} s`));
       wakingNote = null;
     },
+    gpu_paused: (e) => {
+      gpuNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
+        `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Settings → GPU to resume now)`)));
+    },
+    gpu_resumed: (e) => {
+      const text = `GPU free again after ${e.data.seconds < 90 ? `${e.data.seconds} s` : `${Math.round(e.data.seconds / 60)} min`}; reloading the model`;
+      if (gpuNote) fill(gpuNote, text);
+      else add(h("p", { class: "note" }, text));
+      gpuNote = null;
+    },
     target_waiting: (e) => {
       targetNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
         `Waiting for the ${TARGET_LABEL[e.data.target] || e.data.target}: it's offline or asleep. The task continues when it wakes`)));
@@ -898,9 +938,54 @@ async function viewSettings() {
           try { await api("/notify/test", { method: "POST" }); toast("Test notification sent"); } catch (e) { toast(e.message); }
         },
       }, "Send test notification") : null),
+    gpuCard(),
     diskCard(),
     h("div", { class: "card" }, h("h3", {}, "Install"),
       h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")));
+}
+
+function backupLine(b) {
+  if (!b || !b.enabled) return null;
+  const failed = b.error && (b.error_at || 0) > (b.ok_at || 0);
+  return h("p", { class: `small${failed ? " bad" : ""}` },
+    b.ok_at ? `Backup ${ago(b.ok_at)} (${Math.max(1, Math.round(b.bytes / 2 ** 20))} MB) in ${b.dir}` : "No backup yet",
+    failed ? ` · last attempt failed: ${b.error}` : "");
+}
+
+function gpuText(g) {
+  const why = (g.reasons || []).map((r) => r.detail).filter((d, i, a) => a.indexOf(d) === i).join(", ") || "GPU busy";
+  if (g.state === "pausing") return `Pausing for ${why}: finishing the current model turn`;
+  if (g.state === "paused") return g.manual ? "Paused from the app" : `Paused for ${why}`;
+  if (g.state === "resuming") return "GPU free: reloading the model";
+  return "Agents have the GPU";
+}
+
+function gpuCard() {
+  const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
+  const act = async (action) => {
+    try { render(await api(`/gpu/${action}`, { method: "POST" })); } catch (e) { toast(e.message); }
+    setTimeout(load, 1500);
+  };
+  const render = (g) => {
+    if (!g.enabled) return fill(body, h("p", { class: "muted small" }, "The GPU guard is disabled in config/harness.yaml."));
+    const now = g.signals.map((s) => s.detail);
+    const left = g.resume_after_seconds - (g.clear_for_seconds || 0);
+    const reload = g.state === "paused" && !now.length && !g.manual && g.clear_for_seconds !== null
+      ? ` · reloads in ${left >= 90 ? `${Math.round(left / 60)} min` : `${Math.max(0, Math.round(left))} s`}` : "";
+    fill(body,
+      h("p", {}, `${g.state === "clear" ? "✓" : "⏸"} ${gpuText(g)}${reload}`),
+      h("p", { class: "muted small" }, now.length ? `Using the GPU now: ${now.join(", ")}${g.override ? " (ignored until that changes)" : ""}`
+        : "No game or Plex transcode detected. Desktop streaming doesn't pause agents."),
+      g.plex_error ? h("p", { class: "muted small" }, `Plex check: ${g.plex_error}`) : null,
+      h("div", { class: "row" },
+        g.state === "clear" ? h("button", { class: "btn", onclick: () => act("pause") }, "Pause agents (I'm gaming)")
+          : h("button", { class: "btn", onclick: () => act("resume") }, now.length ? "Resume anyway" : "Resume now")));
+  };
+  const load = async () => { try { render(await api("/gpu")); } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); } };
+  load();
+  const timer = setInterval(load, 5000);
+  onLeave(() => clearInterval(timer));
+  return h("div", { class: "card" }, h("h3", {}, "GPU"), body);
 }
 
 function diskCard() {
@@ -914,6 +999,7 @@ function diskCard() {
         h("p", {}, `${u.free_gb} GB free of ${u.total_gb} GB · workspaces ${mb(u.workspaces_mb)} (${u.workspaces.length}) · quota ${u.quota_mb} MB each`),
         top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null,
         h("p", { class: "muted small" }, `${u.containers.length} sandbox container${u.containers.length === 1 ? "" : "s"}`),
+        backupLine(u.backup),
         (u.runners || []).map((r) => h("p", { class: "small" },
           `💻 ${TARGET_LABEL[r.name] || r.name}: `,
           r.online ? `online · ${r.info.free_gb} GB free · runner ${r.info.version} · macOS ${r.info.macos}`

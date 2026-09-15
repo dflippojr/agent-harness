@@ -83,3 +83,22 @@ gpu_guard:
   resume_after_seconds: 180
   drain_timeout_seconds: 300
   pause_flag: C:/AI/llama-server.paused   # also in ops/llama-server/run-qwen.ps1
+
+# Nightly online copy of the session database, transcripts, and project config (harness/maintenance.py).
+# Also on demand: POST /maintenance/backup.
+backup:
+  enabled: true
+  dir: D:/My Backups/agent-harness
+  at: "03:30"
+  keep_days: 14
+
+# Read-only memory library for agents (harness/memory_library.py). The daemon keeps its own clone and pulls it at
+# most every refresh_minutes. Only these categories are visible; sensitive ones (health, emotions, feelings,
+# finance, relationships, identity) and the top-level index, inbox, and cross-category capsules are not.
+# Projects can opt out with `memory_library: false`. Set repo in harness.local.yaml.
+memory_library:
+  enabled: true
+  repo: ""
+  clone_dir: D:/Agents/memory-library
+  refresh_minutes: 10
+  categories: [project-ideas, work, home-and-pets, sport, taste-and-media, communication-preferences]

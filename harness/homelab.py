@@ -20,7 +20,8 @@ from .config import HomelabConfig
 from .sandbox import run_cmd
 from .tools import ToolError
 
-TOOLS = ("homelab_services", "container_logs", "read_service_config", "prometheus_query", "restart_service")
+TOOLS = ("homelab_services", "container_logs", "read_service_config", "prometheus_query", "restart_service",
+         "rebuild_service")
 
 
 class HomelabError(ToolError):
@@ -59,6 +60,11 @@ def schemas(cfg: HomelabConfig) -> list[dict]:
         }, ["query"]),
         _fn("restart_service", "Restart a homelab service (starts it if it's stopped, recreates it with docker "
                                "compose if the container is gone). Always needs the user's approval.", {
+            "service": service,
+        }, ["service"]),
+        _fn("rebuild_service", "Rebuild a homelab service's image from its stack directory and recreate the "
+                               "container (docker compose up -d --build). Use it after a code or Dockerfile change "
+                               "was merged into the stack. Always needs the user's approval.", {
             "service": service,
         }, ["service"]),
     ]
@@ -193,6 +199,18 @@ class Homelab:
         _, state, _ = await run_cmd(["docker", "inspect", "-f", "{{.State.Status}} since {{.State.StartedAt}}",
                                      container], timeout=30)
         return f"{service} {action}; now {state.strip()}"
+
+    async def rebuild_service(self, service: str) -> str:
+        svc = self._service(service)
+        stack = Path(self.cfg.docker_root) / svc.stack
+        code, out, err = await run_cmd(["docker", "compose", "--project-directory", str(stack), "up", "-d", "--build",
+                                        svc.service or svc.name], timeout=1800)
+        log = (out + err).strip()
+        if code != 0:
+            raise HomelabError(f"rebuild failed (exit {code}):\n{log[-3000:]}")
+        _, state, _ = await run_cmd(["docker", "inspect", "-f", "{{.State.Status}} since {{.State.StartedAt}}, image "
+                                     "{{.Image}}", svc.container or svc.name], timeout=30)
+        return f"{service} rebuilt and recreated; now {state.strip()}\n{log[-1500:]}"
 
     async def call(self, name: str, args: dict) -> str:
         if name == "read_service_config":

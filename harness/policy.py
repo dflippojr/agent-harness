@@ -28,6 +28,7 @@ DEFAULT_RULES: list[dict] = [
      "action": ALLOW},
     {"tool": "git_clone", "action": ASK, "reason": "clone from a host that isn't on the allowlist"},
     {"tool": "restart_service", "action": ASK, "reason": "restarts a homelab service"},
+    {"tool": "rebuild_service", "action": ASK, "reason": "rebuilds and recreates a homelab service"},
 ]
 
 # Added for projects with a repo: the daemon publishes the session branch, the user reviews and merges it.

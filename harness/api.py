@@ -124,6 +124,12 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def health():
         return {"ok": True}
 
+    @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
+    async def metrics(request: Request):
+        from .metrics import render
+        m = mgr(request)
+        return PlainTextResponse(await asyncio.to_thread(render, m), media_type="text/plain; version=0.0.4")
+
     @app.get("/me")
     async def me(request: Request):
         cfg = mgr(request).cfg
@@ -259,6 +265,10 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.post("/maintenance/cleanup")
     async def maintenance_cleanup(request: Request):
         return await mgr(request).maintenance.cleanup()
+
+    @app.post("/maintenance/backup")
+    async def maintenance_backup(request: Request):
+        return await mgr(request).maintenance.backup()
 
     @app.get("/sessions/{ref}/approvals")
     async def approvals(ref: str, request: Request, all: bool = False):
