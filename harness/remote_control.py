@@ -8,8 +8,8 @@ they don't go through the harness queue, sandbox, or approvals. Claude Code asks
 (`--permission-mode default`).
 
 Only the unmodified `claude` CLI is started. Claude Code refuses folders whose workspace trust dialog hasn't been
-accepted, and trust isn't inherited from parent folders, so launches check `~/.claude.json` first and explain how to
-trust the folder rather than accepting trust on the user's behalf.
+accepted, and trust isn't inherited from parent folders, so launches check `~/.claude.json` first. The web app can
+open an interactive Claude window in the exact folder, but the user still reviews and accepts Claude's trust prompt.
 
 Servers keep running when the daemon restarts; the registry (`<data_dir>/remote-control/state.json`) records the
 process id and start time so a restarted daemon can still find and stop them.
@@ -86,6 +86,7 @@ class RemoteControl:
         self.dir = cfg.data_dir / "remote-control"
         self.state_path = self.dir / "state.json"
         self._lock = asyncio.Lock()
+        self._trust_processes: dict[str, subprocess.Popen] = {}
 
     # registry
     def _load(self) -> dict:
@@ -149,6 +150,7 @@ class RemoteControl:
                 entry["stopped_at"] = time.time()
                 changed = True
             info = {"project": name, "path": str(path), "trusted": _norm_path(path) in trusted,
+                    "trust_prompt_open": self._trust_prompt_open(name),
                     "git": (path / ".git").exists(), "running": running}
             if entry:
                 info.update({"started_at": entry["started_at"], "started_by": entry.get("started_by", ""),
@@ -167,13 +169,26 @@ class RemoteControl:
         except OSError:
             return ""
 
-    def _command(self) -> list[str]:
+    def _claude(self) -> str:
         claude = self.rc.claude_path or shutil.which("claude")
         if not claude:
             raise RemoteControlError("the claude CLI isn't installed or isn't on the daemon's PATH "
                                      "(set remote_control.claude_path)")
-        return [claude, "remote-control", "--spawn", self.rc.spawn, "--permission-mode", self.rc.permission_mode,
+        return claude
+
+    def _command(self) -> list[str]:
+        return [self._claude(), "remote-control", "--spawn", self.rc.spawn,
+                "--permission-mode", self.rc.permission_mode,
                 "--capacity", str(self.rc.capacity)]
+
+    def _trust_prompt_open(self, name: str) -> bool:
+        proc = self._trust_processes.get(name)
+        if proc is None:
+            return False
+        if proc.poll() is None:
+            return True
+        self._trust_processes.pop(name, None)
+        return False
 
     # actions
     async def launch(self, name: str, started_by: str = "") -> dict:
@@ -222,6 +237,37 @@ class RemoteControl:
         await self.stop(name)
         error = parse_log(text)["error"] or (text.splitlines()[-1] if text else "no output")
         raise RemoteControlError(f"Remote Control didn't start in {path}: {error}"[:500])
+
+    def open_trust_prompt(self, name: str) -> dict:
+        """Open Claude interactively in a project; Claude itself owns the trust decision."""
+        path = self.folder(name)
+        if _norm_path(path) in trusted_folders(self.claude_json):
+            return {**self._view(name), "already_trusted": True}
+        if self._trust_prompt_open(name):
+            return {**self._view(name), "already_open": True}
+        if sys.platform != "win32":
+            raise RemoteControlError("opening the Claude trust window is currently supported only on Windows")
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            raise RemoteControlError("PowerShell isn't installed or isn't on the daemon's PATH")
+
+        # Repository and executable paths stay out of the command string. PowerShell reads them from the environment,
+        # and Popen selects the repository with cwd, so spaces and shell metacharacters can't change the command.
+        env = os.environ.copy()
+        env["HARNESS_CLAUDE_TRUST_PROJECT"] = name
+        env["HARNESS_CLAUDE_PATH"] = self._claude()
+        script = (
+            "$Host.UI.RawUI.WindowTitle = 'Claude workspace trust - ' + $env:HARNESS_CLAUDE_TRUST_PROJECT; "
+            "Write-Host ''; Write-Host ('Claude workspace trust for ' + $env:HARNESS_CLAUDE_TRUST_PROJECT); "
+            "Write-Host ('Folder: ' + (Get-Location).Path); "
+            "Write-Host 'Review the folder and accept Claude Code workspace trust. Exit Claude when finished.'; "
+            "Write-Host ''; & $env:HARNESS_CLAUDE_PATH"
+        )
+        flags = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
+        proc = self.popen([powershell, "-NoLogo", "-NoProfile", "-Command", script], cwd=str(path), env=env,
+                          creationflags=flags)
+        self._trust_processes[name] = proc
+        return {**self._view(name), "trust_prompt_open": True}
 
     def _view(self, name: str) -> dict:
         return next(s for s in self.status() if s["project"] == name)

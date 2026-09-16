@@ -301,6 +301,14 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         except ToolError as e:
             raise HarnessError(400, str(e))
 
+    @app.post("/remote-control/{project}/trust")
+    async def rc_trust(project: str, request: Request):
+        from .fileops import ToolError
+        try:
+            return remote_control(mgr(request)).open_trust_prompt(project)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
     @app.post("/remote-control/{project}/stop")
     async def rc_stop(project: str, request: Request):
         from .fileops import ToolError

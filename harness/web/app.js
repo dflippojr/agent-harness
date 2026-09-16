@@ -1360,17 +1360,31 @@ function remoteControlCard() {
     busy = "";
     load();
   };
+  const trust = async (project) => {
+    if (!confirm(`Open Claude on the tower to trust “${project}”?\n\nReview the folder shown by Claude, then accept its workspace trust prompt. The harness cannot accept it for you.`)) return;
+    busy = project;
+    load();
+    try {
+      const r = await api(`/remote-control/${encodeURIComponent(project)}/trust`, { method: "POST" });
+      toast(r.already_trusted ? "This repository is already trusted" : r.already_open ? "The trust window is already open" : "Claude trust window opened on the tower", 5000);
+    } catch (e) { toast(e.message); }
+    busy = "";
+    load();
+  };
   const row = (p) => {
     const state = busy === p.project ? h("span", { class: "dots" }, "working")
       : p.running ? `running${p.active_sessions ? ` · ${p.active_sessions} session${p.active_sessions === 1 ? "" : "s"}` : ""} · started ${ago(p.started_at)}`
-      : !p.trusted ? "not trusted yet: run claude once in this folder" : "stopped";
+      : !p.trusted && p.trust_prompt_open ? "trust window open on the tower"
+        : !p.trusted ? "needs one-time Claude workspace trust" : "stopped";
     return h("div", { class: "rc-row" },
       h("p", {}, h("strong", {}, p.project), " ", h("span", { class: `muted small${!p.running && !p.trusted ? " bad" : ""}` }, state)),
       h("p", { class: "muted small" }, p.path),
+      !p.trusted && p.trust_prompt_open ? h("p", { class: "note small" }, "On the tower, review the folder in Claude and accept its trust prompt. This page will notice automatically.") : null,
       h("div", { class: "row" },
         p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
         p.running ? h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop")
-          : h("button", { class: "btn", disabled: !!busy || !p.trusted, onclick: () => act(p.project, false) }, "Start")));
+          : !p.trusted ? h("button", { class: "btn", disabled: !!busy || p.trust_prompt_open, onclick: () => trust(p.project) }, p.trust_prompt_open ? "Trust window open" : "Trust in Claude…")
+            : h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, false) }, "Start")));
   };
   const load = async () => {
     try {
@@ -1382,7 +1396,7 @@ function remoteControlCard() {
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
-  const timer = setInterval(() => { if (!busy) load(); }, 10000);
+  const timer = setInterval(() => { if (!busy) load(); }, 3000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "card" }, h("h3", {}, "Claude Remote Control"), body);
 }

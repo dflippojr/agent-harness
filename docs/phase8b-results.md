@@ -37,10 +37,13 @@ Issue [#19](https://github.com/dflippojr/agent-harness/issues/19). Commit `e7b67
   keep running.
 - **Stop:** kills the process tree. The npm `claude` shim starts `cmd.exe`, then `claude.exe`, then node children.
 - **Web app:** Settings → Claude Remote Control lists each project with its trust state, running state, session
-  count, and Start / Stop / Open in Claude.
-- **API:** `GET /remote-control`, `POST /remote-control/{project}`, `POST /remote-control/{project}/stop`. The app
-  API mirrors these under `/api/v1/remote-control` with the new scope `remote_control`, and the API version is now
-  1.1.
+  count, and Trust in Claude / Start / Stop / Open in Claude. For a newly configured repository, Trust in Claude
+  opens an interactive Claude window in that exact folder on the tower; the user accepts Claude's own workspace
+  trust prompt, and the card polls until the repository becomes trusted. The harness never accepts trust itself.
+- **API:** `GET /remote-control`, `POST /remote-control/{project}`, `POST /remote-control/{project}/trust`, and
+  `POST /remote-control/{project}/stop`. The trust endpoint is local-web-only because it opens an interactive tower
+  window. The app API mirrors status, start, and stop under `/api/v1/remote-control` with the new scope
+  `remote_control`, and the API version is now 1.1.
 - **Agent tool:** `open_claude_remote_control(project, reason)`. It's in `ALWAYS_ASK`, so a project rule can't make
   it automatic. Tower sessions only, and not app sessions.
 
@@ -66,9 +69,9 @@ hour. `test_web_app_js_parses` now runs `node --check` on `app.js`.
 
 ## Exit test (user)
 
-1. On the tower, run `claude` once in `D:\Agents\repos\invoice-tools` and accept the trust prompt. Remote Login or
-   Sunshine is fine for this.
-2. From the phone: Settings → Claude Remote Control → invoice-tools → Start. The "Remote Control ready" notification
+1. From the phone: Settings → Claude Remote Control → invoice-tools → Trust in Claude. On the tower, review the
+   folder in the new Claude window and accept the one-time workspace trust prompt, then exit Claude.
+2. From the phone: tap Start. The "Remote Control ready" notification
    should arrive. Tap it or "Open in Claude", start a session in the Claude app, and confirm that it works in a
    worktree and asks before editing.
 3. Stop it from the card.

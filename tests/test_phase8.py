@@ -258,6 +258,69 @@ def test_remote_control_refuses_untrusted_and_reports_failures(tmp_path):
     asyncio.run(failing())
 
 
+def test_remote_control_opens_trust_prompt_in_exact_folder(tmp_path, monkeypatch):
+    import harness.remote_control as rc_module
+
+    rc, repo, _ = _rc_setup(tmp_path, trusted=False)
+    calls = []
+
+    class FakeProcess:
+        pid = 123
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    process = FakeProcess()
+
+    def fake_popen(command, **kwargs):
+        calls.append((command, kwargs))
+        return process
+
+    rc.popen = fake_popen
+    monkeypatch.setattr(rc_module.sys, "platform", "win32")
+    monkeypatch.setattr(rc_module.shutil, "which", lambda name: "C:\\Windows\\powershell.exe" if name == "powershell.exe" else None)
+
+    view = rc.open_trust_prompt("repo")
+    assert view["trust_prompt_open"] and not view["trusted"]
+    command, options = calls[0]
+    assert command[:4] == ["C:\\Windows\\powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+    assert options["cwd"] == str(repo)
+    assert options["env"]["HARNESS_CLAUDE_PATH"] == _sys.executable
+    assert options["env"]["HARNESS_CLAUDE_TRUST_PROJECT"] == "repo"
+    assert str(repo) not in command[-1]  # paths are passed without shell interpolation
+    assert rc.open_trust_prompt("repo")["already_open"] and len(calls) == 1
+
+    process.returncode = 0
+    assert not rc.status()[0]["trust_prompt_open"]
+    rc.claude_json.write_text(_json.dumps({"projects": {
+        str(repo).replace("\\", "/"): {"hasTrustDialogAccepted": True}}}), encoding="utf-8")
+    assert rc.open_trust_prompt("repo")["already_trusted"] and len(calls) == 1
+
+
+def test_remote_control_trust_web_endpoint(tmp_path, monkeypatch):
+    import harness.remote_control as rc_module
+
+    rc, _, _ = _rc_setup(tmp_path, trusted=False)
+
+    class FakeProcess:
+        pid = 123
+
+        def poll(self):
+            return None
+
+    rc.popen = lambda command, **kwargs: FakeProcess()
+    monkeypatch.setattr(rc_module.sys, "platform", "win32")
+    monkeypatch.setattr(rc_module.shutil, "which", lambda name: "powershell.exe")
+    manager = Manager(rc.cfg, chat=Script([Completion(content="unused")]))
+    manager.remote_control = rc
+    with TestClient(create_app(manager)) as client:
+        response = client.post("/remote-control/repo/trust")
+        assert response.status_code == 200
+        assert response.json()["trust_prompt_open"]
+        assert client.post("/remote-control/nope/trust").status_code == 400
+
+
 def test_remote_control_tool_always_asks():
     assert Policy().decide("open_claude_remote_control", {"project": "x", "reason": "y"}).action == ASK
     assert Policy([{"tool": "*", "action": "allow"}]).decide("open_claude_remote_control", {}).action == ASK
