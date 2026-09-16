@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from harness.api import create_app
-from harness.cli_backends import ClaudeSession, CodexSession
+from harness.cli_backends import ClaudeSession, CodexSession, CursorSession
 from harness.config import BackendConfig, SandboxConfig, WebConfig
 from harness.grounding import ungrounded_quotes
 from harness.llm import Completion
@@ -857,3 +857,174 @@ def test_codex_inbox_cancel_and_policy(tmp_path):
     assert Policy(repo=True).decide("exec_command", {"command": "git push origin main"}).action != ALLOW
     assert Policy().decide("apply_patch", {"file_paths": ["/workspace/a.py"]}).action == ALLOW
     assert Policy().decide("apply_patch", {"file_paths": ["/workspace/a.py", "/etc/passwd"]}).action == ASK
+
+
+# Cursor Agent stream-json backend (8a step 5)
+
+FAKE_CURSOR = r'''import json
+import pathlib
+import sys
+import time
+
+mode = sys.argv[1]
+state = pathlib.Path(sys.argv[2])
+prompt = sys.argv[-1]
+resumed = "--resume" in sys.argv
+with state.open("a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": sys.argv[3:], "prompt": prompt, "resumed": resumed}) + "\n")
+
+def send(item):
+    print(json.dumps(item), flush=True)
+
+send({"type": "system", "subtype": "init", "apiKeySource": "login", "cwd": "/workspace",
+      "session_id": "cursor-session-1", "model": "Cursor Grok 4.6", "permissionMode": "force"})
+
+if mode == "cancel" or (mode == "recover" and not resumed):
+    time.sleep(60)
+    raise SystemExit(0)
+
+if mode == "inbox" and not resumed:
+    time.sleep(0.25)
+    answer = "first turn"
+elif mode == "inbox":
+    answer = "followup received" if "follow up" in prompt else prompt
+else:
+    answer = "cursor done"
+
+send({"type": "assistant", "message": {"role": "assistant", "content": [
+      {"type": "text", "text": answer[:7]}]}, "session_id": "cursor-session-1", "timestamp_ms": 1})
+send({"type": "assistant", "message": {"role": "assistant", "content": [
+      {"type": "text", "text": answer[7:]}]}, "session_id": "cursor-session-1", "timestamp_ms": 2})
+send({"type": "assistant", "message": {"role": "assistant", "content": [
+      {"type": "text", "text": answer}]}, "session_id": "cursor-session-1"})
+send({"type": "tool_call", "subtype": "started", "call_id": "tool-1", "tool_call": {
+      "readToolCall": {"args": {"path": "README.md"}}}, "session_id": "cursor-session-1"})
+send({"type": "tool_call", "subtype": "completed", "call_id": "tool-1", "tool_call": {
+      "readToolCall": {"args": {"path": "README.md"}, "result": {"success": {
+      "content": "demo", "isEmpty": False, "totalLines": 1}}}}, "session_id": "cursor-session-1"})
+send({"type": "result", "subtype": "success", "is_error": False, "result": answer,
+      "session_id": "cursor-session-1", "usage": {"inputTokens": 5, "outputTokens": 2,
+      "cacheReadTokens": 2, "cacheWriteTokens": 0},
+      "num_turns": 1, "total_cost_usd": 0})
+'''
+
+
+def _cursor_manager(tmp_path, mode: str, state=None, max_sessions=2):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fake = tmp_path / "fake_cursor.py"
+    fake.write_text(FAKE_CURSOR, encoding="utf-8")
+    state = state or tmp_path / "fake-cursor-state.jsonl"
+    cfg = make_cfg(tmp_path)
+    cfg.backends["cursor"] = BackendConfig(enabled=True, model="cursor-grok-4.6-high", effort="high",
+                                            permission_mode="force", max_sessions=max_sessions)
+    manager = Manager(cfg)
+    made = []
+
+    def factory(**kwargs):
+        made.append(kwargs)
+        return CursorSession(**kwargs, command=[sys.executable, "-u", str(fake), mode, str(state)])
+
+    manager.runner.cursor_factory = factory
+    return manager, made, state
+
+
+def test_cursor_docker_command_is_sandboxed_forced_and_resumable(tmp_path):
+    backend = BackendConfig(enabled=True, proxy="http://proxy:8888", volume="cursor-auth", network="cursor-net",
+                            model="cursor-grok-4.6-high", effort="high", permission_mode="force")
+    cli = CursorSession(session_id="abc", workspace=tmp_path, backend=backend,
+                        sandbox=SandboxConfig(memory="3g", cpus="1.5", pids=321), system_prompt="system",
+                        backend_session_id="resume-me")
+    command = cli.command("do it")
+    assert command[:6] == ["docker", "run", "--rm", "-i", "--name", "harness-abc-cursor"]
+    for pair in (["--network", "cursor-net"], ["-e", "HTTPS_PROXY=http://proxy:8888"],
+                 ["-e", "HOME=/home/agent/.cursor/home"],
+                 ["-e", "CURSOR_CONFIG_DIR=/home/agent/.cursor/config"],
+                 ["-v", "cursor-auth:/home/agent/.cursor"], ["--memory", "3g"], ["--cpus", "1.5"],
+                 ["--pids-limit", "321"], ["--sandbox", "enabled"], ["--workspace", "/workspace"],
+                 ["--model", "cursor-grok-4.6-high"], ["--resume", "resume-me"]):
+        assert any(command[at:at + 2] == pair for at in range(len(command) - 1))
+    assert ["--security-opt", "seccomp=unconfined"] == command[
+        command.index("seccomp=unconfined") - 1:command.index("seccomp=unconfined") + 1]
+    assert ["--security-opt", "apparmor=unconfined"] == command[
+        command.index("apparmor=unconfined") - 1:command.index("apparmor=unconfined") + 1]
+    assert "--force" in command and "--trust" in command and "--auto-review" not in command and "--yolo" not in command
+    assert command[-1] == "do it"
+    keyed = CursorSession(session_id="keyed", workspace=tmp_path, backend=backend, sandbox=SandboxConfig(),
+                          system_prompt="system", api_key="secret-value").command("task")
+    assert ["-e", "CURSOR_API_KEY"] == keyed[keyed.index("CURSOR_API_KEY") - 1:keyed.index("CURSOR_API_KEY") + 1]
+    assert "secret-value" not in keyed
+
+
+def test_cursor_maps_stream_events_and_usage(tmp_path):
+    async def body():
+        m, made, state = _cursor_manager(tmp_path, "normal")
+        await m.start()
+        s = await wait_status(m, m.create("inspect it", backend="cursor")["id"], "done")
+        await asyncio.gather(*m.tasks.values())
+        assert s["answer"] == "cursor done" and s["run"]["backend_session_id"] == "cursor-session-1"
+        assert s["run"]["tool_calls"] == 1 and s["run"]["tool_errors"] == 0
+        assert s["totals"] == {"turns": 1, "prompt_tokens": 5, "completion_tokens": 2,
+                                "total_cost_usd": 0.0}
+        assert events(m, s["id"], "assistant")[-1]["content"] == "cursor done"
+        tool = events(m, s["id"], "tool_result")[0]
+        assert tool["name"] == "readToolCall" and tool["ok"] and "demo" in tool["output"]
+        assert "User task:\\ninspect it" in state.read_text(encoding="utf-8")
+        assert made[0]["model"] == "cursor-grok-4.6-high"
+        assert m.db.approvals(s["id"]) == []
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_cursor_queues_live_inbox_as_resumed_turn(tmp_path):
+    async def body():
+        m, _, state = _cursor_manager(tmp_path, "inbox")
+        await m.start()
+        sid = m.create("first", backend="cursor")["id"]
+        await wait_status(m, sid, "running")
+        await m.send(sid, "follow up")
+        s = await wait_status(m, sid, "done")
+        await asyncio.gather(*m.tasks.values())
+        assert s["answer"] == "followup received" and s["inbox"] == []
+        assert s["totals"]["turns"] == 2 and s["totals"]["prompt_tokens"] == 10
+        records = [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines()]
+        assert len(records) == 2 and records[1]["resumed"]
+        assert records[1]["argv"][-3:-1] == ["--resume", "cursor-session-1"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_cursor_cancel_and_restart_recovery(tmp_path):
+    async def cancel():
+        m, _, _ = _cursor_manager(tmp_path / "cancel", "cancel")
+        await m.start()
+        sid = m.create("wait", backend="cursor")["id"]
+        await wait_status(m, sid, "running")
+        assert (await m.cancel(sid))["status"] == "cancelled"
+        assert sid not in m.runner._cli_sessions
+        await m.stop()
+
+    async def recover():
+        root = tmp_path / "recover"
+        m1, _, state = _cursor_manager(root, "recover")
+        await m1.start()
+        sid = m1.create("wait", backend="cursor")["id"]
+        for _ in range(500):
+            s = m1.db.get_session(sid)
+            if s["run"].get("backend_session_id"):
+                break
+            await asyncio.sleep(0.02)
+        assert s["run"]["backend_session_id"] == "cursor-session-1"
+        await m1.stop()
+        m1.db.close()
+
+        m2, made, _ = _cursor_manager(root, "recover", state=state)
+        await m2.start()
+        s = await wait_status(m2, sid, "done")
+        await asyncio.gather(*m2.tasks.values())
+        assert s["answer"] == "cursor done" and made[0]["backend_session_id"] == "cursor-session-1"
+        records = [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines()]
+        assert records[-1]["resumed"] and "harness restarted" in records[-1]["prompt"].lower()
+        await m2.stop()
+
+    asyncio.run(cancel())
+    asyncio.run(recover())

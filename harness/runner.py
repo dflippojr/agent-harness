@@ -18,7 +18,7 @@ from pathlib import Path
 from . import compaction, grounding, llm, projects
 from .backend_state import billing_warning
 from .bus import EventBus
-from .cli_backends import ClaudeSession, CliBackendError, CodexSession
+from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
 from .config import Config
 from .db import Database
 from .homelab import Homelab
@@ -96,11 +96,12 @@ class Runner:
         self.approval_events: dict[str, asyncio.Event] = {}
         self.user_cancelled: set[str] = set()
         self._sandboxes: dict[str, Sandbox] = {}
-        self._cli_sessions: dict[str, ClaudeSession | CodexSession] = {}
+        self._cli_sessions: dict[str, ClaudeSession | CodexSession | CursorSession] = {}
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
+        self.cursor_factory = CursorSession
         self._quota_checked: dict[str, float] = {}
         self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
         self.generating: set[str] = set()       # sessions with a model call in flight (the guard waits for them)
@@ -362,7 +363,7 @@ class Runner:
         s = self.db.get_session(sid)
         backend_name = s["backend"]
         backend = self.cfg.backends[backend_name]
-        if backend_name not in ("claude", "codex"):
+        if backend_name not in ("claude", "codex", "cursor"):
             raise CliBackendError(f"backend {backend_name!r} is not implemented")
         if recovered:
             self.bus.emit(sid, "resumed", {"status": s["status"]})
@@ -393,7 +394,8 @@ class Runner:
                         run["billing_warned"] = True
                         self.db.update_session(sid, run=run)
                         self.bus.emit(sid, "billing_warning", {"backend": backend_name, "message": warning})
-                    factory = self.cli_factory if backend_name == "claude" else self.codex_factory
+                    factory = {"claude": self.cli_factory, "codex": self.codex_factory,
+                               "cursor": self.cursor_factory}[backend_name]
                     cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
                                   sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
                                   model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
@@ -445,7 +447,7 @@ class Runner:
         except OSError:
             return ""
 
-    async def _send_cli_inbox(self, sid: str, cli: ClaudeSession | CodexSession) -> None:
+    async def _send_cli_inbox(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession) -> None:
         """Forward messages received during a CLI run without racing a newer inbox append."""
         queued = list(self.db.get_session(sid)["inbox"])
         if not queued:
@@ -477,11 +479,13 @@ class Runner:
                     parts.append(Runner._cli_text(block["content"]))
         return "\n".join(x for x in parts if x)
 
-    async def _handle_cli_event(self, sid: str, cli: ClaudeSession | CodexSession, event: dict,
+    async def _handle_cli_event(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession, event: dict,
                                  tool_names: dict[str, str], recovered: bool = False) -> bool:
         """Map one hosted-CLI record. Returns true when the run is complete."""
         if isinstance(cli, CodexSession):
             return await self._handle_codex_event(sid, cli, event, tool_names, recovered=recovered)
+        if isinstance(cli, CursorSession):
+            return await self._handle_cursor_event(sid, cli, event, tool_names)
         type_ = event.get("type")
         if type_ == "system" and event.get("subtype") == "init":
             backend_session_id = str(event.get("session_id") or "")
@@ -565,6 +569,80 @@ class Runner:
                 latest = self.db.get_session(sid)["run"].get("rate_limits") or {}
                 raise CliLimitError(float(latest.get("resetsAt") or 0))
             self._finish_cli_result(sid, event)
+            return True
+        return False
+
+    @staticmethod
+    def _cursor_tool(event: dict) -> tuple[str, dict, dict]:
+        tool_call = event.get("tool_call") if isinstance(event.get("tool_call"), dict) else {}
+        for name, value in tool_call.items():
+            if isinstance(value, dict):
+                args = value.get("args") if isinstance(value.get("args"), dict) else {}
+                result = value.get("result") if isinstance(value.get("result"), dict) else {}
+                return name, args, result
+        return "cursorTool", {}, {}
+
+    async def _handle_cursor_event(self, sid: str, cli: CursorSession, event: dict,
+                                   tool_names: dict[str, str]) -> bool:
+        """Map Cursor Agent's documented print-mode stream-json records."""
+        type_ = str(event.get("type") or "")
+        if type_ == "system" and event.get("subtype") == "init":
+            backend_session_id = str(event.get("session_id") or "")
+            if backend_session_id:
+                cli.backend_session_id = backend_session_id
+                s = self.db.get_session(sid)
+                self.db.update_session(sid, run={**s["run"], "backend_session_id": backend_session_id})
+            return False
+        if type_ in ("assistant", "thinking"):
+            text = self._cli_text((event.get("message") or {}).get("content"))
+            if not text and isinstance(event.get("text"), str):
+                text = event["text"]
+            if text:
+                kind = "reasoning" if type_ == "thinking" else "content"
+                # With --stream-partial-output Cursor emits timestamped deltas,
+                # then one untimestamped aggregate assistant record. Stream the
+                # deltas and retain the aggregate without displaying it twice.
+                if type_ == "thinking" or event.get("timestamp_ms") is not None:
+                    self.bus.ephemeral(sid, "delta", {"kind": kind, "text": text})
+                if type_ == "assistant" and event.get("timestamp_ms") is None:
+                    cli.last_answer = text
+            return False
+        if type_ == "tool_call":
+            call_id = str(event.get("call_id") or "")
+            name, args, result = self._cursor_tool(event)
+            tool_names[call_id] = name
+            if event.get("subtype") == "started":
+                self.bus.emit(sid, "assistant", {"content": "", "reasoning": "", "tool_calls": [{
+                    "id": call_id, "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)}}], "finish_reason": "",
+                    "prompt_tokens": 0, "completion_tokens": 0, "prompt_tps": 0, "gen_tps": 0})
+            elif event.get("subtype") == "completed":
+                ok = "success" in result and "error" not in result
+                output = result.get("success") if ok else result.get("error", result)
+                with self.db.tx():
+                    run = self.db.get_session(sid)["run"]
+                    run["tool_calls"] = run.get("tool_calls", 0) + 1
+                    if not ok:
+                        run["tool_errors"] = run.get("tool_errors", 0) + 1
+                    self.db.update_session(sid, run=run)
+                    self.bus.emit(sid, "tool_result", {"id": call_id, "name": tool_names.get(call_id, name),
+                                                        "ok": ok, "seconds": 0,
+                                                        "output": truncate_middle(self._cli_text(output), 20000)})
+            return False
+        if type_ == "result":
+            combined = cli.combined_result(event)
+            text = str(combined.get("result") or "").lower()
+            if (combined.get("is_error") or combined.get("subtype") in ("error", "failed")) and any(
+                    marker in text for marker in ("rate limit", "quota", "usage limit")):
+                raise CliLimitError()
+            if cli.has_followups:
+                await cli.continue_followups()
+                return False
+            if cli.last_answer:
+                self.bus.emit(sid, "assistant", {"content": cli.last_answer, "reasoning": "", "tool_calls": [],
+                                                   "finish_reason": "", "prompt_tokens": 0,
+                                                   "completion_tokens": 0, "prompt_tps": 0, "gen_tps": 0})
+            self._finish_cli_result(sid, combined)
             return True
         return False
 

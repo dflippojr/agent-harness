@@ -1,5 +1,4 @@
-^api[0-9]*\.cursor\.sh$
-^([a-z0-9-]+\.)?cursor\.sh$
+^([a-z0-9-]+\.)*cursor\.sh$
 ^cursor\.com$
 ^([a-z0-9-]+\.)?cursor\.com$
 ^([a-z0-9-]+\.)?cursorapi\.com$

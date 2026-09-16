@@ -1,7 +1,7 @@
 # Phase 8a design: Claude Code, Codex and Cursor as session backends
 
-Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **steps 1-4 complete, including the live
-Claude and Codex exits; step 5 (Cursor) is next**. Written 2026-09-15 from the CLIs installed on the tower:
+Issue [#20](https://github.com/dflippojr/agent-harness/issues/20). Status: **all five steps complete, including live
+Claude, Codex and Cursor branch-review exits**. Written 2026-09-15 from the CLIs installed on the tower:
 Claude Code 2.1.272, Codex CLI (Plus plan, models `gpt-6-astra`,
 `gpt-5.6-sol`, ...), and Cursor Agent (`cursor-agent`, models incl. `cursor-grok-4.6-high`). The terms and billing
 background and the promises made to app builders are in `docs/app-api.md` → "Subscription backends".
@@ -43,6 +43,20 @@ background and the promises made to app builders are in `docs/app-api.md` → "S
   `workspace-write` + `on-request` policy. Live session `1569974567` fixed invoice-tools on branch
   `agent/1569974567` (`28e4c75`), reported **4 passed**, saved the branch for review, and surfaced 7-day usage. Full
   suite: **149 passed, 1 skipped**.
+- **Step 5 complete:** `CursorSession` runs the documented print-mode stream-json protocol with
+  `cursor-grok-4.6-high`, resumes durable chat IDs, maps assistant/tool/result events, normalizes Cursor's current
+  camelCase usage fields, and promotes inbox messages received during a turn into a subsequent `--resume` process
+  because print mode has no live stdin protocol. Cancellation and daemon recovery retain the shared CLI lifecycle.
+  Cursor has no host approval bridge in print mode, so the recorded user decision is enforced exactly: `--force`
+  only inside its workspace-mounted container, with `--sandbox enabled`, provider-only egress and branch review.
+  Docker's default AppArmor and seccomp profiles are relaxed only for Cursor's container so its inner unprivileged
+  user-namespace sandbox can start; `no-new-privileges`, dropped capabilities and resource limits remain. Browser
+  auth now persists by placing Cursor's home-relative state under its provider volume, and the Cursor allowlist
+  accepts multi-level `*.cursor.sh` endpoints used by the current CLI. Fake-CLI tests cover events, usage, queued
+  follow-ups, cancellation and restart recovery. Live session `941ad71f77` fixed invoice-tools on branch
+  `agent/941ad71f77` (`a2a1cb9`), with the one-line diff independently reviewed and **4 passed** independently.
+  Full suite: **153 passed, 1 skipped**. Phase 8a is complete; Phase 8 still needs only the separate 8b native
+  Claude Remote Control user exit test recorded in the project capsule.
 
 ## Requirements (user decisions)
 

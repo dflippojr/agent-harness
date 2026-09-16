@@ -23,7 +23,11 @@ $spec = @{
                 Login = @('claude', 'auth', 'login', '--claudeai'); State = @('claude', 'auth', 'status'); Out = @('claude', 'auth', 'logout') }
     codex  = @{ Dir = '/home/agent/.codex'; Env = @('CODEX_HOME=/home/agent/.codex')
                 Login = @('codex', 'login', '--device-auth'); State = @('codex', 'login', 'status'); Out = @('codex', 'logout') }
-    cursor = @{ Dir = '/home/agent/.cursor'; Env = @('NO_OPEN_BROWSER=1')
+    # Cursor keeps browser-auth state outside CURSOR_CONFIG_DIR on some releases.
+    # Put HOME under the mounted volume so every home-relative auth path survives
+    # the disposable login/session container without exposing it to the daemon.
+    cursor = @{ Dir = '/home/agent/.cursor'; Env = @('NO_OPEN_BROWSER=1', 'HOME=/home/agent/.cursor/home',
+                                                      'CURSOR_CONFIG_DIR=/home/agent/.cursor/config')
                 Login = @('agent', 'login'); State = @('agent', 'status'); Out = @('agent', 'logout') }
 }[$Backend]
 

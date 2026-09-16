@@ -407,3 +407,204 @@ class CodexSession:
             await asyncio.to_thread(thread.join, 0.5)
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+
+
+class CursorSession:
+    """A sequence of Cursor Agent print-mode processes sharing one chat id.
+
+    Cursor's headless CLI has no live stdin protocol. Messages received while a
+    turn is running are queued and started with ``--resume`` after the current
+    terminal result.
+    """
+
+    def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
+                 sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
+                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None):
+        self.session_id = session_id
+        self.workspace = workspace.resolve()
+        self.backend = backend
+        self.sandbox = sandbox
+        self.system_prompt = system_prompt
+        self.model = model or backend.model
+        self.backend_session_id = backend_session_id
+        self.api_key = api_key
+        self.container = f"harness-{session_id}-cursor"
+        self._popen = popen
+        self._command_override = command
+        self.process: subprocess.Popen | None = None
+        self._events: asyncio.Queue[str | None] = asyncio.Queue()
+        self._stderr: list[str] = []
+        self._threads: list[threading.Thread] = []
+        self._followups: list[str] = []
+        self._result_usage: dict[str, int] = {}
+        self._result_turns = 0
+        self._result_cost = 0.0
+        self.last_answer = ""
+
+    def command(self, prompt: str = "") -> list[str]:
+        if self._command_override is not None:
+            args = list(self._command_override)
+            if self.backend_session_id:
+                args += ["--resume", self.backend_session_id]
+            return [*args, prompt]
+        args = [
+            "docker", "run", "--rm", "-i", "--name", self.container,
+            "--label", f"agent-harness.session={self.session_id}",
+            "--network", self.backend.network,
+            "-e", f"HTTPS_PROXY={self.backend.proxy}",
+            "-e", f"HTTP_PROXY={self.backend.proxy}",
+            "-e", "NO_PROXY=localhost,127.0.0.1",
+            "-e", "NODE_USE_ENV_PROXY=1",
+            # Keep every home-relative Cursor auth path inside the provider
+            # volume; recent releases do not keep browser auth solely in the
+            # documented config directory.
+            "-e", "HOME=/home/agent/.cursor/home",
+            "-e", "CURSOR_CONFIG_DIR=/home/agent/.cursor/config",
+            "-v", f"{self.backend.volume}:/home/agent/.cursor",
+            "--mount", f"type=bind,source={self.workspace},target=/workspace",
+            "-w", "/workspace",
+            "--memory", self.sandbox.memory,
+            "--cpus", str(self.sandbox.cpus),
+            "--pids-limit", str(self.sandbox.pids),
+            # Cursor's Linux sandbox creates its own unprivileged user
+            # namespace. Docker's default seccomp and AppArmor profiles block
+            # that setup; relax only those outer profiles while keeping the
+            # inner Cursor sandbox, no-new-privileges, dropped capabilities,
+            # resource limits, workspace-only mount and provider-only network.
+            "--security-opt", "seccomp=unconfined",
+            "--security-opt", "apparmor=unconfined",
+            "--security-opt", "no-new-privileges",
+            "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
+            self.backend.image,
+            "agent", "-p", "--output-format", "stream-json", "--stream-partial-output",
+            # Cursor exposes no host approval protocol in print mode. This is
+            # the user's explicit Phase 8a choice, confined by the outer
+            # workspace-only container, provider-only network and branch review.
+            "--force", "--sandbox", "enabled", "--trust", "--workspace", "/workspace",
+            "--model", self.model,
+        ]
+        if self.backend_session_id:
+            args += ["--resume", self.backend_session_id]
+        args.append(prompt)
+        if self.api_key:
+            at = args.index(self.backend.image)
+            args[at:at] = ["-e", "CURSOR_API_KEY"]
+        return args
+
+    async def start(self) -> None:
+        if self._command_override is None:
+            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+
+    async def _spawn(self, prompt: str) -> None:
+        loop = asyncio.get_running_loop()
+        self._events = asyncio.Queue()
+        self._stderr = []
+        child_env = os.environ.copy()
+        if self.api_key:
+            child_env["CURSOR_API_KEY"] = self.api_key
+        process = self._popen(
+            self.command(prompt), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=child_env,
+        )
+        self.process = process
+        events = self._events
+
+        def stdout_reader() -> None:
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    loop.call_soon_threadsafe(events.put_nowait, line)
+            finally:
+                loop.call_soon_threadsafe(events.put_nowait, None)
+
+        def stderr_reader() -> None:
+            assert process.stderr is not None
+            self._stderr.extend(process.stderr)
+
+        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
+                         threading.Thread(target=stderr_reader, daemon=True)]
+        for thread in self._threads:
+            thread.start()
+
+    async def initialize(self, prompt: str) -> None:
+        first_prompt = prompt if self.backend_session_id else f"{self.system_prompt}\n\nUser task:\n{prompt}"
+        await self._spawn(first_prompt)
+
+    def user_message(self, content: str) -> dict:
+        return {"type": "cursor_followup", "content": content}
+
+    async def send(self, item: dict) -> None:
+        content = item.get("content") if isinstance(item, dict) else None
+        if not isinstance(content, str):
+            raise CliBackendError("Cursor follow-up was not text")
+        self._followups.append(content)
+
+    @property
+    def has_followups(self) -> bool:
+        return bool(self._followups)
+
+    async def continue_followups(self) -> None:
+        prompts, self._followups = self._followups, []
+        await self._close_process(terminate=False)
+        if self._command_override is None:
+            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+        prompt = "Messages received while the prior turn was running:\n\n" + "\n\n".join(prompts)
+        await self._spawn(prompt)
+
+    def combined_result(self, result: dict) -> dict:
+        raw = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        cache_read = int(raw.get("cacheReadTokens") or raw.get("cache_read_input_tokens") or 0)
+        cache_write = int(raw.get("cacheWriteTokens") or raw.get("cache_creation_input_tokens") or 0)
+        total_input = int(raw.get("inputTokens") or raw.get("input_tokens") or 0)
+        usage = {
+            "input_tokens": max(0, total_input - cache_read - cache_write),
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
+            "output_tokens": int(raw.get("outputTokens") or raw.get("output_tokens") or 0),
+        }
+        for key, value in usage.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self._result_usage[key] = self._result_usage.get(key, 0) + int(value)
+        self._result_turns += int(result.get("num_turns") or 1)
+        self._result_cost += float(result.get("total_cost_usd") or 0)
+        self.last_answer = str(result.get("result") or self.last_answer)
+        return {**result, "result": self.last_answer, "usage": dict(self._result_usage),
+                "num_turns": self._result_turns, "total_cost_usd": self._result_cost}
+
+    async def receive(self, timeout: float | None = None) -> dict | None:
+        try:
+            line = await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
+        except asyncio.TimeoutError:
+            return None
+        if line is None:
+            code = self.process.poll() if self.process is not None else None
+            error = "".join(self._stderr).strip()
+            raise CliBackendError(f"Cursor Agent exited with code {code} before a result: {error}".rstrip())
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise CliBackendError(f"Cursor Agent wrote invalid JSONL: {line[:300].rstrip()}") from e
+        if not isinstance(value, dict):
+            raise CliBackendError("Cursor Agent JSONL event was not an object")
+        return value
+
+    async def _close_process(self, terminate: bool) -> None:
+        proc = self.process
+        self.process = None
+        if proc is not None and proc.poll() is None:
+            if terminate:
+                proc.terminate()
+            try:
+                await asyncio.to_thread(proc.wait, 2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                await asyncio.to_thread(proc.wait)
+        for thread in self._threads:
+            await asyncio.to_thread(thread.join, 0.5)
+        self._threads = []
+
+    async def stop(self) -> None:
+        await self._close_process(terminate=True)
+        if self._command_override is None:
+            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)

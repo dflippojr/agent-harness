@@ -62,6 +62,19 @@ backends:
     volume: harness-auth-codex
     network: harness-cli-codex
     api_key_file: D:/Agents/harness/secrets/codex-api-key
+  cursor:
+    enabled: true
+    image: agent-harness-cli:1
+    model: cursor-grok-4.6-high
+    effort: high
+    permission_mode: force
+    max_sessions: 2
+    billing: subscription
+    auth: subscription
+    proxy: http://harness-egress-cursor:8888
+    volume: harness-auth-cursor
+    network: harness-cli-cursor
+    api_key_file: D:/Agents/harness/secrets/cursor-api-key
 
 # Homelab tools for projects with `homelab: true` (harness/homelab.py). The daemon runs these on the host;
 # agents only name a service from this allowlist. Restarts always need approval.

@@ -39,6 +39,10 @@ def _subscription_status(name: str, cfg) -> bool:
     command = ["docker", "run", "--rm", "--network", cfg.network,
                "-e", f"HTTPS_PROXY={cfg.proxy}", "-e", "NODE_USE_ENV_PROXY=1",
                "-v", f"{cfg.volume}:{dirs[name]}", cfg.image, *commands[name]]
+    if name == "cursor":
+        at = command.index(cfg.image)
+        command[at:at] = ["-e", "HOME=/home/agent/.cursor/home",
+                          "-e", "CURSOR_CONFIG_DIR=/home/agent/.cursor/config"]
     try:
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
