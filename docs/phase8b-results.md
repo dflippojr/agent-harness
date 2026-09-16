@@ -22,8 +22,10 @@ Issue [#19](https://github.com/dflippojr/agent-harness/issues/19). Commit `e7b67
 
 ## Built (`harness/remote_control.py`)
 
-- **Eligible projects:** tower projects whose `repo` is a local folder, or the names listed in
-  `remote_control.projects`. On the tower that's invoice-tools, plex-webhook and observability-stack.
+- **Eligible projects:** tower projects whose `repo` is a local folder (optionally limited by
+  `remote_control.projects`) plus local paths configured under `remote_control.folders`. Standalone folders are
+  native Claude Remote Control entries only: they do not become harness session projects or enter the Docker
+  sandbox. On the tower this also exposes the agent-harness repo and the private memory-library working copy.
 - **Launch:**
   - Refuses untrusted folders, reading `hasTrustDialogAccepted` from `~/.claude.json`, with instructions to run
     `claude` there once. The harness never accepts trust for the user.

@@ -150,6 +150,8 @@ class RemoteControlConfig:
     permission_mode: str = "default"      # for sessions opened from the phone
     capacity: int = 4                     # max concurrent sessions per server
     projects: list[str] | None = None     # which projects may be launched; default: every tower project with a local repo
+    # Extra local folders exposed only to native Claude Remote Control, never as harness session projects.
+    folders: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -112,25 +112,35 @@ class RemoteControl:
 
     # projects
     def folder(self, name: str) -> Path:
-        project = self.cfg.projects.get(name)
-        if project is None:
-            raise RemoteControlError(f"no project named {name!r}")
-        allowed = self.rc.projects
-        if allowed is not None and name not in allowed:
-            raise RemoteControlError(f"project {name!r} isn't enabled for Remote Control (remote_control.projects)")
-        if project.target != "tower":
-            raise RemoteControlError(f"{name} runs on the {project.target}; Remote Control launches only work for "
-                                     "tower projects")
-        if not project.repo or "://" in project.repo:
-            raise RemoteControlError(f"{name} has no local folder on the tower to open")
-        path = Path(project.repo)
+        folders = self.rc.folders or {}
+        configured = folders.get(name)
+        if configured is not None:
+            if not configured or "://" in configured:
+                raise RemoteControlError(f"{name} has no local folder on the tower to open")
+            path = Path(os.path.expandvars(configured)).expanduser()
+        else:
+            project = self.cfg.projects.get(name)
+            if project is None:
+                raise RemoteControlError(f"no project or Remote Control folder named {name!r}")
+            allowed = self.rc.projects
+            if allowed is not None and name not in allowed:
+                raise RemoteControlError(
+                    f"project {name!r} isn't enabled for Remote Control (remote_control.projects)")
+            if project.target != "tower":
+                raise RemoteControlError(f"{name} runs on the {project.target}; Remote Control launches only work "
+                                         "for tower projects")
+            if not project.repo or "://" in project.repo:
+                raise RemoteControlError(f"{name} has no local folder on the tower to open")
+            path = Path(os.path.expandvars(project.repo)).expanduser()
         if not path.is_dir():
             raise RemoteControlError(f"{path} doesn't exist")
         return path
 
     def eligible(self) -> list[str]:
         names = []
-        for name in self.rc.projects if self.rc.projects is not None else self.cfg.projects:
+        project_names = self.rc.projects if self.rc.projects is not None else self.cfg.projects
+        candidates = dict.fromkeys([*project_names, *(self.rc.folders or {})])
+        for name in candidates:
             try:
                 self.folder(name)
             except RemoteControlError:

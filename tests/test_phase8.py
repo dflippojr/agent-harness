@@ -222,6 +222,24 @@ def _rc_setup(tmp_path, trusted=True, script=None):
     return rc, repo, notes
 
 
+def test_remote_control_only_folders_are_additive_and_expand_environment(tmp_path, monkeypatch):
+    rc, repo, _ = _rc_setup(tmp_path)
+    standalone = tmp_path / "standalone"
+    (standalone / ".git").mkdir(parents=True)
+    monkeypatch.setenv("REMOTE_CONTROL_TEST_ROOT", str(tmp_path))
+    rc.rc.projects = []
+    rc.rc.folders = {"standalone": "$REMOTE_CONTROL_TEST_ROOT/standalone"}
+
+    # A standalone folder is eligible without becoming a harness session project. An explicit project allowlist
+    # still limits ordinary session projects, while Remote Control-only folders remain additive.
+    assert "standalone" not in rc.cfg.projects
+    assert rc.eligible() == ["standalone"]
+    assert rc.folder("standalone") == standalone
+    with pytest.raises(ToolError, match="isn't enabled"):
+        rc.folder("repo")
+    assert repo.is_dir()
+
+
 def test_remote_control_launch_status_stop(tmp_path):
     rc, repo, notes = _rc_setup(tmp_path)
 

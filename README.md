@@ -38,7 +38,8 @@ Terms and billing notes for app builders are in `docs/app-api.md`.
   Trust is Claude's own dialog; the harness never accepts it. Untrusted folders offer **Trust in
   Claude**, which opens a visible `claude` window on the tower. API:
   `GET/POST /remote-control/{project}` and `/api/v1/remote-control` (scope `remote_control`).
-  Eligible today: tower projects whose `repo` is a local folder.
+  Eligible entries are tower projects whose `repo` is a local folder plus any native-only paths in
+  `remote_control.folders`; the latter never appear as sandboxed harness session projects.
 - Quote checks (`web.quote_check`): a quoted passage of 25+ characters in a final answer must
   appear in something the agent read. One fix request, then a ⚠ flag on the answer and the Done
   notification. `web_fetch` reads GitHub repository and folder pages through the public API (license,
