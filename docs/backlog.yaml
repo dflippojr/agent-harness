@@ -931,3 +931,73 @@ items:
       Needs refinement: browse roots/allowlists, depth, symlink/junction policy, what is shown vs opened, and how discovered paths are promoted to trusted RC locations.
       Blocked on daemon-config-ui / #24.
       Do not put real filesystem paths, logins, tokens, or tailnet names in public comments.
+
+  - key: profile-actions-menu
+    kind: feature
+    title: "Profile: Actions menu for GPU hold, Remote Control, and Disk"
+    body: |
+      Phone feedback on `#/profile`. The Claude Remote Control card is now a long inline widget on the landing
+      (every eligible folder as a row with path, trust/start/stop, pairing). The GPU pause control is an operator
+      action, not a preference. Settings is already a short labeled list of `#/profile/<section>` links.
+
+      **Add an Actions menu** on the Profile landing, matching Settings (`section-label` + `card settings-list`).
+      Place it **above** Settings so operator controls come first.
+
+      **Actions**
+      - **GPU** — collapse the landing card into one Actions **row with an on/off toggle**. On means "don't load
+        local models right now": do not load the LLM (Qwen / llama-server) or the diffusion checkpoint (ComfyUI).
+        Off (default) means local models may load as they do today.
+
+        Optional duration: default **until I turn it off**. Also allow a timeframe (e.g. 30 min / 1 h / 3 h).
+        When a duration is set, show remaining time on the row; auto-clear when it expires (same as turning the
+        toggle off).
+
+        Reuse the existing GPU-guard pause path (`POST /gpu/pause|resume`, pause flag, queue wait) rather than a
+        second GPU system. Extend it so diffusion is held too. While the hold is on: do **not start ComfyUI at
+        all** (no portable-install launch, no #56 Images-tab warmup, no "listening without a checkpoint"). Image
+        jobs may sit in the image queue only. Skip the PWA's `POST /models/warm`. Do not load Qwen or a diffusion
+        checkpoint until the hold is off or expired.
+
+        Automatic game / Plex GPU-guard stays. This toggle is the manual hold (today's "Pause agents (I'm gaming)").
+        If a game or transcode is active, the row can show that as status; it is not a second switch.
+
+      - **Claude Remote Control** — move the current landing widget to a subpage (e.g. `#/profile/remote-control`).
+        Keep the existing start/stop/trust/pairing UI and polling; do not redesign the card, just stop embedding
+        it on `#/profile`.
+      - **Disk** — move up from Settings. Used/free meters plus **Clean up now** are operator maintenance, not a
+        preference. Route stays `#/profile/disk`.
+
+      **Local-model menus (warning + queue)**
+      When the GPU hold is on, attempting to use a **local** model from its menu must warn that the request can
+      be queued and that nothing will be sent to the model until the hold is turned off or expires:
+      - New task (and New job) when backend is Local model — still allow creating the session/job; it waits
+        (`gpu_paused` / existing queue pause). Hosted Claude / Codex / Cursor are unaffected and need no warning.
+      - Images — warn on Generate. Do not start ComfyUI on tab open. The job may sit queued.
+
+      Do not block creating the work; block sending it to Qwen or ComfyUI.
+
+      **How queued requests drain when the hold ends**
+      Mixed FIFO across kinds is wrong on this GPU. The card holds Qwen (~14.7 GB) or a diffusion model, never
+      both; each switch is a long load. A fresh image request already takes a decent amount of time. Interleaving
+      session turns and image jobs in arrival order would pick up and drop models repeatedly.
+
+      Drain in two phases, FIFO **within** each kind:
+      1. **LLM sessions first** — run every local-model session that waited on the hold (existing `GpuScheduler`:
+         one session at a time). Keep Qwen loaded.
+      2. **Then images in a row** — one ComfyUI start, run every queued image job, then stop ComfyUI and restore
+         Qwen (existing image batch already runs queued workflows in one occupancy).
+
+      Hosted Claude / Codex / Cursor are not in this drain. If new LLM work arrives after the image batch has
+      already taken the GPU, keep today's exclusive-image behavior: finish that image batch, then Qwen comes back.
+
+      **Settings stays**
+      Appearance, Notifications, Install, Backends, Memory, Apps, Inference endpoint.
+
+      **Leave on the landing**
+      Identity → Account only. No GPU card, no Remote Control widget. The session-list pause banner should link
+      to `#/profile` (the Actions GPU row is there). Guests can see the row; they cannot toggle GPU, start/stop
+      Remote Control, or run cleanup.
+
+      Distinct from #1 (verify automatic game/Plex guard), #45, #48, closed #55/#56, #67.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
