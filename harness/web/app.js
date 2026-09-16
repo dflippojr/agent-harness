@@ -93,9 +93,36 @@ function fill(el, ...children) {
 }
 
 function showFab(href, label) {
+  if (isGuest()) return;
   $fab.href = href;
   $fab.textContent = label;
   $fabHost.hidden = false;
+}
+
+let currentMe = { role: "owner" };
+async function currentUser() {
+  try { currentMe = await api("/me"); } catch (_) { currentMe = { role: "owner" }; }
+  return currentMe;
+}
+function isGuest() { return currentMe.role === "guest"; }
+
+function paintGuestChrome() {
+  const banner = document.getElementById("guest-banner");
+  const guest = isGuest();
+  document.documentElement.classList.toggle("guest", guest);
+  if (!banner) return;
+  if (!guest) {
+    banner.hidden = true;
+    banner.textContent = "";
+    return;
+  }
+  const until = currentMe.guest_until;
+  const when = until ? new Date(until) : null;
+  const ends = when && !Number.isNaN(when.getTime())
+    ? ` Ends ${when.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}.`
+    : "";
+  banner.textContent = `Demo access — look around only.${ends}`;
+  banner.hidden = false;
 }
 
 function toast(text, ms = 2600) {
@@ -276,8 +303,15 @@ async function route() {
   document.querySelector(".composer")?.remove();
   $fabHost.hidden = true;
   document.querySelectorAll(".jump").forEach((el) => el.remove());
+  await currentUser();
+  paintGuestChrome();
   const parts = hashParts();
   $back.hidden = isTopLevel(parts);
+  const guestBlocked = isGuest() && (
+    parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
+    || ((parts[0] === "profile" || parts[0] === "settings")
+      && ["notifications", "apps", "endpoint"].includes(parts[1])));
+  if (guestBlocked) { go(parts[0] === "jobs" ? "#/jobs" : "#/profile", true); return; }
   try {
     if (parts.length === 0) await viewList();
     else if (parts[0] === "new") await viewNew();
@@ -626,6 +660,7 @@ route();
 }
 
 function sessionTitle(session) {
+  if (isGuest()) return h("h2", { class: "session-title" }, session.title);
   const label = h("button", { class: "session-title", type: "button", title: "Rename session" }, session.title);
   const startEdit = () => {
     const input = h("input", { class: "session-title-edit", type: "text", value: session.title, maxlength: "120", "aria-label": "Session title" });
@@ -741,13 +776,13 @@ async function viewSession(sid, tab, focusApproval) {
   const feed = h("div");
   $app.append(feed);
 
-  // composer
+  // composer (owner only; guests may watch the live transcript)
   const input = h("textarea", { placeholder: "Message the agent…", rows: 1 });
   const send = h("button", { class: "btn primary" }, "Send");
   const actions = h("div", { class: "row", style: "margin-bottom:6px" });
-  const composer = h("div", { class: "composer" }, h("div", { class: "inner", style: "flex-direction:column;align-items:stretch" },
+  const composer = isGuest() ? null : h("div", { class: "composer" }, h("div", { class: "inner", style: "flex-direction:column;align-items:stretch" },
     actions, h("div", { class: "row", style: "flex-wrap:nowrap;align-items:flex-end" }, input, send)));
-  document.body.append(composer);
+  if (composer) document.body.append(composer);
   input.addEventListener("input", () => { input.style.height = "44px"; input.style.height = `${Math.min(160, input.scrollHeight)}px`; });
   send.addEventListener("click", async () => {
     const text = input.value.trim();
@@ -762,6 +797,7 @@ async function viewSession(sid, tab, focusApproval) {
   });
 
   const renderActions = () => {
+    if (isGuest()) return;
     const active = !TERMINAL.has(session.status);
     input.placeholder = active ? "Add guidance…" : "Continue this session…";
     fill(actions,
@@ -912,9 +948,13 @@ async function viewSession(sid, tab, focusApproval) {
         buttons.querySelectorAll("button").forEach((b) => { b.disabled = false; });
       }
     };
-    buttons.append(
-      h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
-      h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
+    if (isGuest()) {
+      buttons.append(h("p", { class: "muted small" }, "Demo access cannot approve or deny."));
+    } else {
+      buttons.append(
+        h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
+        h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
+    }
     const what = a.tool === "run_shell" ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
       : a.tool === "git_clone" ? `git clone ${a.args.url}`
         : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
@@ -1144,7 +1184,7 @@ async function viewSession(sid, tab, focusApproval) {
     };
   }
   onLeave(openStream(() => `/sessions/${sid}/events?after=${lastSeq}`, tracked));
-  onLeave(() => composer.remove());
+  if (composer) onLeave(() => composer.remove());
 }
 
 function reviewCard(s) {
@@ -1156,6 +1196,10 @@ function reviewCard(s) {
     return match ? match[1].split(", ").filter(Boolean) : [];
   };
   const conflictHelp = (files) => {
+    if (isGuest()) {
+      return h("div", { class: "merge-conflict" },
+        h("p", { class: "muted small" }, `Merge conflicts in ${files.join(", ")}. Demo access cannot ask the agent to resolve them.`));
+    }
     const ask = h("button", { class: "btn primary" }, "Ask agent to resolve");
     ask.addEventListener("click", async () => {
       if (!confirm(`Ask the agent to merge origin/${base} and resolve ${files.length} conflicting file${files.length === 1 ? "" : "s"}?`)) return;
@@ -1195,7 +1239,7 @@ function reviewCard(s) {
     }
   };
   const buttons = [];
-  if (!busy && !s.workspace_removed && s.review !== "discarded") {
+  if (!isGuest() && !busy && !s.workspace_removed && s.review !== "discarded") {
     if (s.repo_kind === "local") {
       buttons.push(h("button", { class: "btn ok", onclick: act("merge", `Squash-merge ${s.branch} into ${base}?`) }, `Merge into ${base}`));
     } else {
@@ -1334,7 +1378,7 @@ async function viewImages() {
   render(data);
   const go = h("button", { class: "btn primary", type: "submit" }, "Generate");
   $app.append(
-    h("form", {
+    isGuest() ? h("p", { class: "muted small" }, "Demo access can view generated images, not start new ones.") : h("form", {
       onsubmit: async (e) => {
         e.preventDefault();
         if (!prompt.value.trim()) return toast("Describe the image first");
@@ -1372,7 +1416,7 @@ async function viewImage(id) {
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, `${img.model} · ${img.width}×${img.height} · seed ${img.seed} · ${img.source}${img.seconds ? ` · ${Math.round(img.seconds)} s` : ""} · ${when}`),
         h("div", { class: "row" },
-          h("button", {
+          isGuest() ? null : h("button", {
             class: "btn",
             onclick: async () => {
               try {
@@ -1494,6 +1538,9 @@ async function viewJob(id) {
     preview();
   });
   preview();
+  if (isGuest()) {
+    [name, prompt, cron, preset, project, backend, model, notify, enabled].forEach((el) => { el.disabled = true; });
+  }
   const body = () => ({ name: name.value, prompt: prompt.value, cron: cron.value, project: project.value,
     backend: backend.value, model: backend.value === "local" ? model.value : "", notify: notify.value, enabled: enabled.checked });
   const save = h("button", { class: "btn primary", type: "submit" }, isNew ? "Create" : "Save");
@@ -1519,7 +1566,7 @@ async function viewJob(id) {
   h("label", {}, "Notify me"), notify,
   h("label", { class: "row", style: "font-weight:500" }, enabled, "Enabled"),
   h("div", { class: "row", style: "margin-top:18px" },
-    !isNew ? h("button", {
+    isGuest() ? null : !isNew ? h("button", {
       class: "btn bad", type: "button",
       onclick: async () => {
         if (!confirm(`Delete the job “${j.name}”? Its past sessions stay.`)) return;
@@ -1527,13 +1574,13 @@ async function viewJob(id) {
       },
     }, "Delete") : null,
     h("span", { class: "spacer" }),
-    !isNew ? h("button", {
+    isGuest() ? null : !isNew ? h("button", {
       class: "btn", type: "button",
       onclick: async () => {
         try { const s = await api(`/jobs/${id}/run`, { method: "POST" }); location.hash = `#/s/${s.id}`; } catch (err) { toast(err.message); }
       },
     }, "Run now") : null,
-    save)));
+    isGuest() ? null : save)));
   if (job) {
     $app.append(h("h3", { style: "margin-top:28px" }, "Recent runs"),
       job.last_skip ? h("p", { class: "muted small" }, `Last skipped: ${job.last_skip}`) : null,
@@ -1546,6 +1593,7 @@ async function viewJob(id) {
 
 // ---------- profile ----------
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
+const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint"]);
 const PROFILE_PAGES = {
   appearance: "Appearance",
   notifications: "Notifications",
@@ -1625,13 +1673,17 @@ function emojiPicker(profile, onPick) {
 function accountCard(me, profile) {
   const live = $conn.classList.contains("live");
   return h("div", {},
-    h("div", { class: "card" },
+    isGuest() ? h("div", { class: "card" },
+      h("p", { class: "muted small" }, "Profile icon is owner-only during demo access."),
+      h("p", { style: "font-size:32px;margin:0" }, profile.emoji))
+      : h("div", { class: "card" },
       h("p", { class: "muted small" }, "Shown at the top left of the app."),
       emojiPicker(profile)),
     h("div", { class: "card" },
       h("h3", {}, "Account"),
       h("p", {}, me.name || "You"),
-      h("p", { class: "muted small" }, me.login || "Not identified by Tailscale on this request.")),
+      h("p", { class: "muted small" }, me.login || "Not identified by Tailscale on this request."),
+      isGuest() ? h("p", { class: "muted small" }, "Demo access — look around only.") : null),
     h("div", { class: "card" },
       h("h3", {}, "Connection"),
       me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
@@ -1666,7 +1718,7 @@ async function viewProfile(page) {
     h("p", { class: "section-label" }, "Settings"),
     h("div", { class: "card settings-list" },
       Object.entries(PROFILE_PAGES)
-        .filter(([id]) => id !== "install" || !isStandalone())
+        .filter(([id]) => (id !== "install" || !isStandalone()) && !(isGuest() && GUEST_HIDDEN_PAGES.has(id)))
         .map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
   );
 }
@@ -1868,8 +1920,10 @@ async function backendsCard() {
     return h("div", { class: "backend-block" },
       h("strong", {}, title(b)),
       line,
-      h("label", {}, "Default model"), modelControl(b),
-      b.name === "local" ? null : [h("label", {}, "Effort"), effortSelect(b)]);
+      isGuest() ? null : h("label", {}, "Default model"),
+      isGuest() ? null : modelControl(b),
+      isGuest() || b.name === "local" ? null : h("label", {}, "Effort"),
+      isGuest() || b.name === "local" ? null : effortSelect(b));
   }) : h("p", { class: "muted small" }, "No backends configured."));
   api("/backends").then((fresh) => {
     for (const b of fresh) {
@@ -1917,7 +1971,7 @@ function gpuCard() {
       h("p", { class: "muted small" }, now.length ? `Using the GPU now: ${now.join(", ")}${g.override ? " (ignored until that changes)" : ""}`
         : "No game or Plex transcode detected. Desktop streaming doesn't pause agents."),
       g.plex_error ? h("p", { class: "muted small" }, `Plex check: ${g.plex_error}`) : null,
-      h("div", { class: "row" },
+      isGuest() ? h("p", { class: "muted small" }, "Demo access cannot pause or resume the GPU.") : h("div", { class: "row" },
         g.state === "clear" ? h("button", { class: "btn", onclick: () => act("pause") }, "Pause agents (I'm gaming)")
           : h("button", { class: "btn", onclick: () => act("resume") }, now.length ? "Resume anyway" : "Resume now")));
   };
@@ -1961,7 +2015,7 @@ function remoteControlCard() {
       h("p", {}, h("strong", {}, p.project), " ", h("span", { class: `muted small${!p.running && !p.trusted ? " bad" : ""}` }, state)),
       h("p", { class: "muted small" }, p.path),
       !p.trusted && p.trust_prompt_open ? h("p", { class: "note small" }, "On the tower, review the folder in Claude and accept its trust prompt. This page will notice automatically.") : null,
-      h("div", { class: "row" },
+      isGuest() ? h("p", { class: "muted small" }, "Demo access cannot start, stop, or trust Remote Control.") : h("div", { class: "row" },
         p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
         p.running ? h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop")
           : !p.trusted ? h("button", { class: "btn", disabled: !!busy || p.trust_prompt_open, onclick: () => trust(p.project) }, p.trust_prompt_open ? "Trust window open" : "Trust in Claude…")
@@ -1989,8 +2043,8 @@ function memoryCard() {
     try {
       const mem = await api("/memory");
       if (!mem.enabled) return fill(body, h("p", { class: "muted small" }, "The memory library is disabled in config/harness.yaml."));
-      const editor = h("textarea", { class: "memory-editor", rows: 24 }, mem.profile || "");
-      const save = h("button", { class: "btn primary", disabled: !mem.writes }, "Save");
+      const editor = h("textarea", { class: "memory-editor", rows: 24, readOnly: isGuest() || !mem.writes }, mem.profile || "");
+      const save = h("button", { class: "btn primary", disabled: !mem.writes || isGuest() }, "Save");
       save.addEventListener("click", async () => {
         if (!confirm("Save this profile to the memory library? It is given to every new session, then committed and pushed.")) return;
         save.disabled = true;
@@ -2006,7 +2060,8 @@ function memoryCard() {
           mem.writes ? "They can propose changes; every change asks you first." : "Read-only for agents."),
         editor,
         h("p", { class: "muted small" }, `${mem.profile_path || "profile"} · limit ${mem.profile_max_chars} characters`),
-        mem.writes ? save : h("p", { class: "muted small" }, "Enable memory_library.writes to edit from here."),
+        isGuest() ? h("p", { class: "muted small" }, "Demo access cannot edit the memory profile.")
+          : mem.writes ? save : h("p", { class: "muted small" }, "Enable memory_library.writes to edit from here."),
         mem.last_commit?.head ? h("p", { class: "muted small" }, `Last saved change: ${mem.last_commit.summary} (${mem.last_commit.head}, ${ago(mem.last_commit.at)})`) : null,
         mem.refresh_error ? h("p", { class: "small bad" }, `Couldn't refresh the library: ${mem.refresh_error}`) : null);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
@@ -2182,7 +2237,7 @@ function diskCard() {
   load();
   return h("div", {},
     h("div", { class: "card" }, body),
-    h("div", { class: "card" },
+    isGuest() ? null : h("div", { class: "card" },
       h("p", { class: "muted small" }, "Removes stopped sandbox containers, expired session workspaces, and leftover workspace folders."),
       h("button", {
         class: "btn",
@@ -2203,6 +2258,7 @@ function diskCard() {
 // Loading the model takes about a minute after it has slept, so start as soon as the app is opened.
 let lastWarm = 0;
 async function warmModel(force = false) {
+  if (isGuest()) return;
   if (!force && Date.now() - lastWarm < 60_000) return;
   lastWarm = Date.now();
   try { await api("/models/warm", { method: "POST" }); } catch (_) { /* offline */ }
@@ -2213,6 +2269,8 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
-warmModel();
-loadProfileIcon().then(() => applyAppIcon(readAppIcon()));
-route();
+currentUser().then(() => {
+  paintGuestChrome();
+  if (!isGuest()) warmModel();
+  return loadProfileIcon();
+}).then(() => applyAppIcon(readAppIcon())).then(() => route());

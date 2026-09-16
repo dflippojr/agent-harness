@@ -57,11 +57,16 @@ def test_web_app_and_guard(tmp_path):
         assert "swatch split" in js
         assert "Scratch is a fresh empty folder" in js
         assert "Only tower projects with a local folder appear" in js
+        assert 'id="guest-banner"' in client.get("/").text
+        assert 'id="bar"' in client.get("/").text
+        assert 'id="feature-nav"' in client.get("/").text
+        assert "paintGuestChrome" in js and "isGuest()" in js
         css = client.get("/static/style.css").text
         assert "safe-area-inset-top, 0px) + 18px" in css
         assert ".session-chrome" in css and ".jump-top" in css
         assert ".swatch.split" in css and ".hue-preview" in css
         assert "#fab-host" in css and "width: 9.75rem" in css
+        assert "#guest-banner" in css
         assert 'showFab("#/new", "+ New task")' in js
         assert 'showFab("#/jobs/new", "+ New job")' in js
         assert 'api("/backends?auth=skip")' in js
@@ -79,7 +84,8 @@ def test_web_app_and_guard(tmp_path):
         assert client.get("/manifest.webmanifest").json()["display"] == "standalone"
         # tailnet identity
         assert client.get("/sessions", headers={"Tailscale-User-Login": "intruder@example.com"}).status_code == 403
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()["login"] == LOGIN
+        me = client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()
+        assert me["login"] == LOGIN and me["role"] == "owner" and me["guest_until"] is None
         # cross-site browser POSTs are refused; same-origin and non-browser clients are fine
         body = {"prompt": "hello"}
         assert client.post("/sessions", json=body, headers={"Origin": "https://evil.example"}).status_code == 403
@@ -202,3 +208,74 @@ def test_sleeping_model_is_announced_and_warmed(tmp_path):
         note = wait_for(lambda: next((p for p in sent if p["title"].startswith("Waking the model")), None))
         assert note["priority"] == 2 and note["click"].endswith(f"/#/s/{sid}")
         assert "model ready after" in client.get(f"/sessions/{sid}/transcript").text
+
+
+def test_guest_demo_access(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from harness.access import guest_forbidden, parse_guest_until, resolve_access
+    from harness.config import GuestAccess
+
+    now = datetime.now(timezone.utc)
+    future = (now + timedelta(hours=2)).isoformat()
+    past = (now - timedelta(hours=1)).isoformat()
+    until = parse_guest_until(future)
+    assert until is not None and until > now
+
+    client, m, _ = make_client(tmp_path, [Completion(content="hi")])
+    guest = "buddy@example.com"
+    m.cfg.guests = [GuestAccess(login=guest, until=future)]
+    gh = {"Tailscale-User-Login": guest, "Tailscale-User-Name": "Buddy"}
+    oh = {"Tailscale-User-Login": LOGIN}
+
+    ident = resolve_access(m.cfg, guest)
+    assert ident.allowed and ident.role == "guest"
+    assert guest_forbidden(ident, "GET", "/sessions") is None
+    assert guest_forbidden(ident, "POST", "/sessions") == "demo access is read-only"
+    assert guest_forbidden(ident, "GET", "/keys") == "demo access cannot view owner credentials"
+    assert guest_forbidden(ident, "POST", "/runners/macbook/poll") is None
+    owner = resolve_access(m.cfg, LOGIN)
+    assert owner.role == "owner" and owner.allowed
+    assert resolve_access(m.cfg, None).role == "owner"
+    assert resolve_access(m.cfg, "intruder@example.com").allowed is False
+
+    with client:
+        me = client.get("/me", headers=gh).json()
+        assert me["role"] == "guest" and me["login"] == guest
+        assert me["name"] == "Buddy" and me["notify"]["topic"] == ""
+        assert me["guest_until"]
+        assert client.get("/sessions", headers=gh).status_code == 200
+        assert client.get("/keys", headers=gh).status_code == 403
+        assert client.get("/metrics", headers=gh).status_code == 403
+        denied = client.post("/sessions", json={"prompt": "hello"}, headers=gh)
+        assert denied.status_code == 403 and "read-only" in denied.json()["detail"]
+        assert client.put("/profile", json={"emoji": "🚀"}, headers=gh).status_code == 403
+        assert client.post("/models/warm", headers=gh).status_code == 403
+        created = client.post("/sessions", json={"prompt": "hello"}, headers=oh)
+        assert created.status_code == 201
+        sid = created.json()["id"]
+        assert client.patch(f"/sessions/{sid}", json={"title": "Nope"}, headers=gh).status_code == 403
+        assert client.get(f"/sessions/{sid}", headers=gh).json()["title"]
+        assert client.post(f"/sessions/{sid}/cancel", headers=gh).status_code == 403
+        assert client.post("/a/not-a-token/approve", headers=gh).status_code == 403
+
+        m.cfg.guests = [GuestAccess(login=guest, until=past)]
+        expired = client.get("/sessions", headers=gh)
+        assert expired.status_code == 403 and "expired" in expired.json()["detail"]
+
+        m.cfg.guests = [GuestAccess(login=guest, until="not-a-date")]
+        assert client.get("/sessions", headers=gh).status_code == 403
+
+        m.cfg.guests = [GuestAccess(login=LOGIN, until=future)]
+        still_owner = client.get("/me", headers=oh).json()
+        assert still_owner["role"] == "owner"
+
+        m.cfg.allowed_logins = []
+        m.cfg.guests = [GuestAccess(login=guest, until=future)]
+        open_tailnet = client.get("/me", headers=gh).json()
+        assert open_tailnet["role"] == "owner"
+
+        from harness.config import _load_guests
+        loaded = _load_guests([guest, {"login": "other@example.com", "until": future}])
+        assert loaded[0].login == guest and loaded[0].until == ""
+        assert loaded[1].login == "other@example.com" and loaded[1].until == future

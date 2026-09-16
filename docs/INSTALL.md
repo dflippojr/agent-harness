@@ -67,8 +67,12 @@ The daemon only listens on localhost. To reach it from other devices, use [Tails
 1. Install Tailscale on the PC and your phone, and sign in to both with the same account.
 2. In the Tailscale admin console, enable **HTTPS certificates** (DNS page) and Serve.
 3. On the PC: `tailscale serve --bg --https=443 http://127.0.0.1:8100`
-4. In `config\harness.yaml` set `public_url: https://<pc-name>.<tailnet>.ts.net` and
+4. In `config\harness.yaml` (or `harness.local.yaml`) set `public_url: https://<pc-name>.<tailnet>.ts.net` and
    `allowed_logins: [you@example.com]`, then restart the daemon task.
+   To let a tailnet buddy look around for a couple of hours without owner powers, add them under `guests`
+   in the untracked local file (`login` plus an ISO `until`), restart, and remove the entry when done.
+   Guests can browse sessions, jobs and images; they cannot start tasks, approve, mint keys, or use GPU /
+   Remote Control / Review. Default stays "this login is the owner."
 5. Open the URL on the phone, then Share → Add to Home Screen.
 
 Phone notifications (approvals with Approve/Deny buttons, task finished) use a self-hosted

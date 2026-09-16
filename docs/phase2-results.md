@@ -40,6 +40,9 @@ action types `view` and `http` supported, `http` actions run from the phone with
 
 - The daemon still binds `127.0.0.1`. `tailscale serve` (tailnet-only, not Funnel) terminates HTTPS with a
   tailnet certificate and adds `Tailscale-User-Login`; the daemon refuses logins not in `allowed_logins`.
+  Optional `guests` entries (with an ISO `until`) let a named tailnet login browse the Control Center
+  read-only until that time; they are ignored unless `allowed_logins` is set. Owner logins win if listed
+  in both. Guests cannot mutate, view `/keys` or `/metrics`, or use notification approval tokens.
 - Cross-site requests: non-GET requests with a foreign `Origin` or `Sec-Fetch-Site: cross-site` are refused, so a
   web page open on a tailnet device can't drive the agent. Non-browser clients (CLI, ntfy app) send no Origin.
 - Notification buttons authenticate with a 32-byte random token per approval (never returned by the API or

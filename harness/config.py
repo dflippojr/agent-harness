@@ -222,6 +222,13 @@ class Project:
 
 
 @dataclass
+class GuestAccess:
+    """Time-boxed read-only Control Center access for a tailnet login that is not the owner."""
+    login: str
+    until: str = ""  # ISO-8601 datetime; empty means until the entry is removed from config
+
+
+@dataclass
 class Config:
     host: str
     port: int
@@ -234,6 +241,7 @@ class Config:
     backends: dict[str, BackendConfig] = field(default_factory=dict)
     public_url: str = ""               # how the phone reaches the daemon, e.g. https://host.tailnet.ts.net
     allowed_logins: list[str] = field(default_factory=list)  # Tailscale logins allowed through `tailscale serve`
+    guests: list[GuestAccess] = field(default_factory=list)  # read-only demo logins; ignored if allowed_logins is empty
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     homelab: HomelabConfig = field(default_factory=HomelabConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
@@ -264,6 +272,16 @@ class Config:
     @property
     def transcripts_dir(self) -> Path:
         return self.data_dir / "transcripts"
+
+
+def _load_guests(raw) -> list[GuestAccess]:
+    guests = []
+    for item in raw or []:
+        if isinstance(item, str) and item.strip():
+            guests.append(GuestAccess(login=item.strip()))
+        elif isinstance(item, dict) and str(item.get("login") or "").strip():
+            guests.append(GuestAccess(login=str(item["login"]).strip(), until=str(item.get("until") or "").strip()))
+    return guests
 
 
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
@@ -329,6 +347,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         backends=backends,
         public_url=(raw.get("public_url") or "").rstrip("/"),
         allowed_logins=list(raw.get("allowed_logins") or []),
+        guests=_load_guests(raw.get("guests")),
         notify=NotifyConfig(**(raw.get("notify") or {})),
         homelab=homelab,
         cleanup=CleanupConfig(**(raw.get("cleanup") or {})),

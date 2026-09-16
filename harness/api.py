@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import access as access_mod
 from . import config as config_mod
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
@@ -128,9 +129,16 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         cfg = m.cfg
         # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
         login = request.headers.get("tailscale-user-login")
-        if login is not None and cfg.allowed_logins and login not in cfg.allowed_logins:
-            log.warning("refused %s %s from tailnet login %s", request.method, request.url.path, login)
-            return JSONResponse({"detail": "this tailnet login is not allowed"}, status_code=403)
+        ident = access_mod.resolve_access(cfg, login)
+        request.state.access = ident
+        if not ident.allowed:
+            log.warning("refused %s %s from tailnet login %s (%s)",
+                        request.method, request.url.path, login, ident.detail)
+            return JSONResponse({"detail": ident.detail or "this tailnet login is not allowed"}, status_code=403)
+        guest_block = access_mod.guest_forbidden(ident, request.method, request.url.path)
+        if guest_block:
+            log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
+            return JSONResponse({"detail": guest_block}, status_code=403)
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             # Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent).
             origin = request.headers.get("origin")
@@ -177,11 +185,18 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/me")
     async def me(request: Request):
         cfg = mgr(request).cfg
+        ident = getattr(request.state, "access", None) or access_mod.resolve_access(
+            cfg, request.headers.get("tailscale-user-login"))
+        guest = ident.role == "guest"
         return {
-            "login": request.headers.get("tailscale-user-login"),
+            "login": ident.login,
             "name": request.headers.get("tailscale-user-name"),
             "public_url": cfg.public_url,
-            "notify": {"enabled": cfg.notify.enabled, "topic": cfg.notify.topic},
+            "role": ident.role,
+            "guest_until": ident.until_iso(),
+            "notify": {"enabled": False, "topic": ""} if guest else {
+                "enabled": cfg.notify.enabled, "topic": cfg.notify.topic,
+            },
         }
 
     profile_emojis = ("🙂", "😎", "🤓", "🧠", "🤖", "👾", "🧑‍💻", "🦊", "🐙", "🐉", "🦉", "🐝", "🌙", "⭐", "🔥", "⚡", "🎨", "🎯", "🚀", "🛠️", "💻", "🎮", "🎧", "📚")
