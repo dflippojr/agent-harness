@@ -319,3 +319,66 @@ items:
       Verify Xcode and command-line tools on the MacBook, accept the license, select the active developer directory,
       and build/run a minimal Swift project. Record the supported macOS/Xcode versions before scoping any native iOS
       Control Center work.
+
+  - key: session-header-tabs-quotes
+    kind: feature
+    title: "Session page: drop the truncated title, stop the chat/changes swipe loop, link quotes to sources"
+    body: |
+      Phone feedback from a live session on iPhone.
+
+      **Truncated header title.** `setHeader("agents", session.title)` puts the session title to the right of the
+      Agents dropdown. Long titles (e.g. "Phase 8a…") render as "phase…" and are too small to read. Remove the title
+      from the header. If it is still useful, show it on the session page itself (transcript heading or Info), not
+      in the chrome.
+
+      **Chat ↔ Changes swipe loop.** Transcript / Changes / Info still assign `location.hash`, which pushes history.
+      Swiping back from Changes returns to the bottom of the chat; swiping forward (or tapping Changes again) returns
+      to Changes, and the pair loops. Treat those three as tabs: replace the current history entry when switching,
+      and do not use `history.back()` for a tab change. Keep a real back stack only for leaving the session.
+
+      **Quoted sources as links.** If the agent quotes a document or webpage it read, the quote in the transcript
+      should be a link that opens that source, ideally scrolled to the quoted passage.
+
+      Difficulty: moderate for web pages, harder for files.
+      - Grounding (`harness/grounding.py`) already checks that a quote appears in concatenated tool output, but it
+        does not remember which `web_fetch` URL or file produced it. Attribution is the missing piece.
+      - Web: once a quote is tied to a URL, wrap it in a link. Chrome/Edge can deep-link with a text fragment
+        (`#:~:text=`). Safari/iOS support is partial (16.4+). Pages that block fragments still open at the top.
+      - Local files, PDFs and memory-library notes have no public URL. Those need a harness viewer or a jump to the
+        tool-result in the transcript, not a web link.
+      - Suggested slice: web_fetch quotes first (store URL + quote, render `<a>`). Files/PDFs later.
+
+  - key: settings-pages-overhaul
+    kind: feature
+    title: "Settings: themes, backends as controls, memory editor, and clearer apps/endpoint/disk pages"
+    body: |
+      Phone feedback after the Profile landing + Settings list split. Keep GPU and Claude Remote Control on the
+      Profile landing; fix the Settings pages below.
+
+      **Appearance.** The page is the emoji picker, which is already reachable from the identity row ("click your
+      profile"). That is misleading. Appearance should be visual: a few sample themes, or controls to set the three
+      main hues (background, panel, accent). Keep the icon picker on the identity card only.
+
+      **Install.** Useless once the PWA is on the phone. Hide it when `display-mode: standalone` / `navigator.standalone`,
+      or remove the page.
+
+      **Hosted backends.** Drop the long provider-terms paragraphs. Show Claude, Codex, Cursor **and the hosted Qwen
+      (local) connection**. Let the user pick each backend's default model and effort. Clean up the cost counters
+      (today they mix `$0.0000` estimates with subscription usage percents).
+
+      **Memory library.** The agent-profile blob injected into every new session currently includes personal
+      biographical detail, and the page dumps that text plus a character count. Rewrite the profile to a short
+      purpose statement (how agents should use the library), make it editable on this page (save through the
+      existing approved-write path), and replace the description with one line on what the document is for.
+
+      **Apps.** "New app" is opaque. Explain up front that this mints a scoped API token so another program can
+      start/follow sessions on this daemon (link to `docs/app-api.md` in plain language). The create flow should
+      say what the token is, that it is shown once, and what each permission allows, before anyone taps Create.
+
+      **Inference endpoint.** Put the OpenAI and Anthropic base URLs in horizontally scrolling code boxes with tap
+      to copy. Make the new-key flow a short form (name → create → copy-once warning) instead of `window.prompt`.
+
+      **Disk.** Tower and MacBook report free space in different shapes (tower: "N GB free of M GB" plus workspace
+      quotas; Mac: "online · N GB free · runner …"). Use one layout per device (free / total, then what is using
+      space). Label **Clean up now** with what it removes (stopped sandbox containers, expired session workspaces
+      and orphans) and confirm before running.

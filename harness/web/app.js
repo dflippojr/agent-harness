@@ -5,7 +5,8 @@
 //   #/s/<id>/approval/<aid>  same, focused on one approval (notification deep link)
 //   #/s/<id>/changes         diff viewer
 //   #/s/<id>/info            session details
-//   #/profile                identity, icon, notifications, and system controls
+//   #/profile                identity, GPU, Claude Remote Control, and a Settings menu
+//   #/profile/<section>      a Settings page (appearance, notifications, backends, …)
 //   #/images[/<id>]          image generation and gallery
 //   #/jobs[/new|/<id>]       scheduled jobs
 
@@ -43,10 +44,13 @@ const progressBar = (fraction) => h("div", { class: `progress${fraction === null
 let cleanup = [];
 const onLeave = (fn) => cleanup.push(fn);
 
-function setHeader(feature, pageTitle = "") {
+function setHeader(feature, pageTitle = "", { page = false } = {}) {
   $feature.value = feature;
+  $feature.hidden = page;
+  $profileIcon.hidden = page;
   $title.textContent = pageTitle;
   $title.hidden = !pageTitle;
+  document.getElementById("bar").classList.toggle("page", page);
 }
 
 async function loadProfileIcon() {
@@ -203,32 +207,45 @@ function openStream(urlFor, handlers) {
 }
 
 // ---------- router ----------
+const hashParts = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+const isTopLevel = (parts) => parts.length === 0 || (parts.length === 1 && (parts[0] === "jobs" || parts[0] === "images"));
+
+function go(hash, replace = false) {
+  const url = !hash || hash === "#" || hash === "#/" ? "#/" : (hash.startsWith("#") ? hash : `#/${hash}`);
+  const cur = location.hash || "#/";
+  const same = url === cur || (url === "#/" && (cur === "" || cur === "#" || cur === "#/"));
+  if (same) return;
+  if (replace) location.replace(url);
+  else location.hash = url;
+}
+
 async function route() {
   cleanup.forEach((fn) => { try { fn(); } catch (_) { /* ignore */ } });
   cleanup = [];
   $app.replaceChildren();
   document.querySelector(".composer")?.remove();
   document.querySelector(".fab")?.remove();
-  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-  $back.hidden = parts.length === 0;
+  const parts = hashParts();
+  $back.hidden = isTopLevel(parts);
   try {
     if (parts.length === 0) await viewList();
     else if (parts[0] === "new") await viewNew();
-    else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile();
+    else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1]);
     else if (parts[0] === "images") await (parts[1] ? viewImage(parts[1]) : viewImages());
     else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
     else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
-    else location.hash = "#/";
+    else go("#/", true);
   } catch (e) {
     $app.append(h("p", { class: "note bad" }, e.message));
   }
 }
 $back.addEventListener("click", () => {
-  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-  location.hash = parts[0] === "s" && parts.length > 2 ? `#/s/${parts[1]}` : "#/";
+  const parts = hashParts();
+  if (parts[0] === "s" && parts.length > 2) go(`#/s/${parts[1]}`);
+  else history.back();
 });
 $feature.addEventListener("change", () => {
-  location.hash = $feature.value === "jobs" ? "#/jobs" : $feature.value === "images" ? "#/images" : "#/";
+  go($feature.value === "jobs" ? "#/jobs" : $feature.value === "images" ? "#/images" : "#/", true);
 });
 window.addEventListener("hashchange", route);
 
@@ -1224,8 +1241,8 @@ const cronLabel = (cron) => (CRON_PRESETS.find(([c]) => c === cron) || [null, cr
 
 async function viewJobs() {
   setHeader("jobs");
+  document.body.append(h("a", { class: "btn new-task fab", href: "#/jobs/new" }, "+ New job"));
   const jobs = await api("/jobs");
-  document.body.append(h("a", { class: "btn primary fab", href: "#/jobs/new" }, "+ New job"));
   if (!jobs.length) {
     $app.append(h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
     return;
@@ -1333,7 +1350,7 @@ async function viewJob(id) {
       class: "btn bad", type: "button",
       onclick: async () => {
         if (!confirm(`Delete the job “${j.name}”? Its past sessions stay.`)) return;
-        try { await api(`/jobs/${id}`, { method: "DELETE" }); location.hash = "#/jobs"; } catch (err) { toast(err.message); }
+        try { await api(`/jobs/${id}`, { method: "DELETE" }); go("#/jobs", true); } catch (err) { toast(err.message); }
       },
     }, "Delete") : null,
     h("span", { class: "spacer" }),
@@ -1355,12 +1372,47 @@ async function viewJob(id) {
 }
 
 // ---------- profile ----------
-async function viewProfile() {
-  setHeader("agents", "Profile");
+const PROFILE_PAGES = {
+  appearance: "Appearance",
+  notifications: "Notifications",
+  install: "Install",
+  backends: "Hosted backends",
+  memory: "Memory library",
+  apps: "Apps",
+  endpoint: "Inference endpoint",
+  disk: "Disk",
+};
+
+async function viewProfile(page) {
+  if (page && !PROFILE_PAGES[page]) { go("#/profile", true); return; }
+  setHeader("agents", PROFILE_PAGES[page] || "Profile", { page: true });
   const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
-  const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
-  const ntfyUrl = me.public_url ? `${me.public_url}:8443` : "(set public_url)";
-  const activeEmoji = h("span", { style: "font-size:36px" }, profile.emoji);
+  if (page === "appearance") return $app.append(appearanceCard(profile));
+  if (page === "notifications") return $app.append(notificationsCard(me));
+  if (page === "install") return $app.append(installCard());
+  if (page === "backends") return $app.append(backendsCard());
+  if (page === "memory") return $app.append(memoryCard());
+  if (page === "apps") return $app.append(appsCard(me));
+  if (page === "endpoint") return $app.append(endpointCard(me));
+  if (page === "disk") return $app.append(diskCard());
+  $app.append(
+    h("a", { class: "card identity", href: "#/profile/appearance" },
+      h("div", { class: "row" },
+        h("span", { class: "identity-emoji" }, profile.emoji),
+        h("div", { class: "spacer" },
+          h("h3", {}, me.name || "You"),
+          h("div", { class: "muted small" }, me.login || "Local access")),
+        h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
+    gpuCard(),
+    remoteControlCard(),
+    h("p", { class: "section-label" }, "Settings"),
+    h("div", { class: "card settings-list" },
+      Object.entries(PROFILE_PAGES).map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
+  );
+}
+
+function appearanceCard(profile) {
+  const activeEmoji = h("span", { class: "identity-emoji" }, profile.emoji);
   const emojiButtons = profile.choices.map((emoji) => h("button", {
     class: `btn emoji-choice${emoji === profile.emoji ? " selected" : ""}`, type: "button", "aria-label": `Use ${emoji}`,
     onclick: async (event) => {
@@ -1372,33 +1424,31 @@ async function viewProfile() {
       } catch (e) { toast(e.message); }
     },
   }, emoji));
-  $app.append(
-    h("div", { class: "card" }, h("div", { class: "row" }, activeEmoji,
-      h("div", {}, h("h3", {}, "Your profile"), h("div", { class: "muted small" }, me.login ? `${me.name || ""} ${me.login}` : "Local access"))),
-      h("p", { class: "muted small" }, "Choose the icon shown at the top left of the app."),
-      h("div", { class: "emoji-grid" }, emojiButtons)),
-    h("div", { class: "card" }, h("h3", {}, "Notifications"),
-      me.notify.enabled ? h("ol", {},
-        h("li", {}, "Install the ntfy app from the App Store."),
-        h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password (D:\\Docker\\ntfy\\secrets\\phone-login.txt on the tower)."),
-        h("li", {}, "Settings → Default server → the same URL. Then + → topic ", h("code", {}, me.notify.topic), "."),
-        h("li", {}, "Tap a notification to open the session; long-press it for Approve / Deny.")) : h("p", {}, "Disabled in config/harness.yaml."),
-      me.notify.enabled ? h("button", {
-        class: "btn",
-        onclick: async () => {
-          try { await api("/notify/test", { method: "POST" }); toast("Test notification sent"); } catch (e) { toast(e.message); }
-        },
-      }, "Send test notification") : null),
-    h("div", { class: "card" }, h("h3", {}, "Install"),
-      h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")),
-    backendsCard(),
-    gpuCard(),
-    remoteControlCard(),
-    memoryCard(),
-    appsCard(me),
-    endpointCard(me),
-    diskCard(),
-  );
+  return h("div", { class: "card" },
+    h("div", { class: "row" }, activeEmoji, h("div", { class: "muted small" }, "Shown at the top left of the app.")),
+    h("div", { class: "emoji-grid" }, emojiButtons));
+}
+
+function notificationsCard(me) {
+  const ntfyUrl = me.public_url ? `${me.public_url}:8443` : "(set public_url)";
+  return h("div", { class: "card" },
+    me.notify.enabled ? h("ol", {},
+      h("li", {}, "Install the ntfy app from the App Store."),
+      h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password (D:\\Docker\\ntfy\\secrets\\phone-login.txt on the tower)."),
+      h("li", {}, "Settings → Default server → the same URL. Then + → topic ", h("code", {}, me.notify.topic), "."),
+      h("li", {}, "Tap a notification to open the session; long-press it for Approve / Deny.")) : h("p", {}, "Disabled in config/harness.yaml."),
+    me.notify.enabled ? h("button", {
+      class: "btn",
+      onclick: async () => {
+        try { await api("/notify/test", { method: "POST" }); toast("Test notification sent"); } catch (e) { toast(e.message); }
+      },
+    }, "Send test notification") : null);
+}
+
+function installCard() {
+  const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  return h("div", { class: "card" },
+    h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen."));
 }
 
 function backendsCard() {
@@ -1418,7 +1468,7 @@ function backendsCard() {
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
-  return h("div", { class: "card" }, h("h3", {}, "Hosted backends"), body);
+  return h("div", { class: "card" }, body);
 }
 
 function backupLine(b) {
@@ -1509,7 +1559,7 @@ function remoteControlCard() {
       const r = await api("/remote-control");
       if (!r.enabled) return fill(body, h("p", { class: "muted small" }, "Disabled in config/harness.yaml (remote_control)."));
       fill(body,
-        h("p", { class: "muted small" }, "Starts Claude Code Remote Control in a project folder so you can work there from the Claude app. Each session gets its own git worktree, and Claude asks you in the app before edits and commands. These sessions use your Claude subscription and don't go through the harness."),
+        h("p", { class: "muted small" }, "Start Claude Code in a project folder and continue in the Claude app. These sessions use your Claude subscription, not the harness."),
         r.projects.length ? r.projects.map(row) : h("p", { class: "muted small" }, "No tower projects with a local folder."));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
@@ -1536,7 +1586,7 @@ function memoryCard() {
           : h("p", { class: "muted small" }, `No agent profile yet (${mem.profile_path || "profile_path not set"}).`));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   })();
-  return h("div", { class: "card" }, h("h3", {}, "Memory library"), body);
+  return h("div", { class: "card" }, body);
 }
 
 function endpointCard(me) {
@@ -1577,7 +1627,7 @@ function endpointCard(me) {
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
-  return h("div", { class: "card" }, h("h3", {}, "Inference endpoint"), body);
+  return h("div", { class: "card" }, body);
 }
 
 const APP_SCOPES = {
@@ -1634,7 +1684,7 @@ function appsCard(me) {
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
-  return h("div", { class: "card" }, h("h3", {}, "Apps"), body);
+  return h("div", { class: "card" }, body);
 }
 
 function diskCard() {
@@ -1656,7 +1706,7 @@ function diskCard() {
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
-  return h("div", { class: "card" }, h("h3", {}, "Disk"), body,
+  return h("div", { class: "card" }, body,
     h("button", {
       class: "btn",
       onclick: async (ev) => {
