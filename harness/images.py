@@ -236,6 +236,8 @@ class ImageService:
         self._done: dict[str, asyncio.Event] = {}
         self._keep_warm = False
         self._wake: asyncio.Event | None = None
+        self._guard_wake = asyncio.Event()
+        self._drain_sessions: set[str] = set()
         self.images_dir = Path(cfg.work_dir) / "images"
         self.transport = None          # tests inject a fake ComfyUI
 
@@ -335,6 +337,17 @@ class ImageService:
             self._wake.set()
         return self.status()
 
+    def hold(self) -> None:
+        """Cancel an idle warmup when a GPU hold begins; a running image is allowed to finish."""
+        self._keep_warm = False
+        if self._wake is not None:
+            self._wake.set()
+
+    def drain_after_sessions(self, session_ids) -> None:
+        """Make queued images wait for the local sessions that were held by the guard."""
+        self._drain_sessions = set(session_ids) if self.phase == "waiting" or not self.queue.empty() else set()
+        self._guard_wake.set()
+
     def apply_comfy_progress(self, job_id: str, started: float, message: dict) -> None:
         """Update status from a ComfyUI websocket `progress` event (`data.value` / `data.max`)."""
         if message.get("type") != "progress":
@@ -356,9 +369,17 @@ class ImageService:
         """Take the GPU over, run queued jobs (or sit warm until Generate), then give the GPU back."""
         guard = self.runner.guard
         self.phase = "waiting"
-        paused = lambda: guard is not None and guard.active  # noqa: E731
+        paused = lambda: guard is not None and (guard.active or guard.manual)  # noqa: E731
         while paused():  # a game or a transcode: wait for it like agent turns do
-            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(self._guard_wake.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            self._guard_wake.clear()
+        if self._drain_sessions:
+            drain = self._drain_sessions
+            self._drain_sessions = set()
+            await self.runner.scheduler.wait_for_drain(drain)
         slot = await self.runner.gate.acquire_exclusive()
         flagged = False
         ran_job = False

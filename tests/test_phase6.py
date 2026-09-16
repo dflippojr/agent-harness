@@ -452,6 +452,67 @@ def test_image_warmup_holds_gpu_until_cooldown(tmp_path):
     asyncio.run(body())
 
 
+def test_gpu_hold_prevents_comfyui_warmup(tmp_path):
+    async def body():
+        from types import SimpleNamespace
+
+        m, server, _ = image_manager(tmp_path)
+        m.runner.guard = SimpleNamespace(active=False, manual=True)
+        await m.start(maintenance=False)
+        await m.images.warmup()
+        for _ in range(20):
+            if m.images.phase == "waiting":
+                break
+            await asyncio.sleep(0.01)
+        assert m.images.phase == "waiting"
+        assert server.calls == []
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_resume_without_pending_images_does_not_leave_a_drain_barrier(tmp_path):
+    m, _, _ = image_manager(tmp_path)
+    m.images.drain_after_sessions({"old-session"})
+    assert m.images._drain_sessions == set()
+
+
+def test_held_images_drain_after_waiting_sessions(tmp_path):
+    async def body():
+        from types import SimpleNamespace
+
+        m, server, _ = image_manager(tmp_path)
+        guard = SimpleNamespace(active=False, manual=True)
+        m.runner.guard = guard
+        m.scheduler.set_paused(True)
+        a = asyncio.create_task(m.scheduler.acquire("a"))
+        b = asyncio.create_task(m.scheduler.acquire("b"))
+        await asyncio.sleep(0)
+        await m.start(maintenance=False)
+        job = m.images.submit("queued landscape")
+        for _ in range(100):
+            if m.images.phase == "waiting":
+                break
+            await asyncio.sleep(0.01)
+        assert server.calls == []
+
+        guard.manual = False
+        m.images.drain_after_sessions(m.scheduler.positions())
+        m.scheduler.set_paused(False)
+        await a
+        await asyncio.sleep(0.05)
+        assert server.calls == []
+        m.scheduler.release("a")
+        await b
+        await asyncio.sleep(0.05)
+        assert server.calls == []
+        m.scheduler.release("b")
+        done = await m.images.wait(job["id"])
+        assert done["status"] == "done"
+        assert server.calls == ["stop", "start"]
+        await m.stop()
+    asyncio.run(body())
+
+
 def test_image_batch_does_not_linger_after_last_job(tmp_path):
     async def body():
         m, server, _ = image_manager(tmp_path)

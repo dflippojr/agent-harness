@@ -71,6 +71,7 @@ def test_web_app_and_guard(tmp_path):
         assert "#guest-banner" in css
         assert "--text-scale" in css and "max(16px, 1rem)" in css
         assert ".size-grid" in css
+        assert ".action-item" in css and ".switch:checked" in css
         assert "prefers-reduced-motion: reduce" in css
         assert ".image-status .progress.indeterminate > span" in css
         assert 'showFab("#/new", "+ New task")' in js
@@ -83,6 +84,9 @@ def test_web_app_and_guard(tmp_path):
         assert "grid.dataset.keys" in js
         assert "Sampling ${Math.round(fraction * 100)}%" in js
         assert 'href: "#/profile/account"' in js
+        assert "gpuActionRow()" in js and "function gpuCard()" not in js
+        assert 'href: "#/profile/remote-control"' in js and 'href: "#/profile/disk"' in js
+        assert "confirmGpuQueue" in js and "gpu.manual" in js
         assert "picker.hidden = !picker.hidden" not in js
         assert "if (holding)" in js
         assert 'id="fab-host"' in client.get("/").text
