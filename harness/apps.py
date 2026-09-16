@@ -20,7 +20,9 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import time
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -30,7 +32,7 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.1"
+API_VERSION = "1.2"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
@@ -44,6 +46,58 @@ MAX_CONTEXT_CHARS = 60_000
 MAX_TOOLS = 16
 DEFAULT_TOOL_TIMEOUT = 600
 HOLD_SLOT_SECONDS = 3      # an app answering faster than this keeps the session on the GPU
+PAIRING_TTL_SECONDS = 10 * 60
+STREAM_TICKET_TTL_SECONDS = 60
+
+
+def normalize_origin(value: str) -> str:
+    """Return a canonical web origin, or raise ValueError for URLs that are not origins."""
+    value = (value or "").strip()
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as e:
+        raise ValueError("origin must be a valid http(s) origin") from e
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
+        raise ValueError("origin must contain only an http(s) scheme, host, and optional port")
+    host = parsed.hostname.lower()
+    if parsed.scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("browser origins must use https (http is allowed only for loopback development)")
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = (parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443)
+    return f"{parsed.scheme}://{host}{f':{port}' if port is not None and not default_port else ''}"
+
+
+def daemon_origins(cfg) -> set[str]:
+    values = [cfg.public_url, f"http://127.0.0.1:{cfg.port}", f"http://localhost:{cfg.port}"]
+    out = set()
+    for value in values:
+        try:
+            out.add(normalize_origin(value))
+        except ValueError:
+            pass
+    return out
+
+
+def cors_origin_allowed(m, request: Request, origin: str) -> bool:
+    """Whether a cross-origin /api/v1 browser request may receive CORS response headers.
+
+    Route authentication still makes the authorization decision. This check exists separately because a browser's
+    OPTIONS preflight deliberately omits its bearer token.
+    """
+    try:
+        origin = normalize_origin(origin)
+    except ValueError:
+        return False
+    path = request.url.path
+    if path == "/api/v1/pair":
+        return m.db.pairing_origin_active(origin)
+    ticket = request.query_params.get("ticket", "")
+    if ticket and m.db.stream_ticket_origin_active(ticket, origin):
+        return True
+    return m.db.origin_allowed(origin)
 
 
 class ContextBlock(BaseModel):
@@ -85,6 +139,17 @@ class ToolResult(BaseModel):
 class AppDecision(BaseModel):
     decision: str
     note: str = ""
+
+
+class PairingCodeRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    origin: str = Field(max_length=500)
+    scopes: list[str] = Field(default_factory=lambda: ["sessions"])
+    ttl_seconds: int = Field(default=PAIRING_TTL_SECONDS, ge=60, le=PAIRING_TTL_SECONDS)
+
+
+class PairRequest(BaseModel):
+    code: str = Field(min_length=8, max_length=200)
 
 
 def context_text(app_name: str, blocks: list[dict]) -> str:
@@ -193,6 +258,14 @@ def register(app: FastAPI, mgr) -> None:
         scopes = set((key.get("scopes") or "").split())
         if scope not in scopes and not (scope == "sessions" and "sessions:all" in scopes and request.method == "GET"):
             raise HarnessError(403, f"this token lacks the {scope!r} scope")
+        raw_origin = request.headers.get("origin", "")
+        if raw_origin:
+            try:
+                origin = normalize_origin(raw_origin)
+            except ValueError as e:
+                raise HarnessError(403, str(e))
+            if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
+                raise HarnessError(403, "this app token is not approved for this origin")
         key["scope_set"] = scopes
         return key
 
@@ -210,6 +283,49 @@ def register(app: FastAPI, mgr) -> None:
         out["answer"] = m.db.get_session(s["id"])["answer"]
         return out
 
+    @app.get("/pairing-codes")
+    async def pairing_codes(request: Request):
+        """Owner view. Codes themselves are shown only by the create response."""
+        return mgr(request).db.list_pairing_codes()
+
+    @app.post("/pairing-codes", status_code=201)
+    async def create_pairing_code(body: PairingCodeRequest, request: Request):
+        m = mgr(request)
+        name = body.name.strip()
+        if not name:
+            raise HarnessError(400, "name is required")
+        unknown = [scope for scope in body.scopes if scope not in SCOPES]
+        if unknown or not body.scopes:
+            raise HarnessError(400, f"unknown or empty scopes; known: {', '.join(SCOPES)}")
+        try:
+            origin = normalize_origin(body.origin)
+        except ValueError as e:
+            raise HarnessError(400, str(e))
+        row, code = m.db.create_pairing_code(name, origin,
+                                             " ".join(dict.fromkeys(body.scopes)), body.ttl_seconds)
+        return JSONResponse({**row, "code": code}, status_code=201,
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+    @app.delete("/pairing-codes/{pid}", status_code=204)
+    async def revoke_pairing_code(pid: str, request: Request):
+        if not mgr(request).db.revoke_pairing_code(pid):
+            raise HarnessError(404, "no such active pairing code")
+
+    @app.post("/api/v1/pair", status_code=201)
+    async def pair_browser(body: PairRequest, request: Request):
+        raw_origin = request.headers.get("origin", "")
+        if not raw_origin:
+            raise HarnessError(400, "browser pairing requires an Origin header")
+        try:
+            origin = normalize_origin(raw_origin)
+        except ValueError as e:
+            raise HarnessError(403, str(e))
+        key, secret, error = mgr(request).db.redeem_pairing_code(body.code, origin)
+        if key is None:
+            raise HarnessError(400, error)
+        return JSONResponse({"token": secret, "app": key, "api_version": API_VERSION}, status_code=201,
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
     @app.get("/api/v1")
     async def api_root(request: Request):
         m = mgr(request)
@@ -221,7 +337,8 @@ def register(app: FastAPI, mgr) -> None:
                 "models": list(m.cfg.models), "backends": backends, "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
-                    "remote_control": m.remote_control is not None}}
+                    "remote_control": m.remote_control is not None, "browser_pairing": True,
+                    "stream_tickets": True}}
 
     @app.get("/api/v1/backends")
     async def backends(request: Request):
@@ -313,11 +430,45 @@ def register(app: FastAPI, mgr) -> None:
             raise HarnessError(400, "decision must be approve or deny")
         return m.decide(s["id"], approval_id, body.decision == "approve", note=f"[{key['name']}] {body.note}".strip())
 
+    @app.post("/api/v1/sessions/{ref}/events/ticket", status_code=201)
+    async def event_ticket(ref: str, request: Request):
+        """Mint a short-lived query credential so native EventSource need not receive a bearer token in its URL."""
+        m = mgr(request)
+        key = auth(request, "sessions")
+        s = own_session(request, key, ref)
+        try:
+            origin = normalize_origin(request.headers.get("origin", ""))
+        except ValueError:
+            raise HarnessError(400, "stream tickets require the paired browser Origin header")
+        if origin not in (key.get("origins") or []):
+            raise HarnessError(403, "stream tickets are only available to a paired browser origin")
+        ticket, expires_at = m.db.create_stream_ticket(key["id"], s["id"], origin, STREAM_TICKET_TTL_SECONDS)
+        return JSONResponse({"ticket": ticket, "expires_at": expires_at,
+                             "events_url": f"/api/v1/sessions/{s['id']}/events?ticket={ticket}"}, status_code=201,
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
     @app.get("/api/v1/sessions/{ref}/events")
     async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
         m = mgr(request)
-        s = own_session(request, auth(request, "sessions"), ref)
+        raw_origin = request.headers.get("origin", "")
+        ticket = request.query_params.get("ticket", "")
+        if ticket:
+            try:
+                origin = normalize_origin(raw_origin)
+            except ValueError:
+                origin = ""
+            key = m.db.stream_ticket_key(ticket, ref, origin)
+            if key is None:
+                raise HarnessError(401, "invalid or expired stream ticket")
+            key["scope_set"] = set((key.get("scopes") or "").split())
+            if "sessions" not in key["scope_set"] and "sessions:all" not in key["scope_set"]:
+                raise HarnessError(403, "this token lacks the 'sessions' scope")
+        else:
+            key = auth(request, "sessions")
+        s = own_session(request, key, ref)
         sid = s["id"]
+        if request.headers.get("last-event-id", "").isdigit():
+            after = max(after, int(request.headers["last-event-id"]))
 
         async def stream():
             sub = m.bus.subscribe(sid)
@@ -346,7 +497,8 @@ def register(app: FastAPI, mgr) -> None:
                 m.bus.unsubscribe(sid, sub)
 
         return StreamingResponse(stream(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                          "Referrer-Policy": "no-referrer"})
 
     @app.post("/api/v1/images", status_code=201)
     async def app_image(request: Request):
