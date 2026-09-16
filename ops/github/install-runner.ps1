@@ -29,7 +29,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "runner registration failed with exit code $LASTEXITCODE" }
 } finally { Pop-Location }
 
-$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/d /c run.cmd' -WorkingDirectory $InstallDir
+$launchArgs = "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"& '$InstallDir\run.cmd'`""
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $launchArgs -WorkingDirectory $InstallDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
