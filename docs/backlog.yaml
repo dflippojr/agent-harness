@@ -413,3 +413,68 @@ items:
 
       Reduce the extra inset while keeping the bar out of the status-bar overlap. Check both the feature-nav header
       and `#bar.page`.
+
+  - key: appearance-theme-chips
+    kind: feature
+    title: "Appearance: drop the color grabber, preview custom hues, split System light/dark"
+    body: |
+      Phone feedback on Settings → Appearance after #33.
+
+      **No page-sampling grabber.** The custom hue controls are native `input type=color`. On iOS the picker includes
+      an eyedropper/grabber that only samples the Appearance page itself, so it is useless. Remove that control.
+      Keep a way to set background, panel and accent (palette, sliders, or hex) that does not rely on sampling the
+      current screen.
+
+      **Custom chip shows the saved hues.** `THEMES.custom.swatch` is hardcoded `#888888` / `#aaaaaa` / `#2563eb`.
+      Only the accent stripe reads `harness.themeHues` today, and only while painting the third span. The Custom
+      tile should show the three stored custom colors (bg, panel, accent) even when Custom is not the active
+      profile, so you can see what Custom is before selecting it.
+
+      **System is light and dark.** The System tile currently uses the light swatch only (`#f6f7f9` / `#ffffff` /
+      `#2563eb`), so it looks like Light. Split it with a diagonal so one side is the light palette and the other
+      is the dark palette.
+
+  - key: header-inset-ios-blur
+    kind: feature
+    title: "Header: sit below the iOS status-bar blur without a large empty band"
+    body: |
+      Phone feedback after #35 reduced `#bar` padding from `env(safe-area-inset-top) + 20px` to `+ 8px`.
+
+      The Agents dropdown and Profile/Settings titles are too close to the top again and are being blurred by iOS
+      (Dynamic Island / Control Center / `black-translucent` status bar). `+ 20px` was too much empty space; `+ 8px`
+      is too little.
+
+      Pick a middle extra inset (and keep the bar opaque) so the controls sit fully below the system fade on the
+      installed PWA. Check both the feature-nav header and `#bar.page`. Headless screenshots are not enough:
+      `safe-area-inset-top` is 0 there.
+
+  - key: session-rename-method
+    kind: feature
+    title: "Session rename: PATCH /sessions/{id} returns 405 Method Not Allowed"
+    body: |
+      Phone feedback after #34. Tapping the sticky title, editing it, and blurring/saving toasts **Method Not Allowed**.
+
+      The PWA already sends `PATCH /sessions/{id}` `{title}` (`harness/web/app.js`). FastAPI defines that route in
+      repo `3f03c62`, and unit tests pass against `create_app()`. The live tower daemon does not: `PATCH` and
+      `OPTIONS` on `/sessions/{ref}` return 405, and the process OpenAPI has no PATCH on that path. Static `app.js`
+      is served from disk, so the phone got the new UI without the new Python route.
+
+      Fix: restart `AgentHarness-Daemon` so it loads `3f03c62`. If 405 remains, Tailscale Serve or another proxy may
+      be blocking PATCH; add a `PUT` alias (or another allowed method) and point the PWA at that.
+
+      Confirm on the phone after the daemon is running the new code: rename, reload, title sticks on the session
+      page and in the session list.
+
+  - key: session-jump-closer
+    kind: feature
+    title: "Session jump arrows: show when closer to the top or bottom"
+    body: |
+      Phone feedback after #34. The ↑ / ↓ buttons do not appear in ordinary threads.
+
+      `bindSessionJumps` hides each arrow until the reader is more than **two viewports** from that end
+      (`2 * window.innerHeight`). A typical session is shorter than that. On iPhone (390×844) a ~1967px transcript
+      at the bottom is only ~1123px from the top, so ↑ stays hidden the whole time.
+
+      Show the arrows sooner — around half a viewport to one viewport from the end, not two. Still hide an arrow
+      when that end is already in view. Check a short finished session and a long live one, on Transcript and on
+      a long Changes page.
