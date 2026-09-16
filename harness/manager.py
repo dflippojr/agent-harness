@@ -188,6 +188,16 @@ class Manager:
     def get(self, ref: str) -> dict:
         return self.db.get_session(self.resolve_id(ref))
 
+    def rename(self, ref: str, title: str) -> dict:
+        s = self.get(ref)
+        title = " ".join((title or "").split())
+        if not title:
+            raise HarnessError(400, "title is empty")
+        if len(title) > 120:
+            raise HarnessError(400, "title is too long")
+        self.db.update_session(s["id"], title=title)
+        return self.db.get_session(s["id"])
+
     # operations
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
                backend: str = "local",

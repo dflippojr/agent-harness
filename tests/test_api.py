@@ -48,8 +48,12 @@ def test_web_app_and_guard(tmp_path):
         assert "<title>Agents</title>" in client.get("/").text
         js = client.get("/static/app.js").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
+        assert "session-chrome" in js and "jump-top" in js and 'method: "PATCH"' in js
         assert "session-title" in js
         assert "harness.theme" in js
+        css = client.get("/static/style.css").text
+        assert "safe-area-inset-top, 0px) + 8px" in css
+        assert ".session-chrome" in css and ".jump-top" in css
         assert client.get("/static/app.js").status_code == 200
         profile = client.get("/profile").json()
         assert profile["emoji"] == "🙂" and "🚀" in profile["choices"]
@@ -67,6 +71,19 @@ def test_web_app_and_guard(tmp_path):
         assert client.post("/sessions", json=body, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
         assert client.post("/sessions", json=body, headers={"Origin": PUBLIC}).status_code == 201
         assert client.post("/sessions", json=body).status_code == 201
+
+
+def test_rename_session(tmp_path):
+    client, m, _ = make_client(tmp_path, [Completion(content="hi")])
+    with client:
+        sid = client.post("/sessions", json={"prompt": "Make dark mode black"}).json()["id"]
+        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        renamed = client.patch(f"/sessions/{sid}", json={"title": "  Dark mode  "}).json()
+        assert renamed["title"] == "Dark mode"
+        assert client.get(f"/sessions/{sid}").json()["title"] == "Dark mode"
+        assert client.get("/sessions").json()[0]["title"] == "Dark mode"
+        assert client.patch(f"/sessions/{sid}", json={"title": "   "}).status_code == 400
+        assert client.patch(f"/sessions/{sid}", json={"title": "x" * 121}).status_code == 400
 
 
 def test_session_list_has_whole_chat_summary(tmp_path):

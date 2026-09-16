@@ -44,6 +44,13 @@ const progressBar = (fraction) => h("div", { class: `progress${fraction === null
 let cleanup = [];
 const onLeave = (fn) => cleanup.push(fn);
 
+function layoutBar() {
+  const bar = document.getElementById("bar");
+  const chrome = document.querySelector(".session-chrome");
+  if (bar) document.documentElement.style.setProperty("--bar-h", `${bar.offsetHeight}px`);
+  document.documentElement.style.setProperty("--session-chrome-h", `${chrome ? chrome.offsetHeight : 0}px`);
+}
+
 function setHeader(feature, pageTitle = "", { page = false } = {}) {
   $feature.value = feature;
   $feature.hidden = page;
@@ -51,7 +58,9 @@ function setHeader(feature, pageTitle = "", { page = false } = {}) {
   $title.textContent = pageTitle;
   $title.hidden = !pageTitle;
   document.getElementById("bar").classList.toggle("page", page);
+  requestAnimationFrame(layoutBar);
 }
+window.addEventListener("resize", layoutBar);
 
 async function loadProfileIcon() {
   try { $profileIcon.textContent = (await api("/profile")).emoji; } catch (_) { /* offline */ }
@@ -257,6 +266,7 @@ async function route() {
   $app.replaceChildren();
   document.querySelector(".composer")?.remove();
   document.querySelector(".fab")?.remove();
+  document.querySelectorAll(".jump").forEach((el) => el.remove());
   const parts = hashParts();
   $back.hidden = isTopLevel(parts);
   try {
@@ -566,6 +576,66 @@ route();
   }
 }
 
+function sessionTitle(session) {
+  const label = h("button", { class: "session-title", type: "button", title: "Rename session" }, session.title);
+  const startEdit = () => {
+    const input = h("input", { class: "session-title-edit", type: "text", value: session.title, maxlength: "120", "aria-label": "Session title" });
+    label.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (commit) => {
+      if (done) return;
+      done = true;
+      if (commit) {
+        const next = input.value.replace(/\s+/g, " ").trim();
+        if (next && next !== session.title) {
+          try {
+            const updated = await api(`/sessions/${session.id}`, { method: "PATCH", body: { title: next } });
+            session.title = updated.title;
+          } catch (e) { toast(e.message); }
+        }
+      }
+      label.textContent = session.title;
+      if (input.isConnected) input.replaceWith(label);
+      layoutBar();
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+  };
+  label.addEventListener("click", startEdit);
+  return label;
+}
+
+function bindSessionJumps() {
+  const pageHeight = () => document.documentElement.scrollHeight;
+  const jumpTop = h("button", { class: "btn small jump jump-top", type: "button", hidden: true, "aria-label": "Jump to start" }, "↑");
+  const jumpBottom = h("button", { class: "btn small jump jump-bottom", type: "button", hidden: true, "aria-label": "Jump to end" }, "↓");
+  const updateJumps = () => {
+    layoutBar();
+    const y = window.scrollY;
+    const two = 2 * window.innerHeight;
+    jumpTop.hidden = y <= two;
+    jumpBottom.hidden = pageHeight() - window.innerHeight - y <= two;
+  };
+  jumpTop.addEventListener("click", () => window.scrollTo(0, 0));
+  jumpBottom.addEventListener("click", () => window.scrollTo(0, pageHeight()));
+  document.body.append(jumpTop, jumpBottom);
+  window.addEventListener("scroll", updateJumps, { passive: true });
+  window.addEventListener("resize", updateJumps);
+  onLeave(() => {
+    window.removeEventListener("scroll", updateJumps);
+    window.removeEventListener("resize", updateJumps);
+    jumpTop.remove();
+    jumpBottom.remove();
+  });
+  requestAnimationFrame(updateJumps);
+  return { updateJumps, pageHeight };
+}
+
 // ---------- session ----------
 async function viewSession(sid, tab, focusApproval) {
   let session = await api(`/sessions/${sid}`);
@@ -579,7 +649,8 @@ async function viewSession(sid, tab, focusApproval) {
     }, name[0].toUpperCase() + name.slice(1))));
   const head = h("div", { class: "row small" });
   const usage = h("div", { class: "row small usage" });
-  $app.append(h("h2", { class: "session-title" }, session.title), head, usage, tabs);
+  $app.append(h("div", { class: "session-chrome" }, sessionTitle(session)), head, usage, tabs);
+  const jumps = bindSessionJumps();
   const pages = [];
   const fetchById = new Map();
   const rememberFetch = (id, url, text) => {
@@ -608,8 +679,8 @@ async function viewSession(sid, tab, focusApproval) {
   };
   renderHead();
 
-  if (tab === "changes") return viewChanges(session);
-  if (tab === "info") return viewInfo(session);
+  if (tab === "changes") { await viewChanges(session); jumps.updateJumps(); return; }
+  if (tab === "info") { viewInfo(session); jumps.updateJumps(); return; }
 
   const feed = h("div");
   $app.append(feed);
@@ -666,21 +737,19 @@ async function viewSession(sid, tab, focusApproval) {
   let follow = true;
   let touching = false;
   let lastY = window.scrollY;
-  const pageHeight = () => document.documentElement.scrollHeight;
+  const pageHeight = jumps.pageHeight;
   const atBottom = () => window.innerHeight + window.scrollY >= pageHeight() - 2;
-  const jump = h("button", { class: "btn small jump", hidden: true, onclick: () => { follow = true; jump.hidden = true; scrollDown(true); } }, "↓ Latest");
-  document.body.append(jump);
   const scrollDown = (force = false) => {
     if (!force && (!follow || touching)) return;
     window.scrollTo(0, pageHeight());
     lastY = window.scrollY;
+    jumps.updateJumps();
   };
   const onScroll = () => {
     const y = window.scrollY;
     if (y < lastY - 0.5 && !atBottom()) follow = false; // content shrinking at the bottom also moves y; ignore that
     else if (atBottom()) follow = true;
     lastY = y;
-    if (follow) jump.hidden = true;
   };
   const stopFollowing = () => { follow = false; };
   const onWheel = (e) => { if (e.deltaY < 0) stopFollowing(); };
@@ -697,9 +766,8 @@ async function viewSession(sid, tab, focusApproval) {
     window.removeEventListener("touchstart", onTouchStart);
     window.removeEventListener("touchend", onTouchEnd);
     window.removeEventListener("touchcancel", onTouchEnd);
-    jump.remove();
   });
-  const grew = () => { if (follow && !touching) scrollDown(); else jump.hidden = false; };
+  const grew = () => { if (follow && !touching) scrollDown(); else jumps.updateJumps(); };
   const add = (el) => {
     feed.append(el);
     if (live && live.el !== el) feed.append(live.el); // the in-progress turn always stays last

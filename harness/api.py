@@ -39,6 +39,10 @@ class SendMessage(BaseModel):
     content: str
 
 
+class SessionUpdate(BaseModel):
+    title: str
+
+
 class Decision(BaseModel):
     decision: str  # approve | deny
     note: str = ""
@@ -442,6 +446,11 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def get_session(ref: str, request: Request):
         m = mgr(request)
         return m.summary(m.get(ref))
+
+    @app.patch("/sessions/{ref}")
+    async def patch_session(ref: str, body: SessionUpdate, request: Request):
+        m = mgr(request)
+        return m.summary(m.rename(ref, body.title))
 
     @app.post("/sessions/{ref}/messages")
     async def send_message(ref: str, body: SendMessage, request: Request):
