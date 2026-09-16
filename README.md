@@ -10,8 +10,8 @@ direction is to split the phone PWA (Control Center) from a separately distribut
 (issues #23–#29).
 
 GitHub-hosted CI runs the full suite on pull requests and publishes tested sandbox images to GHCR after merges to
-`main`; see [`docs/CI-CD.md`](docs/CI-CD.md). Automatic tower deployment is a separate, explicitly documented trust
-decision because a self-hosted runner would have host-level access.
+`main`; a repository-scoped tower runner then performs the fail-closed deployment. See
+[`docs/CI-CD.md`](docs/CI-CD.md) for the trust boundary and recovery details.
 
 ## Install
 

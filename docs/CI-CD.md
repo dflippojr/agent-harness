@@ -8,6 +8,9 @@
    images to GHCR:
    - `ghcr.io/dflippojr/agent-harness-sandbox:sha-<commit>` and `:py312`
    - `ghcr.io/dflippojr/agent-harness-cli:sha-<commit>` and `:1`
+3. **deploy-tower** runs only after image publication for a trusted `main` push. The repository-scoped runner pulls
+   the immutable images, verifies that the live checkout is clean `main` and can fast-forward, installs requirements,
+   retags the images to the daemon's local names, restarts the daemon, and waits for `/health`.
 
 The SHA tags are immutable deployment inputs; the stable tags match the local names already expected by the daemon.
 The CLI Dockerfile accepts `SANDBOX_IMAGE` so its hosted build is based on the exact sandbox image from the same commit.
@@ -17,18 +20,33 @@ The CLI Dockerfile accepts `SANDBOX_IMAGE` so its hosted build is based on the e
 The daemon itself is deliberately not containerized. It is a host Python process because it coordinates Windows
 scheduled tasks, local repository paths, Docker sandbox creation, GPU/model controls, and native provider logins.
 
-Automatic tower deployment is not enabled by this workflow. A repository-scoped self-hosted runner would give trusted
-`main` workflow code the tower user's filesystem, Docker, credentials, and service-restart authority. That is useful,
-but it is a separate security decision from hosted CI/image publishing and should be enabled only with explicit owner
-approval. Pull requests must never target such a runner.
+The owner explicitly approved the repository-scoped self-hosted runner. It gives trusted `main` workflow code the
+tower user's filesystem, Docker, credentials, and service-restart authority. Pull requests never target it; all
+third-party actions are pinned to exact commits, and main deployments serialize rather than being canceled midway.
 
-Until then, the existing manual update path remains:
+## Tower runner
+
+The pinned official runner is installed in `D:\Agents\github-runner`, with job work under its `_work` directory.
+It is registered only to `dflippojr/agent-harness`, carries the custom
+`agent-harness-tower` label, and starts at user logon through the hidden `AgentHarness-GitHubRunner` scheduled task.
+Diagnostics live in `D:\Agents\github-runner\_diag`.
+
+To repair or reinstall it, remove the runner in GitHub and its local install directory, obtain a fresh short-lived
+registration token, then run:
 
 ```powershell
-git pull --ff-only
-docker pull ghcr.io/dflippojr/agent-harness-sandbox:py312
-docker pull ghcr.io/dflippojr/agent-harness-cli:1
-docker tag ghcr.io/dflippojr/agent-harness-sandbox:py312 agent-harness-sandbox:py312
-docker tag ghcr.io/dflippojr/agent-harness-cli:1 agent-harness-cli:1
-.\ops\harness\restart-daemon.ps1
+$gh = 'C:\Program Files\GitHub CLI\gh.exe'
+$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
+.\ops\github\install-runner.ps1 -Token $token
 ```
+
+The token is never saved by the installer. GitHub stores the runner's own credential files in its install directory.
+
+## Failure behavior
+
+- Test failure: no images and no deployment.
+- Image build/push failure: no deployment.
+- Docker unavailable, live checkout dirty, wrong branch, non-fast-forward history, dependency install failure, or failed
+  daemon health check: deployment fails visibly in Actions rather than forcing or discarding host state.
+- A newer `main` commit superseding an older queued deployment makes the older deployment exit without changing the
+  tower; the serialized newer workflow run handles it.
