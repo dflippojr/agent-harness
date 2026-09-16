@@ -22,7 +22,8 @@ scheduled tasks, local repository paths, Docker sandbox creation, GPU/model cont
 
 The owner explicitly approved the repository-scoped self-hosted runner. It gives trusted `main` workflow code the
 tower user's filesystem, Docker, credentials, and service-restart authority. Pull requests never target it; all
-third-party actions are pinned to exact commits, and main deployments serialize rather than being canceled midway.
+third-party actions are pinned to exact commits, main deployments serialize rather than being canceled midway, and
+the GitHub `tower-production` environment accepts deployments from `main` only.
 
 ## Tower runner
 
