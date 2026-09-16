@@ -234,6 +234,8 @@ window.addEventListener("hashchange", route);
 
 // ---------- session list ----------
 let searchQuery = "";  // kept while navigating, so Back from a result returns to the results
+let sessionTarget = "all";
+try { sessionTarget = localStorage.getItem("harness.sessionTarget") || "all"; } catch (_) { /* private mode */ }
 
 // Search passages mark matches with  … ; everything else is escaped.
 const markPassage = (text) => escapeHtml(text).replace(//g, "<mark>").replace(//g, "</mark>");
@@ -245,8 +247,51 @@ async function viewList() {
   const results = h("div", { hidden: true });
   const queueNote = h("p", { class: "note" });
   const search = h("input", { type: "search", placeholder: "Search", value: searchQuery, class: "search" });
-  $app.append(h("div", { class: "search-wrap" }, search), queueNote, results, list);
+  const targetSwitch = h("div", { class: "tabs", role: "group", "aria-label": "Filter sessions by machine" });
+  $app.append(h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
   document.body.append(h("a", { class: "btn new-task fab", href: "#/new" }, "+ New task"));
+
+  let sessions = [];
+  let targets = [];
+  const targetName = (target) => target === "tower" ? "Tower" : TARGET_LABEL[target] || target;
+  const renderSessions = () => {
+    const visible = sessionTarget === "all" ? sessions : sessions.filter((s) => s.target === sessionTarget);
+    if (!sessions.length) {
+      list.replaceChildren(h("p", { class: "empty" }, "No sessions yet. Start one with “New task”."));
+      return;
+    }
+    if (!visible.length) {
+      list.replaceChildren(h("p", { class: "empty" }, `No sessions on the ${targetName(sessionTarget)} yet.`));
+      return;
+    }
+    list.replaceChildren(...visible.map((s) => {
+      const pending = (s.pending_approvals || []).length;
+      return h("a", { class: "card", href: `#/s/${s.id}${pending ? `/approval/${s.pending_approvals[0].id}` : ""}` },
+        h("h3", {}, s.title),
+        h("div", { class: "meta" },
+          badge(s.status),
+          pending ? h("span", { class: "badge waiting_approval" }, `${pending} approval${pending > 1 ? "s" : ""}`) : null,
+          s.queue_position > 0 ? h("span", {}, `#${s.queue_position} in queue`) : null,
+          s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, REVIEW_LABEL[s.review] || s.review) : null,
+          s.job_status ? jobStatusBadge(s.job_status) : null,
+          s.target !== "tower" ? h("span", {}, `💻 ${TARGET_LABEL[s.target] || s.target}`) : null,
+          h("span", {}, s.project), h("span", {}, ago(s.updated_at))),
+        s.chat_summary ? h("div", { class: "preview" }, s.chat_summary) : null);
+    }));
+  };
+  const renderTargetSwitch = () => {
+    if (!targets.includes(sessionTarget)) sessionTarget = "all";
+    targetSwitch.hidden = !!search.value.trim() || targets.length < 2;
+    fill(targetSwitch, ["all", ...targets].map((target) => h("button", {
+      type: "button", class: target === sessionTarget ? "on" : "", "aria-pressed": target === sessionTarget,
+      onclick: () => {
+        sessionTarget = target;
+        try { localStorage.setItem("harness.sessionTarget", target); } catch (_) { /* private mode */ }
+        renderTargetSwitch();
+        renderSessions();
+      },
+    }, target === "all" ? "All" : targetName(target))));
+  };
 
   const runSearch = async () => {
     const q = search.value.trim();
@@ -254,6 +299,7 @@ async function viewList() {
     results.hidden = !q;
     list.hidden = !!q;
     queueNote.hidden = !!q;
+    targetSwitch.hidden = !!q || targets.length < 2;
     if (!q) return;
     try {
       const data = await api(`/search?q=${encodeURIComponent(q)}`);
@@ -273,31 +319,19 @@ async function viewList() {
   if (searchQuery.trim()) runSearch();
 
   const render = async () => {
-    const [sessions, queue, gpu] = await Promise.all([api("/sessions"), api("/queue"), api("/gpu").catch(() => null)]);
+    const [freshSessions, queue, gpu, projects] = await Promise.all([
+      api("/sessions"), api("/queue"), api("/gpu").catch(() => null), api("/projects")]);
+    sessions = freshSessions;
+    targets = [...new Set(projects.map((p) => p.target || "tower"))]
+      .sort((a, b) => (a === "tower" ? -1 : b === "tower" ? 1 : a.localeCompare(b)));
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && gpu.state !== "clear";
     queueNote.replaceChildren(
       paused ? h("a", { href: "#/profile" }, `⏸ ${gpuText(gpu)}`) : "",
       paused && waiting ? " · " : "",
       waiting ? `${waiting} waiting for the GPU` : "");
-    if (!sessions.length) {
-      list.replaceChildren(h("p", { class: "empty" }, "No sessions yet. Start one with “New task”."));
-      return;
-    }
-    list.replaceChildren(...sessions.map((s) => {
-      const pending = (s.pending_approvals || []).length;
-      return h("a", { class: "card", href: `#/s/${s.id}${pending ? `/approval/${s.pending_approvals[0].id}` : ""}` },
-        h("h3", {}, s.title),
-        h("div", { class: "meta" },
-          badge(s.status),
-          pending ? h("span", { class: "badge waiting_approval" }, `${pending} approval${pending > 1 ? "s" : ""}`) : null,
-          s.queue_position > 0 ? h("span", {}, `#${s.queue_position} in queue`) : null,
-          s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, REVIEW_LABEL[s.review] || s.review) : null,
-          s.job_status ? jobStatusBadge(s.job_status) : null,
-          s.target !== "tower" ? h("span", {}, `💻 ${TARGET_LABEL[s.target] || s.target}`) : null,
-          h("span", {}, s.project), h("span", {}, ago(s.updated_at))),
-        s.chat_summary ? h("div", { class: "preview" }, s.chat_summary) : null);
-    }));
+    renderTargetSwitch();
+    renderSessions();
   };
   await render();
   let timer = null;
@@ -926,6 +960,32 @@ async function viewSession(sid, tab, focusApproval) {
 function reviewCard(s) {
   if (!s.repo_kind || !s.branch) return null;
   const busy = !TERMINAL.has(s.status);
+  const base = s.base_branch || "base";
+  const conflictFiles = (message) => {
+    const match = /^merge conflicts in (.+?)\. Ask the agent/.exec(message);
+    return match ? match[1].split(", ").filter(Boolean) : [];
+  };
+  const conflictHelp = (files) => {
+    const ask = h("button", { class: "btn primary" }, "Ask agent to resolve");
+    ask.addEventListener("click", async () => {
+      if (!confirm(`Ask the agent to merge origin/${base} and resolve ${files.length} conflicting file${files.length === 1 ? "" : "s"}?`)) return;
+      ask.disabled = true;
+      try {
+        await api(`/sessions/${s.id}/messages`, { method: "POST", body: { content:
+          `Merge origin/${base} into your branch, resolve the merge conflicts in ${files.join(", ")}, run the relevant tests, and commit the resolution. Do not push.` } });
+        toast("Asked the agent to resolve the conflicts", 4000);
+        location.hash = `#/s/${s.id}`;
+      } catch (e) {
+        toast(e.message, 6000);
+        ask.disabled = false;
+      }
+    });
+    return h("div", { class: "approval merge-conflict", style: "margin-top:10px" },
+      h("h4", {}, "Merge needs conflict resolution"),
+      h("p", { class: "small" }, "Conflicting files:"),
+      h("ul", { class: "small" }, files.map((file) => h("li", {}, h("code", {}, file)))),
+      h("div", { class: "row end" }, ask));
+  };
   const act = (action, question) => async (ev) => {
     if (question && !confirm(question)) return;
     const card = ev.target.closest(".card");
@@ -937,9 +997,13 @@ function reviewCard(s) {
     } catch (e) {
       toast(e.message, 6000);
       card.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+      const files = action === "merge" ? conflictFiles(e.message) : [];
+      if (files.length) {
+        card.querySelector(".merge-conflict")?.remove();
+        card.append(conflictHelp(files));
+      }
     }
   };
-  const base = s.base_branch || "base";
   const buttons = [];
   if (!busy && !s.workspace_removed && s.review !== "discarded") {
     if (s.repo_kind === "local") {
