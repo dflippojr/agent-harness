@@ -888,3 +888,46 @@ items:
 
       Needs refinement: whether Google is the only extra IdP, how it maps to owner vs household vs guest, and how Tailscale identity still gates the network.
       Blocked on household-user-accounts.
+
+  - key: daemon-config-ui
+    kind: feature
+    title: "Daemon config UI: host settings/flags with app vs admin privilege"
+    body: |
+      Eventually the hosting machine needs a UI for daemon settings and flags, not only YAML/local files.
+
+      Privilege split (decided 2026-09-16):
+      - Apps that build on the daemon may configure **most** flags through the app API (`/api/v1`).
+      - Some flags require **admin/owner input** in the first-party Control Center (or another owner surface) via `/api/admin/v1`. App tokens must not set those.
+      - This belongs in the daemon vs Control Center split (#23–#26), not a third product. Control Center is the first-party owner UI; implementing apps are not.
+
+      Likely surfaces:
+      - Control Center Settings as the owner/admin config UI once it dogfoods `/api/admin/v1` (#23/#24)
+      - App-writable flags exposed in capability/config discovery so implementing apps can set them without owner chrome
+
+      Out of scope until refined:
+      - the full flag catalog and defaults
+      - whether a host-local tray/installer UI is needed in addition to Control Center
+      - persistence (data-dir overlay vs committed YAML)
+
+      Blocked on #24 (owner API) and the #23 Control Center client using it.
+      Distinct from #26 (which modules are installed) and from #29 (per-app provider keys).
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: admin-fs-browse-remote-locations
+    kind: feature
+    title: "Admin-only flag: browse the host filesystem for new Remote Control locations"
+    body: |
+      Later developer-oriented admin flag (2026-09-16). Not ready.
+
+      When enabled by the **machine owner**, the daemon may browse the host filesystem to discover new folders that could be used as Remote Control (or similar host-local) locations — e.g. finding a project root the owner has not added yet.
+
+      Hard constraint (decided):
+      - This flag is **admin/owner-only**. Implementing apps must **never** be able to enable it, request it, or inherit it from an app token / pairing scope.
+      - Discovery is not the same as granting access: the owner still has to confirm a path before it becomes a Remote Control workspace (existing one-time Claude workspace-trust still applies).
+      - Default off. Treat it as a developer convenience on the hosting machine, not a capability of third-party apps.
+
+      Distinct from #48 (adding specific Remote Control folders for agent-harness and the memory library — do not change that issue). Distinct from #45 (homelab has no repo folder). Follows the daemon-config-ui privilege split and #24 admin API.
+
+      Needs refinement: browse roots/allowlists, depth, symlink/junction policy, what is shown vs opened, and how discovered paths are promoted to trusted RC locations.
+      Blocked on daemon-config-ui / #24.
+      Do not put real filesystem paths, logins, tokens, or tailnet names in public comments.
