@@ -8,15 +8,26 @@ compares letters and digits only, because PDF text layers break spacing and mode
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 MIN_QUOTE_CHARS = 25
 _QUOTE = re.compile(r'["“]([^"”\n]{%d,400})["”]' % MIN_QUOTE_CHARS)
 _ELLIPSIS = re.compile(r"\.\.\.|…")
+_HTTP = re.compile(r"^https?://", re.I)
 NUDGE_MARK = "don't appear word for word in anything you read"  # our own request repeats the quotes
 
 
 def normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def quote_parts(quote_text: str) -> list[str]:
+    return [normalize(x) for x in _ELLIPSIS.split(quote_text) if len(normalize(x)) >= 12]
+
+
+def quote_in(quote_text: str, source: str) -> bool:
+    parts = quote_parts(quote_text)
+    return bool(parts) and all(part in normalize(source) for part in parts)
 
 
 def ungrounded_quotes(answer: str, sources: list[str]) -> list[str]:
@@ -28,10 +39,29 @@ def ungrounded_quotes(answer: str, sources: list[str]) -> list[str]:
     source = normalize("\n".join(sources))
     missing = []
     for q in quotes:
-        parts = [normalize(x) for x in _ELLIPSIS.split(q) if len(normalize(x)) >= 12]
+        parts = quote_parts(q)
         if parts and not all(part in source for part in parts):
             missing.append(q)
     return missing
+
+
+def text_fragment_url(url: str, quote_text: str) -> str:
+    """Deep-link to `quote_text` on `url` (`#:~:text=`). Chrome/Edge follow it; Safari/iOS support is partial."""
+    base = (url or "").split("#", 1)[0]
+    snippet = re.sub(r"\s+", " ", quote_text).strip()[:80]
+    return f"{base}#:~:text={quote(snippet, safe='')}"
+
+
+def quote_hrefs(answer: str, pages: list[tuple[str, str]]) -> dict[str, str]:
+    """Map quoted passages in `answer` to the first `web_fetch` URL they appear in, as text-fragment links."""
+    hrefs = {}
+    web_pages = [(url, text) for url, text in pages if _HTTP.match(url or "")]
+    for q in _QUOTE.findall(answer or ""):
+        for url, text in web_pages:
+            if quote_in(q, text):
+                hrefs[q] = text_fragment_url(url, q)
+                break
+    return hrefs
 
 
 def session_sources(context: list[dict], events: list[dict]) -> list[str]:

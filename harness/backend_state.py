@@ -8,6 +8,9 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+EFFORTS = ("low", "medium", "high")
+PREFS_KEY = "backend_prefs"
+
 
 def billing_warning(cfg, limits: dict | None = None, using_api_key: bool = False) -> str:
     limits = limits or {}
@@ -72,8 +75,66 @@ def view(manager, name: str, check_auth: bool = True) -> dict:
     limits = state["data"]
     return {
         "name": name, "available": cfg.enabled, "logged_in": logged_in, "auth": cfg.auth,
-        "billing": cfg.billing, "model": cfg.model, "limits": limits, "limits_updated_at": state["updated_at"],
+        "billing": cfg.billing, "model": cfg.model, "effort": cfg.effort,
+        "limits": limits, "limits_updated_at": state["updated_at"],
         "today": manager.db.usage_tally(name, local_midnight),
         "week": manager.db.usage_tally(name, week), "notice": notice(name, cfg, limits),
         "billing_warning": billing_warning(cfg, limits), "api_key_available": key_ready,
     }
+
+
+def _prefs(manager) -> dict:
+    raw = manager.db.get_meta(PREFS_KEY)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def apply_prefs(manager) -> None:
+    """Overlay Settings → Backends model/effort choices onto the in-memory config."""
+    for name, spec in _prefs(manager).items():
+        if not isinstance(spec, dict):
+            continue
+        model = str(spec.get("model") or "").strip()[:80]
+        effort = str(spec.get("effort") or "").strip()
+        if name == "local":
+            if model in manager.cfg.models:
+                manager.cfg.default_model = model
+        elif name in manager.cfg.backends:
+            if model:
+                manager.cfg.backends[name].model = model
+            if effort in EFFORTS:
+                manager.cfg.backends[name].effort = effort
+
+
+def save_prefs(manager, name: str, model: str | None = None, effort: str | None = None) -> dict:
+    """Persist a default model/effort for `name` (`local` or a hosted backend) and apply it now."""
+    prefs = _prefs(manager)
+    spec = dict(prefs.get(name) or {})
+    if name == "local":
+        if model is not None:
+            model = model.strip()
+            if model not in manager.cfg.models:
+                raise ValueError(f"unknown model {model!r}; known: {', '.join(manager.cfg.models)}")
+            spec["model"] = model
+            spec.pop("effort", None)
+    elif name in manager.cfg.backends:
+        if model is not None:
+            model = model.strip()[:80]
+            if not model:
+                raise ValueError("model is empty")
+            spec["model"] = model
+        if effort is not None:
+            if effort not in EFFORTS:
+                raise ValueError(f"effort must be one of {', '.join(EFFORTS)}")
+            spec["effort"] = effort
+    else:
+        raise KeyError(name)
+    prefs[name] = spec
+    manager.db.set_meta(PREFS_KEY, json.dumps(prefs))
+    apply_prefs(manager)
+    return spec

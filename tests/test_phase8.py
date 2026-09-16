@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from harness.api import create_app
 from harness.cli_backends import ClaudeSession, CodexSession, CursorSession
 from harness.config import BackendConfig, SandboxConfig, WebConfig
-from harness.grounding import ungrounded_quotes
+from harness.grounding import quote_hrefs, ungrounded_quotes
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.web_tools import WebTools, github_sources
@@ -36,6 +36,17 @@ def test_ungrounded_quotes_matching():
     # short quotes (names, terms) aren't checked
     assert ungrounded_quotes('Licensed as "AGPL-3.0".', sources) == []
     assert ungrounded_quotes("no quotes at all", []) == []
+
+
+def test_quote_hrefs_link_web_fetch_pages():
+    page = ("https://docs.example.com/license", PAGE)
+    other = ("https://example.com/other", "unrelated text about something else entirely for matching")
+    hrefs = quote_hrefs('The README says "released under the GNU Affero General Public License".', [other, page])
+    assert hrefs["released under the GNU Affero General Public License"].startswith("https://docs.example.com/license#:~:text=")
+    assert "GNU" in hrefs["released under the GNU Affero General Public License"]
+    assert quote_hrefs('The README says "released under the GNU Affero General Public License".', [other]) == {}
+    assert quote_hrefs('See memory note "released under the GNU Affero General Public License".',
+                       [("categories/work/memory.md", PAGE)]) == {}
 
 
 def test_final_answer_quote_gets_one_fix(tmp_path):
@@ -652,6 +663,30 @@ def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
             assert client.get("/api/v1/backends", headers=headers).json()[0]["week"]["cost_usd"] == 0.42
             assert client.get("/api/v1").json()["backends"][0]["notice"]
     asyncio.run(body())
+
+
+def test_backend_prefs_persist_model_and_effort(tmp_path, monkeypatch):
+    from harness import backend_state
+    monkeypatch.setattr(backend_state, "_subscription_status", lambda name, cfg: True)
+    cfg = make_cfg(tmp_path)
+    cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", effort="high")
+    m = Manager(cfg, chat=Script([Completion(content="hi")]))
+    with TestClient(create_app(m)) as client:
+        listed = {row["name"]: row for row in client.get("/backends").json()}
+        assert listed["local"]["model"] == cfg.default_model
+        assert listed["claude"]["model"] == "claude-opus-5" and listed["claude"]["effort"] == "high"
+        updated = client.put("/backends/claude", json={"model": "claude-sonnet-4", "effort": "low"})
+        assert updated.status_code == 200
+        again = {row["name"]: row for row in client.get("/backends").json()}
+        assert again["claude"]["model"] == "claude-sonnet-4" and again["claude"]["effort"] == "low"
+        assert client.put("/backends/claude", json={"effort": "banana"}).status_code == 400
+        assert client.put("/backends/nope", json={"model": "x"}).status_code == 404
+        assert client.put("/backends/local", json={"model": "missing"}).status_code == 400
+    cfg2 = make_cfg(tmp_path)
+    cfg2.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", effort="high")
+    reloaded = Manager(cfg2)
+    assert reloaded.cfg.backends["claude"].model == "claude-sonnet-4"
+    assert reloaded.cfg.backends["claude"].effort == "low"
 
 
 def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):

@@ -46,6 +46,10 @@ def test_web_app_and_guard(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     with client:
         assert "<title>Agents</title>" in client.get("/").text
+        js = client.get("/static/app.js").text
+        assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
+        assert "session-title" in js
+        assert "harness.theme" in js
         assert client.get("/static/app.js").status_code == 200
         profile = client.get("/profile").json()
         assert profile["emoji"] == "🙂" and "🚀" in profile["choices"]

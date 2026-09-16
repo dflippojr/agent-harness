@@ -369,6 +369,30 @@ class MemoryLibrary:
             text = text[: self.cfg.profile_max_chars] + "\n[... profile cut at its size limit]"
         return text
 
+    async def owner_write(self, path: str, content: str, summary: str) -> dict:
+        """Control Center save: same git commit/push as an approved agent write. The owner is the approver."""
+        if not self.cfg.writes:
+            raise ToolError("memory library writes are disabled")
+        args = {"path": path, "content": content, "summary": summary}
+        async with self._lock:
+            await self._sync_for_write()
+            f, rel, old, new = self._proposal("memory_write", args)
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(new, encoding="utf-8")
+            message = f"{' '.join(summary.split())[:150]}\n\nSaved from Control Center Settings."
+            for step in (("add", "--", rel), ("commit", "-q", "-m", message)):
+                code, out, err = await self._git(*step)
+                if code != 0:
+                    await self._reset()
+                    raise ToolError(f"git {step[0]} failed: {(err or out).strip()[:300]}")
+            pushed, detail = await self._push()
+            code, head, _ = await self._git("rev-parse", "--short", "HEAD")
+            self.last_commit = {"head": head.strip(), "path": rel, "summary": " ".join(summary.split())[:150],
+                                "at": time.time(), "pushed": pushed}
+            if not pushed:
+                raise ToolError(f"the change to {rel} was saved locally but couldn't be pushed ({detail})")
+            return self.last_commit
+
     async def call(self, name: str, args: dict, session: dict | None = None, call_id: str = "") -> str:
         if name in WRITE_TOOLS:
             if not self.cfg.writes:

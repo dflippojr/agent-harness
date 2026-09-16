@@ -121,8 +121,40 @@ function badge(status) {
 
 const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+const normalizeQuote = (text) => (text || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const quoteParts = (q) => q.split(/\.\.\.|…/).map(normalizeQuote).filter((p) => p.length >= 12);
+const quoteIn = (q, text) => {
+  const parts = quoteParts(q);
+  return parts.length > 0 && parts.every((p) => normalizeQuote(text).includes(p));
+};
+function quoteHref(url, quote) {
+  const base = (url || "").split("#")[0];
+  const snippet = quote.replace(/\s+/g, " ").trim().slice(0, 80);
+  return `${base}#:~:text=${encodeURIComponent(snippet)}`;
+}
+function quoteLinks(answer, pages) {
+  const links = {};
+  const re = /["“]([^"”\n]{25,400})["”]/g;
+  let match;
+  while ((match = re.exec(answer || ""))) {
+    const q = match[1];
+    const page = (pages || []).find((p) => /^https?:\/\//i.test(p.url || "") && quoteIn(q, p.text));
+    if (page) links[q] = quoteHref(page.url, q);
+  }
+  return links;
+}
+function linkQuotes(html, answer, pages) {
+  const links = quoteLinks(answer, pages);
+  const quotes = Object.keys(links).sort((a, b) => b.length - a.length);
+  for (const q of quotes) {
+    const escaped = escapeHtml(q);
+    html = html.split(escaped).join(`<a class="quote-source" href="${escapeHtml(links[q])}" target="_blank" rel="noopener">${escaped}</a>`);
+  }
+  return html;
+}
+
 // Small, safe Markdown subset: everything is escaped first, then a few constructs are re-enabled.
-function md(src) {
+function md(src, pages) {
   const blocks = [];
   let text = escapeHtml(src || "").replace(/```[\w+-]*\n?([\s\S]*?)```/g, (_, code) => {
     blocks.push(`<pre><code>${code.replace(/\n$/, "")}</code></pre>`);
@@ -170,7 +202,7 @@ function md(src) {
     if (!line.trim()) { out.push(""); continue; }
     out.push(`<p>${inline(line)}</p>`);
   }
-  return out.join("\n").replace(/\u0000(\d+)\u0000/g, (_, n) => blocks[Number(n)]);
+  return linkQuotes(out.join("\n").replace(/\u0000(\d+)\u0000/g, (_, n) => blocks[Number(n)]), src, pages);
 }
 
 // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
@@ -241,7 +273,9 @@ async function route() {
 }
 $back.addEventListener("click", () => {
   const parts = hashParts();
-  if (parts[0] === "s" && parts.length > 2) go(`#/s/${parts[1]}`);
+  // Session Transcript/Changes/Info are tabs (replaceState), so Back always leaves the session.
+  // An approval deep-link is a real subpage of the transcript.
+  if (parts[0] === "s" && parts[2] === "approval") go(`#/s/${parts[1]}`, true);
   else history.back();
 });
 $feature.addEventListener("change", () => {
@@ -428,7 +462,7 @@ async function viewNew() {
     }
     model.disabled = !isLocal;
     modelState.hidden = !isLocal;
-    backendState.textContent = b?.billing_warning || b?.notice || "";
+    backendState.textContent = b?.billing_warning || "";
     backendState.classList.toggle("bad", !!b?.billing_warning);
   };
   backend.addEventListener("change", showBackend);
@@ -536,16 +570,24 @@ route();
 async function viewSession(sid, tab, focusApproval) {
   let session = await api(`/sessions/${sid}`);
   sid = session.id;
-  setHeader("agents", session.title);
+  setHeader("agents");
 
   const tabs = h("div", { class: "tabs" },
     ["transcript", "changes", "info"].map((name) => h("button", {
       class: (tab === name || (tab === "approval" && name === "transcript")) ? "on" : "",
-      onclick: () => { location.hash = name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`; },
+      onclick: () => go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true),
     }, name[0].toUpperCase() + name.slice(1))));
   const head = h("div", { class: "row small" });
   const usage = h("div", { class: "row small usage" });
-  $app.append(head, usage, tabs);
+  $app.append(h("h2", { class: "session-title" }, session.title), head, usage, tabs);
+  const pages = [];
+  const fetchById = new Map();
+  const rememberFetch = (id, url, text) => {
+    const href = (url || "").trim();
+    if (!/^https?:\/\//i.test(href)) return;
+    if (id) fetchById.set(id, href);
+    pages.push({ url: href, text: text || "" });
+  };
   let totals = session.totals || {};
   let ctxUsed = session.context_used || 0;
   const ctxLimit = session.context_limit || 0;
@@ -613,7 +655,7 @@ async function viewSession(sid, tab, focusApproval) {
         },
       }, "Run again as new session") : null,
       h("span", { class: "spacer" }),
-      h("a", { class: "btn small", href: `#/s/${sid}/changes` }, "Changes"));
+      h("button", { class: "btn small", type: "button", onclick: () => go(`#/s/${sid}/changes`, true) }, "Changes"));
   };
   renderActions();
 
@@ -718,9 +760,11 @@ async function viewSession(sid, tab, focusApproval) {
     const fn = call.function || {};
     let args = {};
     try { args = JSON.parse(fn.arguments || "{}"); } catch (_) { args = { raw: fn.arguments }; }
+    if (fn.name === "web_fetch" && args.url) rememberFetch(call.id, args.url, "");
     const summaryText = fn.name === "run_shell" ? args.command
       : fn.name === "git_clone" ? args.url
         : fn.name === "prometheus_query" ? args.query
+        : fn.name === "web_fetch" ? args.url
         : args.service ? `${args.service}${args.since ? ` since ${args.since}` : ""}`
         : args.path ? `${args.path}${args.start_line ? ` :${args.start_line}` : ""}` : fn.arguments;
     const state = h("span", { class: "state" }, "…");
@@ -822,7 +866,7 @@ async function viewSession(sid, tab, focusApproval) {
       }
       if (d.content && d.content.trim()) {
         lastContent = d.content.trim();
-        wrap.append(h("div", { class: `msg assistant${d.tool_calls.length ? "" : " final"}`, html: md(d.content) }));
+        wrap.append(h("div", { class: `msg assistant${d.tool_calls.length ? "" : " final"}`, html: md(d.content, pages) }));
       }
       if (wrap.childNodes.length) add(wrap);
       for (const call of d.tool_calls || []) add(toolEl(call));
@@ -848,6 +892,10 @@ async function viewSession(sid, tab, focusApproval) {
     },
     tool_result: (e) => {
       pendingCalls.delete(e.data.id);
+      if ((e.data.name === "web_fetch" || fetchById.has(e.data.id)) && e.data.output) {
+        const fromOutput = (e.data.output.split("\n").find((line) => /^https?:\/\//i.test(line.trim())) || "").trim();
+        rememberFetch(e.data.id, fetchById.get(e.data.id) || fromOutput, e.data.output);
+      }
       const c = calls.get(e.data.id);
       const out = h("pre", {}, e.data.output);
       if (!c) { add(h("details", { class: "tool ev" }, h("summary", {}, e.data.name), out)); return; }
@@ -903,8 +951,9 @@ async function viewSession(sid, tab, focusApproval) {
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
     resumed: () => add(h("p", { class: "note" }, "Daemon restarted — session resumed")),
     workspace_ready: (e) => add(h("p", { class: "note" }, `Checked out on branch ${e.data.branch} (from ${e.data.base_branch})`)),
-    branch_saved: (e) => add(h("p", { class: "note" }, h("a", { href: `#/s/${sid}/changes` },
-      `Branch saved: ${e.data.commits.length} commit${e.data.commits.length === 1 ? "" : "s"} to review${e.data.auto_commit ? " (leftover edits committed)" : ""}`))),
+    branch_saved: (e) => add(h("p", { class: "note" }, h("button", {
+      class: "btn small", type: "button", onclick: () => go(`#/s/${sid}/changes`, true),
+    }, `Branch saved: ${e.data.commits.length} commit${e.data.commits.length === 1 ? "" : "s"} to review${e.data.auto_commit ? " (leftover edits committed)" : ""}`))),
     review: (e) => add(h("p", { class: "note" }, `Review: ${e.data.detail}`)),
     model_waking: (e) => {
       wakingNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
@@ -950,7 +999,7 @@ async function viewSession(sid, tab, focusApproval) {
         live?.el.remove();
         live = null;
         const answer = (e.data.answer || "").trim();
-        if (answer && answer !== lastContent) add(h("div", { class: "ev msg assistant final", html: md(answer) }));
+        if (answer && answer !== lastContent) add(h("div", { class: "ev msg assistant final", html: md(answer, pages) }));
         add(h("p", { class: "status-line" }, badge(e.data.status),
           e.data.stop_reason && !["final_message", "finished"].includes(e.data.stop_reason) ? ` ${e.data.stop_reason}` : ""));
       }
@@ -1089,7 +1138,7 @@ function splitDiff(diff) {
 function viewInfo(s) {
   const t = s.totals || {};
   const rows = [
-    ["Session", s.id], ["Status", `${s.status}${s.stop_reason ? ` (${s.stop_reason})` : ""}`],
+    ["Title", s.title], ["Session", s.id], ["Status", `${s.status}${s.stop_reason ? ` (${s.stop_reason})` : ""}`],
     ["Project", s.project], ["Target", s.target], ["Backend", s.backend || "local"], ["Model", s.model],
     ["Created", new Date(s.created_at * 1000).toLocaleString()], ["Updated", new Date(s.updated_at * 1000).toLocaleString()],
     ["Model turns", t.turns || 0], ["Prompt tokens", t.prompt_tokens || 0], ["Completion tokens", t.completion_tokens || 0],
@@ -1296,7 +1345,7 @@ async function viewJob(id) {
       fill(model, h("option", { value: b?.model || "" }, b?.model || `${backend.value} default`));
     }
     model.disabled = !isLocal;
-    backendNote.textContent = b?.billing_warning || (backend.value === "local" ? "" : b?.notice || "");
+    backendNote.textContent = b?.billing_warning || "";
     backendNote.classList.toggle("bad", !!b?.billing_warning);
   };
   backend.addEventListener("change", showBackend);
@@ -1372,61 +1421,148 @@ async function viewJob(id) {
 }
 
 // ---------- profile ----------
+const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
 const PROFILE_PAGES = {
   appearance: "Appearance",
   notifications: "Notifications",
   install: "Install",
-  backends: "Hosted backends",
+  backends: "Backends",
   memory: "Memory library",
   apps: "Apps",
   endpoint: "Inference endpoint",
   disk: "Disk",
 };
+const THEMES = {
+  auto: { label: "System", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
+  light: { label: "Light", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
+  dark: { label: "Dark", swatch: ["#000000", "#232323", "#dddddd"] },
+  midnight: { label: "Midnight", swatch: ["#0b1220", "#152038", "#7dd3fc"] },
+  forest: { label: "Forest", swatch: ["#0f1a14", "#1a2c22", "#86efac"] },
+  paper: { label: "Paper", swatch: ["#f4efe6", "#fffaf2", "#9a3412"] },
+  custom: { label: "Custom", swatch: ["#888888", "#aaaaaa", "#2563eb"] },
+};
+const THEME_COLORS = { bg: "#f6f7f9", panel: "#ffffff", accent: "#2563eb" };
 
-async function viewProfile(page) {
-  if (page && !PROFILE_PAGES[page]) { go("#/profile", true); return; }
-  setHeader("agents", PROFILE_PAGES[page] || "Profile", { page: true });
-  const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
-  if (page === "appearance") return $app.append(appearanceCard(profile));
-  if (page === "notifications") return $app.append(notificationsCard(me));
-  if (page === "install") return $app.append(installCard());
-  if (page === "backends") return $app.append(backendsCard());
-  if (page === "memory") return $app.append(memoryCard());
-  if (page === "apps") return $app.append(appsCard(me));
-  if (page === "endpoint") return $app.append(endpointCard(me));
-  if (page === "disk") return $app.append(diskCard());
-  $app.append(
-    h("a", { class: "card identity", href: "#/profile/appearance" },
-      h("div", { class: "row" },
-        h("span", { class: "identity-emoji" }, profile.emoji),
-        h("div", { class: "spacer" },
-          h("h3", {}, me.name || "You"),
-          h("div", { class: "muted small" }, me.login || "Local access")),
-        h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    gpuCard(),
-    remoteControlCard(),
-    h("p", { class: "section-label" }, "Settings"),
-    h("div", { class: "card settings-list" },
-      Object.entries(PROFILE_PAGES).map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
-  );
+function readTheme() {
+  try { return localStorage.getItem("harness.theme") || "auto"; } catch (_) { return "auto"; }
+}
+function readHues() {
+  try { return { ...THEME_COLORS, ...(JSON.parse(localStorage.getItem("harness.themeHues") || "null") || {}) }; }
+  catch (_) { return { ...THEME_COLORS }; }
+}
+function applyTheme(name, hues) {
+  const root = document.documentElement;
+  const theme = name || readTheme();
+  const colors = hues || readHues();
+  if (theme && theme !== "auto") root.dataset.theme = theme;
+  else delete root.dataset.theme;
+  for (const key of ["bg", "panel", "accent"]) {
+    if (theme === "custom" && colors[key]) root.style.setProperty(`--${key}`, colors[key]);
+    else root.style.removeProperty(`--${key}`);
+  }
+  const meta = document.querySelector('meta[name="theme-color"]:not([media])')
+    || document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = getComputedStyle(root).getPropertyValue("--bg").trim() || "#000000";
+  try {
+    localStorage.setItem("harness.theme", theme);
+    localStorage.setItem("harness.themeHues", JSON.stringify(colors));
+  } catch (_) { /* private mode */ }
+}
+applyTheme();
+
+function copyBox(value) {
+  const code = h("code", {}, value);
+  const btn = h("button", {
+    class: "btn small", type: "button",
+    onclick: async () => {
+      try { await navigator.clipboard.writeText(value); toast("Copied"); }
+      catch (_) { const range = document.createRange(); range.selectNodeContents(code); getSelection().removeAllRanges(); getSelection().addRange(range); }
+    },
+  }, "Copy");
+  return h("div", { class: "copy-box", onclick: () => btn.click() }, code, btn);
 }
 
-function appearanceCard(profile) {
-  const activeEmoji = h("span", { class: "identity-emoji" }, profile.emoji);
-  const emojiButtons = profile.choices.map((emoji) => h("button", {
+function emojiPicker(profile, onPick) {
+  return h("div", { class: "emoji-grid" }, profile.choices.map((emoji) => h("button", {
     class: `btn emoji-choice${emoji === profile.emoji ? " selected" : ""}`, type: "button", "aria-label": `Use ${emoji}`,
     onclick: async (event) => {
       try {
         await api("/profile", { method: "PUT", body: { emoji } });
-        activeEmoji.textContent = emoji;
         $profileIcon.textContent = emoji;
+        profile.emoji = emoji;
         for (const button of event.currentTarget.parentNode.children) button.classList.toggle("selected", button === event.currentTarget);
+        onPick?.(emoji);
       } catch (e) { toast(e.message); }
     },
-  }, emoji));
+  }, emoji)));
+}
+
+async function viewProfile(page) {
+  if (page && !PROFILE_PAGES[page]) { go("#/profile", true); return; }
+  if (page === "install" && isStandalone()) { go("#/profile", true); return; }
+  setHeader("agents", PROFILE_PAGES[page] || "Profile", { page: true });
+  const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
+  if (page === "appearance") return $app.append(appearanceCard());
+  if (page === "notifications") return $app.append(notificationsCard(me));
+  if (page === "install") return $app.append(installCard());
+  if (page === "backends") return $app.append(await backendsCard());
+  if (page === "memory") return $app.append(memoryCard());
+  if (page === "apps") return $app.append(appsCard(me));
+  if (page === "endpoint") return $app.append(endpointCard(me));
+  if (page === "disk") return $app.append(diskCard());
+  const activeEmoji = h("span", { class: "identity-emoji" }, profile.emoji);
+  const picker = h("div", { class: "card", hidden: true },
+    h("p", { class: "muted small" }, "Shown at the top left of the app."),
+    emojiPicker(profile, (emoji) => { activeEmoji.textContent = emoji; }));
+  $app.append(
+    h("button", {
+      class: "card identity", type: "button",
+      onclick: () => { picker.hidden = !picker.hidden; },
+    },
+      h("div", { class: "row" },
+        activeEmoji,
+        h("div", { class: "spacer" },
+          h("h3", {}, me.name || "You"),
+          h("div", { class: "muted small" }, "Tap to change your icon")),
+        h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
+    picker,
+    gpuCard(),
+    remoteControlCard(),
+    h("p", { class: "section-label" }, "Settings"),
+    h("div", { class: "card settings-list" },
+      Object.entries(PROFILE_PAGES)
+        .filter(([id]) => id !== "install" || !isStandalone())
+        .map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
+  );
+}
+
+function appearanceCard() {
+  let theme = readTheme();
+  let hues = readHues();
+  const hueRow = h("div", { class: "hue-row", hidden: theme !== "custom" });
+  const grid = h("div", { class: "theme-grid" });
+  const paint = () => {
+    fill(grid, Object.entries(THEMES).map(([id, spec]) => h("button", {
+      class: `theme-choice${theme === id ? " on" : ""}`, type: "button",
+      onclick: () => { theme = id; applyTheme(theme, hues); hueRow.hidden = theme !== "custom"; paint(); },
+    },
+      h("div", { class: "swatch" }, spec.swatch.map((color, i) => h("span", { style: `background:${i === 2 && id === "custom" ? hues.accent : color}` }))),
+      h("div", { class: "name" }, spec.label))));
+  };
+  paint();
+  fill(hueRow, ["bg", "panel", "accent"].map((key) => {
+    const input = h("input", { type: "color", value: /^#[0-9a-fA-F]{6}$/.test(hues[key]) ? hues[key] : THEME_COLORS[key] });
+    input.addEventListener("input", () => {
+      hues = { ...hues, [key]: input.value };
+      applyTheme("custom", hues);
+      theme = "custom";
+      paint();
+    });
+    return h("label", {}, key === "bg" ? "Background" : key === "panel" ? "Panel" : "Accent", input);
+  }));
   return h("div", { class: "card" },
-    h("div", { class: "row" }, activeEmoji, h("div", { class: "muted small" }, "Shown at the top left of the app.")),
-    h("div", { class: "emoji-grid" }, emojiButtons));
+    h("p", { class: "muted small" }, "How the app looks on this phone. The icon lives on your profile card."),
+    grid, hueRow);
 }
 
 function notificationsCard(me) {
@@ -1446,29 +1582,70 @@ function notificationsCard(me) {
 }
 
 function installCard() {
-  const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
   return h("div", { class: "card" },
-    h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen."));
+    h("p", {}, "In Safari: Share → Add to Home Screen. The app then opens full screen."));
 }
 
-function backendsCard() {
+function backendUsage(b) {
+  if (b.name === "local") return "Local Qwen on this PC";
+  const limits = b.limits || {};
+  const pct = limits.utilization === undefined ? null : Math.round(limits.utilization * 100);
+  const period = String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h");
+  const sub = pct === null ? (b.logged_in ? "signed in" : "sign-in needed") : `${period} ${pct}% used`;
+  const req = `${b.today.requests || 0} today · ${b.week.requests || 0} this week`;
+  const cost = Number(b.today.cost_usd || 0) + Number(b.week.cost_usd || 0);
+  const dollars = cost > 0 ? ` · $${Number(b.today.cost_usd || 0).toFixed(2)} today` : "";
+  return `${b.logged_in ? "signed in" : "sign-in/key needed"} · ${sub} · ${req}${dollars}`;
+}
+
+async function backendsCard() {
   const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
-  const load = async () => {
-    try {
-      const rows = (await api("/backends")).filter((b) => b.name !== "local");
-      fill(body, rows.length ? rows.map((b) => {
-        const limits = b.limits || {};
-        const usage = limits.utilization === undefined ? "limits not reported yet"
-          : `${String(limits.rateLimitType || "limit").replace("seven_day", "7d")} ${Math.round(limits.utilization * 100)}%`;
-        return h("div", { style: "margin-bottom:12px" },
-          h("strong", {}, b.name), ` · ${b.logged_in ? "signed in" : "sign-in/key needed"} · ${usage}`,
-          h("p", { class: `small ${b.billing_warning ? "bad" : "muted"}` }, b.billing_warning || b.notice),
-          h("p", { class: "muted small" }, `Today: ${b.today.requests || 0} requests, $${Number(b.today.cost_usd || 0).toFixed(4)} estimate · 7d: ${b.week.requests || 0} requests, $${Number(b.week.cost_usd || 0).toFixed(4)}`));
-      }) : h("p", { class: "muted small" }, "No hosted backends configured."));
-    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
+  let failed = false;
+  const [rows, models] = await Promise.all([api("/backends"), api("/models")]).catch((e) => {
+    fill(body, h("p", { class: "note bad" }, e.message));
+    failed = true;
+    return [[], []];
+  });
+  if (failed) {
+    return h("div", { class: "card" }, body);
+  }
+  const effortSelect = (b) => {
+    const sel = h("select", {}, ["low", "medium", "high"].map((level) =>
+      h("option", { value: level, selected: (b.effort || "high") === level }, level)));
+    sel.addEventListener("change", async () => {
+      try { await api(`/backends/${b.name}`, { method: "PUT", body: { effort: sel.value } }); toast(`Saved ${b.name} effort`); }
+      catch (e) { toast(e.message); }
+    });
+    return sel;
   };
-  load();
-  return h("div", { class: "card" }, body);
+  const modelControl = (b) => {
+    if (b.name === "local") {
+      const sel = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.name === b.model }, m.name)));
+      sel.addEventListener("change", async () => {
+        try { await api("/backends/local", { method: "PUT", body: { model: sel.value } }); toast("Saved local model"); }
+        catch (e) { toast(e.message); }
+      });
+      return sel;
+    }
+    const input = h("input", { type: "text", value: b.model || "", placeholder: "Provider model name" });
+    input.addEventListener("change", async () => {
+      const model = input.value.trim();
+      if (!model) return toast("Model is empty");
+      try { await api(`/backends/${b.name}`, { method: "PUT", body: { model } }); toast(`Saved ${b.name} model`); }
+      catch (e) { toast(e.message); }
+    });
+    return input;
+  };
+  const title = (b) => (b.name === "local" ? "Qwen (this PC)" : b.name === "claude" ? "Claude" : b.name === "codex" ? "Codex" : b.name === "cursor" ? "Cursor" : b.name);
+  fill(body, rows.length ? rows.map((b) => h("div", { class: "backend-block" },
+    h("strong", {}, title(b)),
+    h("p", { class: `small ${b.billing_warning ? "bad" : "muted"}` }, b.billing_warning || backendUsage(b)),
+    h("label", {}, "Default model"), modelControl(b),
+    b.name === "local" ? null : [h("label", {}, "Effort"), effortSelect(b)],
+  )) : h("p", { class: "muted small" }, "No backends configured."));
+  return h("div", { class: "card" },
+    h("p", { class: "muted small" }, "New tasks use these defaults. You can still pick a backend when you start one."),
+    body);
 }
 
 function backupLine(b) {
@@ -1575,15 +1752,26 @@ function memoryCard() {
     try {
       const mem = await api("/memory");
       if (!mem.enabled) return fill(body, h("p", { class: "muted small" }, "The memory library is disabled in config/harness.yaml."));
-      const c = mem.last_commit || {};
+      const editor = h("textarea", { rows: 8 }, mem.profile || "");
+      const save = h("button", { class: "btn primary", disabled: !mem.writes }, "Save");
+      save.addEventListener("click", async () => {
+        if (!confirm("Save this profile to the memory library? It is given to every new session, then committed and pushed.")) return;
+        save.disabled = true;
+        try {
+          const saved = await api("/memory/profile", { method: "PUT", body: { content: editor.value, summary: "Update agent profile from Settings" } });
+          toast(`Saved (${saved.last_commit.head})`);
+        } catch (e) { toast(e.message); }
+        save.disabled = !mem.writes;
+      });
       fill(body,
+        h("p", { class: "small" }, "A short purpose statement given to every new session: how agents should use this library. Keep personal biography in category files, not here."),
         h("p", { class: "small" }, `Agents can read ${mem.categories.join(", ")}. `,
-          mem.writes ? "They can propose changes there; every change asks you first." : "Read-only."),
-        c.head ? h("p", { class: "small" }, `Last saved change: ${c.summary} (${c.path}, ${c.head}, ${ago(c.at)})`) : null,
-        mem.refresh_error ? h("p", { class: "small bad" }, `Couldn't refresh the library: ${mem.refresh_error}`) : null,
-        mem.profile ? h("details", {}, h("summary", { class: "small" }, `Agent profile: ${mem.profile_chars} of ${mem.profile_max_chars} characters, given to every new session`),
-          h("div", { class: "msg assistant small", style: "margin-top:8px", html: md(mem.profile) }))
-          : h("p", { class: "muted small" }, `No agent profile yet (${mem.profile_path || "profile_path not set"}).`));
+          mem.writes ? "They can propose changes; every change asks you first." : "Read-only for agents."),
+        editor,
+        h("p", { class: "muted small" }, `${mem.profile_path || "profile"} · limit ${mem.profile_max_chars} characters`),
+        mem.writes ? save : h("p", { class: "muted small" }, "Enable memory_library.writes to edit from here."),
+        mem.last_commit?.head ? h("p", { class: "muted small" }, `Last saved change: ${mem.last_commit.summary} (${mem.last_commit.head}, ${ago(mem.last_commit.at)})`) : null,
+        mem.refresh_error ? h("p", { class: "small bad" }, `Couldn't refresh the library: ${mem.refresh_error}`) : null);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   })();
   return h("div", { class: "card" }, body);
@@ -1596,10 +1784,37 @@ function endpointCard(me) {
     try {
       const keys = await api("/keys");
       const active = keys.filter((k) => !k.revoked_at && k.kind !== "app");
+      const form = h("div");
+      const newBtn = h("button", { class: "btn", type: "button", onclick: () => { newBtn.hidden = true; showForm(); } }, "New key");
+      const showForm = () => {
+        const name = h("input", { type: "text", placeholder: "Name (the device or app)" });
+        fill(form,
+          h("p", { class: "small" }, "The token is shown once. Anyone with it can call the inference endpoint as you."),
+          h("label", {}, "Key name"), name,
+          h("div", { class: "row", style: "margin-top:10px" },
+            h("button", { class: "btn", type: "button", onclick: load }, "Cancel"),
+            h("span", { class: "spacer" }),
+            h("button", {
+              class: "btn primary", type: "button",
+              onclick: async () => {
+                if (!name.value.trim()) return toast("Name the key");
+                try {
+                  const k = await api("/keys", { method: "POST", body: { name: name.value } });
+                  const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
+                  fill(form, h("p", { class: "small" }, `Key for ${k.name}. Copy it now; it isn't shown again.`), field,
+                    h("div", { class: "row", style: "margin-top:8px" },
+                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: load }, "Done")));
+                } catch (e) { toast(e.message); }
+              },
+            }, "Create")));
+      };
       fill(body,
-        h("p", { class: "small" }, "OpenAI-compatible base URL: ", h("code", {}, `${base}/v1`)),
-        h("p", { class: "small" }, "Anthropic-compatible base URL: ", h("code", {}, base)),
-        h("p", { class: "muted small" }, "Any model name works; unknown names use the default model. Requests go ahead of the next agent turn."),
+        h("p", { class: "muted small" }, "Point a coding tool at these URLs. Tap a box to copy. Any model name works; unknown names use the default."),
+        h("p", { class: "small", style: "margin-bottom:0" }, "OpenAI-compatible"),
+        copyBox(`${base}/v1`),
+        h("p", { class: "small", style: "margin-bottom:0" }, "Anthropic-compatible"),
+        copyBox(base),
         active.length ? h("ul", { class: "small" }, active.map((k) => h("li", {},
           h("strong", {}, k.name), ` ${k.prefix}… · ${k.requests} request${k.requests === 1 ? "" : "s"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
           h("button", {
@@ -1609,21 +1824,7 @@ function endpointCard(me) {
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No keys yet."),
-        h("button", {
-          class: "btn",
-          onclick: async () => {
-            const name = window.prompt("Key name (the device or app that will use it)");
-            if (!name) return;
-            try {
-              const k = await api("/keys", { method: "POST", body: { name } });
-              const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
-              fill(body, h("p", { class: "small" }, `Key for ${k.name}. Copy it now; it isn't shown again.`), field,
-                h("div", { class: "row", style: "margin-top:8px" },
-                  h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
-                  h("button", { class: "btn", onclick: load }, "Done")));
-            } catch (e) { toast(e.message); }
-          },
-        }, "New key"));
+        form, newBtn);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
@@ -1632,10 +1833,11 @@ function endpointCard(me) {
 
 const APP_SCOPES = {
   sessions: "Start and follow its own sessions (with context and tools)",
-  "sessions:all": "Read all sessions",
+  "sessions:all": "Read all sessions, not only its own",
   approvals: "Approve or deny in its own sessions",
   images: "Generate images",
   inference: "Use the inference endpoint",
+  remote_control: "Start and stop Claude Remote Control in a project folder",
 };
 
 function appsCard(me) {
@@ -1644,8 +1846,36 @@ function appsCard(me) {
   const load = async () => {
     try {
       const apps = (await api("/keys")).filter((k) => k.kind === "app" && !k.revoked_at);
+      const form = h("div");
+      const newBtn = h("button", { class: "btn", type: "button", onclick: () => { newBtn.hidden = true; showForm(); } }, "New app");
+      const showForm = () => {
+        const name = h("input", { type: "text", placeholder: "App name" });
+        const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
+          h("input", { type: "checkbox", value: scope, checked: scope === "sessions" }), ` ${label}`));
+        fill(form,
+          h("p", { class: "small" }, "This mints a token shown once. Anyone with it can use the permissions you tick. It is not your Claude/Codex/Cursor login."),
+          h("label", {}, "Name"), name, h("label", {}, "What it may do"), boxes,
+          h("div", { class: "row", style: "margin-top:10px" },
+            h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
+            h("button", {
+              class: "btn primary",
+              onclick: async () => {
+                const scopes = boxes.map((b) => b.querySelector("input")).filter((i) => i.checked).map((i) => i.value);
+                if (!name.value.trim() || !scopes.length) return toast("Name the app and allow at least one thing");
+                try {
+                  const k = await api("/keys", { method: "POST", body: { name: name.value, kind: "app", scopes } });
+                  const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
+                  fill(form, h("p", { class: "small" }, `Token for ${k.name}. Copy it now; it isn't shown again.`), field,
+                    h("div", { class: "row", style: "margin-top:8px" },
+                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: load }, "Done")));
+                } catch (e) { toast(e.message); }
+              },
+            }, "Create")));
+      };
       fill(body,
-        h("p", { class: "small" }, "App API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md · Python SDK: sdk/harness_client.py"),
+        h("p", { class: "small" }, "An app token lets another program start and follow sessions on this daemon — a script, a bot, or a future phone client. It is shown once and can be revoked later."),
+        h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
           h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
           h("button", {
@@ -1655,32 +1885,7 @@ function appsCard(me) {
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
-        h("button", {
-          class: "btn",
-          onclick: () => {
-            const name = h("input", { type: "text", placeholder: "App name" });
-            const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
-              h("input", { type: "checkbox", value: scope, checked: scope === "sessions" }), ` ${label} (${scope})`));
-            fill(body, h("label", {}, "Name"), name, h("label", {}, "Allowed"), boxes,
-              h("div", { class: "row", style: "margin-top:10px" },
-                h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
-                h("button", {
-                  class: "btn primary",
-                  onclick: async () => {
-                    const scopes = boxes.map((b) => b.querySelector("input")).filter((i) => i.checked).map((i) => i.value);
-                    if (!name.value.trim() || !scopes.length) return toast("Name the app and allow at least one thing");
-                    try {
-                      const k = await api("/keys", { method: "POST", body: { name: name.value, kind: "app", scopes } });
-                      const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
-                      fill(body, h("p", { class: "small" }, `Token for ${k.name}. Copy it now; it isn't shown again.`), field,
-                        h("div", { class: "row", style: "margin-top:8px" },
-                          h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
-                          h("button", { class: "btn", onclick: load }, "Done")));
-                    } catch (e) { toast(e.message); }
-                  },
-                }, "Create")));
-          },
-        }, "New app"));
+        form, newBtn);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
@@ -1692,24 +1897,36 @@ function diskCard() {
   const load = async () => {
     try {
       const u = await api("/maintenance");
-      const top = u.workspaces.slice(0, 5);
       const mb = (n) => (n < 1 ? "<1 MB" : `${n} MB`);
+      const device = (name, free, total, extra) => h("div", { class: "disk-device" },
+        h("strong", {}, name),
+        h("div", { class: "disk-meter" },
+          h("span", {}, `${Math.round(Number(free)) || free} GB free`),
+          total != null ? h("span", { class: "muted" }, `of ${Math.round(Number(total))} GB`) : null),
+        extra);
+      const top = u.workspaces.slice(0, 5);
       fill(body,
-        h("p", {}, `${u.free_gb} GB free of ${u.total_gb} GB · workspaces ${mb(u.workspaces_mb)} (${u.workspaces.length}) · quota ${u.quota_mb} MB each`),
-        top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null,
-        h("p", { class: "muted small" }, `${u.containers.length} sandbox container${u.containers.length === 1 ? "" : "s"}`),
-        backupLine(u.backup),
-        (u.runners || []).map((r) => h("p", { class: "small" },
-          `💻 ${TARGET_LABEL[r.name] || r.name}: `,
-          r.online ? `online · ${r.info.free_gb} GB free · runner ${r.info.version} · macOS ${r.info.macos}`
-            : `offline${r.last_seen_seconds !== null ? ` (last seen ${Math.round(r.last_seen_seconds / 60)} min ago)` : " (not connected since the daemon started)"}`)));
+        device("Tower", u.free_gb, u.total_gb, [
+          h("p", { class: "muted small" }, `Workspaces ${mb(u.workspaces_mb)} (${u.workspaces.length}) · quota ${u.quota_mb} MB each`),
+          top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null,
+          h("p", { class: "muted small" }, `${u.containers.length} sandbox container${u.containers.length === 1 ? "" : "s"}`),
+          backupLine(u.backup),
+        ]),
+        (u.runners || []).map((r) => device(TARGET_LABEL[r.name] || r.name,
+          r.online ? r.info.free_gb : "—",
+          r.online && r.info.total_gb != null ? r.info.total_gb : null,
+          h("p", { class: "muted small" },
+            r.online ? `online · runner ${r.info.version} · macOS ${r.info.macos}`
+              : `offline${r.last_seen_seconds !== null ? ` (last seen ${Math.round(r.last_seen_seconds / 60)} min ago)` : " (not connected since the daemon started)"}`))));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
   return h("div", { class: "card" }, body,
+    h("p", { class: "muted small" }, "Clean up now removes stopped sandbox containers, expired session workspaces, and leftover workspace folders."),
     h("button", {
       class: "btn",
       onclick: async (ev) => {
+        if (!confirm("Remove stopped sandbox containers, expired session workspaces, and leftover workspace folders?")) return;
         ev.target.disabled = true;
         try {
           const r = await api("/maintenance/cleanup", { method: "POST" });

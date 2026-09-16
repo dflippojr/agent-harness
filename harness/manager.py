@@ -108,6 +108,8 @@ class Manager:
             self.warmer.blocked = lambda: self.guard.active or bool(self.images and self.images.gpu_taken)
         elif self.images is not None:
             self.warmer.blocked = lambda: self.images.gpu_taken
+        from .backend_state import apply_prefs
+        apply_prefs(self)
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
         for s in self.db.sessions_with_status(*ACTIVE):

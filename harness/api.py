@@ -70,6 +70,16 @@ class ProfileUpdate(BaseModel):
     emoji: str
 
 
+class BackendUpdate(BaseModel):
+    model: str | None = None
+    effort: str | None = None
+
+
+class MemoryProfileUpdate(BaseModel):
+    content: str
+    summary: str = "Update agent profile"
+
+
 class Job(BaseModel):
     name: str
     prompt: str
@@ -228,10 +238,28 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = mgr(request)
         from .backend_state import view as backend_view
         local = {"name": "local", "available": True, "logged_in": True, "auth": "local", "billing": "local",
-                 "model": m.cfg.default_model,
+                 "model": m.cfg.default_model, "effort": "",
                  "limits": {}, "today": {}, "week": {}, "notice": "Runs the local model on this server.",
-                 "billing_warning": ""}
+                 "billing_warning": "", "api_key_available": False}
         return [local] + [await asyncio.to_thread(backend_view, m, name) for name in m.cfg.backends]
+
+    @app.put("/backends/{name}")
+    async def update_backend(name: str, body: BackendUpdate, request: Request):
+        """Settings → Backends: persist the default model (and effort, for hosted CLIs)."""
+        from .backend_state import save_prefs
+        m = mgr(request)
+        if body.model is None and body.effort is None:
+            raise HarnessError(400, "set model or effort")
+        try:
+            save_prefs(m, name, model=body.model, effort=body.effort)
+        except KeyError:
+            raise HarnessError(404, f"unknown backend {name!r}")
+        except ValueError as e:
+            raise HarnessError(400, str(e))
+        if name == "local":
+            return {"name": "local", "model": m.cfg.default_model, "effort": ""}
+        from .backend_state import view as backend_view
+        return await asyncio.to_thread(backend_view, m, name, False)
 
     @app.get("/models/status")
     async def models_status(request: Request):
@@ -375,6 +403,24 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return {"enabled": True, "writes": cfg.writes, "categories": cfg.categories, "profile_path": cfg.profile_path,
                 "profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
                 "last_commit": lib.last_commit, "refresh_error": lib.refresh_error}
+
+    @app.put("/memory/profile")
+    async def update_memory_profile(body: MemoryProfileUpdate, request: Request):
+        """Owner edit of the agent profile from Settings. Commits and pushes like an approved memory write."""
+        from .fileops import ToolError
+        m = mgr(request)
+        lib, cfg = m.runner.memory, m.cfg.memory_library
+        if lib is None:
+            raise HarnessError(400, "the memory library is disabled in config/harness.yaml")
+        if not cfg.profile_path:
+            raise HarnessError(400, "memory_library.profile_path is not set")
+        try:
+            saved = await lib.owner_write(cfg.profile_path, body.content, body.summary)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+        profile = await asyncio.to_thread(lib.profile_text)
+        return {"profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
+                "last_commit": saved}
 
     @app.get("/search")
     async def search_sessions(request: Request, q: str = "", project: str = "", limit: int = 20):

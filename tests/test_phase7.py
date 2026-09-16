@@ -321,6 +321,14 @@ def test_memory_api(tmp_path):
         data = wait_until(lambda: (lambda d: d if d.get("profile") else None)(client.get("/memory").json()))
         assert data["enabled"] and data["writes"] and "Prefers short answers." in data["profile"]
         assert data["profile_max_chars"] == 300
+        saved = client.put("/memory/profile", json={"content": "# Agent profile\nUse the library for project facts.\n",
+                                                    "summary": "Purpose-only profile"})
+        assert saved.status_code == 200
+        assert "Use the library for project facts." in saved.json()["profile"]
+        text, message = remote_file(tmp_path, bare, "agent-profile.md")
+        assert "Use the library for project facts." in text
+        assert "Purpose-only profile" in message
+        assert client.put("/memory/profile", json={"content": "x" * 400, "summary": "too long"}).status_code == 400
 
 
 # 7d: scheduled jobs
