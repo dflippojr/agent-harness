@@ -24,6 +24,9 @@
         if (hues.panel) document.documentElement.style.setProperty("--panel", hues.panel);
         if (hues.accent) document.documentElement.style.setProperty("--accent", hues.accent);
       }
+      const sizes = { s: "0.875", m: "1", l: "1.125", xl: "1.25" };
+      const size = localStorage.getItem("harness.textSize");
+      if (size && sizes[size]) document.documentElement.style.setProperty("--text-scale", sizes[size]);
     } catch (e) { /* private mode */ }
   </script>
 </head>

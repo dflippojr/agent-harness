@@ -1642,6 +1642,26 @@ function applyTheme(name, hues) {
 }
 applyTheme();
 
+const TEXT_SIZES = {
+  s: { label: "Small", sample: "Aa", scale: 0.875 },
+  m: { label: "Default", sample: "Aa", scale: 1 },
+  l: { label: "Large", sample: "Aa", scale: 1.125 },
+  xl: { label: "Extra", sample: "Aa", scale: 1.25 },
+};
+function readTextSize() {
+  try {
+    const id = localStorage.getItem("harness.textSize") || "m";
+    return TEXT_SIZES[id] ? id : "m";
+  } catch (_) { return "m"; }
+}
+function applyTextSize(id) {
+  const size = TEXT_SIZES[id] ? id : readTextSize();
+  document.documentElement.style.setProperty("--text-scale", String(TEXT_SIZES[size].scale));
+  try { localStorage.setItem("harness.textSize", size); } catch (_) { /* private mode */ }
+  requestAnimationFrame(layoutBar);
+}
+applyTextSize();
+
 function copyBox(value) {
   const code = h("code", {}, value);
   const btn = h("button", {
@@ -1675,7 +1695,7 @@ function accountCard(me, profile) {
   return h("div", {},
     isGuest() ? h("div", { class: "card" },
       h("p", { class: "muted small" }, "Profile icon is owner-only during demo access."),
-      h("p", { style: "font-size:32px;margin:0" }, profile.emoji))
+      h("p", { style: "font-size:2rem;margin:0" }, profile.emoji))
       : h("div", { class: "card" },
       h("p", { class: "muted small" }, "Shown at the top left of the app."),
       emojiPicker(profile)),
@@ -1763,8 +1783,10 @@ function appearanceCard() {
   let theme = readTheme();
   let hues = readHues();
   let appIcon = readAppIcon();
+  let textSize = readTextSize();
   const hueRow = h("div", { class: "hue-row", hidden: theme !== "custom" });
   const grid = h("div", { class: "theme-grid" });
+  const sizes = h("div", { class: "size-grid", role: "group", "aria-label": "Text size" });
   const icons = h("div", { class: "app-icon-grid" });
   const themeSwatch = (id, spec) => {
     if (id === "auto") {
@@ -1782,6 +1804,12 @@ function appearanceCard() {
     },
       themeSwatch(id, spec),
       h("div", { class: "name" }, spec.label))));
+    fill(sizes, Object.entries(TEXT_SIZES).map(([id, spec]) => h("button", {
+      class: `size-choice${textSize === id ? " on" : ""}`, type: "button", "aria-label": spec.label,
+      onclick: () => { textSize = id; applyTextSize(textSize); paint(); },
+    },
+      h("span", { class: "sample", style: `font-size:${16 * spec.scale}px` }, spec.sample),
+      h("span", { class: "name" }, spec.label))));
     fill(icons, APP_ICONS.map((spec) => h("button", {
       class: `app-icon-choice${appIcon === spec.id ? " on" : ""}`, type: "button",
       onclick: () => { appIcon = spec.id; applyAppIcon(appIcon); paint(); },
@@ -1816,6 +1844,9 @@ function appearanceCard() {
   return h("div", { class: "card" },
     h("p", { class: "muted small" }, "How the app looks on this phone. The profile icon — the emoji next to your name — lives on the Profile card."),
     grid, hueRow,
+    h("p", { class: "section-label" }, "Text size"),
+    h("p", { class: "muted small" }, "This phone only, like the theme. Session list, transcript, Settings, and the header all follow it."),
+    sizes,
     h("p", { class: "section-label" }, "Home screen icon"),
     h("p", { class: "muted small" }, "Used when you add this app to the home screen. Separate from the profile icon."),
     icons,

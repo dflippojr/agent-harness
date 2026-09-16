@@ -51,6 +51,7 @@ def test_web_app_and_guard(tmp_path):
         assert "session-chrome" in js and "jump-top" in js and 'method: "PATCH"' in js
         assert "session-title" in js
         assert "harness.theme" in js
+        assert "harness.textSize" in js and "TEXT_SIZES" in js and "applyTextSize" in js
         assert 'setHeader("agents", "New task", { page: true })' in js
         assert "0.75 * window.innerHeight" in js
         assert 'type: "color"' not in js
@@ -60,6 +61,7 @@ def test_web_app_and_guard(tmp_path):
         assert 'id="guest-banner"' in client.get("/").text
         assert 'id="bar"' in client.get("/").text
         assert 'id="feature-nav"' in client.get("/").text
+        assert "harness.textSize" in client.get("/").text
         assert "paintGuestChrome" in js and "isGuest()" in js
         css = client.get("/static/style.css").text
         assert "safe-area-inset-top, 0px) + 18px" in css
@@ -67,6 +69,8 @@ def test_web_app_and_guard(tmp_path):
         assert ".swatch.split" in css and ".hue-preview" in css
         assert "#fab-host" in css and "width: 9.75rem" in css
         assert "#guest-banner" in css
+        assert "--text-scale" in css and "max(16px, 1rem)" in css
+        assert ".size-grid" in css
         assert 'showFab("#/new", "+ New task")' in js
         assert 'showFab("#/jobs/new", "+ New job")' in js
         assert 'api("/backends?auth=skip")' in js
