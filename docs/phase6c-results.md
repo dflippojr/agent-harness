@@ -40,7 +40,17 @@ Live on the tower (2026-09-15):
 | Streamed usage without `include_usage` | recorded from `timings` after the fix |
 | MacBook over Tailscale (issue #6 follow-up) | disposable standard-library probe fetched models, received 128 SSE chunks and a requested `get_weather` tool call in 20.94 s; temporary key revoked afterward |
 
-Not tested live: the 90 s fairness rule and 429 under real load (both covered by tests).
+### Issue #11 live queue exit (2026-09-16)
+
+- **429 limit:** one real local-agent model call held the GPU while four endpoint requests filled the configured
+  waiting slots. A fifth request returned 429 in 0.02 s; after the holder session was cancelled, all four queued
+  requests completed with 200 and the gate drained to zero running / zero waiting.
+- **90-second fairness:** a real streaming endpoint request held the GPU while a local agent waited. A newer endpoint
+  request was added after 97.16 s. When the held stream closed, the gate changed to zero running / one waiting,
+  proving the starved agent acquired the GPU before the newer endpoint. The agent finished normally and the newer
+  request then completed with 200 in 3.91 s.
+- The verification key was revoked immediately afterward. The long 429-holder session was cancelled deliberately;
+  the fairness session completed normally.
 
 ### Embeddings follow-up (2026-09-15, issue #10)
 
