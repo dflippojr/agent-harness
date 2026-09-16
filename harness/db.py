@@ -514,7 +514,8 @@ class Database:
     # inference endpoint keys and request log
     def create_api_key(self, name: str, scopes: str = "inference", kind: str = "device") -> tuple[dict, str]:
         import hashlib
-        key = ("ha-" if kind == "app" else "hk-") + secrets.token_urlsafe(32)
+        prefix = {"app": "ha-", "owner": "ho-"}.get(kind, "hk-")
+        key = prefix + secrets.token_urlsafe(32)
         row = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": key[:10], "created_at": time.time(),
                "scopes": scopes, "kind": kind}
         with self.lock:

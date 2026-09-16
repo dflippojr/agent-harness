@@ -18,7 +18,8 @@ git clone https://github.com/dflippojr/agent-harness; cd agent-harness
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
-No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`).
+No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`);
+the owner API is `docs/admin-api.md`.
 
 ## Phase 8: subscription backends, Remote Control, answer checks
 
@@ -66,6 +67,9 @@ it grew into the first-party operator UI rather than a thin session list:
 - Time-boxed guest/demo access (`guests:` in untracked `config/harness.local.yaml`): a named tailnet
   login can browse read-only until an ISO `until`. Requires `allowed_logins`. Guests cannot start or
   cancel work, approve, mint keys, pause the GPU, use Remote Control, edit memory, or Review.
+- Owner operations are also versioned at `/api/admin/v1` (`docs/admin-api.md`): Tailscale/localhost
+  owner identity, or an `ho-` bearer token with the `admin` scope. App tokens cannot call that
+  surface. The bundled PWA still uses the unversioned operator routes until #23.
 
 Still open from that pass: **#48** (add agent-harness and the memory library to Remote Control) and
 **#56** (Images: warm ComfyUI when the tab opens, real step progress, unload immediately, in-app
