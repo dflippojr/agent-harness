@@ -382,3 +382,34 @@ items:
       quotas; Mac: "online · N GB free · runner …"). Use one layout per device (free / total, then what is using
       space). Label **Clean up now** with what it removes (stopped sandbox containers, expired session workspaces
       and orphans) and confirm before running.
+
+  - key: session-sticky-title-jumps
+    kind: feature
+    title: "Session page: sticky editable title and jump-to-end arrows"
+    body: |
+      Phone feedback after #32 moved the title out of the header and onto the scrolling page.
+
+      **Title always in view, and editable.** `h2.session-title` sits in the scrolling transcript, so a long thread
+      hides it. Keep the title visible for the whole session (sticky under `#bar`, or in the chrome without going
+      back to the old truncated header title). Tapping it should rename the session. Titles are set only at create
+      today; there is no `PATCH /sessions/{id}`. Wrap rather than ellipsize. Same title on Transcript / Changes / Info.
+
+      **Jump arrows when far from an end.** A long thread can leave the user many screens from the top or bottom.
+      When more than about two viewports from the top, show an ↑ that scrolls to the start. When more than about two
+      viewports from the bottom, show a ↓ that scrolls to the end. Hide each arrow when that end is already in view.
+
+      The existing `.jump` ("↓ Latest") only appears when follow-mode is off and new output arrives. Extend or replace
+      it so both directions work for reading old history, not only catching up to a live stream.
+
+  - key: header-top-inset
+    kind: feature
+    title: "Tighten the extra space above the app header"
+    body: |
+      Phone feedback after the 2026-09-16 iPhone header change.
+
+      `#bar` padding is `env(safe-area-inset-top) + 20px` so content sits below the Dynamic Island / Control Center
+      fade. That extra 20px now looks like too much empty space above the Agents dropdown (and above the ‹ title on
+      Profile/Settings pages).
+
+      Reduce the extra inset while keeping the bar out of the status-bar overlap. Check both the feature-nav header
+      and `#bar.page`.
