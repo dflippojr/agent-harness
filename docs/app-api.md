@@ -25,6 +25,43 @@ Create a token in **Settings → Apps** (or `POST /keys` from the PC:
 Apps see only the sessions they created, unless they hold `sessions:all`. Errors are `{"detail": "..."}`, with 401
 (bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual.
 
+## Pair a separately hosted browser app
+
+Do not paste a long-lived app token into a browser URL. In **Settings → Apps → Pair browser app**, the owner enters
+the client's exact origin (for example `https://control.example`) and scopes, then approves a bootstrap code. The
+code expires after 10 minutes, works once, and can only be redeemed from that exact `Origin`. Browser origins must
+use HTTPS; HTTP is accepted only for loopback development (`localhost`, `127.0.0.1`, or `[::1]`):
+
+```js
+const paired = await fetch(`${daemon}/api/v1/pair`, {
+  method: "POST",
+  headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({code}),
+}).then((r) => r.json());
+const token = paired.token;
+```
+
+The resulting `ha-...` credential is scoped, revocable, and bound to the approved origin. It is an Agent Harness app
+credential, never a Claude, Codex, Cursor, or other provider credential. Keep it out of URLs and logs; send it in
+`Authorization: Bearer ...`. The daemon emits `Access-Control-Allow-Origin` only for the exact paired origin, never
+uses wildcard CORS, and does not allow credentials/cookies. This means ordinary browser mutations cannot ride ambient
+cookies as CSRF. A non-browser client can continue to use the same bearer API without an `Origin` header.
+
+For native `EventSource`, first mint a short-lived stream ticket with the bearer credential:
+
+```js
+const stream = await fetch(`${daemon}/api/v1/sessions/${sid}/events/ticket`, {
+  method: "POST",
+  headers: {Authorization: `Bearer ${token}`},
+}).then((r) => r.json());
+const events = new EventSource(`${daemon}${stream.events_url}`);
+```
+
+The ticket is valid for 60 seconds to establish or briefly reconnect the stream, and is bound to the app, session,
+and origin. It contains no bearer/provider credential, is stored only as a hash, and stops working immediately if the
+app is revoked. Track the latest event `seq`. After a long iOS suspension, close the old `EventSource`, mint a fresh
+ticket, and reconnect with `&after=<last-seq>`; normal short reconnects also resume via `Last-Event-ID`.
+
 ## Quick start (Python)
 
 ```python
@@ -221,3 +258,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | --- | --- | --- |
 | 1.0 | 2026-09-15 | First release: sessions, context, app tools, events, approvals, images, scoped tokens |
 | 1.1 | 2026-09-15 | `remote_control` scope and endpoints; `ungrounded_quotes` in `run_finished` and as an event |
+| 1.2 | 2026-09-16 | Exact-origin browser pairing/CORS and short-lived authenticated SSE stream tickets |
