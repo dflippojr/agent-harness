@@ -36,6 +36,13 @@ class CreateSession(BaseModel):
     title: str | None = None
 
 
+class CreateProject(BaseModel):
+    name: str
+    description: str = ""
+    target: str = "tower"
+    repo: str = ""  # empty workspace, or a local folder / git URL cloned for each session
+
+
 class SendMessage(BaseModel):
     content: str
 
@@ -122,6 +129,21 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     def mgr(request: Request) -> Manager:
         return request.app.state.manager
+
+    def owner_id(request: Request) -> str:
+        ident = request.state.access
+        return "owner" if ident.role == "owner" else f"guest:{ident.login or 'unknown'}"
+
+    def owned_session(request: Request, ref: str) -> tuple[Manager, str, dict]:
+        """Resolve a human-facing session only inside the caller's durable owner scope."""
+        m = mgr(request)
+        if request.state.access.role == "guest":
+            raise HarnessError(404, "no session matches that id")
+        sid = m.resolve_id(ref)
+        session = m.db.get_session(sid)
+        if session is None or session.get("owner_id", "owner") != owner_id(request):
+            raise HarnessError(404, "no session matches that id")
+        return m, sid, session
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -217,8 +239,23 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/projects")
     async def projects(request: Request):
         cfg = mgr(request).cfg
+        scope = owner_id(request)
         return [{"name": p.name, "description": p.description, "repo": bool(p.repo), "homelab": p.homelab,
-                 "target": p.target} for p in cfg.projects.values()]
+                 "target": p.target, "managed": p.managed} for p in cfg.projects.values() if p.owner_id == scope]
+
+    @app.post("/projects", status_code=201)
+    async def create_project(body: CreateProject, request: Request):
+        cfg = mgr(request).cfg
+        if body.target != "tower" and body.target not in cfg.runners:
+            raise HarnessError(400, f"runner {body.target!r} is not configured")
+        project = config_mod.Project(name=body.name, description=body.description, target=body.target,
+                                     repo=body.repo, owner_id=owner_id(request), managed=True)
+        try:
+            config_mod.add_project(cfg, project)
+        except (OSError, ValueError, TypeError) as e:
+            raise HarnessError(400, str(e))
+        return {"name": project.name, "description": project.description, "repo": bool(project.repo),
+                "homelab": False, "target": project.target, "managed": True}
 
     # runners (the MacBook): outbound long-polling, authenticated with a per-runner bearer token
     def runner_auth(request: Request, name: str) -> Manager:
@@ -370,6 +407,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = mgr(request)
         if m.remote_control is None:
             return {"enabled": False, "projects": []}
+        if request.state.access.role == "guest":
+            return {"enabled": True, "projects": []}
         return {"enabled": True, "projects": m.remote_control.status()}
 
     @app.post("/remote-control/{project}")
@@ -399,14 +438,17 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/queue")
     async def queue(request: Request):
-        positions = mgr(request).scheduler.positions()
-        return [{"session_id": sid, "position": pos} for sid, pos in sorted(positions.items(), key=lambda x: x[1])]
+        m = mgr(request)
+        scope = owner_id(request)
+        positions = m.scheduler.positions()
+        return [{"session_id": sid, "position": pos} for sid, pos in sorted(positions.items(), key=lambda x: x[1])
+                if (m.db.get_session(sid) or {}).get("owner_id", "owner") == scope]
 
     @app.get("/sessions")
     async def list_sessions(request: Request, limit: int = 50):
         m = mgr(request)
         out = []
-        for s in m.db.list_sessions(limit):
+        for s in m.db.list_sessions(limit, owner_id=owner_id(request)):
             item = m.summary(s)
             full = m.db.get_session(s["id"])
             user_messages = [" ".join(e["data"].get("content", "").split()) for e in m.db.events(s["id"])
@@ -458,6 +500,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         """Full-text search over past sessions. Passages mark matches with \\u0002 ... \\u0003."""
         from . import search
         m = mgr(request)
+        if request.state.access.role == "guest":
+            return {"query": q, "mode": "all", "results": []}
         if not m.cfg.search.enabled:
             raise HarnessError(400, "session search is disabled in config/harness.yaml")
         return await asyncio.to_thread(search.search, m.db, q, project, max(1, min(limit, 50)))
@@ -466,39 +510,40 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def create_session(body: CreateSession, request: Request):
         m = mgr(request)
         s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
-                     model=body.model, title=body.title)
+                     model=body.model, title=body.title, owner_id=owner_id(request))
         return m.summary(s)
 
     @app.get("/sessions/{ref}")
     async def get_session(ref: str, request: Request):
-        m = mgr(request)
-        return m.summary(m.get(ref))
+        m, _, session = owned_session(request, ref)
+        return m.summary(session)
 
     @app.patch("/sessions/{ref}")
     @app.put("/sessions/{ref}")
     async def patch_session(ref: str, body: SessionUpdate, request: Request):
-        m = mgr(request)
-        return m.summary(m.rename(ref, body.title))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(m.rename(sid, body.title))
 
     @app.post("/sessions/{ref}/messages")
     async def send_message(ref: str, body: SendMessage, request: Request):
-        m = mgr(request)
-        return m.summary(await m.send(ref, body.content))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(await m.send(sid, body.content))
 
     @app.post("/sessions/{ref}/rerun", status_code=201)
     async def rerun(ref: str, request: Request):
-        m = mgr(request)
-        return m.summary(m.rerun(ref))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(m.rerun(sid))
 
     @app.get("/sessions/{ref}/changes")
     async def changes(ref: str, request: Request):
-        return await mgr(request).changes(ref)
+        m, sid, _ = owned_session(request, ref)
+        return await m.changes(sid)
 
     @app.post("/sessions/{ref}/review/{action}")
     async def review(ref: str, action: str, request: Request):
         """merge | push | discard the session's git branch."""
-        m = mgr(request)
-        return m.summary(await m.review(ref, action))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(await m.review(sid, action))
 
     @app.get("/maintenance")
     async def maintenance(request: Request):
@@ -514,8 +559,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/sessions/{ref}/approvals")
     async def approvals(ref: str, request: Request, all: bool = False):
-        m = mgr(request)
-        sid = m.resolve_id(ref)
+        m, sid, _ = owned_session(request, ref)
         rows = m.db.approvals(sid) if all else m.db.pending_approvals(sid)
         return [public_approval(a) for a in rows]
 
@@ -523,8 +567,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def decide(ref: str, approval_id: str, body: Decision, request: Request):
         if body.decision not in ("approve", "deny"):
             raise HarnessError(400, "decision must be approve or deny")
-        return mgr(request).decide(ref, None if approval_id == "pending" else approval_id,
-                                   body.decision == "approve", body.note)
+        m, sid, _ = owned_session(request, ref)
+        return m.decide(sid, None if approval_id == "pending" else approval_id,
+                        body.decision == "approve", body.note)
 
     @app.post("/a/{token}/{decision}")
     async def decide_by_token(token: str, decision: str, request: Request):
@@ -536,13 +581,13 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.post("/sessions/{ref}/cancel")
     async def cancel(ref: str, request: Request):
-        m = mgr(request)
-        return m.summary(await m.cancel(ref))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(await m.cancel(sid))
 
     @app.get("/sessions/{ref}/transcript", response_class=PlainTextResponse)
     async def get_transcript(ref: str, request: Request):
-        m = mgr(request)
-        return transcript.render(m.db, m.resolve_id(ref))
+        m, sid, _ = owned_session(request, ref)
+        return transcript.render(m.db, sid)
 
     # scheduled jobs (jobs.py)
     def jobs_on(request: Request) -> Manager:
@@ -558,6 +603,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/jobs")
     async def list_jobs(request: Request):
         m = jobs_on(request)
+        if request.state.access.role == "guest":
+            return []
         return [job_view(m, j) for j in m.db.list_jobs()]
 
     @app.get("/jobs/preview")
@@ -592,6 +639,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/jobs/{jid}")
     async def get_job(jid: str, request: Request):
         m = jobs_on(request)
+        if request.state.access.role == "guest":
+            raise HarnessError(404, "no such job")
         job = m.db.get_job(jid)
         if job is None:
             raise HarnessError(404, "no such job")
@@ -633,6 +682,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     # templates
     @app.get("/templates")
     async def list_templates(request: Request):
+        if request.state.access.role == "guest":
+            return []
         return mgr(request).db.list_templates()
 
     @app.post("/templates", status_code=201)
@@ -680,6 +731,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def all_events(request: Request):
         """Status-level events for every session (the session list). Live only; reload the list to catch up."""
         m = mgr(request)
+        scope = owner_id(request)
 
         async def stream():
             sub = m.bus.subscribe("*")
@@ -693,7 +745,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                             return
                         yield ": keepalive\n\n"
                         continue
-                    if e["type"] in GLOBAL_TYPES:
+                    session = m.db.get_session(e["session_id"])
+                    if e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope:
                         if e["type"] == "run_finished":
                             e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}
                         yield sse(e)
@@ -707,8 +760,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
         """Server-sent events: replays persisted events after `after`, then streams live ones.
         Ephemeral events (token deltas, queue moves) have `seq: null` and are never replayed."""
-        m = mgr(request)
-        sid = m.resolve_id(ref)
+        m, sid, _ = owned_session(request, ref)
         if request.headers.get("last-event-id", "").isdigit():  # EventSource reconnects resume by itself
             after = max(after, int(request.headers["last-event-id"]))
 

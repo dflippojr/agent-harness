@@ -202,7 +202,7 @@ class Manager:
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
                backend: str = "local",
                title: str | None = None, app: dict | None = None, app_context: str = "", app_tools: list | None = None,
-               app_metadata: dict | None = None, job_id: str = "") -> dict:
+               app_metadata: dict | None = None, job_id: str = "", owner_id: str = "owner") -> dict:
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
         if project not in self.cfg.projects:
@@ -312,7 +312,7 @@ class Manager:
             "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             "run": new_run(), "totals": {}, "inbox": [], "branch": branch,
             "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
-            "job_id": job_id,
+            "job_id": job_id, "owner_id": owner_id,
         }
         with self.db.tx():
             self.db.insert_session(session)
@@ -360,7 +360,7 @@ class Manager:
         backend = s.get("backend", "local")
         model = s["model"] if backend != "local" or s["model"] in self.cfg.models else None
         return self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
-                           model=model, backend=backend, title=s["title"])
+                           model=model, backend=backend, title=s["title"], owner_id=s.get("owner_id", "owner"))
 
     async def remote(self, s: dict, op: str, params: dict, timeout: float = 300):
         """A request to a session's runner from a user action: fails fast instead of waiting for a sleeping Mac."""

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from .config import Config, GuestAccess
 
-OWNER_GET_PREFIXES = ("/keys", "/metrics")
+OWNER_GET_PREFIXES = ("/keys", "/metrics", "/maintenance")
 RUNNER_PREFIX = "/runners/"
 
 

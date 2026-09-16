@@ -146,8 +146,10 @@ Details and verification: `docs/phase4-results.md`.
 Git-backed projects with a branch per session, allowlisted homelab tools, cleanup and quotas.
 Details and verification: `docs/phase3-results.md`.
 
-- Projects: `config/projects.yaml` (`repo`, `base_branch`, `homelab`, `quota_mb`). Review a session's branch on the
-  Changes tab: merge (local repos), push (URL repos), or discard.
+- Projects: checked-in defaults live in `config/projects.yaml` (`repo`, `base_branch`, `homelab`, `quota_mb`). The
+  owner can add private projects from **New task → New project**; they persist in `<data_dir>/projects.yaml` and hot-
+  load without changing the public config. Review a git project's session branch on the Changes tab: merge (local
+  repos), push (URL repos), or discard. Guest/demo logins receive empty project and session views.
 - Homelab allowlist, cleanup and quota settings: `homelab:` and `cleanup:` in `config/harness.yaml`.
 - API: `POST /sessions/{id}/review/{merge|push|discard}`, `GET /maintenance`, `POST /maintenance/cleanup`.
 - After code or config changes: `.\ops\harness\restart-daemon.ps1`.
