@@ -47,6 +47,11 @@ def test_web_app_and_guard(tmp_path):
     with client:
         assert "<title>Agents</title>" in client.get("/").text
         assert client.get("/static/app.js").status_code == 200
+        profile = client.get("/profile").json()
+        assert profile["emoji"] == "🙂" and "🚀" in profile["choices"]
+        assert client.put("/profile", json={"emoji": "🚀"}).json()["emoji"] == "🚀"
+        assert client.get("/profile").json()["emoji"] == "🚀"
+        assert client.put("/profile", json={"emoji": "nope"}).status_code == 400
         assert client.get("/sw.js").headers["content-type"].startswith("text/javascript")
         assert client.get("/manifest.webmanifest").json()["display"] == "standalone"
         # tailnet identity
@@ -58,6 +63,21 @@ def test_web_app_and_guard(tmp_path):
         assert client.post("/sessions", json=body, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
         assert client.post("/sessions", json=body, headers={"Origin": PUBLIC}).status_code == 201
         assert client.post("/sessions", json=body).status_code == 201
+
+
+def test_session_list_has_whole_chat_summary(tmp_path):
+    client, m, _ = make_client(tmp_path, [Completion(content="Changed the palette."),
+                                          Completion(content="Moved the control to the header.")])
+    with client:
+        sid = client.post("/sessions", json={"prompt": "Make dark mode black"}).json()["id"]
+        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        client.post(f"/sessions/{sid}/messages", json={"content": "Also move the profile control"})
+        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        card = next(item for item in client.get("/sessions").json() if item["id"] == sid)
+        assert "Make dark mode black" in card["chat_summary"]
+        assert "Also move the profile control" in card["chat_summary"]
+        assert "Moved the control to the header" in card["chat_summary"]
+        assert "answer_preview" not in card
 
 
 def test_approval_notification_and_token_buttons(tmp_path):

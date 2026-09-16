@@ -355,7 +355,7 @@ def test_image_batch_takes_gpu_and_gives_it_back(tmp_path):
         await m.start(maintenance=False)
         a = m.images.submit("a lighthouse at dusk", model="fast", aspect_ratio="16:9")
         b = m.images.submit("broken", model="quality")
-        c = m.images.submit("a red bicycle", model="quality", aspect_ratio="3:4")
+        c = m.images.submit("a red bicycle", model="quality", aspect_ratio="3:4", resolution="standard")
         for _ in range(100):
             if m.images.gpu_taken and m.runner.gate.exclusive_active:
                 break
@@ -365,7 +365,8 @@ def test_image_batch_takes_gpu_and_gives_it_back(tmp_path):
         done = [await m.images.wait(j["id"]) for j in (a, b, c)]
         assert [j["status"] for j in done] == ["done", "failed", "done"]
         assert "CUDA out of memory" in done[1]["error"]
-        assert (done[0]["width"], done[0]["height"]) == (1344, 768) and (done[2]["width"], done[2]["height"]) == (1104, 1472)
+        assert (done[0]["width"], done[0]["height"]) == (1344, 768) and (done[2]["width"], done[2]["height"]) == (864, 1152)
+        assert done[1]["resolution"] == "high" and done[2]["resolution"] == "standard"
         assert m.images.path(done[0]).read_bytes() == PNG
         steps = [next(n["inputs"]["steps"] for n in g.values() if n["class_type"] == "KSampler") for g in state["graphs"]]
         assert steps == [8, 50, 50]  # fast = Z-Image-Turbo, quality = Qwen-Image-2512
@@ -411,6 +412,7 @@ def test_images_api_and_tool_only_for_tower_sessions(tmp_path):
     m.cfg.projects["mac"] = Project(name="mac", target="macbook")
     with TestClient(create_app(m)) as client:
         assert client.post("/images", json={"prompt": "x", "model": "huge"}).status_code == 400
+        assert client.post("/images", json={"prompt": "x", "resolution": "poster"}).status_code == 400
         job = client.post("/images", json={"prompt": "a cat", "aspect_ratio": "1:1"}).json()
         for _ in range(200):
             if client.get(f"/images/{job['id']}").json()["status"] == "done":
@@ -420,6 +422,7 @@ def test_images_api_and_tool_only_for_tower_sessions(tmp_path):
         assert r.status_code == 200 and r.content == PNG and r.headers["content-type"] == "image/png"
         listing = client.get("/images").json()
         assert listing["images"][0]["id"] == job["id"] and "fast" in listing["status"]["models"]
+        assert listing["status"]["resolutions"]["high"]["sizes"]["16:9"] == [1664, 928]
         tower = {"id": "t", "project": "scratch", "target": "tower", "model": "fake", "workspace": str(tmp_path)}
         mac = {**tower, "project": "mac", "target": "macbook"}
         assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(tower)}

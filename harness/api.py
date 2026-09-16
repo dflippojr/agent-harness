@@ -62,7 +62,12 @@ class ImageRequest(BaseModel):
     prompt: str
     model: str = "fast"
     aspect_ratio: str = "1:1"
+    resolution: str = "auto"
     seed: int | None = None
+
+
+class ProfileUpdate(BaseModel):
+    emoji: str
 
 
 class Job(BaseModel):
@@ -165,6 +170,21 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             "notify": {"enabled": cfg.notify.enabled, "topic": cfg.notify.topic},
         }
 
+    profile_emojis = ("🙂", "😎", "🤓", "🧠", "🤖", "👾", "🧑‍💻", "🦊", "🐙", "🐉", "🦉", "🐝", "🌙", "⭐", "🔥", "⚡", "🎨", "🎯", "🚀", "🛠️", "💻", "🎮", "🎧", "📚")
+
+    @app.get("/profile")
+    async def profile(request: Request):
+        m = mgr(request)
+        return {"emoji": m.db.get_meta("profile_emoji", "🙂"), "choices": profile_emojis}
+
+    @app.put("/profile")
+    async def update_profile(body: ProfileUpdate, request: Request):
+        if body.emoji not in profile_emojis:
+            raise HarnessError(400, "choose one of the available profile icons")
+        m = mgr(request)
+        m.db.set_meta("profile_emoji", body.emoji)
+        return {"emoji": body.emoji, "choices": profile_emojis}
+
     @app.get("/projects")
     async def projects(request: Request):
         cfg = mgr(request).cfg
@@ -243,7 +263,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         from .fileops import ToolError
         svc = images_service(request)
         try:
-            return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio, seed=body.seed)
+            return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
+                              resolution=body.resolution, seed=body.seed)
         except ToolError as e:
             raise HarnessError(400, str(e))
 
@@ -328,8 +349,18 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         out = []
         for s in m.db.list_sessions(limit):
             item = m.summary(s)
-            if s["status"] in ("done", "failed", "cancelled"):
-                item["answer_preview"] = (m.db.get_session(s["id"])["answer"] or "")[:200]
+            full = m.db.get_session(s["id"])
+            user_messages = [" ".join(e["data"].get("content", "").split()) for e in m.db.events(s["id"])
+                             if e["type"] == "user_message" and e["data"].get("content", "").strip()]
+            asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
+            if len(user_messages) > 3:
+                asks += f" · {len(user_messages) - 3} more follow-up{'s' if len(user_messages) > 4 else ''}"
+            answer = " ".join((full["answer"] or "").split())
+            if answer:
+                outcome = answer[:110] + ("…" if len(answer) > 110 else "")
+                item["chat_summary"] = f"{asks} — {outcome}" if asks else outcome
+            else:
+                item["chat_summary"] = asks
             out.append(item)
         return out
 

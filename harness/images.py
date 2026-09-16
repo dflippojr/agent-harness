@@ -38,13 +38,15 @@ log = logging.getLogger("harness.images")
 
 TOOLS = ("generate_image",)
 ASPECTS = ("1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3")
-SIZES = {
+RESOLUTIONS = {"standard": "Standard", "high": "High"}
+RESOLUTION_SIZES = {
     # Qwen-Image's native sizes (template notes); Z-Image-Turbo trained around 1024 px
-    "quality": {"1:1": (1328, 1328), "16:9": (1664, 928), "9:16": (928, 1664), "4:3": (1472, 1104),
+    "high": {"1:1": (1328, 1328), "16:9": (1664, 928), "9:16": (928, 1664), "4:3": (1472, 1104),
                 "3:4": (1104, 1472), "3:2": (1584, 1056), "2:3": (1056, 1584)},
-    "fast": {"1:1": (1024, 1024), "16:9": (1344, 768), "9:16": (768, 1344), "4:3": (1152, 864),
+    "standard": {"1:1": (1024, 1024), "16:9": (1344, 768), "9:16": (768, 1344), "4:3": (1152, 864),
              "3:4": (864, 1152), "3:2": (1216, 832), "2:3": (832, 1216)},
 }
+MODEL_RESOLUTION = {"fast": "standard", "quality": "high"}
 MODELS = {
     "fast": {"label": "Z-Image-Turbo (fast, Apache 2.0)", "negative": False},
     "quality": {"label": "Qwen-Image-2512 (quality, Apache 2.0)", "negative": True},
@@ -64,6 +66,7 @@ def schemas(cfg: ImagesConfig) -> list[dict]:
             "prompt": {"type": "string", "description": "Detailed description of the image."},
             "filename": {"type": "string", "description": "Where to save it in the workspace, e.g. assets/logo.png"},
             "aspect_ratio": {"type": "string", "description": f"One of {', '.join(ASPECTS)}. Default 1:1."},
+            "resolution": {"type": "string", "description": "standard or high. Defaults to the model's native size."},
             "model": {"type": "string", "description": "fast or quality. Default fast."},
         }, "required": ["prompt", "filename"]},
     }}]
@@ -234,8 +237,8 @@ class ImageService:
             await self.comfy.stop()
 
     # jobs
-    def submit(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", source: str = "phone",
-               session_id: str = "", seed: int | None = None) -> dict:
+    def submit(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", resolution: str = "auto",
+               source: str = "phone", session_id: str = "", seed: int | None = None) -> dict:
         prompt = prompt.strip()
         if not prompt:
             raise ToolError("prompt is empty")
@@ -243,9 +246,13 @@ class ImageService:
             raise ToolError(f"model must be one of {', '.join(MODELS)}")
         if aspect_ratio not in ASPECTS:
             raise ToolError(f"aspect_ratio must be one of {', '.join(ASPECTS)}")
-        width, height = SIZES[model][aspect_ratio]
+        if resolution == "auto":
+            resolution = MODEL_RESOLUTION[model]
+        if resolution not in RESOLUTIONS:
+            raise ToolError(f"resolution must be one of {', '.join(RESOLUTIONS)}")
+        width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
         job = {"id": uuid.uuid4().hex[:12], "session_id": session_id, "source": source, "prompt": prompt[:4000],
-               "model": model, "aspect_ratio": aspect_ratio, "width": width, "height": height,
+               "model": model, "aspect_ratio": aspect_ratio, "resolution": resolution, "width": width, "height": height,
                "seed": seed if seed is not None else random.randrange(2**48)}
         self.db.insert_image(job)
         self._done[job["id"]] = asyncio.Event()
@@ -380,7 +387,9 @@ class ImageService:
     def status(self) -> dict:
         return {"enabled": self.cfg.enabled, "phase": self.phase, "active_job": self.active_job,
                 "queued": self.queue.qsize(), "progress": self.progress,
-                "models": {k: v["label"] for k, v in MODELS.items()}, "aspect_ratios": list(ASPECTS)}
+                "models": {k: v["label"] for k, v in MODELS.items()}, "aspect_ratios": list(ASPECTS),
+                "resolutions": {name: {"label": label, "sizes": {aspect: list(size) for aspect, size in RESOLUTION_SIZES[name].items()}}
+                                for name, label in RESOLUTIONS.items()}}
 
     # agent tool
     async def call(self, name: str, args: dict, workspace_root: Path | None = None) -> str:
@@ -394,7 +403,8 @@ class ImageService:
         if not target.is_relative_to(workspace_root.resolve()):
             raise ToolError(f"filename escapes the workspace: {filename}")
         job = self.submit(args["prompt"], model=args.get("model") or "fast",
-                          aspect_ratio=args.get("aspect_ratio") or "1:1", source="agent",
+                          aspect_ratio=args.get("aspect_ratio") or "1:1", resolution=args.get("resolution") or "auto",
+                          source="agent",
                           session_id=args.get("_session", ""))
         job = await self.wait(job["id"])
         if job["status"] != "done":

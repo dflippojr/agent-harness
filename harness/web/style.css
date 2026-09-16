@@ -24,13 +24,14 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #101418;
-    --panel: #181d23;
-    --panel-2: #20262e;
-    --text: #e6e9ed;
-    --muted: #97a1ad;
-    --line: #2b323b;
-    --accent: #4f8cff;
+    --bg: #000000;
+    --panel: #232323;
+    --panel-2: #303030;
+    --text: #f3f3f3;
+    --muted: #b5b5b5;
+    --line: #3b3b3b;
+    --accent: #dddddd;
+    --accent-text: #171717;
     --ok: #4ade80;
     --warn: #fbbf24;
     --bad: #f87171;
@@ -59,11 +60,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
   position: sticky; top: 0; z-index: 10;
   display: flex; align-items: center; gap: 8px;
   padding: calc(env(safe-area-inset-top) + 8px) 16px 8px;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
   backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
 }
-#bar h1 { flex: 1; margin: 0; font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#bar h1 { flex: 1; margin: 0; font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+#feature-nav {
+  width: auto; max-width: 190px; min-height: 40px; padding: 7px 32px 7px 11px; border: 0;
+  background-color: var(--panel-2); font-weight: 650; cursor: pointer;
+}
+.profile-icon { font-size: 24px; border-radius: 50%; background: var(--panel-2); padding: 0; margin: 0; }
 .icon {
   border: 0; background: none; font-size: 26px; line-height: 1; padding: 4px 8px; margin: -4px;
   color: var(--accent); text-decoration: none; cursor: pointer; min-width: 44px; min-height: 44px;
@@ -80,6 +86,7 @@ main { max-width: 760px; margin: 0 auto; padding: 12px 16px 120px; }
   background: var(--panel); cursor: pointer; font-weight: 500; text-decoration: none; color: var(--text);
 }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn.new-task { background: #d7d7d7; border-color: #d7d7d7; color: #202020; }
 .btn.ok { background: var(--ok); border-color: var(--ok); color: #fff; }
 .btn.bad { color: var(--bad); }
 .btn.bad.solid { background: var(--bad); border-color: var(--bad); color: #fff; }
@@ -116,6 +123,7 @@ main { max-width: 760px; margin: 0 auto; padding: 12px 16px 120px; }
 
 label { display: block; font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
 input.search { flex: 1; min-width: 0; }
+.search-wrap { margin: 4px 0 8px; }
 .passage { margin-top: 6px; color: var(--text); overflow-wrap: anywhere; }
 mark { background: var(--warn-bg); color: inherit; border-radius: 3px; padding: 0 2px; }
 input[type=text], input[type=search], select, textarea {
@@ -220,3 +228,15 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .image-card .preview { -webkit-line-clamp: 2; margin-top: 6px; }
 .image-full { width: 100%; height: auto; border-radius: 10px; display: block; margin-bottom: 12px; }
 .small.bad, .preview.bad { color: var(--bad); }
+
+/* profile and image choices */
+.emoji-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-top: 10px; }
+.emoji-choice { min-width: 0; padding: 7px; font-size: 24px; background: var(--panel-2); }
+.emoji-choice.selected { outline: 2px solid var(--text); outline-offset: 1px; }
+.resolution-group { margin-top: 12px; }
+.field-label { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.resolution-options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.resolution-option { margin: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; }
+.resolution-option:has(input:checked) { border-color: var(--text); background: var(--panel-2); }
+.resolution-option input { width: auto; margin: 0 7px 0 0; }
+.resolution-option .size { display: block; margin-left: 24px; font-size: 12px; font-weight: 400; color: var(--muted); }

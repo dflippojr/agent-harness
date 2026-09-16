@@ -5,7 +5,7 @@
 //   #/s/<id>/approval/<aid>  same, focused on one approval (notification deep link)
 //   #/s/<id>/changes         diff viewer
 //   #/s/<id>/info            session details
-//   #/settings               identity, notifications, install help
+//   #/profile                identity, icon, notifications, and system controls
 //   #/images[/<id>]          image generation and gallery
 //   #/jobs[/new|/<id>]       scheduled jobs
 
@@ -13,6 +13,8 @@ const $app = document.getElementById("app");
 const $title = document.getElementById("title");
 const $back = document.getElementById("back");
 const $conn = document.getElementById("conn");
+const $feature = document.getElementById("feature-nav");
+const $profileIcon = document.getElementById("profile-icon");
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 const STATUS_LABEL = {
   queued: "queued", running: "running", waiting_approval: "needs approval", waiting_target: "waiting for Mac", waiting_app: "waiting for app", waiting_limit: "waiting for limit",
@@ -40,6 +42,16 @@ const progressBar = (fraction) => h("div", { class: `progress${fraction === null
 
 let cleanup = [];
 const onLeave = (fn) => cleanup.push(fn);
+
+function setHeader(feature, pageTitle = "") {
+  $feature.value = feature;
+  $title.textContent = pageTitle;
+  $title.hidden = !pageTitle;
+}
+
+async function loadProfileIcon() {
+  try { $profileIcon.textContent = (await api("/profile")).emoji; } catch (_) { /* offline */ }
+}
 
 // ---------- utilities ----------
 function h(tag, attrs = {}, ...children) {
@@ -202,7 +214,7 @@ async function route() {
   try {
     if (parts.length === 0) await viewList();
     else if (parts[0] === "new") await viewNew();
-    else if (parts[0] === "settings") await viewSettings();
+    else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile();
     else if (parts[0] === "images") await (parts[1] ? viewImage(parts[1]) : viewImages());
     else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
     else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
@@ -215,6 +227,9 @@ $back.addEventListener("click", () => {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   location.hash = parts[0] === "s" && parts.length > 2 ? `#/s/${parts[1]}` : "#/";
 });
+$feature.addEventListener("change", () => {
+  location.hash = $feature.value === "jobs" ? "#/jobs" : $feature.value === "images" ? "#/images" : "#/";
+});
 window.addEventListener("hashchange", route);
 
 // ---------- session list ----------
@@ -225,15 +240,13 @@ const markPassage = (text) => escapeHtml(text).replace(//g, "<mark>").replace(/
 const PASSAGE_KIND = { title: "title", message: "you", assistant: "agent", tool: "tool output", answer: "answer", context: "app context" };
 
 async function viewList() {
-  $title.textContent = "Agents";
+  setHeader("agents");
   const list = h("div");
   const results = h("div", { hidden: true });
   const queueNote = h("p", { class: "note" });
-  const search = h("input", { type: "search", placeholder: "Search past sessions", value: searchQuery, class: "search" });
-  $app.append(h("div", { class: "row", style: "margin:4px 0 8px;flex-wrap:nowrap" }, search,
-    h("a", { class: "btn small", href: "#/jobs", title: "Scheduled jobs" }, "⏰ Jobs"),
-    h("a", { class: "btn small", href: "#/images", title: "Images" }, "🖼")), queueNote, results, list);
-  document.body.append(h("a", { class: "btn primary fab", href: "#/new" }, "+ New task"));
+  const search = h("input", { type: "search", placeholder: "Search", value: searchQuery, class: "search" });
+  $app.append(h("div", { class: "search-wrap" }, search), queueNote, results, list);
+  document.body.append(h("a", { class: "btn new-task fab", href: "#/new" }, "+ New task"));
 
   const runSearch = async () => {
     const q = search.value.trim();
@@ -264,7 +277,7 @@ async function viewList() {
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && gpu.state !== "clear";
     queueNote.replaceChildren(
-      paused ? h("a", { href: "#/settings" }, `⏸ ${gpuText(gpu)}`) : "",
+      paused ? h("a", { href: "#/profile" }, `⏸ ${gpuText(gpu)}`) : "",
       paused && waiting ? " · " : "",
       waiting ? `${waiting} waiting for the GPU` : "");
     if (!sessions.length) {
@@ -283,7 +296,7 @@ async function viewList() {
           s.job_status ? jobStatusBadge(s.job_status) : null,
           s.target !== "tower" ? h("span", {}, `💻 ${TARGET_LABEL[s.target] || s.target}`) : null,
           h("span", {}, s.project), h("span", {}, ago(s.updated_at))),
-        s.answer_preview ? h("div", { class: "preview" }, s.answer_preview) : null);
+        s.chat_summary ? h("div", { class: "preview" }, s.chat_summary) : null);
     }));
   };
   await render();
@@ -301,7 +314,7 @@ async function viewList() {
 
 // ---------- new task ----------
 async function viewNew() {
-  $title.textContent = "New task";
+  setHeader("agents", "New task");
   const [projects, models, allTemplates, backends] = await Promise.all([
     api("/projects"), api("/models"), api("/templates"), api("/backends")]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
@@ -472,7 +485,7 @@ route();
 async function viewSession(sid, tab, focusApproval) {
   let session = await api(`/sessions/${sid}`);
   sid = session.id;
-  $title.textContent = session.title;
+  setHeader("agents", session.title);
 
   const tabs = h("div", { class: "tabs" },
     ["transcript", "changes", "info"].map((name) => h("button", {
@@ -1023,7 +1036,7 @@ function imageCard(img) {
 }
 
 async function viewImages() {
-  $title.textContent = "Images";
+  setHeader("images");
   let data;
   try { data = await api("/images"); } catch (e) { $app.append(h("p", { class: "note bad" }, e.message)); return; }
   const prompt = h("textarea", { placeholder: "Describe the image…" });
@@ -1032,6 +1045,29 @@ async function viewImages() {
   prompt.addEventListener("input", () => { try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ } });
   const model = h("select", {}, Object.entries(data.status.models).map(([k, label]) => h("option", { value: k }, label)));
   const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
+  let resolutionTouched = false;
+  const resolutionInputs = Object.entries(data.status.resolutions).map(([name, spec]) => {
+    const input = h("input", { type: "radio", name: "resolution", value: name, checked: name === "standard" });
+    input.addEventListener("change", () => { resolutionTouched = true; });
+    const size = h("span", { class: "size" });
+    const label = h("label", { class: "resolution-option" }, input, spec.label, size);
+    return { name, spec, input, size, label };
+  });
+  const renderResolutions = () => {
+    for (const choice of resolutionInputs) {
+      const [w, height] = choice.spec.sizes[aspect.value];
+      choice.size.textContent = `${w} × ${height}`;
+    }
+  };
+  aspect.addEventListener("change", renderResolutions);
+  model.addEventListener("change", () => {
+    if (!resolutionTouched) {
+      const recommended = model.value === "quality" ? "high" : "standard";
+      resolutionInputs.find((choice) => choice.name === recommended).input.checked = true;
+    }
+    renderResolutions();
+  });
+  renderResolutions();
   const phase = h("p", { class: "note" });
   const grid = h("div", { class: "image-grid" });
   const render = (d) => {
@@ -1050,7 +1086,8 @@ async function viewImages() {
         if (!prompt.value.trim()) return toast("Describe the image first");
         go.disabled = true;
         try {
-          await api("/images", { method: "POST", body: { prompt: prompt.value, model: model.value, aspect_ratio: aspect.value } });
+          const resolution = resolutionInputs.find((choice) => choice.input.checked).name;
+          await api("/images", { method: "POST", body: { prompt: prompt.value, model: model.value, aspect_ratio: aspect.value, resolution } });
           try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
           render(await api("/images"));
         } catch (err) { toast(err.message); }
@@ -1059,7 +1096,9 @@ async function viewImages() {
     },
     h("label", {}, "Prompt"), prompt,
     h("div", { class: "row" }, h("div", { style: "flex:2" }, h("label", {}, "Model"), model),
-      h("div", { style: "flex:1" }, h("label", {}, "Aspect"), aspect)),
+      h("div", { style: "flex:1" }, h("label", {}, "Aspect ratio"), aspect)),
+    h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
+      h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
     h("p", { class: "muted small" }, "The language model is unloaded while images generate; running tasks pause for a few minutes."),
     h("div", { class: "row", style: "margin-top:12px" }, h("span", { class: "spacer" }), go)),
     phase, grid);
@@ -1068,7 +1107,7 @@ async function viewImages() {
 }
 
 async function viewImage(id) {
-  $title.textContent = "Image";
+  setHeader("images", "Image");
   const load = async () => {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
@@ -1083,7 +1122,7 @@ async function viewImage(id) {
             class: "btn",
             onclick: async () => {
               try {
-                const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio } });
+                const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio, resolution: img.resolution } });
                 location.hash = `#/images/${again.id}`;
               } catch (e) { toast(e.message); }
             },
@@ -1120,7 +1159,7 @@ const whenText = (ts) => {
 const cronLabel = (cron) => (CRON_PRESETS.find(([c]) => c === cron) || [null, cron])[1];
 
 async function viewJobs() {
-  $title.textContent = "Scheduled jobs";
+  setHeader("jobs");
   const jobs = await api("/jobs");
   document.body.append(h("a", { class: "btn primary fab", href: "#/jobs/new" }, "+ New job"));
   if (!jobs.length) {
@@ -1141,7 +1180,7 @@ async function viewJobs() {
 
 async function viewJob(id) {
   const isNew = id === "new";
-  $title.textContent = isNew ? "New job" : "Job";
+  setHeader("jobs", isNew ? "New job" : "Job");
   const [projects, models, backends, job] = await Promise.all([
     api("/projects"), api("/models"), api("/backends"), isNew ? null : api(`/jobs/${id}`)]);
   const j = job || {
@@ -1251,15 +1290,29 @@ async function viewJob(id) {
   }
 }
 
-// ---------- settings ----------
-async function viewSettings() {
-  $title.textContent = "Settings";
-  const me = await api("/me");
+// ---------- profile ----------
+async function viewProfile() {
+  setHeader("agents", "Profile");
+  const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
   const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
   const ntfyUrl = me.public_url ? `${me.public_url}:8443` : "(set public_url)";
+  const activeEmoji = h("span", { style: "font-size:36px" }, profile.emoji);
+  const emojiButtons = profile.choices.map((emoji) => h("button", {
+    class: `btn emoji-choice${emoji === profile.emoji ? " selected" : ""}`, type: "button", "aria-label": `Use ${emoji}`,
+    onclick: async (event) => {
+      try {
+        await api("/profile", { method: "PUT", body: { emoji } });
+        activeEmoji.textContent = emoji;
+        $profileIcon.textContent = emoji;
+        for (const button of event.currentTarget.parentNode.children) button.classList.toggle("selected", button === event.currentTarget);
+      } catch (e) { toast(e.message); }
+    },
+  }, emoji));
   $app.append(
-    h("div", { class: "card" }, h("h3", {}, "Signed in"),
-      h("p", {}, me.login ? `${me.name || ""} ${me.login}` : "Local access (no Tailscale identity)")),
+    h("div", { class: "card" }, h("div", { class: "row" }, activeEmoji,
+      h("div", {}, h("h3", {}, "Your profile"), h("div", { class: "muted small" }, me.login ? `${me.name || ""} ${me.login}` : "Local access"))),
+      h("p", { class: "muted small" }, "Choose the icon shown at the top left of the app."),
+      h("div", { class: "emoji-grid" }, emojiButtons)),
     h("div", { class: "card" }, h("h3", {}, "Notifications"),
       me.notify.enabled ? h("ol", {},
         h("li", {}, "Install the ntfy app from the App Store."),
@@ -1272,15 +1325,16 @@ async function viewSettings() {
           try { await api("/notify/test", { method: "POST" }); toast("Test notification sent"); } catch (e) { toast(e.message); }
         },
       }, "Send test notification") : null),
+    h("div", { class: "card" }, h("h3", {}, "Install"),
+      h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")),
+    backendsCard(),
     gpuCard(),
     remoteControlCard(),
-    backendsCard(),
     memoryCard(),
-    endpointCard(me),
     appsCard(me),
+    endpointCard(me),
     diskCard(),
-    h("div", { class: "card" }, h("h3", {}, "Install"),
-      h("p", {}, standalone ? "Running as an installed app." : "In Safari: Share → Add to Home Screen. The app then opens full screen.")));
+  );
 }
 
 function backendsCard() {
@@ -1568,4 +1622,5 @@ if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 warmModel();
+loadProfileIcon();
 route();

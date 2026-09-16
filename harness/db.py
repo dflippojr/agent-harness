@@ -184,6 +184,8 @@ MIGRATIONS = [
     ("sessions", "backend", "TEXT NOT NULL DEFAULT 'local'"),
     ("jobs", "backend", "TEXT NOT NULL DEFAULT 'local'"),
     ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
+    # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
+    ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
 ]
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data"}
@@ -384,6 +386,16 @@ class Database:
                 "SELECT * FROM approvals WHERE session_id = ? ORDER BY created_at", (sid,)).fetchall()
         return [_row(r) for r in rows]
 
+    # small user-facing preferences (profile emoji, later display choices)
+    def get_meta(self, key: str, default: str = "") -> str:
+        with self.lock:
+            row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self.lock:
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
     # hosted backend usage and limits
     def set_backend_usage(self, backend: str, data: dict) -> None:
         with self.lock:
@@ -475,7 +487,7 @@ class Database:
 
     # images
     def insert_image(self, job: dict) -> None:
-        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "width", "height", "seed"]
+        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height", "seed"]
         with self.lock:
             self.conn.execute(f"INSERT INTO images ({','.join(cols)}, status, created_at) VALUES "
                               f"({','.join('?' * len(cols))}, 'queued', ?)", [job[c] for c in cols] + [time.time()])
