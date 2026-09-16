@@ -1,8 +1,13 @@
 # agent-harness
 
-Personal agent harness for `dflippotower`: agents run on the basement PC against local models
-and are driven from the phone or MacBook over Tailscale. The phased plan lives in the agent
-memory library (`categories/project-ideas/capsules/local-agent-harness.md`).
+Personal agent harness for `dflippotower`: agents run on the basement PC against a local model
+**or** your own Claude Code, Codex, or Cursor subscription, and are driven from the phone or
+MacBook over Tailscale. The phased plan lives in the agent memory library
+(`categories/project-ideas/capsules/local-agent-harness.md`).
+
+Phases 0–8 are built. Open work is GitHub issues, mirrored from `docs/backlog.yaml`. The longer-term
+direction is to split the phone PWA (Control Center) from a separately distributable daemon
+(issues #23–#29).
 
 ## Install
 
@@ -15,7 +20,59 @@ powershell -ExecutionPolicy Bypass -File install\install.ps1
 
 No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`).
 
-## Phase 7: memory, search, schedules, documents (current)
+## Phase 8: subscription backends, Remote Control, answer checks
+
+Built as mini-phases (`docs/phase8a-design.md`, `docs/phase8b-results.md`, `docs/phase8c-results.md`).
+Terms and billing notes for app builders are in `docs/app-api.md`.
+
+- Hosted backends (`backends:` in `config/harness.yaml`): unmodified `claude`, `codex`, and Cursor
+  `agent` CLIs run in a provider-only Docker sandbox under your own login. Sign in once with
+  `ops\backends\login.ps1 <backend>`. New task, templates and jobs pick a backend; Settings →
+  Backends shows model/effort, 5h/7d usage and popular-model presets. CLI permission prompts become
+  ordinary harness approvals (web, ntfy, or `/api/v1`). Optional user API-key fallback lives in
+  `D:/Agents/harness/secrets/<backend>-api-key` and is never returned from an API. Cursor print mode
+  uses `--force` only inside its workspace-mounted container, with branch review afterwards.
+- Remote Control (`remote_control:`): Profile → Claude Remote Control starts
+  `claude remote-control --spawn worktree` in a trusted tower git folder so you can pair from the
+  Claude app. Those sessions are native Claude Code (no harness queue, sandbox or transcripts).
+  Trust is Claude's own dialog; the harness never accepts it. Untrusted folders offer **Trust in
+  Claude**, which opens a visible `claude` window on the tower. API:
+  `GET/POST /remote-control/{project}` and `/api/v1/remote-control` (scope `remote_control`).
+  Eligible today: tower projects whose `repo` is a local folder.
+- Quote checks (`web.quote_check`): a quoted passage of 25+ characters in a final answer must
+  appear in something the agent read. One fix request, then a ⚠ flag on the answer and the Done
+  notification. `web_fetch` reads GitHub repository and folder pages through the public API (license,
+  README, file list) and file pages from `raw.githubusercontent.com`, falling back to HTML.
+
+## Control Center
+
+The daemon serves an installable phone PWA (Agents, Jobs, Images, Profile/Settings). After Phase 8
+it grew into the first-party operator UI rather than a thin session list:
+
+- Agents / Jobs / Images are tabs; session Transcript / Changes / Info are tabs. Session titles sit
+  on the page, stay sticky, and are editable (`PATCH`/`PUT /sessions/{id}`). Jump arrows appear when
+  you are about 0.75 viewport from an end. The session list filters by machine and skips a rebuild
+  while a finger is down so the first tap opens a card.
+- Review shows merge-conflict filenames and **Ask agent to resolve**. Scratch/mac-scratch is
+  explained as a disposable empty folder, not a git repo.
+- Settings: Memory (editable agent profile through the approved-write path), Appearance (themes,
+  home-screen icon, in-app text size), Backends as controls including local Qwen, Disk used/free
+  bars and cleanup. New task / New job / job details / Backends paint from `GET /backends?auth=skip`
+  (~50 ms); live login/usage fills in afterwards.
+- Mac sessions get `generate_image`: after ComfyUI finishes on the tower the PNG is copied into the
+  Mac workspace (`put_file`, runner 4.1). Redeploy the runner (`ops\macbook\deploy.ps1`) to pick
+  that up.
+- Time-boxed guest/demo access (`guests:` in untracked `config/harness.local.yaml`): a named tailnet
+  login can browse read-only until an ISO `until`. Requires `allowed_logins`. Guests cannot start or
+  cancel work, approve, mint keys, pause the GPU, use Remote Control, edit memory, or Review.
+
+Still open from that pass: **#48** (add agent-harness and the memory library to Remote Control) and
+**#56** (Images: warm ComfyUI when the tab opens, real step progress, unload immediately, in-app
+fullscreen). User-facing checks still waiting: GPU guard with a real game (#1), Mac lid-closed
+sleep (#2), private-repo push (#4), endpoint load test (#11), clean-machine installer (#14),
+Docker Desktop after a cold reboot (#30), Xcode (#31).
+
+## Phase 7: memory, search, schedules, documents
 
 Built as mini-phases (`docs/phase7a-results.md`, `phase7b-results.md` for 7b+7c, `phase7d-results.md`,
 `phase7e-results.md`).

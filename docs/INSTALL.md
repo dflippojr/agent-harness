@@ -89,6 +89,10 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |
 | Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`) |
+| Claude / Codex / Cursor as session backends | `backends` | `ops\backends\login.ps1 <backend>` (`docs/phase8a-design.md`) |
+| Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
+| Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |
+| Scheduled jobs | `jobs` (on by default) | nothing |
 | Apps that start and drive sessions | always on | a token from Settings → Apps (`docs/app-api.md`) |
 | Nightly backups | `backup` (on by default) | nothing |
 
@@ -109,8 +113,9 @@ powershell -ExecutionPolicy Bypass -File install\uninstall.ps1 -RemoveFiles # al
 
 ## Security model, briefly
 
-- One person per install. The web app and APIs trust localhost; other devices need a tailnet login plus, for the
-  inference endpoint and app API, a key or token.
+- One owner per install. The web app and APIs trust localhost; other devices need a tailnet login plus, for the
+  inference endpoint and app API, a key or token. Optional `guests:` entries grant time-boxed read-only Control
+  Center access to a named tailnet login without owner powers.
 - Agents are untrusted: shell commands run in a Docker container with only the workspace mounted and no network
   unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first.
 - Web fetches refuse private, tailnet and metadata addresses. App-provided context and web pages are marked as

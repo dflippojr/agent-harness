@@ -727,3 +727,41 @@ items:
       - connection details (public URL, whether the live stream is connected)
 
       Keep GPU and Claude Remote Control on the Profile landing. Do not dump Settings onto this page.
+
+  - key: images-page-warmup-progress
+    kind: feature
+    title: "Images: warmup ComfyUI on open, real progress, unload immediately, in-app fullscreen"
+    body: |
+      Phone/Control Center feedback from the Image generation page (`#/images`). The page works, but the wait is
+      long and several status/navigation details fight the user.
+
+      **Warm up ComfyUI when the Images tab opens.** Opening `#/images` should start the ComfyUI process immediately
+      so Generate is not paying the ~45s boot. Do **not** load the diffusion checkpoint yet if that is possible —
+      the model should load only when a job actually runs. Guests/demo can view the gallery but cannot generate; do
+      not warm up for them.
+
+      VRAM constraint from Phase 6d: Qwen (~14.7 GB) and an image model do not fit together, and an idle ComfyUI can
+      still hold a CUDA context. Prefer a ComfyUI process that is listening without a loaded checkpoint and without
+      stealing the LLM's VRAM. If a CUDA context is unavoidable, unload the language model when the Images tab is
+      opened (the user is signaling intent) rather than waiting for Generate, still without loading the image
+      checkpoint until a prompt is submitted. `harness/images.py` currently starts ComfyUI only inside `_run_batch`
+      after exclusive GPU hand-over.
+
+      **Loading status shows six periods, and only the last three animate.** Phase copy in `IMAGE_PHASE` already ends
+      with a Unicode ellipsis. The renderer then wraps that text in `.dots`. Drop the ellipsis from the phase
+      strings (or stop applying `.dots` on copy that already has one). After immediate unload, the lingering phase
+      should go away.
+
+      **During actual generation, show a progress bar instead of a seconds counter.** Surface ComfyUI websocket
+      `progress` (`data.value` / `data.max`) as `progress.value` / `progress.max`, and keep an indeterminate bar
+      while queued / starting / loading the checkpoint. Reuse `progressBar()` in `harness/web/app.js`. Poll faster
+      while `phase === "generating"`.
+
+      **When the last job finishes and the queue is empty, unload immediately and give the GPU back to the LLM.**
+      Skip `linger_seconds` (currently 60). Delete lingering copy so a leftover `progress.seconds` is never appended.
+
+      **Clicking the image on a result card should open an in-app fullscreen page** (e.g. `#/images/<id>/full`),
+      not `target="_blank"` to the raw PNG.
+
+      Suggested slice: doubled ellipsis → immediate unload → step progress → warmup without checkpoint → fullscreen
+      viewer. Distinct from #12 (backups/upscaling/inpainting) and #13 (extra workflows).

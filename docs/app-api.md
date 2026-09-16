@@ -55,6 +55,7 @@ Server info: API version, scopes, projects, models, and enabled features. Doesn'
 {
   "prompt": "When does order A-17 ship?",
   "project": "scratch",
+  "backend": "local",
   "model": null,
   "title": null,
   "context": [{"title": "Customer", "content": "Dana, premium plan"}],
@@ -76,6 +77,8 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
   a JSON Schema object; the agent's arguments are validated against its property types before your app sees them.
   App tools don't need approval.
 - `project` must exist in the harness's `projects.yaml` (`GET /api/v1` lists them).
+- `backend` is `local` (the tower model) or a hosted CLI id such as `claude`, `codex`, or `cursor`
+  (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login.
 
 ### `GET /api/v1/sessions`, `GET /api/v1/sessions/{id}`
 List (newest first, `?limit=`) or read. Statuses: `queued`, `running`, `waiting_approval`, `waiting_target`,
