@@ -429,6 +429,78 @@ def test_images_api_and_generate_image_for_tower_and_mac(tmp_path):
         assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(mac)}
 
 
+def test_image_warmup_holds_gpu_until_cooldown(tmp_path):
+    async def body():
+        m, server, _ = image_manager(tmp_path)
+        await m.start(maintenance=False)
+        await m.images.warmup()
+        for _ in range(200):
+            if m.images.phase == "warm":
+                break
+            await asyncio.sleep(0.01)
+        assert m.images.phase == "warm" and m.images.gpu_taken
+        assert server.calls == ["stop"]
+        assert m.images.status()["phase"] == "warm"
+        m.images.cooldown()
+        for _ in range(200):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.02)
+        assert m.images.phase == "idle" and not m.images.gpu_taken
+        assert server.calls == ["stop", "start"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_image_batch_does_not_linger_after_last_job(tmp_path):
+    async def body():
+        m, server, _ = image_manager(tmp_path)
+        await m.start(maintenance=False)
+        job = m.images.submit("a red cube")
+        done = await m.images.wait(job["id"])
+        assert done["status"] == "done"
+        for _ in range(200):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.01)
+        assert m.images.phase == "idle"
+        assert "lingering" not in server.calls
+        assert server.calls == ["stop", "start"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_comfy_progress_event_sets_value_and_max(tmp_path):
+    m, _, _ = image_manager(tmp_path)
+    m.images.apply_comfy_progress("abc", time.time() - 2, {"type": "status", "data": {}})
+    assert m.images.progress == {}
+    m.images.apply_comfy_progress("abc", time.time() - 2, {"type": "progress", "data": {"value": 3, "max": 8}})
+    progress = m.images.status()["progress"]
+    assert progress["value"] == 3 and progress["max"] == 8 and progress["job"] == "abc"
+
+
+def test_images_warmup_api(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+
+    m, server, _ = image_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        assert client.post("/images/warmup").status_code == 200
+        for _ in range(200):
+            if client.get("/images").json()["status"]["phase"] == "warm":
+                break
+            time.sleep(0.02)
+        assert client.get("/images").json()["status"]["phase"] == "warm"
+        assert server.calls == ["stop"]
+        assert client.post("/images/cooldown").status_code == 200
+        for _ in range(200):
+            if client.get("/images").json()["status"]["phase"] == "idle":
+                break
+            time.sleep(0.02)
+        assert client.get("/images").json()["status"]["phase"] == "idle"
+        assert server.calls == ["stop", "start"]
+
+
 def test_agent_generate_image_saves_into_mac_workspace(tmp_path):
     from harness.config import ImagesConfig
     from test_phase4 import FakeRunner, executor, mac_cfg

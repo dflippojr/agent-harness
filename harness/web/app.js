@@ -8,7 +8,9 @@
 //   #/profile                identity, GPU, Claude Remote Control, and a Settings menu
 //   #/profile/account        icon picker, account info, connection details
 //   #/profile/<section>      a Settings page (appearance, notifications, backends, …)
-//   #/images[/<id>]          image generation and gallery
+//   #/images                 image generation and gallery
+//   #/images/<id>            one result (prompt, metadata, Another one)
+//   #/images/<id>/full       in-app fullscreen viewer
 //   #/jobs[/new|/<id>]       scheduled jobs
 
 const $app = document.getElementById("app");
@@ -229,7 +231,7 @@ function md(src, pages) {
         i++;
       }
       i--;
-      out.push(html + "</tbody></table>");
+      out.push(`<div class="md-table">${html}</tbody></table></div>`);
       continue;
     }
     if (/^\s*([-*]|\d+\.) /.test(line)) {
@@ -306,6 +308,12 @@ async function route() {
   await currentUser();
   paintGuestChrome();
   const parts = hashParts();
+  const images = parts[0] === "images";
+  if (!isGuest()) {
+    if (images && !route.onImages) api("/images/warmup", { method: "POST" }).catch(() => {});
+    if (!images && route.onImages) api("/images/cooldown", { method: "POST" }).catch(() => {});
+  }
+  route.onImages = images;
   $back.hidden = isTopLevel(parts);
   const guestBlocked = isGuest() && (
     parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
@@ -316,7 +324,11 @@ async function route() {
     if (parts.length === 0) await viewList();
     else if (parts[0] === "new") await viewNew();
     else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1]);
-    else if (parts[0] === "images") await (parts[1] ? viewImage(parts[1]) : viewImages());
+    else if (parts[0] === "images") {
+      if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
+      else if (parts[1]) await viewImage(parts[1]);
+      else await viewImages();
+    }
     else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
     else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
     else go("#/", true);
@@ -1320,10 +1332,11 @@ function viewInfo(s) {
 
 // ---------- images ----------
 const IMAGE_PHASE = {
-  idle: "", waiting: "Waiting for the GPU (a game or transcode is using it)…", switching: "Unloading the language model…",
-  starting: "Starting ComfyUI…", generating: "Generating…", lingering: "Done; keeping the image model loaded for another minute",
-  restoring: "Reloading the language model…",
+  idle: "", waiting: "Waiting for the GPU (a game or transcode is using it)", switching: "Unloading the language model",
+  starting: "Starting ComfyUI", warm: "Image generator is ready", generating: "Generating",
+  restoring: "Reloading the language model",
 };
+const IMAGE_BUSY = new Set(["waiting", "switching", "starting", "generating", "restoring"]);
 
 function imageCard(img) {
   const ready = img.status === "done";
@@ -1331,6 +1344,19 @@ function imageCard(img) {
     ready ? h("img", { src: `/images/${img.id}.png`, alt: img.prompt, loading: "lazy" })
       : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" ? "failed" : h("span", { class: "dots" }, img.status)),
     h("div", { class: "preview small" }, img.prompt));
+}
+
+function imageStatusView(s) {
+  const text = s.phase in IMAGE_PHASE ? IMAGE_PHASE[s.phase] : s.phase;
+  if (!text) return null;
+  const queued = s.queued ? ` · ${s.queued} queued` : "";
+  const p = s.progress || {};
+  const busy = IMAGE_BUSY.has(s.phase);
+  const hasSteps = s.phase === "generating" && p.max;
+  return h("div", { class: "image-status note" },
+    h("span", { class: busy ? "dots" : "" }, text + queued),
+    busy ? progressBar(hasSteps ? p.value / p.max : null) : null,
+    hasSteps ? h("span", { class: "muted small" }, `${p.value} / ${p.max}`) : null);
 }
 
 async function viewImages() {
@@ -1366,14 +1392,12 @@ async function viewImages() {
     renderResolutions();
   });
   renderResolutions();
-  const phase = h("p", { class: "note" });
+  const phase = h("div", { class: "note" });
   const grid = h("div", { class: "image-grid" });
   const render = (d) => {
-    const s = d.status;
-    const text = s.phase in IMAGE_PHASE ? IMAGE_PHASE[s.phase] : s.phase;
-    fill(phase, text ? h("span", { class: s.phase === "lingering" ? "" : "dots" },
-      `${text}${s.progress && s.progress.seconds ? ` ${s.progress.seconds} s` : ""}${s.queued ? ` · ${s.queued} queued` : ""}`) : "");
+    fill(phase, imageStatusView(d.status));
     fill(grid, d.images.map(imageCard));
+    return d;
   };
   render(data);
   const go = h("button", { class: "btn primary", type: "submit" }, "Generate");
@@ -1400,18 +1424,25 @@ async function viewImages() {
     h("p", { class: "muted small" }, "The language model is unloaded while images generate; running tasks pause for a few minutes."),
     h("div", { class: "row", style: "margin-top:12px" }, h("span", { class: "spacer" }), go)),
     phase, grid);
-  const timer = setInterval(async () => { try { render(await api("/images")); } catch (_) { /* offline */ } }, 4000);
-  onLeave(() => clearInterval(timer));
+  let timer = 0;
+  const tick = async () => {
+    try {
+      const d = render(await api("/images"));
+      timer = setTimeout(tick, IMAGE_BUSY.has(d.status.phase) ? 400 : 4000);
+    } catch (_) { timer = setTimeout(tick, 4000); }
+  };
+  timer = setTimeout(tick, IMAGE_BUSY.has(data.status.phase) ? 400 : 4000);
+  onLeave(() => clearTimeout(timer));
 }
 
 async function viewImage(id) {
-  setHeader("images", "Image");
+  setHeader("images", "Image", { page: true });
   const load = async () => {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
     fill($app,
-      img.status === "done" ? h("a", { href: `/images/${id}.png`, target: "_blank" }, h("img", { class: "image-full", src: `/images/${id}.png`, alt: img.prompt }))
-        : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : h("span", { class: "dots" }, IMAGE_PHASE[img.service.phase] || img.status)),
+      img.status === "done" ? h("a", { href: `#/images/${id}/full` }, h("img", { class: "image-full", src: `/images/${id}.png`, alt: img.prompt }))
+        : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : imageStatusView(img.service)),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, `${img.model} · ${img.width}×${img.height} · seed ${img.seed} · ${img.source}${img.seconds ? ` · ${Math.round(img.seconds)} s` : ""} · ${when}`),
@@ -1425,6 +1456,7 @@ async function viewImage(id) {
               } catch (e) { toast(e.message); }
             },
           }, "Another one"),
+          img.status === "done" ? h("a", { class: "btn", href: `/images/${id}.png`, download: `${id}.png` }, "Download") : null,
           img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null)));
     return img;
   };
@@ -1432,8 +1464,16 @@ async function viewImage(id) {
   const timer = setInterval(async () => {
     if (img.status === "done" || img.status === "failed") return clearInterval(timer);
     try { img = await load(); } catch (_) { /* offline */ }
-  }, 3000);
+  }, 400);
   onLeave(() => clearInterval(timer));
+}
+
+async function viewImageFull(id) {
+  const img = await api(`/images/${id}`);
+  if (img.status !== "done") { go(`#/images/${id}`, true); return; }
+  setHeader("images", "Image", { page: true });
+  fill($app, h("div", { class: "image-viewer" },
+    h("img", { src: `/images/${id}.png`, alt: img.prompt })));
 }
 
 // ---------- scheduled jobs ----------

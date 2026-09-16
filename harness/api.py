@@ -317,6 +317,16 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         except ToolError as e:
             raise HarnessError(400, str(e))
 
+    @app.post("/images/warmup")
+    async def warmup_images(request: Request):
+        """Start ComfyUI without a checkpoint. Called when the owner opens the Images tab."""
+        return await images_service(request).warmup()
+
+    @app.post("/images/cooldown")
+    async def cooldown_images(request: Request):
+        """Drop an unused Images-tab warmup so the language model can come back."""
+        return images_service(request).cooldown()
+
     @app.get("/images/{iid}")
     async def get_image(iid: str, request: Request):
         svc = images_service(request)

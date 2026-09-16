@@ -6,9 +6,14 @@ therefore takes the GPU over:
 1. wait until the GPU guard is clear (no game or Plex transcode) and take the InferenceGate exclusively (the model
    call in flight finishes; agent turns wait; endpoint requests get 503);
 2. stop llama-server through the guard's pause flag (its supervisor waits while the flag exists);
-3. start ComfyUI (portable install, launched hidden by the daemon only while jobs run) and run the workflow;
-4. keep ComfyUI warm for `linger_seconds` in case more jobs come, then stop it, remove the flag (llama-server restarts
-   and reloads Qwen, ~1 min) and release the gate.
+3. start ComfyUI (portable install, launched hidden by the daemon) without loading a checkpoint until a prompt runs;
+4. run queued workflows, then stop ComfyUI immediately, remove the flag (llama-server restarts and reloads Qwen, ~1 min)
+   and release the gate.
+
+Opening the Images tab (owner only) starts ComfyUI in this same GPU session so Generate is not paying the ~45s boot.
+A CUDA context is unavoidable on the portable install, so warmup unloads Qwen rather than sharing the 16 GB card.
+After the last job the GPU is given back immediately; there is no linger. Leaving the Images tab cancels an unused
+warmup.
 
 Jobs come from the phone (POST /images) and from agents (the `generate_image` tool). Two workflows, from ComfyUI's own
 templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; assets agents may ship) and `quality` = Qwen-Image-2512
@@ -20,8 +25,10 @@ Results are PNGs under data_dir/images, served by GET /images/{id}.png.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import os
 import random
 import shutil
 import subprocess
@@ -127,6 +134,23 @@ async def _run(args: list[str]) -> tuple[int, str, str]:
     return await run_cmd(args, timeout=30)
 
 
+async def _ws_read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
+    hdr = await reader.readexactly(2)
+    opcode = hdr[0] & 0x0F
+    masked = hdr[1] & 0x80
+    length = hdr[1] & 0x7F
+    if length == 126:
+        length = int.from_bytes(await reader.readexactly(2), "big")
+    elif length == 127:
+        length = int.from_bytes(await reader.readexactly(8), "big")
+    mask = await reader.readexactly(4) if masked else b""
+    payload = bytearray(await reader.readexactly(length))
+    if mask:
+        for i, byte in enumerate(payload):
+            payload[i] = byte ^ mask[i % 4]
+    return opcode, bytes(payload)
+
+
 class ComfyProcess:
     """Starts and stops the portable ComfyUI as a hidden child process."""
 
@@ -204,12 +228,14 @@ class ImageService:
         self.runner = runner
         self.comfy = ComfyProcess(cfg)
         self.notify = notify           # callable(job) for finished phone jobs
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.active_job: str = ""
-        self.phase = "idle"            # idle | waiting | switching | starting | generating | lingering | restoring
+        self.phase = "idle"            # idle | waiting | switching | starting | warm | generating | restoring
         self.progress: dict = {}
         self._task: asyncio.Task | None = None
         self._done: dict[str, asyncio.Event] = {}
+        self._keep_warm = False
+        self._wake: asyncio.Event | None = None
         self.images_dir = Path(cfg.work_dir) / "images"
         self.transport = None          # tests inject a fake ComfyUI
 
@@ -218,7 +244,7 @@ class ImageService:
 
     @property
     def gpu_taken(self) -> bool:
-        return self.phase in ("switching", "starting", "generating", "lingering", "restoring")
+        return self.phase in ("switching", "starting", "warm", "generating", "restoring")
 
     def start(self) -> None:
         if self._task is None:
@@ -295,8 +321,39 @@ class ImageService:
                 log.exception("image batch failed")
                 self.phase = "idle"
 
-    async def _run_batch(self, first: str) -> None:
-        """Take the GPU over, run jobs until the queue has been empty for linger_seconds, give the GPU back."""
+    async def warmup(self) -> dict:
+        """Owner opened the Images tab: start ComfyUI without a checkpoint so Generate skips the boot."""
+        self._keep_warm = True
+        if self.phase == "idle":
+            self.queue.put_nowait(None)
+        return self.status()
+
+    def cooldown(self) -> dict:
+        """Owner left the Images tab: drop an unused warmup and restore the language model."""
+        self._keep_warm = False
+        if self._wake is not None:
+            self._wake.set()
+        return self.status()
+
+    def apply_comfy_progress(self, job_id: str, started: float, message: dict) -> None:
+        """Update status from a ComfyUI websocket `progress` event (`data.value` / `data.max`)."""
+        if message.get("type") != "progress":
+            return
+        data = message.get("data") or {}
+        maximum = data.get("max")
+        if not maximum:
+            return
+        self.progress = {
+            **self.progress,
+            "job": job_id,
+            "stage": "generating",
+            "value": int(data.get("value") or 0),
+            "max": int(maximum),
+            "seconds": round(time.time() - started),
+        }
+
+    async def _run_batch(self, first: str | None) -> None:
+        """Take the GPU over, run queued jobs (or sit warm until Generate), then give the GPU back."""
         guard = self.runner.guard
         self.phase = "waiting"
         paused = lambda: guard is not None and guard.active  # noqa: E731
@@ -304,6 +361,7 @@ class ImageService:
             await asyncio.sleep(5)
         slot = await self.runner.gate.acquire_exclusive()
         flagged = False
+        ran_job = False
         try:
             self.phase = "switching"
             await self.control.stop()  # stop llama-server; its supervisor waits while the flag exists
@@ -311,19 +369,42 @@ class ImageService:
             self.phase = "starting"
             await self.comfy.start()
             job_id: str | None = first
-            while job_id is not None:
+            while True:
                 if paused():
-                    # a game started mid-batch: put the job back and hand the GPU to the game
-                    self.db.update_image(job_id, status="queued")
-                    self.queue.put_nowait(job_id)
+                    if job_id:
+                        self.db.update_image(job_id, status="queued")
+                        self.queue.put_nowait(job_id)
                     break
-                await self._run_job(job_id)
-                self.phase = "lingering"
-                try:
-                    job_id = await asyncio.wait_for(self.queue.get(), timeout=self.cfg.linger_seconds)
-                except asyncio.TimeoutError:
+                if job_id:
+                    await self._run_job(job_id)
+                    ran_job = True
                     job_id = None
+                if not self.queue.empty():
+                    job_id = self.queue.get_nowait()
+                    continue
+                if self._keep_warm and not ran_job:
+                    self.phase = "warm"
+                    self.progress = {}
+                    self._wake = asyncio.Event()
+                    waiter = asyncio.create_task(self.queue.get())
+                    wake = asyncio.create_task(self._wake.wait())
+                    done, pending = await asyncio.wait({waiter, wake}, return_when=asyncio.FIRST_COMPLETED)
+                    for task in pending:
+                        task.cancel()
+                    for task in pending:
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    self._wake = None
+                    if waiter in done:
+                        job_id = waiter.result()
+                        continue
+                    break
+                break
         finally:
+            self._keep_warm = False
+            self._wake = None
             self.phase = "restoring"
             await self.comfy.stop()
             if flagged and not paused():  # when the guard is paused it restores the model itself later
@@ -336,7 +417,9 @@ class ImageService:
             self.phase = "idle"
             self.progress = {}
 
-    async def _run_job(self, job_id: str) -> None:
+    async def _run_job(self, job_id: str | None) -> None:
+        if not job_id:
+            return
         job = self.db.get_image(job_id)
         if job is None or job["status"] in ("done", "failed"):
             return
@@ -345,6 +428,8 @@ class ImageService:
         started = time.time()
         self.db.update_image(job_id, status="running", started_at=started)
         self.progress = {"job": job_id, "stage": "queued in ComfyUI"}
+        stop_progress = asyncio.Event()
+        listener = asyncio.create_task(self._listen_progress(job_id, started, stop_progress))
         try:
             prefix = f"harness/{job_id}"
             graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix)
@@ -368,9 +453,9 @@ class ImageService:
                             raise ToolError(f"ComfyUI error: {detail[:500]}")
                         if status.get("completed"):
                             break
-                    self.progress = {"job": job_id, "stage": "generating",
+                    self.progress = {**self.progress, "job": job_id, "stage": "generating",
                                      "seconds": round(time.time() - started)}
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.4)
                 images = [img for out in hist.get("outputs", {}).values() for img in out.get("images", [])]
                 if not images:
                     raise ToolError("ComfyUI finished without an image")
@@ -387,6 +472,9 @@ class ImageService:
             self.db.update_image(job_id, status="failed", finished_at=time.time(), error=str(e)[:1000])
             log.warning("image %s failed: %s", job_id, e)
         finally:
+            stop_progress.set()
+            listener.cancel()
+            await asyncio.gather(listener, return_exceptions=True)
             self.active_job = ""
             event = self._done.pop(job_id, None)
             if event:
@@ -394,6 +482,44 @@ class ImageService:
             finished = self.db.get_image(job_id)
             if self.notify and finished and finished["source"] == "phone":
                 self.notify(finished)
+
+    async def _listen_progress(self, job_id: str, started: float, stop: asyncio.Event) -> None:
+        """Read ComfyUI websocket progress until the job finishes. No-op in tests (MockTransport)."""
+        if self.transport is not None:
+            return
+        writer = None
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", self.cfg.port), timeout=2)
+            key = base64.b64encode(os.urandom(16)).decode()
+            writer.write(
+                f"GET /ws?clientId=agent-harness-{job_id} HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.cfg.port}\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+            await writer.drain()
+            header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+            if b" 101 " not in header.split(b"\r\n", 1)[0]:
+                return
+            while not stop.is_set():
+                opcode, payload = await _ws_read_frame(reader)
+                if opcode == 8:
+                    break
+                if opcode != 1:
+                    continue
+                try:
+                    self.apply_comfy_progress(job_id, started, json.loads(payload))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.CancelledError):
+            return
+        finally:
+            if writer is not None:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    pass
 
     def status(self) -> dict:
         return {"enabled": self.cfg.enabled, "phase": self.phase, "active_job": self.active_job,

@@ -189,7 +189,7 @@ class ImagesConfig:
     port: int = 8188
     work_dir: str = "D:/Agents/harness/images-work"  # ComfyUI output/temp and the harness's PNGs (images/)
     log_dir: str = "D:/Agents/harness/logs"
-    linger_seconds: float = 60                 # keep ComfyUI loaded this long for more jobs before restoring Qwen
+    linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
 
