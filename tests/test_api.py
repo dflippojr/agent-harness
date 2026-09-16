@@ -58,9 +58,16 @@ def test_web_app_and_guard(tmp_path):
         assert "Scratch is a fresh empty folder" in js
         assert "Only tower projects with a local folder appear" in js
         css = client.get("/static/style.css").text
-        assert "safe-area-inset-top, 0px) + 14px" in css
+        assert "safe-area-inset-top, 0px) + 18px" in css
         assert ".session-chrome" in css and ".jump-top" in css
         assert ".swatch.split" in css and ".hue-preview" in css
+        assert "min-width: 148px" in css
+        assert 'showFab("#/new", "+ New task")' in js
+        assert 'showFab("#/jobs/new", "+ New job")' in js
+        assert 'href: "#/profile/account"' in js
+        assert "picker.hidden = !picker.hidden" not in js
+        assert "if (holding)" in js
+        assert 'id="fab"' in client.get("/").text
         assert client.get("/static/app.js").status_code == 200
         profile = client.get("/profile").json()
         assert profile["emoji"] == "🙂" and "🚀" in profile["choices"]

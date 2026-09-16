@@ -681,6 +681,10 @@ def test_backend_prefs_persist_model_and_effort(tmp_path, monkeypatch):
         assert again["claude"]["model"] == "claude-sonnet-4" and again["claude"]["effort"] == "low"
         assert [m["id"] for m in listed["claude"]["popular_models"]] == [
             "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+        from harness.backend_state import POPULAR_MODELS
+        assert [m[0] for m in POPULAR_MODELS["cursor"]] == [
+            "cursor-grok-4.6-high", "composer-2.5-fast", "muse-spark-1.3-high"]
+        assert not any(mid.startswith("gpt-") for mid, _ in POPULAR_MODELS["cursor"])
         assert client.put("/backends/claude", json={"effort": "banana"}).status_code == 400
         assert client.put("/backends/nope", json={"model": "x"}).status_code == 404
         assert client.put("/backends/local", json={"model": "missing"}).status_code == 400

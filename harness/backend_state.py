@@ -25,7 +25,7 @@ POPULAR_MODELS = {
     "cursor": (
         ("cursor-grok-4.6-high", "Grok 4.6"),
         ("composer-2.5-fast", "Composer 2.5"),
-        ("gpt-5.6-sol-medium", "GPT-5.6 Sol"),
+        ("muse-spark-1.3-high", "Muse Spark 1.3"),
     ),
 }
 

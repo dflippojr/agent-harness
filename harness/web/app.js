@@ -6,6 +6,7 @@
 //   #/s/<id>/changes         diff viewer
 //   #/s/<id>/info            session details
 //   #/profile                identity, GPU, Claude Remote Control, and a Settings menu
+//   #/profile/account        icon picker, account info, connection details
 //   #/profile/<section>      a Settings page (appearance, notifications, backends, …)
 //   #/images[/<id>]          image generation and gallery
 //   #/jobs[/new|/<id>]       scheduled jobs
@@ -16,6 +17,7 @@ const $back = document.getElementById("back");
 const $conn = document.getElementById("conn");
 const $feature = document.getElementById("feature-nav");
 const $profileIcon = document.getElementById("profile-icon");
+const $fab = document.getElementById("fab");
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 const STATUS_LABEL = {
   queued: "queued", running: "running", waiting_approval: "needs approval", waiting_target: "waiting for Mac", waiting_app: "waiting for app", waiting_limit: "waiting for limit",
@@ -87,6 +89,12 @@ function h(tag, attrs = {}, ...children) {
 function fill(el, ...children) {
   el.replaceChildren(...children.flat().filter((c) => c !== null && c !== undefined && c !== false));
   return el;
+}
+
+function showFab(href, label) {
+  $fab.href = href;
+  $fab.textContent = label;
+  $fab.hidden = false;
 }
 
 function toast(text, ms = 2600) {
@@ -265,7 +273,7 @@ async function route() {
   cleanup = [];
   $app.replaceChildren();
   document.querySelector(".composer")?.remove();
-  document.querySelector(".fab")?.remove();
+  $fab.hidden = true;
   document.querySelectorAll(".jump").forEach((el) => el.remove());
   const parts = hashParts();
   $back.hidden = isTopLevel(parts);
@@ -310,21 +318,30 @@ async function viewList() {
   const search = h("input", { type: "search", placeholder: "Search", value: searchQuery, class: "search" });
   const targetSwitch = h("div", { class: "tabs", role: "group", "aria-label": "Filter sessions by machine" });
   $app.append(h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
-  document.body.append(h("a", { class: "btn new-task fab", href: "#/new" }, "+ New task"));
+  showFab("#/new", "+ New task");
 
   let sessions = [];
   let targets = [];
   const targetName = (target) => target === "tower" ? "Tower" : TARGET_LABEL[target] || target;
+  const sessionCardKey = (s) => [
+    s.id, s.title, s.status, s.updated_at, s.chat_summary, s.queue_position, s.review, s.job_status,
+    s.target, s.project, (s.pending_approvals || []).map((a) => a.id).join(","),
+  ].join("\0");
   const renderSessions = () => {
     const visible = sessionTarget === "all" ? sessions : sessions.filter((s) => s.target === sessionTarget);
     if (!sessions.length) {
+      delete list.dataset.keys;
       list.replaceChildren(h("p", { class: "empty" }, "No sessions yet. Start one with “New task”."));
       return;
     }
     if (!visible.length) {
+      delete list.dataset.keys;
       list.replaceChildren(h("p", { class: "empty" }, `No sessions on the ${targetName(sessionTarget)} yet.`));
       return;
     }
+    const keys = visible.map(sessionCardKey).join("\n");
+    if (list.dataset.keys === keys && list.querySelector("a.card")) return;
+    list.dataset.keys = keys;
     list.replaceChildren(...visible.map((s) => {
       const pending = (s.pending_approvals || []).length;
       return h("a", { class: "card", href: `#/s/${s.id}${pending ? `/approval/${s.pending_approvals[0].id}` : ""}` },
@@ -396,7 +413,29 @@ async function viewList() {
   };
   await render();
   let timer = null;
-  const refresh = () => { clearTimeout(timer); timer = setTimeout(() => render().catch(() => {}), 300); };
+  let holding = false;
+  let pendingRefresh = false;
+  const releaseHold = () => {
+    holding = false;
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      render().catch(() => {});
+    }
+  };
+  list.addEventListener("pointerdown", () => { holding = true; });
+  window.addEventListener("pointerup", releaseHold);
+  window.addEventListener("pointercancel", releaseHold);
+  onLeave(() => {
+    window.removeEventListener("pointerup", releaseHold);
+    window.removeEventListener("pointercancel", releaseHold);
+  });
+  const refresh = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (holding) { pendingRefresh = true; return; }
+      render().catch(() => {});
+    }, 300);
+  };
   const handlers = {};
   for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
     handlers[type] = refresh;
@@ -1374,7 +1413,7 @@ const cronLabel = (cron) => (CRON_PRESETS.find(([c]) => c === cron) || [null, cr
 
 async function viewJobs() {
   setHeader("jobs");
-  document.body.append(h("a", { class: "btn new-task fab", href: "#/jobs/new" }, "+ New job"));
+  showFab("#/jobs/new", "+ New job");
   const jobs = await api("/jobs");
   if (!jobs.length) {
     $app.append(h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
@@ -1582,11 +1621,29 @@ function emojiPicker(profile, onPick) {
   }, emoji)));
 }
 
+function accountCard(me, profile) {
+  const live = $conn.classList.contains("live");
+  return h("div", {},
+    h("div", { class: "card" },
+      h("p", { class: "muted small" }, "Shown at the top left of the app."),
+      emojiPicker(profile)),
+    h("div", { class: "card" },
+      h("h3", {}, "Account"),
+      h("p", {}, me.name || "You"),
+      h("p", { class: "muted small" }, me.login || "Not identified by Tailscale on this request.")),
+    h("div", { class: "card" },
+      h("h3", {}, "Connection"),
+      me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
+      h("p", { class: "muted small" }, live ? "Live stream connected." : "Live stream is offline.")));
+}
+
 async function viewProfile(page) {
-  if (page && !PROFILE_PAGES[page]) { go("#/profile", true); return; }
+  const titles = { account: "Account", ...PROFILE_PAGES };
+  if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
-  setHeader("agents", PROFILE_PAGES[page] || "Profile", { page: true });
+  setHeader("agents", titles[page] || "Profile", { page: true });
   const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
+  if (page === "account") return $app.append(accountCard(me, profile));
   if (page === "appearance") return $app.append(appearanceCard());
   if (page === "notifications") return $app.append(notificationsCard(me));
   if (page === "install") return $app.append(installCard());
@@ -1595,22 +1652,14 @@ async function viewProfile(page) {
   if (page === "apps") return $app.append(appsCard(me));
   if (page === "endpoint") return $app.append(endpointCard(me));
   if (page === "disk") return $app.append(diskCard());
-  const activeEmoji = h("span", { class: "identity-emoji" }, profile.emoji);
-  const picker = h("div", { class: "card", hidden: true },
-    h("p", { class: "muted small" }, "Shown at the top left of the app."),
-    emojiPicker(profile, (emoji) => { activeEmoji.textContent = emoji; }));
   $app.append(
-    h("button", {
-      class: "card identity", type: "button",
-      onclick: () => { picker.hidden = !picker.hidden; },
-    },
+    h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
-        activeEmoji,
+        h("span", { class: "identity-emoji" }, profile.emoji),
         h("div", { class: "spacer" },
           h("h3", {}, me.name || "You"),
-          h("div", { class: "muted small" }, "Tap to change your icon")),
+          h("div", { class: "muted small" }, "Account and connection")),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    picker,
     gpuCard(),
     remoteControlCard(),
     h("p", { class: "section-label" }, "Settings"),
