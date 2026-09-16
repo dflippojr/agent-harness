@@ -1,7 +1,9 @@
 """Inference endpoint: the tower's model for other tools, OpenAI- and Anthropic-compatible.
 
 llama-server already speaks both APIs (/v1/chat/completions, /v1/completions, /v1/responses, /v1/messages,
-/v1/messages/count_tokens), so this is a thin proxy inside the daemon rather than a separate gateway such as LiteLLM.
+/v1/messages/count_tokens). A separately configured llama-server started with `--embedding` provides
+/v1/embeddings; llama.cpp restricts that mode to dedicated embedding models. This is a thin proxy inside the daemon
+rather than a separate gateway such as LiteLLM.
 Living in the daemon is the point: requests share the GPU with agent sessions through the InferenceGate (endpoint
 requests go ahead of the next agent turn, user decision), honor the GPU guard (a game or Plex transcode means 503),
 and are logged per key.
@@ -27,6 +29,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from .config import ModelConfig
 from .scheduler import GpuExclusive, QueueFull
 
 log = logging.getLogger("harness.endpoint")
@@ -37,6 +40,7 @@ ROUTES = {
     "/v1/responses": "openai",
     "/v1/messages": "anthropic",
     "/v1/messages/count_tokens": "anthropic",
+    "/v1/embeddings": "openai",
 }
 NO_GPU = {"/v1/messages/count_tokens"}  # tokenizer only
 MAX_BODY = 32 * 2**20
@@ -67,8 +71,24 @@ def usage_from(head: bytes, tail: bytes) -> tuple[int, int]:
 
 
 def register(app: FastAPI, mgr) -> None:
-    def resolve_model(m, requested: str):
+    def embeddings_enabled(m) -> bool:
+        return bool(m.cfg.endpoint.embedding_base_url.strip() and m.cfg.endpoint.embedding_model.strip())
+
+    def available_models(m) -> list[ModelConfig]:
+        models = list(m.cfg.models.values())
+        if embeddings_enabled(m) and m.cfg.endpoint.embedding_model not in {mc.name for mc in models}:
+            models.append(ModelConfig(name=m.cfg.endpoint.embedding_model,
+                                      base_url=m.cfg.endpoint.embedding_base_url,
+                                      context_tokens=m.cfg.endpoint.embedding_context_tokens, max_tokens=0))
+        return models
+
+    def resolve_model(m, requested: str, path: str):
         cfg = m.cfg
+        if path == "/v1/embeddings":
+            if not embeddings_enabled(m):
+                return None
+            return ModelConfig(name=cfg.endpoint.embedding_model, base_url=cfg.endpoint.embedding_base_url,
+                               context_tokens=cfg.endpoint.embedding_context_tokens, max_tokens=0)
         if requested in cfg.models:
             return cfg.models[requested]
         for pattern, target in cfg.endpoint.model_aliases.items():
@@ -94,7 +114,7 @@ def register(app: FastAPI, mgr) -> None:
             return error(flavor_of(request), 401, "authentication_error", "missing or invalid API key")
         data = [{"id": mc.name, "object": "model", "type": "model", "display_name": mc.name, "owned_by": "tower",
                  "created": 0, "created_at": "2026-01-01T00:00:00Z", "context_length": mc.context_tokens}
-                for mc in m.cfg.models.values()]
+                for mc in available_models(m)]
         return {"object": "list", "data": data, "has_more": False,
                 "first_id": data[0]["id"] if data else None, "last_id": data[-1]["id"] if data else None}
 
@@ -105,12 +125,14 @@ def register(app: FastAPI, mgr) -> None:
             return error("openai", 401, "authentication_error", "missing or invalid API key")
         return {
             "server": "agent-harness", "api_version": 1,
-            "routes": {path: {"method": "POST", "api": api} for path, api in ROUTES.items()}
+            "routes": {path: {"method": "POST", "api": api} for path, api in ROUTES.items()
+                       if path != "/v1/embeddings" or embeddings_enabled(m)}
             | {"/v1/models": {"method": "GET", "api": "both"}},
             "models": [{"id": mc.name, "context_tokens": mc.context_tokens, "max_tokens": mc.max_tokens,
                         "default": mc.name == (m.cfg.endpoint.default_model or m.cfg.default_model)}
-                       for mc in m.cfg.models.values()],
-            "features": {"streaming": True, "tool_calls": True, "reasoning": True, "embeddings": False,
+                       for mc in available_models(m)],
+            "features": {"streaming": True, "tool_calls": True, "reasoning": True,
+                         "embeddings": embeddings_enabled(m),
                          "images": bool(m.images)},
             "model_aliases": m.cfg.endpoint.model_aliases,
             "gpu": {"shared_with_agents": True, "guard_state": m.guard.state if m.guard else "clear"},
@@ -134,8 +156,13 @@ def register(app: FastAPI, mgr) -> None:
                 raise ValueError
         except ValueError:
             return error(flavor, 400, "invalid_request_error", "body must be a JSON object")
-        model = resolve_model(m, str(body.get("model") or ""))
+        model = resolve_model(m, str(body.get("model") or ""), path)
+        if model is None:
+            return error(flavor, 404, "not_found_error", "the embeddings endpoint is not configured; set "
+                         "endpoint.embedding_base_url and endpoint.embedding_model for a dedicated embedding server")
         body["model"] = model.name
+        if path == "/v1/embeddings":
+            body.pop("stream", None)
         stream = bool(body.get("stream"))
         record = {"key_id": key["id"], "route": path, "model": model.name, "stream": stream, "status": 0}
         started = time.monotonic()

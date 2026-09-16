@@ -188,7 +188,8 @@ remote_control:
   capacity: 4
 
 # OpenAI/Anthropic-compatible inference endpoint for other tools (harness/endpoint.py): /v1/chat/completions,
-# /v1/completions, /v1/responses, /v1/messages, /v1/models, /v1/capabilities. Per-device keys from Settings or POST /keys.
+# /v1/completions, /v1/responses, /v1/messages, /v1/models, /v1/capabilities, and optionally /v1/embeddings.
+# Per-device keys come from Settings or POST /keys.
 # Requests go ahead of the next agent turn (user decision, Phase 6c); an agent turn that has waited agent_fair_seconds
 # goes first. Refused with 503 while the GPU guard has the model unloaded.
 endpoint:
@@ -197,6 +198,11 @@ endpoint:
   max_waiting: 4
   agent_fair_seconds: 90
   request_timeout_seconds: 1800
+  # Embeddings require a separate llama-server started with --embedding and a dedicated embedding model.
+  # Set both to advertise and enable /v1/embeddings; leaving either blank keeps the route unavailable.
+  embedding_base_url: ""     # e.g. http://127.0.0.1:8091
+  embedding_model: ""        # e.g. nomic-embed-text-v1.5
+  embedding_context_tokens: 8192
 
 # Local image generation with ComfyUI (harness/images.py). Jobs stop llama-server (same pause flag as the GPU guard),
 # start ComfyUI from C:/AI/ComfyUI, and restore the language model after linger_seconds without new jobs.

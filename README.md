@@ -42,7 +42,8 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
   projects opt out with `web: false`.
 - Inference endpoint (`endpoint:`; `docs/phase6c-results.md`): OpenAI- and Anthropic-compatible proxy to the tower's
   model at `https://<tower>/v1` with per-device keys (Settings → Inference endpoint). Requests go ahead of the next
-  agent turn; 503 while the GPU guard has the model unloaded.
+  agent turn; 503 while the GPU guard has the model unloaded. `/v1/embeddings` is advertised when a separate
+  llama.cpp embedding server/model is configured.
 - Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`)
   and Qwen-Image-2512 (`quality`), both Apache 2.0. A batch unloads the language model, generates, and restores it.
   Phone: Images screen; agents: `generate_image` (tower sessions).

@@ -174,6 +174,11 @@ class EndpointConfig:
     max_waiting: int = 4                    # endpoint requests waiting for the GPU before new ones get 429
     agent_fair_seconds: float = 90          # after an agent turn waits this long, new endpoint requests queue behind it
     request_timeout_seconds: float = 1800
+    # Embeddings need a dedicated llama-server started with --embedding and an embedding model. The normal
+    # generation server cannot safely provide them, so the route stays unavailable until both values are set.
+    embedding_base_url: str = ""
+    embedding_model: str = ""
+    embedding_context_tokens: int = 8192
 
 
 @dataclass
