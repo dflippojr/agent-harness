@@ -840,3 +840,51 @@ items:
       live answer.
 
       Distinct from #52 / text-size chrome clipping. Do not change code-block wrapping in this issue.
+
+  - key: household-user-accounts
+    kind: feature
+    title: "Household user accounts on one daemon"
+    body: |
+      Split from #57 (later). Not ready.
+
+      A second person on the same machine (roommate / household) should get their own Control Center account, create their own projects, and run the local LLM without seeing the first user's projects, sessions, transcripts, workspaces, or Review.
+
+      Out of scope until refined:
+      - how the second account is created and approved by the owner
+      - workspace disk layout and quotas per user
+      - whether hosted provider CLIs are shared or strictly owner-only
+      - GPU guard, homelab tools, Remote Control, inference keys, and machine Settings stay owner/host operations unless a later issue says otherwise
+
+      Do not store provider or GitHub tokens in SQLite or return them from any API (same bar as #29).
+      Do not put real logins, tokens, or tailnet names in public comments.
+
+      Blocked on #57 v1 (owner create-project + guest isolation).
+
+  - key: per-user-github-clone
+    kind: feature
+    title: "Per-user GitHub credentials for isolated project clones"
+    body: |
+      Split from #57 (later). Not ready.
+
+      Optionally, a household user connects *their* GitHub account and clones *their* repos into an isolated workspace, in the spirit of Cursor's cloud agent (their credentials, not the host git login).
+
+      Constraints already decided:
+      - Do not store GitHub tokens in SQLite or return them from any API (same bar as #29).
+      - Prefer owner- or user-managed files / OS secret references over plaintext in the database.
+      - Distinct from #16 (`harness projects add` on the Mac CLI).
+
+      Needs refinement: auth flow, token storage, clone path isolation, and what happens on revocation.
+      Blocked on household-user-accounts.
+
+  - key: google-signin-control-center
+    kind: feature
+    title: "Google sign-in for the Control Center"
+    body: |
+      Split from #57 (later). Not ready.
+
+      Tailscale identity is enough for a single owner plus a named #54 guest. A second real user on the same tailnet, or a browser that is not Tailscale-authenticated, needs an account. Google OAuth is a candidate so the PWA is not only whoever `tailscale serve` says.
+
+      Keep the tailnet as the network boundary. Distinct from #25 (app/browser pairing and CORS).
+
+      Needs refinement: whether Google is the only extra IdP, how it maps to owner vs household vs guest, and how Tailscale identity still gates the network.
+      Blocked on household-user-accounts.
