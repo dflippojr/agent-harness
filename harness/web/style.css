@@ -297,6 +297,9 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .image-card .preview { -webkit-line-clamp: 2; margin-top: 6px; }
 .image-full { width: 100%; height: auto; border-radius: 10px; display: block; margin-bottom: 12px; }
 .image-status .progress { max-width: 260px; margin: 8px auto; }
+.image-status .progress.indeterminate > span { animation-duration: 2.4s; }
+.image-status .dots::after { animation-duration: 1.8s; }
+.image-status-detail { display: block; font-variant-numeric: tabular-nums; }
 .image-viewer {
   margin: -12px -16px;
   min-height: calc(100dvh - var(--bar-h, 52px) - env(safe-area-inset-bottom, 0px));
@@ -308,6 +311,11 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
   object-fit: contain; display: block;
 }
 .small.bad, .preview.bad { color: var(--bad); }
+
+@media (prefers-reduced-motion: reduce) {
+  .progress > span { transition: none; }
+  .progress.indeterminate > span, .dots::after { animation: none; }
+}
 
 /* profile and image choices */
 .emoji-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-top: 10px; }

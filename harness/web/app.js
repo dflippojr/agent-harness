@@ -309,9 +309,10 @@ async function route() {
   paintGuestChrome();
   const parts = hashParts();
   const images = parts[0] === "images";
-  if (!isGuest()) {
-    if (images && !route.onImages) api("/images/warmup", { method: "POST" }).catch(() => {});
-    if (!images && route.onImages) api("/images/cooldown", { method: "POST" }).catch(() => {});
+  if (!isGuest() && !images && route.onImages && route.imageWarmupStarted) {
+    route.imageWarmupStarted = false;
+    route.imageWarmupPromise = null;
+    api("/images/cooldown", { method: "POST" }).catch(() => {});
   }
   route.onImages = images;
   $back.hidden = isTopLevel(parts);
@@ -1346,17 +1347,40 @@ function imageCard(img) {
     h("div", { class: "preview small" }, img.prompt));
 }
 
-function imageStatusView(s) {
+function updateImageStatusView(view, s) {
   const text = s.phase in IMAGE_PHASE ? IMAGE_PHASE[s.phase] : s.phase;
-  if (!text) return null;
+  const { label, bar, fill: barFill, detail } = view.imageStatusParts;
+  view.hidden = !text;
+  if (!text) return view;
   const queued = s.queued ? ` · ${s.queued} queued` : "";
   const p = s.progress || {};
   const busy = IMAGE_BUSY.has(s.phase);
-  const hasSteps = s.phase === "generating" && p.max;
-  return h("div", { class: "image-status note" },
-    h("span", { class: busy ? "dots" : "" }, text + queued),
-    busy ? progressBar(hasSteps ? p.value / p.max : null) : null,
-    hasSteps ? h("span", { class: "muted small" }, `${p.value} / ${p.max}`) : null);
+  const hasSteps = s.phase === "generating" && Number(p.max) > 0;
+  label.textContent = text + queued;
+  label.classList.toggle("dots", busy);
+  bar.hidden = !busy;
+  detail.hidden = !hasSteps;
+  if (busy) {
+    bar.classList.toggle("indeterminate", !hasSteps);
+    if (hasSteps) {
+      const fraction = Math.max(0, Math.min(1, Number(p.value || 0) / Number(p.max)));
+      barFill.style.width = `${Math.max(2, fraction * 100).toFixed(1)}%`;
+      detail.textContent = `Sampling ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
+    } else {
+      barFill.style.width = "";
+      detail.textContent = "";
+    }
+  }
+  return view;
+}
+
+function imageStatusView(s) {
+  const label = h("span", { class: "image-status-label" });
+  const bar = progressBar(null);
+  const detail = h("span", { class: "muted small image-status-detail" });
+  const view = h("div", { class: "image-status note" }, label, bar, detail);
+  view.imageStatusParts = { label, bar, fill: bar.firstElementChild, detail };
+  return updateImageStatusView(view, s);
 }
 
 async function viewImages() {
@@ -1366,7 +1390,23 @@ async function viewImages() {
   const prompt = h("textarea", { placeholder: "Describe the image…" });
   const draftKey = "harness.imageDraft";
   try { prompt.value = localStorage.getItem(draftKey) || ""; } catch (_) { /* private mode */ }
-  prompt.addEventListener("input", () => { try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ } });
+  const startWarmup = () => {
+    if (route.imageWarmupPromise) return route.imageWarmupPromise;
+    if (route.imageWarmupStarted) return Promise.resolve();
+    route.imageWarmupStarted = true;
+    const request = api("/images/warmup", { method: "POST" }).catch((error) => {
+      route.imageWarmupStarted = false;
+      throw error;
+    }).finally(() => {
+      if (route.imageWarmupPromise === request) route.imageWarmupPromise = null;
+    });
+    route.imageWarmupPromise = request;
+    return request;
+  };
+  prompt.addEventListener("input", () => {
+    try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ }
+    if (prompt.value.trim()) startWarmup().catch(() => {});
+  });
   const model = h("select", {}, Object.entries(data.status.models).map(([k, label]) => h("option", { value: k }, label)));
   const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
   let resolutionTouched = false;
@@ -1392,11 +1432,17 @@ async function viewImages() {
     renderResolutions();
   });
   renderResolutions();
-  const phase = h("div", { class: "note" });
+  const phase = imageStatusView(data.status);
   const grid = h("div", { class: "image-grid" });
+  const imageGridKey = (img) => [img.id, img.status, img.error, img.prompt, img.finished_at].join("\0");
   const render = (d) => {
-    fill(phase, imageStatusView(d.status));
-    fill(grid, d.images.map(imageCard));
+    if (d.status.phase === "idle" && !route.imageWarmupPromise) route.imageWarmupStarted = false;
+    updateImageStatusView(phase, d.status);
+    const keys = d.images.map(imageGridKey).join("\n");
+    if (grid.dataset.keys !== keys) {
+      grid.dataset.keys = keys;
+      fill(grid, d.images.map(imageCard));
+    }
     return d;
   };
   render(data);
@@ -1408,6 +1454,7 @@ async function viewImages() {
         if (!prompt.value.trim()) return toast("Describe the image first");
         go.disabled = true;
         try {
+          await startWarmup().catch(() => {});
           const resolution = resolutionInputs.find((choice) => choice.input.checked).name;
           await api("/images", { method: "POST", body: { prompt: prompt.value, model: model.value, aspect_ratio: aspect.value, resolution } });
           try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }

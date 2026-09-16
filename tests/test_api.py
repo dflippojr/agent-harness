@@ -71,9 +71,17 @@ def test_web_app_and_guard(tmp_path):
         assert "#guest-banner" in css
         assert "--text-scale" in css and "max(16px, 1rem)" in css
         assert ".size-grid" in css
+        assert "prefers-reduced-motion: reduce" in css
+        assert ".image-status .progress.indeterminate > span" in css
         assert 'showFab("#/new", "+ New task")' in js
         assert 'showFab("#/jobs/new", "+ New job")' in js
         assert 'api("/backends?auth=skip")' in js
+        assert 'if (images && !route.onImages) api("/images/warmup"' not in js
+        assert 'if (prompt.value.trim()) startWarmup()' in js
+        assert 'await startWarmup().catch(() => {})' in js
+        assert "updateImageStatusView(phase, d.status)" in js
+        assert "grid.dataset.keys" in js
+        assert "Sampling ${Math.round(fraction * 100)}%" in js
         assert 'href: "#/profile/account"' in js
         assert "picker.hidden = !picker.hidden" not in js
         assert "if (holding)" in js
