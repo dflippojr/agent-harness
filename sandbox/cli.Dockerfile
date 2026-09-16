@@ -3,10 +3,11 @@
 #   docker build -t agent-harness-sandbox:py312 sandbox
 #   docker build -t agent-harness-cli:1 -f sandbox/cli.Dockerfile sandbox
 # Logins live in per-provider volumes mounted at the CLIs' home directories, never in the image.
+ARG SANDBOX_IMAGE=agent-harness-sandbox:py312
 ARG NODE_IMAGE=node:22-bookworm-slim
 FROM ${NODE_IMAGE} AS node
 
-FROM agent-harness-sandbox:py312
+FROM ${SANDBOX_IMAGE}
 
 ARG CLAUDE_CODE_VERSION=2.1.272
 ARG CODEX_VERSION=0.154.0

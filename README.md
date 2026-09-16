@@ -9,6 +9,10 @@ Phases 0–8 are built. Open work is GitHub issues, mirrored from `docs/backlog.
 direction is to split the phone PWA (Control Center) from a separately distributable daemon
 (issues #23–#29).
 
+GitHub-hosted CI runs the full suite on pull requests and publishes tested sandbox images to GHCR after merges to
+`main`; see [`docs/CI-CD.md`](docs/CI-CD.md). Automatic tower deployment is a separate, explicitly documented trust
+decision because a self-hosted runner would have host-level access.
+
 ## Install
 
 Windows 10/11 with an NVIDIA GPU (12 GB+), Docker Desktop and Git:
