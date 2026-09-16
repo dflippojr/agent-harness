@@ -585,3 +585,145 @@ items:
       Use the Profile/Settings page header (`{ page: true }`: ‹ plus the title, switcher hidden), or drop the
       in-chrome title and put "New task" on the page. Check New job (`setHeader("jobs", "New job")`) for the same
       pattern.
+
+  - key: header-inset-a-few-more
+    kind: feature
+    title: "Header: move a few more pixels below the iOS status-bar fade"
+    body: |
+      Phone feedback after #37 set `#bar` extra padding to `env(safe-area-inset-top) + 14px`. The Agents dropdown
+      and Profile/Settings titles still sit a few pixels too high under the iOS status-bar / Control Center fade
+      on the installed PWA.
+
+      Bump the extra inset a little (about 18px, still under the old +20px that looked like an empty band). Keep
+      the bar opaque. Check both the feature-nav header and `#bar.page` on the phone; headless shots are not
+      enough (`safe-area-inset-top` is 0 there).
+
+      Scaling: the `env(safe-area-inset-top)` part already follows the device (0 on desktop, larger on Dynamic
+      Island phones). The extra pixels are a fixed fudge for the translucent status-bar blur that extends below
+      the safe area. They do not follow Dynamic Type. Do not invent a per-model table unless +18px still fails
+      on this iPhone.
+
+  - key: remote-control-harness-and-memory
+    kind: feature
+    title: "Remote Control: add agent-harness and the memory library"
+    body: |
+      Phone question after #45. Profile → Claude Remote Control lists tower projects with a local `repo` folder.
+      The user wants to start native Claude in **agent-harness** and in **agent-memory-library** the same way.
+
+      This is a `config/projects.yaml` (and maybe `remote_control.projects`) change once the folders exist, not a
+      list bug. Neither project is in `projects.yaml` today (memory-library is only a commented example).
+
+      Remote Control is an unmodified `claude` process on the tower, not a Docker sandbox. It can read gitignored
+      files in that folder, run git with the host credentials, and edit the live tree.
+
+      **agent-harness** (`D:/Projects/agent-harness`): moderate-high operational risk. The daemon serves
+      `harness/web` from disk, so UI edits apply on reload; Python changes apply on restart. Local config next
+      to the repo is gitignored but readable. The GitHub remote is public.
+
+      **agent-memory-library**: higher privacy risk. Harness agents only see allowlisted categories through the
+      daemon clone. Native Claude in the library folder would see the whole tree, including categories those
+      agents cannot read. Decide whether Remote Control opens the user's working copy or the daemon clone
+      (`memory_library.clone_dir`), and do not point it at a path that would publish private notes.
+
+      If added, keep the existing one-time Claude workspace-trust step. Do not widen Remote Control to MacBook
+      projects in this issue.
+
+  - key: jobs-fab-align
+    kind: feature
+    title: "Jobs: put + New job in the same spot as + New task"
+    body: |
+      Phone feedback. The scheduled-jobs list still shows **+ New job** in a different place than **+ New task**
+      on the Agents list.
+
+      Both already append `a.btn.new-task.fab` with the same CSS (`right: max(16px, env(safe-area-inset-right))`,
+      `bottom: calc(env(safe-area-inset-bottom) + 20px)`). Make them match on the iPhone: same corner, size,
+      safe-area inset, and visual weight. If a leftover composer, jump button, or page-specific overlay is
+      shifting Jobs, remove it. Verify both list pages, including the empty Jobs state.
+
+  - key: slow-form-pages
+    kind: feature
+    title: "New task, New job, and Backends pages wait on live CLI login checks"
+    body: |
+      Phone feedback: Settings → Backends, `#/new`, and `#/jobs/new` now take a noticeable time to appear.
+
+      All three `await api("/backends")` before painting. `GET /backends` builds each hosted backend with
+      `backend_state.view()`, which runs a Docker `claude auth status` / `codex login status` / `agent status`
+      check (30s timeout) **sequentially**. New task and New job only need the backend names/models for the
+      form; they should not wait on those probes.
+
+      Paint the page first (cached or cheap backend list). Load login/usage/limits in the background. Prefer
+      parallel checks and a short TTL cache for `GET /backends` so Settings → Backends is fast on a second
+      visit too.
+
+  - key: cursor-drop-openai-models
+    kind: feature
+    title: "Cursor model picker: drop GPT-5.6 Sol after OpenAI ended the Cursor deal"
+    body: |
+      Phone feedback on Settings → Backends. The Cursor popular-model list includes `gpt-5.6-sol-medium`
+      labeled **GPT-5.6 Sol** (`harness/backend_state.py` `POPULAR_MODELS["cursor"]`).
+
+      OpenAI announced it is winding down model access for Cursor after the SpaceX acquisition (proposed
+      cutoff 2026-11-12; no future OpenAI models). Treat the OpenAI ids as invalid presets for Cursor even
+      if Custom can still type them.
+
+      Remove `gpt-5.6-sol-medium` (and any other OpenAI GPT ids) from the Cursor starter list. Keep
+      `cursor-grok-4.6-high` and `composer-2.5-fast`, and add another current Cursor-native id if a third
+      slot is useful. Leave Custom so a typed name still works. Do not change the Codex list in this issue.
+
+  - key: appearance-text-size
+    kind: feature
+    title: "Appearance: in-app text size"
+    body: |
+      Phone feedback on Settings → Appearance after #36.
+
+      Add a control to scale text inside the Control Center (this device only, like theme). Persist it
+      (e.g. `localStorage`) and apply it to the UI. Keep the 16px minimum on focused inputs so iOS does
+      not zoom. Check session transcript, session list, Settings pages, and the header.
+
+  - key: session-card-double-tap
+    kind: feature
+    title: "Session list: old session cards take two taps to open"
+    body: |
+      Phone feedback on the Agents list. Opening an older session card needs two taps; it should open on
+      the first.
+
+      Cards are `a.card` with `href="#/s/<id>"`. `viewList` rebuilds the list with `replaceChildren` on a
+      300ms-debounced `/events` refresh and on becoming visible again, which can drop the tap that was in
+      flight. iOS also sometimes eats the first tap after a scroll.
+
+      Open on the first tap for finished and live sessions. Keep the machine filter and search working.
+      Check after scrolling a long list.
+
+  - key: guest-demo-access
+    kind: feature
+    title: "Guest/demo access for a tailnet buddy without the full owner UI"
+    body: |
+      The user wants to show the Control Center to another SWE for a couple of hours by adding them to the
+      tailnet.
+
+      Today the PWA is an owner console. `tailscale serve` sends `Tailscale-User-Login`; `allowed_logins`
+      (in untracked local config) is a single owner login. A tailnet peer who is not on that list gets 403.
+      A peer who is added gets **everything** the owner can: all sessions and transcripts, start/cancel,
+      approvals, GPU pause, Remote Control, memory editor, inference keys, Review merge/push.
+
+      There is no guest, read-only, or time-boxed role. App API scoped tokens exist but the PWA does not
+      use them. Distinct from #24 (owner API) and #25 (browser pairing/CORS).
+
+      Add a way to let a named tailnet login look around for a limited time without owner powers. Default
+      should stay "this login is the owner." Do not put real logins, tokens, or tailnet names in the
+      public issue comments.
+
+  - key: profile-account-page
+    kind: feature
+    title: "Profile identity: open an account page instead of toggling the icon picker"
+    body: |
+      Phone feedback on `#/profile`. Tapping the identity card shows/hides the emoji picker on the same
+      page (`picker.hidden = !picker.hidden`). It used to feel like a subpage (chevron) and should again.
+
+      Navigate to a real Profile subpage (e.g. `#/profile/account`) with the usual `{ page: true }` header.
+      On that page show:
+      - the profile icon picker
+      - account/profile information (`GET /me` name and Tailscale login, without extra secrets)
+      - connection details (public URL, whether the live stream is connected)
+
+      Keep GPU and Claude Remote Control on the Profile landing. Do not dump Settings onto this page.
