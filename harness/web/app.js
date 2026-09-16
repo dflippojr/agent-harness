@@ -1495,7 +1495,7 @@ const PROFILE_PAGES = {
   notifications: "Notifications",
   install: "Install",
   backends: "Backends",
-  memory: "Memory library",
+  memory: "Memory",
   apps: "Apps",
   endpoint: "Inference endpoint",
   disk: "Disk",
@@ -1558,6 +1558,7 @@ function emojiPicker(profile, onPick) {
         await api("/profile", { method: "PUT", body: { emoji } });
         $profileIcon.textContent = emoji;
         profile.emoji = emoji;
+        if (readAppIcon() === "profile") applyAppIcon("profile", emoji);
         for (const button of event.currentTarget.parentNode.children) button.classList.toggle("selected", button === event.currentTarget);
         onPick?.(emoji);
       } catch (e) { toast(e.message); }
@@ -1604,17 +1605,63 @@ async function viewProfile(page) {
   );
 }
 
+const APP_ICONS = [
+  { id: "default", label: "Default" },
+  { id: "profile", label: "Profile icon" },
+  { id: "robot", emoji: "🤖", label: "Robot" },
+  { id: "spark", emoji: "✨", label: "Spark" },
+];
+
+function readAppIcon() {
+  try { return localStorage.getItem("harness.appIcon") || "default"; } catch (_) { return "default"; }
+}
+function emojiIconDataUrl(emoji) {
+  const size = 180;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#101418";
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, size, size);
+  ctx.font = "120px system-ui, Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(emoji, size / 2, size / 2 + 6);
+  return canvas.toDataURL("image/png");
+}
+function applyAppIcon(id, profileEmoji) {
+  const spec = APP_ICONS.find((icon) => icon.id === id) || APP_ICONS[0];
+  let href = "/static/icon-180.png";
+  const emoji = spec.id === "profile" ? (profileEmoji || $profileIcon.textContent || "🙂") : spec.emoji;
+  if (emoji) href = emojiIconDataUrl(emoji);
+  const apple = document.querySelector('link[rel="apple-touch-icon"]');
+  const fav = document.querySelector('link[rel="icon"]');
+  if (apple) apple.href = href;
+  if (fav) fav.href = spec.id === "default" ? "/static/icon-192.png" : href;
+  try { localStorage.setItem("harness.appIcon", spec.id); } catch (_) { /* private mode */ }
+}
+
 function appearanceCard() {
   let theme = readTheme();
   let hues = readHues();
+  let appIcon = readAppIcon();
   const hueRow = h("div", { class: "hue-row", hidden: theme !== "custom" });
   const grid = h("div", { class: "theme-grid" });
+  const icons = h("div", { class: "app-icon-grid" });
   const paint = () => {
     fill(grid, Object.entries(THEMES).map(([id, spec]) => h("button", {
       class: `theme-choice${theme === id ? " on" : ""}`, type: "button",
       onclick: () => { theme = id; applyTheme(theme, hues); hueRow.hidden = theme !== "custom"; paint(); },
     },
       h("div", { class: "swatch" }, spec.swatch.map((color, i) => h("span", { style: `background:${i === 2 && id === "custom" ? hues.accent : color}` }))),
+      h("div", { class: "name" }, spec.label))));
+    fill(icons, APP_ICONS.map((spec) => h("button", {
+      class: `app-icon-choice${appIcon === spec.id ? " on" : ""}`, type: "button",
+      onclick: () => { appIcon = spec.id; applyAppIcon(appIcon); paint(); },
+    },
+      h("div", { class: "preview" }, spec.id === "default"
+        ? h("img", { src: "/static/icon-180.png", alt: "" })
+        : (spec.id === "profile" ? ($profileIcon.textContent || "🙂") : spec.emoji)),
       h("div", { class: "name" }, spec.label))));
   };
   paint();
@@ -1629,8 +1676,12 @@ function appearanceCard() {
     return h("label", {}, key === "bg" ? "Background" : key === "panel" ? "Panel" : "Accent", input);
   }));
   return h("div", { class: "card" },
-    h("p", { class: "muted small" }, "How the app looks on this phone. The icon lives on your profile card."),
-    grid, hueRow);
+    h("p", { class: "muted small" }, "How the app looks on this phone. The profile icon — the emoji next to your name — lives on the Profile card."),
+    grid, hueRow,
+    h("p", { class: "section-label" }, "Home screen icon"),
+    h("p", { class: "muted small" }, "Used when you add this app to the home screen. Separate from the profile icon."),
+    icons,
+    h("p", { class: "muted small" }, "iPhone keeps the icon from when you added the app. To apply a new one, delete it from the home screen and Add to Home Screen again."));
 }
 
 function notificationsCard(me) {
@@ -1695,14 +1746,33 @@ async function backendsCard() {
       });
       return sel;
     }
-    const input = h("input", { type: "text", value: b.model || "", placeholder: "Provider model name" });
-    input.addEventListener("change", async () => {
-      const model = input.value.trim();
+    const popular = b.popular_models || [];
+    const save = async (model) => {
       if (!model) return toast("Model is empty");
       try { await api(`/backends/${b.name}`, { method: "PUT", body: { model } }); toast(`Saved ${b.name} model`); }
       catch (e) { toast(e.message); }
+    };
+    if (!popular.length) {
+      const input = h("input", { type: "text", value: b.model || "", placeholder: "Provider model name" });
+      input.addEventListener("change", () => save(input.value.trim()));
+      return input;
+    }
+    const known = popular.some((m) => m.id === b.model);
+    const sel = h("select", {},
+      popular.map((m) => h("option", { value: m.id, selected: m.id === b.model }, m.label || m.id)),
+      h("option", { value: "__custom__", selected: !known }, "Custom"));
+    const input = h("input", {
+      type: "text", value: known ? "" : (b.model || ""),
+      placeholder: "Model name the CLI accepts", hidden: known,
     });
-    return input;
+    sel.addEventListener("change", () => {
+      const custom = sel.value === "__custom__";
+      input.hidden = !custom;
+      if (custom) input.focus();
+      else save(sel.value);
+    });
+    input.addEventListener("change", () => save(input.value.trim()));
+    return [sel, input];
   };
   const title = (b) => (b.name === "local" ? "Qwen (this PC)" : b.name === "claude" ? "Claude" : b.name === "codex" ? "Codex" : b.name === "cursor" ? "Cursor" : b.name);
   fill(body, rows.length ? rows.map((b) => h("div", { class: "backend-block" },
@@ -1820,7 +1890,7 @@ function memoryCard() {
     try {
       const mem = await api("/memory");
       if (!mem.enabled) return fill(body, h("p", { class: "muted small" }, "The memory library is disabled in config/harness.yaml."));
-      const editor = h("textarea", { rows: 8 }, mem.profile || "");
+      const editor = h("textarea", { class: "memory-editor", rows: 24 }, mem.profile || "");
       const save = h("button", { class: "btn primary", disabled: !mem.writes }, "Save");
       save.addEventListener("click", async () => {
         if (!confirm("Save this profile to the memory library? It is given to every new session, then committed and pushed.")) return;
@@ -1960,50 +2030,74 @@ function appsCard(me) {
   return h("div", { class: "card" }, body);
 }
 
+function gbLabel(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return String(n);
+  return `${v >= 10 ? Math.round(v) : v.toFixed(1)} GB`;
+}
+
 function diskCard() {
   const body = h("div", {}, h("p", { class: "muted small" }, "Measuring…"));
   const load = async () => {
     try {
       const u = await api("/maintenance");
       const mb = (n) => (n < 1 ? "<1 MB" : `${n} MB`);
-      const device = (name, free, total, extra) => h("div", { class: "disk-device" },
-        h("strong", {}, name),
-        h("div", { class: "disk-meter" },
-          h("span", {}, `${Math.round(Number(free)) || free} GB free`),
-          total != null ? h("span", { class: "muted" }, `of ${Math.round(Number(total))} GB`) : null),
-        extra);
+      const device = (name, free, total, extra, { offline = false } = {}) => {
+        const freeN = Number(free);
+        const totalN = Number(total);
+        const haveMeter = !offline && Number.isFinite(freeN) && Number.isFinite(totalN) && totalN > 0;
+        const used = haveMeter ? Math.max(0, Math.min(1, (totalN - freeN) / totalN)) : null;
+        return h("div", { class: "disk-device" },
+          h("strong", {}, name),
+          haveMeter ? progressBar(used) : null,
+          h("div", { class: "disk-meter" },
+            h("span", {}, offline ? "Offline" : `${gbLabel(free)} free`),
+            !offline && Number.isFinite(totalN) ? h("span", { class: "muted" }, `of ${gbLabel(total)}`) : null),
+          extra);
+      };
+      const fact = (label, value) => h("p", { class: "small" }, h("strong", {}, label), " ", value);
       const top = u.workspaces.slice(0, 5);
+      const towerExtra = h("div", { class: "disk-facts" },
+        fact("Workspaces", `${mb(u.workspaces_mb)} · ${u.workspaces.length} session${u.workspaces.length === 1 ? "" : "s"} · ${u.quota_mb} MB quota each`),
+        fact("Sandboxes", `${u.containers.length} container${u.containers.length === 1 ? "" : "s"}`),
+        backupLine(u.backup),
+        top.length ? h("p", { class: "muted small", style: "margin-top:10px" }, "Largest workspaces") : null,
+        top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null);
       fill(body,
-        device("Tower", u.free_gb, u.total_gb, [
-          h("p", { class: "muted small" }, `Workspaces ${mb(u.workspaces_mb)} (${u.workspaces.length}) · quota ${u.quota_mb} MB each`),
-          top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null,
-          h("p", { class: "muted small" }, `${u.containers.length} sandbox container${u.containers.length === 1 ? "" : "s"}`),
-          backupLine(u.backup),
-        ]),
-        (u.runners || []).map((r) => device(TARGET_LABEL[r.name] || r.name,
-          r.online ? r.info.free_gb : "—",
-          r.online && r.info.total_gb != null ? r.info.total_gb : null,
-          h("p", { class: "muted small" },
-            r.online ? `online · runner ${r.info.version} · macOS ${r.info.macos}`
-              : `offline${r.last_seen_seconds !== null ? ` (last seen ${Math.round(r.last_seen_seconds / 60)} min ago)` : " (not connected since the daemon started)"}`))));
+        device("Tower", u.free_gb, u.total_gb, towerExtra),
+        (u.runners || []).map((r) => {
+          const online = !!r.online;
+          const extra = h("div", { class: "disk-facts" },
+            fact("Runner", online
+              ? `${r.info.version} · macOS ${r.info.macos}`
+              : (r.last_seen_seconds !== null
+                ? `last seen ${Math.round(r.last_seen_seconds / 60)} min ago`
+                : "not connected since the daemon started")));
+          return device(TARGET_LABEL[r.name] || r.name,
+            online ? r.info.free_gb : "—",
+            online && r.info.total_gb != null ? r.info.total_gb : null,
+            extra, { offline: !online });
+        }));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
-  return h("div", { class: "card" }, body,
-    h("p", { class: "muted small" }, "Clean up now removes stopped sandbox containers, expired session workspaces, and leftover workspace folders."),
-    h("button", {
-      class: "btn",
-      onclick: async (ev) => {
-        if (!confirm("Remove stopped sandbox containers, expired session workspaces, and leftover workspace folders?")) return;
-        ev.target.disabled = true;
-        try {
-          const r = await api("/maintenance/cleanup", { method: "POST" });
-          toast(`Removed ${r.containers_removed.length} containers, ${r.workspaces_removed.length + r.orphans_removed.length} workspaces`);
-          load();
-        } catch (e) { toast(e.message); }
-        ev.target.disabled = false;
-      },
-    }, "Clean up now"));
+  return h("div", {},
+    h("div", { class: "card" }, body),
+    h("div", { class: "card" },
+      h("p", { class: "muted small" }, "Removes stopped sandbox containers, expired session workspaces, and leftover workspace folders."),
+      h("button", {
+        class: "btn",
+        onclick: async (ev) => {
+          if (!confirm("Remove stopped sandbox containers, expired session workspaces, and leftover workspace folders?")) return;
+          ev.target.disabled = true;
+          try {
+            const r = await api("/maintenance/cleanup", { method: "POST" });
+            toast(`Removed ${r.containers_removed.length} containers, ${r.workspaces_removed.length + r.orphans_removed.length} workspaces`);
+            load();
+          } catch (e) { toast(e.message); }
+          ev.target.disabled = false;
+        },
+      }, "Clean up now")));
 }
 
 // ---------- model warm-up ----------
@@ -2021,5 +2115,5 @@ if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 warmModel();
-loadProfileIcon();
+loadProfileIcon().then(() => applyAppIcon(readAppIcon()));
 route();

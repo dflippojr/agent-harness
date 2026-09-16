@@ -104,13 +104,19 @@ class Executor:
             repo = str(path)
         return Project(repo, params.get("base_branch") or "")
 
-    def free_gb(self) -> float:
+    def disk(self) -> tuple[float, float]:
         self.workspaces.mkdir(parents=True, exist_ok=True)
-        return round(shutil.disk_usage(self.workspaces).free / 2**30, 1)
+        usage = shutil.disk_usage(self.workspaces)
+        return round(usage.free / 2**30, 1), round(usage.total / 2**30, 1)
+
+    def free_gb(self) -> float:
+        return self.disk()[0]
 
     def info(self) -> dict:
+        free_gb, total_gb = self.disk()
         return {"version": VERSION, "python": platform.python_version(), "macos": platform.mac_ver()[0],
-                "arch": platform.machine(), "free_gb": self.free_gb(), "workspaces": str(self.workspaces),
+                "arch": platform.machine(), "free_gb": free_gb, "total_gb": total_gb,
+                "workspaces": str(self.workspaces),
                 "sandbox": self.profile_template is not None, "repo_roots": [str(r) for r in self.repo_roots]}
 
     # dispatch

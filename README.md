@@ -25,7 +25,7 @@ Built as mini-phases (`docs/phase7a-results.md`, `phase7b-results.md` for 7b+7c,
 - Memory writes (`memory_library.writes`): `memory_edit` / `memory_write` in the readable categories. Every change asks,
   with the diff on the phone; once approved, the daemon's clone commits and pushes. Sensitive categories stay invisible.
 - Agent profile (`memory_library.profile_path`, `agent-profile.md` in the library): a short curated file put into each
-  new session's system prompt once, so the prompt prefix stays cacheable. Settings → Memory library shows it.
+  new session's system prompt once, so the prompt prefix stays cacheable. Settings → Memory shows it.
 - Scheduled jobs (`jobs:`): cron schedules for agent tasks, managed under ⏰ Jobs. Runs end with `STATUS: OK` or
   `STATUS: ATTENTION`; OK is quiet or low-priority per job, ATTENTION notifies normally.
 - Documents and a recorded web (`web:`): `web_fetch` reads PDFs (page-marked) and Word `.docx`, not only HTML and text.

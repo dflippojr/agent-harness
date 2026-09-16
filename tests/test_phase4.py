@@ -273,6 +273,13 @@ def test_runner_endpoints_need_the_token(tmp_path):
 
 
 # runner executor
+def test_runner_info_includes_disk_total(tmp_path):
+    ex = executor(tmp_path, [tmp_path / "Projects"])
+    info = ex.info()
+    assert info["free_gb"] >= 0
+    assert info["total_gb"] >= info["free_gb"]
+
+
 def test_executor_refuses_repos_outside_roots_and_bad_ids(tmp_path):
     ex = executor(tmp_path, [tmp_path / "Projects"])
     with pytest.raises(harness_runner.OpError, match="allowed project directory"):

@@ -164,6 +164,11 @@ input[type=text], input[type=search], select, textarea {
   font-size: 16px; /* 16px keeps iOS from zooming on focus */
 }
 textarea { min-height: 140px; resize: vertical; }
+textarea.memory-editor {
+  min-height: calc(100dvh - var(--bar-h, 52px) - 200px);
+  font-family: var(--mono);
+  line-height: 1.45;
+}
 
 .tabs { display: flex; gap: 4px; background: var(--panel-2); padding: 3px; border-radius: 10px; margin: 4px 0 12px; }
 .tabs button { flex: 1; border: 0; background: none; padding: 8px; border-radius: 8px; cursor: pointer; font-weight: 500; color: var(--muted); }
@@ -328,6 +333,23 @@ a.quote-source { text-decoration: underline; text-decoration-style: dotted; text
 
 .backend-block { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .backend-block:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
-.disk-device { margin-bottom: 16px; }
-.disk-meter { display: flex; justify-content: space-between; gap: 8px; margin: 4px 0 8px; }
+.backend-block input[type=text] { margin-top: 8px; }
+.disk-device { margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.disk-device:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
+.disk-device .progress { height: 8px; margin: 8px 0 6px; }
+.disk-meter { display: flex; justify-content: space-between; gap: 8px; margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+.disk-facts { margin: 0; }
+.disk-facts p { margin: 4px 0; }
+.app-icon-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 8px 0 10px; }
+.app-icon-choice {
+  margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  cursor: pointer; text-align: left;
+}
+.app-icon-choice.on { border-color: var(--text); outline: 2px solid var(--text); outline-offset: 1px; }
+.app-icon-choice .preview {
+  display: flex; align-items: center; justify-content: center;
+  height: 48px; border-radius: 10px; margin-bottom: 6px; background: var(--panel-2); font-size: 28px;
+}
+.app-icon-choice .preview img { width: 40px; height: 40px; border-radius: 8px; }
+.app-icon-choice .name { font-weight: 600; font-size: 14px; }
 .identity { width: 100%; text-align: left; cursor: pointer; font: inherit; }

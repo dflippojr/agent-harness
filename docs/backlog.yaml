@@ -478,3 +478,110 @@ items:
       Show the arrows sooner — around half a viewport to one viewport from the end, not two. Still hide an arrow
       when that end is already in view. Check a short finished session and a long live one, on Transcript and on
       a long Changes page.
+
+  - key: settings-memory-page
+    kind: feature
+    title: "Settings Memory: rename the page and enlarge the profile editor"
+    body: |
+      Phone feedback after #33.
+
+      **Rename.** Settings still labels the page **Memory library**. Call it **Memory**. Keep the hash
+      `#/profile/memory`.
+
+      **Taller editor.** The profile textarea is `rows: 8` with a 140px min-height, so most of the document sits
+      behind a tiny box. Make the edit box tall enough that it extends the widget and fills most of the page
+      below the short purpose copy (phone-first).
+
+  - key: appearance-profile-and-app-icon
+    kind: feature
+    title: "Appearance: say profile icon, and let the user pick a home-screen app icon"
+    body: |
+      Phone feedback after #33 / #36.
+
+      **Copy.** Appearance says "The icon lives on your profile card." That does not say *profile* icon, so it
+      reads as if the home-screen / app icon were on Profile. Say that the **profile icon** (the emoji next to
+      the name) lives on the Profile card.
+
+      **Home-screen app icon.** The unclear copy also makes the missing control obvious: Appearance should offer
+      a few application-icon options for the PWA home-screen icon, separate from the in-app profile emoji.
+      iOS keeps the icon from Add to Home Screen, so say that applying a new one means removing the app and
+      adding it again.
+
+  - key: backends-popular-models
+    kind: feature
+    title: "Backends: popular model presets plus a custom name"
+    body: |
+      Phone feedback after #33. Hosted backends (Claude, Codex, Cursor) currently use a free-text model field.
+
+      For each platform, show the few most-used models as a select, plus **Custom** with a text field so the
+      user can type any model name the CLI accepts. Local Qwen can keep listing configured models.
+
+      Suggested starters (update if the CLIs rename them):
+      - Claude: `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5`
+      - Codex: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`
+      - Cursor: `cursor-grok-4.6-high`, `composer-2.5-fast`, `gpt-5.6-sol-medium`
+
+      If the saved model is not in the list, select Custom and fill the text field.
+
+  - key: disk-page-layout
+    kind: feature
+    title: "Disk: remaining layout cleanup"
+    body: |
+      Phone feedback after #33, which already asked for one layout per device. The page is still messy:
+      `.disk-meter` is only two text spans (not a bar), Tower dumps workspaces / containers / backup into one
+      jumble, and MacBook only reports free space (no total) plus a runner/version line.
+
+      Use one layout per device: name, a real used/free bar, "N GB free of M GB", then labeled rows for what is
+      using space. Keep **Clean up now** in its own block with the existing confirm copy. Have the Mac runner
+      report `total_gb` so both machines can use the same meter.
+
+  - key: scratch-not-a-repo
+    kind: feature
+    title: "Scratch: empty per-session folder, not a new git repo or project"
+    body: |
+      Phone question after using New task → scratch.
+
+      **Current behavior.** `scratch` (and `mac-scratch`) are fixed entries in `config/projects.yaml`. Starting a
+      scratch task does **not** create a git repository and does **not** add a new selectable project. Each session
+      gets a fresh empty directory under the data dir (`workspaces/<session-id>` on the tower, or the Mac runner's
+      workspaces folder). There is no clone, no `agent/<id>` branch, and no Review merge/push. Cleanup deletes that
+      folder after retention. The project name stays `scratch` every time.
+
+      **Why it exists.** A disposable sandbox for prompts that aren't tied to a code repo (questions, one-off files,
+      experiments). Homelab-without-repo sessions work the same way: empty workspace plus host tools.
+
+      Capture this so New task can explain it (or so scratch can later mint a real repo/project if that's wanted).
+      Do not change the runtime in this issue until that's decided.
+
+  - key: remote-control-homelab
+    kind: feature
+    title: "Remote Control card omits homelab because it has no local repo folder"
+    body: |
+      Phone feedback: Profile → Claude Remote Control lists invoice-tools, plex-webhook, observability-stack, but
+      not **homelab**.
+
+      This is intentional with the current rule, not a list bug. `RemoteControl.folder()` only accepts tower
+      projects whose `repo` is a local directory (`harness/remote_control.py`). `homelab` in `config/projects.yaml`
+      has `homelab: true` and **no `repo`**, so `eligible()` skips it (same as `scratch`). Claude Code Remote Control
+      has to start in a folder; there isn't one.
+
+      Decide one of:
+      - leave it omitted, and say on the card that only tower projects with a local folder appear
+      - point homelab at a real folder (e.g. `D:/Docker`) so a server can be launched there
+      - add a separate "open Claude in the homelab root" path
+
+      Tests already encode the skip: `eligible() == ["repo"]  # scratch has no folder, remote is a URL`.
+
+  - key: new-task-header
+    kind: feature
+    title: "New task: header is busy again with truncated text"
+    body: |
+      Phone feedback on `#/new`. The header shows the Agents dropdown plus a truncated page title.
+
+      `viewNew` calls `setHeader("agents", "New task")` without `{ page: true }`. That leaves the profile icon and
+      feature switcher visible and puts "New task" in `#title` beside them — the same cramped truncated-title
+      pattern #32 removed from session pages.
+
+      Use the Profile/Settings page header (`{ page: true }`: ‹ plus the title, switcher hidden), or drop the
+      in-chrome title and put "New task" on the page. Check New job (`setHeader("jobs", "New job")`) for the same
+      pattern.

@@ -10,6 +10,24 @@ from pathlib import Path
 
 EFFORTS = ("low", "medium", "high")
 PREFS_KEY = "backend_prefs"
+# Few currently popular CLI model ids per hosted backend. The PWA offers these plus a Custom field.
+POPULAR_MODELS = {
+    "claude": (
+        ("claude-opus-5", "Opus 5"),
+        ("claude-sonnet-5", "Sonnet 5"),
+        ("claude-haiku-4-5", "Haiku 4.5"),
+    ),
+    "codex": (
+        ("gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("gpt-5.6-terra", "GPT-5.6 Terra"),
+        ("gpt-5.6-luna", "GPT-5.6 Luna"),
+    ),
+    "cursor": (
+        ("cursor-grok-4.6-high", "Grok 4.6"),
+        ("composer-2.5-fast", "Composer 2.5"),
+        ("gpt-5.6-sol-medium", "GPT-5.6 Sol"),
+    ),
+}
 
 
 def billing_warning(cfg, limits: dict | None = None, using_api_key: bool = False) -> str:
@@ -80,6 +98,7 @@ def view(manager, name: str, check_auth: bool = True) -> dict:
         "today": manager.db.usage_tally(name, local_midnight),
         "week": manager.db.usage_tally(name, week), "notice": notice(name, cfg, limits),
         "billing_warning": billing_warning(cfg, limits), "api_key_available": key_ready,
+        "popular_models": [{"id": model_id, "label": label} for model_id, label in POPULAR_MODELS.get(name, ())],
     }
 
 
