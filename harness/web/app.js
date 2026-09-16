@@ -13,6 +13,8 @@
 //   #/images/<id>/full       in-app fullscreen viewer
 //   #/jobs[/new|/<id>]       scheduled jobs
 
+import { controlCenter } from "./client.mjs";
+
 const $app = document.getElementById("app");
 const $title = document.getElementById("title");
 const $back = document.getElementById("back");
@@ -103,7 +105,8 @@ function showFab(href, label) {
 
 let currentMe = { role: "owner" };
 async function currentUser() {
-  try { currentMe = await api("/me"); } catch (_) { currentMe = { role: "owner" }; }
+  const bootstrap = !controlCenter.token && !controlCenter.independent ? "legacy" : "admin";
+  try { currentMe = await api("/me", { surface: bootstrap }); } catch (_) { currentMe = { role: "owner" }; }
   return currentMe;
 }
 function isGuest() { return currentMe.role === "guest"; }
@@ -135,23 +138,46 @@ function toast(text, ms = 2600) {
   toast.timer = setTimeout(() => { t.hidden = true; }, ms);
 }
 
-async function api(path, { method = "GET", body } = {}) {
-  const opts = { method, headers: {} };
-  if (body !== undefined) {
-    opts.headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(body);
+function apiSurface(path, method) {
+  if (isGuest() && !controlCenter.token) return "legacy";
+  const route = path.split("?")[0];
+  if (route === "/sessions" && (method === "GET" || method === "POST")) return "app";
+  if (/^\/sessions\/[^/]+$/.test(route) && method === "GET") return "app";
+  if (/^\/sessions\/[^/]+\/(messages|cancel)$/.test(route) && method === "POST") return "app";
+  if (/^\/sessions\/[^/]+\/approvals\/[^/]+$/.test(route) && method === "POST") return "app";
+  return "admin";
+}
+
+async function api(path, { method = "GET", body, surface } = {}) {
+  return controlCenter.request(path, { method, body, surface: surface || apiSurface(path, method) });
+}
+
+const ownerSurface = () => (isGuest() && !controlCenter.token ? "legacy" : "admin");
+
+function daemonImage(path, attrs = {}) {
+  const img = h("img", { ...attrs, alt: attrs.alt || "" });
+  if (!controlCenter.token) {
+    img.src = controlCenter.url(path, ownerSurface());
+  } else {
+    controlCenter.blob(path, "admin").then((blob) => {
+      const url = URL.createObjectURL(blob);
+      img.src = url;
+      img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
+    }).catch((e) => { img.alt = `${attrs.alt || "Image"} (${e.message})`; });
   }
-  let resp;
+  return img;
+}
+
+async function downloadDaemonFile(path, filename) {
   try {
-    resp = await fetch(path, opts);
-  } catch (e) {
-    throw new Error("Can't reach the tower. Is Tailscale connected?");
-  }
-  if (resp.status === 204) return null;
-  const type = resp.headers.get("content-type") || "";
-  const data = type.includes("json") ? await resp.json() : await resp.text();
-  if (!resp.ok) throw new Error((data && data.detail) || `HTTP ${resp.status}`);
-  return data;
+    const blob = await controlCenter.blob(path, ownerSurface());
+    const url = URL.createObjectURL(blob);
+    const link = h("a", { href: url, download: filename });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) { toast(e.message); }
 }
 
 function ago(ts) {
@@ -253,24 +279,71 @@ function md(src, pages) {
 }
 
 // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
-function openStream(urlFor, handlers) {
+function openStream(urlFor, handlers, { authorized = false } = {}) {
   let es = null;
+  let controller = null;
   let closed = false;
   let retry = null;
-  const connect = () => {
+  let generation = 0;
+  const dispatch = (block) => {
+    let type = "message";
+    const data = [];
+    for (const line of block.replace(/\r/g, "").split("\n")) {
+      if (line.startsWith("event:")) type = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+    }
+    if (data.length && handlers[type]) handlers[type](JSON.parse(data.join("\n")));
+  };
+  const fetchStream = async (url) => {
+    controller = new AbortController();
+    const resp = await fetch(url, { headers: controlCenter.headers(), cache: "no-store", signal: controller.signal });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+    $conn.classList.add("live");
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (!closed) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let end;
+      while ((end = buffer.search(/\r?\n\r?\n/)) >= 0) {
+        const block = buffer.slice(0, end);
+        buffer = buffer.slice(end).replace(/^\r?\n\r?\n/, "");
+        if (block && !block.startsWith(":")) dispatch(block);
+      }
+    }
+  };
+  const connect = async () => {
     if (closed) return;
+    const run = ++generation;
     es?.close();
-    es = new EventSource(urlFor());
-    es.onopen = () => $conn.classList.add("live");
-    es.onerror = () => {
+    controller?.abort();
+    let url;
+    try { url = await urlFor(); }
+    catch (_) {
       $conn.classList.remove("live");
-      if (es.readyState === EventSource.CLOSED) {
+      if (!closed && run === generation) retry = setTimeout(connect, 3000);
+      return;
+    }
+    if (authorized && controlCenter.token) {
+      try { await fetchStream(url); } catch (_) { /* retry below */ }
+      $conn.classList.remove("live");
+      if (!closed && run === generation) retry = setTimeout(connect, 3000);
+      return;
+    }
+    const source = new EventSource(url);
+    es = source;
+    source.onopen = () => $conn.classList.add("live");
+    source.onerror = () => {
+      $conn.classList.remove("live");
+      if (source.readyState === EventSource.CLOSED && run === generation) {
         clearTimeout(retry);
         retry = setTimeout(connect, 3000);
       }
     };
     for (const [type, fn] of Object.entries(handlers)) {
-      es.addEventListener(type, (msg) => fn(JSON.parse(msg.data)));
+      source.addEventListener(type, (msg) => fn(JSON.parse(msg.data)));
     }
   };
   const onVisible = () => { if (document.visibilityState === "visible") connect(); };
@@ -280,6 +353,7 @@ function openStream(urlFor, handlers) {
     closed = true;
     clearTimeout(retry);
     es?.close();
+    controller?.abort();
     $conn.classList.remove("live");
     document.removeEventListener("visibilitychange", onVisible);
   };
@@ -334,7 +408,8 @@ async function route() {
     else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
     else go("#/", true);
   } catch (e) {
-    $app.append(h("p", { class: "note bad" }, e.message));
+    $app.append(h("p", { class: "note bad" }, e.message),
+      h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings"));
   }
 }
 $back.addEventListener("click", () => {
@@ -488,7 +563,8 @@ async function viewList() {
   for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
     handlers[type] = refresh;
   }
-  onLeave(openStream(() => "/events", handlers));
+  onLeave(openStream(() => controlCenter.url("/events", isGuest() && !controlCenter.token ? "legacy" : "admin"), handlers,
+    { authorized: !(isGuest() && !controlCenter.token) }));
   const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
   document.addEventListener("visibilitychange", onVisible);
   onLeave(() => document.removeEventListener("visibilitychange", onVisible));
@@ -1196,7 +1272,9 @@ async function viewSession(sid, tab, focusApproval) {
       if (persisted && !finalAnswer && !TERMINAL.has(session.status)) maybeThinking();
     };
   }
-  onLeave(openStream(() => `/sessions/${sid}/events?after=${lastSeq}`, tracked));
+  onLeave(openStream(() => (isGuest() && !controlCenter.token
+    ? controlCenter.url(`/sessions/${sid}/events?after=${lastSeq}`, "legacy")
+    : controlCenter.sessionStreamUrl(sid, lastSeq)), tracked));
   if (composer) onLeave(() => composer.remove());
 }
 
@@ -1328,7 +1406,8 @@ function viewInfo(s) {
   if (s.branch) rows.push(["Branch", `${s.branch}${s.base_branch ? ` from ${s.base_branch}` : ""}`], ["Review", s.review || "pending"]);
   $app.append(h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
     h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v))))),
-  h("a", { class: "btn", href: `/sessions/${s.id}/transcript`, target: "_blank" }, "Open Markdown transcript"));
+  h("button", { class: "btn", onclick: () => downloadDaemonFile(`/sessions/${s.id}/transcript`, `${s.id}.md`) },
+    "Download Markdown transcript"));
 }
 
 // ---------- images ----------
@@ -1342,7 +1421,7 @@ const IMAGE_BUSY = new Set(["waiting", "switching", "starting", "generating", "r
 function imageCard(img) {
   const ready = img.status === "done";
   return h("a", { class: "card image-card", href: `#/images/${img.id}` },
-    ready ? h("img", { src: `/images/${img.id}.png`, alt: img.prompt, loading: "lazy" })
+    ready ? daemonImage(`/images/${img.id}.png`, { alt: img.prompt, loading: "lazy" })
       : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" ? "failed" : h("span", { class: "dots" }, img.status)),
     h("div", { class: "preview small" }, img.prompt));
 }
@@ -1488,7 +1567,7 @@ async function viewImage(id) {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
     fill($app,
-      img.status === "done" ? h("a", { href: `#/images/${id}/full` }, h("img", { class: "image-full", src: `/images/${id}.png`, alt: img.prompt }))
+      img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
         : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : imageStatusView(img.service)),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
@@ -1503,7 +1582,7 @@ async function viewImage(id) {
               } catch (e) { toast(e.message); }
             },
           }, "Another one"),
-          img.status === "done" ? h("a", { class: "btn", href: `/images/${id}.png`, download: `${id}.png` }, "Download") : null,
+          img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
           img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null)));
     return img;
   };
@@ -1520,7 +1599,7 @@ async function viewImageFull(id) {
   if (img.status !== "done") { go(`#/images/${id}`, true); return; }
   setHeader("images", "Image", { page: true });
   fill($app, h("div", { class: "image-viewer" },
-    h("img", { src: `/images/${id}.png`, alt: img.prompt })));
+    daemonImage(`/images/${id}.png`, { alt: img.prompt })));
 }
 
 // ---------- scheduled jobs ----------
@@ -1682,6 +1761,7 @@ async function viewJob(id) {
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
 const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint"]);
 const PROFILE_PAGES = {
+  connection: "Connection",
   appearance: "Appearance",
   notifications: "Notifications",
   install: "Install",
@@ -1802,6 +1882,7 @@ async function viewProfile(page) {
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
   setHeader("agents", titles[page] || "Profile", { page: true });
+  if (page === "connection") return $app.append(connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
   if (page === "account") return $app.append(accountCard(me, profile));
   if (page === "appearance") return $app.append(appearanceCard());
@@ -1828,6 +1909,69 @@ async function viewProfile(page) {
         .filter(([id]) => (id !== "install" || !isStandalone()) && !(isGuest() && GUEST_HIDDEN_PAGES.has(id)))
         .map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
   );
+}
+
+function connectionCard() {
+  const daemon = h("input", {
+    type: "url", inputmode: "url", value: controlCenter.baseUrl,
+    placeholder: "Blank for this server, or https://tower.example.ts.net",
+    autocomplete: "url", spellcheck: "false",
+  });
+  const token = h("input", {
+    type: "password", value: controlCenter.token, placeholder: "ho-… owner token",
+    autocomplete: "off", spellcheck: "false",
+  });
+  const status = h("p", { class: "muted small" }, controlCenter.independent
+    ? `This app connects to ${controlCenter.baseUrl}.` : "This bundled app connects to the server that served it.");
+  const save = async () => {
+    try {
+      controlCenter.configure(daemon.value, token.value);
+      status.textContent = "Checking the daemon…";
+      const root = await controlCenter.request("", { surface: "admin" });
+      status.textContent = `Connected to ${root.server} owner API ${root.api_version}. Reloading…`;
+      setTimeout(() => location.reload(), 350);
+    } catch (e) {
+      status.className = "note bad";
+      status.textContent = `${e.message} Settings were saved so you can correct them here.`;
+    }
+  };
+  const origin = h("input", {
+    type: "url", inputmode: "url", value: location.origin,
+    placeholder: "https://control-center.example.com", spellcheck: "false",
+  });
+  const minted = h("div");
+  const mint = async () => {
+    let approvedOrigin;
+    try { approvedOrigin = new URL(origin.value).origin; }
+    catch (_) { toast("Enter the Control Center's complete origin"); return; }
+    try {
+      const key = await api("/keys", { method: "POST", surface: "admin", body: {
+        name: `Control Center (${new URL(approvedOrigin).host})`, kind: "owner", scopes: ["admin"], origins: [approvedOrigin],
+      } });
+      const field = h("input", { type: "text", readonly: true, value: key.key, onclick: (e) => e.target.select() });
+      fill(minted,
+        h("p", { class: "note" }, "Copy this token now; it is not shown again."), field,
+        h("button", { class: "btn small", onclick: async () => {
+          try { await navigator.clipboard.writeText(key.key); toast("Copied"); } catch (_) { field.select(); }
+        } }, "Copy token"));
+    } catch (e) { toast(e.message, 5000); }
+  };
+  return h("div", {},
+    h("div", { class: "card" },
+      h("h3", {}, "This Control Center"),
+      h("p", { class: "muted small" }, "Leave the daemon URL blank when this app is bundled with the daemon. For a separately hosted copy, enter the daemon URL and an owner token approved for this app's exact origin."),
+      h("label", {}, "Daemon URL"), daemon,
+      h("label", {}, "Owner token"), token,
+      h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an ordinary app token; Control Center manages owner-only settings."),
+      h("div", { class: "row", style: "margin-top:10px" },
+        h("button", { class: "btn", onclick: () => { daemon.value = ""; token.value = ""; save(); } }, "Use bundled server"),
+        h("span", { class: "spacer" }),
+        h("button", { class: "btn primary", onclick: save }, "Save and test")), status),
+    h("div", { class: "card" },
+      h("h3", {}, "Authorize another Control Center"),
+      h("p", { class: "muted small" }, "Open this bundled copy as the owner, then mint an origin-bound token for a separately hosted copy. Revocation is available under Settings → Apps."),
+      h("label", {}, "Control Center origin"), origin,
+      h("button", { class: "btn", onclick: mint }, "Create owner token"), minted));
 }
 
 const APP_ICONS = [
@@ -2257,6 +2401,7 @@ function appsCard(me) {
     try {
       const [keys, pairingCodes] = await Promise.all([api("/keys"), api("/pairing-codes")]);
       const apps = keys.filter((k) => k.kind === "app" && !k.revoked_at);
+      const ownerClients = keys.filter((k) => k.kind === "owner" && !k.revoked_at);
       const pending = pairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
       const form = h("div");
       const newBtn = h("button", { class: "btn", type: "button", onclick: () => {
@@ -2328,6 +2473,13 @@ function appsCard(me) {
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
+        ownerClients.length ? [h("p", { class: "section-label" }, "Control Centers"),
+          h("ul", { class: "small" }, ownerClients.map((k) => h("li", {},
+            h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+            h("button", { class: "btn small bad", onclick: async () => {
+              if (!confirm(`Revoke “${k.name}”? That Control Center will stop working.`)) return;
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+            } }, "Revoke"))))] : null,
         pending.length ? h("ul", { class: "small" }, pending.map((p) => h("li", {},
           `Pairing pending for ${p.name} at ${p.origin} · expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
           h("button", { class: "btn small bad", onclick: async () => {

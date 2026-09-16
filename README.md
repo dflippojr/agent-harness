@@ -19,7 +19,7 @@ powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
 No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`);
-the owner API is `docs/admin-api.md`.
+the owner API is `docs/admin-api.md`; and bundled/separate Control Center deployment is in `docs/control-center.md`.
 
 ## Phase 8: subscription backends, Remote Control, answer checks
 
@@ -67,9 +67,10 @@ it grew into the first-party operator UI rather than a thin session list:
 - Time-boxed guest/demo access (`guests:` in untracked `config/harness.local.yaml`): a named tailnet
   login can browse read-only until an ISO `until`. Requires `allowed_logins`. Guests cannot start or
   cancel work, approve, mint keys, pause the GPU, use Remote Control, edit memory, or Review.
-- Owner operations are also versioned at `/api/admin/v1` (`docs/admin-api.md`): Tailscale/localhost
-  owner identity, or an `ho-` bearer token with the `admin` scope. App tokens cannot call that
-  surface. The bundled PWA still uses the unversioned operator routes until #23.
+- Control Center is a first-party daemon client (`docs/control-center.md`). Bundled static serving remains the
+  default, while the same no-build PWA can be hosted separately with a configurable daemon URL and an origin-bound
+  `ho-` owner token. Session work dogfoods `/api/v1`; owner operations dogfood `/api/admin/v1`. Authenticated SSE,
+  images, and downloads work without putting bearer tokens in URLs. App tokens cannot call the owner surface.
 
 Still open from that pass: **#48** (add agent-harness and the memory library to Remote Control) and
 **#56** (Images: warm ComfyUI when the tab opens, real step progress, unload immediately, in-app

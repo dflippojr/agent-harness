@@ -30,6 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import ModelConfig
+from .manager import HarnessError
 from .scheduler import GpuExclusive, QueueFull
 
 log = logging.getLogger("harness.endpoint")
@@ -261,7 +262,19 @@ def register(app: FastAPI, mgr) -> None:
         body = await request.json()
         from .admin import parse_key_spec
         name, scopes, kind = parse_key_spec(body)
-        row, key = mgr(request).db.create_api_key(name, scopes, kind)
+        origins = []
+        if body.get("origins"):
+            if kind != "owner":
+                raise HarnessError(400, "browser origins on manually minted keys are owner-only; pair app tokens")
+            raw_origins = body["origins"]
+            if not isinstance(raw_origins, list) or not all(isinstance(value, str) for value in raw_origins):
+                raise HarnessError(400, "origins must be a list of browser origins")
+            from .apps import normalize_origin
+            try:
+                origins = list(dict.fromkeys(normalize_origin(value) for value in raw_origins))
+            except ValueError as e:
+                raise HarnessError(400, str(e))
+        row, key = mgr(request).db.create_api_key(name, scopes, kind, origins)
         return {**row, "key": key}
 
     @app.delete("/keys/{kid}", status_code=204)

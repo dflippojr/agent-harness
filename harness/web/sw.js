@@ -1,7 +1,7 @@
 // Service worker: caches the app shell so the app opens instantly (and shows a clear offline state).
 // API responses are never cached: session state must always be live.
-const SHELL = "harness-shell-v1";
-const ASSETS = ["/", "/static/style.css", "/static/app.js", "/static/icon-192.png", "/manifest.webmanifest"];
+const SHELL = "harness-shell-v2";
+const ASSETS = ["/", "/static/style.css", "/static/app.js", "/static/client.mjs", "/static/icon-192.png", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

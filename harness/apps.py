@@ -32,7 +32,7 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.2"
+API_VERSION = "1.3"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
@@ -82,7 +82,7 @@ def daemon_origins(cfg) -> set[str]:
 
 
 def cors_origin_allowed(m, request: Request, origin: str) -> bool:
-    """Whether a cross-origin /api/v1 browser request may receive CORS response headers.
+    """Whether a cross-origin versioned API request may receive CORS response headers.
 
     Route authentication still makes the authorization decision. This check exists separately because a browser's
     OPTIONS preflight deliberately omits its bearer token.
@@ -98,6 +98,11 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
     if ticket and m.db.stream_ticket_origin_active(ticket, origin):
         return True
     return m.db.origin_allowed(origin)
+
+
+def owner_key(key: dict | None) -> bool:
+    """An owner token can dogfood app operations as Control Center without becoming an app."""
+    return bool(key and key.get("kind") == "owner" and "admin" in set((key.get("scopes") or "").split()))
 
 
 class ContextBlock(BaseModel):
@@ -254,9 +259,21 @@ def register(app: FastAPI, mgr) -> None:
         token = header[7:].strip() if header.lower().startswith("bearer ") else ""
         key = m.db.api_key_by_secret(token)
         if key is None:
+            # The bundled first-party client has the daemon's same-origin Tailscale/localhost owner identity.
+            # Cross-origin clients must use an origin-bound owner token; never promote an approved app origin.
+            ident = getattr(request.state, "access", None)
+            raw_origin = request.headers.get("origin", "")
+            try:
+                same_origin = not raw_origin or normalize_origin(raw_origin) in daemon_origins(m.cfg)
+            except ValueError:
+                same_origin = False
+            if not token and ident is not None and ident.role == "owner" and ident.allowed and same_origin:
+                return {"id": "", "name": "Control Center", "kind": "owner", "scopes": "admin",
+                        "scope_set": {"admin"}, "origins": [], "bundled": True}
             raise HarnessError(401, "missing or invalid app token")
         scopes = set((key.get("scopes") or "").split())
-        if scope not in scopes and not (scope == "sessions" and "sessions:all" in scopes and request.method == "GET"):
+        if (not owner_key(key) and scope not in scopes
+                and not (scope == "sessions" and "sessions:all" in scopes and request.method == "GET")):
             raise HarnessError(403, f"this token lacks the {scope!r} scope")
         raw_origin = request.headers.get("origin", "")
         if raw_origin:
@@ -272,7 +289,8 @@ def register(app: FastAPI, mgr) -> None:
     def own_session(request: Request, key: dict, ref: str) -> dict:
         m = mgr(request)
         s = m.get(ref)
-        if s.get("app_id") != key["id"] and "sessions:all" not in key["scope_set"]:
+        if (not owner_key(key) and s.get("app_id") != key["id"]
+                and "sessions:all" not in key["scope_set"]):
             raise HarnessError(404, f"no session matches {ref!r}")
         return s
 
@@ -354,7 +372,8 @@ def register(app: FastAPI, mgr) -> None:
         blocks = [b.model_dump() for b in body.context]
         if sum(len(b["content"]) for b in blocks) > MAX_CONTEXT_CHARS:
             raise HarnessError(413, f"context is larger than {MAX_CONTEXT_CHARS} characters")
-        s = m.create(body.prompt, project=body.project, backend=body.backend, model=body.model, title=body.title, app=key,
+        s = m.create(body.prompt, project=body.project, backend=body.backend, model=body.model, title=body.title,
+                     app=None if owner_key(key) else key,
                      app_context=context_text(key["name"], blocks) if blocks else "", app_tools=body.tools,
                      app_metadata=body.metadata)
         return view(m, s)
@@ -364,7 +383,8 @@ def register(app: FastAPI, mgr) -> None:
         m = mgr(request)
         key = auth(request, "sessions")
         rows = m.db.list_sessions(limit * 5)
-        mine = [r for r in rows if "sessions:all" in key["scope_set"] or r.get("app_id") == key["id"]][:limit]
+        mine = [r for r in rows if owner_key(key) or "sessions:all" in key["scope_set"]
+                or r.get("app_id") == key["id"]][:limit]
         return [m.summary(r) for r in mine]
 
     @app.get("/api/v1/sessions/{ref}")
@@ -424,7 +444,7 @@ def register(app: FastAPI, mgr) -> None:
         m = mgr(request)
         key = auth(request, "approvals")
         s = own_session(request, key, ref)
-        if s.get("app_id") != key["id"]:
+        if not owner_key(key) and s.get("app_id") != key["id"]:
             raise HarnessError(403, "apps can only decide approvals in their own sessions")
         if body.decision not in ("approve", "deny"):
             raise HarnessError(400, "decision must be approve or deny")
@@ -461,7 +481,8 @@ def register(app: FastAPI, mgr) -> None:
             if key is None:
                 raise HarnessError(401, "invalid or expired stream ticket")
             key["scope_set"] = set((key.get("scopes") or "").split())
-            if "sessions" not in key["scope_set"] and "sessions:all" not in key["scope_set"]:
+            if (not owner_key(key) and "sessions" not in key["scope_set"]
+                    and "sessions:all" not in key["scope_set"]):
                 raise HarnessError(403, "this token lacks the 'sessions' scope")
         else:
             key = auth(request, "sessions")

@@ -6,6 +6,11 @@ a tailnet). FastAPI also serves the machine-readable schema at `/openapi.json`. 
 GPU, review/push, token management, maintenance, Remote Control trust) live on [`/api/admin/v1`](admin-api.md) and
 are not part of this app contract. App tokens cannot call them.
 
+The first-party [Control Center](control-center.md) also uses this surface for ordinary session operations. A
+same-origin bundled Control Center may use its Tailscale/localhost owner identity; a separately hosted copy uses an
+origin-bound owner token. Owner-created sessions are not assigned to an app. This first-party privilege does not
+change app-token scoping: app tokens still see only their own sessions unless granted read-only `sessions:all`.
+
 A Python client lives in [`sdk/harness_client.py`](../sdk/harness_client.py) (one file, needs `httpx`), with an
 example in [`sdk/examples/shopping_list_app.py`](../sdk/examples/shopping_list_app.py).
 
@@ -261,3 +266,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.0 | 2026-09-15 | First release: sessions, context, app tools, events, approvals, images, scoped tokens |
 | 1.1 | 2026-09-15 | `remote_control` scope and endpoints; `ungrounded_quotes` in `run_finished` and as an event |
 | 1.2 | 2026-09-16 | Exact-origin browser pairing/CORS and short-lived authenticated SSE stream tickets |
+| 1.3 | 2026-09-16 | First-party Control Center owner identity/token support for ordinary session operations |
