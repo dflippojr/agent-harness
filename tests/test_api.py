@@ -61,13 +61,14 @@ def test_web_app_and_guard(tmp_path):
         assert "safe-area-inset-top, 0px) + 18px" in css
         assert ".session-chrome" in css and ".jump-top" in css
         assert ".swatch.split" in css and ".hue-preview" in css
-        assert "min-width: 148px" in css
+        assert "#fab-host" in css and "width: 9.75rem" in css
         assert 'showFab("#/new", "+ New task")' in js
         assert 'showFab("#/jobs/new", "+ New job")' in js
+        assert 'api("/backends?auth=skip")' in js
         assert 'href: "#/profile/account"' in js
         assert "picker.hidden = !picker.hidden" not in js
         assert "if (holding)" in js
-        assert 'id="fab"' in client.get("/").text
+        assert 'id="fab-host"' in client.get("/").text
         assert client.get("/static/app.js").status_code == 200
         profile = client.get("/profile").json()
         assert profile["emoji"] == "🙂" and "🚀" in profile["choices"]

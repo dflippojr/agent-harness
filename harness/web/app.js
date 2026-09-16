@@ -17,6 +17,7 @@ const $back = document.getElementById("back");
 const $conn = document.getElementById("conn");
 const $feature = document.getElementById("feature-nav");
 const $profileIcon = document.getElementById("profile-icon");
+const $fabHost = document.getElementById("fab-host");
 const $fab = document.getElementById("fab");
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 const STATUS_LABEL = {
@@ -94,7 +95,7 @@ function fill(el, ...children) {
 function showFab(href, label) {
   $fab.href = href;
   $fab.textContent = label;
-  $fab.hidden = false;
+  $fabHost.hidden = false;
 }
 
 function toast(text, ms = 2600) {
@@ -273,7 +274,7 @@ async function route() {
   cleanup = [];
   $app.replaceChildren();
   document.querySelector(".composer")?.remove();
-  $fab.hidden = true;
+  $fabHost.hidden = true;
   document.querySelectorAll(".jump").forEach((el) => el.remove());
   const parts = hashParts();
   $back.hidden = isTopLevel(parts);
@@ -450,7 +451,7 @@ async function viewList() {
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
   const [projects, models, allTemplates, backends] = await Promise.all([
-    api("/projects"), api("/models"), api("/templates"), api("/backends")]);
+    api("/projects"), api("/models"), api("/templates"), api("/backends?auth=skip")]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
   const targetKey = "harness.target";
@@ -1435,7 +1436,7 @@ async function viewJob(id) {
   const isNew = id === "new";
   setHeader("jobs", isNew ? "New job" : "Job", { page: true });
   const [projects, models, backends, job] = await Promise.all([
-    api("/projects"), api("/models"), api("/backends"), isNew ? null : api(`/jobs/${id}`)]);
+    api("/projects"), api("/models"), api("/backends?auth=skip"), isNew ? null : api(`/jobs/${id}`)]);
   const j = job || {
     name: "", prompt: "", cron: "0 8 * * *", backend: "local", model: "", notify: "low", enabled: true,
     project: projects.some((p) => p.name === "homelab") ? "homelab" : "scratch",
@@ -1805,7 +1806,7 @@ function backendUsage(b) {
 async function backendsCard() {
   const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
   let failed = false;
-  const [rows, models] = await Promise.all([api("/backends"), api("/models")]).catch((e) => {
+  const [rows, models] = await Promise.all([api("/backends?auth=skip"), api("/models")]).catch((e) => {
     fill(body, h("p", { class: "note bad" }, e.message));
     failed = true;
     return [[], []];
@@ -1860,12 +1861,24 @@ async function backendsCard() {
     return [sel, input];
   };
   const title = (b) => (b.name === "local" ? "Qwen (this PC)" : b.name === "claude" ? "Claude" : b.name === "codex" ? "Codex" : b.name === "cursor" ? "Cursor" : b.name);
-  fill(body, rows.length ? rows.map((b) => h("div", { class: "backend-block" },
-    h("strong", {}, title(b)),
-    h("p", { class: `small ${b.billing_warning ? "bad" : "muted"}` }, b.billing_warning || backendUsage(b)),
-    h("label", {}, "Default model"), modelControl(b),
-    b.name === "local" ? null : [h("label", {}, "Effort"), effortSelect(b)],
-  )) : h("p", { class: "muted small" }, "No backends configured."));
+  const usage = {};
+  fill(body, rows.length ? rows.map((b) => {
+    const line = h("p", { class: `small ${b.billing_warning ? "bad" : "muted"}` }, b.billing_warning || backendUsage(b));
+    usage[b.name] = line;
+    return h("div", { class: "backend-block" },
+      h("strong", {}, title(b)),
+      line,
+      h("label", {}, "Default model"), modelControl(b),
+      b.name === "local" ? null : [h("label", {}, "Effort"), effortSelect(b)]);
+  }) : h("p", { class: "muted small" }, "No backends configured."));
+  api("/backends").then((fresh) => {
+    for (const b of fresh) {
+      const line = usage[b.name];
+      if (!line) continue;
+      line.className = `small ${b.billing_warning ? "bad" : "muted"}`;
+      line.textContent = b.billing_warning || backendUsage(b);
+    }
+  }).catch(() => {});
   return h("div", { class: "card" },
     h("p", { class: "muted small" }, "New tasks use these defaults. You can still pick a backend when you start one."),
     body);

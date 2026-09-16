@@ -48,7 +48,7 @@ def notice(name: str, cfg, limits: dict | None = None) -> str:
     return base + billing + " An API key can be configured as the default or limit fallback."
 
 
-def _subscription_status(name: str, cfg) -> bool:
+def _probe_subscription(name: str, cfg) -> bool:
     commands = {
         "claude": ["claude", "auth", "status"],
         "codex": ["codex", "login", "status"],
@@ -77,6 +77,30 @@ def _subscription_status(name: str, cfg) -> bool:
         except (ValueError, AttributeError):
             return False
     return "not logged in" not in result.stdout.lower()
+
+
+_AUTH_TTL = 45.0
+_auth_cache: dict[tuple[str, str], tuple[float, bool]] = {}
+
+
+def _subscription_status(name: str, cfg) -> bool:
+    key = (str(getattr(cfg, "volume", "")), name)
+    now = time.time()
+    cached = _auth_cache.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+    ok = _probe_subscription(name, cfg)
+    _auth_cache[key] = (now + _AUTH_TTL, ok)
+    return ok
+
+
+def local_view(manager) -> dict:
+    return {
+        "name": "local", "available": True, "logged_in": True, "auth": "local", "billing": "local",
+        "model": manager.cfg.default_model, "effort": "",
+        "limits": {}, "today": {}, "week": {}, "notice": "Runs the local model on this server.",
+        "billing_warning": "", "api_key_available": False,
+    }
 
 
 def view(manager, name: str, check_auth: bool = True) -> dict:

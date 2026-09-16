@@ -240,12 +240,14 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/backends")
     async def backends(request: Request):
         m = mgr(request)
-        from .backend_state import view as backend_view
-        local = {"name": "local", "available": True, "logged_in": True, "auth": "local", "billing": "local",
-                 "model": m.cfg.default_model, "effort": "",
-                 "limits": {}, "today": {}, "week": {}, "notice": "Runs the local model on this server.",
-                 "billing_warning": "", "api_key_available": False}
-        return [local] + [await asyncio.to_thread(backend_view, m, name) for name in m.cfg.backends]
+        from .backend_state import local_view, view as backend_view
+        check_auth = request.query_params.get("auth") != "skip"
+        names = list(m.cfg.backends)
+        if check_auth:
+            hosted = await asyncio.gather(*[asyncio.to_thread(backend_view, m, name) for name in names])
+        else:
+            hosted = [backend_view(m, name, False) for name in names]
+        return [local_view(m), *hosted]
 
     @app.put("/backends/{name}")
     async def update_backend(name: str, body: BackendUpdate, request: Request):

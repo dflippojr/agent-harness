@@ -695,6 +695,21 @@ def test_backend_prefs_persist_model_and_effort(tmp_path, monkeypatch):
     assert reloaded.cfg.backends["claude"].effort == "low"
 
 
+def test_backends_skip_auth_skips_docker_login_probe(tmp_path, monkeypatch):
+    from harness import backend_state
+    calls = []
+    monkeypatch.setattr(backend_state, "_subscription_status", lambda name, cfg: calls.append(name) or True)
+    cfg = make_cfg(tmp_path)
+    cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", effort="high")
+    m = Manager(cfg, chat=Script([Completion(content="hi")]))
+    with TestClient(create_app(m)) as client:
+        skip = {row["name"]: row for row in client.get("/backends", params={"auth": "skip"}).json()}
+        assert calls == []
+        assert skip["claude"]["model"] == "claude-opus-5" and skip["claude"]["logged_in"] is False
+        listed = {row["name"]: row for row in client.get("/backends").json()}
+        assert calls == ["claude"] and listed["claude"]["logged_in"] is True
+
+
 def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
     async def waiting():
         m, _, _ = _claude_manager(tmp_path / "waiting", "limit")
