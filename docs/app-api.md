@@ -134,8 +134,9 @@ daemon restarts.
 
 ## Subscription backends (Claude Code, Codex, Cursor): terms and billing
 
-> **Status: planned (Phase 8a, [issue #20](https://github.com/dflippojr/agent-harness/issues/20)).** Nothing below is
-> built yet. This section describes the rules the backends will follow, so apps can be designed with them in mind.
+> **Status: built in Phase 8a ([issue #20](https://github.com/dflippojr/agent-harness/issues/20)).** Claude Code,
+> Codex CLI and Cursor Agent CLI are available as sandboxed session backends with usage/limit reporting and
+> user-level API-key fallback. This section describes the rules the backends follow so apps can integrate safely.
 > It's the harness author's reading of the providers' published terms as of 2026-09-15, not legal advice. Terms and
 > billing change, so check the sources at the end.
 

@@ -163,3 +163,159 @@ items:
     title: "Session list: filter by machine"
     body: |
       New task already has a Tower/MacBook switch; the session list doesn't.
+
+  - key: decouple-control-center
+    kind: feature
+    title: "Extract the Control Center PWA as a first-party daemon client"
+    body: |
+      The bundled phone PWA has become the first application that consumes the daemon. Make that boundary explicit so
+      the daemon can be distributed as a UI-independent local agent service and the Control Center can evolve like any
+      other client.
+
+      Current coupling:
+      - FastAPI serves `harness/web` directly.
+      - The PWA uses relative URLs and same-origin `EventSource` connections.
+      - It has no configurable daemon address or bearer-token support.
+      - It calls the unversioned operator endpoints rather than dogfooding `/api/v1`.
+
+      Plan:
+      1. Give the PWA a configurable daemon base URL and authenticated request/stream client.
+      2. Migrate ordinary session/context/event operations to `/api/v1`.
+      3. Consume owner-only operations through the planned `/api/admin/v1` surface.
+      4. Move the static bundle into its own package or repository.
+      5. Retain bundled static serving only as an optional compatibility mode.
+
+      A same-origin extraction is about 1–2 days. A genuinely independent authenticated browser client is expected to
+      take about 3–5 days, excluding the owner API and pairing work tracked separately.
+
+  - key: owner-admin-api
+    kind: feature
+    title: "Add a versioned owner-only API for Control Center operations"
+    body: |
+      Keep the least-privilege application API separate from machine-owner powers. Add `/api/admin/v1` for the
+      operations the Control Center needs but ordinary apps should not receive.
+
+      Candidate owner operations include:
+      - global session/search access and session review/push
+      - projects, templates and scheduled jobs
+      - app/token management
+      - maintenance, cleanup and backup
+      - GPU/model controls and model warmup
+      - runner status, memory status and notifications
+      - native Remote Control workspace trust
+
+      Preserve `/api/v1` as the stable app-facing contract. Define an explicit owner credential/scope, version the
+      schemas, migrate the PWA, and add authorization tests proving app tokens cannot reach this surface.
+
+  - key: browser-pairing-cors
+    kind: feature
+    title: "Browser pairing, CORS allowlists and authenticated SSE"
+    body: |
+      A separately hosted Control Center or browser app cannot use today's implicit same-origin/Tailscale trust model.
+      Design a browser-safe connection flow without weakening the daemon's current cross-site request protection.
+
+      Plan:
+      - pair through a short-lived, one-time bootstrap code approved by the owner
+      - issue a revocable scoped client credential; never put provider credentials in the browser
+      - store explicit allowed origins per app/client and emit narrow CORS headers
+      - support authenticated resumable SSE (native `EventSource` cannot set an Authorization header, so use fetch
+        streaming, an HttpOnly-cookie exchange, or a short-lived stream ticket)
+      - cover origin spoofing, token leakage/revocation, reconnect after iOS suspension and CSRF in tests
+
+      This is the main security-sensitive part of decoupling the webapp from the daemon.
+
+  - key: daemon-lite-profile
+    kind: feature
+    title: "Add a stripped-down daemon service profile"
+    body: |
+      Provide an install/configuration profile focused on the reusable app service: applications inject context and
+      tools, select one of the user's configured providers, stream the session and receive the answer.
+
+      The profile should require only sessions, provider adapters, approvals, events, scoped tokens, storage and
+      capability discovery. Local inference, homelab tools, memory-library integration, image generation, scheduled
+      jobs, GPU guard, Mac runner and Remote Control should be optional modules selected during setup.
+
+      Requirements:
+      - start successfully with hosted providers and no local model configured
+      - report enabled capabilities through the API
+      - avoid initializing disabled integrations or requiring their dependencies/secrets
+      - provide an upgrade path from the current full Windows configuration
+      - document the minimum Docker/provider-login requirements and threat boundary
+
+  - key: sdk-contract
+    kind: feature
+    title: "Stabilize the app SDK and OpenAPI contract across every provider"
+    body: |
+      Turn the existing one-file Python client and FastAPI schema into the supported integration surface for new apps.
+
+      Cover the complete app lifecycle:
+      - connect/pair and capability discovery
+      - create a local, Claude, Codex or Cursor session
+      - inject initial and incremental context
+      - register tools and return tool results
+      - stream/reconnect events, surface approvals and cancel
+      - expose usage, limits, billing notices, errors and the final answer consistently
+
+      Add provider-contract tests that run the same scripted scenario through all backend adapters. Document event
+      ordering, replay guarantees, additive versioning and normalized provider failures. Generate or validate SDK
+      types from OpenAPI so the docs, client and server cannot silently drift.
+
+  - key: marketplace-review
+    kind: feature
+    title: "Design the optional app marketplace and review process"
+    body: |
+      The original bring-your-own-agent vision includes a free catalog of apps that list the locally installed daemon
+      as a prerequisite. Design this only after the service/client split is stable.
+
+      Planning constraints already decided:
+      - every user installs their own daemon and authenticates their own unmodified provider CLI
+      - apps never receive provider credentials or route multiple users through one person's subscription
+      - programmatic usage and provider billing/limit warnings must remain visible
+      - the daemon cannot technically enforce whether an external app is commercial
+
+      Define submission metadata, requested scopes/capabilities, static and human review, permission disclosure,
+      update/revocation handling, abuse reporting and provider-policy review. Before public promotion, obtain current
+      provider guidance for subscription-authenticated third-party apps and preserve an official API-key path.
+
+  - key: per-app-provider-credentials
+    kind: feature
+    title: "Isolate per-app provider API keys and billing policy"
+    body: |
+      User-level file-backed provider API-key fallback exists, but an app cannot supply its own isolated provider
+      billing configuration. Add this without storing plaintext provider credentials in SQLite or returning them from
+      any API.
+
+      Design questions:
+      - whether app-builder keys are installed by the owner, paired out of band, or referenced from an OS secret store
+      - per-app default vs fallback policy and provider/model allowlists
+      - attribution of usage/cost to the app, user and credential source
+      - revocation and session behavior when a key disappears
+      - preventing one app from selecting or observing another app's key
+
+      Prefer opaque secret references backed by the OS credential store or owner-managed files. Extend backend status,
+      notices and usage tallies to identify the billing source without exposing secret material.
+
+  - key: docker-desktop-autostart
+    kind: check
+    title: "Verify Docker Desktop and daemon recovery across a cold reboot"
+    body: |
+      Docker Desktop's autostart setting is enabled, but the complete dependency chain has not been verified after a
+      cold Windows reboot.
+
+      Exit test:
+      - reboot without manually opening Docker Desktop
+      - confirm Docker, the CLI egress proxies and required harness networks become available
+      - confirm the scheduled daemon/model supervisors recover without manual intervention
+      - verify `/health`, backend login status and a small hosted-provider session
+      - record startup ordering/race fixes if the daemon begins before Docker is ready
+
+  - key: mac-xcode-setup
+    kind: check
+    title: "Install and verify Xcode prerequisites for native iOS client work"
+    body: |
+      Xcode is still required before building a native iOS client or companion for the harness. This is a user-machine
+      setup check, not a daemon code feature.
+
+      Verify Xcode and command-line tools on the MacBook, accept the license, select the active developer directory,
+      and build/run a minimal Swift project. Record the supported macOS/Xcode versions before scoping any native iOS
+      Control Center work.
