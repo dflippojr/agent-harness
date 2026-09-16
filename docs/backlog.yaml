@@ -765,3 +765,41 @@ items:
 
       Suggested slice: doubled ellipsis → immediate unload → step progress → warmup without checkpoint → fullscreen
       viewer. Distinct from #12 (backups/upscaling/inpainting) and #13 (extra workflows).
+
+  - key: webapp-user-projects
+    kind: feature
+    title: "Create projects from the Control Center, scoped to the user who created them"
+    body: |
+      New projects today mean editing `config/projects.yaml` on the tower and restarting. The Control Center
+      can start a session in an existing project but cannot create one. Every project and session is global:
+      a #54 guest can still GET the full project list, session list, and transcripts (read-only).
+
+      **Create from the webapp.** From New task (or a Projects page), the owner can add a project without YAML:
+      a name, optional description, tower vs MacBook target, and either an empty workspace (like scratch) or a
+      local folder / git URL to clone. Persist it so New task lists it after reload. Creating a git project
+      should produce a real repo the Review card can merge/push, not another disposable scratch folder (#44).
+
+      **Scope to the creating user.** Projects, sessions, transcripts, workspaces, and Review belong to the
+      user who created them. A guest/demo login must not see the owner's projects or sessions (empty list or a
+      dedicated demo fixture). Today #54 only strips mutations; GET `/projects` and `/sessions` still return
+      everything. The app API already scopes sessions to the creating app token; the PWA should get the same
+      idea for people.
+
+      **Later: a second household user.** A roommate (or similar) should be able to set up their own account on
+      the same daemon, create their own project, and run it on the local LLM without seeing the first user's
+      work. Optionally they connect *their* GitHub account and clone *their* repos into an isolated workspace,
+      in the spirit of Cursor's cloud agent (their credentials, not the host git login). Do not store provider
+      or GitHub tokens in SQLite or return them from any API (same bar as #29).
+
+      **Later: Google sign-in for the Control Center.** Tailscale identity is enough for a single owner plus a
+      named guest. A second real user on the same tailnet, or a browser that is not Tailscale-authenticated,
+      needs an account. Google OAuth is a candidate so the PWA is not only "whoever `tailscale serve` says."
+      Keep the tailnet as the network boundary. Distinct from #25 (app/browser pairing and CORS).
+
+      GPU guard, homelab tools, Remote Control, inference keys, and machine Settings stay owner/host
+      operations until a later issue says otherwise.
+
+      Suggested slice: create-project in the PWA for the single owner → attach an owner identity to projects
+      and sessions so guests see none of them → multi-user accounts → per-user GitHub clone → Google login.
+      Distinct from #16 (`harness projects add` on the Mac CLI) and from #54 (guest is currently a read-only
+      window onto the owner console). Do not put real logins, tokens, or tailnet names in public comments.
