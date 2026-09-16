@@ -55,6 +55,17 @@ QWEN_NEGATIVE = ("low resolution, low quality, deformed limbs, deformed fingers,
                  "detail, over-smoothed, AI look, cluttered composition, blurry text, distorted text")
 
 
+def workspace_png_name(filename: str) -> str:
+    """Workspace-relative PNG path. Rejects escapes before any bytes are written or transferred."""
+    name = str(filename or "").strip().replace("\\", "/").lstrip("/")
+    if not name.lower().endswith(".png"):
+        name += ".png"
+    parts = Path(name).parts
+    if not name or Path(name).is_absolute() or ".." in parts:
+        raise ToolError(f"filename escapes the workspace: {filename}")
+    return name
+
+
 def schemas(cfg: ImagesConfig) -> list[dict]:
     return [{"type": "function", "function": {
         "name": "generate_image",
@@ -392,16 +403,15 @@ class ImageService:
                                 for name, label in RESOLUTIONS.items()}}
 
     # agent tool
-    async def call(self, name: str, args: dict, workspace_root: Path | None = None) -> str:
-        filename = str(args.get("filename") or "").strip().replace("\\", "/").lstrip("/")
-        if not filename.lower().endswith(".png"):
-            filename += ".png"
-        if workspace_root is None:
-            raise ToolError("generate_image only works in tower sessions for now (the file couldn't be copied to "
-                            "the MacBook)")
-        target = (workspace_root / filename).resolve()
-        if not target.is_relative_to(workspace_root.resolve()):
-            raise ToolError(f"filename escapes the workspace: {filename}")
+    async def call(self, name: str, args: dict, workspace_root: Path | None = None, put_bytes=None) -> str:
+        filename = workspace_png_name(args.get("filename") or "")
+        target: Path | None = None
+        if workspace_root is not None:
+            target = (workspace_root / filename).resolve()
+            if not target.is_relative_to(workspace_root.resolve()):
+                raise ToolError(f"filename escapes the workspace: {filename}")
+        elif put_bytes is None:
+            raise ToolError("generate_image needs a workspace path or a runner transfer")
         job = self.submit(args["prompt"], model=args.get("model") or "fast",
                           aspect_ratio=args.get("aspect_ratio") or "1:1", resolution=args.get("resolution") or "auto",
                           source="agent",
@@ -409,7 +419,10 @@ class ImageService:
         job = await self.wait(job["id"])
         if job["status"] != "done":
             raise ToolError(f"image generation failed: {job['error']}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(self.path(job), target)
+        if put_bytes is not None:
+            await put_bytes(filename, self.path(job).read_bytes())
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.path(job), target)
         return (f"Saved {filename} ({job['width']}x{job['height']}, {job['model']} model, seed {job['seed']}, "
                 f"{job['seconds']:.0f} s). The user can see it in the app's Images screen.")

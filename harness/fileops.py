@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
+MAX_PUT_BYTES = 32 * 1024 * 1024  # binary files the daemon may send to a runner (ComfyUI PNGs are much smaller)
 
 
 class ToolError(Exception):
@@ -162,6 +163,14 @@ class FileOps:
         with open(p, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         return f"wrote {len(content)} characters to {self.rel(p)}"
+
+    def write_bytes(self, path: str, data: bytes) -> str:
+        if len(data) > MAX_PUT_BYTES:
+            raise ToolError(f"file is {len(data)} bytes; limit is {MAX_PUT_BYTES}")
+        p = self.resolve(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        return f"wrote {len(data)} bytes to {self.rel(p)}"
 
     def edit_file(self, path: str, old_text: str, new_text: str) -> str:
         p = self.resolve(path)

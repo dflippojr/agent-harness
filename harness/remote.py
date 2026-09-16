@@ -17,6 +17,7 @@ declared dead during the night.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import logging
 import time
@@ -26,7 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import RunnerConfig
-from .fileops import FILE_TOOLS, ToolError
+from .fileops import FILE_TOOLS, MAX_PUT_BYTES, ToolError
 from .tools import shell_result, tool_schemas
 
 log = logging.getLogger("harness.remote")
@@ -266,6 +267,15 @@ class RemoteWorkspace:
         if name == "git_clone":
             return await self._call("git_clone", args, timeout=700)
         raise ToolError(f"{name} isn't available on the {self.target}")
+
+    async def put_file(self, path: str, data: bytes) -> str:
+        """Copy bytes generated on the tower into this session's runner workspace."""
+        if len(data) > MAX_PUT_BYTES:
+            raise ToolError(f"file is {len(data)} bytes; limit is {MAX_PUT_BYTES}")
+        return await self._call("put_file", {
+            "path": path,
+            "content_b64": base64.b64encode(data).decode("ascii"),
+        }, timeout=120)
 
     async def preview(self, name: str, args: dict) -> str:
         try:

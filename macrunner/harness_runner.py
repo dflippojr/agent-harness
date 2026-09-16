@@ -15,6 +15,8 @@ Layout under ~/.agent-harness:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -41,7 +43,7 @@ from harness import projects  # noqa: E402
 from harness.changes import workspace_changes  # noqa: E402
 from harness.fileops import FILE_TOOLS, FileOps, ToolError, dir_size, resolve_path  # noqa: E402
 
-VERSION = "4.0"
+VERSION = "4.1"
 POLL_TIMEOUT = 60           # the daemon holds a poll for up to 25 s
 OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trims further for the model)
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
@@ -148,6 +150,18 @@ class Executor:
     def op_size(self, rid: str, p: dict):
         ws = self.workspace(p["session"])
         return dir_size(ws) if ws.exists() else 0
+
+    def op_put_file(self, rid: str, p: dict):
+        raw = p.get("content_b64") or ""
+        if not isinstance(raw, str) or not raw.strip():
+            raise OpError("content_b64 is required", "tool")
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError):
+            raise OpError("content_b64 is not valid base64", "tool")
+        ws = self.workspace(p["session"], create=True)
+        files = FileOps(ws, 65536, prefixes=(str(ws), "/workspace"))
+        return files.write_bytes(p.get("path") or "", data)
 
     def op_shell(self, rid: str, p: dict):
         ws = self.workspace(p["session"], create=True)

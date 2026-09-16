@@ -403,7 +403,7 @@ def test_agent_generate_image_tool_saves_into_workspace(tmp_path):
         asyncio.run(body())
 
 
-def test_images_api_and_tool_only_for_tower_sessions(tmp_path):
+def test_images_api_and_generate_image_for_tower_and_mac(tmp_path):
     from fastapi.testclient import TestClient
     from harness.api import create_app
     from harness.config import Project
@@ -426,7 +426,42 @@ def test_images_api_and_tool_only_for_tower_sessions(tmp_path):
         tower = {"id": "t", "project": "scratch", "target": "tower", "model": "fake", "workspace": str(tmp_path)}
         mac = {**tower, "project": "mac", "target": "macbook"}
         assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(tower)}
-        assert all("generate_image" not in k.tool_names for k in m.runner.daemon_toolkits(mac))
+        assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(mac)}
+
+
+def test_agent_generate_image_saves_into_mac_workspace(tmp_path):
+    from harness.config import ImagesConfig
+    from test_phase4 import FakeRunner, executor, mac_cfg
+
+    steps = [Completion(tool_calls=[call("generate_image", 0, prompt="app icon", filename="assets/icon")]),
+             Completion(content="made the icon")]
+    cfg = mac_cfg(tmp_path)
+    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2)
+    m = Manager(cfg, chat=Script(steps))
+    m.images.control = FakeServer()
+    handler, _ = fake_comfy()
+    m.images.transport = httpx.MockTransport(handler)
+
+    async def no_process():
+        return None
+    m.images.comfy.start = no_process
+    m.images.comfy.stop = no_process
+
+    async def body():
+        runner = FakeRunner(m.hub, executor(tmp_path, [tmp_path])).start()
+        await m.start(maintenance=False)
+        s = m.create("make an icon", project="mac-scratch")
+        await wait_status(m, s["id"], "done", timeout=20)
+        result = events(m, s["id"], "tool_result")[0]
+        assert result["ok"] and "assets/icon.png" in result["output"]
+        assert (tmp_path / "mac-workspaces" / s["id"] / "assets" / "icon.png").read_bytes() == PNG
+        assert not (tmp_path / "data" / "workspaces").exists() or not any((tmp_path / "data" / "workspaces").rglob("*.png"))
+        job = m.db.list_images()[0]
+        assert job["source"] == "agent" and job["session_id"] == s["id"]
+        assert "put_file" in runner.seen_ops
+        await runner.stop()
+        await m.stop()
+    asyncio.run(body())
 
 
 # 6e: app API

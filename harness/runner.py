@@ -144,7 +144,7 @@ class Runner:
             kits.append(self.memory)
         if self.web is not None and (project is None or project.web):
             kits.append(self.web)
-        if self.images is not None and s["target"] == "tower" and (project is None or project.images):
+        if self.images is not None and (project is None or project.images):
             kits.append(self.images)
         if self.sessions is not None and (project is None or project.session_search):
             kits.append(self.sessions)
@@ -257,9 +257,12 @@ class Runner:
             await self._acquire(sid)
 
     async def _remote_call(self, sid: str, ws: RemoteWorkspace, name: str, args: dict) -> str:
+        return await self._remote_await(sid, ws, name, ws.call(name, args))
+
+    async def _remote_await(self, sid: str, ws: RemoteWorkspace, name: str, coro) -> str:
         """A runner call that may outlive the runner's connection (the lid closed mid-command): once the runner
         is offline the session gives up the GPU and shows as waiting; the call itself keeps waiting for its result."""
-        task = asyncio.create_task(ws.call(name, args))
+        task = asyncio.ensure_future(coro)
         waiting_since = None
         try:
             while True:
@@ -1083,7 +1086,7 @@ class Runner:
             output = await self._authorize(s, call, name, args, ws)
             if output is None:
                 output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
-                if name in ("run_shell", "git_clone", "write_file") and await self._over_quota(sid):
+                if name in ("run_shell", "git_clone", "write_file", "generate_image") and await self._over_quota(sid):
                     for rest in pending[i + 1:]:
                         self._record_result(sid, rest, rest["function"].get("name", ""),
                                             "Not run: the workspace is over its disk quota.", ok=False)
@@ -1224,7 +1227,13 @@ class Runner:
                 output = await self.app_tools.call(s, call["id"], name, args, on_wait=waiting,
                                                    on_resume=lambda: self._acquire(sid))
             elif kit is not None and kit is self.images:
-                output = await kit.call(name, {**args, "_session": sid}, workspace_root=Path(s["workspace"]))
+                put_bytes = None
+                root = Path(s["workspace"]) if s["target"] == "tower" else None
+                if root is None and isinstance(ws, RemoteWorkspace):
+                    async def put_bytes(rel: str, data: bytes) -> str:
+                        await self._wait_for_target(sid)
+                        return await self._remote_await(sid, ws, "put_file", ws.put_file(rel, data))
+                output = await kit.call(name, {**args, "_session": sid}, workspace_root=root, put_bytes=put_bytes)
             elif kit is not None and getattr(kit, "wants_session", False):
                 output = await kit.call(name, args, session=s, call_id=call["id"])
             elif kit is not None:

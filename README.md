@@ -46,7 +46,7 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
   llama.cpp embedding server/model is configured.
 - Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`)
   and Qwen-Image-2512 (`quality`), both Apache 2.0. A batch unloads the language model, generates, and restores it.
-  Phone: Images screen; agents: `generate_image` (tower sessions).
+  Phone: Images screen; agents: `generate_image` (tower and MacBook sessions).
 - Distributable (`docs/phase6e-results.md`): app API `/api/v1` with scoped tokens, context, app-registered tools and
   events (`harness/apps.py`, `sdk/harness_client.py`); installer, uninstaller and `python -m harness.doctor`.
 
@@ -74,7 +74,8 @@ Details and verification: `docs/phase4-results.md`.
 - Runner: `macrunner/` (stdlib-only Python 3.9, launchd agent). It connects out to the daemon over the tailnet and
   long-polls `POST /runners/macbook/poll` with a bearer token. Shell commands run natively under `sandbox-exec`
   (`macrunner/sandbox.sb`): writes limited to the workspace, temp and build caches; credentials and personal
-  folders unreadable; no network unless the command was approved with `network: true`.
+  folders unreadable; no network unless the command was approved with `network: true`. Binary files generated on
+  the tower (`generate_image`) are copied into the Mac workspace with a `put_file` op (base64 in the poll request).
 - Install or update from the tower: `.\ops\macbook\deploy.ps1 -MacHost <host> -MacUser <user>` (needs Remote Login
   on the Mac while deploying). Daemon side: `runners:` in `config/harness.yaml`; runner side:
   `~/.agent-harness/runner/config.json` (`repo_roots` limits which Mac repos projects may use).

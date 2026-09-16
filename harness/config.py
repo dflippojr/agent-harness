@@ -217,7 +217,7 @@ class Project:
     target: str = "tower"   # where tools run: tower, or a runner name such as macbook (repo is then a path there)
     memory_library: bool = True  # give sessions the memory-library tools (when memory_library is enabled)
     web: bool = True             # give sessions web_search / web_fetch (when web is enabled)
-    images: bool = True          # give tower sessions generate_image (when images is enabled)
+    images: bool = True          # give sessions generate_image (when images is enabled)
     session_search: bool = True  # give sessions session_search / session_read (when search is enabled)
 
 

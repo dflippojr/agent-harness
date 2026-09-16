@@ -39,9 +39,9 @@ ComfyUI: portable NVIDIA build **v0.35.0** (torch 2.13 + CUDA 13.0) in `C:\AI\Co
 - **Phone:** Images screen (`#/images`, button on the session list): prompt, model, aspect ratio, live phase
   ("Unloading the language model…", "Generating… 42 s"), gallery, detail view with "Another one". A notification is
   sent when a phone job finishes. API: `POST /images`, `GET /images`, `GET /images/{id}`, `GET /images/{id}.png`.
-- **Agents:** `generate_image(prompt, filename, aspect_ratio, model)` saves a PNG into the session workspace (tower
-  sessions only; the Mac runner has no binary file transfer). No approval needed. The tool description warns that it
-  takes minutes.
+- **Agents:** `generate_image(prompt, filename, aspect_ratio, model)` saves a PNG into the session workspace on the
+  tower or, for MacBook sessions, copies it there with a `put_file` runner op. No approval needed. The tool
+  description warns that it takes minutes.
 - **Inputs:** aspect ratio from a fixed list mapped to each model's native sizes; a random seed is recorded per job; no
   upscaling (Hermes lesson: default-on upscaling degraded text and faces).
 - **Metrics:** `harness_images_total{model,source,status}`, `harness_images_seconds_total`,
@@ -55,7 +55,8 @@ Tests: 3 new (`tests/test_phase6.py`) with a fake ComfyUI and model server:
 - a batch with one failing job does a single stop/start hand-over, sizes and step counts per model are right, the
   endpoint is refused during the batch, and the gate is released after;
 - the agent tool writes into the workspace, and a path escape is refused;
-- API routes and PNG serving work, and the tool is offered only to tower sessions.
+- API routes and PNG serving work, and the tool is offered to tower and MacBook sessions;
+- a MacBook session copies the PNG into the runner workspace through `put_file`.
 
 Live on the tower (2026-09-15):
 

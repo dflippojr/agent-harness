@@ -304,6 +304,33 @@ def test_executor_shell_timeout_and_absolute_workspace_paths(tmp_path):
     assert (ws / "sub" / "a.txt").read_text() == "x"
 
 
+def test_executor_put_file_writes_png_and_refuses_escape(tmp_path, monkeypatch):
+    import base64
+
+    import harness.fileops as fileops
+
+    monkeypatch.setattr(fileops, "MAX_PUT_BYTES", 16)
+    ex = executor(tmp_path, [tmp_path])
+    sid = "0123456789"
+    png = b"\x89PNG\r\n\x1a\nfake"
+    out = ex.handle("r", "put_file", {
+        "session": sid, "path": "assets/icon.png", "content_b64": base64.b64encode(png).decode(),
+    })
+    assert "assets/icon.png" in out
+    assert (ex.workspace(sid) / "assets" / "icon.png").read_bytes() == png
+    with pytest.raises(harness_runner.OpError, match="escapes"):
+        ex.handle("r", "put_file", {
+            "session": sid, "path": "../escape.png", "content_b64": base64.b64encode(png).decode(),
+        })
+    with pytest.raises(harness_runner.OpError, match="base64"):
+        ex.handle("r", "put_file", {"session": sid, "path": "x.png", "content_b64": "%%%"})
+    with pytest.raises(harness_runner.OpError, match="required"):
+        ex.handle("r", "put_file", {"session": sid, "path": "x.png", "content_b64": ""})
+    huge = base64.b64encode(b"x" * 17).decode()
+    with pytest.raises(harness_runner.OpError, match="limit"):
+        ex.handle("r", "put_file", {"session": sid, "path": "big.png", "content_b64": huge})
+
+
 def test_fileops_skip_symlinks_out_of_the_workspace(tmp_path):
     outside = tmp_path / "secret"
     outside.mkdir()
