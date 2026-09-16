@@ -803,3 +803,40 @@ items:
       and sessions so guests see none of them → multi-user accounts → per-user GitHub clone → Google login.
       Distinct from #16 (`harness projects add` on the Mac CLI) and from #54 (guest is currently a read-only
       window onto the owner console). Do not put real logins, tokens, or tailnet names in public comments.
+
+  - key: text-size-chrome-clip
+    kind: feature
+    title: "Appearance: large text size clips labels in the header and other fixed chrome"
+    body: |
+      Phone feedback after #52 (`harness.textSize` / `--text-scale` on `html` font-size). At Large / Extra,
+      labels in fixed-width chrome no longer fit.
+
+      Example: the feature switcher option **Image generation** (`#feature-nav` in `index.html`) renders as
+      **image genera**. `#feature-nav` is `max-width: 190px` with no wrap (`style.css`). **Scheduled jobs**
+      is the same class of bug. Other likely hits: the sticky `#bar` title (`white-space: nowrap` + ellipsis),
+      the + New task / + New job FAB, Settings list rows, and chips that assume Default (16px) metrics.
+
+      The control should still scale transcript, session list, Settings copy, and the header. Do not clip
+      mid-word. Prefer letting the switcher grow, wrap onto two lines, or use a shorter label at large sizes
+      — pick whichever keeps Agents / Jobs / Images readable at Extra on iPhone. Recheck Default so this
+      does not reintroduce the empty-band / truncated-title problems from #32 / #35.
+
+      Distinct from #52 (the size control itself) and from transcript table wrapping.
+
+  - key: transcript-table-mobile
+    kind: feature
+    title: "Session transcript: markdown tables wrap mid-word on a phone"
+    body: |
+      Phone feedback on agent answers that include markdown tables. On a mobile viewport the table is too
+      wide, and cell text wraps character-by-character instead of staying readable.
+
+      `md()` in `harness/web/app.js` turns `| ... |` blocks into `<table>`. `.msg table` is already
+      `display: block; overflow-x: auto`, but `.ev` sets `overflow-wrap: anywhere`, so `th`/`td` wrap
+      mid-word and the table never grows wider than the screen. Horizontal scroll never helps.
+
+      On a phone, keep each markdown row as one visual row: cells should not wrap letter-by-letter.
+      Scroll the table sideways when it is wider than the transcript. A slightly smaller table font is
+      fine if it reduces scrolling. Check Default and Extra text size, and a 3–6 column table from a
+      live answer.
+
+      Distinct from #52 / text-size chrome clipping. Do not change code-block wrapping in this issue.
