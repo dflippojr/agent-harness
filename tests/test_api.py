@@ -51,9 +51,16 @@ def test_web_app_and_guard(tmp_path):
         assert "session-chrome" in js and "jump-top" in js and 'method: "PATCH"' in js
         assert "session-title" in js
         assert "harness.theme" in js
+        assert 'setHeader("agents", "New task", { page: true })' in js
+        assert "0.75 * window.innerHeight" in js
+        assert 'type: "color"' not in js
+        assert "swatch split" in js
+        assert "Scratch is a fresh empty folder" in js
+        assert "Only tower projects with a local folder appear" in js
         css = client.get("/static/style.css").text
-        assert "safe-area-inset-top, 0px) + 8px" in css
+        assert "safe-area-inset-top, 0px) + 14px" in css
         assert ".session-chrome" in css and ".jump-top" in css
+        assert ".swatch.split" in css and ".hue-preview" in css
         assert client.get("/static/app.js").status_code == 200
         profile = client.get("/profile").json()
         assert profile["emoji"] == "🙂" and "🚀" in profile["choices"]
@@ -82,6 +89,7 @@ def test_rename_session(tmp_path):
         assert renamed["title"] == "Dark mode"
         assert client.get(f"/sessions/{sid}").json()["title"] == "Dark mode"
         assert client.get("/sessions").json()[0]["title"] == "Dark mode"
+        assert client.put(f"/sessions/{sid}", json={"title": "Palette"}).json()["title"] == "Palette"
         assert client.patch(f"/sessions/{sid}", json={"title": "   "}).status_code == 400
         assert client.patch(f"/sessions/{sid}", json={"title": "x" * 121}).status_code == 400
 

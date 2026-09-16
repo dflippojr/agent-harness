@@ -90,9 +90,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 #bar {
   position: sticky; top: 0; z-index: 10;
   display: flex; align-items: center; gap: 8px;
-  /* Extra space below the iOS status-bar / Control Center fade (Dynamic Island). Opaque fill so that
-     system overlay does not stack with backdrop-filter blur. */
-  padding: calc(env(safe-area-inset-top, 0px) + 8px) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+  /* Extra space below the iOS status-bar / Control Center fade (Dynamic Island). Middle value
+     between the old +20px gap and the too-tight +8px. Opaque fill so the system overlay does
+     not stack with backdrop-filter blur. */
+  padding: calc(env(safe-area-inset-top, 0px) + 14px) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
   background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
@@ -315,11 +316,21 @@ a.quote-source { text-decoration: underline; text-decoration-style: dotted; text
 }
 .theme-choice.on { border-color: var(--text); outline: 2px solid var(--text); outline-offset: 1px; }
 .theme-choice .swatch { display: flex; height: 28px; border-radius: 8px; overflow: hidden; margin-bottom: 6px; }
+.theme-choice .swatch.split { position: relative; display: block; }
 .theme-choice .swatch span { flex: 1; }
+.theme-choice .swatch-half {
+  position: absolute; inset: 0; display: flex;
+}
+.theme-choice .swatch-half.light { clip-path: polygon(0 0, 100% 0, 0 100%); }
+.theme-choice .swatch-half.dark { clip-path: polygon(100% 0, 100% 100%, 0 100%); }
 .theme-choice .name { font-weight: 600; font-size: 14px; }
-.hue-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px; }
+.hue-row { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 8px; }
 .hue-row label { margin: 0; font-weight: 500; }
-.hue-row input[type=color] { width: 100%; height: 40px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; }
+.hue-control { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.hue-preview {
+  width: 28px; height: 28px; flex: none; border-radius: 8px; border: 1px solid var(--line);
+}
+.hue-row input[type=text] { width: auto; flex: 1; min-width: 0; padding: 8px; font-family: var(--mono); font-size: 16px; }
 
 .copy-box {
   display: flex; align-items: center; gap: 8px; margin: 8px 0;

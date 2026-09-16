@@ -409,7 +409,7 @@ async function viewList() {
 
 // ---------- new task ----------
 async function viewNew() {
-  setHeader("agents", "New task");
+  setHeader("agents", "New task", { page: true });
   const [projects, models, allTemplates, backends] = await Promise.all([
     api("/projects"), api("/models"), api("/templates"), api("/backends")]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
@@ -438,6 +438,7 @@ async function viewNew() {
       for (const b of ev.currentTarget.parentNode.children) b.classList.toggle("primary", b === ev.currentTarget);
       fillChoices();
       showTarget();
+      showProjectHint();
     },
   }, name === "tower" ? "🖥 Tower" : `💻 ${TARGET_LABEL[name] || name}`))) : null;
   const targetState = h("div", { class: "muted small", style: "margin-top:6px" });
@@ -452,8 +453,15 @@ async function viewNew() {
         : `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
     } catch (_) { /* offline */ }
   };
-  project.addEventListener("change", showTarget);
+  const projectHint = h("div", { class: "muted small", style: "margin-top:6px" });
+  const showProjectHint = () => {
+    projectHint.textContent = (project.value === "scratch" || project.value === "mac-scratch")
+      ? "Scratch is a fresh empty folder for this session only. It is not a git repo and does not add a new project."
+      : "";
+  };
+  project.addEventListener("change", () => { showTarget(); showProjectHint(); });
   showTarget();
+  showProjectHint();
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   let localModel = model.value;
   model.addEventListener("change", () => { localModel = model.value; });
@@ -513,6 +521,7 @@ async function viewNew() {
     backend.value = t.backend || "local";
     showBackend();
     showTarget();
+    showProjectHint();
     prompt.value = t.prompt;
   });
 
@@ -536,7 +545,7 @@ async function viewNew() {
   targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
   allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
-  h("label", {}, "Project"), project, targetState,
+  h("label", {}, "Project"), project, targetState, projectHint,
   h("label", {}, "Backend"), backend, backendState,
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
@@ -591,7 +600,14 @@ function sessionTitle(session) {
         const next = input.value.replace(/\s+/g, " ").trim();
         if (next && next !== session.title) {
           try {
-            const updated = await api(`/sessions/${session.id}`, { method: "PATCH", body: { title: next } });
+            const body = { title: next };
+            let updated;
+            try {
+              updated = await api(`/sessions/${session.id}`, { method: "PATCH", body });
+            } catch (e) {
+              if (!/405|Method Not Allowed/i.test(e.message)) throw e;
+              updated = await api(`/sessions/${session.id}`, { method: "PUT", body });
+            }
             session.title = updated.title;
           } catch (e) { toast(e.message); }
         }
@@ -617,9 +633,9 @@ function bindSessionJumps() {
   const updateJumps = () => {
     layoutBar();
     const y = window.scrollY;
-    const two = 2 * window.innerHeight;
-    jumpTop.hidden = y <= two;
-    jumpBottom.hidden = pageHeight() - window.innerHeight - y <= two;
+    const far = 0.75 * window.innerHeight;
+    jumpTop.hidden = y <= far;
+    jumpBottom.hidden = pageHeight() - window.innerHeight - y <= far;
   };
   jumpTop.addEventListener("click", () => window.scrollTo(0, 0));
   jumpBottom.addEventListener("click", () => window.scrollTo(0, pageHeight()));
@@ -1378,7 +1394,7 @@ async function viewJobs() {
 
 async function viewJob(id) {
   const isNew = id === "new";
-  setHeader("jobs", isNew ? "New job" : "Job");
+  setHeader("jobs", isNew ? "New job" : "Job", { page: true });
   const [projects, models, backends, job] = await Promise.all([
     api("/projects"), api("/models"), api("/backends"), isNew ? null : api(`/jobs/${id}`)]);
   const j = job || {
@@ -1648,12 +1664,21 @@ function appearanceCard() {
   const hueRow = h("div", { class: "hue-row", hidden: theme !== "custom" });
   const grid = h("div", { class: "theme-grid" });
   const icons = h("div", { class: "app-icon-grid" });
+  const themeSwatch = (id, spec) => {
+    if (id === "auto") {
+      return h("div", { class: "swatch split" },
+        h("div", { class: "swatch-half light" }, THEMES.light.swatch.map((color) => h("span", { style: `background:${color}` }))),
+        h("div", { class: "swatch-half dark" }, THEMES.dark.swatch.map((color) => h("span", { style: `background:${color}` }))));
+    }
+    const colors = id === "custom" ? [hues.bg, hues.panel, hues.accent] : spec.swatch;
+    return h("div", { class: "swatch" }, colors.map((color) => h("span", { style: `background:${color}` })));
+  };
   const paint = () => {
     fill(grid, Object.entries(THEMES).map(([id, spec]) => h("button", {
       class: `theme-choice${theme === id ? " on" : ""}`, type: "button",
       onclick: () => { theme = id; applyTheme(theme, hues); hueRow.hidden = theme !== "custom"; paint(); },
     },
-      h("div", { class: "swatch" }, spec.swatch.map((color, i) => h("span", { style: `background:${i === 2 && id === "custom" ? hues.accent : color}` }))),
+      themeSwatch(id, spec),
       h("div", { class: "name" }, spec.label))));
     fill(icons, APP_ICONS.map((spec) => h("button", {
       class: `app-icon-choice${appIcon === spec.id ? " on" : ""}`, type: "button",
@@ -1666,14 +1691,25 @@ function appearanceCard() {
   };
   paint();
   fill(hueRow, ["bg", "panel", "accent"].map((key) => {
-    const input = h("input", { type: "color", value: /^#[0-9a-fA-F]{6}$/.test(hues[key]) ? hues[key] : THEME_COLORS[key] });
+    const hex = /^#[0-9a-fA-F]{6}$/.test(hues[key]) ? hues[key] : THEME_COLORS[key];
+    const preview = h("span", { class: "hue-preview", style: `background:${hex}` });
+    const input = h("input", {
+      type: "text", inputmode: "text", maxlength: "7", spellcheck: "false",
+      value: hex, "aria-label": `${key} hex color`, autocomplete: "off",
+    });
     input.addEventListener("input", () => {
-      hues = { ...hues, [key]: input.value };
+      const value = input.value.trim();
+      if (!/^#[0-9a-fA-F]{6}$/.test(value)) return;
+      hues = { ...hues, [key]: value };
+      preview.style.background = value;
       applyTheme("custom", hues);
       theme = "custom";
+      hueRow.hidden = false;
       paint();
     });
-    return h("label", {}, key === "bg" ? "Background" : key === "panel" ? "Panel" : "Accent", input);
+    return h("label", {},
+      key === "bg" ? "Background" : key === "panel" ? "Panel" : "Accent",
+      h("div", { class: "hue-control" }, preview, input));
   }));
   return h("div", { class: "card" },
     h("p", { class: "muted small" }, "How the app looks on this phone. The profile icon — the emoji next to your name — lives on the Profile card."),
@@ -1875,6 +1911,7 @@ function remoteControlCard() {
       if (!r.enabled) return fill(body, h("p", { class: "muted small" }, "Disabled in config/harness.yaml (remote_control)."));
       fill(body,
         h("p", { class: "muted small" }, "Start Claude Code in a project folder and continue in the Claude app. These sessions use your Claude subscription, not the harness."),
+        h("p", { class: "muted small" }, "Only tower projects with a local folder appear. Homelab and scratch have none, so they are omitted."),
         r.projects.length ? r.projects.map(row) : h("p", { class: "muted small" }, "No tower projects with a local folder."));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };

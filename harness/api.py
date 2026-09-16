@@ -448,6 +448,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return m.summary(m.get(ref))
 
     @app.patch("/sessions/{ref}")
+    @app.put("/sessions/{ref}")
     async def patch_session(ref: str, body: SessionUpdate, request: Request):
         m = mgr(request)
         return m.summary(m.rename(ref, body.title))
