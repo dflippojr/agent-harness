@@ -20,13 +20,14 @@ import re
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from pydantic import BaseModel, Field
 
 from . import access as access_mod
 from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.2"
+API_VERSION = "1.3"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Control Center operations under /api/admin/v1"
@@ -164,6 +165,14 @@ def _template_re(path: str) -> re.Pattern[str]:
     return re.compile("^" + re.sub(r"\{[^}/]+\}", r"[^/]+", path) + "$")
 
 
+class ProviderCredentialRequest(BaseModel):
+    app_id: str
+    backend: str
+    secret_ref: str = ""
+    policy: str = "api_key"
+    models: list[str] = Field(default_factory=list)
+
+
 def register(app: FastAPI, mgr) -> None:
     matchers = [_template_re(path) for path in ADMIN_PATHS]
     operations: list[dict] = []
@@ -174,6 +183,11 @@ def register(app: FastAPI, mgr) -> None:
     for route in existing:
         for method in sorted(m for m in route.methods if m != "HEAD"):
             operations.append({"method": method, "path": PREFIX + route.path})
+    operations.extend([
+        {"method": "GET", "path": PREFIX + "/provider-credentials"},
+        {"method": "POST", "path": PREFIX + "/provider-credentials"},
+        {"method": "DELETE", "path": PREFIX + "/provider-credentials/{credential_id}"},
+    ])
     operations.sort(key=lambda row: (row["path"], row["method"]))
 
     @app.get(PREFIX)
@@ -190,6 +204,25 @@ def register(app: FastAPI, mgr) -> None:
             },
             "operations": operations,
         }
+
+    @app.get(PREFIX + "/provider-credentials")
+    async def provider_credentials(request: Request):
+        require_admin(request, mgr)
+        return mgr(request).provider_credentials()
+
+    @app.post(PREFIX + "/provider-credentials", status_code=201)
+    async def set_provider_credential(body: ProviderCredentialRequest, request: Request):
+        require_admin(request, mgr)
+        manager = mgr(request)
+        row = manager.set_app_provider_credential(body.app_id, body.backend, body.secret_ref,
+                                                  body.policy, body.models)
+        return next(item for item in manager.provider_credentials() if item["id"] == row["id"])
+
+    @app.delete(PREFIX + "/provider-credentials/{credential_id}", status_code=204)
+    async def revoke_provider_credential(credential_id: str, request: Request):
+        require_admin(request, mgr)
+        if not mgr(request).revoke_app_provider_credential(credential_id):
+            raise HarnessError(404, "no active provider credential with that id")
 
     @app.middleware("http")
     async def admin_alias(request: Request, call_next):

@@ -76,6 +76,8 @@ class BackendStatus(TypedDict, total=False):
     week: dict
     notice: str
     billing_warning: str
+    usage_by_source: dict[str, dict]
+    provider_policy: dict | None
 
 
 class ProviderFailure(TypedDict, total=False):

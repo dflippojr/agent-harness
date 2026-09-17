@@ -32,7 +32,7 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.5"
+API_VERSION = "1.6"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
@@ -184,6 +184,8 @@ class BackendResponse(BaseModel):
     week: dict = Field(default_factory=dict)
     notice: str = ""
     billing_warning: str = ""
+    usage_by_source: dict[str, dict] = Field(default_factory=dict)
+    provider_policy: dict | None = None
 
 
 class ProjectResponse(BaseModel):
@@ -458,7 +460,8 @@ def register(app: FastAPI, mgr) -> None:
     async def api_root(request: Request):
         m = mgr(request)
         from .backend_state import view as backend_view
-        backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name) for name in m.cfg.backends]))
+        backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, False, None, False)
+                                               for name in m.cfg.backends]))
         return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
                 "projects": [{"name": p.name, "description": p.description, "target": p.target}
                              for p in m.cfg.projects.values()],
@@ -471,9 +474,11 @@ def register(app: FastAPI, mgr) -> None:
     @app.get("/api/v1/backends", response_model=list[BackendResponse])
     async def backends(request: Request):
         m = mgr(request)
-        auth(request, "sessions")
+        key = auth(request, "sessions")
+        app_id = None if owner_key(key) else key["id"]
         from .backend_state import view as backend_view
-        return list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name) for name in m.cfg.backends]))
+        return list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, True, app_id, True)
+                                           for name in m.cfg.backends]))
 
     @app.post("/api/v1/sessions", status_code=201, response_model=SessionResponse)
     async def create_session(body: CreateAppSession, request: Request):

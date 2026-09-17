@@ -237,6 +237,14 @@ class Manager:
             model = model or backend_cfg.model
             if not model:
                 raise HarnessError(400, f"backend {backend!r} has no model configured")
+            if app is not None and self.db.app_provider_managed(app["id"]):
+                credential = self.db.app_provider_credential(app["id"], backend)
+                if credential is None:
+                    raise HarnessError(403, f"this app is not allowed to use backend {backend!r}",
+                                       "provider_not_allowed")
+                if credential["models"] and model not in credential["models"]:
+                    raise HarnessError(403, f"this app is not allowed to use model {model!r} on {backend}",
+                                       "provider_model_not_allowed")
         remote = target != "tower"
         if remote:
             free_gb = self.hub.state[target].info.get("free_gb")
@@ -543,3 +551,49 @@ class Manager:
         else:
             item["chat_summary"] = asks
         return item
+
+    # owner-managed app provider credentials (issue #29)
+    def app_provider_status(self, app_id: str, backend: str) -> dict:
+        managed = self.db.app_provider_managed(app_id)
+        row = self.db.app_provider_credential(app_id, backend)
+        if row is None:
+            return {"managed": managed, "allowed": not managed, "policy": "server_default", "models": [],
+                    "credential_source": "server_default", "available": not managed}
+        path = self.cfg.provider_secret_files.get(row["secret_ref"], "") if row["secret_ref"] else ""
+        needs_file = row["policy"] in ("api_key", "subscription_then_api_key")
+        return {"managed": True, "allowed": True, "policy": row["policy"], "models": row["models"],
+                "credential_source": "app_file" if needs_file else "subscription",
+                "available": bool(path and Path(path).is_file()) if needs_file else True}
+
+    def set_app_provider_credential(self, app_id: str, backend: str, secret_ref: str, policy: str,
+                                    models: list[str]) -> dict:
+        app = self.db.get_api_key(app_id)
+        if app is None or app.get("kind") != "app" or app.get("revoked_at") is not None:
+            raise HarnessError(404, "no active app with that id")
+        if backend not in self.cfg.backends or not self.cfg.backends[backend].enabled:
+            raise HarnessError(400, f"unknown or disabled backend {backend!r}")
+        if policy not in ("subscription", "api_key", "subscription_then_api_key"):
+            raise HarnessError(400, "policy must be subscription, api_key, or subscription_then_api_key")
+        secret_ref = secret_ref.strip()
+        if policy == "subscription":
+            if secret_ref:
+                raise HarnessError(400, "subscription policy must not have a secret_ref")
+        elif not secret_ref or secret_ref not in self.cfg.provider_secret_files:
+            raise HarnessError(400, "secret_ref must name an entry in provider_secret_files")
+        clean_models = list(dict.fromkeys(str(model).strip() for model in models if str(model).strip()))
+        if any(len(model) > 100 for model in clean_models):
+            raise HarnessError(400, "model ids must be at most 100 characters")
+        return self.db.set_app_provider_credential(app_id, backend, secret_ref, policy, clean_models)
+
+    def provider_credentials(self) -> list[dict]:
+        rows = []
+        for row in self.db.list_app_provider_credentials():
+            path = self.cfg.provider_secret_files.get(row["secret_ref"], "") if row["secret_ref"] else ""
+            needs_file = row["policy"] in ("api_key", "subscription_then_api_key")
+            rows.append({k: row[k] for k in ("id", "app_id", "app_name", "backend", "secret_ref", "policy",
+                                                   "models", "created_at", "revoked_at")} |
+                        {"available": bool(path and Path(path).is_file()) if needs_file else True})
+        return rows
+
+    def revoke_app_provider_credential(self, cid: str) -> bool:
+        return self.db.revoke_app_provider_credential(cid)
