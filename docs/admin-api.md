@@ -24,9 +24,10 @@ Two owner credentials are accepted:
 App tokens (`ha-…`, kind `app`) and device/inference tokens (`hk-…`, kind `device`) receive **403**
 `app tokens cannot use the owner API`. The `admin` scope cannot be granted to those kinds.
 
-Browser pairing, CORS allowlists, and authenticated SSE for a separately hosted Control Center are
-issue #25. Until then this API is for same-origin/Tailscale owner calls and for owner tokens used by
-non-browser clients.
+An owner token may include an exact browser-origin allowlist for a separately hosted Control Center. Create it from
+the bundled client's **Settings → Connection** page (or `POST /api/admin/v1/keys` with `kind: "owner"`, the `admin`
+scope, and an `origins` array). Versioned API CORS is allowlisted by those live keys, and each actual owner request
+also checks that the presented token was approved for the request's origin. See [`control-center.md`](control-center.md).
 
 ## Discovery
 
@@ -47,7 +48,7 @@ same; only the prefix and the owner credential check are new.
 | Review | `/sessions/{ref}/changes`, `/sessions/{ref}/review/{action}` (`merge` \| `push` \| `discard`) |
 | Search | `/search`, `/events`, `/queue` |
 | Projects and jobs | `/projects`, `/templates`, `/jobs` |
-| Tokens | `/keys`, `/keys/{kid}` |
+| Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}` |
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
 | Images | `/images`, `/images/warmup`, `/images/cooldown` |
@@ -82,8 +83,12 @@ curl -s http://127.0.0.1:8100/api/admin/v1/keys \
   -d '{"name":"control-center","kind":"owner","scopes":["admin"]}'
 ```
 
+For a browser client, add `"origins":["https://control.example"]`. Browser origins must be HTTPS except for
+loopback development and contain no path, query, fragment, or credentials.
+
 ## Changelog
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.1 | 2026-09-16 | Origin-bound Control Center owner tokens and cross-origin browser access |
 | 1.0 | 2026-09-16 | First release: versioned owner operations, `admin` scope, owner tokens (`ho-`) |

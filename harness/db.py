@@ -603,9 +603,14 @@ class Database:
                               (now, key["id"], pairing["id"]))
         return key, secret, ""
 
-    def origin_allowed(self, origin: str) -> bool:
+    def origin_allowed(self, origin: str, kind: str | None = None) -> bool:
+        query = "SELECT origins FROM api_keys WHERE revoked_at IS NULL"
+        params: tuple = ()
+        if kind is not None:
+            query += " AND kind = ?"
+            params = (kind,)
         with self.lock:
-            rows = self.conn.execute("SELECT origins FROM api_keys WHERE revoked_at IS NULL").fetchall()
+            rows = self.conn.execute(query, params).fetchall()
         return any(origin in (json.loads(r["origins"] or "[]")) for r in rows)
 
     def create_stream_ticket(self, key_id: str, session_id: str, origin: str,

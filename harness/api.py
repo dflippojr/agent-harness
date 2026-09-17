@@ -145,27 +145,28 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             origin = normalize_origin(raw_origin) if raw_origin else ""
         except ValueError:
             origin = ""
-        cross_origin_app = bool(origin and origin not in daemon_origins(cfg)
-                                and request.url.path.startswith("/api/v1")
-                                and cors_origin_allowed(m, request, origin))
-        cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_app else {}
+        public_path = request.scope.get("harness_original_path", request.url.path)
+        browser_api = public_path.startswith("/api/v1") or public_path.startswith("/api/admin/v1")
+        cross_origin_api = bool(origin and origin not in daemon_origins(cfg)
+                                and browser_api and cors_origin_allowed(m, request, origin))
+        cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_api else {}
 
-        if request.method == "OPTIONS" and request.url.path.startswith("/api/v1") and raw_origin:
+        if request.method == "OPTIONS" and browser_api and raw_origin:
             requested_method = request.headers.get("access-control-request-method", "").upper()
             requested_headers = {h.strip().lower() for h in
                                  request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
-            if (not cross_origin_app or requested_method not in {"GET", "POST"}
+            if (not cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
                     or not requested_headers <= {"authorization", "content-type", "last-event-id"}):
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
             return Response(status_code=204, headers={**cors_headers,
-                            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
                             "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID",
                             "Access-Control-Max-Age": "600"})
 
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             # Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent).
-            if ((raw_origin and origin not in daemon_origins(cfg) and not cross_origin_app)
-                    or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_app)):
+            if ((raw_origin and origin not in daemon_origins(cfg) and not cross_origin_api)
+                    or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_api)):
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
         response = await call_next(request)
         for key, value in cors_headers.items():
@@ -430,23 +431,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/sessions")
     async def list_sessions(request: Request, limit: int = 50):
         m = mgr(request)
-        out = []
-        for s in m.db.list_sessions(limit):
-            item = m.summary(s)
-            full = m.db.get_session(s["id"])
-            user_messages = [" ".join(e["data"].get("content", "").split()) for e in m.db.events(s["id"])
-                             if e["type"] == "user_message" and e["data"].get("content", "").strip()]
-            asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
-            if len(user_messages) > 3:
-                asks += f" · {len(user_messages) - 3} more follow-up{'s' if len(user_messages) > 4 else ''}"
-            answer = " ".join((full["answer"] or "").split())
-            if answer:
-                outcome = answer[:110] + ("…" if len(answer) > 110 else "")
-                item["chat_summary"] = f"{asks} — {outcome}" if asks else outcome
-            else:
-                item["chat_summary"] = asks
-            out.append(item)
-        return out
+        return [m.list_summary(s) for s in m.db.list_sessions(limit)]
 
     @app.get("/memory")
     async def memory(request: Request):
@@ -775,4 +760,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     from . import admin
     admin.register(app, mgr)
+    # Keep /static for installed bundled clients, while making harness/web directly deployable at a static-site root.
+    # This catch-all mount is last so daemon/API routes always win.
+    app.mount("/", StaticFiles(directory=WEB), name="web-root")
     return app

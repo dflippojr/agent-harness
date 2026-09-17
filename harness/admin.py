@@ -26,7 +26,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.0"
+API_VERSION = "1.1"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Control Center operations under /api/admin/v1"
@@ -82,6 +82,8 @@ ADMIN_PATHS = frozenset({
     "/events",
     "/keys",
     "/keys/{kid}",
+    "/pairing-codes",
+    "/pairing-codes/{pid}",
 })
 
 
@@ -127,7 +129,27 @@ def require_admin(request: Request, mgr) -> dict | None:
         scopes = set((key.get("scopes") or "").split())
         if key.get("kind") != OWNER_KIND or ADMIN_SCOPE not in scopes:
             raise HarnessError(403, "app tokens cannot use the owner API")
+        raw_origin = request.headers.get("origin", "")
+        if raw_origin:
+            from .apps import daemon_origins, normalize_origin
+            try:
+                origin = normalize_origin(raw_origin)
+            except ValueError as e:
+                raise HarnessError(403, str(e))
+            if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
+                raise HarnessError(403, "this owner token is not approved for this origin")
         return key
+    raw_origin = request.headers.get("origin", "")
+    if raw_origin:
+        from .apps import daemon_origins, normalize_origin
+        try:
+            origin = normalize_origin(raw_origin)
+        except ValueError as e:
+            raise HarnessError(403, str(e))
+        if origin not in daemon_origins(m.cfg):
+            raise HarnessError(401, "cross-origin browser requests require an owner token")
+    elif request.headers.get("sec-fetch-site") == "cross-site":
+        raise HarnessError(401, "cross-origin browser requests require an owner token")
     ident = getattr(request.state, "access", None)
     if ident is None:
         ident = access_mod.resolve_access(m.cfg, request.headers.get("tailscale-user-login"))
@@ -176,10 +198,15 @@ def register(app: FastAPI, mgr) -> None:
         rest = path[len(PREFIX):]
         if not any(matcher.fullmatch(rest) for matcher in matchers):
             return await call_next(request)
+        # The inner access/CORS middleware handles preflight without credentials. Preserve the public path
+        # when rewriting actual requests so it still recognizes this as a versioned browser API call.
+        if request.method == "OPTIONS":
+            return await call_next(request)
         try:
             require_admin(request, mgr)
         except HarnessError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+        request.scope["harness_original_path"] = path
         request.scope["path"] = rest
         if "raw_path" in request.scope:
             request.scope["raw_path"] = rest.encode("ascii")

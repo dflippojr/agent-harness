@@ -509,3 +509,20 @@ class Manager:
         if s["status"] == "waiting_approval":
             out["pending_approvals"] = [public_approval(a) for a in self.db.pending_approvals(s["id"])]
         return out
+
+    def list_summary(self, s: dict) -> dict:
+        """Session-card view shared by the owner UI and first-party app API client."""
+        item = self.summary(s)
+        full = self.db.get_session(s["id"])
+        user_messages = [" ".join(e["data"].get("content", "").split()) for e in self.db.events(s["id"])
+                         if e["type"] == "user_message" and e["data"].get("content", "").strip()]
+        asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
+        if len(user_messages) > 3:
+            asks += f" · {len(user_messages) - 3} more follow-up{'s' if len(user_messages) > 4 else ''}"
+        answer = " ".join((full["answer"] or "").split())
+        if answer:
+            outcome = answer[:110] + ("…" if len(answer) > 110 else "")
+            item["chat_summary"] = f"{asks} — {outcome}" if asks else outcome
+        else:
+            item["chat_summary"] = asks
+        return item
