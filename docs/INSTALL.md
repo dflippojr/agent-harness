@@ -1,10 +1,11 @@
 # Installing the agent harness
 
-Run AI agents on your own Windows PC and drive them from a browser or your phone. Use either a local model or your
-own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky actions.
+Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from a browser or your phone. Use either a
+local model or your own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky
+actions.
 
-This iteration supports **Windows 10/11**. The full local-model profile needs an NVIDIA GPU; the hosted-provider
-service profile does not.
+The full local-model profile supports Windows 10/11 and x86-64 Linux with an NVIDIA GPU. Apple Silicon macOS uses
+the hosted-provider service profile (Claude, Codex, or Cursor) and does not download a local model.
 
 ## Requirements
 
@@ -13,7 +14,11 @@ service profile does not.
 | GPU | Service: none. Full: NVIDIA, 12 GB VRAM, driver 580+ | RTX 4070 Ti Super 16 GB, driver 616.92 |
 | RAM | 16 GB (32 GB for the Qwen model) | 32 GB DDR5 |
 | Disk | ~20 GB (gpt-oss) or ~30 GB (Qwen) free | NVMe SSD for models |
-| Software | [Docker Desktop](https://www.docker.com/products/docker-desktop/) running, [Git](https://git-scm.com/) | Docker 29.7, Git for Windows |
+| Software | Docker running, Git, curl, tar | Docker 29.7; Docker Desktop on Windows/macOS |
+
+Linux local inference also needs
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+configured for Docker. The installer uses llama.cpp's pinned CUDA container, so a host CUDA compiler is not needed.
 
 Models picked automatically:
 
@@ -32,7 +37,11 @@ powershell -ExecutionPolicy Bypass -File install\install.ps1 -Profile Service
 ops\backends\login.ps1 claude  # repeat for codex or cursor as wanted
 ```
 
-Docker Desktop and at least one provider login are the operational minimum. The installer configures Claude, Codex,
+On Linux or macOS, use `install/install.sh --profile service` and then
+`ops/backends/login.sh claude` (or `codex` / `cursor`). Credentials remain in provider-specific Docker volumes on
+all platforms.
+
+Docker (Docker Desktop on Windows/macOS) and at least one provider login are the operational minimum. The installer configures Claude, Codex,
 and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example
 `-EnableModules jobs,backup`. `endpoint`, `images`, and `gpu_guard` automatically opt into `local_model` and restore
 the GPU/model requirements. The complete module catalog and security boundary are in
@@ -42,13 +51,16 @@ On an existing install, `-Profile Service` writes only `config\profile.yaml`; it
 overrides, paths, and secrets. Run with `-Profile Full` to restore the full profile. With no `-Profile`, upgrades
 preserve the existing choice (and use Full for a new install).
 
-## Install
+## Install on Windows
 
 ```powershell
 git clone https://github.com/dflippojr/agent-harness
 cd agent-harness
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
+
+On Linux/macOS, pull the checkout and rerun `install/install.sh` with the same options. Existing profile and config
+are preserved when `--profile auto` (the default) is used.
 
 No administrator rights are needed. The installer:
 
@@ -72,6 +84,45 @@ Then open **http://127.0.0.1:8100**. The first model load takes a minute or two.
 > and downloads packages. It's a false positive; allow the `%LOCALAPPDATA%\agent-harness\bin` folder. You can check
 > the file against [uv's GitHub release](https://github.com/astral-sh/uv/releases) with `gh attestation verify`.
 
+## Install on Linux with NVIDIA
+
+From an x86-64 Linux checkout:
+
+```bash
+git clone https://github.com/dflippojr/agent-harness
+cd agent-harness
+install/install.sh
+```
+
+The default is the full profile. The installer checks `nvidia-smi`, Docker GPU access, disk/RAM, and the Docker
+engine; installs a pinned uv/Python environment; downloads the selected resumable GGUF; builds the sandbox; and
+registers `systemd --user` services for llama.cpp and the daemon. llama.cpp runs from the pinned official
+`server-cuda-b10830` image with the model mounted read-only and localhost port 8090 served through host networking.
+
+If the Docker GPU check fails, install NVIDIA Container Toolkit and restart Docker before rerunning the installer.
+On a headless host, an administrator may need to enable user lingering with `loginctl enable-linger <user>`.
+
+Useful options include `--profile service`, `--enable-modules jobs,backup`, `--model gpt-oss`,
+`--install-dir /srv/agent-harness`, `--data-dir /srv/agents`, `--model-path /models/model.gguf`,
+`--existing-server http://127.0.0.1:8090`, `--no-start`, and `--dry-run`. Run `install/install.sh --help` for the
+complete list. The installer is idempotent and does not overwrite base config unless `--force` is passed.
+
+## Install on Apple Silicon macOS
+
+Install and start Docker Desktop, then run:
+
+```bash
+git clone https://github.com/dflippojr/agent-harness
+cd agent-harness
+install/install.sh
+ops/backends/login.sh codex  # or claude / cursor
+```
+
+macOS defaults to the service profile and rejects `full`, `local_model`, and modules that require a local model.
+It builds the hosted-provider sandbox and egress proxies and registers a per-user launchd agent for the daemon. No
+Rosetta, local GPU model, or administrator privileges are required. Docker Desktop must be running before hosted
+sessions can start.
+
 ## Check it
 
 ```powershell
@@ -79,7 +130,15 @@ cd agent-harness
 & "$env:LOCALAPPDATA\agent-harness\venv\Scripts\python.exe" -m harness.doctor --config-dir "$env:LOCALAPPDATA\agent-harness\config" --instance Main
 ```
 
-Logs: `%LOCALAPPDATA%\agent-harness\logs` (`daemon.log`, `llama-server.log`, and both supervisors').
+Linux/macOS:
+
+```bash
+~/.local/share/agent-harness/venv/bin/python -m harness.doctor \
+  --config-dir ~/.local/share/agent-harness/config --instance Main
+```
+
+Logs are under `%LOCALAPPDATA%\agent-harness\logs` on Windows and
+`~/.local/share/agent-harness/logs` on Unix (`daemon.log`, `llama-server.log`, and supervisor logs).
 
 ## Use it from your phone
 
@@ -117,7 +176,7 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |
 | Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`) |
-| Claude / Codex / Cursor as session backends | `backends` | `ops\backends\login.ps1 <backend>` (`docs/phase8a-design.md`) |
+| Claude / Codex / Cursor as session backends | `backends` | `ops/backends/login.sh <backend>` on Unix or `login.ps1` on Windows (`docs/phase8a-design.md`) |
 | Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
 | Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |
 | Scheduled jobs | `jobs` (on by default) | nothing |
@@ -137,6 +196,13 @@ powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File install\uninstall.ps1              # tasks and processes; keeps data and models
 powershell -ExecutionPolicy Bypass -File install\uninstall.ps1 -RemoveFiles # also deletes %LOCALAPPDATA%\agent-harness
+```
+
+Linux/macOS equivalents:
+
+```bash
+install/uninstall.sh                 # remove per-user services; keep data
+install/uninstall.sh --remove-files  # also remove the install directory
 ```
 
 ## Security model, briefly

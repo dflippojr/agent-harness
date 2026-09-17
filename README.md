@@ -11,7 +11,8 @@ direction is to split the phone PWA (Control Center) from a separately distribut
 
 ## Install
 
-Windows 10/11 with Docker Desktop and Git. The default full profile also needs an NVIDIA GPU (12 GB+):
+The default full profile runs on Windows 10/11 or x86-64 Linux and needs an NVIDIA GPU (12 GB+). Apple Silicon
+macOS uses the hosted-provider service profile. Docker and Git are required on every platform.
 
 ```powershell
 git clone https://github.com/dflippojr/agent-harness; cd agent-harness
@@ -23,6 +24,13 @@ For a hosted-provider-only daemon with no local model or GPU requirement:
 ```powershell
 powershell -ExecutionPolicy Bypass -File install\install.ps1 -Profile Service
 ops\backends\login.ps1 codex # or claude / cursor
+```
+
+Linux/NVIDIA or Apple Silicon macOS:
+
+```bash
+install/install.sh                         # Linux defaults full; macOS defaults service
+ops/backends/login.sh codex                # service profile: or claude / cursor
 ```
 
 No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`);
@@ -40,7 +48,8 @@ Terms and billing notes for app builders are in `docs/app-api.md`.
 
 - Hosted backends (`backends:` in `config/harness.yaml`): unmodified `claude`, `codex`, and Cursor
   `agent` CLIs run in a provider-only Docker sandbox under your own login. Sign in once with
-  `ops\backends\login.ps1 <backend>`. New task, templates and jobs pick a backend; Settings →
+  `ops\backends\login.ps1 <backend>` (Windows) or `ops/backends/login.sh <backend>` (Unix). New task, templates and
+  jobs pick a backend; Settings →
   Backends shows model/effort, 5h/7d usage and popular-model presets. CLI permission prompts become
   ordinary harness approvals (web, ntfy, or `/api/v1`). Optional user API-key fallback lives in
   `D:/Agents/harness/secrets/<backend>-api-key` and is never returned from an API. Cursor print mode
