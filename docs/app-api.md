@@ -112,10 +112,10 @@ requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and
 ## Endpoints
 
 ### `GET /api/v1`
-Server info: API version, scopes, projects, models, hosted backends, enabled features, and `capabilities`. The
-capability object identifies the `full` or `service` profile, always-on daemon facilities, and effective optional
-modules. It contains no credentials and doesn't need a token. `GET /health` exposes the same capability object for
-lightweight discovery.
+Server info: API version, scopes, projects, models, hosted backends, enabled features, `capabilities`, and
+`image_modes` (labels, availability, and setup text for optional Lightning `quality-fast`). The capability object
+identifies the `full` or `service` profile, always-on daemon facilities, and effective optional modules. It contains
+no credentials and doesn't need a token. `GET /health` exposes the same capability object for lightweight discovery.
 
 ### `POST /api/v1/sessions`  (scope `sessions`)
 
@@ -204,8 +204,11 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 `{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name.
 
 ### `POST /api/v1/images`, `GET /api/v1/images/{id}`, `GET /api/v1/images/{id}.png`  (scope `images`)
-`{"prompt": "...", "model": "fast" | "quality", "aspect_ratio": "1:1"}` queues a job; poll the job until `status` is
-`done`, then download the PNG. While images generate, the language model is unloaded for a few minutes.
+`{"prompt": "...", "model": "fast" | "quality" | "quality-fast", "aspect_ratio": "1:1"}` queues a job; poll the job
+until `status` is `done`, then download the PNG. `quality-fast` is the Qwen-Image-2512 Lightning 4-step LoRA; it is
+opt-in and listed on `GET /api/v1` as `image_modes["quality-fast"]`. If that LoRA is missing, `available` is false and
+`setup` has the pinned filename, size, SHA-256, and destination; requesting the mode fails instead of falling back to
+50-step `quality`. While images generate, the language model is unloaded for a few minutes.
 
 ### `GET /api/v1/remote-control`, `POST /api/v1/remote-control/{project}`, `POST /api/v1/remote-control/{project}/stop`  (scope `remote_control`)
 Starts the unmodified `claude remote-control --spawn worktree` in a tower project's folder, so the user can work there
@@ -309,3 +312,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
 | 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
 | 1.7 | 2026-09-16 | Native Mac bootstrap pairing and capability discovery (owner-approved, not an app SDK operation) |
+| 1.8 | 2026-09-17 | Image mode discovery (`image_modes`) including optional `quality-fast` Lightning LoRA |

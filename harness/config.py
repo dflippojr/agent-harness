@@ -200,6 +200,7 @@ class ImagesConfig:
     linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
+    models_dir: str = "C:/AI/comfy-models"    # diffusion_models, text_encoders, vae, loras
 
 
 @dataclass

@@ -1536,6 +1536,15 @@ function imageStatusView(s) {
   return updateImageStatusView(view, s);
 }
 
+function imageModeEntries(status) {
+  if (status.modes) {
+    return Object.entries(status.modes);
+  }
+  return Object.entries(status.models || {}).map(([id, label]) => [id, {
+    label, available: true, resolution: id === "quality" || id === "quality-fast" ? "high" : "standard",
+  }]);
+}
+
 async function viewImages() {
   setHeader("images");
   let data;
@@ -1560,7 +1569,13 @@ async function viewImages() {
     try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ }
     if (prompt.value.trim()) startWarmup().catch(() => {});
   });
-  const model = h("select", {}, Object.entries(data.status.models).map(([k, label]) => h("option", { value: k }, label)));
+  const modes = Object.fromEntries(imageModeEntries(data.status));
+  const model = h("select", {}, imageModeEntries(data.status).map(([k, spec]) => h("option", {
+    value: k, disabled: spec.available === false,
+  }, spec.label || spec)));
+  const qualityFast = modes["quality-fast"];
+  const loraNote = h("p", { class: "muted small image-lora-setup", hidden: !qualityFast || qualityFast.available !== false },
+    (qualityFast && qualityFast.setup) || "");
   const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
   let resolutionTouched = false;
   const resolutionInputs = Object.entries(data.status.resolutions).map(([name, spec]) => {
@@ -1579,7 +1594,8 @@ async function viewImages() {
   aspect.addEventListener("change", renderResolutions);
   model.addEventListener("change", () => {
     if (!resolutionTouched) {
-      const recommended = model.value === "quality" ? "high" : "standard";
+      const recommended = (modes[model.value] && modes[model.value].resolution)
+        || (model.value === "quality" || model.value === "quality-fast" ? "high" : "standard");
       resolutionInputs.find((choice) => choice.name === recommended).input.checked = true;
     }
     renderResolutions();
@@ -1620,6 +1636,7 @@ async function viewImages() {
     h("label", {}, "Prompt"), prompt,
     h("div", { class: "row" }, h("div", { style: "flex:2" }, h("label", {}, "Model"), model),
       h("div", { style: "flex:1" }, h("label", {}, "Aspect ratio"), aspect)),
+    loraNote,
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
     h("p", { class: "muted small" }, "The language model is unloaded while images generate; running tasks pause for a few minutes."),
@@ -1646,7 +1663,7 @@ async function viewImage(id) {
         : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : imageStatusView(img.service)),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
-        h("p", { class: "muted small" }, `${img.model} · ${img.width}×${img.height} · seed ${img.seed} · ${img.source}${img.seconds ? ` · ${Math.round(img.seconds)} s` : ""} · ${when}`),
+        h("p", { class: "muted small" }, `${img.model} · ${img.width}×${img.height} · seed ${img.seed} · ${img.source}${img.seconds ? ` · ${Math.round(img.seconds)} s` : ""}${img.lora ? ` · LoRA ${img.lora}` : ""}${img.lora_revision ? ` · ${img.lora_revision.slice(0, 8)}` : ""} · ${when}`),
         h("div", { class: "row" },
           isGuest() ? null : h("button", {
             class: "btn",

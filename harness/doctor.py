@@ -198,6 +198,14 @@ def main(argv: list[str] | None = None) -> int:
         py = Path(cfg.images.comfy_dir) / "python_embeded" / "python.exe"
         (r.ok if py.exists() else r.fail)("Image generation", f"ComfyUI at {cfg.images.comfy_dir}"
                                           + ("" if py.exists() else " not found"))
+        from .images import LIGHTNING_LORA, lightning_lora_status
+        lora = lightning_lora_status(cfg.images)
+        if lora["available"]:
+            r.ok("Qwen quality-fast LoRA",
+                 f"{lora['path']} ({LIGHTNING_LORA['filename']}, {LIGHTNING_LORA['bytes']} bytes, "
+                 f"revision {LIGHTNING_LORA['revision']})")
+        else:
+            r.warn("Qwen quality-fast LoRA", lora["setup"])
     code, out = run(["tailscale", "serve", "status", "--json"])
     if code == 0 and str(cfg.port) in out:
         r.ok("Phone access", "tailscale serve publishes the daemon")

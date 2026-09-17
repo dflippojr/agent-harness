@@ -51,7 +51,9 @@ Check 'Image generation' {
         Where-Object { -not (Test-Path (Join-Path 'C:\AI\comfy-models' $_)) }
     if ($files) { throw "missing models: $($files -join ', ')" }
     if (-not (Test-Path 'C:\AI\ComfyUI\python_embeded\python.exe')) { throw 'ComfyUI portable missing at C:\AI\ComfyUI' }
-    "phase $($s.phase); models present; ComfyUI starts on demand"
+    $lora = 'loras\Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors'
+    $loraNote = if (Test-Path (Join-Path 'C:\AI\comfy-models' $lora)) { 'quality-fast LoRA present' } else { 'quality-fast LoRA not installed (optional)' }
+    "phase $($s.phase); models present; $loraNote; ComfyUI starts on demand"
 }
 Check 'Harness daemon :8100' {
     $null = Get-Json 'http://127.0.0.1:8100/health'

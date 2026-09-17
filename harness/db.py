@@ -231,6 +231,10 @@ MIGRATIONS = [
     ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    ("images", "base_model", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "lora", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "lora_revision", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "lora_sha256", "TEXT NOT NULL DEFAULT ''"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
 ]
@@ -593,7 +597,8 @@ class Database:
 
     # images
     def insert_image(self, job: dict) -> None:
-        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height", "seed"]
+        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height", "seed",
+                "base_model", "lora", "lora_revision", "lora_sha256"]
         with self.lock:
             self.conn.execute(f"INSERT INTO images ({','.join(cols)}, status, created_at) VALUES "
                               f"({','.join('?' * len(cols))}, 'queued', ?)", [job[c] for c in cols] + [time.time()])

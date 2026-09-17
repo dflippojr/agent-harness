@@ -15,9 +15,10 @@ A CUDA context is unavoidable on the portable install, so warmup unloads Qwen ra
 After the last job the GPU is given back immediately; there is no linger. Leaving the Images tab cancels an unused
 warmup.
 
-Jobs come from the phone (POST /images) and from agents (the `generate_image` tool). Two workflows, from ComfyUI's own
-templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; assets agents may ship) and `quality` = Qwen-Image-2512
-(Apache 2.0, 20B fp8, best text rendering; slower, part of it runs from RAM). Inputs the workflow doesn't support
+Jobs come from the phone (POST /images) and from agents (the `generate_image` tool). Workflows, from ComfyUI's own
+templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; assets agents may ship), `quality` = Qwen-Image-2512
+(Apache 2.0, 20B fp8, 50 steps, best text rendering; slower, part of it runs from RAM), and optional `quality-fast` =
+the same Qwen base with the Apache-2.0 lightx2v Lightning 4-step LoRA. Inputs the workflow doesn't support
 are ignored, upscaling isn't done by default (lessons from Hermes Agent's image tool, docs/phase6a-hermes-study.md).
 Results are PNGs under data_dir/images, served by GET /images/{id}.png.
 """
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +39,7 @@ import uuid
 from pathlib import Path
 
 import httpx
+import yaml
 
 from .config import ImagesConfig
 from .fileops import ToolError
@@ -53,13 +56,124 @@ RESOLUTION_SIZES = {
     "standard": {"1:1": (1024, 1024), "16:9": (1344, 768), "9:16": (768, 1344), "4:3": (1152, 864),
              "3:4": (864, 1152), "3:2": (1216, 832), "2:3": (832, 1216)},
 }
-MODEL_RESOLUTION = {"fast": "standard", "quality": "high"}
+MODEL_RESOLUTION = {"fast": "standard", "quality": "high", "quality-fast": "high"}
 MODELS = {
-    "fast": {"label": "Z-Image-Turbo (fast, Apache 2.0)", "negative": False},
-    "quality": {"label": "Qwen-Image-2512 (quality, Apache 2.0)", "negative": True},
+    "fast": {"label": "Z-Image-Turbo (fast, Apache 2.0)", "negative": False, "optional": False,
+             "base_model": "z_image_turbo_bf16.safetensors"},
+    "quality": {"label": "Qwen-Image-2512 (quality, Apache 2.0)", "negative": True, "optional": False,
+                "base_model": "qwen_image_2512_fp8_e4m3fn.safetensors"},
+    "quality-fast": {"label": "Qwen quality (fast, 4-step)", "negative": True, "optional": True,
+                     "base_model": "qwen_image_2512_fp8_e4m3fn.safetensors"},
 }
 QWEN_NEGATIVE = ("low resolution, low quality, deformed limbs, deformed fingers, oversaturated, waxy, no facial "
                  "detail, over-smoothed, AI look, cluttered composition, blurry text, distorted text")
+# Apache-2.0 4-step Lightning LoRA from lightx2v/Qwen-Image-2512-Lightning, documented by QwenLM/Qwen-Image
+# and ComfyUI's native image_qwen_Image_2512.json 4-steps subgraph. Pin the Hugging Face revision used on 2026-09-17.
+LIGHTNING_LORA = {
+    "repo": "lightx2v/Qwen-Image-2512-Lightning",
+    "revision": "a52649c9d0f6e1a248bff13f0df33bb8a2abdb52",
+    "filename": "Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors",
+    "bytes": 1698951104,
+    "sha256": "ad12117461cb41e2ea637fec8df6392ce8e8550c47fbe2b829ed3deb98262066",
+    "license": "Apache-2.0",
+}
+LIGHTNING_LORA["url"] = (f"https://huggingface.co/{LIGHTNING_LORA['repo']}/resolve/"
+                         f"{LIGHTNING_LORA['revision']}/{LIGHTNING_LORA['filename']}")
+
+
+def lightning_lora_dirs(cfg: ImagesConfig) -> list[Path]:
+    """Folders ComfyUI may load LoRAs from: configured models_dir, portable install, extra_model_paths.yaml."""
+    root = Path(cfg.comfy_dir)
+    dirs = [Path(cfg.models_dir) / "loras", root / "ComfyUI" / "models" / "loras", root / "models" / "loras"]
+    for extra in (root / "ComfyUI" / "extra_model_paths.yaml", root / "extra_model_paths.yaml"):
+        dirs.extend(_loras_from_extra_paths(extra))
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for folder in dirs:
+        key = str(folder).replace("\\", "/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(folder)
+    return unique
+
+
+def _loras_from_extra_paths(path: Path) -> list[Path]:
+    if not path.is_file():
+        return []
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    found: list[Path] = []
+    for spec in raw.values():
+        if not isinstance(spec, dict):
+            continue
+        base = Path(str(spec.get("base_path") or spec.get("basepath") or ""))
+        loras = spec.get("loras") or spec.get("lora")
+        if not loras:
+            continue
+        for entry in loras if isinstance(loras, list) else [loras]:
+            folder = Path(str(entry))
+            found.append(folder if folder.is_absolute() else (base / folder if base.parts else folder))
+    return found
+
+
+def lightning_lora_setup(cfg: ImagesConfig) -> str:
+    dest = Path(cfg.models_dir) / "loras" / LIGHTNING_LORA["filename"]
+    return (f"quality-fast needs the Apache-2.0 Qwen-Image-2512 Lightning 4-step LoRA "
+            f"({LIGHTNING_LORA['filename']}, {LIGHTNING_LORA['bytes']} bytes, "
+            f"SHA-256 {LIGHTNING_LORA['sha256']}, revision {LIGHTNING_LORA['revision']} from "
+            f"{LIGHTNING_LORA['repo']}). Download {LIGHTNING_LORA['url']} and save it as {dest}. "
+            f"quality-fast will not fall back to 50-step quality.")
+
+
+def lightning_lora_path(cfg: ImagesConfig) -> Path | None:
+    name = LIGHTNING_LORA["filename"]
+    for folder in lightning_lora_dirs(cfg):
+        candidate = folder / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def lightning_lora_status(cfg: ImagesConfig) -> dict:
+    """Whether the optional Lightning LoRA is present and the expected size. Hash is checked when a job runs."""
+    setup = lightning_lora_setup(cfg)
+    path = lightning_lora_path(cfg)
+    if path is None:
+        return {"available": False, "path": None, "reason": "missing", "setup": setup}
+    size = path.stat().st_size
+    if size != LIGHTNING_LORA["bytes"]:
+        return {"available": False, "path": str(path), "reason": "size",
+                "setup": (f"quality-fast LoRA at {path} is {size} bytes, expected {LIGHTNING_LORA['bytes']} "
+                          f"(SHA-256 {LIGHTNING_LORA['sha256']}). {setup}")}
+    return {"available": True, "path": str(path), "reason": "ok", "setup": "",
+            "filename": LIGHTNING_LORA["filename"], "revision": LIGHTNING_LORA["revision"],
+            "sha256": LIGHTNING_LORA["sha256"], "bytes": LIGHTNING_LORA["bytes"]}
+
+
+def verify_lightning_lora(path: Path) -> str:
+    """Return an empty string if SHA-256 matches the pin, otherwise an error."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    got = digest.hexdigest()
+    if got != LIGHTNING_LORA["sha256"]:
+        return (f"quality-fast LoRA at {path} SHA-256 is {got}, expected {LIGHTNING_LORA['sha256']} "
+                f"(revision {LIGHTNING_LORA['revision']})")
+    return ""
+
+
+def mode_provenance(model: str) -> dict:
+    spec = MODELS[model]
+    if model != "quality-fast":
+        return {"base_model": spec["base_model"], "lora": "", "lora_revision": "", "lora_sha256": ""}
+    return {"base_model": spec["base_model"], "lora": LIGHTNING_LORA["filename"],
+            "lora_revision": LIGHTNING_LORA["revision"], "lora_sha256": LIGHTNING_LORA["sha256"]}
 
 
 def workspace_png_name(filename: str) -> str:
@@ -73,26 +187,33 @@ def workspace_png_name(filename: str) -> str:
     return name
 
 
-def schemas(cfg: ImagesConfig) -> list[dict]:
+def schemas(cfg: ImagesConfig, available: list[str] | None = None) -> list[dict]:
+    names = [name for name in MODELS if available is None or name in available]
+    quality_fast = "quality-fast" in names
+    model_help = "fast or quality. Default fast."
+    extra = ""
+    if quality_fast:
+        model_help = "fast, quality, or quality-fast. Default fast."
+        extra = " 'quality-fast' is the same Qwen model with a 4-step Lightning LoRA: quicker, a bit less detailed."
     return [{"type": "function", "function": {
         "name": "generate_image",
         "description": "Generate an image from a text prompt with a local model and save it as a PNG in the workspace. "
                        "Slow: the language model is unloaded while it runs (about 1-3 minutes in total). 'fast' "
                        "(default) suits icons, placeholders and illustrations; 'quality' renders text and detail "
-                       "better but takes several minutes.",
+                       f"better but takes several minutes.{extra}",
         "parameters": {"type": "object", "properties": {
             "prompt": {"type": "string", "description": "Detailed description of the image."},
             "filename": {"type": "string", "description": "Where to save it in the workspace, e.g. assets/logo.png"},
             "aspect_ratio": {"type": "string", "description": f"One of {', '.join(ASPECTS)}. Default 1:1."},
             "resolution": {"type": "string", "description": "standard or high. Defaults to the model's native size."},
-            "model": {"type": "string", "description": "fast or quality. Default fast."},
+            "model": {"type": "string", "description": model_help},
         }, "required": ["prompt", "filename"]},
     }}]
 
 
 def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix: str) -> dict:
     """ComfyUI API-format graph, transcribed from the bundled templates image_z_image_turbo.json and
-    image_qwen_Image_2512.json (without the optional Lightning LoRA)."""
+    image_qwen_Image_2512.json. quality-fast enables that template's official 4-step Lightning LoRA subgraph."""
     if model == "fast":
         return {
             "28": {"class_type": "UNETLoader", "inputs": {"unet_name": "z_image_turbo_bf16.safetensors",
@@ -111,18 +232,28 @@ def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["29", 0]}},
             "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": prefix}},
         }
+    sampled = ["226", 0]
+    steps, cfg_scale = 50, 4
+    extra = {}
+    if model == "quality-fast":
+        extra["221"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": ["226", 0], "lora_name": LIGHTNING_LORA["filename"], "strength_model": 1}}
+        sampled = ["221", 0]
+        steps, cfg_scale = 4, 1
     return {
         "226": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_2512_fp8_e4m3fn.safetensors",
                                                        "weight_dtype": "default"}},
-        "222": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["226", 0], "shift": 3.1}},
+        **extra,
+        "222": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": sampled, "shift": 3.1}},
         "219": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
                                                        "type": "qwen_image", "device": "default"}},
         "227": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["219", 0], "text": prompt}},
         "228": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["219", 0], "text": QWEN_NEGATIVE}},
         "232": {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
         "230": {"class_type": "KSampler", "inputs": {"model": ["222", 0], "positive": ["227", 0], "negative": ["228", 0],
-                                                     "latent_image": ["232", 0], "seed": seed, "steps": 50, "cfg": 4,
-                                                     "sampler_name": "euler", "scheduler": "simple", "denoise": 1}},
+                                                     "latent_image": ["232", 0], "seed": seed, "steps": steps,
+                                                     "cfg": cfg_scale, "sampler_name": "euler", "scheduler": "simple",
+                                                     "denoise": 1}},
         "220": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
         "231": {"class_type": "VAEDecode", "inputs": {"samples": ["230", 0], "vae": ["220", 0]}},
         "60": {"class_type": "SaveImage", "inputs": {"images": ["231", 0], "filename_prefix": prefix}},
@@ -240,9 +371,54 @@ class ImageService:
         self._drain_sessions: set[str] = set()
         self.images_dir = Path(cfg.work_dir) / "images"
         self.transport = None          # tests inject a fake ComfyUI
+        self._lora_available: bool | None = None  # tests force Lightning LoRA presence; None = inspect disk
+        self._lora_hash_ok: bool | None = None
 
     def schemas(self) -> list[dict]:
-        return schemas(self.cfg)
+        return schemas(self.cfg, available=[name for name in MODELS if self.mode_available(name)])
+
+    def mode_available(self, model: str) -> bool:
+        if model not in MODELS:
+            return False
+        if model != "quality-fast" or MODELS[model]["optional"] is False:
+            return True
+        if self._lora_available is not None:
+            return self._lora_available
+        return bool(lightning_lora_status(self.cfg)["available"])
+
+    def mode_catalog(self) -> dict:
+        """Discovery metadata for every mode. quality-fast is listed even when the optional LoRA is missing."""
+        catalog = {}
+        for name, spec in MODELS.items():
+            available = self.mode_available(name)
+            entry = {"label": spec["label"], "available": available, "optional": spec["optional"],
+                     "resolution": MODEL_RESOLUTION[name], "base_model": spec["base_model"]}
+            if name == "quality-fast":
+                entry["lora"] = LIGHTNING_LORA["filename"]
+                entry["lora_revision"] = LIGHTNING_LORA["revision"]
+                entry["lora_sha256"] = LIGHTNING_LORA["sha256"]
+                entry["lora_bytes"] = LIGHTNING_LORA["bytes"]
+                if not available:
+                    entry["setup"] = lightning_lora_status(self.cfg)["setup"] if self._lora_available is None \
+                        else lightning_lora_setup(self.cfg)
+            catalog[name] = entry
+        return catalog
+
+    def _require_quality_fast(self) -> None:
+        if not self.mode_available("quality-fast"):
+            raise ToolError(self.mode_catalog()["quality-fast"].get("setup") or lightning_lora_setup(self.cfg))
+        if self._lora_available is True:
+            return
+        path = lightning_lora_path(self.cfg)
+        if path is None:
+            raise ToolError(lightning_lora_setup(self.cfg))
+        if self._lora_hash_ok:
+            return
+        error = verify_lightning_lora(path)
+        if error:
+            self._lora_hash_ok = False
+            raise ToolError(error)
+        self._lora_hash_ok = True
 
     @property
     def gpu_taken(self) -> bool:
@@ -283,6 +459,10 @@ class ImageService:
             raise ToolError("prompt is empty")
         if model not in MODELS:
             raise ToolError(f"model must be one of {', '.join(MODELS)}")
+        if not self.mode_available(model):
+            raise ToolError(self.mode_catalog()[model].get("setup") or lightning_lora_setup(self.cfg))
+        if model == "quality-fast":
+            self._require_quality_fast()
         if aspect_ratio not in ASPECTS:
             raise ToolError(f"aspect_ratio must be one of {', '.join(ASPECTS)}")
         if resolution == "auto":
@@ -292,7 +472,7 @@ class ImageService:
         width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
         job = {"id": uuid.uuid4().hex[:12], "session_id": session_id, "source": source, "prompt": prompt[:4000],
                "model": model, "aspect_ratio": aspect_ratio, "resolution": resolution, "width": width, "height": height,
-               "seed": seed if seed is not None else random.randrange(2**48)}
+               "seed": seed if seed is not None else random.randrange(2**48), **mode_provenance(model)}
         self.db.insert_image(job)
         self._done[job["id"]] = asyncio.Event()
         self.queue.put_nowait(job["id"])
@@ -452,6 +632,8 @@ class ImageService:
         stop_progress = asyncio.Event()
         listener = asyncio.create_task(self._listen_progress(job_id, started, stop_progress))
         try:
+            if job["model"] == "quality-fast":
+                self._require_quality_fast()
             prefix = f"harness/{job_id}"
             graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix)
             async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
@@ -545,7 +727,8 @@ class ImageService:
     def status(self) -> dict:
         return {"enabled": self.cfg.enabled, "phase": self.phase, "active_job": self.active_job,
                 "queued": self.queue.qsize(), "progress": self.progress,
-                "models": {k: v["label"] for k, v in MODELS.items()}, "aspect_ratios": list(ASPECTS),
+                "models": {k: v["label"] for k, v in MODELS.items()}, "modes": self.mode_catalog(),
+                "aspect_ratios": list(ASPECTS),
                 "resolutions": {name: {"label": label, "sizes": {aspect: list(size) for aspect, size in RESOLUTION_SIZES[name].items()}}
                                 for name, label in RESOLUTIONS.items()}}
 

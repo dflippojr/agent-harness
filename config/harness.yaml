@@ -229,9 +229,11 @@ endpoint:
 # and start ComfyUI from C:/AI/ComfyUI. Opening the Images tab warms ComfyUI without loading a checkpoint; the GPU
 # is given back as soon as the queue is empty.
 # Models in C:/AI/comfy-models: fast = Z-Image-Turbo, quality = Qwen-Image-2512 (both Apache 2.0).
+# Optional quality-fast = the same Qwen base plus the lightx2v Lightning 4-step LoRA in loras/.
 images:
   enabled: true
   comfy_dir: C:/AI/ComfyUI
   port: 8188
   work_dir: D:/Agents/harness/images-work
   linger_seconds: 0
+  models_dir: C:/AI/comfy-models

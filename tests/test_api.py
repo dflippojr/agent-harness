@@ -85,6 +85,9 @@ def test_web_app_and_guard(tmp_path):
         assert 'showFab("#/jobs/new", "+ New job")' in js
         assert 'api("/backends?auth=skip")' in js
         assert 'if (images && !route.onImages) api("/images/warmup"' not in js
+        assert "function imageModeEntries" in js
+        assert 'disabled: spec.available === false' in js
+        assert "quality-fast" in js
         assert 'if (prompt.value.trim()) startWarmup()' in js
         assert 'await startWarmup().catch(() => {})' in js
         assert "updateImageStatusView(phase, d.status)" in js
