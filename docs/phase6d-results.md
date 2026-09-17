@@ -9,12 +9,13 @@ both a permissive default and a higher-quality model.
 | --- | --- | --- | --- | --- |
 | `fast` (default, agent assets) | **Z-Image-Turbo** | Apache 2.0, not gated | `z_image_turbo_bf16` (12 GB), `qwen_3_4b` text encoder (7.5 GB), `ae` VAE | 8 steps, fits in VRAM |
 | `quality` (phone) | **Qwen-Image-2512** | Apache 2.0, not gated | `qwen_image_2512_fp8_e4m3fn` (20 GB), `qwen_2.5_vl_7b_fp8_scaled` (8.8 GB), `qwen_image_vae` | 50 steps, cfg 4; best text rendering; ComfyUI streams part of it from RAM |
+| `flux-fast` (optional) | **FLUX.2 [klein] 4B FP8** | Apache 2.0, not gated | See `docs/flux-fast.md`. Disabled until `ops/images-models.ps1 install flux-fast`. | 4 steps; not a replacement for `fast` |
 
 The user allowed a personal-use license for the quality slot, but the best model that works here without extra steps
 is Apache-licensed anyway:
 
-- **FLUX.2 [klein] 9B** (non-commercial) is gated (needs a Hugging Face login and license acceptance), so it wasn't
-  installed. It can be added later as a third workflow.
+- **FLUX.2 [klein] 9B** (non-commercial) stays out: it is gated. The 4B Apache-2.0 distilled checkpoint is the
+  optional third workflow (`docs/flux-fast.md`, issue #92).
 - The "Qwen-Image 2.0" some 2026 articles mention couldn't be found on Hugging Face.
 
 ComfyUI: portable NVIDIA build **v0.35.0** (torch 2.13 + CUDA 13.0) in `C:\AI\ComfyUI`, models via

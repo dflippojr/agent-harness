@@ -333,7 +333,8 @@ def fake_comfy(fail_prompts=()):
 def image_manager(tmp_path, steps=None, fail_prompts=()):
     from harness.config import ImagesConfig
     cfg = make_cfg(tmp_path)
-    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2)
+    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2,
+                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"))
     m = Manager(cfg, chat=Script(steps or [Completion(content="done")]))
     server = FakeServer()
     m.images.control = server
@@ -569,7 +570,8 @@ def test_agent_generate_image_saves_into_mac_workspace(tmp_path):
     steps = [Completion(tool_calls=[call("generate_image", 0, prompt="app icon", filename="assets/icon")]),
              Completion(content="made the icon")]
     cfg = mac_cfg(tmp_path)
-    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2)
+    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2,
+                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"))
     m = Manager(cfg, chat=Script(steps))
     m.images.control = FakeServer()
     handler, _ = fake_comfy()

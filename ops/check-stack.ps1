@@ -53,6 +53,18 @@ Check 'Image generation' {
     if (-not (Test-Path 'C:\AI\ComfyUI\python_embeded\python.exe')) { throw 'ComfyUI portable missing at C:\AI\ComfyUI' }
     "phase $($s.phase); models present; ComfyUI starts on demand"
 }
+# Optional component: warn (never FAIL) when flux-fast assets or nodes are missing.
+try {
+    $flux = @((Get-Json 'http://127.0.0.1:8100/images?limit=1').status.modes | Where-Object { $_.key -eq 'flux-fast' })[0]
+    if (-not $flux) { throw 'flux-fast mode missing from /images status' }
+    if ($flux.available) {
+        Write-Host ("[ OK ] FLUX.2 klein 4B (optional)  {0}" -f $flux.display_name) -ForegroundColor Green
+    } else {
+        Write-Host ("[WARN] FLUX.2 klein 4B (optional)  {0}. {1}" -f $flux.unavailable_reason, $flux.remediation) -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host ("[WARN] FLUX.2 klein 4B (optional)  {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+}
 Check 'Harness daemon :8100' {
     $null = Get-Json 'http://127.0.0.1:8100/health'
     $m = Get-Json 'http://127.0.0.1:8100/models/status'

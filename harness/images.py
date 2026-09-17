@@ -15,11 +15,12 @@ A CUDA context is unavoidable on the portable install, so warmup unloads Qwen ra
 After the last job the GPU is given back immediately; there is no linger. Leaving the Images tab cancels an unused
 warmup.
 
-Jobs come from the phone (POST /images) and from agents (the `generate_image` tool). Two workflows, from ComfyUI's own
-templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; assets agents may ship) and `quality` = Qwen-Image-2512
-(Apache 2.0, 20B fp8, best text rendering; slower, part of it runs from RAM). Inputs the workflow doesn't support
-are ignored, upscaling isn't done by default (lessons from Hermes Agent's image tool, docs/phase6a-hermes-study.md).
-Results are PNGs under data_dir/images, served by GET /images/{id}.png.
+Jobs come from the phone (POST /images) and from agents (the `generate_image` tool). Workflows, transcribed from
+ComfyUI's own templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; the default), `quality` = Qwen-Image-2512
+(Apache 2.0, 20B fp8, best text rendering), and optional `flux-fast` = distilled FLUX.2 [klein] 4B FP8 (Apache 2.0,
+4 steps; disabled until its assets and nodes pass preflight). Selecting `flux-fast` never falls back to another
+model. Inputs a workflow doesn't support are rejected rather than silently resized. Results are PNGs under
+data_dir/images, served by GET /images/{id}.png.
 """
 
 from __future__ import annotations
@@ -53,10 +54,17 @@ RESOLUTION_SIZES = {
     "standard": {"1:1": (1024, 1024), "16:9": (1344, 768), "9:16": (768, 1344), "4:3": (1152, 864),
              "3:4": (864, 1152), "3:2": (1216, 832), "2:3": (832, 1216)},
 }
-MODEL_RESOLUTION = {"fast": "standard", "quality": "high"}
+MODEL_RESOLUTION = {"fast": "standard", "quality": "high", "flux-fast": "standard"}
 MODELS = {
-    "fast": {"label": "Z-Image-Turbo (fast, Apache 2.0)", "negative": False},
-    "quality": {"label": "Qwen-Image-2512 (quality, Apache 2.0)", "negative": True},
+    "fast": {"label": "Z-Image-Turbo (fast, Apache 2.0)", "negative": False, "optional": False,
+             "steps": 8, "sampler": "res_multistep", "scheduler": "simple", "guidance": 1.0,
+             "license": "Apache-2.0"},
+    "quality": {"label": "Qwen-Image-2512 (quality, Apache 2.0)", "negative": True, "optional": False,
+                "steps": 50, "sampler": "euler", "scheduler": "simple", "guidance": 4.0,
+                "license": "Apache-2.0"},
+    "flux-fast": {"label": "FLUX.2 klein 4B (fast, Apache 2.0)", "negative": False, "optional": True,
+                  "steps": 4, "sampler": "euler", "scheduler": "Flux2Scheduler", "guidance": 1.0,
+                  "license": "Apache-2.0"},
 }
 QWEN_NEGATIVE = ("low resolution, low quality, deformed limbs, deformed fingers, oversaturated, waxy, no facial "
                  "detail, over-smoothed, AI look, cluttered composition, blurry text, distorted text")
@@ -79,20 +87,30 @@ def schemas(cfg: ImagesConfig) -> list[dict]:
         "description": "Generate an image from a text prompt with a local model and save it as a PNG in the workspace. "
                        "Slow: the language model is unloaded while it runs (about 1-3 minutes in total). 'fast' "
                        "(default) suits icons, placeholders and illustrations; 'quality' renders text and detail "
-                       "better but takes several minutes.",
+                       "better but takes several minutes; 'flux-fast' is an optional Apache-2.0 FLUX.2 klein 4B "
+                       "style that is refused (never substituted) when its component is not installed.",
         "parameters": {"type": "object", "properties": {
             "prompt": {"type": "string", "description": "Detailed description of the image."},
             "filename": {"type": "string", "description": "Where to save it in the workspace, e.g. assets/logo.png"},
             "aspect_ratio": {"type": "string", "description": f"One of {', '.join(ASPECTS)}. Default 1:1."},
-            "resolution": {"type": "string", "description": "standard or high. Defaults to the model's native size."},
-            "model": {"type": "string", "description": "fast or quality. Default fast."},
+            "resolution": {"type": "string", "description": "standard or high. Defaults to the model's native size. "
+                           "flux-fast only supports standard."},
+            "model": {"type": "string", "description": "fast, quality, or flux-fast. Default fast."},
         }, "required": ["prompt", "filename"]},
     }}]
 
 
-def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix: str) -> dict:
-    """ComfyUI API-format graph, transcribed from the bundled templates image_z_image_turbo.json and
-    image_qwen_Image_2512.json (without the optional Lightning LoRA)."""
+def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix: str,
+             encoder_name: str | None = None) -> dict:
+    """ComfyUI API-format graph.
+
+    `fast` / `quality` are transcribed from the bundled templates image_z_image_turbo.json and
+    image_qwen_Image_2512.json (without the optional Lightning LoRA). `flux-fast` is transcribed from the distilled
+    subgraph of Comfy-Org/workflow_templates templates/image_flux2_klein_text_to_image.json at revision
+    8f6709b8f6ef808b0eccc47eff28ada4a58adbbe. Deliberate deviation: UNET file is BFL's public FP8 checkpoint
+    flux-2-klein-4b-fp8.safetensors rather than the template's bf16 flux-2-klein-4b.safetensors. Sampler (euler),
+    Flux2Scheduler steps=4, and CFGGuider cfg=1.0 match upstream.
+    """
     if model == "fast":
         return {
             "28": {"class_type": "UNETLoader", "inputs": {"unet_name": "z_image_turbo_bf16.safetensors",
@@ -111,27 +129,56 @@ def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["29", 0]}},
             "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": prefix}},
         }
-    return {
-        "226": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_2512_fp8_e4m3fn.safetensors",
-                                                       "weight_dtype": "default"}},
-        "222": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["226", 0], "shift": 3.1}},
-        "219": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-                                                       "type": "qwen_image", "device": "default"}},
-        "227": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["219", 0], "text": prompt}},
-        "228": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["219", 0], "text": QWEN_NEGATIVE}},
-        "232": {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
-        "230": {"class_type": "KSampler", "inputs": {"model": ["222", 0], "positive": ["227", 0], "negative": ["228", 0],
-                                                     "latent_image": ["232", 0], "seed": seed, "steps": 50, "cfg": 4,
-                                                     "sampler_name": "euler", "scheduler": "simple", "denoise": 1}},
-        "220": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
-        "231": {"class_type": "VAEDecode", "inputs": {"samples": ["230", 0], "vae": ["220", 0]}},
-        "60": {"class_type": "SaveImage", "inputs": {"images": ["231", 0], "filename_prefix": prefix}},
-    }
+    if model == "quality":
+        return {
+            "226": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_2512_fp8_e4m3fn.safetensors",
+                                                           "weight_dtype": "default"}},
+            "222": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["226", 0], "shift": 3.1}},
+            "219": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                                                           "type": "qwen_image", "device": "default"}},
+            "227": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["219", 0], "text": prompt}},
+            "228": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["219", 0], "text": QWEN_NEGATIVE}},
+            "232": {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+            "230": {"class_type": "KSampler", "inputs": {"model": ["222", 0], "positive": ["227", 0],
+                                                         "negative": ["228", 0], "latent_image": ["232", 0],
+                                                         "seed": seed, "steps": 50, "cfg": 4, "sampler_name": "euler",
+                                                         "scheduler": "simple", "denoise": 1}},
+            "220": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
+            "231": {"class_type": "VAEDecode", "inputs": {"samples": ["230", 0], "vae": ["220", 0]}},
+            "60": {"class_type": "SaveImage", "inputs": {"images": ["231", 0], "filename_prefix": prefix}},
+        }
+    if model == "flux-fast":
+        clip = encoder_name or "qwen_3_4b.safetensors"
+        return {
+            "70": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux-2-klein-4b-fp8.safetensors",
+                                                          "weight_dtype": "default"}},
+            "71": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip, "type": "flux2", "device": "default"}},
+            "72": {"class_type": "VAELoader", "inputs": {"vae_name": "flux2-vae.safetensors"}},
+            "74": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["71", 0], "text": prompt}},
+            "76": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["74", 0]}},
+            "66": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+            "69": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+            "61": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+            "62": {"class_type": "Flux2Scheduler", "inputs": {"steps": 4, "width": width, "height": height}},
+            "63": {"class_type": "CFGGuider", "inputs": {"model": ["70", 0], "positive": ["74", 0],
+                                                         "negative": ["76", 0], "cfg": 1.0}},
+            "64": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["69", 0], "guider": ["63", 0],
+                                                                     "sampler": ["61", 0], "sigmas": ["62", 0],
+                                                                     "latent_image": ["66", 0]}},
+            "65": {"class_type": "VAEDecode", "inputs": {"samples": ["64", 0], "vae": ["72", 0]}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["65", 0], "filename_prefix": prefix}},
+        }
+    raise ToolError(f"model must be one of {', '.join(MODELS)}")
 
 
 async def _run(args: list[str]) -> tuple[int, str, str]:
     from .sandbox import run_cmd
     return await run_cmd(args, timeout=30)
+
+
+def _comfy_revision(cfg: ImagesConfig) -> str:
+    from .images_models import comfy_version_label
+    return comfy_version_label(Path(cfg.comfy_dir))
 
 
 async def _ws_read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -240,6 +287,9 @@ class ImageService:
         self._drain_sessions: set[str] = set()
         self.images_dir = Path(cfg.work_dir) / "images"
         self.transport = None          # tests inject a fake ComfyUI
+        self.object_info = None        # tests inject ComfyUI /object_info
+        self.flux_manifest = None      # tests inject a tiny fixture manifest
+        self._cancel: set[str] = set()
 
     def schemas(self) -> list[dict]:
         return schemas(self.cfg)
@@ -275,6 +325,45 @@ class ImageService:
         if self.comfy.proc:
             await self.comfy.stop()
 
+    def flux_status(self) -> dict:
+        from .images_models import inspect_flux_fast
+        return inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest)
+
+    def mode_reports(self) -> list[dict]:
+        flux = self.flux_status()
+        reports = []
+        for key, spec in MODELS.items():
+            if key == "flux-fast":
+                available, reason, remediation = flux["available"], flux["unavailable_reason"], flux["remediation"]
+                revision, sha = flux["checkpoint_revision"], flux["checkpoint_sha256"]
+                resolutions = list(flux["supported_resolutions"])
+            else:
+                available, reason, remediation = True, "", ""
+                revision, sha = "", ""
+                resolutions = list(RESOLUTIONS)
+            reports.append({
+                "key": key, "display_name": spec["label"], "available": available,
+                "unavailable_reason": reason, "remediation": remediation, "license": spec["license"],
+                "checkpoint_revision": revision, "checkpoint_hash": sha,
+                "supported_resolutions": resolutions, "supported_aspects": list(ASPECTS),
+                "steps": spec["steps"], "negative_prompt": spec["negative"],
+                "sampler": spec["sampler"], "scheduler": spec["scheduler"], "guidance": spec["guidance"],
+            })
+        return reports
+
+    def provenance_for(self, job: dict) -> dict:
+        spec = MODELS[job["model"]]
+        extra = {}
+        if job["model"] == "flux-fast":
+            flux = self.flux_status()
+            extra = {"checkpoint_revision": flux["checkpoint_revision"], "checkpoint_sha256": flux["checkpoint_sha256"],
+                     "encoder_sha256": flux["encoder_sha256"], "vae_sha256": flux["vae_sha256"],
+                     "encoder_name": flux["encoder_name"],
+                     "comfy_revision": _comfy_revision(self.cfg)}
+        return {"mode": job["model"], "prompt": job["prompt"], "width": job["width"], "height": job["height"],
+                "seed": job["seed"], "steps": spec["steps"], "sampler": spec["sampler"],
+                "scheduler": spec["scheduler"], "guidance": spec["guidance"], **extra}
+
     # jobs
     def submit(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", resolution: str = "auto",
                source: str = "phone", session_id: str = "", seed: int | None = None) -> dict:
@@ -289,14 +378,38 @@ class ImageService:
             resolution = MODEL_RESOLUTION[model]
         if resolution not in RESOLUTIONS:
             raise ToolError(f"resolution must be one of {', '.join(RESOLUTIONS)}")
+        allowed = list(RESOLUTIONS) if model != "flux-fast" else ["standard"]
+        if resolution not in allowed:
+            raise ToolError(f"{model} does not support resolution {resolution}; use {', '.join(allowed)}")
+        if model == "flux-fast":
+            flux = self.flux_status()
+            if not flux["available"]:
+                raise ToolError(flux["unavailable_reason"] +
+                                (f". {flux['remediation']}" if flux.get("remediation") else ""))
         width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
         job = {"id": uuid.uuid4().hex[:12], "session_id": session_id, "source": source, "prompt": prompt[:4000],
                "model": model, "aspect_ratio": aspect_ratio, "resolution": resolution, "width": width, "height": height,
                "seed": seed if seed is not None else random.randrange(2**48)}
+        job["provenance"] = self.provenance_for(job)
         self.db.insert_image(job)
         self._done[job["id"]] = asyncio.Event()
         self.queue.put_nowait(job["id"])
         return self.db.get_image(job["id"])
+
+    def cancel(self, job_id: str) -> dict:
+        job = self.db.get_image(job_id)
+        if job is None:
+            raise ToolError("no such image")
+        if job["status"] in ("done", "failed"):
+            return job
+        self._cancel.add(job_id)
+        if job["status"] == "queued":
+            self.db.update_image(job_id, status="failed", finished_at=time.time(), error="cancelled")
+            event = self._done.get(job_id)
+            if event:
+                event.set()
+            return self.db.get_image(job_id)
+        return job
 
     async def wait(self, job_id: str) -> dict:
         event = self._done.setdefault(job_id, asyncio.Event())
@@ -444,6 +557,12 @@ class ImageService:
         job = self.db.get_image(job_id)
         if job is None or job["status"] in ("done", "failed"):
             return
+        if job_id in self._cancel:
+            self.db.update_image(job_id, status="failed", finished_at=time.time(), error="cancelled")
+            event = self._done.pop(job_id, None)
+            if event:
+                event.set()
+            return
         self.active_job = job_id
         self.phase = "generating"
         started = time.time()
@@ -453,7 +572,11 @@ class ImageService:
         listener = asyncio.create_task(self._listen_progress(job_id, started, stop_progress))
         try:
             prefix = f"harness/{job_id}"
-            graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix)
+            encoder = None
+            if job["model"] == "flux-fast":
+                encoder = self.flux_status()["encoder_name"]
+            graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix,
+                             encoder_name=encoder)
             async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
                 resp = await client.post(f"{self.comfy.url}/prompt", json={"prompt": graph,
                                                                              "client_id": "agent-harness"})
@@ -462,6 +585,9 @@ class ImageService:
                 prompt_id = resp.json()["prompt_id"]
                 deadline = time.monotonic() + self.cfg.job_timeout_seconds
                 while True:
+                    if job_id in self._cancel:
+                        await self.comfy.interrupt()
+                        raise ToolError("cancelled")
                     if time.monotonic() > deadline:
                         await self.comfy.interrupt()
                         raise ToolError("image generation timed out")
@@ -486,8 +612,10 @@ class ImageService:
                 data.raise_for_status()
             self.images_dir.mkdir(parents=True, exist_ok=True)
             self.path(job).write_bytes(data.content)
-            self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=round(time.time() - started, 1),
-                                 bytes=len(data.content))
+            seconds = round(time.time() - started, 1)
+            provenance = {**(job.get("provenance") or {}), **self.provenance_for(job), "seconds": seconds}
+            self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=seconds,
+                                 bytes=len(data.content), provenance=provenance)
             log.info("image %s (%s) done in %.0f s", job_id, job["model"], time.time() - started)
         except (ToolError, httpx.HTTPError, KeyError, ValueError) as e:
             self.db.update_image(job_id, status="failed", finished_at=time.time(), error=str(e)[:1000])
@@ -543,9 +671,11 @@ class ImageService:
                     pass
 
     def status(self) -> dict:
+        modes = self.mode_reports()
         return {"enabled": self.cfg.enabled, "phase": self.phase, "active_job": self.active_job,
                 "queued": self.queue.qsize(), "progress": self.progress,
-                "models": {k: v["label"] for k, v in MODELS.items()}, "aspect_ratios": list(ASPECTS),
+                "models": {m["key"]: m["display_name"] for m in modes},
+                "modes": modes, "aspect_ratios": list(ASPECTS),
                 "resolutions": {name: {"label": label, "sizes": {aspect: list(size) for aspect, size in RESOLUTION_SIZES[name].items()}}
                                 for name, label in RESOLUTIONS.items()}}
 

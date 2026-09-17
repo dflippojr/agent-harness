@@ -204,8 +204,12 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 `{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name.
 
 ### `POST /api/v1/images`, `GET /api/v1/images/{id}`, `GET /api/v1/images/{id}.png`  (scope `images`)
-`{"prompt": "...", "model": "fast" | "quality", "aspect_ratio": "1:1"}` queues a job; poll the job until `status` is
-`done`, then download the PNG. While images generate, the language model is unloaded for a few minutes.
+`{"prompt": "...", "model": "fast" | "quality" | "flux-fast", "aspect_ratio": "1:1"}` queues a job; poll the job until
+`status` is `done`, then download the PNG. `flux-fast` is optional: if the component is not installed the request is
+refused (HTTP 400) rather than falling back to `fast`. While images generate, the language model is unloaded for a
+few minutes. `GET /images` (phone) and job JSON include a `modes` array with availability, license, steps, and
+unsupported-reason fields. Each finished job stores `provenance` (mode, steps, sampler, hashes, seed, timing);
+older rows without that column still load.
 
 ### `GET /api/v1/remote-control`, `POST /api/v1/remote-control/{project}`, `POST /api/v1/remote-control/{project}/stop`  (scope `remote_control`)
 Starts the unmodified `claude remote-control --spawn worktree` in a tower project's folder, so the user can work there

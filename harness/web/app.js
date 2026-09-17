@@ -1560,7 +1560,23 @@ async function viewImages() {
     try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ }
     if (prompt.value.trim()) startWarmup().catch(() => {});
   });
-  const model = h("select", {}, Object.entries(data.status.models).map(([k, label]) => h("option", { value: k }, label)));
+  const modelChoices = (data.status.modes || Object.entries(data.status.models).map(([k, label]) => ({ key: k, display_name: label, available: true })));
+  const model = h("select", {}, modelChoices.map((m) => h("option", {
+    value: m.key, disabled: m.available === false,
+  }, m.available === false ? `${m.display_name} — not installed` : m.display_name)));
+  const fluxHint = h("p", { class: "muted small" });
+  const updateFluxHint = () => {
+    const selected = modelChoices.find((m) => m.key === model.value);
+    if (selected && selected.available === false) {
+      fluxHint.hidden = false;
+      fluxHint.textContent = [selected.unavailable_reason, selected.remediation].filter(Boolean).join(". ");
+    } else {
+      fluxHint.hidden = true;
+      fluxHint.textContent = "";
+    }
+  };
+  model.addEventListener("change", updateFluxHint);
+  updateFluxHint();
   const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
   let resolutionTouched = false;
   const resolutionInputs = Object.entries(data.status.resolutions).map(([name, spec]) => {
@@ -1605,6 +1621,8 @@ async function viewImages() {
       onsubmit: async (e) => {
         e.preventDefault();
         if (!prompt.value.trim()) return toast("Describe the image first");
+        const selectedMode = modelChoices.find((m) => m.key === model.value);
+        if (selectedMode && selectedMode.available === false) return toast(selectedMode.unavailable_reason || "That image mode isn't installed");
         if (!(await confirmGpuQueue("This image job"))) return;
         go.disabled = true;
         try {
@@ -1620,6 +1638,7 @@ async function viewImages() {
     h("label", {}, "Prompt"), prompt,
     h("div", { class: "row" }, h("div", { style: "flex:2" }, h("label", {}, "Model"), model),
       h("div", { style: "flex:1" }, h("label", {}, "Aspect ratio"), aspect)),
+    fluxHint,
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
     h("p", { class: "muted small" }, "The language model is unloaded while images generate; running tasks pause for a few minutes."),
@@ -1647,6 +1666,11 @@ async function viewImage(id) {
       h("div", { class: "card" },
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, `${img.model} · ${img.width}×${img.height} · seed ${img.seed} · ${img.source}${img.seconds ? ` · ${Math.round(img.seconds)} s` : ""} · ${when}`),
+        img.provenance && (img.provenance.checkpoint_revision || img.provenance.steps) ? h("p", { class: "muted small" },
+          [img.provenance.mode || img.model, img.provenance.steps && `${img.provenance.steps} steps`,
+           img.provenance.sampler, img.provenance.scheduler, img.provenance.guidance != null && `cfg ${img.provenance.guidance}`,
+           img.provenance.checkpoint_revision && `ckpt ${String(img.provenance.checkpoint_revision).slice(0, 12)}`,
+           img.provenance.comfy_revision && `ComfyUI ${img.provenance.comfy_revision}`].filter(Boolean).join(" · ")) : null,
         h("div", { class: "row" },
           isGuest() ? null : h("button", {
             class: "btn",

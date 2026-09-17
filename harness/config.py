@@ -194,6 +194,7 @@ class ImagesConfig:
     """Local image generation with ComfyUI (images.py). The language model is unloaded while jobs run."""
     enabled: bool = False
     comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
+    models_dir: str = "C:/AI/comfy-models"    # extra_model_paths.yaml points here
     port: int = 8188
     work_dir: str = "D:/Agents/harness/images-work"  # ComfyUI output/temp and the harness's PNGs (images/)
     log_dir: str = "D:/Agents/harness/logs"

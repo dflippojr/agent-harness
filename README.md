@@ -129,7 +129,9 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
   agent turn; 503 while the GPU guard has the model unloaded. `/v1/embeddings` is advertised when a separate
   llama.cpp embedding server/model is configured.
 - Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`)
-  and Qwen-Image-2512 (`quality`), both Apache 2.0. A batch unloads the language model, generates, and restores it.
+  and Qwen-Image-2512 (`quality`), both Apache 2.0, plus optional `flux-fast` (FLUX.2 klein 4B FP8, Apache 2.0)
+  which stays disabled until `ops/images-models.ps1 install flux-fast` and ComfyUI node preflight succeed.
+  A batch unloads the language model, generates, and restores it.
   Phone: Images screen; agents: `generate_image` (tower and MacBook sessions).
 - Distributable (`docs/phase6e-results.md`): app API `/api/v1` with scoped tokens, context, app-registered tools and
   events (`harness/apps.py`, `sdk/harness_client.py`); installer, uninstaller and `python -m harness.doctor`.

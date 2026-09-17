@@ -231,12 +231,14 @@ MIGRATIONS = [
     ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    # Issue #92: enough to reproduce a generation; old rows stay readable with {}.
+    ("images", "provenance", "TEXT NOT NULL DEFAULT '{}'"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
 ]
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data", "origins",
-                "models"}
+                "models", "provenance"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -594,11 +596,17 @@ class Database:
     # images
     def insert_image(self, job: dict) -> None:
         cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height", "seed"]
+        values = [job[c] for c in cols]
+        provenance = job.get("provenance") or {}
         with self.lock:
-            self.conn.execute(f"INSERT INTO images ({','.join(cols)}, status, created_at) VALUES "
-                              f"({','.join('?' * len(cols))}, 'queued', ?)", [job[c] for c in cols] + [time.time()])
+            self.conn.execute(
+                f"INSERT INTO images ({','.join(cols)}, provenance, status, created_at) VALUES "
+                f"({','.join('?' * len(cols))}, ?, 'queued', ?)",
+                values + [json.dumps(provenance), time.time()])
 
     def update_image(self, iid: str, **fields) -> None:
+        if "provenance" in fields and not isinstance(fields["provenance"], str):
+            fields = {**fields, "provenance": json.dumps(fields["provenance"])}
         sets = ", ".join(f"{k} = ?" for k in fields)
         with self.lock:
             self.conn.execute(f"UPDATE images SET {sets} WHERE id = ?", [*fields.values(), iid])
@@ -606,7 +614,7 @@ class Database:
     def get_image(self, iid: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM images WHERE id = ?", (iid,)).fetchone()
-        return dict(row) if row else None
+        return self._image_row(row)
 
     def list_images(self, limit: int = 60, status: tuple = ()) -> list[dict]:
         query, params = "SELECT * FROM images", []
@@ -615,7 +623,21 @@ class Database:
             params = list(status)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
-        return [dict(r) for r in rows]
+        return [self._image_row(r) for r in rows]
+
+    def _image_row(self, row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        out = dict(row)
+        raw = out.get("provenance")
+        if isinstance(raw, str):
+            try:
+                out["provenance"] = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                out["provenance"] = {}
+        elif raw is None:
+            out["provenance"] = {}
+        return out
 
     # inference endpoint keys and request log
     def create_api_key(self, name: str, scopes: str = "inference", kind: str = "device",

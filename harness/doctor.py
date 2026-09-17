@@ -198,6 +198,12 @@ def main(argv: list[str] | None = None) -> int:
         py = Path(cfg.images.comfy_dir) / "python_embeded" / "python.exe"
         (r.ok if py.exists() else r.fail)("Image generation", f"ComfyUI at {cfg.images.comfy_dir}"
                                           + ("" if py.exists() else " not found"))
+        from .images_models import doctor_warning, inspect_flux_fast
+        warn = doctor_warning(inspect_flux_fast(cfg.images))
+        if warn:
+            r.warn("FLUX.2 klein 4B (optional)", warn)
+        else:
+            r.ok("FLUX.2 klein 4B (optional)", "flux-fast assets and nodes are ready")
     code, out = run(["tailscale", "serve", "status", "--json"])
     if code == 0 and str(cfg.port) in out:
         r.ok("Phone access", "tailscale serve publishes the daemon")
