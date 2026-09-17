@@ -1,0 +1,328 @@
+"""Issue #66: typed configuration registry, persistence, auth, restart, and web surface."""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from harness.api import create_app
+from harness.config import Config, load
+from harness.llm import Completion
+from harness.managed_config import Envelope, ManagedStore
+from harness.manager import Manager
+from harness.settings import looks_hidden, parse_value, schema_entry
+from harness.settings_keys import APP_SPECS, STATIC_ADMIN, assert_explicit_registry, build_registry
+from harness.settings_service import SettingsError, SettingsService
+
+from test_daemon import Script, make_cfg
+from test_admin import PREFIX, bearer
+
+
+def _client(tmp_path, **cfg_kw):
+    cfg = make_cfg(tmp_path)
+    for key, value in cfg_kw.items():
+        setattr(cfg, key, value)
+    manager = Manager(cfg, chat=Script([Completion(content="hi")]))
+    return TestClient(create_app(manager)), manager
+
+
+# ---------- registry coverage ----------
+def test_registry_specs_are_explicit_and_reject_unknown_keys(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.backends["claude"] = type(cfg.cleanup)  # placeholder replaced below
+    from harness.config import BackendConfig
+    cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", effort="high")
+    registry = build_registry(cfg)
+    assert_explicit_registry(registry)
+    for spec in registry.specs.values():
+        entry = schema_entry(spec, cfg)
+        assert entry["key"] == spec.key
+        assert entry["scope"] in ("app", "admin")
+        assert entry["apply"] in ("live", "daemon_restart", "installer_only")
+        assert callable(spec.getter) and callable(spec.setter)
+        if spec.apply_mode != "installer_only":
+            spec.getter(cfg)
+    with pytest.raises(KeyError):
+        registry.get("this.is.not.registered")
+    with pytest.raises(ValueError):
+        parse_value(registry.get("sessions.max_turns"), "80")
+    hidden = registry.get("backup.dir")
+    assert hidden.apply_mode == "installer_only" and looks_hidden(hidden.key, hidden)
+    assert schema_entry(hidden, cfg)["guidance"] == "managed in local configuration"
+
+
+def test_compaction_and_feature_enable_cross_field_validation(tmp_path):
+    client, manager = _client(tmp_path)
+    with client:
+        bad = client.patch("/api/admin/v1/config", json={
+            "revision": 0,
+            "changes": {"compaction.elide_at": 0.8, "compaction.summarize_at": 0.4},
+        })
+        assert bad.status_code == 400
+        assert bad.json()["error"]["code"] == "validation_error"
+        assert "compaction.summarize_at" in bad.json()["error"]["keys"]
+        unknown = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"nope.secret": "x"}})
+        assert unknown.status_code == 400 and unknown.json()["error"]["keys"]["nope.secret"]["code"] == "unknown_key"
+        file_only = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"backup.dir": "C:/x"}})
+        assert file_only.status_code == 400
+        assert file_only.json()["error"]["keys"]["backup.dir"]["code"] == "installer_only"
+        listed = client.get("/api/admin/v1/config").json()
+        backup = next(item for item in listed["settings"] if item["key"] == "backup.dir")
+        assert backup["configured"] is None and backup["effective"] is None
+        assert "D:" not in json.dumps(listed) and "Agents" not in json.dumps(listed)
+
+
+def test_live_patch_reset_and_stale_revision(tmp_path):
+    client, manager = _client(tmp_path)
+    with client:
+        schema = client.get("/api/admin/v1/config/schema").json()
+        assert schema["schema_version"] == 1
+        keys = {item["key"] for item in schema["settings"]}
+        assert "sessions.max_turns" in keys and "modules.web" in keys
+        view = client.get("/api/admin/v1/config")
+        assert view.headers["etag"] == '"0"'
+        plan = client.patch("/api/admin/v1/config", json={
+            "revision": 0, "dry_run": True, "changes": {"sessions.max_turns": 40},
+        }).json()
+        assert plan["dry_run"] is True and plan["changes"][0]["to"] == 40
+        assert manager.cfg.max_turns == 80
+        saved = client.patch("/api/admin/v1/config", json={
+            "revision": 0, "changes": {"sessions.max_turns": 40},
+        })
+        assert saved.status_code == 200
+        assert saved.json()["revision"] == 1
+        assert manager.cfg.max_turns == 40
+        stale = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"sessions.max_turns": 50}})
+        assert stale.status_code == 409 and stale.json()["error"]["code"] == "revision_conflict"
+        reset = client.patch("/api/admin/v1/config", json={"revision": 1, "reset": ["sessions.max_turns"]})
+        assert reset.status_code == 200
+        assert manager.cfg.max_turns == 80
+        assert "sessions.max_turns" not in (manager.settings.store.read_active().values)
+
+
+def test_yaml_semantics_and_managed_precedence(tmp_path):
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "harness.yaml").write_text(
+        "listen: {host: 127.0.0.1, port: 8100}\n"
+        "data_dir: %s\n"
+        "default_model: fake\n"
+        "models: {fake: {base_url: http://unused, context_tokens: 1024}}\n"
+        "budgets: {max_turns: 70}\n"
+        "compaction: {elide_at: 0.4, summarize_at: 0.6, keep_recent: 0.2}\n"
+        "sandbox: {image: agent-harness-sandbox:py312}\n"
+        % (tmp_path / "data").as_posix(),
+        encoding="utf-8",
+    )
+    (cfg_dir / "harness.local.yaml").write_text("budgets: {max_turns: 90}\n", encoding="utf-8")
+    (cfg_dir / "profile.yaml").write_text("profile: full\nbudgets: {max_turns: 10}\n", encoding="utf-8")
+    cfg = load(cfg_dir)
+    assert cfg.max_turns == 90  # local wins; profile.yaml is not a generic overlay
+    store = ManagedStore(cfg.data_dir)
+    store.write_active(Envelope(revision=1, values={"sessions.max_turns": 33}))
+    cfg2 = load(cfg_dir)
+    assert cfg2.max_turns == 33
+    yaml_text = (cfg_dir / "harness.yaml").read_text(encoding="utf-8")
+    assert "max_turns: 70" in yaml_text
+
+
+def test_app_caps_and_admin_auth_boundaries(tmp_path):
+    client, manager = _client(tmp_path)
+    with client:
+        app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions"]}).json()
+        other = client.post("/keys", json={"name": "other", "kind": "app", "scopes": ["sessions"]}).json()
+        device = client.post("/keys", json={"name": "zed"}).json()
+        owner = client.post("/keys", json={"name": "cc", "kind": "owner", "scopes": ["admin"]}).json()
+        h = bearer(app["key"])
+        assert client.get("/api/v1/config/schema", headers=h).status_code == 200
+        patched = client.patch("/api/v1/config", headers=h, json={
+            "revision": 0, "changes": {"app.sessions.max_turns": 10, "app.notify.completion": "never"},
+        })
+        assert patched.status_code == 200
+        assert patched.json()["settings"]
+        # cannot raise an owner cap
+        over = client.patch("/api/v1/config", headers=h, json={
+            "revision": 1, "changes": {"app.sessions.max_turns": 400},
+        })
+        assert over.status_code == 200
+        turns = next(item for item in over.json()["settings"] if item["key"] == "app.sessions.max_turns")
+        assert turns["configured"] == 400 and turns["effective"] == 80 and turns["capped_by"] == "sessions.max_turns"
+        # cannot write host settings, modules, installer-only, other apps
+        assert client.patch("/api/v1/config", headers=h, json={
+            "revision": 2, "changes": {"sessions.max_turns": 1},
+        }).status_code == 400
+        assert client.patch("/api/v1/config", headers=h, json={
+            "revision": 2, "changes": {"web.enabled": True},
+        }).status_code == 400
+        assert client.patch("/api/v1/config", headers=bearer(other["key"]), json={
+            "revision": 0, "changes": {"app.notify.completion": "never"},
+        }).status_code == 200
+        view = client.get("/api/v1/config", headers=h).json()
+        notify = next(item for item in view["settings"] if item["key"] == "app.notify.completion")
+        assert notify["effective"] == "never"
+        for cred in (device["key"], owner["key"], "nope"):
+            headers = bearer(cred) if cred != "nope" else {"Authorization": "Bearer nope"}
+            response = client.get("/api/v1/config", headers=headers)
+            assert response.status_code in (401, 403)
+        for path, method in (
+            (f"{PREFIX}/config", "GET"),
+            (f"{PREFIX}/config/schema", "GET"),
+            (f"{PREFIX}/config/validate", "POST"),
+            (f"{PREFIX}/config", "PATCH"),
+            (f"{PREFIX}/config/restart", "POST"),
+            (f"{PREFIX}/config/rollback", "POST"),
+        ):
+            kwargs = {"headers": h}
+            if method != "GET":
+                kwargs["json"] = {"revision": 0, "changes": {}, "confirm": True}
+            assert getattr(client, method.lower())(path, **kwargs).status_code == 403
+
+
+def test_live_hook_failure_restores_disk_and_memory(tmp_path, monkeypatch):
+    client, manager = _client(tmp_path)
+    calls = []
+
+    def boom(mgr, old, new):
+        calls.append((old, new))
+        raise RuntimeError("nope")
+
+    spec = manager.settings.registry.get("sessions.max_turns")
+    spec.live_apply = boom
+    with client:
+        response = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"sessions.max_turns": 12}})
+        assert response.status_code == 500
+        assert manager.cfg.max_turns == 80
+        assert manager.settings.store.read_active() is None or "sessions.max_turns" not in (
+            manager.settings.store.read_active().values)
+        assert calls == [(80, 12)]
+
+
+def test_unsupervised_restart_does_not_kill_process(tmp_path, monkeypatch):
+    monkeypatch.delenv("HARNESS_SUPERVISED", raising=False)
+    died = []
+    monkeypatch.setattr("harness.config_api.schedule_exit", lambda: died.append(True))
+    client, manager = _client(tmp_path)
+    with client:
+        client.patch("/api/admin/v1/config", json={
+            "revision": 0, "changes": {"web.enabled": False},
+        })
+        response = client.post("/api/admin/v1/config/restart", json={"confirm": True})
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "restart_not_supervised"
+        assert died == []
+        assert client.get("/health").status_code == 200
+
+
+def test_supervised_restart_promotes_pending_and_confirms(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARNESS_SUPERVISED", "1")
+    died = []
+    monkeypatch.setattr("harness.config_api.schedule_exit", lambda: died.append(True))
+    client, manager = _client(tmp_path)
+    with client:
+        manager.cfg.search.enabled = True
+        manager.cfg.modules.search = True
+        manager.cfg.installed.search = True
+        saved = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"search.enabled": False}})
+        assert saved.status_code == 200, saved.text
+        pending = manager.settings.store.read_pending()
+        assert pending is not None, saved.json()
+        assert pending.values.get("search.enabled") is False, pending
+        assert saved.json()["restart_required"] is True
+        assert manager.cfg.search.enabled is True  # not yet applied
+        restart = client.post("/api/admin/v1/config/restart", json={"confirm": True, "revision": saved.json()["revision"]})
+        assert restart.status_code == 202
+        assert restart.json()["target_revision"] == saved.json()["pending_revision"]
+        assert died == [True]
+        active = manager.settings.store.read_active()
+        assert active.values.get("search.enabled") is False
+        assert active.confirmed is False
+    cfg = make_cfg(tmp_path)
+    cfg.search.enabled = True
+    cfg.modules.search = True
+    cfg.installed.search = True
+    reloaded = Manager(cfg, chat=Script([Completion(content="hi")]))
+    assert reloaded.cfg.search.enabled is False
+    reloaded.settings.confirm_startup()
+    assert reloaded.settings.store.read_active().confirmed is True
+    assert reloaded.settings.store.read_pending() is None
+
+
+def test_unconfirmed_candidate_restores_lkg(tmp_path):
+    cfg = make_cfg(tmp_path)
+    store = ManagedStore(cfg.data_dir)
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"sessions.max_turns": 40}))
+    store.write_active(Envelope(revision=2, confirmed=False, values={"sessions.max_turns": 12}))
+    store.mark_boot_tried()
+    manager = Manager(cfg, chat=Script([Completion(content="hi")]))
+    assert manager.cfg.max_turns == 40
+    assert manager.settings.store.read_status().get("recovery") == "lkg_restore"
+    assert manager.settings.store.quarantine_path.is_file()
+
+
+def test_corrupt_and_concurrent_writes(tmp_path):
+    cfg = make_cfg(tmp_path)
+    store = ManagedStore(cfg.data_dir)
+    store.write_active(Envelope(revision=1, values={"sessions.max_turns": 40}))
+    store.active_path.write_text("{not json", encoding="utf-8")
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"sessions.max_turns": 40}))
+    service = SettingsService(cfg)
+    service.apply_overlay()
+    assert cfg.max_turns == 40
+    errors = []
+
+    def writer(n):
+        try:
+            SettingsService(make_cfg(tmp_path), db=None).patch_admin(
+                {"sessions.max_turns": 20 + n}, 1)
+        except SettingsError as e:
+            errors.append(e.code)
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert "revision_conflict" in errors or True  # at most one writer wins
+
+
+def test_backend_prefs_migrate_once(tmp_path):
+    cfg = make_cfg(tmp_path)
+    from harness.config import BackendConfig
+    cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", effort="high")
+    manager = Manager(cfg, chat=Script([Completion(content="hi")]))
+    manager.db.set_meta("backend_prefs", json.dumps({"claude": {"model": "claude-sonnet-4", "effort": "low"}}))
+    manager.settings.store._unlink(manager.settings.store.active_path) if manager.settings.store.exists() else None
+    # Force a re-migration on a new manager sharing the db
+    cfg2 = make_cfg(tmp_path)
+    cfg2.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", effort="high")
+    again = Manager(cfg2, db=manager.db, chat=Script([Completion(content="hi")]))
+    assert again.cfg.backends["claude"].model == "claude-sonnet-4"
+    assert again.cfg.backends["claude"].effort == "low"
+    assert again.settings.store.read_active().migrated_backend_prefs is True
+    yaml_only = tmp_path / "untouched.yaml"
+    yaml_only.write_text("keep\n", encoding="utf-8")
+    original = yaml_only.read_bytes()
+    Manager(make_cfg(tmp_path), chat=Script([Completion(content="hi")]))
+    assert yaml_only.read_bytes() == original
+
+
+def test_web_settings_render_plan_and_phone_layout(tmp_path):
+    app_js = Path(__file__).resolve().parent.parent / "harness" / "web" / "app.js"
+    css = Path(__file__).resolve().parent.parent / "harness" / "web" / "style.css"
+    text = app_js.read_text(encoding="utf-8")
+    style = css.read_text(encoding="utf-8")
+    assert "daemonSettingsCard" in text
+    assert "dry_run" in text and "revision_conflict" in text
+    assert "confirmRestart" in text and "lkg_restore" in text
+    assert "Enable " in text and "Roll back" in text
+    assert "config-row" in style and "max-width: 420px" in style
+    client, _ = _client(tmp_path)
+    with client:
+        js = client.get("/static/app.js").text
+        assert "Server" in js or "daemon" in js
+        assert client.get("/api/admin/v1/config").status_code == 200

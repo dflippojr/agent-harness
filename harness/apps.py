@@ -32,7 +32,7 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.7"
+API_VERSION = "1.8"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
@@ -120,7 +120,7 @@ class AppTool(BaseModel):
 class CreateAppSession(BaseModel):
     prompt: str
     project: str = "scratch"
-    backend: str = "local"
+    backend: str | None = None
     model: str | None = None
     title: str | None = None
     context: list[ContextBlock] = []
@@ -174,6 +174,7 @@ class AppImageRequest(BaseModel):
 
 
 class CapabilitiesResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     profile: str
     required: dict[str, bool]
     modules: dict[str, bool]
@@ -741,3 +742,6 @@ def register(app: FastAPI, mgr) -> None:
                 raise HarnessError(404, "image not ready")
             return FileResponse(m.images.path(job), media_type="image/png")
         return {**job, "url": f"/api/v1/images/{job['id']}.png" if job["status"] == "done" else None}
+
+    from . import config_api
+    config_api.register_app(app, mgr, auth, owner_key)

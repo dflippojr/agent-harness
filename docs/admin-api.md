@@ -51,6 +51,7 @@ same; only the prefix and the owner credential check are new.
 | App provider policy | `/provider-credentials`, `/provider-credentials/{credential_id}` |
 | Mac pairing | `/runner-pairing-codes`, `/runner-pairing-codes/{pid}` |
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` |
+| Configuration | `/config`, `/config/schema`, `/config/validate`, `/config/rollback`, `/config/restart` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
 | Images | `/images`, `/images/warmup`, `/images/cooldown` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
@@ -139,10 +140,17 @@ The Mac redeems the code at `POST /api/v1/runner-pair`. That one response contai
 the selected runner's existing token. It is marked `Cache-Control: no-store`. The code is stored only as a hash, the
 runner token stays in its configured owner file and never enters SQLite, and neither token is printed by the CLI.
 
+## Configuration registry
+
+Owner operational settings live on `/api/admin/v1/config` (schema, GET, validate, PATCH, rollback,
+restart). The typed allowlist, persistence, recovery, and error codes are documented in
+[`config-registry.md`](config-registry.md). App tokens, device tokens, and guests receive 403.
+
 ## Changelog
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.5 | 2026-09-17 | Typed configuration registry, managed overlay, supervised restart/rollback |
 | 1.4 | 2026-09-16 | One-time native Mac client and runner pairing |
 | 1.3 | 2026-09-16 | Owner-managed per-app provider policy, opaque key-file references, and revocation |
 | 1.2 | 2026-09-16 | Daemon profile and optional-module capability discovery |

@@ -199,6 +199,8 @@ class Notifier:
             return self._job_finished(sid, title, d, base)
 
         if event["type"] == "run_finished":
+            if self._app_silences_completion(session):
+                return None
             status = d["status"]
             if status == "done":
                 head, tags, prio = "Done", ["white_check_mark"], 3
@@ -215,6 +217,14 @@ class Notifier:
             return {**base, "title": f"{head}: {title}", "message": _short(body, 400), "priority": prio,
                     "tags": tags, "click": self.link(f"/#/s/{sid}")}
         return None
+
+    def _app_silences_completion(self, session: dict) -> bool:
+        app_id = session.get("app_id") or ""
+        if not app_id:
+            return False
+        row = self.db.get_app_settings(app_id)
+        values = (row or {}).get("values") or {}
+        return values.get("app.notify.completion") == "never"
 
     def _job_finished(self, sid: str, title: str, d: dict, base: dict) -> dict | None:
         """Scheduled jobs are quiet unless something needs attention (user decision, Phase 7d)."""

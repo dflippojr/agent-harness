@@ -48,6 +48,12 @@ Apps see only the sessions they created, unless they hold `sessions:all`. Errors
 include `error: {code, message, retryable}`; `detail` remains for compatibility. The SDK exposes these as
 `HarnessError.code`, `.detail`, and `.retryable`.
 
+## App configuration
+
+`GET /api/v1/config/schema`, `GET /api/v1/config`, and `PATCH /api/v1/config` require a live app token. They return
+only that app's registered settings and effective caps. Owner, device, runner, guest, and anonymous credentials
+cannot impersonate this surface. The allowlist and cap rules are in [`config-registry.md`](config-registry.md).
+
 ## Pair a separately hosted browser app
 
 Do not paste a long-lived app token into a browser URL. In **Settings → Apps → Pair browser app**, the owner enters
@@ -309,3 +315,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
 | 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
 | 1.7 | 2026-09-16 | Native Mac bootstrap pairing and capability discovery (owner-approved, not an app SDK operation) |
+| 1.8 | 2026-09-17 | Per-app configuration registry (`/api/v1/config`); values may only narrow owner/token authority |

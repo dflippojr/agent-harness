@@ -379,8 +379,10 @@ class Runner:
                 continue
 
             run = s["run"]
-            if run["turns"] >= self.cfg.max_turns or run["completion_tokens"] >= self.cfg.max_completion_tokens:
-                reason = "budget_turns" if run["turns"] >= self.cfg.max_turns else "budget_tokens"
+            max_turns = int(run.get("max_turns") or self.cfg.max_turns)
+            max_tokens = int(run.get("max_completion_tokens") or self.cfg.max_completion_tokens)
+            if run["turns"] >= max_turns or run["completion_tokens"] >= max_tokens:
+                reason = "budget_turns" if run["turns"] >= max_turns else "budget_tokens"
                 self.set_status(sid, "done", stop_reason=reason)
                 await self._end_run(sid)
                 return
@@ -434,7 +436,9 @@ class Runner:
                         self.bus.emit(sid, "billing_warning", {"backend": backend_name, "message": warning})
                     factory = {"claude": self.cli_factory, "codex": self.codex_factory,
                                "cursor": self.cursor_factory}[backend_name]
-                    cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
+                    from dataclasses import replace
+                    frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
+                    cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=frozen,
                                   sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
                                   model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
                     self._cli_sessions[sid] = cli

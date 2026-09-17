@@ -201,9 +201,14 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.exception_handler(HarnessError)
     async def harness_error(request: Request, exc: HarnessError):
-        return JSONResponse({"detail": str(exc), "error": {
+        body = {"detail": str(exc), "error": {
             "code": exc.code, "message": str(exc), "retryable": exc.status == 429 or exc.status >= 500,
-        }}, status_code=exc.status)
+        }}
+        if getattr(exc, "keys", None):
+            body["error"]["keys"] = exc.keys
+        if getattr(exc, "details", None):
+            body["error"]["details"] = exc.details
+        return JSONResponse(body, status_code=exc.status)
 
     # web app
     @app.get("/", include_in_schema=False)
@@ -242,7 +247,17 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/health")
     async def health():
         cfg = app.state.manager.cfg
-        return {"ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities()}
+        settings = getattr(app.state.manager, "settings", None)
+        recovery = settings.store.read_status() if settings else {}
+        return {
+            "ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities(),
+            "config": {
+                "revision": settings.admin_view()["revision"] if settings else 0,
+                "confirmed": settings.admin_view()["confirmed"] if settings else True,
+                "supervised_restart": bool(settings and settings.admin_view()["supervised_restart"]),
+                "recovery": recovery or None,
+            },
+        }
 
     @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
     async def metrics(request: Request):

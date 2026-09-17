@@ -268,6 +268,8 @@ class Config:
     projects: dict[str, Project]
     profile: str = "full"
     modules: ModulesConfig = field(default_factory=ModulesConfig)
+    installed: ModulesConfig = field(default_factory=ModulesConfig)
+    config_dir: Path = field(default_factory=lambda: ROOT / "config")
     # Opaque names to owner-managed files. Only the names may be stored in SQLite; paths stay in local config.
     provider_secret_files: dict[str, str] = field(default_factory=dict)
     backends: dict[str, BackendConfig] = field(default_factory=dict)
@@ -319,6 +321,8 @@ class Config:
             },
             "modules": asdict(self.modules),
             "hosted_backends": [name for name, cfg in self.backends.items() if cfg.enabled],
+            "config_registry": True,
+            "supervised_restart": os.environ.get("HARNESS_SUPERVISED", "").strip() in ("1", "true", "yes"),
         }
 
 
@@ -552,6 +556,8 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         projects=projects,
         profile=profile,
         modules=modules,
+        installed=selected,
+        config_dir=config_dir,
         provider_secret_files=provider_secret_files,
         backends=backends,
         public_url=(raw.get("public_url") or "").rstrip("/"),
@@ -576,6 +582,15 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),
     )
+    _validate_loaded(cfg)
+    from .settings_keys import build_registry
+    registry = build_registry(cfg)
+    cfg._inherited = {spec.key: spec.getter(cfg) for spec in registry.writable_admin()}
+    _apply_managed_overlay(cfg)
+    return cfg
+
+
+def _validate_loaded(cfg: Config) -> None:
     if cfg.modules.local_model and not cfg.models:
         raise ValueError("the local_model module requires at least one configured model")
     if cfg.default_model and cfg.default_model not in cfg.models:
@@ -591,4 +606,13 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                 raise ValueError(f"project {project.name}: target {project.target!r} is not in runners")
             if project.homelab:
                 raise ValueError(f"project {project.name}: homelab tools only run on the tower")
-    return cfg
+
+
+def _apply_managed_overlay(cfg: Config) -> None:
+    """Apply registered admin keys from data_dir/managed-config.json after YAML loading.
+
+    An invalid or unconfirmed managed candidate restores the last known good overlay.
+    Invalid base/local/profile YAML is never masked by that fallback.
+    """
+    from .settings_service import SettingsService
+    SettingsService(cfg).apply_overlay()

@@ -58,6 +58,22 @@ class Maintenance:
         if self._backup_task is None and self.cfg.backup.enabled:
             self._backup_task = asyncio.create_task(self._backup_loop(), name="backup")
 
+    def reschedule(self) -> None:
+        """Apply a live change to cleanup.interval_minutes by restarting the sweep task."""
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        if self.cfg.cleanup.interval_minutes > 0:
+            self._task = asyncio.create_task(self._loop(), name="maintenance")
+
+    def reschedule_backup(self) -> None:
+        """Pick up a live backup.at / keep_days change on the next wait."""
+        if self._backup_task is not None:
+            self._backup_task.cancel()
+            self._backup_task = None
+        if self.cfg.backup.enabled:
+            self._backup_task = asyncio.create_task(self._backup_loop(), name="backup")
+
     async def stop(self) -> None:
         for task in (self._task, self._backup_task):
             if task:
@@ -145,6 +161,10 @@ class Maintenance:
         for name in ("harness.yaml", "harness.local.yaml", "projects.yaml"):
             if (ROOT / "config" / name).exists():
                 shutil.copy2(ROOT / "config" / name, config / name)
+        from .managed_config import ManagedStore
+        managed = ManagedStore(self.cfg.data_dir)
+        for path in managed.overlay_files():
+            shutil.copy2(path, tmp / path.name)
         remove_tree(dest)
         tmp.rename(dest)
 
