@@ -26,13 +26,13 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.4"
+API_VERSION = "1.5"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
@@ -155,6 +155,116 @@ class PairingCodeRequest(BaseModel):
 
 class PairRequest(BaseModel):
     code: str = Field(min_length=8, max_length=200)
+
+
+class AppImageRequest(BaseModel):
+    prompt: str
+    model: str = "fast"
+    aspect_ratio: str = "1:1"
+
+
+class CapabilitiesResponse(BaseModel):
+    profile: str
+    required: dict[str, bool]
+    modules: dict[str, bool]
+    hosted_backends: list[str]
+
+
+class BackendResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    name: str
+    available: bool
+    logged_in: bool
+    auth: str
+    billing: str
+    model: str
+    effort: str
+    limits: dict = Field(default_factory=dict)
+    today: dict = Field(default_factory=dict)
+    week: dict = Field(default_factory=dict)
+    notice: str = ""
+    billing_warning: str = ""
+
+
+class ProjectResponse(BaseModel):
+    name: str
+    description: str
+    target: str
+
+
+class AppRootResponse(BaseModel):
+    api_version: str
+    server: str
+    scopes: dict[str, str]
+    projects: list[ProjectResponse]
+    models: list[str]
+    backends: list[BackendResponse]
+    capabilities: CapabilitiesResponse
+    features: dict[str, bool | str]
+
+
+class ProviderFailureResponse(BaseModel):
+    code: str
+    provider: str
+    message: str
+    retryable: bool
+
+
+class SessionResponse(BaseModel):
+    """Stable app fields; extra additive fields remain present in serialized responses."""
+    model_config = ConfigDict(extra="allow")
+    id: str
+    project: str
+    target: str
+    backend: str
+    model: str
+    title: str
+    status: str
+    stop_reason: str = ""
+    created_at: float
+    updated_at: float
+    totals: dict = Field(default_factory=dict)
+    run: dict = Field(default_factory=dict)
+    answer: str = ""
+    app_tools: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+    failure: ProviderFailureResponse | None = None
+    last_event_seq: int = 0
+    queue_position: int | None = None
+
+
+class AppToolCallResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    call_id: str
+    name: str
+    args: dict
+    status: str
+
+
+class ApprovalResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    tool: str
+    args: dict
+    reason: str = ""
+    detail: str = ""
+    status: str = "pending"
+
+
+class AcceptedResponse(BaseModel):
+    accepted: bool
+
+
+class PairResponse(BaseModel):
+    token: str
+    app: dict
+    api_version: str
+
+
+class EventTicketResponse(BaseModel):
+    ticket: str
+    expires_at: float
+    events_url: str
 
 
 def context_text(app_name: str, blocks: list[dict]) -> str:
@@ -329,7 +439,7 @@ def register(app: FastAPI, mgr) -> None:
         if not mgr(request).db.revoke_pairing_code(pid):
             raise HarnessError(404, "no such active pairing code")
 
-    @app.post("/api/v1/pair", status_code=201)
+    @app.post("/api/v1/pair", status_code=201, response_model=PairResponse)
     async def pair_browser(body: PairRequest, request: Request):
         raw_origin = request.headers.get("origin", "")
         if not raw_origin:
@@ -344,7 +454,7 @@ def register(app: FastAPI, mgr) -> None:
         return JSONResponse({"token": secret, "app": key, "api_version": API_VERSION}, status_code=201,
                             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
-    @app.get("/api/v1")
+    @app.get("/api/v1", response_model=AppRootResponse)
     async def api_root(request: Request):
         m = mgr(request)
         from .backend_state import view as backend_view
@@ -358,14 +468,14 @@ def register(app: FastAPI, mgr) -> None:
                     "remote_control": m.remote_control is not None, "browser_pairing": True,
                     "stream_tickets": True}}
 
-    @app.get("/api/v1/backends")
+    @app.get("/api/v1/backends", response_model=list[BackendResponse])
     async def backends(request: Request):
         m = mgr(request)
         auth(request, "sessions")
         from .backend_state import view as backend_view
         return list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name) for name in m.cfg.backends]))
 
-    @app.post("/api/v1/sessions", status_code=201)
+    @app.post("/api/v1/sessions", status_code=201, response_model=SessionResponse)
     async def create_session(body: CreateAppSession, request: Request):
         m = mgr(request)
         key = auth(request, "sessions")
@@ -378,7 +488,7 @@ def register(app: FastAPI, mgr) -> None:
                      app_metadata=body.metadata)
         return view(m, s)
 
-    @app.get("/api/v1/sessions")
+    @app.get("/api/v1/sessions", response_model=list[SessionResponse])
     async def list_sessions(request: Request, limit: int = 50):
         m = mgr(request)
         key = auth(request, "sessions")
@@ -387,18 +497,18 @@ def register(app: FastAPI, mgr) -> None:
                 or r.get("app_id") == key["id"]][:limit]
         return [m.list_summary(r) for r in mine]
 
-    @app.get("/api/v1/sessions/{ref}")
+    @app.get("/api/v1/sessions/{ref}", response_model=SessionResponse)
     async def get_session(ref: str, request: Request):
         m = mgr(request)
         return view(m, own_session(request, auth(request, "sessions"), ref))
 
-    @app.post("/api/v1/sessions/{ref}/messages")
+    @app.post("/api/v1/sessions/{ref}/messages", response_model=SessionResponse)
     async def send(ref: str, body: AppMessage, request: Request):
         m = mgr(request)
         s = own_session(request, auth(request, "sessions"), ref)
         return view(m, await m.send(s["id"], body.content))
 
-    @app.post("/api/v1/sessions/{ref}/context")
+    @app.post("/api/v1/sessions/{ref}/context", response_model=SessionResponse)
     async def add_context(ref: str, body: AppContext, request: Request):
         m = mgr(request)
         key = auth(request, "sessions")
@@ -408,19 +518,19 @@ def register(app: FastAPI, mgr) -> None:
             raise HarnessError(400, f"send 1+ context blocks, at most {MAX_CONTEXT_CHARS} characters in total")
         return view(m, await m.send(s["id"], context_text(key["name"], blocks), kind="app_context"))
 
-    @app.post("/api/v1/sessions/{ref}/cancel")
+    @app.post("/api/v1/sessions/{ref}/cancel", response_model=SessionResponse)
     async def cancel(ref: str, request: Request):
         m = mgr(request)
         s = own_session(request, auth(request, "sessions"), ref)
         return view(m, await m.cancel(s["id"]))
 
-    @app.get("/api/v1/sessions/{ref}/tool_calls")
+    @app.get("/api/v1/sessions/{ref}/tool_calls", response_model=list[AppToolCallResponse])
     async def tool_calls(ref: str, request: Request, status: str = "pending"):
         m = mgr(request)
         s = own_session(request, auth(request, "sessions"), ref)
         return m.db.app_tool_calls(s["id"], status or None)
 
-    @app.post("/api/v1/sessions/{ref}/tool_calls/{call_id}")
+    @app.post("/api/v1/sessions/{ref}/tool_calls/{call_id}", response_model=AcceptedResponse)
     async def tool_result(ref: str, call_id: str, body: ToolResult, request: Request):
         m = mgr(request)
         key = auth(request, "sessions")
@@ -433,13 +543,13 @@ def register(app: FastAPI, mgr) -> None:
             raise HarnessError(409, "no pending call with that id")
         return {"accepted": True}
 
-    @app.get("/api/v1/sessions/{ref}/approvals")
+    @app.get("/api/v1/sessions/{ref}/approvals", response_model=list[ApprovalResponse])
     async def approvals(ref: str, request: Request):
         m = mgr(request)
         s = own_session(request, auth(request, "sessions"), ref)
         return [public_approval(a) for a in m.db.pending_approvals(s["id"])]
 
-    @app.post("/api/v1/sessions/{ref}/approvals/{approval_id}")
+    @app.post("/api/v1/sessions/{ref}/approvals/{approval_id}", response_model=ApprovalResponse)
     async def decide(ref: str, approval_id: str, body: AppDecision, request: Request):
         m = mgr(request)
         key = auth(request, "approvals")
@@ -448,9 +558,10 @@ def register(app: FastAPI, mgr) -> None:
             raise HarnessError(403, "apps can only decide approvals in their own sessions")
         if body.decision not in ("approve", "deny"):
             raise HarnessError(400, "decision must be approve or deny")
-        return m.decide(s["id"], approval_id, body.decision == "approve", note=f"[{key['name']}] {body.note}".strip())
+        return m.decide(s["id"], approval_id, body.decision == "approve",
+                        note=f"[{key['name']}] {body.note}".strip())
 
-    @app.post("/api/v1/sessions/{ref}/events/ticket", status_code=201)
+    @app.post("/api/v1/sessions/{ref}/events/ticket", status_code=201, response_model=EventTicketResponse)
     async def event_ticket(ref: str, request: Request):
         """Mint a short-lived query credential so native EventSource need not receive a bearer token in its URL."""
         m = mgr(request)
@@ -522,15 +633,14 @@ def register(app: FastAPI, mgr) -> None:
                                           "Referrer-Policy": "no-referrer"})
 
     @app.post("/api/v1/images", status_code=201)
-    async def app_image(request: Request):
+    async def app_image(body: AppImageRequest, request: Request):
         m = mgr(request)
         key = auth(request, "images")
         if m.images is None:
             raise HarnessError(400, "image generation is disabled on this harness")
-        body = await request.json()
         try:
-            job = m.images.submit(str(body.get("prompt", "")), model=body.get("model") or "fast",
-                                  aspect_ratio=body.get("aspect_ratio") or "1:1", source=f"app:{key['name']}"[:40])
+            job = m.images.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
+                                  source=f"app:{key['name']}"[:40])
         except ToolError as e:
             raise HarnessError(400, str(e))
         return {**job, "url": f"/api/v1/images/{job['id']}.png"}

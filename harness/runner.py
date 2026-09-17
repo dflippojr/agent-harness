@@ -316,17 +316,43 @@ class Runner:
                 self._record_cancel(sid)
                 await self._end_run(sid)
             raise
-        except (SandboxUnavailable, CliBackendError) as e:
-            self.bus.emit(sid, "error", {"message": str(e)})
+        except CliBackendError as e:
+            s = self.db.get_session(sid)
+            message = str(e)
+            code = ("model_unavailable" if s.get("backend", "local") == "local" else
+                    "provider_auth_required" if any(marker in message.lower()
+                                                    for marker in ("auth", "login", "api key", "api-key")) else
+                    "provider_unavailable")
+            failure = {"code": code, "provider": s.get("backend", "local"), "message": message,
+                       "retryable": code in ("model_unavailable", "provider_unavailable")}
+            self.db.update_session(sid, run={**s["run"], "failure": failure})
+            self.bus.emit(sid, "error", failure)
+            self.set_status(sid, "failed", stop_reason=f"{code}: {message}")
+            await self._end_run(sid)
+        except SandboxUnavailable as e:
+            s = self.db.get_session(sid)
+            failure = {"code": "backend_unavailable", "provider": s.get("backend", "local"),
+                       "message": str(e), "retryable": True}
+            self.db.update_session(sid, run={**s["run"], "failure": failure})
+            self.bus.emit(sid, "error", failure)
             self.set_status(sid, "failed", stop_reason=f"sandbox_unavailable: {e}")
             await self._end_run(sid)
         except (projects.GitError, RunnerError) as e:
-            self.bus.emit(sid, "error", {"message": str(e)})
+            s = self.db.get_session(sid)
+            failure = {"code": "workspace_error", "provider": s.get("backend", "local"),
+                       "message": str(e), "retryable": False}
+            self.db.update_session(sid, run={**s["run"], "failure": failure})
+            self.bus.emit(sid, "error", failure)
             self.set_status(sid, "failed", stop_reason=f"workspace_error: {e}")
             await self._end_run(sid)
         except Exception as e:  # noqa: BLE001 - a crash must not leave the session looking active
             log.exception("session %s crashed", sid)
-            self.bus.emit(sid, "error", {"message": f"{type(e).__name__}: {e}"})
+            s = self.db.get_session(sid)
+            message = f"{type(e).__name__}: {e}"
+            failure = {"code": "internal_error", "provider": s.get("backend", "local"),
+                       "message": message, "retryable": True}
+            self.db.update_session(sid, run={**s["run"], "failure": failure})
+            self.bus.emit(sid, "error", failure)
             self.set_status(sid, "failed", stop_reason=f"internal_error: {type(e).__name__}: {e}")
             await self._end_run(sid)
         finally:
@@ -892,11 +918,17 @@ class Runner:
         totals["total_cost_usd"] = round(float(totals.get("total_cost_usd", 0)) + cost, 10)
         answer = str(result.get("result") or "")
         failed = bool(result.get("is_error")) or result.get("subtype") in ("error", "failed")
-        status, reason = ("failed", str(result.get("subtype") or "cli_error")) if failed else ("done", "final_message")
+        status, reason = ("failed", "provider_error") if failed else ("done", "final_message")
+        if failed:
+            failure = {"code": "provider_error", "provider": s["backend"],
+                       "message": answer or str(result.get("subtype") or "provider failed"), "retryable": True}
+            run["failure"] = failure
         with self.db.tx():
             self.db.update_session(sid, run=run, totals=totals, status=status, stop_reason=reason, answer=answer)
             self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
                                  str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing))
+            if failed:
+                self.bus.emit(sid, "error", failure)
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})
 
     async def _stop_cli(self, sid: str) -> None:

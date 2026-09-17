@@ -48,9 +48,12 @@ def public_approval(a: dict | None) -> dict | None:
 
 
 class HarnessError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code: str = ""):
         super().__init__(message)
         self.status = status
+        self.code = code or {400: "invalid_request", 401: "authentication_required", 403: "forbidden",
+                             404: "not_found", 409: "conflict", 413: "payload_too_large",
+                             429: "rate_limited"}.get(status, "server_error" if status >= 500 else "http_error")
 
 
 class Manager:
@@ -312,7 +315,9 @@ class Manager:
             "title": title or (first_line[:80] + ("…" if len(first_line) > 80 else "")),
             "status": "queued", "workspace": str(workspace), "created_at": now, "updated_at": now,
             "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            "run": new_run(), "totals": {}, "inbox": [], "branch": branch,
+            "run": new_run(), "totals": {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                                             "total_cost_usd": 0.0},
+            "inbox": [], "branch": branch,
             "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
             "job_id": job_id,
         }
@@ -498,6 +503,16 @@ class Manager:
 
     def summary(self, s: dict) -> dict:
         out = {k: v for k, v in s.items() if k not in ("context", "inbox")}
+        failure = (s.get("run") or {}).get("failure") or (s.get("run") or {}).get("provider_failure")
+        if s.get("status") == "failed" and not failure:
+            reason = str(s.get("stop_reason") or "failed")
+            prefix = reason.split(":", 1)[0]
+            code = {"sandbox_unavailable": "backend_unavailable", "workspace_error": "workspace_error",
+                    "quota_exceeded": "resource_limit", "internal_error": "internal_error"}.get(
+                        prefix, "provider_error" if s.get("backend", "local") != "local" else "model_error")
+            failure = {"code": code, "provider": s.get("backend", "local"), "message": reason,
+                       "retryable": code in ("backend_unavailable", "internal_error", "provider_error")}
+        out["failure"] = failure
         out["queue_position"] = self.scheduler.positions().get(s["id"])
         model = self.cfg.models.get(s["model"])
         out["context_used"] = (s.get("run") or {}).get("context_tokens", 0)

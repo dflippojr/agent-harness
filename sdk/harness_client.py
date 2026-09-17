@@ -13,8 +13,9 @@
     print(result.answer)
 
 `run` creates a session, answers the agent's calls to your tools as they arrive, and returns when the session ends.
-Everything else (create_session, events, send, add_context, cancel, submit_tool_result, generate_image) is a thin
-wrapper over the HTTP API described in docs/app-api.md.
+Everything else (pair, capabilities, backends, create_session, events, send, add_context, approvals, cancel,
+submit_tool_result, generate_image) is a thin wrapper over the HTTP API described in docs/app-api.md. Run
+`Harness.validate_openapi()` in an integration check to detect client/server contract drift.
 """
 
 from __future__ import annotations
@@ -22,11 +23,116 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, TypedDict
 
 import httpx
 
 TERMINAL = ("done", "failed", "cancelled")
+SDK_API_MAJOR = "1"
+
+# Used by validate_openapi() and CI. Paths use the server's OpenAPI templates, not formatted runtime ids.
+SDK_OPERATIONS = {
+    "info": ("get", "/api/v1"), "pair": ("post", "/api/v1/pair"),
+    "backends": ("get", "/api/v1/backends"), "create_session": ("post", "/api/v1/sessions"),
+    "sessions": ("get", "/api/v1/sessions"), "session": ("get", "/api/v1/sessions/{ref}"),
+    "send": ("post", "/api/v1/sessions/{ref}/messages"),
+    "add_context": ("post", "/api/v1/sessions/{ref}/context"),
+    "cancel": ("post", "/api/v1/sessions/{ref}/cancel"),
+    "pending_tool_calls": ("get", "/api/v1/sessions/{ref}/tool_calls"),
+    "submit_tool_result": ("post", "/api/v1/sessions/{ref}/tool_calls/{call_id}"),
+    "pending_approvals": ("get", "/api/v1/sessions/{ref}/approvals"),
+    "decide_approval": ("post", "/api/v1/sessions/{ref}/approvals/{approval_id}"),
+    "events": ("get", "/api/v1/sessions/{ref}/events"),
+    "generate_image": ("post", "/api/v1/images"),
+}
+SDK_REQUEST_FIELDS = {
+    ("post", "/api/v1/pair"): {"code"},
+    ("post", "/api/v1/sessions"): {"prompt", "project", "backend", "model", "title", "context", "tools", "metadata"},
+    ("post", "/api/v1/sessions/{ref}/messages"): {"content"},
+    ("post", "/api/v1/sessions/{ref}/context"): {"context"},
+    ("post", "/api/v1/sessions/{ref}/tool_calls/{call_id}"): {"output", "ok"},
+    ("post", "/api/v1/sessions/{ref}/approvals/{approval_id}"): {"decision", "note"},
+    ("post", "/api/v1/images"): {"prompt", "model", "aspect_ratio"},
+}
+
+
+class Capabilities(TypedDict, total=False):
+    profile: str
+    required: dict[str, bool]
+    modules: dict[str, bool]
+    hosted_backends: list[str]
+
+
+class BackendStatus(TypedDict, total=False):
+    name: str
+    available: bool
+    logged_in: bool
+    auth: str
+    billing: str
+    model: str
+    effort: str
+    limits: dict
+    today: dict
+    week: dict
+    notice: str
+    billing_warning: str
+
+
+class ProviderFailure(TypedDict, total=False):
+    code: str
+    provider: str
+    message: str
+    retryable: bool
+
+
+class Session(TypedDict, total=False):
+    id: str
+    project: str
+    target: str
+    backend: str
+    model: str
+    title: str
+    status: str
+    stop_reason: str
+    created_at: float
+    updated_at: float
+    answer: str
+    totals: dict
+    run: dict
+    failure: ProviderFailure | None
+    last_event_seq: int
+    app_tools: list[str]
+    metadata: dict
+
+
+class Event(TypedDict, total=False):
+    seq: int | None
+    session_id: str
+    ts: float
+    type: str
+    data: dict
+
+
+class Approval(TypedDict, total=False):
+    id: str
+    tool: str
+    args: dict
+    reason: str
+    detail: str
+    status: str
+
+
+SDK_RESPONSE_TYPES = {
+    ("get", "/api/v1/backends"): ("200", BackendStatus, True),
+    ("post", "/api/v1/sessions"): ("201", Session, False),
+    ("get", "/api/v1/sessions"): ("200", Session, True),
+    ("get", "/api/v1/sessions/{ref}"): ("200", Session, False),
+    ("post", "/api/v1/sessions/{ref}/messages"): ("200", Session, False),
+    ("post", "/api/v1/sessions/{ref}/context"): ("200", Session, False),
+    ("post", "/api/v1/sessions/{ref}/cancel"): ("200", Session, False),
+    ("get", "/api/v1/sessions/{ref}/approvals"): ("200", Approval, True),
+    ("post", "/api/v1/sessions/{ref}/approvals/{approval_id}"): ("200", Approval, False),
+}
 
 
 @dataclass
@@ -54,8 +160,8 @@ def tool(description: str, required: list[str] | None = None, timeout_seconds: i
 
 @dataclass
 class RunResult:
-    session: dict
-    events: list[dict] = field(default_factory=list)
+    session: Session
+    events: list[Event] = field(default_factory=list)
 
     @property
     def answer(self) -> str:
@@ -65,46 +171,160 @@ class RunResult:
     def status(self) -> str:
         return self.session.get("status", "")
 
+    @property
+    def usage(self) -> dict:
+        return self.session.get("totals") or {}
+
+    @property
+    def limits(self) -> dict:
+        latest = next((e["data"] for e in reversed(self.events) if e.get("type") == "rate_limit"), None)
+        return latest or ((self.session.get("run") or {}).get("rate_limits") or {})
+
+    @property
+    def billing_notices(self) -> list[str]:
+        return [str(e.get("data", {}).get("message") or "") for e in self.events
+                if e.get("type") == "billing_warning"]
+
+    @property
+    def errors(self) -> list[dict]:
+        return [e.get("data") or {} for e in self.events if e.get("type") == "error"]
+
+    @property
+    def failure(self) -> ProviderFailure | None:
+        return self.session.get("failure")
+
 
 class HarnessError(Exception):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, code: str = ""):
         super().__init__(f"HTTP {status}: {detail}")
         self.status = status
+        self.detail = detail
+        self.code = code or {400: "invalid_request", 401: "authentication_required", 403: "forbidden",
+                             404: "not_found", 409: "conflict", 413: "payload_too_large",
+                             429: "rate_limited"}.get(status, "server_error" if status >= 500 else "http_error")
+        self.retryable = status == 429 or status >= 500
+
+
+class ContractError(Exception):
+    pass
 
 
 class Harness:
-    def __init__(self, base_url: str, token: str, timeout: float = 60):
+    def __init__(self, base_url: str, token: str = "", timeout: float = 60, origin: str = ""):
         self.base = base_url.rstrip("/")
-        self.client = httpx.Client(base_url=self.base, timeout=timeout,
-                                   headers={"Authorization": f"Bearer {token}"})
+        self.token = token
+        self.origin = origin
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        if origin:
+            headers["Origin"] = origin
+        self.client = httpx.Client(base_url=self.base, timeout=timeout, headers=headers)
+
+    def close(self) -> None:
+        self.client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    @classmethod
+    def pair(cls, base_url: str, code: str, origin: str, timeout: float = 60) -> "Harness":
+        """Redeem a one-time browser pairing code and return an origin-bound client."""
+        with httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, headers={"Origin": origin}) as client:
+            resp = client.post("/api/v1/pair", json={"code": code})
+            if resp.status_code >= 400:
+                cls._raise_response(resp)
+            paired = resp.json()
+        return cls(base_url, paired["token"], timeout=timeout, origin=origin)
 
     # plumbing
+    @staticmethod
+    def _raise_response(resp: httpx.Response) -> None:
+        try:
+            payload = resp.json()
+            detail = payload.get("detail", resp.text)
+            code = (payload.get("error") or {}).get("code", "")
+        except ValueError:
+            detail, code = resp.text, ""
+        raise HarnessError(resp.status_code, str(detail), str(code))
+
     def _call(self, method: str, path: str, **kwargs) -> Any:
         resp = self.client.request(method, f"/api/v1{path}", **kwargs)
         if resp.status_code >= 400:
-            try:
-                detail = resp.json().get("detail", resp.text)
-            except ValueError:
-                detail = resp.text
-            raise HarnessError(resp.status_code, str(detail))
+            self._raise_response(resp)
         return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.content
 
     def info(self) -> dict:
         return self._call("GET", "")
 
+    def capabilities(self) -> Capabilities:
+        return self.info()["capabilities"]
+
+    def backends(self) -> list[BackendStatus]:
+        return self._call("GET", "/backends")
+
+    @staticmethod
+    def _resolve_schema(schema: dict, value: dict) -> dict:
+        while "$ref" in value:
+            value = schema["components"]["schemas"][value["$ref"].rsplit("/", 1)[-1]]
+        return value
+
+    def validate_openapi(self, schema: dict | None = None) -> None:
+        """Fail if this SDK's operations or JSON body fields drift from the daemon OpenAPI document."""
+        fetched = schema is None
+        schema = schema or self.client.get("/openapi.json").json()
+        errors: list[str] = []
+        for name, (method, path) in SDK_OPERATIONS.items():
+            operation = (schema.get("paths", {}).get(path) or {}).get(method)
+            if operation is None:
+                errors.append(f"{name}: missing {method.upper()} {path}")
+                continue
+            expected = SDK_REQUEST_FIELDS.get((method, path))
+            if expected is None:
+                continue
+            body = (((operation.get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get(
+                "schema")
+            if not body:
+                errors.append(f"{name}: OpenAPI has no JSON request schema")
+                continue
+            body = self._resolve_schema(schema, body)
+            actual = set((body.get("properties") or {}).keys())
+            if expected != actual:
+                errors.append(f"{name}: SDK fields {sorted(expected)} != OpenAPI fields {sorted(actual)}")
+        for (method, path), (status, response_type, is_list) in SDK_RESPONSE_TYPES.items():
+            operation = (schema.get("paths", {}).get(path) or {}).get(method) or {}
+            response = (((operation.get("responses") or {}).get(status) or {}).get("content") or {}).get(
+                "application/json", {}).get("schema")
+            if not response:
+                errors.append(f"{method.upper()} {path}: OpenAPI has no JSON response schema")
+                continue
+            if is_list:
+                response = response.get("items") or {}
+            response = self._resolve_schema(schema, response)
+            missing = set(response_type.__annotations__) - set((response.get("properties") or {}).keys())
+            if missing:
+                errors.append(f"{method.upper()} {path}: SDK response fields missing from OpenAPI: {sorted(missing)}")
+        version = str((self.info() if fetched else {}).get("api_version") or "")
+        if version and version.split(".", 1)[0] != SDK_API_MAJOR:
+            errors.append(f"SDK supports API major {SDK_API_MAJOR}, daemon reports {version}")
+        if errors:
+            raise ContractError("; ".join(errors))
+
     # sessions
     def create_session(self, prompt: str, project: str = "scratch", context: dict[str, str] | None = None,
                        tools: list[Tool] | None = None, metadata: dict | None = None, title: str | None = None,
-                       model: str | None = None) -> dict:
-        body = {"prompt": prompt, "project": project, "metadata": metadata or {}, "title": title, "model": model,
+                       model: str | None = None, backend: str = "local") -> Session:
+        body = {"prompt": prompt, "project": project, "backend": backend, "metadata": metadata or {},
+                "title": title, "model": model,
                 "context": [{"title": k, "content": v} for k, v in (context or {}).items()],
                 "tools": [t.spec() for t in tools or []]}
         return self._call("POST", "/sessions", json=body)
 
-    def session(self, sid: str) -> dict:
+    def session(self, sid: str) -> Session:
         return self._call("GET", f"/sessions/{sid}")
 
-    def sessions(self, limit: int = 50) -> list[dict]:
+    def sessions(self, limit: int = 50) -> list[Session]:
         return self._call("GET", "/sessions", params={"limit": limit})
 
     def send(self, sid: str, content: str) -> dict:
@@ -123,7 +343,14 @@ class Harness:
     def submit_tool_result(self, sid: str, call_id: str, output: str, ok: bool = True) -> dict:
         return self._call("POST", f"/sessions/{sid}/tool_calls/{call_id}", json={"output": output, "ok": ok})
 
-    def events(self, sid: str, after: int = 0, follow: bool = True) -> Iterator[dict]:
+    def pending_approvals(self, sid: str) -> list[Approval]:
+        return self._call("GET", f"/sessions/{sid}/approvals")
+
+    def decide_approval(self, sid: str, approval_id: str, approve: bool, note: str = "") -> Approval:
+        return self._call("POST", f"/sessions/{sid}/approvals/{approval_id}",
+                          json={"decision": "approve" if approve else "deny", "note": note})
+
+    def events(self, sid: str, after: int = 0, follow: bool = True) -> Iterator[Event]:
         """Server-sent events of a session. Reconnects on network errors, resuming after the last event seen."""
         last = after
         while True:
@@ -132,7 +359,8 @@ class Harness:
                                         params={"after": last, "follow": str(follow).lower()},
                                         timeout=httpx.Timeout(60, read=90)) as resp:
                     if resp.status_code >= 400:
-                        raise HarnessError(resp.status_code, resp.read().decode("utf-8", "replace"))
+                        resp.read()
+                        self._raise_response(resp)
                     data = []
                     for line in resp.iter_lines():
                         if line.startswith("data:"):

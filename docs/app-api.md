@@ -14,6 +14,11 @@ change app-token scoping: app tokens still see only their own sessions unless gr
 A Python client lives in [`sdk/harness_client.py`](../sdk/harness_client.py) (one file, needs `httpx`), with an
 example in [`sdk/examples/shopping_list_app.py`](../sdk/examples/shopping_list_app.py).
 
+The client is the supported Python surface. It covers discovery and pairing, every session backend, initial and
+incremental context, app tools, approvals, cancellation, resumable events, provider status, and images. Call
+`Harness.validate_openapi()` during an integration check to verify that its operation and request types still match
+the daemon's live `/openapi.json`; the repository test suite performs the same check against every change.
+
 ## Tokens and scopes
 
 Create a token in **Settings → Apps** (or `POST /keys` from the PC:
@@ -30,7 +35,9 @@ Create a token in **Settings → Apps** (or `POST /keys` from the PC:
 | `remote_control` | start and stop Claude Code Remote Control servers in project folders |
 
 Apps see only the sessions they created, unless they hold `sessions:all`. Errors are `{"detail": "..."}`, with 401
-(bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual.
+(bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual. Harness-generated errors also
+include `error: {code, message, retryable}`; `detail` remains for compatibility. The SDK exposes these as
+`HarnessError.code`, `.detail`, and `.retryable`.
 
 ## Pair a separately hosted browser app
 
@@ -88,6 +95,11 @@ result = h.run("Read the context and save the three most important follow-ups as
 print(result.status, result.answer, notes)
 ```
 
+`Harness.pair(url, code, origin)` redeems an owner-approved browser pairing code. `capabilities()` and `backends()`
+discover what a daemon can run; pass `backend="claude"`, `"codex"`, or `"cursor"` to `run()` / `create_session()`
+instead of the default `"local"`. `pending_approvals()` / `decide_approval()` expose native provider permission
+requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and `.failure` normalize run outcomes.
+
 ## Endpoints
 
 ### `GET /api/v1`
@@ -131,6 +143,13 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
 List (newest first, `?limit=`) or read. Statuses: `queued`, `running`, `waiting_approval`, `waiting_target`,
 `waiting_app`, `done`, `failed`, `cancelled`.
 
+Every provider uses the same session totals (`turns`, `prompt_tokens`, `completion_tokens`, `total_cost_usd`). A
+failed session has `failure: {code, provider, message, retryable}`. Provider startup/transport failures use
+`provider_unavailable`, missing provider credentials use `provider_auth_required`, and a rejected provider turn uses
+`provider_error`. Local model, workspace, quota, and internal failures use the same object with their corresponding
+codes. The original `stop_reason` remains for compatibility. `rate_limit`, `billing_warning`, and `error` events use
+provider-neutral envelopes; provider-specific raw limit fields may be included additively in `data`.
+
 ### `GET /api/v1/sessions/{id}/events?after=0&follow=true`
 Server-sent events. Each event has `seq` (resume with `after=` or `Last-Event-ID`), `type`, `ts`, and `data`. Token
 deltas (`delta`) and queue moves have `seq: null` and aren't replayed. Types an app usually handles:
@@ -143,6 +162,13 @@ deltas (`delta`) and queue moves have `seq: null` and aren't replayed. Types an 
 | `approval_requested` | `id`, `tool`, `args`, `reason`: the user (or an app with `approvals`) must decide |
 | `status` | `status`, and for the end `stop_reason`, `answer` |
 | `run_finished` | the run ended; the session may continue if you send a message |
+
+Persisted events are committed and delivered in increasing `seq` order. A stream subscribes before replaying the
+database and suppresses duplicate sequence numbers, so events committed during reconnect are not lost. `after=N`
+replays exactly persisted events with `seq > N`; reconnect with the largest sequence actually processed. Ephemeral
+events (`seq: null`) are best-effort UI hints and may be missed or repeated across reconnects. Within one run the
+usual durable order is `session_created` / `user_message`, status changes, assistant/tool/approval events, a terminal
+`status`, then `run_finished`. A follow-up begins another status-to-`run_finished` run in the same session.
 
 ### `GET /api/v1/sessions/{id}/tool_calls?status=pending`
 Calls waiting for your app. Use it after a reconnect instead of relying on events alone.
@@ -271,3 +297,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.2 | 2026-09-16 | Exact-origin browser pairing/CORS and short-lived authenticated SSE stream tickets |
 | 1.3 | 2026-09-16 | First-party Control Center owner identity/token support for ordinary session operations |
 | 1.4 | 2026-09-16 | Daemon profile and optional-module capability discovery |
+| 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
