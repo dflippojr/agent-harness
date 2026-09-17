@@ -58,6 +58,7 @@ def test_app_tokens_cannot_use_admin_api(tmp_path):
         all_app_scopes = ["sessions", "sessions:all", "approvals", "images", "inference", "remote_control"]
         app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": all_app_scopes}).json()
         device = client.post("/keys", json={"name": "zed"}).json()
+        # Legacy pre-#91 display names remain valid owner credentials.
         owner = client.post("/keys", json={"name": "control-center", "kind": OWNER_KIND,
                                            "scopes": [ADMIN_SCOPE]}).json()
         assert app["kind"] == "app" and app["key"].startswith("ha-")

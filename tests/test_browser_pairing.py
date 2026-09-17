@@ -45,7 +45,7 @@ def test_owner_approved_pairing_is_one_time_and_cors_is_exact(tmp_path):
     client, m = app_client(tmp_path, [Completion(content="hi"), Completion(content="hi again")])
     with client:
         approved = client.post("/pairing-codes", json={
-            "name": "separate control center", "origin": ORIGIN, "scopes": ["sessions"]})
+            "name": "separate Agent Harness App", "origin": ORIGIN, "scopes": ["sessions"]})
         assert approved.headers["cache-control"] == "no-store"
         approved = approved.json()
         assert approved["code"].startswith("hp-")
