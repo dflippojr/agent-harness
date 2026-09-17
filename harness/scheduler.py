@@ -20,6 +20,7 @@ class GpuScheduler:
         self.holder: str | None = None
         self.paused = False
         self._waiters: OrderedDict[str, asyncio.Future] = OrderedDict()
+        self._change_waiters: set[asyncio.Future] = set()
         self._on_change = on_change
 
     def positions(self) -> dict[str, int]:
@@ -29,8 +30,22 @@ class GpuScheduler:
         return out
 
     def _changed(self) -> None:
+        for waiter in self._change_waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+        self._change_waiters.clear()
         if self._on_change:
             self._on_change(self.positions())
+
+    async def wait_for_drain(self, session_ids: set[str]) -> None:
+        """Wait until a snapshot of session holders/waiters has left the queue."""
+        while session_ids.intersection(self.positions()):
+            waiter = asyncio.get_running_loop().create_future()
+            self._change_waiters.add(waiter)
+            try:
+                await waiter
+            finally:
+                self._change_waiters.discard(waiter)
 
     async def acquire(self, sid: str, front: bool = False) -> None:
         """Wait for the slot. `front` puts the session first in line (it had the slot and stepped aside)."""

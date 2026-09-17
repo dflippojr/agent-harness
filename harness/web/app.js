@@ -5,8 +5,9 @@
 //   #/s/<id>/approval/<aid>  same, focused on one approval (notification deep link)
 //   #/s/<id>/changes         diff viewer
 //   #/s/<id>/info            session details
-//   #/profile                identity, GPU, Claude Remote Control, and a Settings menu
+//   #/profile                identity plus Actions and Settings menus
 //   #/profile/account        icon picker, account info, connection details
+//   #/profile/remote-control native Claude Code Remote Control sessions
 //   #/profile/<section>      a Settings page (appearance, notifications, backends, …)
 //   #/images                 image generation and gallery
 //   #/images/<id>            one result (prompt, metadata, Another one)
@@ -541,7 +542,7 @@ async function viewList() {
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
       .sort((a, b) => (a === "tower" ? -1 : b === "tower" ? 1 : a.localeCompare(b)));
     const waiting = queue.filter((q) => q.position > 0).length;
-    const paused = gpu && gpu.state !== "clear";
+    const paused = gpu && (gpu.manual || gpu.state !== "clear");
     queueNote.replaceChildren(
       paused ? h("a", { href: "#/profile" }, `⏸ ${gpuText(gpu)}`) : "",
       paused && waiting ? " · " : "",
@@ -586,6 +587,16 @@ async function viewList() {
 }
 
 // ---------- new task ----------
+async function confirmGpuQueue(label) {
+  try {
+    const gpu = await api("/gpu");
+    if (!gpu.manual) return true;
+    const remaining = gpu.manual_remaining_seconds === null ? "until you turn it off"
+      : `for about ${gpu.manual_remaining_seconds >= 90 ? `${Math.ceil(gpu.manual_remaining_seconds / 60)} min` : `${gpu.manual_remaining_seconds} s`}`;
+    return confirm(`GPU hold is on ${remaining}. ${label} can be queued, but nothing will be sent to the local model until the hold ends. Queue it?`);
+  } catch (_) { return true; }
+}
+
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
   let [projects, models, allTemplates, backends] = await Promise.all([
@@ -755,6 +766,7 @@ async function viewNew() {
     onsubmit: async (e) => {
       e.preventDefault();
       if (!prompt.value.trim()) return toast("Write a prompt first");
+      if (backend.value === "local" && !(await confirmGpuQueue("This task"))) return;
       start.disabled = true;
       try {
         const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
@@ -1593,6 +1605,7 @@ async function viewImages() {
       onsubmit: async (e) => {
         e.preventDefault();
         if (!prompt.value.trim()) return toast("Describe the image first");
+        if (!(await confirmGpuQueue("This image job"))) return;
         go.disabled = true;
         try {
           await startWarmup().catch(() => {});
@@ -1775,6 +1788,7 @@ async function viewJob(id) {
   $app.append(h("form", {
     onsubmit: async (e) => {
       e.preventDefault();
+      if (isNew && backend.value === "local" && !(await confirmGpuQueue("This scheduled job"))) return;
       save.disabled = true;
       try {
         const saved = await api(isNew ? "/jobs" : `/jobs/${id}`, { method: isNew ? "POST" : "PUT", body: body() });
@@ -1805,6 +1819,7 @@ async function viewJob(id) {
     isGuest() ? null : !isNew ? h("button", {
       class: "btn", type: "button",
       onclick: async () => {
+        if (backend.value === "local" && !(await confirmGpuQueue("This job run"))) return;
         try { const s = await api(`/jobs/${id}/run`, { method: "POST" }); location.hash = `#/s/${s.id}`; } catch (err) { toast(err.message); }
       },
     }, "Run now") : null,
@@ -1831,7 +1846,6 @@ const PROFILE_PAGES = {
   memory: "Memory",
   apps: "Apps",
   endpoint: "Inference endpoint",
-  disk: "Disk",
 };
 const THEMES = {
   auto: { label: "System", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
@@ -1940,7 +1954,7 @@ function accountCard(me, profile) {
 }
 
 async function viewProfile(page) {
-  const titles = { account: "Account", ...PROFILE_PAGES };
+  const titles = { account: "Account", "remote-control": "Claude Remote Control", disk: "Disk", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
   setHeader("agents", titles[page] || "Profile", { page: true });
@@ -1955,6 +1969,7 @@ async function viewProfile(page) {
   if (page === "apps") return $app.append(appsCard(me));
   if (page === "endpoint") return $app.append(endpointCard(me));
   if (page === "disk") return $app.append(diskCard());
+  if (page === "remote-control") return $app.append(remoteControlCard());
   $app.append(
     h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
@@ -1963,8 +1978,11 @@ async function viewProfile(page) {
           h("h3", {}, me.name || "You"),
           h("div", { class: "muted small" }, "Account and connection")),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    gpuCard(),
-    remoteControlCard(),
+    h("p", { class: "section-label" }, "Actions"),
+    h("div", { class: "card settings-list" },
+      gpuActionRow(),
+      h("a", { href: "#/profile/remote-control" }, "Claude Remote Control"),
+      h("a", { href: "#/profile/disk" }, "Disk")),
     h("p", { class: "section-label" }, "Settings"),
     h("div", { class: "card settings-list" },
       Object.entries(PROFILE_PAGES)
@@ -2272,38 +2290,63 @@ function backupLine(b) {
 
 function gpuText(g) {
   const why = (g.reasons || []).map((r) => r.detail).filter((d, i, a) => a.indexOf(d) === i).join(", ") || "GPU busy";
+  if (g.manual) {
+    if (g.manual_remaining_seconds === null) return "Local models held until you turn this off";
+    const left = g.manual_remaining_seconds;
+    return `Local models held for ${left >= 90 ? `${Math.ceil(left / 60)} min` : `${left} s`}`;
+  }
   if (g.state === "pausing") return `Pausing for ${why}: finishing the current model turn`;
-  if (g.state === "paused") return g.manual ? "Paused from the app" : `Paused for ${why}`;
+  if (g.state === "paused") return `Paused for ${why}`;
   if (g.state === "resuming") return "GPU free: reloading the model";
   return "Agents have the GPU";
 }
 
-function gpuCard() {
-  const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
+function gpuActionRow() {
+  const status = h("div", { class: "muted small" }, "Checking…");
+  const toggle = h("input", { class: "switch", type: "checkbox", role: "switch", "aria-label": "GPU hold", disabled: isGuest() });
+  const duration = h("select", { disabled: isGuest(), "aria-label": "GPU hold duration" },
+    h("option", { value: "" }, "Until I turn it off"),
+    h("option", { value: "1800" }, "30 minutes"),
+    h("option", { value: "3600" }, "1 hour"),
+    h("option", { value: "10800" }, "3 hours"));
+  const durationRow = h("label", { class: "action-subitem disabled" },
+    h("span", {}, "Duration:"), duration);
   const act = async (action) => {
-    try { render(await api(`/gpu/${action}`, { method: "POST" })); } catch (e) { toast(e.message); }
+    const body = action === "pause" ? { duration_seconds: duration.value ? Number(duration.value) : null } : undefined;
+    try { render(await api(`/gpu/${action}`, { method: "POST", body })); } catch (e) { toast(e.message); }
     setTimeout(load, 1500);
   };
   const render = (g) => {
-    if (!g.enabled) return fill(body, h("p", { class: "muted small" }, "The GPU guard is disabled in config/harness.yaml."));
+    if (!g.enabled) {
+      toggle.disabled = true;
+      duration.disabled = true;
+      durationRow.classList.add("disabled");
+      status.textContent = "GPU guard disabled";
+      return;
+    }
     const now = g.signals.map((s) => s.detail);
-    const left = g.resume_after_seconds - (g.clear_for_seconds || 0);
-    const reload = g.state === "paused" && !now.length && !g.manual && g.clear_for_seconds !== null
-      ? ` · reloads in ${left >= 90 ? `${Math.round(left / 60)} min` : `${Math.max(0, Math.round(left))} s`}` : "";
-    fill(body,
-      h("p", {}, `${g.state === "clear" ? "✓" : "⏸"} ${gpuText(g)}${reload}`),
-      h("p", { class: "muted small" }, now.length ? `Using the GPU now: ${now.join(", ")}${g.override ? " (ignored until that changes)" : ""}`
-        : "No game or Plex transcode detected. Desktop streaming doesn't pause agents."),
-      g.plex_error ? h("p", { class: "muted small" }, `Plex check: ${g.plex_error}`) : null,
-      isGuest() ? h("p", { class: "muted small" }, "Demo access cannot pause or resume the GPU.") : h("div", { class: "row" },
-        g.state === "clear" ? h("button", { class: "btn", onclick: () => act("pause") }, "Pause agents (I'm gaming)")
-          : h("button", { class: "btn", onclick: () => act("resume") }, now.length ? "Resume anyway" : "Resume now")));
+    toggle.checked = g.manual;
+    if (g.manual && g.manual_duration_seconds) duration.value = String(g.manual_duration_seconds);
+    duration.disabled = isGuest() || !g.manual;
+    durationRow.classList.toggle("disabled", duration.disabled);
+    const automatic = !g.manual && g.state !== "clear" ? ` · ${gpuText(g)}` : "";
+    const using = now.length ? ` · ${now.join(", ")}${g.override ? " (ignored)" : ""}` : "";
+    status.textContent = `${g.manual ? gpuText(g) : "Local models available"}${automatic}${using}`;
   };
-  const load = async () => { try { render(await api("/gpu")); } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); } };
+  const load = async () => { try { render(await api("/gpu")); } catch (e) { status.textContent = e.message; status.classList.add("bad"); } };
+  toggle.addEventListener("change", () => {
+    duration.disabled = isGuest() || !toggle.checked;
+    durationRow.classList.toggle("disabled", duration.disabled);
+    act(toggle.checked ? "pause" : "resume");
+  });
+  duration.addEventListener("change", () => { if (toggle.checked) act("pause"); });
   load();
   const timer = setInterval(load, 5000);
   onLeave(() => clearInterval(timer));
-  return h("div", { class: "card" }, h("h3", {}, "GPU"), body);
+  return h("div", { class: "action-item" },
+    h("div", { class: "action-row" }, h("div", {}, h("strong", {}, "GPU"), status), toggle),
+    durationRow,
+    isGuest() ? h("div", { class: "muted small" }, "Demo access cannot change GPU hold.") : null);
 }
 
 function remoteControlCard() {
@@ -2664,8 +2707,12 @@ let lastWarm = 0;
 async function warmModel(force = false) {
   if (isGuest()) return;
   if (!force && Date.now() - lastWarm < 60_000) return;
-  lastWarm = Date.now();
-  try { await api("/models/warm", { method: "POST" }); } catch (_) { /* offline */ }
+  try {
+    const gpu = await api("/gpu");
+    if (gpu.manual) return;
+    lastWarm = Date.now();
+    await api("/models/warm", { method: "POST" });
+  } catch (_) { /* offline */ }
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") warmModel(); });
 

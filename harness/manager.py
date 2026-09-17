@@ -106,20 +106,28 @@ class Manager:
         if cfg.gpu_guard.enabled:
             from .gpu_guard import GpuGuard
             self.guard = GpuGuard(cfg.gpu_guard, cfg.models[cfg.default_model], self.scheduler,
-                                  busy=lambda: bool(self.runner.generating) or self.runner.gate.busy,
+                                  busy=lambda: bool(self.runner.generating) or self.runner.gate.busy
+                                  or self.runner.gate.exclusive,
                                   on_pause=self._gpu_paused,
-                                  on_resume=self.runner.gpu_resumed)
+                                  on_resume=self._gpu_resumed)
             self.runner.guard = self.guard
-            self.warmer.blocked = lambda: self.guard.active or bool(self.images and self.images.gpu_taken)
+            self.warmer.blocked = lambda: self.guard.active or self.guard.manual or bool(self.images and self.images.gpu_taken)
         elif self.images is not None:
             self.warmer.blocked = lambda: self.images.gpu_taken
         from .backend_state import apply_prefs
         apply_prefs(self)
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
+        if self.images is not None:
+            self.images.hold()
         for s in self.db.sessions_with_status(*ACTIVE):
             if s.get("backend", "local") == "local" and s["status"] != "waiting_approval":
                 self.runner.note_gpu_pause(s["id"])
+
+    def _gpu_resumed(self, seconds: float) -> None:
+        if self.images is not None:
+            self.images.drain_after_sessions(self.scheduler.positions())
+        self.runner.gpu_resumed(seconds)
 
     def _remote_control_ready(self, payload: dict) -> None:
         self.notifier.send({"topic": self.cfg.notify.topic, **payload})

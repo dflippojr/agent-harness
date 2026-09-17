@@ -238,6 +238,8 @@ class GpuGuard:
         self.signals: list[dict] = []
         self.reasons: list[dict] = []   # what caused the current pause
         self.manual = False             # paused by hand
+        self.manual_until: float | None = None  # epoch seconds; None means until explicitly resumed
+        self.manual_duration_seconds: int | None = None
         self.override: frozenset | None = None  # triggers the user chose to ignore
         self.changed_at = time.time()
         self.last_check = 0.0
@@ -257,8 +259,12 @@ class GpuGuard:
         return self.state != CLEAR
 
     def status(self) -> dict:
+        remaining = (max(0, round(self.manual_until - time.time()))
+                     if self.manual and self.manual_until is not None else None)
         return {"enabled": self.cfg.enabled, "state": self.state, "signals": self.signals, "reasons": self.reasons,
                 "manual": self.manual, "override": bool(self.override), "since": self.changed_at,
+                "manual_until": self.manual_until, "manual_remaining_seconds": remaining,
+                "manual_duration_seconds": self.manual_duration_seconds,
                 "last_check": self.last_check, "resume_after_seconds": self.cfg.resume_after_seconds,
                 "clear_for_seconds": (round(time.monotonic() - self._clear_since)
                                       if self._clear_since is not None else None),
@@ -279,15 +285,30 @@ class GpuGuard:
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
 
-    def pause(self) -> None:
+    def pause(self, duration_seconds: int | None = None) -> None:
         self.manual = True
+        self.manual_until = time.time() + duration_seconds if duration_seconds else None
+        self.manual_duration_seconds = duration_seconds
+        if self.state in (CLEAR, RESUMING):
+            self.reasons = [{"key": "manual", "kind": "manual", "detail": "paused from the app"}]
+            was_clear = self.state == CLEAR
+            self._set(PAUSING)
+            self.scheduler.set_paused(True)
+            self._drain_deadline = time.monotonic() + self.cfg.drain_timeout_seconds
+            if was_clear:
+                self._paused_at = time.time()
+                self.pauses += 1
+                if self.on_pause:
+                    self.on_pause(self.reasons)
         self._wake.set()
 
-    def resume(self) -> None:
-        """Resume now: clears a manual pause and ignores the current triggers until they change."""
+    def resume(self, *, override_signals: bool = True) -> None:
+        """Clear a manual pause, optionally ignoring current automatic triggers until they change."""
         self.manual = False
+        self.manual_until = None
+        self.manual_duration_seconds = None
         keys = frozenset(s["key"] for s in self.signals)
-        self.override = keys or None
+        self.override = (keys or None) if override_signals else None
         self._resume_now = True
         self._wake.set()
 
@@ -300,8 +321,11 @@ class GpuGuard:
             except Exception:  # noqa: BLE001 - keep guarding
                 log.exception("GPU guard check failed")
             fast = self.state in (PAUSING, RESUMING)
+            timeout = 2 if fast else self.cfg.poll_seconds
+            if self.manual and self.manual_until is not None:
+                timeout = min(timeout, max(0.05, self.manual_until - time.time()))
             try:
-                await asyncio.wait_for(self._wake.wait(), timeout=2 if fast else self.cfg.poll_seconds)
+                await asyncio.wait_for(self._wake.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
@@ -313,6 +337,8 @@ class GpuGuard:
             self.changed_at = time.time()
 
     async def check(self, startup: bool = False) -> None:
+        if self.manual and self.manual_until is not None and time.time() >= self.manual_until:
+            self.resume(override_signals=False)
         self.signals = await self.detector()
         self.last_check = time.time()
         keys = frozenset(s["key"] for s in self.signals)
@@ -324,6 +350,8 @@ class GpuGuard:
         if want:
             self._clear_since = None
             self._resume_now = False
+            if self.state == PAUSED and not self.manual and self.signals:
+                self.reasons = list(self.signals)
             if self.state in (CLEAR, RESUMING):
                 self.reasons = list(self.signals) if self.signals else [
                     {"key": "manual", "kind": "manual", "detail": "paused from the app"}]
@@ -345,8 +373,8 @@ class GpuGuard:
             self._clear_since = now
         if self.state == PAUSING:  # the trigger went away before the model was stopped
             self._finish_resume()
-        elif self.state == PAUSED and (startup or self._resume_now
-                                       or now - self._clear_since >= self.cfg.resume_after_seconds):
+        elif (self.state == PAUSED and not self.busy()
+              and (startup or self._resume_now or now - self._clear_since >= self.cfg.resume_after_seconds)):
             self._resume_now = False
             await self.control.start()
             self._resume_started = now
@@ -360,9 +388,9 @@ class GpuGuard:
         self.paused_seconds_total += seconds
         self.reasons = []
         self._set(CLEAR)
-        self.scheduler.set_paused(False)
         if self.on_resume:
             self.on_resume(seconds)
+        self.scheduler.set_paused(False)
 
 
 def describe(reasons: list[dict]) -> str:

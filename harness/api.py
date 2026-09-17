@@ -78,6 +78,10 @@ class ImageRequest(BaseModel):
     seed: int | None = None
 
 
+class GpuHoldRequest(BaseModel):
+    duration_seconds: int | None = None
+
+
 class ProfileUpdate(BaseModel):
     emoji: str
 
@@ -427,15 +431,20 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return m.guard.status() if m.guard else {"enabled": False, "state": "clear", "signals": []}
 
     @app.post("/gpu/{action}")
-    async def gpu_action(action: str, request: Request):
+    async def gpu_action(action: str, request: Request, body: GpuHoldRequest | None = None):
         """pause: hold the GPU for other uses until resumed. resume: reload now, ignoring the current triggers."""
         m = mgr(request)
         if m.guard is None:
             raise HarnessError(400, "the GPU guard is disabled in config/harness.yaml")
         if action == "pause":
-            m.guard.pause()
+            duration = body.duration_seconds if body else None
+            if duration is not None and not 1 <= duration <= 24 * 60 * 60:
+                raise HarnessError(400, "duration_seconds must be between 1 and 86400")
+            m.guard.pause(duration)
         elif action == "resume":
-            m.guard.resume()
+            # Turning off the manual hold must not suppress a live game/Plex trigger. A direct resume while only an
+            # automatic trigger is active retains the legacy "resume anyway" operator action.
+            m.guard.resume(override_signals=not m.guard.manual)
         else:
             raise HarnessError(404, "unknown action")
         return m.guard.status()
