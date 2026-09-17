@@ -29,6 +29,10 @@ No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `doc
 the owner API is `docs/admin-api.md`; profile details are in `docs/service-profile.md`; and bundled/separate Control
 Center deployment is in `docs/control-center.md`.
 
+Machine owners can optionally isolate a hosted-provider API key and model allowlist per app. Key values remain in
+owner-managed files, apps receive only sanitized policy and their own usage, and revocation never falls back to
+another app's or the machine owner's key. See the per-app provider credentials section in `docs/admin-api.md`.
+
 ## Phase 8: subscription backends, Remote Control, answer checks
 
 Built as mini-phases (`docs/phase8a-design.md`, `docs/phase8b-results.md`, `docs/phase8c-results.md`).

@@ -264,6 +264,8 @@ class Config:
     projects: dict[str, Project]
     profile: str = "full"
     modules: ModulesConfig = field(default_factory=ModulesConfig)
+    # Opaque names to owner-managed files. Only the names may be stored in SQLite; paths stay in local config.
+    provider_secret_files: dict[str, str] = field(default_factory=dict)
     backends: dict[str, BackendConfig] = field(default_factory=dict)
     public_url: str = ""               # how the phone reaches the daemon, e.g. https://host.tailnet.ts.net
     allowed_logins: list[str] = field(default_factory=list)  # Tailscale logins allowed through `tailscale serve`
@@ -370,6 +372,10 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         raise ValueError(f"unknown modules {unknown_modules}; known: {', '.join(MODULE_NAMES)}")
     module_defaults = profile == "full"
     selected = ModulesConfig(**{name: bool(raw_modules.get(name, module_defaults)) for name in MODULE_NAMES})
+    provider_secret_files = raw.get("provider_secret_files") or {}
+    if not isinstance(provider_secret_files, dict) or any(not isinstance(k, str) or not isinstance(v, str)
+                                                          for k, v in provider_secret_files.items()):
+        raise ValueError("provider_secret_files must map opaque names to file paths")
     projects_file = config_dir / "projects.yaml"
     raw_projects = (yaml.safe_load(projects_file.read_text(encoding="utf-8")) or {}) if projects_file.exists() else {}
 
@@ -466,6 +472,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         projects=projects,
         profile=profile,
         modules=modules,
+        provider_secret_files=provider_secret_files,
         backends=backends,
         public_url=(raw.get("public_url") or "").rstrip("/"),
         allowed_logins=list(raw.get("allowed_logins") or []),

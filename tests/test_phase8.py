@@ -678,7 +678,8 @@ def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
             assert public["today"]["requests"] == 1
             token = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()["key"]
             headers = {"Authorization": f"Bearer {token}"}
-            assert client.get("/api/v1/backends", headers=headers).json()[0]["week"]["cost_usd"] == 0.42
+            # App status is attributed to that app; owner and other-app usage is not exposed.
+            assert client.get("/api/v1/backends", headers=headers).json()[0]["week"]["cost_usd"] == 0
             assert client.get("/api/v1").json()["backends"][0]["notice"]
     asyncio.run(body())
 
@@ -761,8 +762,8 @@ def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
         s = await wait_status(m, sid, "done")
         assert len(made) == 2 and made[1]["api_key"] == "api-secret"
         assert events(m, sid, "backend_fallback") and events(m, sid, "billing_warning")
-        rows = m.db.conn.execute("SELECT billing FROM usage WHERE session_id = ?", (sid,)).fetchall()
-        assert [row[0] for row in rows] == ["api_key"]
+        rows = m.db.conn.execute("SELECT billing, credential_source FROM usage WHERE session_id = ?", (sid,)).fetchall()
+        assert [tuple(row) for row in rows] == [("api_key", "user_file")]
         await m.stop()
 
     asyncio.run(waiting())

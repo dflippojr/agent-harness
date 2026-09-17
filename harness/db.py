@@ -172,6 +172,18 @@ CREATE TABLE IF NOT EXISTS usage (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_backend_time ON usage(backend, created_at);
+CREATE TABLE IF NOT EXISTS app_provider_credentials (
+    id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    secret_ref TEXT NOT NULL DEFAULT '', -- opaque key into local config; never a path or credential value
+    policy TEXT NOT NULL,                -- subscription | api_key | subscription_then_api_key
+    models TEXT NOT NULL DEFAULT '[]',   -- empty allows every configured model for this backend
+    created_at REAL NOT NULL,
+    revoked_at REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS app_provider_credentials_active
+ON app_provider_credentials(app_id, backend) WHERE revoked_at IS NULL;
 -- Session search (search.py): one row per indexed event.
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED,
@@ -207,9 +219,12 @@ MIGRATIONS = [
     ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    # Issue #29: usage attribution names the credential class, never the key or its file reference.
+    ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
 ]
 
-JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data", "origins"}
+JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data", "origins",
+                "models"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -430,20 +445,76 @@ class Database:
         return _row(row) or {"backend": backend, "data": {}, "updated_at": None}
 
     def record_usage(self, backend: str, sid: str, app_id: str, prompt_tokens: int,
-                     completion_tokens: int, cost_usd: float, billing: str) -> None:
+                     completion_tokens: int, cost_usd: float, billing: str,
+                     credential_source: str = "subscription") -> None:
         with self.lock:
             self.conn.execute("INSERT INTO usage (backend, session_id, app_id, prompt_tokens, completion_tokens, "
-                              "cost_usd, billing, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                              (backend, sid, app_id, prompt_tokens, completion_tokens, cost_usd, billing, time.time()))
+                              "cost_usd, billing, credential_source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              (backend, sid, app_id, prompt_tokens, completion_tokens, cost_usd, billing,
+                               credential_source, time.time()))
 
-    def usage_tally(self, backend: str, since: float) -> dict:
+    def usage_tally(self, backend: str, since: float, app_id: str | None = None) -> dict:
+        app_clause, params = (" AND app_id = ?", [backend, since, app_id]) if app_id is not None else ("", [backend, since])
         with self.lock:
             row = self.conn.execute("SELECT COALESCE(SUM(requests),0) requests, "
                                     "COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
                                     "COALESCE(SUM(completion_tokens),0) completion_tokens, "
                                     "COALESCE(SUM(cost_usd),0) cost_usd FROM usage "
-                                    "WHERE backend = ? AND created_at >= ?", (backend, since)).fetchone()
+                                    f"WHERE backend = ? AND created_at >= ?{app_clause}", params).fetchone()
         return dict(row)
+
+    def usage_by_source(self, backend: str, since: float, app_id: str | None = None) -> dict[str, dict]:
+        app_clause, params = (" AND app_id = ?", [backend, since, app_id]) if app_id is not None else ("", [backend, since])
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT credential_source, COALESCE(SUM(requests),0) requests, "
+                "COALESCE(SUM(prompt_tokens),0) prompt_tokens, COALESCE(SUM(completion_tokens),0) completion_tokens, "
+                "COALESCE(SUM(cost_usd),0) cost_usd FROM usage WHERE backend = ? AND created_at >= ?"
+                f"{app_clause} GROUP BY credential_source", params).fetchall()
+        return {row["credential_source"]: {k: row[k] for k in
+                                            ("requests", "prompt_tokens", "completion_tokens", "cost_usd")}
+                for row in rows}
+
+    # Owner-managed per-app provider policy. Secret values and file paths never enter this database.
+    def set_app_provider_credential(self, app_id: str, backend: str, secret_ref: str, policy: str,
+                                    models: list[str]) -> dict:
+        now, cid = time.time(), "pc-" + secrets.token_hex(5)
+        with self.tx():
+            self.conn.execute("UPDATE app_provider_credentials SET revoked_at = ? "
+                              "WHERE app_id = ? AND backend = ? AND revoked_at IS NULL", (now, app_id, backend))
+            self.conn.execute("INSERT INTO app_provider_credentials "
+                              "(id, app_id, backend, secret_ref, policy, models, created_at) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (cid, app_id, backend, secret_ref, policy, json.dumps(models), now))
+        return self.app_provider_credential(app_id, backend)
+
+    def app_provider_credential(self, app_id: str, backend: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM app_provider_credentials WHERE app_id = ? AND backend = ? "
+                                    "AND revoked_at IS NULL", (app_id, backend)).fetchone()
+        return _row(row)
+
+    def app_provider_credential_by_id(self, cid: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM app_provider_credentials WHERE id = ?", (cid,)).fetchone()
+        return _row(row)
+
+    def app_provider_managed(self, app_id: str) -> bool:
+        with self.lock:
+            return self.conn.execute("SELECT 1 FROM app_provider_credentials WHERE app_id = ? LIMIT 1",
+                                     (app_id,)).fetchone() is not None
+
+    def list_app_provider_credentials(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT c.*, k.name AS app_name FROM app_provider_credentials c "
+                "LEFT JOIN api_keys k ON k.id = c.app_id ORDER BY c.created_at DESC").fetchall()
+        return [_row(row) for row in rows]
+
+    def revoke_app_provider_credential(self, cid: str) -> bool:
+        with self.lock:
+            return self.conn.execute("UPDATE app_provider_credentials SET revoked_at = ? "
+                                     "WHERE id = ? AND revoked_at IS NULL", (time.time(), cid)).rowcount == 1
 
     # scheduled jobs
     def list_jobs(self) -> list[dict]:
@@ -684,6 +755,11 @@ class Database:
         with self.lock:
             row = self.conn.execute("SELECT * FROM api_keys WHERE hash = ? AND revoked_at IS NULL",
                                     (hashlib.sha256(key.encode()).hexdigest(),)).fetchone()
+        return _row(row)
+
+    def get_api_key(self, kid: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM api_keys WHERE id = ?", (kid,)).fetchone()
         return _row(row)
 
     def list_api_keys(self) -> list[dict]:

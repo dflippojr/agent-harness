@@ -18,6 +18,13 @@ guests: []
 #   - login: buddy@example.com
 #     until: "2026-09-16T22:00:00-04:00"
 
+# Optional API-key files for individual apps. Configure these in harness.local.yaml with opaque names; the owner
+# assigns a name through /api/admin/v1/provider-credentials. File paths stay in local config, plaintext stays in the
+# file, and neither is stored in SQLite or returned by an API. Restrict each file to the daemon's OS account.
+provider_secret_files: {}
+# provider_secret_files:
+#   invoice-automation: D:/Agents/harness/secrets/invoice-automation.key
+
 notify:
   enabled: true
   server: http://127.0.0.1:8095                  # ntfy container (D:/Docker/ntfy), published at :8443 on the tailnet

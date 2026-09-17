@@ -48,6 +48,7 @@ same; only the prefix and the owner credential check are new.
 | Search | `/search`, `/events`, `/queue` |
 | Projects and jobs | `/projects`, `/templates`, `/jobs` |
 | Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}` |
+| App provider policy | `/provider-credentials`, `/provider-credentials/{credential_id}` |
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
 | Images | `/images`, `/images/warmup`, `/images/cooldown` |
@@ -58,6 +59,47 @@ same; only the prefix and the owner credential check are new.
 
 Not on this surface: `/api/v1` app sessions, `/v1` inference, runner `POST /runners/{name}/poll|results`,
 and ntfy `POST /a/{token}/{decision}`.
+
+## Per-app provider credentials
+
+The owner can give an app its own hosted-provider billing policy without giving either the daemon database or the
+app a plaintext provider key. First put the key in an owner-readable file and map an opaque name to it in
+`harness.local.yaml`:
+
+```yaml
+provider_secret_files:
+  invoice-automation: D:/Agents/harness/secrets/invoice-automation.key
+```
+
+Then assign the reference to the app token's `id`:
+
+```http
+POST /api/admin/v1/provider-credentials HTTP/1.1
+Content-Type: application/json
+
+{
+  "app_id": "app-...",
+  "backend": "claude",
+  "secret_ref": "invoice-automation",
+  "policy": "subscription_then_api_key",
+  "models": ["claude-opus-5"]
+}
+```
+
+Policies are `subscription`, `api_key`, and `subscription_then_api_key`. A subscription assignment must use an
+empty `secret_ref`; the other policies require a configured reference. An empty `models` list allows every model,
+while a nonempty list is an allowlist. Only one assignment is active for an app/backend pair; posting a replacement
+revokes the prior assignment.
+
+`GET /api/admin/v1/provider-credentials` returns assignments, opaque references, revocation times, and whether each
+referenced file is available. It never returns a file path or key value. Revoke with
+`DELETE /api/admin/v1/provider-credentials/{credential_id}`. Revocation stops an active provider process and blocks
+new sessions.
+
+Creating the first assignment puts that app into hosted-provider allowlist mode. Every unassigned hosted backend is
+denied, and revoking the last assignment keeps the app managed and denied; it never falls back to a machine-wide
+subscription or key. Local-model sessions are unaffected. Credential-store integration is intentionally outside
+this file-based contract; protect the files with OS permissions and rotate them by replacing the file.
 
 ## Examples
 
@@ -89,6 +131,7 @@ loopback development and contain no path, query, fragment, or credentials.
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.3 | 2026-09-16 | Owner-managed per-app provider policy, opaque key-file references, and revocation |
 | 1.2 | 2026-09-16 | Daemon profile and optional-module capability discovery |
 | 1.1 | 2026-09-16 | Origin-bound Control Center owner tokens and cross-origin browser access |
 | 1.0 | 2026-09-16 | First release: versioned owner operations, `admin` scope, owner tokens (`ho-`) |

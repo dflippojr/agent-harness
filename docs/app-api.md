@@ -19,6 +19,15 @@ incremental context, app tools, approvals, cancellation, resumable events, provi
 `Harness.validate_openapi()` during an integration check to verify that its operation and request types still match
 the daemon's live `/openapi.json`; the repository test suite performs the same check against every change.
 
+`GET /api/v1/backends` is authenticated and app-specific. Its `today`, `week`, and `usage_by_source` fields contain
+only the calling app's usage. `provider_policy` reports whether that app may use the backend, its billing policy and
+model allowlist, and whether the assigned credential source is available. It never contains a provider key, key-file
+path, or owner-only opaque reference. The unauthenticated discovery document at `GET /api/v1` likewise does not
+report key-file availability or usage.
+
+Machine-wide cached provider-limit data is also hidden from managed apps because it could belong to a different
+assignment. A managed app receives limits reported by its own provider process in that session's `rate_limit` events.
+
 ## Tokens and scopes
 
 Create a token in **Settings → Apps** (or `POST /keys` from the PC:
@@ -231,8 +240,8 @@ signs in once, on their own machine, through the provider's own login flow.
   users through one person's subscription.
 - **Usage is visible.** The daemon reports rate-limit state, and a running tally of programmatic usage, through this
   API and the web app. It warns when that usage is billed from separate credits instead of subscription limits.
-- **API keys are optional and configurable.** An Anthropic, OpenAI or Cursor API key, supplied by the user or by the app
-  builder, can be the default backend or the fallback when subscription limits are hit.
+- **API keys are optional and configurable.** An Anthropic, OpenAI or Cursor API key can be the machine default, or
+  the owner can assign an isolated key file and billing policy to one app. Apps never submit or retrieve those keys.
 
 ### Why this is a grey area
 
@@ -298,3 +307,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.3 | 2026-09-16 | First-party Control Center owner identity/token support for ordinary session operations |
 | 1.4 | 2026-09-16 | Daemon profile and optional-module capability discovery |
 | 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
+| 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |

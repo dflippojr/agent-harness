@@ -61,6 +61,7 @@ def test_switching_existing_full_install_preserves_configuration(tmp_path):
     raw = yaml.safe_load(harness_path.read_text(encoding="utf-8"))
     raw["backends"] = {"codex": {"enabled": True, "api_key_file": "D:/private/codex.key",
                                     "model": "custom-codex"}}
+    raw["provider_secret_files"] = {"invoice-app": "D:/private/invoice-app.key"}
     harness_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     before = harness_path.read_text(encoding="utf-8")
 
@@ -70,6 +71,7 @@ def test_switching_existing_full_install_preserves_configuration(tmp_path):
     assert cfg.profile == "service" and not cfg.modules.local_model
     assert cfg.backends["codex"].api_key_file == "D:/private/codex.key"
     assert cfg.backends["codex"].model == "custom-codex"
+    assert cfg.provider_secret_files == {"invoice-app": "D:/private/invoice-app.key"}
     assert sorted(cfg.backends) == ["claude", "codex", "cursor"]
 
     setup_config.main(args)
