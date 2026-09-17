@@ -297,6 +297,8 @@ class Runner:
             if s.get("backend", "local") != "local":
                 await self._run_cli(sid, recovered=recovered)
                 return
+            if not self.cfg.modules.local_model:
+                raise CliBackendError("the local model is disabled in this service profile")
             if recovered:
                 self.bus.emit(sid, "resumed", {"status": s["status"]})
                 if (s["run"].get("executing") or {}).get("name") in ("run_shell", "git_clone"):
@@ -314,17 +316,44 @@ class Runner:
                 self._record_cancel(sid)
                 await self._end_run(sid)
             raise
-        except (SandboxUnavailable, CliBackendError) as e:
-            self.bus.emit(sid, "error", {"message": str(e)})
+        except CliBackendError as e:
+            s = self.db.get_session(sid)
+            message = str(e)
+            code = ("model_unavailable" if s.get("backend", "local") == "local" else
+                    "provider_auth_required" if any(marker in message.lower()
+                                                    for marker in ("auth", "login", "api key", "api-key",
+                                                                   "credential")) else
+                    "provider_unavailable")
+            failure = {"code": code, "provider": s.get("backend", "local"), "message": message,
+                       "retryable": code in ("model_unavailable", "provider_unavailable")}
+            self.db.update_session(sid, run={**s["run"], "failure": failure})
+            self.bus.emit(sid, "error", failure)
+            self.set_status(sid, "failed", stop_reason=f"{code}: {message}")
+            await self._end_run(sid)
+        except SandboxUnavailable as e:
+            s = self.db.get_session(sid)
+            failure = {"code": "backend_unavailable", "provider": s.get("backend", "local"),
+                       "message": str(e), "retryable": True}
+            self.db.update_session(sid, run={**s["run"], "failure": failure})
+            self.bus.emit(sid, "error", failure)
             self.set_status(sid, "failed", stop_reason=f"sandbox_unavailable: {e}")
             await self._end_run(sid)
         except (projects.GitError, RunnerError) as e:
-            self.bus.emit(sid, "error", {"message": str(e)})
+            s = self.db.get_session(sid)
+            failure = {"code": "workspace_error", "provider": s.get("backend", "local"),
+                       "message": str(e), "retryable": False}
+            self.db.update_session(sid, run={**s["run"], "failure": failure})
+            self.bus.emit(sid, "error", failure)
             self.set_status(sid, "failed", stop_reason=f"workspace_error: {e}")
             await self._end_run(sid)
         except Exception as e:  # noqa: BLE001 - a crash must not leave the session looking active
             log.exception("session %s crashed", sid)
-            self.bus.emit(sid, "error", {"message": f"{type(e).__name__}: {e}"})
+            s = self.db.get_session(sid)
+            message = f"{type(e).__name__}: {e}"
+            failure = {"code": "internal_error", "provider": s.get("backend", "local"),
+                       "message": message, "retryable": True}
+            self.db.update_session(sid, run={**s["run"], "failure": failure})
+            self.bus.emit(sid, "error", failure)
             self.set_status(sid, "failed", stop_reason=f"internal_error: {type(e).__name__}: {e}")
             await self._end_run(sid)
         finally:
@@ -380,17 +409,23 @@ class Runner:
                     await asyncio.sleep(delay)
                 self.set_status(sid, "queued")
             backend_session_id = str(s["run"].get("backend_session_id") or "")
-            use_api_key = backend.auth == "api_key" or s["run"].get("backend_auth") == "api_key"
-            api_key = self._backend_api_key(s) if use_api_key else ""
+            credential = self._backend_credential(s)
+            if credential["policy"] == "denied":
+                raise CliBackendError(f"{backend_name} credential policy was revoked for this app")
+            use_api_key = credential["policy"] == "api_key" or s["run"].get("backend_auth") == "api_key"
+            api_key = credential["key"] if use_api_key else ""
             if use_api_key and not api_key:
                 self.bus.emit(sid, "backend_auth_required", {"backend": backend_name, "auth": "api_key"})
-                raise CliBackendError(f"{backend_name} API-key auth is configured but no key is available")
+                raise CliBackendError(f"{backend_name} API-key credential is configured but no key is available")
             try:
                 async with slot:
                     s = self.db.get_session(sid)
                     if s["status"] != "waiting_approval":
                         self.set_status(sid, "running")
-                    run = {**s["run"], "billing_mode": "api_key" if use_api_key else backend.billing}
+                    source = credential["source"] if use_api_key else "subscription"
+                    run = {**s["run"], "billing_mode": "api_key" if use_api_key else backend.billing,
+                           "credential_source": source,
+                           "credential_assignment": credential["assignment_id"]}
                     self.db.update_session(sid, run=run)
                     warning = billing_warning(backend, run.get("rate_limits"), using_api_key=use_api_key)
                     if warning and not run.get("billing_warned"):
@@ -414,6 +449,12 @@ class Runner:
                                                        "backend_session_id": cli.backend_session_id})
                     tool_names: dict[str, str] = {}
                     while True:
+                        if credential["assignment_id"]:
+                            current = self.db.app_provider_credential_by_id(credential["assignment_id"])
+                            if current is None or current.get("revoked_at") is not None:
+                                raise CliBackendError("the app provider credential was revoked")
+                            if use_api_key and self._secret_marker(credential["path"]) != credential["marker"]:
+                                raise CliBackendError("the app provider credential file changed")
                         await self._send_cli_inbox(sid, cli)
                         event = await cli.receive(timeout=0.05)
                         if event is None:
@@ -424,8 +465,8 @@ class Runner:
             except CliLimitError as limit:
                 await self._stop_cli(sid)
                 s = self.db.get_session(sid)
-                key = self._backend_api_key(s)
-                if backend.auth == "subscription_then_api_key" and key and not use_api_key:
+                credential = self._backend_credential(s)
+                if credential["policy"] == "subscription_then_api_key" and credential["key"] and not use_api_key:
                     run = {**s["run"], "backend_auth": "api_key"}
                     self.db.update_session(sid, run=run)
                     self.bus.emit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
@@ -438,17 +479,36 @@ class Runner:
                 self.bus.emit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
                 recovered = True
 
-    def _backend_api_key(self, s: dict) -> str:
-        backend = self.cfg.backends[s["backend"]]
-        if s.get("app_id"):
-            value = self.db.provider_key(s["app_id"], s["backend"])
-            if value:
-                return value
-        path = Path(backend.api_key_file) if backend.api_key_file else None
+    @staticmethod
+    def _secret_marker(path: str) -> tuple[int, int] | None:
         try:
-            return path.read_text(encoding="utf-8").strip() if path and path.is_file() else ""
+            stat = Path(path).stat()
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
+
+    @staticmethod
+    def _read_secret(path: str) -> str:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip() if path else ""
         except OSError:
             return ""
+
+    def _backend_credential(self, s: dict) -> dict:
+        backend = self.cfg.backends[s["backend"]]
+        app_id = s.get("app_id") or ""
+        assignment = self.db.app_provider_credential(app_id, s["backend"]) if app_id else None
+        if assignment is not None:
+            path = self.cfg.provider_secret_files.get(assignment["secret_ref"], "")
+            return {"policy": assignment["policy"], "key": self._read_secret(path),
+                    "source": "app_file" if assignment["secret_ref"] else "subscription",
+                    "assignment_id": assignment["id"], "path": path, "marker": self._secret_marker(path)}
+        if app_id and self.db.app_provider_managed(app_id):
+            return {"policy": "denied", "key": "", "source": "app_file", "assignment_id": "",
+                    "path": "", "marker": None}
+        path = backend.api_key_file
+        return {"policy": backend.auth, "key": self._read_secret(path), "source": "user_file",
+                "assignment_id": "", "path": path, "marker": self._secret_marker(path)}
 
     async def _send_cli_inbox(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession) -> None:
         """Forward messages received during a CLI run without racing a newer inbox append."""
@@ -890,11 +950,18 @@ class Runner:
         totals["total_cost_usd"] = round(float(totals.get("total_cost_usd", 0)) + cost, 10)
         answer = str(result.get("result") or "")
         failed = bool(result.get("is_error")) or result.get("subtype") in ("error", "failed")
-        status, reason = ("failed", str(result.get("subtype") or "cli_error")) if failed else ("done", "final_message")
+        status, reason = ("failed", "provider_error") if failed else ("done", "final_message")
+        if failed:
+            failure = {"code": "provider_error", "provider": s["backend"],
+                       "message": answer or str(result.get("subtype") or "provider failed"), "retryable": True}
+            run["failure"] = failure
         with self.db.tx():
             self.db.update_session(sid, run=run, totals=totals, status=status, stop_reason=reason, answer=answer)
             self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
-                                 str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing))
+                                 str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
+                                 str(run.get("credential_source") or "subscription"))
+            if failed:
+                self.bus.emit(sid, "error", failure)
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})
 
     async def _stop_cli(self, sid: str) -> None:

@@ -11,14 +11,35 @@ direction is to split the phone PWA (Control Center) from a separately distribut
 
 ## Install
 
-Windows 10/11 with an NVIDIA GPU (12 GB+), Docker Desktop and Git:
+The default full profile runs on Windows 10/11 or x86-64 Linux and needs an NVIDIA GPU (12 GB+). Apple Silicon
+macOS uses the hosted-provider service profile. Docker and Git are required on every platform.
 
 ```powershell
 git clone https://github.com/dflippojr/agent-harness; cd agent-harness
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
-No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`).
+For a hosted-provider-only daemon with no local model or GPU requirement:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install\install.ps1 -Profile Service
+ops\backends\login.ps1 codex # or claude / cursor
+```
+
+Linux/NVIDIA or Apple Silicon macOS:
+
+```bash
+install/install.sh                         # Linux defaults full; macOS defaults service
+ops/backends/login.sh codex                # service profile: or claude / cursor
+```
+
+No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`);
+the owner API is `docs/admin-api.md`; profile details are in `docs/service-profile.md`; and bundled/separate Control
+Center deployment is in `docs/control-center.md`.
+
+Machine owners can optionally isolate a hosted-provider API key and model allowlist per app. Key values remain in
+owner-managed files, apps receive only sanitized policy and their own usage, and revocation never falls back to
+another app's or the machine owner's key. See the per-app provider credentials section in `docs/admin-api.md`.
 
 ## Phase 8: subscription backends, Remote Control, answer checks
 
@@ -27,7 +48,8 @@ Terms and billing notes for app builders are in `docs/app-api.md`.
 
 - Hosted backends (`backends:` in `config/harness.yaml`): unmodified `claude`, `codex`, and Cursor
   `agent` CLIs run in a provider-only Docker sandbox under your own login. Sign in once with
-  `ops\backends\login.ps1 <backend>`. New task, templates and jobs pick a backend; Settings →
+  `ops\backends\login.ps1 <backend>` (Windows) or `ops/backends/login.sh <backend>` (Unix). New task, templates and
+  jobs pick a backend; Settings →
   Backends shows model/effort, 5h/7d usage and popular-model presets. CLI permission prompts become
   ordinary harness approvals (web, ntfy, or `/api/v1`). Optional user API-key fallback lives in
   `D:/Agents/harness/secrets/<backend>-api-key` and is never returned from an API. Cursor print mode
@@ -66,6 +88,10 @@ it grew into the first-party operator UI rather than a thin session list:
 - Time-boxed guest/demo access (`guests:` in untracked `config/harness.local.yaml`): a named tailnet
   login can browse read-only until an ISO `until`. Requires `allowed_logins`. Guests cannot start or
   cancel work, approve, mint keys, pause the GPU, use Remote Control, edit memory, or Review.
+- Control Center is a first-party daemon client (`docs/control-center.md`). Bundled static serving remains the
+  default, while the same no-build PWA can be hosted separately with a configurable daemon URL and an origin-bound
+  `ho-` owner token. Session work dogfoods `/api/v1`; owner operations dogfood `/api/admin/v1`. Authenticated SSE,
+  images, and downloads work without putting bearer tokens in URLs. App tokens cannot call the owner surface.
 
 Still open from that pass: **#48** (add agent-harness and the memory library to Remote Control) and
 **#56** (Images: warm ComfyUI when the tab opens, real step progress, unload immediately, in-app
@@ -134,9 +160,11 @@ Details and verification: `docs/phase4-results.md`.
   (`macrunner/sandbox.sb`): writes limited to the workspace, temp and build caches; credentials and personal
   folders unreadable; no network unless the command was approved with `network: true`. Binary files generated on
   the tower (`generate_image`) are copied into the Mac workspace with a `put_file` op (base64 in the poll request).
-- Install or update from the tower: `.\ops\macbook\deploy.ps1 -MacHost <host> -MacUser <user>` (needs Remote Login
-  on the Mac while deploying). Daemon side: `runners:` in `config/harness.yaml`; runner side:
-  `~/.agent-harness/runner/config.json` (`repo_roots` limits which Mac repos projects may use).
+- Install or update from **Settings → Apps → Pair Mac client**. Run the one-time command on the Mac; it creates a
+  venv and `harness` command under `~/.agent-harness`, pairs without SSH or token copying, and installs the runner as
+  a launchd agent. `harness projects add ~/Projects/<repo>` extends its allowed roots; `harness runner
+  status|restart|logs` manages it locally. The older `.\ops\macbook\deploy.ps1` SSH flow remains an update fallback.
+  See `docs/mac-client.md`.
 - Sessions for an offline or sleeping Mac wait (`waiting_target`) without holding the GPU, notify, and resume when
   the runner reconnects. While a Mac session runs, the runner holds `caffeinate -i`.
 - `GET /runners` shows runner state; so does the Settings screen's Disk card.

@@ -39,13 +39,15 @@ if (-not $server) { throw 'public_url is empty (config/harness.local.yaml); the 
 
 # Stage: runner, sandbox profile, the daemon modules it shares, launchd plist, install script, config. LF endings.
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-mac-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
-New-Item -ItemType Directory -Force "$stage\app\harness" | Out-Null
+New-Item -ItemType Directory -Force "$stage\app\harness", "$stage\client" | Out-Null
 $files = @{
     'macrunner\harness_runner.py'              = 'app\harness_runner.py'
     'macrunner\sandbox.sb'                     = 'app\sandbox.sb'
     'harness\fileops.py'                       = 'app\harness\fileops.py'
     'harness\projects.py'                      = 'app\harness\projects.py'
     'harness\changes.py'                       = 'app\harness\changes.py'
+    'harness\cli.py'                           = 'client\harness_cli.py'
+    'sdk\harness_client.py'                    = 'client\harness_client.py'
     'macrunner\install.sh'                     = 'install.sh'
     'macrunner\dev.agent-harness.runner.plist' = 'dev.agent-harness.runner.plist'
 }

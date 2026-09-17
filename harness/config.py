@@ -5,12 +5,16 @@ from __future__ import annotations
 import os
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+MODULE_NAMES = (
+    "local_model", "homelab", "memory_library", "images", "jobs", "gpu_guard", "runners",
+    "remote_control", "web", "search", "endpoint", "notifications", "backup",
+)
 
 
 @dataclass
@@ -208,6 +212,24 @@ class RunnerConfig:
 
 
 @dataclass
+class ModulesConfig:
+    """Effective optional modules. The service profile defaults every one off."""
+    local_model: bool = True
+    homelab: bool = True
+    memory_library: bool = True
+    images: bool = True
+    jobs: bool = True
+    gpu_guard: bool = True
+    runners: bool = True
+    remote_control: bool = True
+    web: bool = True
+    search: bool = True
+    endpoint: bool = True
+    notifications: bool = True
+    backup: bool = True
+
+
+@dataclass
 class Project:
     name: str
     description: str = ""
@@ -244,6 +266,10 @@ class Config:
     models: dict[str, ModelConfig]
     sandbox: SandboxConfig
     projects: dict[str, Project]
+    profile: str = "full"
+    modules: ModulesConfig = field(default_factory=ModulesConfig)
+    # Opaque names to owner-managed files. Only the names may be stored in SQLite; paths stay in local config.
+    provider_secret_files: dict[str, str] = field(default_factory=dict)
     backends: dict[str, BackendConfig] = field(default_factory=dict)
     public_url: str = ""               # how the phone reaches the daemon, e.g. https://host.tailnet.ts.net
     allowed_logins: list[str] = field(default_factory=list)  # Tailscale logins allowed through `tailscale serve`
@@ -282,6 +308,18 @@ class Config:
     @property
     def projects_overlay_path(self) -> Path:
         return self.data_dir / "projects.yaml"
+
+    def capabilities(self) -> dict:
+        """Machine-readable service profile and module catalog for first- and third-party clients."""
+        return {
+            "profile": self.profile,
+            "required": {
+                "sessions": True, "provider_adapters": True, "approvals": True, "events": True,
+                "scoped_tokens": True, "storage": True, "capability_discovery": True,
+            },
+            "modules": asdict(self.modules),
+            "hosted_backends": [name for name, cfg in self.backends.items() if cfg.enabled],
+        }
 
 
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -373,6 +411,46 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                 raw[key] = {**raw[key], **value}
             else:
                 raw[key] = value
+    # install.ps1 writes this small overlay independently of harness.yaml so switching between the full and service
+    # profiles never destroys an existing machine's paths, secrets, or integration settings.
+    profile_file = config_dir / "profile.yaml"
+    if profile_file.exists():
+        profile_raw = yaml.safe_load(profile_file.read_text(encoding="utf-8")) or {}
+        if not isinstance(profile_raw, dict):
+            raise ValueError("profile.yaml must contain a mapping")
+        for key in ("profile", "modules"):
+            if key in profile_raw:
+                raw[key] = profile_raw[key]
+        # A profile can supply a local-model starter when a hosted-only install is later promoted to full. Existing
+        # full-install model choices remain authoritative.
+        if not (raw.get("models") or {}) and profile_raw.get("models"):
+            raw["models"] = profile_raw["models"]
+            raw["default_model"] = profile_raw.get("default_model") or ""
+        # A service overlay supplies safe hosted-provider defaults only when an existing full install did not
+        # already configure that backend. Machine-specific choices in harness.yaml/local.yaml always win.
+        profile_backends = profile_raw.get("backends") or {}
+        if not isinstance(profile_backends, dict):
+            raise ValueError("profile backends must be a mapping")
+        existing_backends = raw.get("backends") or {}
+        if not isinstance(existing_backends, dict):
+            raise ValueError("backends must be a mapping")
+        raw["backends"] = {name: {**(spec or {}), **(existing_backends.get(name) or {})}
+                           for name, spec in profile_backends.items()} | existing_backends
+    profile = str(raw.get("profile") or "full").strip().lower()
+    if profile not in ("full", "service"):
+        raise ValueError("profile must be 'full' or 'service'")
+    raw_modules = raw.get("modules") or {}
+    if not isinstance(raw_modules, dict):
+        raise ValueError("modules must be a mapping")
+    unknown_modules = sorted(set(raw_modules) - set(MODULE_NAMES))
+    if unknown_modules:
+        raise ValueError(f"unknown modules {unknown_modules}; known: {', '.join(MODULE_NAMES)}")
+    module_defaults = profile == "full"
+    selected = ModulesConfig(**{name: bool(raw_modules.get(name, module_defaults)) for name in MODULE_NAMES})
+    provider_secret_files = raw.get("provider_secret_files") or {}
+    if not isinstance(provider_secret_files, dict) or any(not isinstance(k, str) or not isinstance(v, str)
+                                                          for k, v in provider_secret_files.items()):
+        raise ValueError("provider_secret_files must map opaque names to file paths")
     resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
     projects_file = config_dir / "projects.yaml"
     raw_projects = (yaml.safe_load(projects_file.read_text(encoding="utf-8")) or {}) if projects_file.exists() else {}
@@ -384,60 +462,129 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     }
     projects: dict[str, Project] = {}
     for name, spec in (raw_projects.get("projects") or {}).items():
-        projects[name] = _project_from_spec(name, spec)
+        spec = spec or {}
+        target = str(spec.get("target") or "tower")
+        if target != "tower" and not selected.runners:
+            continue
+        project = _project_from_spec(name, spec)
+        project.homelab = project.homelab and selected.homelab
+        project.memory_library = project.memory_library and selected.memory_library
+        project.web = project.web and selected.web
+        project.images = project.images and selected.images
+        projects[name] = project
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
     # The checked-in catalog wins if an owner later defines the same name there. The generated overlay is private
     # daemon state and is deliberately never written back to config/projects.yaml.
     for name, spec in (raw_overlay.get("projects") or {}).items():
         if name not in projects:
-            projects[name] = _project_from_spec(name, spec, managed=True)
+            project = _project_from_spec(name, spec, managed=True)
+            if project.target != "tower" and not selected.runners:
+                continue
+            project.homelab = project.homelab and selected.homelab
+            project.memory_library = project.memory_library and selected.memory_library
+            project.web = project.web and selected.web
+            project.images = project.images and selected.images
+            projects[name] = project
 
     raw_homelab = dict(raw.get("homelab") or {})
     services = {
         name: HomelabService(name=name, **(spec or {})) for name, spec in (raw_homelab.pop("services", None) or {}).items()
     }
-    homelab = HomelabConfig(**raw_homelab, services=services)
+    homelab = HomelabConfig(**raw_homelab, services=services if selected.homelab else {})
 
-    runners = {name: RunnerConfig(name=name, **(spec or {})) for name, spec in (raw.get("runners") or {}).items()}
+    runners = ({name: RunnerConfig(name=name, **(spec or {})) for name, spec in (raw.get("runners") or {}).items()}
+               if selected.runners else {})
     backends = {name: BackendConfig(**(spec or {})) for name, spec in (raw.get("backends") or {}).items()}
     listen = raw.get("listen") or {}
     budgets = raw.get("budgets") or {}
     compaction = raw.get("compaction") or {}
+    notify = NotifyConfig(**(raw.get("notify") or {}))
+    gpu_guard = GpuGuardConfig(**(raw.get("gpu_guard") or {}))
+    backup = BackupConfig(**(raw.get("backup") or {}))
+    memory_library = MemoryLibraryConfig(**(raw.get("memory_library") or {}))
+    web = WebConfig(**(raw.get("web") or {}))
+    endpoint = EndpointConfig(**(raw.get("endpoint") or {}))
+    images = ImagesConfig(**(raw.get("images") or {}))
+    search = SearchConfig(**(raw.get("search") or {}))
+    jobs = JobsConfig(**(raw.get("jobs") or {}))
+    remote_control = RemoteControlConfig(**(raw.get("remote_control") or {}))
+    def module_enabled(name: str, configured: bool) -> bool:
+        # In the service profile, an explicit module opt-in is the enable switch. Full-profile settings keep their
+        # historical two-level behavior: a module must be selected and enabled in its own config section.
+        return bool(raw_modules.get(name)) if profile == "service" else configured and getattr(selected, name)
+
+    notify.enabled = module_enabled("notifications", notify.enabled)
+    gpu_guard.enabled = module_enabled("gpu_guard", gpu_guard.enabled)
+    backup.enabled = module_enabled("backup", backup.enabled)
+    memory_library.enabled = module_enabled("memory_library", memory_library.enabled)
+    web.enabled = module_enabled("web", web.enabled)
+    endpoint.enabled = module_enabled("endpoint", endpoint.enabled)
+    images.enabled = module_enabled("images", images.enabled)
+    search.enabled = module_enabled("search", search.enabled)
+    jobs.enabled = module_enabled("jobs", jobs.enabled)
+    remote_control.enabled = module_enabled("remote_control", remote_control.enabled)
+    modules = ModulesConfig(
+        local_model=selected.local_model,
+        homelab=selected.homelab,
+        memory_library=memory_library.enabled,
+        images=images.enabled,
+        jobs=jobs.enabled,
+        gpu_guard=gpu_guard.enabled,
+        runners=selected.runners,
+        remote_control=remote_control.enabled,
+        web=web.enabled,
+        search=search.enabled,
+        endpoint=endpoint.enabled,
+        notifications=notify.enabled,
+        backup=backup.enabled,
+    )
+    if not selected.local_model:
+        models = {}
     cfg = Config(
         host=listen.get("host", "127.0.0.1"),
         port=int(listen.get("port", 8100)),
         data_dir=resolved_data_dir,
         repos_dir=Path(raw.get("repos_dir", ROOT / "data" / "repos")),
-        default_model=raw.get("default_model") or next(iter(models), ""),
+        default_model=(raw.get("default_model") or next(iter(models), "")) if models else "",
         models=models,
         sandbox=SandboxConfig(**(raw.get("sandbox") or {})),
         projects=projects,
+        profile=profile,
+        modules=modules,
+        provider_secret_files=provider_secret_files,
         backends=backends,
         public_url=(raw.get("public_url") or "").rstrip("/"),
         allowed_logins=list(raw.get("allowed_logins") or []),
         guests=_load_guests(raw.get("guests")),
-        notify=NotifyConfig(**(raw.get("notify") or {})),
+        notify=notify,
         homelab=homelab,
         cleanup=CleanupConfig(**(raw.get("cleanup") or {})),
         runners=runners,
-        gpu_guard=GpuGuardConfig(**(raw.get("gpu_guard") or {})),
-        backup=BackupConfig(**(raw.get("backup") or {})),
-        memory_library=MemoryLibraryConfig(**(raw.get("memory_library") or {})),
-        web=WebConfig(**(raw.get("web") or {})),
-        endpoint=EndpointConfig(**(raw.get("endpoint") or {})),
-        images=ImagesConfig(**(raw.get("images") or {})),
-        search=SearchConfig(**(raw.get("search") or {})),
-        jobs=JobsConfig(**(raw.get("jobs") or {})),
-        remote_control=RemoteControlConfig(**(raw.get("remote_control") or {})),
+        gpu_guard=gpu_guard,
+        backup=backup,
+        memory_library=memory_library,
+        web=web,
+        endpoint=endpoint,
+        images=images,
+        search=search,
+        jobs=jobs,
+        remote_control=remote_control,
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),
     )
-    if cfg.default_model not in cfg.models:
+    if cfg.modules.local_model and not cfg.models:
+        raise ValueError("the local_model module requires at least one configured model")
+    if cfg.default_model and cfg.default_model not in cfg.models:
         raise ValueError(f"default_model {cfg.default_model!r} is not in models")
+    if cfg.profile == "service" and not any(backend.enabled for backend in cfg.backends.values()):
+        raise ValueError("the service profile requires at least one enabled hosted backend")
+    local_dependents = [name for name in ("endpoint", "images", "gpu_guard") if getattr(cfg.modules, name)]
+    if local_dependents and not cfg.modules.local_model:
+        raise ValueError(f"modules {', '.join(local_dependents)} require local_model")
     for project in cfg.projects.values():
         if project.target != "tower":
             if project.target not in cfg.runners:

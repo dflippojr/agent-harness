@@ -292,6 +292,7 @@ def test_guest_demo_access(tmp_path):
     assert guest_forbidden(ident, "GET", "/sessions") is None
     assert guest_forbidden(ident, "POST", "/sessions") == "demo access is read-only"
     assert guest_forbidden(ident, "GET", "/keys") == "demo access cannot view owner credentials"
+    assert guest_forbidden(ident, "GET", "/api/admin/v1") == "demo access cannot use the owner API"
     assert guest_forbidden(ident, "POST", "/runners/macbook/poll") is None
     owner = resolve_access(m.cfg, LOGIN)
     assert owner.role == "owner" and owner.allowed
@@ -311,6 +312,8 @@ def test_guest_demo_access(tmp_path):
         assert client.get("/maintenance", headers=gh).status_code == 403
         assert client.get("/keys", headers=gh).status_code == 403
         assert client.get("/metrics", headers=gh).status_code == 403
+        assert client.get("/api/admin/v1", headers=gh).status_code == 403
+        assert "owner API" in client.get("/api/admin/v1/sessions", headers=gh).json()["detail"]
         denied = client.post("/sessions", json={"prompt": "hello"}, headers=gh)
         assert denied.status_code == 403 and "read-only" in denied.json()["detail"]
         assert client.put("/profile", json={"emoji": "🚀"}, headers=gh).status_code == 403

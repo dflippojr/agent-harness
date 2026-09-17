@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -149,6 +149,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def guard(request: Request, call_next):
         m: Manager = request.app.state.manager
         cfg = m.cfg
+        from .apps import cors_origin_allowed, daemon_origins, normalize_origin
         # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
         login = request.headers.get("tailscale-user-login")
         ident = access_mod.resolve_access(cfg, login)
@@ -161,17 +162,44 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         if guest_block:
             log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
             return JSONResponse({"detail": guest_block}, status_code=403)
+        raw_origin = request.headers.get("origin", "")
+        try:
+            origin = normalize_origin(raw_origin) if raw_origin else ""
+        except ValueError:
+            origin = ""
+        public_path = request.scope.get("harness_original_path", request.url.path)
+        browser_api = public_path.startswith("/api/v1") or public_path.startswith("/api/admin/v1")
+        cross_origin_api = bool(origin and origin not in daemon_origins(cfg)
+                                and browser_api and cors_origin_allowed(m, request, origin))
+        cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_api else {}
+
+        if request.method == "OPTIONS" and browser_api and raw_origin:
+            requested_method = request.headers.get("access-control-request-method", "").upper()
+            requested_headers = {h.strip().lower() for h in
+                                 request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
+            if (not cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+                    or not requested_headers <= {"authorization", "content-type", "last-event-id"}):
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+            return Response(status_code=204, headers={**cors_headers,
+                            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                            "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID",
+                            "Access-Control-Max-Age": "600"})
+
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             # Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent).
-            origin = request.headers.get("origin")
-            allowed = {cfg.public_url, f"http://127.0.0.1:{cfg.port}", f"http://localhost:{cfg.port}"}
-            if origin and origin not in allowed or request.headers.get("sec-fetch-site") == "cross-site":
+            if ((raw_origin and origin not in daemon_origins(cfg) and not cross_origin_api)
+                    or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_api)):
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        for key, value in cors_headers.items():
+            response.headers[key] = value
+        return response
 
     @app.exception_handler(HarnessError)
     async def harness_error(request: Request, exc: HarnessError):
-        return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+        return JSONResponse({"detail": str(exc), "error": {
+            "code": exc.code, "message": str(exc), "retryable": exc.status == 429 or exc.status >= 500,
+        }}, status_code=exc.status)
 
     # web app
     @app.get("/", include_in_schema=False)
@@ -187,6 +215,19 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def manifest():
         return FileResponse(WEB / "manifest.webmanifest", media_type="application/manifest+json")
 
+    @app.get("/mac-client/install.sh", include_in_schema=False)
+    async def mac_client_installer():
+        return FileResponse(Path(__file__).parent.parent / "macrunner" / "install.sh",
+                            media_type="text/x-shellscript", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/mac-client/package.tar.gz", include_in_schema=False)
+    async def mac_client_package():
+        from .mac_client import package_bytes
+        return Response(package_bytes(), media_type="application/gzip", headers={
+            "Content-Disposition": 'attachment; filename="agent-harness-mac.tar.gz"',
+            "Cache-Control": "no-cache",
+        })
+
     app.mount("/static", StaticFiles(directory=WEB), name="static")
 
     from . import apps, endpoint
@@ -196,7 +237,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     # API
     @app.get("/health")
     async def health():
-        return {"ok": True}
+        cfg = app.state.manager.cfg
+        return {"ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities()}
 
     @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
     async def metrics(request: Request):
@@ -329,6 +371,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def models_warm(request: Request):
         """Load the default model if it's asleep. The web app calls this when it opens."""
         m = mgr(request)
+        if not m.cfg.modules.local_model:
+            raise HarnessError(400, "the local model is disabled by this service profile")
         model = m.cfg.models[m.cfg.default_model]
         return {"name": model.name, "state": await m.warmer.warm(model)}
 
@@ -447,23 +491,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/sessions")
     async def list_sessions(request: Request, limit: int = 50):
         m = mgr(request)
-        out = []
-        for s in m.db.list_sessions(limit, owner_id=owner_id(request)):
-            item = m.summary(s)
-            full = m.db.get_session(s["id"])
-            user_messages = [" ".join(e["data"].get("content", "").split()) for e in m.db.events(s["id"])
-                             if e["type"] == "user_message" and e["data"].get("content", "").strip()]
-            asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
-            if len(user_messages) > 3:
-                asks += f" · {len(user_messages) - 3} more follow-up{'s' if len(user_messages) > 4 else ''}"
-            answer = " ".join((full["answer"] or "").split())
-            if answer:
-                outcome = answer[:110] + ("…" if len(answer) > 110 else "")
-                item["chat_summary"] = f"{asks} — {outcome}" if asks else outcome
-            else:
-                item["chat_summary"] = asks
-            out.append(item)
-        return out
+        return [m.list_summary(s) for s in m.db.list_sessions(limit, owner_id=owner_id(request))]
 
     @app.get("/memory")
     async def memory(request: Request):
@@ -800,4 +828,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    from . import admin
+    admin.register(app, mgr)
+    # Keep /static for installed bundled clients, while making harness/web directly deployable at a static-site root.
+    # This catch-all mount is last so daemon/API routes always win.
+    app.mount("/", StaticFiles(directory=WEB), name="web-root")
     return app

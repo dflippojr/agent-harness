@@ -95,33 +95,53 @@ def _subscription_status(name: str, cfg) -> bool:
 
 
 def local_view(manager) -> dict:
+    available = bool(manager.cfg.modules.local_model and manager.cfg.models)
     return {
-        "name": "local", "available": True, "logged_in": True, "auth": "local", "billing": "local",
+        "name": "local", "available": available, "logged_in": available, "auth": "local", "billing": "local",
         "model": manager.cfg.default_model, "effort": "",
         "limits": {}, "today": {}, "week": {}, "notice": "Runs the local model on this server.",
         "billing_warning": "", "api_key_available": False,
     }
 
 
-def view(manager, name: str, check_auth: bool = True) -> dict:
+def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
+         include_usage: bool = True) -> dict:
     cfg = manager.cfg.backends[name]
     state = manager.db.get_backend_usage(name)
     now = time.time()
     local_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     week = now - 7 * 86400
-    key_ready = bool(cfg.api_key_file and Path(cfg.api_key_file).is_file())
-    subscription = _subscription_status(name, cfg) if check_auth and cfg.auth != "api_key" else False
-    logged_in = key_ready if cfg.auth == "api_key" else subscription
-    if cfg.auth == "subscription_then_api_key":
+    provider_policy = manager.app_provider_status(app_id, name) if app_id is not None else None
+    effective_auth = cfg.auth
+    allowed = True
+    if provider_policy and provider_policy["managed"]:
+        allowed = provider_policy["allowed"]
+        effective_auth = provider_policy["policy"] if allowed else "denied"
+        key_ready = provider_policy["available"] if provider_policy["credential_source"] == "app_file" else False
+    else:
+        # An unauthenticated discovery response must not reveal whether the owner has a key file.
+        key_ready = bool(check_auth and cfg.api_key_file and Path(cfg.api_key_file).is_file())
+    subscription = (_subscription_status(name, cfg)
+                    if check_auth and effective_auth not in ("api_key", "denied") else False)
+    logged_in = key_ready if effective_auth == "api_key" else subscription
+    if effective_auth == "subscription_then_api_key":
         logged_in = subscription or key_ready
-    limits = state["data"]
+    # Machine-wide provider limits may describe another app's isolated key. Managed apps get their own
+    # rate-limit events on their sessions instead of this shared cache; public discovery gets no limit data.
+    hide_shared_limits = not include_usage or bool(provider_policy and provider_policy["managed"])
+    limits = {} if hide_shared_limits else state["data"]
+    today = manager.db.usage_tally(name, local_midnight, app_id) if include_usage else {}
+    week_tally = manager.db.usage_tally(name, week, app_id) if include_usage else {}
+    sources = manager.db.usage_by_source(name, week, app_id) if include_usage else {}
     return {
-        "name": name, "available": cfg.enabled, "logged_in": logged_in, "auth": cfg.auth,
+        "name": name, "available": cfg.enabled and allowed, "logged_in": logged_in, "auth": cfg.auth,
         "billing": cfg.billing, "model": cfg.model, "effort": cfg.effort,
-        "limits": limits, "limits_updated_at": state["updated_at"],
-        "today": manager.db.usage_tally(name, local_midnight),
-        "week": manager.db.usage_tally(name, week), "notice": notice(name, cfg, limits),
-        "billing_warning": billing_warning(cfg, limits), "api_key_available": key_ready,
+        "limits": limits, "limits_updated_at": None if hide_shared_limits else state["updated_at"],
+        "today": today, "week": week_tally, "usage_by_source": sources,
+        "provider_policy": provider_policy,
+        "notice": notice(name, cfg, limits),
+        "billing_warning": billing_warning(cfg, limits, effective_auth == "api_key"),
+        "api_key_available": key_ready,
         "popular_models": [{"id": model_id, "label": label} for model_id, label in POPULAR_MODELS.get(name, ())],
     }
 
@@ -159,6 +179,8 @@ def save_prefs(manager, name: str, model: str | None = None, effort: str | None 
     prefs = _prefs(manager)
     spec = dict(prefs.get(name) or {})
     if name == "local":
+        if not manager.cfg.modules.local_model:
+            raise ValueError("the local model is disabled by this service profile")
         if model is not None:
             model = model.strip()
             if model not in manager.cfg.models:

@@ -2,10 +2,31 @@
 
 Other applications can start agent sessions on a harness, give them context, lend them tools, and follow their progress.
 Base path: `/api/v1`, on the daemon's address (`http://127.0.0.1:8100` locally, `https://<pc>.<tailnet>.ts.net` on
-a tailnet). FastAPI also serves the machine-readable schema at `/openapi.json`.
+a tailnet). FastAPI also serves the machine-readable schema at `/openapi.json`. Machine-owner operations (schedules,
+GPU, review/push, token management, maintenance, Remote Control trust) live on [`/api/admin/v1`](admin-api.md) and
+are not part of this app contract. App tokens cannot call them.
+
+The first-party [Control Center](control-center.md) also uses this surface for ordinary session operations. A
+same-origin bundled Control Center may use its Tailscale/localhost owner identity; a separately hosted copy uses an
+origin-bound owner token. Owner-created sessions are not assigned to an app. This first-party privilege does not
+change app-token scoping: app tokens still see only their own sessions unless granted read-only `sessions:all`.
 
 A Python client lives in [`sdk/harness_client.py`](../sdk/harness_client.py) (one file, needs `httpx`), with an
 example in [`sdk/examples/shopping_list_app.py`](../sdk/examples/shopping_list_app.py).
+
+The client is the supported Python surface. It covers discovery and pairing, every session backend, initial and
+incremental context, app tools, approvals, cancellation, resumable events, provider status, and images. Call
+`Harness.validate_openapi()` during an integration check to verify that its operation and request types still match
+the daemon's live `/openapi.json`; the repository test suite performs the same check against every change.
+
+`GET /api/v1/backends` is authenticated and app-specific. Its `today`, `week`, and `usage_by_source` fields contain
+only the calling app's usage. `provider_policy` reports whether that app may use the backend, its billing policy and
+model allowlist, and whether the assigned credential source is available. It never contains a provider key, key-file
+path, or owner-only opaque reference. The unauthenticated discovery document at `GET /api/v1` likewise does not
+report key-file availability or usage.
+
+Machine-wide cached provider-limit data is also hidden from managed apps because it could belong to a different
+assignment. A managed app receives limits reported by its own provider process in that session's `rate_limit` events.
 
 ## Tokens and scopes
 
@@ -23,7 +44,46 @@ Create a token in **Settings → Apps** (or `POST /keys` from the PC:
 | `remote_control` | start and stop Claude Code Remote Control servers in project folders |
 
 Apps see only the sessions they created, unless they hold `sessions:all`. Errors are `{"detail": "..."}`, with 401
-(bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual.
+(bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual. Harness-generated errors also
+include `error: {code, message, retryable}`; `detail` remains for compatibility. The SDK exposes these as
+`HarnessError.code`, `.detail`, and `.retryable`.
+
+## Pair a separately hosted browser app
+
+Do not paste a long-lived app token into a browser URL. In **Settings → Apps → Pair browser app**, the owner enters
+the client's exact origin (for example `https://control.example`) and scopes, then approves a bootstrap code. The
+code expires after 10 minutes, works once, and can only be redeemed from that exact `Origin`. Browser origins must
+use HTTPS; HTTP is accepted only for loopback development (`localhost`, `127.0.0.1`, or `[::1]`):
+
+```js
+const paired = await fetch(`${daemon}/api/v1/pair`, {
+  method: "POST",
+  headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({code}),
+}).then((r) => r.json());
+const token = paired.token;
+```
+
+The resulting `ha-...` credential is scoped, revocable, and bound to the approved origin. It is an Agent Harness app
+credential, never a Claude, Codex, Cursor, or other provider credential. Keep it out of URLs and logs; send it in
+`Authorization: Bearer ...`. The daemon emits `Access-Control-Allow-Origin` only for the exact paired origin, never
+uses wildcard CORS, and does not allow credentials/cookies. This means ordinary browser mutations cannot ride ambient
+cookies as CSRF. A non-browser client can continue to use the same bearer API without an `Origin` header.
+
+For native `EventSource`, first mint a short-lived stream ticket with the bearer credential:
+
+```js
+const stream = await fetch(`${daemon}/api/v1/sessions/${sid}/events/ticket`, {
+  method: "POST",
+  headers: {Authorization: `Bearer ${token}`},
+}).then((r) => r.json());
+const events = new EventSource(`${daemon}${stream.events_url}`);
+```
+
+The ticket is valid for 60 seconds to establish or briefly reconnect the stream, and is bound to the app, session,
+and origin. It contains no bearer/provider credential, is stored only as a hash, and stops working immediately if the
+app is revoked. Track the latest event `seq`. After a long iOS suspension, close the old `EventSource`, mint a fresh
+ticket, and reconnect with `&after=<last-seq>`; normal short reconnects also resume via `Last-Event-ID`.
 
 ## Quick start (Python)
 
@@ -44,10 +104,18 @@ result = h.run("Read the context and save the three most important follow-ups as
 print(result.status, result.answer, notes)
 ```
 
+`Harness.pair(url, code, origin)` redeems an owner-approved browser pairing code. `capabilities()` and `backends()`
+discover what a daemon can run; pass `backend="claude"`, `"codex"`, or `"cursor"` to `run()` / `create_session()`
+instead of the default `"local"`. `pending_approvals()` / `decide_approval()` expose native provider permission
+requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and `.failure` normalize run outcomes.
+
 ## Endpoints
 
 ### `GET /api/v1`
-Server info: API version, scopes, projects, models, and enabled features. Doesn't need a token.
+Server info: API version, scopes, projects, models, hosted backends, enabled features, and `capabilities`. The
+capability object identifies the `full` or `service` profile, always-on daemon facilities, and effective optional
+modules. It contains no credentials and doesn't need a token. `GET /health` exposes the same capability object for
+lightweight discovery.
 
 ### `POST /api/v1/sessions`  (scope `sessions`)
 
@@ -84,6 +152,13 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
 List (newest first, `?limit=`) or read. Statuses: `queued`, `running`, `waiting_approval`, `waiting_target`,
 `waiting_app`, `done`, `failed`, `cancelled`.
 
+Every provider uses the same session totals (`turns`, `prompt_tokens`, `completion_tokens`, `total_cost_usd`). A
+failed session has `failure: {code, provider, message, retryable}`. Provider startup/transport failures use
+`provider_unavailable`, missing provider credentials use `provider_auth_required`, and a rejected provider turn uses
+`provider_error`. Local model, workspace, quota, and internal failures use the same object with their corresponding
+codes. The original `stop_reason` remains for compatibility. `rate_limit`, `billing_warning`, and `error` events use
+provider-neutral envelopes; provider-specific raw limit fields may be included additively in `data`.
+
 ### `GET /api/v1/sessions/{id}/events?after=0&follow=true`
 Server-sent events. Each event has `seq` (resume with `after=` or `Last-Event-ID`), `type`, `ts`, and `data`. Token
 deltas (`delta`) and queue moves have `seq: null` and aren't replayed. Types an app usually handles:
@@ -96,6 +171,13 @@ deltas (`delta`) and queue moves have `seq: null` and aren't replayed. Types an 
 | `approval_requested` | `id`, `tool`, `args`, `reason`: the user (or an app with `approvals`) must decide |
 | `status` | `status`, and for the end `stop_reason`, `answer` |
 | `run_finished` | the run ended; the session may continue if you send a message |
+
+Persisted events are committed and delivered in increasing `seq` order. A stream subscribes before replaying the
+database and suppresses duplicate sequence numbers, so events committed during reconnect are not lost. `after=N`
+replays exactly persisted events with `seq > N`; reconnect with the largest sequence actually processed. Ephemeral
+events (`seq: null`) are best-effort UI hints and may be missed or repeated across reconnects. Within one run the
+usual durable order is `session_created` / `user_message`, status changes, assistant/tool/approval events, a terminal
+`status`, then `run_finished`. A follow-up begins another status-to-`run_finished` run in the same session.
 
 ### `GET /api/v1/sessions/{id}/tool_calls?status=pending`
 Calls waiting for your app. Use it after a reconnect instead of relying on events alone.
@@ -158,8 +240,8 @@ signs in once, on their own machine, through the provider's own login flow.
   users through one person's subscription.
 - **Usage is visible.** The daemon reports rate-limit state, and a running tally of programmatic usage, through this
   API and the web app. It warns when that usage is billed from separate credits instead of subscription limits.
-- **API keys are optional and configurable.** An Anthropic, OpenAI or Cursor API key, supplied by the user or by the app
-  builder, can be the default backend or the fallback when subscription limits are hit.
+- **API keys are optional and configurable.** An Anthropic, OpenAI or Cursor API key can be the machine default, or
+  the owner can assign an isolated key file and billing policy to one app. Apps never submit or retrieve those keys.
 
 ### Why this is a grey area
 
@@ -221,3 +303,9 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | --- | --- | --- |
 | 1.0 | 2026-09-15 | First release: sessions, context, app tools, events, approvals, images, scoped tokens |
 | 1.1 | 2026-09-15 | `remote_control` scope and endpoints; `ungrounded_quotes` in `run_finished` and as an event |
+| 1.2 | 2026-09-16 | Exact-origin browser pairing/CORS and short-lived authenticated SSE stream tickets |
+| 1.3 | 2026-09-16 | First-party Control Center owner identity/token support for ordinary session operations |
+| 1.4 | 2026-09-16 | Daemon profile and optional-module capability discovery |
+| 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
+| 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
+| 1.7 | 2026-09-16 | Native Mac bootstrap pairing and capability discovery (owner-approved, not an app SDK operation) |

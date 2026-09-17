@@ -5,7 +5,7 @@ Connects outbound to the daemon on the tower over the tailnet, long-polls for to
 target this machine, and runs them: file tools directly on the session workspace, shell commands natively under
 sandbox-exec (see sandbox.sb), and git work on the user's source repositories outside the sandbox.
 
-Stdlib only, Python 3.9 (the Command Line Tools python3). Installed by ops/macbook/deploy.ps1 as a launchd agent.
+Stdlib-only runner, installed with the Mac client package (or legacy SSH deploy) as a launchd agent.
 Layout under ~/.agent-harness:
     runner/config.json   server URL, runner name and bearer token (unreadable inside the sandbox)
     runner/app/          this file, sandbox.sb, and the daemon's shared modules under harness/

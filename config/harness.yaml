@@ -1,4 +1,6 @@
 # Harness daemon settings. Paths use forward slashes; they work on Windows.
+# The installer keeps the selected full/service profile and module switches in profile.yaml. Keeping that small
+# overlay separate makes profile changes reversible without rewriting the machine-specific settings below.
 listen:
   host: 127.0.0.1        # published on the tailnet by `tailscale serve` (ops/tailscale/serve.ps1); never bind wider
   port: 8100
@@ -15,6 +17,13 @@ guests: []
 # guests:
 #   - login: buddy@example.com
 #     until: "2026-09-16T22:00:00-04:00"
+
+# Optional API-key files for individual apps. Configure these in harness.local.yaml with opaque names; the owner
+# assigns a name through /api/admin/v1/provider-credentials. File paths stay in local config, plaintext stays in the
+# file, and neither is stored in SQLite or returned by an API. Restrict each file to the daemon's OS account.
+provider_secret_files: {}
+# provider_secret_files:
+#   invoice-automation: D:/Agents/harness/secrets/invoice-automation.key
 
 notify:
   enabled: true
