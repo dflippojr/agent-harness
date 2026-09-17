@@ -22,6 +22,8 @@ def run_installer(tmp_path: Path, platform: str, arch: str, *args: str) -> subpr
         **os.environ,
         "HARNESS_INSTALLER_OS": platform,
         "HARNESS_INSTALLER_ARCH": arch,
+        # Exercise compatibility mode in CI; the live exit test uses Apple's Bash 3.2.
+        "BASH_COMPAT": "3.2" if platform == "Darwin" else os.environ.get("BASH_COMPAT", ""),
     }
     return subprocess.run(
         [BASH, "install/install.sh", "--install-dir", str(tmp_path / "install"), "--dry-run", *args],
@@ -100,3 +102,10 @@ def test_unix_hosted_provider_login_matches_isolation_contract():
     assert '"harness-auth-$backend"' in text
     assert '"harness-egress-$backend"' in text
     assert "HTTPS_PROXY=" in text
+
+
+def test_macos_launchd_has_docker_path_and_installer_waits_for_daemon():
+    installer = (ROOT / "install/install.sh").read_text(encoding="utf-8")
+    assert "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" in installer
+    assert 'curl -fsS "http://127.0.0.1:$port/health"' in installer
+    assert "daemon did not become ready within 60 seconds" in installer

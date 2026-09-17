@@ -99,14 +99,17 @@ fi
 contains_module() {
     case ",$enable_modules," in *",$1,"*) return 0 ;; *) return 1 ;; esac
 }
-IFS=, read -r -a requested_modules <<<"$enable_modules"
-for requested_module in "${requested_modules[@]}"; do
-    [[ -z $requested_module ]] && continue
-    case "$requested_module" in
-        local_model|homelab|memory_library|images|jobs|gpu_guard|runners|remote_control|web|search|endpoint|notifications|backup) ;;
-        *) echo "unknown module: $requested_module" >&2; exit 64 ;;
-    esac
-done
+requested_modules=()
+if [[ -n $enable_modules ]]; then
+    IFS=, read -r -a requested_modules <<<"$enable_modules"
+    for requested_module in "${requested_modules[@]}"; do
+        [[ -z $requested_module ]] && continue
+        case "$requested_module" in
+            local_model|homelab|memory_library|images|jobs|gpu_guard|runners|remote_control|web|search|endpoint|notifications|backup) ;;
+            *) echo "unknown module: $requested_module" >&2; exit 64 ;;
+        esac
+    done
+fi
 needs_local=0
 [[ $profile == full ]] && needs_local=1
 contains_module local_model && needs_local=1
@@ -271,7 +274,11 @@ else
     mkdir -p "$config_dir" "$data_dir" "$log_dir" "$bin_dir"
     config_args=(-m harness.setup_config --config-dir "$config_dir" --data-dir "$data_dir" --model "$model"
         --profile "$profile" --port "$port" --llama-url "$server_url" --pause-flag "$pause_flag")
-    for module in "${requested_modules[@]}"; do [[ -n $module ]] && config_args+=(--enable-module "$module"); done
+    if [[ -n $enable_modules ]]; then
+        for module in "${requested_modules[@]}"; do
+            [[ -n $module ]] && config_args+=(--enable-module "$module")
+        done
+    fi
     [[ -n $existing_server || $needs_local -eq 0 ]] && config_args+=(--no-gpu-guard)
     [[ $force -eq 1 ]] && config_args+=(--force)
     (cd "$app_dir" && "$python" "${config_args[@]}")
@@ -344,6 +351,9 @@ EOF
     <string>$(xml_escape "$python")</string><string>$(xml_escape "$log_dir")</string>
   </array>
   <key>WorkingDirectory</key><string>$(xml_escape "$app_dir")</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$(xml_escape "$log_dir/launchd.log")</string>
   <key>StandardErrorPath</key><string>$(xml_escape "$log_dir/launchd.log")</string>
@@ -358,6 +368,21 @@ step "Checking the install"
 if [[ $dry_run -eq 1 ]]; then
     info "[dry run] skipped python -m harness.doctor"
 else
+    if [[ $no_start -eq 0 ]]; then
+        daemon_ready=0
+        for attempt in {1..30}; do
+            if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+                daemon_ready=1
+                break
+            fi
+            sleep 2
+        done
+        if [[ $daemon_ready -eq 1 ]]; then
+            info "daemon ready on port $port"
+        else
+            info "daemon did not become ready within 60 seconds; doctor will report details"
+        fi
+    fi
     doctor_args=(-m harness.doctor --config-dir "$config_dir")
     [[ $no_start -eq 0 ]] && doctor_args+=(--instance "$instance")
     [[ -n $existing_server || $needs_local -eq 0 ]] && doctor_args+=(--existing-server)
