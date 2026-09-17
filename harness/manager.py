@@ -76,6 +76,19 @@ class Manager:
         from .apps import AppToolBroker
         self.app_tools = AppToolBroker(self.db, self.bus)
         self.runner.app_tools = self.app_tools
+        self.skills = None
+        if cfg.skills.enabled:
+            from .skill_review import SkillReviewer
+            from .skills import SkillStore
+            reviewer = SkillReviewer(
+                cfg.skills, self.db, idle=self._skills_idle,
+                model=cfg.models.get(cfg.default_model) if cfg.modules.local_model else None,
+                chat=chat,
+                hosted_chat=self._hosted_skill_review if cfg.skills.reviewer_base_url else None,
+                local_review=cfg.skills.local_review and cfg.profile == "full" and cfg.modules.local_model,
+            )
+            self.skills = SkillStore(cfg.skills, self.db, cfg.data_dir, cfg.sandbox.image, reviewer=reviewer)
+            self.runner.skills = self.skills
         if cfg.memory_library.enabled:
             from .memory_library import MemoryLibrary
             self.runner.memory = MemoryLibrary(cfg.memory_library, db=self.db)
@@ -143,6 +156,36 @@ class Manager:
         s = self.db.get_session(sid)
         return bool(s) and s["status"] in ACTIVE
 
+    def _skills_idle(self) -> bool:
+        """True only when the GPU scheduler, inference gate, image queue, and GPU guard are all idle."""
+        sch = self.scheduler
+        if sch.holder or sch.paused or sch._waiters:
+            return False
+        if self.runner.generating or self.runner.gate.busy or self.runner.gate.exclusive:
+            return False
+        if self.images is not None and (self.images.gpu_taken or self.images.phase != "idle"):
+            return False
+        if self.guard is not None and (self.guard.active or self.guard.manual):
+            return False
+        return True
+
+    async def _hosted_skill_review(self, messages: list[dict]):
+        """Owner-triggered hosted review only. Never used for silent background Qwen work."""
+        from .llm import Completion
+        import httpx
+        cfg = self.cfg.skills
+        headers = {}
+        if cfg.reviewer_api_key_file:
+            key_path = Path(cfg.reviewer_api_key_file)
+            headers["Authorization"] = "Bearer " + key_path.read_text(encoding="utf-8").strip()
+        url = cfg.reviewer_base_url.rstrip("/") + "/v1/chat/completions"
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(url, json={"model": cfg.reviewer_model, "messages": messages, "max_tokens": 1200},
+                                     headers=headers)
+            resp.raise_for_status()
+            content = (((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+        return Completion(content=content)
+
     def _keep_awake(self, target: str) -> bool:
         """A runner holds off idle sleep while one of its sessions is actually running."""
         return any(s["target"] == target for s in self.db.sessions_with_status("running"))
@@ -167,12 +210,18 @@ class Manager:
             self._spawn(s["id"], recovered=True)
         if self.jobs is not None:
             self.jobs.start()
+        if self.skills is not None:
+            self.skills.reconcile()
+            if self.skills.reviewer is not None:
+                self.skills.reviewer.start()
 
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
         self.hub.close()
         if self.jobs is not None:
             await self.jobs.stop()
+        if self.skills is not None and self.skills.reviewer is not None:
+            await self.skills.reviewer.stop()
         tasks = list(self.tasks.values())
         for task in tasks:
             task.cancel()
@@ -215,7 +264,8 @@ class Manager:
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
                backend: str = "local",
                title: str | None = None, app: dict | None = None, app_context: str = "", app_tools: list | None = None,
-               app_metadata: dict | None = None, job_id: str = "", owner_id: str = "owner") -> dict:
+               app_metadata: dict | None = None, job_id: str = "", owner_id: str = "owner",
+               skills: list[str] | None = None, skill_missing: str = "error") -> dict:
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
         if project not in self.cfg.projects:
@@ -314,9 +364,10 @@ class Manager:
             from .apps import validate_tools
             from . import homelab, images, memory_library, remote_control, search, web_tools
             from .tools import tool_schemas
+            from .skills import TOOLS as SKILL_TOOLS
             reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS) | set(images.TOOLS)
                         | set(memory_library.TOOLS) | set(web_tools.TOOLS) | set(search.TOOLS)
-                        | set(remote_control.TOOLS))
+                        | set(remote_control.TOOLS) | set(SKILL_TOOLS))
             try:
                 tools = validate_tools(app_tools, reserved)
             except ValueError as e:
@@ -326,6 +377,19 @@ class Manager:
         instructions = spec.instructions.strip()
         if instructions:
             system += f"\n\nProject instructions ({project}):\n{instructions}"
+        frozen = []
+        session_meta = {"app_id": app["id"] if app else "", "job_id": job_id or "", "owner_id": owner_id,
+                        "app_metadata": app_metadata or {}}
+        if self.skills is not None:
+            from .skills import SKILLS_TOOL_PROMPT, SkillError, skill_instructions
+            try:
+                frozen = self.skills.resolve_for_session(project, skills or [], session_meta, missing=skill_missing)
+            except SkillError as e:
+                raise HarnessError(e.status, str(e)) from e
+            if frozen:
+                system += "\n\n" + skill_instructions(frozen)
+            if self.skills.can_propose(session_meta):
+                system += "\n\n" + SKILLS_TOOL_PROMPT
         now = time.time()
         first_line = prompt.strip().splitlines()[0]
         session = {
@@ -338,13 +402,15 @@ class Manager:
             "inbox": [], "branch": branch,
             "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
             "job_id": job_id, "owner_id": owner_id,
+            "skills": self.skills.freeze_public(frozen) if self.skills is not None else [],
         }
         with self.db.tx():
             self.db.insert_session(session)
             self.bus.emit(sid, "session_created", {**{k: session[k] for k in
                                                        ("project", "target", "model", "backend", "title")},
                                                    **({"app": app["name"], "app_tools": [t["name"] for t in tools]}
-                                                      if app else {}), **({"job_id": job_id} if job_id else {})})
+                                                      if app else {}), **({"job_id": job_id} if job_id else {}),
+                                                   **({"skills": session["skills"]} if session["skills"] else {})})
             self.bus.emit(sid, "user_message", {"content": prompt})
         self._spawn(sid)
         return self.db.get_session(sid)
@@ -385,7 +451,9 @@ class Manager:
         backend = s.get("backend", "local")
         model = s["model"] if backend != "local" or s["model"] in self.cfg.models else None
         return self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
-                           model=model, backend=backend, title=s["title"], owner_id=s.get("owner_id", "owner"))
+                           model=model, backend=backend, title=s["title"], owner_id=s.get("owner_id", "owner"),
+                           skills=[item["slug"] for item in (s.get("skills") or []) if item.get("slug")],
+                           skill_missing="skip")
 
     async def remote(self, s: dict, op: str, params: dict, timeout: float = 300):
         """A request to a session's runner from a user action: fails fast instead of waiting for a sleeping Mac."""

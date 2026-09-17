@@ -166,4 +166,14 @@ def render(m: Manager) -> str:
         pass
     active = sum(by_status.get(s, 0) for s in ACTIVE)
     out.metric("harness_sessions_active", "gauge", "Sessions not yet finished.", [({}, active)])
+    with db.lock:
+        skill_proposals = dict(db.conn.execute("SELECT status, COUNT(*) FROM skill_proposals GROUP BY status").fetchall())
+        skill_installed = db.conn.execute("SELECT COUNT(*), COALESCE(SUM(enabled), 0) FROM skill_installed").fetchone()
+        skill_reviews = dict(db.conn.execute("SELECT status, COUNT(*) FROM skill_review_jobs GROUP BY status").fetchall())
+    out.metric("harness_skill_proposals", "gauge", "Skill proposals by status.",
+               [({"status": st}, n) for st, n in skill_proposals.items()])
+    out.metric("harness_skills_installed", "gauge", "Installed instruction skills.",
+               [({"enabled": "true"}, skill_installed[1] or 0), ({"enabled": "false"}, (skill_installed[0] or 0) - (skill_installed[1] or 0))])
+    out.metric("harness_skill_reviews", "gauge", "Advisory skill reviews by status.",
+               [({"status": st}, n) for st, n in skill_reviews.items()])
     return "\n".join(out.lines) + "\n"

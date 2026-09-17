@@ -34,7 +34,7 @@ GPU, jobs, image, memory, runner, or other optional routes are usable.
 ## Optional modules
 
 All optional modules default off in the service profile: `local_model`, `homelab`, `memory_library`, `images`,
-`jobs`, `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, and `backup`.
+`jobs`, `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, `backup`, and `skills`.
 Opt in during install with `-EnableModules jobs,backup`. The `endpoint`, `images`, and `gpu_guard` modules depend on
 `local_model`; the installer enables it automatically and applies the full GPU/model checks.
 

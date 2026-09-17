@@ -55,6 +55,7 @@ same; only the prefix and the owner credential check are new.
 | Images | `/images`, `/images/warmup`, `/images/cooldown` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
 | Memory | `/memory`, `/memory/profile` |
+| Skills | `/skills`, `/skills/enabled`, `/skills/proposals/{pid}`, install/reject/reopen/review, `/skills/{slug}/enable`, disable, rollback, uninstall, projects, export |
 | Notifications | `/notify/test` |
 | Remote Control | `/remote-control`, launch/stop, `/remote-control/{project}/trust` |
 

@@ -192,6 +192,18 @@ jobs:
   enabled: true
   poll_seconds: 30
 
+# Instruction-only skills (harness/skills.py): agents may stage a draft SKILL.md for the owner to review. Installation
+# is an explicit owner approval of an exact content hash; new skills stay disabled until the owner enables them for a
+# project allowlist or a New task. Skills never add tools, change approvals, or expand access. Hosted review never
+# runs unless the owner starts it (skills.reviewer_base_url / reviewer_model).
+skills:
+  enabled: true
+  local_review: true
+  proposal_rate_per_hour: 8
+  reviewer_base_url: ""
+  reviewer_model: ""
+  reviewer_api_key_file: ""
+
 # Claude Code Remote Control servers (harness/remote_control.py): Settings -> Claude Remote Control, the app API
 # (/api/v1/remote-control, scope remote_control), and the agent tool open_claude_remote_control (always asks). Each
 # server runs the unmodified `claude remote-control` in a tower project's folder; sessions opened from the Claude app

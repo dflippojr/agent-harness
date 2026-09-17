@@ -82,6 +82,7 @@ def build(args) -> dict:
         "memory_library": {"enabled": "memory_library" in enabled},
         "search": {"enabled": "search" in enabled},
         "jobs": {"enabled": "jobs" in enabled},
+        "skills": {"enabled": args.profile == "full" or "skills" in enabled},
         "remote_control": {"enabled": "remote_control" in enabled},
     }
     if args.profile == "service":
