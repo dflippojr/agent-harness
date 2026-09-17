@@ -23,8 +23,9 @@ in their URLs.
 
 ## Use a separately hosted copy
 
-1. Serve the contents of `harness/web` at the root of an HTTPS origin. Loopback HTTP is also accepted for local
-   development.
+1. Serve the contents of `harness/web` at the root of an HTTPS origin (with `index.html` as the root document).
+   Loopback HTTP is also accepted for local development. The asset URLs are root-relative, so deploy this directory
+   at the origin root rather than below a path prefix.
 2. In the daemon-bundled Control Center, open **Settings → Connection**.
 3. Under **Authorize another Control Center**, enter the separate site's exact origin (scheme, host, and optional
    port) and create a token. Copy the `ho-…` token when shown; only its hash is stored by the daemon.
@@ -36,4 +37,3 @@ requests are allowed only for an origin present on a live key, and the owner API
 token is an owner token approved for that same origin.
 
 The service worker caches only the static shell. API responses, streams, images, and transcripts are never cached.
-

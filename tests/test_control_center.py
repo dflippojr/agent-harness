@@ -29,7 +29,9 @@ def test_bundled_control_center_dogfoods_app_api_without_becoming_an_app(tmp_pat
         assert created.status_code == 201
         sid = created.json()["id"]
         assert manager.db.get_session(sid)["app_id"] == ""
-        assert client.get("/api/v1/sessions").json()[0]["id"] == sid
+        listed = client.get("/api/v1/sessions").json()[0]
+        assert listed["id"] == sid
+        assert listed["chat_summary"] == "from bundled control center — done"
         assert client.get(f"/api/v1/sessions/{sid}").status_code == 200
         assert client.get(f"/api/v1/sessions/{sid}/events?follow=false").status_code == 200
 
@@ -115,4 +117,14 @@ def test_control_center_shell_includes_transport_module():
     worker = (web / "sw.js").read_text(encoding="utf-8")
     assert 'from "./client.mjs"' in app
     assert '"/api/v1"' in client and '"/api/admin/v1"' in client
-    assert "/static/client.mjs" in worker
+    index = (web / "index.html").read_text(encoding="utf-8")
+    assert 'src="/app.js"' in index and 'href="/style.css"' in index
+    assert '"/client.mjs"' in worker
+
+
+def test_control_center_assets_work_at_static_root_and_compatibility_alias(tmp_path):
+    client, _ = make_client(tmp_path)
+    with client:
+        for path in ("/app.js", "/client.mjs", "/style.css", "/static/app.js"):
+            response = client.get(path)
+            assert response.status_code == 200

@@ -385,7 +385,7 @@ def register(app: FastAPI, mgr) -> None:
         rows = m.db.list_sessions(limit * 5)
         mine = [r for r in rows if owner_key(key) or "sessions:all" in key["scope_set"]
                 or r.get("app_id") == key["id"]][:limit]
-        return [m.summary(r) for r in mine]
+        return [m.list_summary(r) for r in mine]
 
     @app.get("/api/v1/sessions/{ref}")
     async def get_session(ref: str, request: Request):
