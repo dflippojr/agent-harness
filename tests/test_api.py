@@ -89,7 +89,9 @@ def test_web_app_and_guard(tmp_path):
         assert 'await startWarmup().catch(() => {})' in js
         assert "updateImageStatusView(phase, d.status)" in js
         assert "grid.dataset.keys" in js
-        assert "Sampling ${Math.round(fraction * 100)}%" in js
+        assert 'upscaling ? "Upscaling" : "Sampling"' in js
+        assert '"Upscale 2×"' in js and '"Upscale 4×"' in js
+        assert "upscale: upscale.value" in js
         assert 'href: "#/profile/account"' in js
         assert "gpuActionRow()" in js and "function gpuCard()" not in js
         assert 'h("span", {}, "Duration:")' in js and 'duration.disabled = isGuest() || !g.manual' in js

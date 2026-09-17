@@ -231,6 +231,12 @@ MIGRATIONS = [
     ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    # Issue #87: opt-in Real-ESRGAN derived images keep the original PNG unchanged.
+    ("images", "parent_id", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
+    ("images", "scale", "INTEGER NOT NULL DEFAULT 1"),
+    ("images", "upscale_model", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
 ]
@@ -593,10 +599,14 @@ class Database:
 
     # images
     def insert_image(self, job: dict) -> None:
-        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height", "seed"]
+        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height",
+                "seed", "parent_id", "operation", "scale", "upscale_model", "requested_upscale"]
+        defaults = {"session_id": "", "resolution": "auto", "parent_id": "", "operation": "generate", "scale": 1,
+                    "upscale_model": "", "requested_upscale": "none"}
+        values = [job[c] if c in job else defaults[c] for c in cols]
         with self.lock:
             self.conn.execute(f"INSERT INTO images ({','.join(cols)}, status, created_at) VALUES "
-                              f"({','.join('?' * len(cols))}, 'queued', ?)", [job[c] for c in cols] + [time.time()])
+                              f"({','.join('?' * len(cols))}, 'queued', ?)", values + [time.time()])
 
     def update_image(self, iid: str, **fields) -> None:
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -615,6 +625,23 @@ class Database:
             params = list(status)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_image_upscale(self, parent_id: str, upscale: str) -> dict | None:
+        """Return the existing derived upscale for this parent and scale, if any (including failed)."""
+        choice = str(upscale or "").strip().lower().replace("×", "x")
+        scale = 2 if choice in ("2x", "2") else 4 if choice in ("4x", "4") else 0
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM images WHERE parent_id = ? AND operation = 'upscale' AND "
+                "(requested_upscale = ? OR scale = ?) ORDER BY created_at DESC LIMIT 1",
+                (parent_id, choice, scale)).fetchone()
+        return dict(row) if row else None
+
+    def image_children(self, parent_id: str) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM images WHERE parent_id = ? ORDER BY created_at DESC", (parent_id,)).fetchall()
         return [dict(r) for r in rows]
 
     # inference endpoint keys and request log

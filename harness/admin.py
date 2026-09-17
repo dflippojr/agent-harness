@@ -49,6 +49,7 @@ ADMIN_PATHS = frozenset({
     "/images/warmup",
     "/images/cooldown",
     "/images/{iid}",
+    "/images/{iid}/upscale",
     "/gpu",
     "/gpu/{action}",
     "/remote-control",
