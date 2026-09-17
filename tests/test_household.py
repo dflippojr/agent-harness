@@ -445,6 +445,16 @@ def test_scheduler_skips_ineligible_without_reordering_eligible(tmp_path):
     asyncio.run(body())
 
 
+def test_scheduler_grants_non_session_gpu_holders(tmp_path):
+    """Image/device holders are not household sessions and must not wait forever."""
+    async def body():
+        _, m = household(tmp_path)
+        await m.scheduler.acquire("images")
+        assert m.scheduler.holder == "images"
+        m.scheduler.release("images")
+    asyncio.run(body())
+
+
 def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
     client, _ = household(tmp_path)
     with client:

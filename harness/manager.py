@@ -697,13 +697,16 @@ class Manager:
     def _scheduler_eligible(self, sid: str) -> bool:
         s = self.db.get_session(sid)
         if not s:
-            return False
+            # Image/device/test holders are not household sessions; do not park them forever.
+            return True
         user_id = s.get("owner_id") or OWNER_USER_ID
         if user_id == OWNER_USER_ID:
             return True
         account = self.db.account_by_id(user_id)
         if account is None or not account.get("enabled", 1):
             return False
+        if s.get("status") == "running":
+            return True
         running = self.db.count_sessions(user_id, "running")
         return running < int(account["max_running"])
 
