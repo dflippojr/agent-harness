@@ -91,13 +91,13 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
         origin = normalize_origin(origin)
     except ValueError:
         return False
-    path = request.url.path
+    path = request.scope.get("harness_original_path", request.url.path)
     if path == "/api/v1/pair":
         return m.db.pairing_origin_active(origin)
     ticket = request.query_params.get("ticket", "")
     if ticket and m.db.stream_ticket_origin_active(ticket, origin):
         return True
-    return m.db.origin_allowed(origin)
+    return m.db.origin_allowed(origin, kind="owner" if path.startswith("/api/admin/") else None)
 
 
 def owner_key(key: dict | None) -> bool:

@@ -139,6 +139,17 @@ def require_admin(request: Request, mgr) -> dict | None:
             if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
                 raise HarnessError(403, "this owner token is not approved for this origin")
         return key
+    raw_origin = request.headers.get("origin", "")
+    if raw_origin:
+        from .apps import daemon_origins, normalize_origin
+        try:
+            origin = normalize_origin(raw_origin)
+        except ValueError as e:
+            raise HarnessError(403, str(e))
+        if origin not in daemon_origins(m.cfg):
+            raise HarnessError(401, "cross-origin browser requests require an owner token")
+    elif request.headers.get("sec-fetch-site") == "cross-site":
+        raise HarnessError(401, "cross-origin browser requests require an owner token")
     ident = getattr(request.state, "access", None)
     if ident is None:
         ident = access_mod.resolve_access(m.cfg, request.headers.get("tailscale-user-login"))

@@ -84,6 +84,30 @@ def test_manual_browser_origins_are_owner_only(tmp_path):
         assert "owner-only" in response.json()["detail"]
 
 
+def test_app_origin_cannot_use_ambient_owner_identity_on_admin_api(tmp_path):
+    client, manager = make_client(tmp_path)
+    with client:
+        manager.db.create_api_key("ordinary browser", "sessions", "app", [ORIGIN])
+        preflight = client.options("/api/admin/v1/me", headers={
+            "Origin": ORIGIN,
+            "Access-Control-Request-Method": "GET",
+        })
+        assert preflight.status_code == 403
+
+        response = client.get("/api/admin/v1/me", headers={"Origin": ORIGIN})
+        assert response.status_code == 401
+        assert "owner token" in response.json()["detail"]
+
+
+def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path):
+    client, manager = make_client(tmp_path)
+    with client:
+        manager.db.create_api_key("Control Center", "admin", "owner", [ORIGIN])
+        response = client.get("/api/admin/v1/me", headers={"Origin": ORIGIN})
+        assert response.status_code == 401
+        assert "owner token" in response.json()["detail"]
+
+
 def test_control_center_shell_includes_transport_module():
     web = Path(__file__).parents[1] / "harness" / "web"
     app = (web / "app.js").read_text(encoding="utf-8")
