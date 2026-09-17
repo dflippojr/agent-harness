@@ -153,6 +153,9 @@ The daemon only listens on localhost. To reach it from other devices, use [Tails
    in the untracked local file (`login` plus an ISO `until`), restart, and remove the entry when done.
    Guests can browse sessions, jobs and images; they cannot start tasks, approve, mint keys, or use GPU /
    Remote Control / Review. Default stays "this login is the owner."
+   To add a household member, keep an explicit `allowed_logins` owner allowlist, then use **Settings → Accounts**
+   (or `POST /api/admin/v1/accounts`) with their exact Tailscale login. Members see only their own work through
+   `/api/v1`. Creating the first member while `allowed_logins` is empty fails closed.
 5. Open the URL on the phone, then Share → Add to Home Screen.
 
 Phone notifications (approvals with Approve/Deny buttons, task finished) use a self-hosted
@@ -207,9 +210,13 @@ install/uninstall.sh --remove-files  # also remove the install directory
 
 ## Security model, briefly
 
-- One owner per install. The web app and APIs trust localhost; other devices need a tailnet login plus, for the
-  inference endpoint and app API, a key or token. Optional `guests:` entries grant time-boxed read-only Control
-  Center access to a named tailnet login without owner powers.
+- One owner per install, plus optional owner-provisioned household members and time-boxed guests. The web app
+  and APIs trust localhost as the owner; other devices need a tailnet login plus, for the inference endpoint and
+  app API, a key or token. Members authenticate only with the exact `Tailscale-User-Login` the owner stored.
+  Optional `guests:` entries grant time-boxed read-only Control Center access to a named tailnet login without
+  owner or member powers. Member data lives under `data_dir/users/<opaque-id>/`. The machine owner remains
+  inside the host/OS trust boundary and can read local storage; household isolation prevents accidental or
+  API/UI cross-account access, not a hostile administrator.
 - Agents are untrusted: shell commands run in a Docker container with only the workspace mounted and no network
   unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first.
 - Web fetches refuse private, tailnet and metadata addresses. App-provided context and web pages are marked as

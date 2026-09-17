@@ -10,13 +10,16 @@ The client does not construct unversioned daemon URLs for owner use:
 
 - ordinary session list/create/read, messages, cancellation, approval decisions, and per-session events use
   `/api/v1`;
-- owner operations such as profile, projects, search, jobs, review, GPU, maintenance, images, keys, and the global
-  event stream use `/api/admin/v1`;
+- owner operations such as profile, projects, search, jobs, review, GPU, maintenance, images, keys, household
+  accounts, and the global event stream use `/api/admin/v1`;
+- household members stay on `/api/v1` after `/me` (including their own projects, search, events, and usage);
 - unversioned routes remain daemon compatibility routes. Control Center uses them only for the existing read-only
   Tailscale guest experience, whose ambient guest identity is intentionally not an API credential.
 
-The bundled client can use same-origin localhost/Tailscale owner identity. Sessions it creates through `/api/v1`
-remain ordinary owner sessions, not app-owned sessions. An independently hosted client sends an owner bearer token.
+The bundled client can use same-origin localhost/Tailscale owner or household-member identity. Owner sessions it
+creates through `/api/v1` remain ordinary owner sessions, not app-owned sessions. Members are recognized after
+`GET /api/v1/me` and use only the account-scoped `/api/v1` surface; they do not construct `/api/admin/v1`
+requests. An independently hosted client sends an owner bearer token and is owner-only.
 Native `EventSource` uses short-lived `/api/v1` stream tickets; the owner-only global stream uses authenticated
 streaming `fetch`. Images and transcript downloads are also fetched with authorization rather than leaking a token
 in their URLs.

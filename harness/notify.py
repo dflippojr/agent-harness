@@ -67,11 +67,17 @@ class Notifier:
             return ""
 
     def listener(self, event: dict) -> None:
-        if self.enabled and event["type"] in WATCHED:
-            try:
-                self.queue.put_nowait(event)
-            except asyncio.QueueFull:
-                log.warning("notification queue full; dropping %s", event["type"])
+        if not self.enabled or event["type"] not in WATCHED:
+            return
+        sid = event.get("session_id")
+        if sid:
+            session = self.db.get_session(sid)
+            if session and (session.get("owner_id") or "owner") != "owner":
+                return  # household members do not receive owner ntfy notifications
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            log.warning("notification queue full; dropping %s", event["type"])
 
     def send(self, payload: dict) -> None:
         """Queue a ready-made notification that isn't about a session event (e.g. a finished image)."""
@@ -127,6 +133,8 @@ class Notifier:
         sid, d = event["session_id"], event["data"]
         session = self.db.get_session(sid)
         if session is None:
+            return None
+        if (session.get("owner_id") or "owner") != "owner":
             return None
         title = _short(session["title"], 60)
         base = {"topic": self.cfg.notify.topic}

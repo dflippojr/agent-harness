@@ -1,0 +1,489 @@
+"""Issue #62: owner-provisioned household accounts with strict isolation."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from harness.access import resolve_access
+from harness.accounts import AccountService, DEFAULT_DISK_QUOTA_BYTES
+from harness.admin import API_VERSION as ADMIN_API_VERSION, PREFIX
+from harness.api import create_app
+from harness.apps import API_VERSION as APP_API_VERSION
+from harness.clone import CloneRefused, isolated_clone_env, public_https_url
+from harness.config import GuestAccess, Project
+from harness.db import Database
+from harness.llm import Completion
+from harness.manager import HarnessError, Manager
+from harness.principal import OWNER_USER_ID, open_owner_mode, require_owner_allowlist, resolve_human
+from harness.scheduler import GpuScheduler
+from harness.storage import ContainmentError, account_usage_bytes, contained, ensure_user_dirs, require_contained, user_root
+
+from test_daemon import Script, make_cfg
+
+OWNER = "me@example.com"
+ALICE = "alice@example.com"
+BOB = "bob@example.com"
+GUEST = "guest@example.com"
+
+
+def household(tmp_path, steps=None, guests=None) -> tuple[TestClient, Manager]:
+    cfg = make_cfg(tmp_path)
+    cfg.allowed_logins = [OWNER]
+    cfg.guests = guests or []
+    cfg.projects["lab"] = Project(name="lab", homelab=True, memory_library=True, images=True)
+    cfg.search.enabled = True
+    m = Manager(cfg, chat=Script(steps or [Completion(content="done")]))
+    return TestClient(create_app(m)), m
+
+
+def H(login: str) -> dict:
+    return {"Tailscale-User-Login": login}
+
+
+def create_member(client, login, name, **extra) -> dict:
+    body = {"login": login, "display_name": name, **extra}
+    r = client.post(f"{PREFIX}/accounts", json=body, headers=H(OWNER))
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_open_owner_legacy_only_without_members(tmp_path):
+    cfg = make_cfg(tmp_path)
+    assert cfg.allowed_logins == []
+    db = Database(cfg.db_path)
+    assert open_owner_mode(cfg, db.member_count())
+    ident = resolve_human(cfg, "anyone@example.com", db)
+    assert ident.kind == "owner" and ident.allowed
+    db.close()
+
+    cfg.allowed_logins = [OWNER]
+    db = Database(cfg.db_path)
+    m = Manager(cfg, db=db, chat=Script([Completion(content="x")]))
+    AccountService(m).create(OWNER_USER_ID, ALICE, "Alice")
+    db.close()
+
+    cfg_open = make_cfg(tmp_path)
+    cfg_open.data_dir = cfg.data_dir
+    cfg_open.allowed_logins = []
+    with pytest.raises(ValueError, match="explicit allowed_logins"):
+        require_owner_allowlist(cfg_open, 1)
+    with pytest.raises(ValueError, match="explicit allowed_logins"):
+        Manager(cfg_open, db=Database(cfg.db_path))
+
+
+def test_first_member_requires_owner_allowlist(tmp_path):
+    cfg = make_cfg(tmp_path)
+    m = Manager(cfg, chat=Script([Completion(content="x")]))
+    with pytest.raises(HarnessError) as exc:
+        AccountService(m).create(OWNER_USER_ID, ALICE, "Alice")
+    assert exc.value.status == 400
+    assert "allowlist" in str(exc.value)
+
+
+def test_migration_keeps_owner_paths_and_user_id(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        s = client.post("/sessions", json={"prompt": "hello"}, headers=H(OWNER)).json()
+        row = m.db.get_session(s["id"])
+        assert row["owner_id"] == OWNER_USER_ID
+        ws = Path(row["workspace"])
+        assert ws.parent == m.cfg.workspaces_dir
+        assert "users" not in ws.parts
+        assert client.get("/projects", headers=H(OWNER)).json()
+        names = [p["name"] for p in client.get("/projects", headers=H(OWNER)).json()]
+        assert "scratch" in names and "lab" in names
+
+
+def test_identity_precedence_and_single_role(tmp_path):
+    guests = [GuestAccess(login=GUEST, until="2099-01-01T00:00:00+00:00")]
+    client, m = household(tmp_path, guests=guests)
+    with client:
+        alice = create_member(client, ALICE, "Alice")
+        assert alice["user_id"].startswith("u-") and alice["user_id"] != OWNER_USER_ID
+        assert alice["login"] == ALICE and alice["enabled"] is True
+        assert alice["disk_quota_bytes"] == DEFAULT_DISK_QUOTA_BYTES
+        assert alice["max_running"] == 1 and alice["max_queued"] == 2
+        assert "prompt" not in alice and "repo" not in str(alice)
+
+        assert client.post(f"{PREFIX}/accounts", json={"login": OWNER, "display_name": "Nope"},
+                           headers=H(OWNER)).status_code == 400
+        assert client.post(f"{PREFIX}/accounts", json={"login": GUEST, "display_name": "Nope"},
+                           headers=H(OWNER)).status_code == 400
+        assert client.post(f"{PREFIX}/accounts", json={"login": ALICE, "display_name": "Dup"},
+                           headers=H(OWNER)).status_code == 409
+
+        owner = resolve_access(m.cfg, OWNER, m.db)
+        member = resolve_access(m.cfg, ALICE, m.db)
+        guest = resolve_access(m.cfg, GUEST, m.db)
+        unknown = resolve_access(m.cfg, "stranger@example.com", m.db)
+        local = resolve_access(m.cfg, None, m.db)
+        assert owner.kind == "owner" and owner.user_id == OWNER_USER_ID
+        assert member.kind == "member" and member.user_id == alice["user_id"] and member.bundled
+        assert guest.kind == "guest" and guest.allowed
+        assert not unknown.allowed
+        assert local.kind == "owner"
+
+        renamed = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
+                               json={"display_name": "Alicia"}, headers=H(OWNER)).json()
+        assert renamed["display_name"] == "Alicia" and renamed["user_id"] == alice["user_id"]
+        rebound = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
+                               json={"login": "alice2@example.com"}, headers=H(OWNER)).json()
+        assert rebound["login"] == "alice2@example.com" and rebound["user_id"] == alice["user_id"]
+        old = client.get("/me", headers=H(ALICE))
+        assert old.status_code == 403
+        me = client.get("/me", headers=H("alice2@example.com")).json()
+        assert me["role"] == "member" and me["user_id"] == alice["user_id"]
+
+
+def test_discovery_hides_project_names(tmp_path):
+    client, _ = household(tmp_path)
+    with client:
+        root = client.get("/api/v1").json()
+        assert root["projects"] == []
+        assert root["api_version"] == APP_API_VERSION
+        assert root["features"]["scoped_projects"] is True
+        assert "scratch" not in str(root["projects"])
+        listed = client.get("/api/v1/projects", headers=H(OWNER)).json()
+        assert any(p["name"] == "scratch" for p in listed)
+
+
+def test_two_member_adversarial_matrix(tmp_path):
+    client, m = household(tmp_path, steps=[Completion(content="secret-owner"),
+                                           Completion(content="secret-alice"),
+                                           Completion(content="secret-bob")])
+    with client:
+        alice = create_member(client, ALICE, "Alice")
+        bob = create_member(client, BOB, "Bob")
+        ah, bh = H(ALICE), H(BOB)
+        owner_s = client.post("/sessions", json={"prompt": "owner unique zebra prompt"},
+                              headers=H(OWNER)).json()
+        alice_s = client.post("/api/v1/sessions", json={"prompt": "alice unique mango prompt"},
+                              headers=ah).json()
+        bob_s = client.post("/api/v1/sessions", json={"prompt": "bob unique papaya prompt"},
+                            headers=bh).json()
+        assert owner_s["id"] != alice_s["id"] != bob_s["id"]
+        assert m.db.get_session(alice_s["id"])["owner_id"] == alice["user_id"]
+        assert Path(m.db.get_session(alice_s["id"])["workspace"]).is_relative_to(
+            user_root(m.cfg, alice["user_id"]))
+
+        def same_404(resp):
+            assert resp.status_code == 404
+            assert resp.json()["detail"] == "no session matches that id"
+
+        same_404(client.get(f"/api/v1/sessions/{owner_s['id']}", headers=ah))
+        same_404(client.get(f"/api/v1/sessions/{bob_s['id']}", headers=ah))
+        same_404(client.get(f"/api/v1/sessions/{alice_s['id']}", headers=bh))
+        same_404(client.get(f"/sessions/{alice_s['id']}", headers=H(OWNER)))
+        same_404(client.get("/api/v1/sessions/nosuchidxx", headers=ah))
+        same_404(client.get(f"/api/v1/sessions/{alice_s['id']}/transcript", headers=bh))
+        same_404(client.get(f"/api/v1/sessions/{alice_s['id']}/changes", headers=bh))
+        same_404(client.get(f"/api/v1/sessions/{alice_s['id']}/approvals", headers=bh))
+        assert client.post(f"/api/v1/sessions/{alice_s['id']}/cancel", headers=bh).status_code == 404
+        assert client.post(f"/api/v1/sessions/{alice_s['id']}/review/merge", headers=bh).status_code == 404
+
+        alice_list = client.get("/api/v1/sessions", headers=ah).json()
+        assert [s["id"] for s in alice_list] == [alice_s["id"]]
+        owner_list = client.get("/sessions", headers=H(OWNER)).json()
+        assert all(s["id"] != alice_s["id"] and s["id"] != bob_s["id"] for s in owner_list)
+        assert "mango" not in str(owner_list) and "papaya" not in str(owner_list)
+
+        q = client.get("/api/v1/search", params={"q": "mango"}, headers=ah).json()
+        assert q["results"] and all(r["id"] == alice_s["id"] for r in q["results"])
+        assert client.get("/api/v1/search", params={"q": "papaya"}, headers=ah).json()["results"] == []
+        owner_search = client.get("/search", params={"q": "mango"}, headers=H(OWNER)).json()
+        assert owner_search["results"] == []
+
+        alice_projects = client.get("/api/v1/projects", headers=ah).json()
+        assert {p["name"] for p in alice_projects} == {"scratch"}
+        created = client.post("/api/v1/projects", json={"name": "notes"}, headers=ah).json()
+        assert created["name"] == "notes" and created["target"] == "tower"
+        assert client.post("/api/v1/projects", json={"name": "notes"}, headers=bh).json()["name"] == "notes"
+        owner_names = {p["name"] for p in client.get("/projects", headers=H(OWNER)).json()}
+        assert "notes" not in owner_names
+        assert "lab" not in {p["name"] for p in client.get("/api/v1/projects", headers=ah).json()}
+
+        queue = client.get("/api/v1/queue", headers=ah).json()
+        assert all(item["session_id"] == alice_s["id"] for item in queue)
+
+        me = client.get("/api/v1/me", headers=ah).json()
+        assert me["role"] == "member" and me["user_id"] == alice["user_id"]
+        assert me["capabilities"]["admin"] is False
+        assert "secret" not in str(me)
+
+        admin = client.get(PREFIX, headers=ah)
+        assert admin.status_code == 403
+        assert "members cannot use the owner API" in admin.json()["detail"]
+        assert "accounts" not in admin.json().get("detail", "")
+        for path in (f"{PREFIX}/accounts", f"{PREFIX}/sessions", f"{PREFIX}/keys", f"{PREFIX}/gpu",
+                     f"{PREFIX}/jobs", f"{PREFIX}/maintenance", "/keys", "/jobs", "/images", "/gpu",
+                     "/memory", "/templates", "/metrics"):
+            r = client.get(path, headers=ah)
+            assert r.status_code == 403, path
+
+        app = client.post("/keys", json={"name": "shop", "kind": "app",
+                                         "scopes": ["sessions", "sessions:all", "approvals"]},
+                          headers=H(OWNER)).json()
+        device = client.post("/keys", json={"name": "zed"}, headers=H(OWNER)).json()
+        bearer = {"Authorization": f"Bearer {app['key']}"}
+        listed = client.get("/api/v1/sessions", headers=bearer).json()
+        ids = {s["id"] for s in listed}
+        assert alice_s["id"] not in ids and bob_s["id"] not in ids
+        same_404(client.get(f"/api/v1/sessions/{alice_s['id']}", headers=bearer))
+        assert client.get("/api/v1/sessions", headers={"Authorization": f"Bearer {device['key']}"}).status_code == 403
+        created_app = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "app work"})
+        assert created_app.status_code == 201
+        assert m.db.get_session(created_app.json()["id"])["owner_id"] == OWNER_USER_ID
+        assert client.post("/api/v1/projects", headers=bearer, json={"name": "from-app"}).status_code == 403
+
+        extra = [client.post("/api/v1/sessions", json={"prompt": f"alice extra {i}"}, headers=ah).json()
+                 for i in range(3)]
+        page = client.get("/api/v1/sessions", params={"limit": 2}, headers=ah).json()
+        assert len(page) == 2
+        assert all(s["id"] != bob_s["id"] and s["id"] != owner_s["id"] for s in page)
+        _ = extra
+
+
+def test_member_cannot_use_hosted_or_owner_modules(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        create_member(client, ALICE, "Alice")
+        ah = H(ALICE)
+        backends = client.get("/api/v1/backends", headers=ah).json()
+        assert [b["name"] for b in backends] == ["local"]
+        assert client.post("/api/v1/sessions", json={"prompt": "x", "backend": "claude"},
+                           headers=ah).status_code == 403
+        assert client.post("/api/v1/images", json={"prompt": "cat"}, headers=ah).status_code == 403
+        assert client.get("/api/v1/remote-control", headers=ah).status_code == 403
+        s = client.post("/api/v1/sessions", json={"prompt": "list files"}, headers=ah).json()
+        row = m.db.get_session(s["id"])
+        schemas = m.runner.tool_schemas(row, m.runner.workspace(row))
+        names = {t["function"]["name"] for t in schemas}
+        for banned in ("homelab_services", "restart_service", "memory_search", "memory_read", "memory_write",
+                       "generate_image", "remote_control_status"):
+            assert banned not in names, banned
+        assert "run_shell" in names and "session_search" in names
+
+
+def test_member_clone_allows_only_public_https(tmp_path):
+    refused = [
+        "C:/secret", r"\\server\share", "file:///tmp/repo", "git@github.com:o/r.git",
+        "ssh://git@github.com/o/r.git", "local:demo", "http://github.com/o/r",
+        "https://evil.example/o/r", "https://github.com/o/r.git:2222",
+        "https://user:pass@github.com/o/r", "https://github.com/o/r?token=1",
+        "https://github.com/o/r#frag", ".", "../etc", "https://github.com/",
+    ]
+    # urlsplit('https://github.com/o/r:2222') treats :2222 as path, not port — still unapproved if weird.
+    for url in refused:
+        with pytest.raises(CloneRefused):
+            public_https_url(url)
+    assert public_https_url("https://github.com/org/repo") == "https://github.com/org/repo"
+    assert public_https_url("https://www.gitlab.com/org/repo.git") == "https://gitlab.com/org/repo.git"
+    env = isolated_clone_env()
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["credential.helper"] if False else env["GIT_CONFIG_VALUE_0"] == ""
+
+    client, m = household(tmp_path)
+    with client:
+        create_member(client, ALICE, "Alice")
+        ah = H(ALICE)
+        for url in ("local:demo", "file:///tmp/x", "D:/Projects/x", "https://example.com/a/b"):
+            r = client.post("/api/v1/projects", json={"name": "p", "repo": url}, headers=ah)
+            assert r.status_code == 400, url
+
+        def fake_clone(url, dest, root):
+            dest.mkdir(parents=True)
+            (dest / "README.md").write_text("public\n", encoding="utf-8")
+            from harness.projects import GitResult
+            return GitResult(0, "", "")
+
+        import harness.clone as clone_mod
+        orig = clone_mod.clone_public
+        clone_mod.clone_public = fake_clone
+        try:
+            created = client.post("/api/v1/projects", json={
+                "name": "pub", "repo": "https://github.com/org/repo",
+            }, headers=ah)
+            assert created.status_code == 201, created.text
+            dest = Path(m.db.get_member_project(
+                client.get("/api/v1/me", headers=ah).json()["user_id"], "pub")["repo"])
+            assert dest.is_relative_to(user_root(m.cfg, client.get("/api/v1/me", headers=ah).json()["user_id"]))
+            assert dest.name == "pub"
+        finally:
+            clone_mod.clone_public = orig
+
+
+def test_filesystem_isolation_duplicate_slugs_and_containment(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        alice = create_member(client, ALICE, "Alice")
+        bob = create_member(client, BOB, "Bob")
+        client.post("/api/v1/projects", json={"name": "notes"}, headers=H(ALICE))
+        client.post("/api/v1/projects", json={"name": "notes"}, headers=H(BOB))
+        assert m.db.get_member_project(alice["user_id"], "notes")
+        assert m.db.get_member_project(bob["user_id"], "notes")
+        ar = user_root(m.cfg, alice["user_id"])
+        br = user_root(m.cfg, bob["user_id"])
+        assert ar != br
+        ensure_user_dirs(m.cfg, alice["user_id"])
+        inside = ar / "repos" / "notes"
+        inside.mkdir(parents=True, exist_ok=True)
+        require_contained(inside, ar)
+        with pytest.raises(ContainmentError):
+            require_contained(br, ar)
+        with pytest.raises(ContainmentError):
+            require_contained(m.cfg.data_dir / "workspaces", ar)
+        escaped = ar / ".." / ".." / "etc"
+        assert not contained(escaped, ar)
+        with pytest.raises(ContainmentError):
+            require_contained(Path("/tmp"), ar)
+
+        link = ar / "escape"
+        try:
+            link.symlink_to(m.cfg.data_dir)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        assert not contained(link, ar)
+        with pytest.raises(ContainmentError):
+            require_contained(link, ar)
+
+        if os.name == "nt":
+            junction = ar / "junc"
+            try:
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(m.cfg.data_dir)],
+                               check=True, capture_output=True)
+            except (OSError, subprocess.CalledProcessError):
+                return
+            with pytest.raises(ContainmentError):
+                require_contained(junction, ar)
+
+
+def test_quota_and_concurrency_and_disable(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        alice = create_member(client, ALICE, "Alice", disk_quota_bytes=64, max_running=1, max_queued=1)
+        ah = H(ALICE)
+        root = ensure_user_dirs(m.cfg, alice["user_id"])
+        fat = root / "artifacts" / "blob.bin"
+        fat.parent.mkdir(parents=True, exist_ok=True)
+        fat.write_bytes(b"x" * 128)
+        assert account_usage_bytes(m.cfg, alice["user_id"]) >= 64
+        refused = client.post("/api/v1/sessions", json={"prompt": "too big"}, headers=ah)
+        assert refused.status_code == 507
+
+        client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
+                     json={"disk_quota_bytes": 50 * 2**20, "max_queued": 2}, headers=H(OWNER))
+        fat.unlink()
+        now = 1_700_000_000.0
+        for i in range(2):
+            sid = f"q{i}queuedxx"
+            ws = m.cfg.data_dir / "users" / alice["user_id"] / "workspaces" / sid
+            ws.mkdir(parents=True, exist_ok=True)
+            m.db.insert_session({
+                "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
+                "title": sid, "status": "queued", "workspace": str(ws), "created_at": now, "updated_at": now,
+                "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
+            })
+        third = client.post("/api/v1/sessions", json={"prompt": "three"}, headers=ah)
+        assert third.status_code == 429
+
+        running = "runalice01"
+        rws = m.cfg.data_dir / "users" / alice["user_id"] / "workspaces" / running
+        rws.mkdir(parents=True, exist_ok=True)
+        m.db.insert_session({
+            "id": running, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
+            "title": running, "status": "running", "workspace": str(rws), "created_at": now, "updated_at": now,
+            "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
+        })
+        disabled = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
+                                json={"enabled": False}, headers=H(OWNER)).json()
+        assert disabled["enabled"] is False
+        denied = client.get("/api/v1/me", headers=ah)
+        assert denied.status_code == 403
+        assert m.db.get_session(running)["status"] == "cancelled"
+        assert rws.exists()
+        audit = client.get(f"{PREFIX}/accounts/audit", headers=H(OWNER)).json()
+        actions = {a["action"] for a in audit}
+        assert "disable" in actions and "create" in actions
+        assert all("prompt" not in (a.get("detail") or "") for a in audit)
+
+        client.patch(f"{PREFIX}/accounts/{alice['user_id']}", json={"enabled": True}, headers=H(OWNER))
+        me = client.get("/api/v1/me", headers=ah).json()
+        assert me["user_id"] == alice["user_id"]
+
+
+def test_scheduler_skips_ineligible_without_reordering_eligible(tmp_path):
+    async def body():
+        eligible = {"a": False, "b": True, "c": True}
+        order = []
+        s = GpuScheduler(eligible=lambda sid: eligible.get(sid, True))
+        await s.acquire("holder")
+
+        async def worker(sid):
+            await s.acquire(sid)
+            order.append(sid)
+            await asyncio.sleep(0.01)
+            s.release(sid)
+
+        tasks = [asyncio.create_task(worker(x)) for x in "abc"]
+        await asyncio.sleep(0.02)
+        s.release("holder")
+        await asyncio.sleep(0.05)
+        assert order == ["b", "c"]
+        tasks[0].cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        eligible["a"] = True
+        await s.acquire("a")
+        assert s.holder == "a"
+        s.release("a")
+    asyncio.run(body())
+
+
+def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
+    client, _ = household(tmp_path)
+    with client:
+        js = client.get("/static/app.js").text
+        assert "function isMember()" in js
+        assert "accountsCard" in js
+        assert "Household member" in js
+        accounts_js = js.split("async function accountsCard")[1].split("async function viewProfile")[0]
+        assert "Delete" not in accounts_js
+        create_member(client, ALICE, "Alice")
+        rows = client.get(f"{PREFIX}/accounts", headers=H(OWNER)).json()
+        assert rows[0]["display_name"] == "Alice"
+        blob = str(rows)
+        for leak in ("prompt", "transcript", "diff", "github.com"):
+            assert leak not in blob
+        assert client.get(f"{PREFIX}").json()["api_version"] == ADMIN_API_VERSION
+        assert any(op["path"] == f"{PREFIX}/accounts" for op in client.get(PREFIX).json()["operations"])
+
+
+def test_guest_stays_non_durable(tmp_path):
+    guests = [GuestAccess(login=GUEST, until="2099-01-01T00:00:00+00:00")]
+    client, m = household(tmp_path, guests=guests)
+    with client:
+        me = client.get("/me", headers=H(GUEST)).json()
+        assert me["role"] == "guest" and me["user_id"] is None
+        assert client.post("/sessions", json={"prompt": "x"}, headers=H(GUEST)).status_code == 403
+        assert m.db.member_count() == 0
+        assert client.post("/api/v1/projects", json={"name": "g"}, headers=H(GUEST)).status_code in (401, 403)
+
+
+def test_no_secrets_in_sqlite(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        create_member(client, ALICE, "Alice")
+        app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions"]},
+                          headers=H(OWNER)).json()
+        raw = m.cfg.db_path.read_bytes()
+        assert app["key"].encode() not in raw
+        assert b"Tailscale" not in raw
+        accounts = list(m.db.list_accounts())
+        assert "token" not in accounts[0]
+        assert ALICE in accounts[0]["login"]

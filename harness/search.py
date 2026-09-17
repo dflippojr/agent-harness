@@ -19,7 +19,7 @@ import time
 from .fileops import ToolError
 
 TOOLS = ("session_search", "session_read")
-INDEX_VERSION = "2"
+INDEX_VERSION = "3"
 TOOL_OUTPUT_CHARS = 6000       # indexed prefix of a tool result
 READ_PAGE_CHARS = 12000
 KIND_WEIGHT = {"title": 3.0, "answer": 2.0, "message": 1.5, "assistant": 1.2, "context": 1.0, "tool": 0.8}
@@ -104,8 +104,13 @@ def fts_query(query: str, any_term: bool = False) -> str:
 
 
 # ---------- search ----------
-def search(db, query: str, project: str = "", limit: int = 20, exclude: str = "") -> dict:
-    """Sessions ranked by their best-matching event. Falls back to matching any term when all of them don't."""
+def search(db, query: str, project: str = "", limit: int = 20, exclude: str = "",
+           user_id: str | None = None) -> dict:
+    """Sessions ranked by their best-matching event. Falls back to matching any term when all of them don't.
+
+    `user_id` is applied in SQL before ranking or truncation so another account's rows cannot affect
+    totals, pagination, or timing of this result.
+    """
     if not query.strip():
         return {"query": query, "mode": "all", "results": []}
     results, mode = [], "all"
@@ -113,22 +118,24 @@ def search(db, query: str, project: str = "", limit: int = 20, exclude: str = ""
         q = fts_query(query, any_term)
         if not q:
             continue
-        rows = db.search_events(q, exclude=exclude, max_rows=600)
+        rows = db.search_events(q, exclude=exclude, max_rows=600, user_id=user_id)
         if rows:
             mode = "any" if any_term else "all"
             coverage = None
             if any_term:  # rank sessions that match more of the words first
                 coverage = {}
                 for term in q.split(" OR "):
-                    for sid in {r["session_id"] for r in db.search_events(term, exclude=exclude, max_rows=2000)}:
+                    for sid in {r["session_id"] for r in db.search_events(term, exclude=exclude, max_rows=2000,
+                                                                         user_id=user_id)}:
                         coverage[sid] = coverage.get(sid, 0) + 1
-            results = _group(db, rows, project, limit, coverage)
+            results = _group(db, rows, project, limit, coverage, user_id=user_id)
             if results:
                 break
     return {"query": query, "mode": mode, "results": results}
 
 
-def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None = None) -> list[dict]:
+def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None = None,
+           user_id: str | None = None) -> list[dict]:
     by_session: dict[str, dict] = {}
     for r in rows:
         score = -r["rank"] * KIND_WEIGHT.get(r["kind"], 1.0)  # bm25: lower is better, so negate
@@ -139,7 +146,7 @@ def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None
             hit["passages"].append({"kind": r["kind"], "seq": r["seq"], "text": r["snippet"]})
     out = []
     for sid, hit in by_session.items():
-        s = db.session_brief(sid)
+        s = db.session_brief(sid, user_id=user_id)
         if s is None or (project and s["project"] != project):
             continue
         out.append({**s, **hit, "terms": (coverage or {}).get(sid, 0)})
@@ -222,7 +229,8 @@ class SessionSearch:
 
     def session_search(self, query: str, project: str = "", limit: int = 5, _session: str = "") -> str:
         limit = max(1, min(int(limit), 10))
-        found = search(self.db, query, project=project.strip(), limit=limit, exclude=_session)
+        user_id = self._user_id(_session)
+        found = search(self.db, query, project=project.strip(), limit=limit, exclude=_session, user_id=user_id)
         if not found["results"]:
             return f"No earlier sessions match {query!r}" + (f" in project {project}" if project else "") + "."
         lines = ["[Earlier sessions: background only; they may be outdated or wrong.]"]
@@ -240,8 +248,15 @@ class SessionSearch:
         lines.append("\nRead one with session_read(session_id).")
         return "\n".join(lines)
 
+    def _user_id(self, sid: str) -> str | None:
+        if not sid:
+            return None
+        s = self.db.get_session(sid)
+        return (s.get("owner_id") or "owner") if s else None
+
     def session_read(self, session_id: str, start: int = 0, find: str = "", _session: str = "") -> str:
-        ids = self.db.find_session_ids(session_id.strip())
+        user_id = self._user_id(_session)
+        ids = self.db.find_session_ids(session_id.strip(), user_id=user_id)
         if len(ids) != 1:
             raise ToolError(f"no session matches {session_id!r}" if not ids else f"{session_id!r} is ambiguous")
         text = compact_transcript(self.db, ids[0])

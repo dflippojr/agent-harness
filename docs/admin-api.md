@@ -43,6 +43,7 @@ same; only the prefix and the owner credential check are new.
 | Area | Paths |
 | --- | --- |
 | Identity | `/me`, `/profile` |
+| Household accounts | `/accounts`, `/accounts/{user_id}`, `/accounts/audit` |
 | Sessions | `/sessions`, `/sessions/{ref}`, messages, cancel, rerun, approvals, transcript, events |
 | Review | `/sessions/{ref}/changes`, `/sessions/{ref}/review/{action}` (`merge` \| `push` \| `discard`) |
 | Search | `/search`, `/events`, `/queue` |
@@ -59,7 +60,24 @@ same; only the prefix and the owner credential check are new.
 | Remote Control | `/remote-control`, launch/stop, `/remote-control/{project}/trust` |
 
 Not on this surface: `/api/v1` app sessions, `/v1` inference, runner `POST /runners/{name}/poll|results`,
-and ntfy `POST /a/{token}/{decision}`.
+and ntfy `POST /a/{token}/{decision}`. Household members receive **403** `members cannot use the owner API` on
+every `/api/admin/v1` path and learn no admin data from the error.
+
+## Household accounts
+
+`POST /api/admin/v1/accounts` with `login` (exact Tailscale login), `display_name`, and optional `disk_quota_bytes`,
+`max_running`, and `max_queued` creates a member immediately with an opaque `user_id`. First login does not create
+identity. `PATCH /api/admin/v1/accounts/{user_id}` can rename, rebind the login (same `user_id`, old login invalid
+immediately), disable/re-enable, or change quota and concurrency. Disable cancels that member's running and queued
+work and revokes their live streams; data stays. There is no Delete in v1.
+
+`GET /api/admin/v1/accounts` returns aggregate metadata only: display name, login, account-id hint, enabled flag,
+disk used/quota, running/queued counts, last activity, and limits. It never includes prompts, answers, filenames,
+repo URLs, diffs, or transcript excerpts. `GET /api/admin/v1/accounts/audit` is owner-only (365-day retention) and
+stores actor/target opaque ids, action, outcome, and timestamp — not prompts, diffs, tokens, or headers.
+
+The durable owner scope remains `user_id = owner`. SQLite stores non-secret account metadata only: never Tailscale
+session material, provider credentials, GitHub tokens, or Google tokens.
 
 ## Per-app provider credentials
 
@@ -143,6 +161,7 @@ runner token stays in its configured owner file and never enters SQLite, and nei
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.5 | 2026-09-17 | Owner-provisioned household members: accounts, audit, aggregate metadata, no member content |
 | 1.4 | 2026-09-16 | One-time native Mac client and runner pairing |
 | 1.3 | 2026-09-16 | Owner-managed per-app provider policy, opaque key-file references, and revocation |
 | 1.2 | 2026-09-16 | Daemon profile and optional-module capability discovery |

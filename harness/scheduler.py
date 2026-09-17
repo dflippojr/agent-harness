@@ -16,12 +16,14 @@ from typing import Callable
 
 
 class GpuScheduler:
-    def __init__(self, on_change: Callable[[dict[str, int]], None] | None = None):
+    def __init__(self, on_change: Callable[[dict[str, int]], None] | None = None,
+                 eligible: Callable[[str], bool] | None = None):
         self.holder: str | None = None
         self.paused = False
         self._waiters: OrderedDict[str, asyncio.Future] = OrderedDict()
         self._change_waiters: set[asyncio.Future] = set()
         self._on_change = on_change
+        self._eligible = eligible
 
     def positions(self) -> dict[str, int]:
         """0 = running, 1 = next, ..."""
@@ -52,9 +54,10 @@ class GpuScheduler:
         if self.holder == sid:
             return
         if self.holder is None and not self._waiters and not self.paused:
-            self.holder = sid
-            self._changed()
-            return
+            if self._eligible is None or self._eligible(sid):
+                self.holder = sid
+                self._changed()
+                return
         fut = asyncio.get_running_loop().create_future()
         self._waiters[sid] = fut
         if front:
@@ -87,12 +90,24 @@ class GpuScheduler:
     def _grant_next(self) -> None:
         if self.paused:
             return
+        skipped: OrderedDict[str, asyncio.Future] = OrderedDict()
+        granted = False
         while self._waiters:
             nxt, fut = self._waiters.popitem(last=False)
-            if not fut.done():
-                self.holder = nxt
-                fut.set_result(None)
-                break
+            if fut.done():
+                continue
+            if self._eligible is not None and not self._eligible(nxt):
+                skipped[nxt] = fut
+                continue
+            self.holder = nxt
+            fut.set_result(None)
+            granted = True
+            break
+        rest = OrderedDict(self._waiters)
+        self._waiters = OrderedDict()
+        self._waiters.update(skipped)
+        self._waiters.update(rest)
+        _ = granted
 
 
 class QueueFull(Exception):
