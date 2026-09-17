@@ -1152,7 +1152,7 @@ items:
 
   - key: client-daemon-version-skew
     kind: feature
-    title: "Version skew: Server should tolerate older components, which should offer to update"
+    title: "Version skew: Agent Harness Server should tolerate older first-party components"
     body: |
       User-reported incident (2026-09-16): an Agent Harness Server release shipped without the matching Web update,
       so endpoints stopped working until the mismatch was caught by hand. The same risk exists for the
