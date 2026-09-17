@@ -67,6 +67,11 @@ def test_web_app_and_guard(tmp_path):
         assert "paintGuestChrome" in js and "isGuest()" in js
         css = client.get("/static/style.css").text
         assert "safe-area-inset-top, 0px) + 18px" in css
+        assert "-webkit-transform: translate3d(0, 0, 0)" in css
+        assert "#bar.paint-refresh" in css and "#bar > *" in css
+        assert 'window.addEventListener("pageshow", repaintBar)' in js
+        assert 'window.addEventListener("orientationchange", repaintBar)' in js
+        assert "if (!document.hidden) repaintBar()" in js
         assert ".session-chrome" in css and ".jump-top" in css
         assert ".swatch.split" in css and ".hue-preview" in css
         assert "#fab-host" in css and "width: 9.75rem" in css

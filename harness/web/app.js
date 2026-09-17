@@ -58,6 +58,18 @@ function layoutBar() {
   document.documentElement.style.setProperty("--session-chrome-h", `${chrome ? chrome.offsetHeight : 0}px`);
 }
 
+let barPaintFrame = 0;
+let barPaintPhase = false;
+function repaintBar() {
+  cancelAnimationFrame(barPaintFrame);
+  barPaintFrame = requestAnimationFrame(() => {
+    const bar = document.getElementById("bar");
+    barPaintPhase = !barPaintPhase;
+    bar.classList.toggle("paint-refresh", barPaintPhase);
+    layoutBar();
+  });
+}
+
 function setHeader(feature, pageTitle = "", { page = false } = {}) {
   $feature.value = feature;
   $feature.hidden = page;
@@ -65,9 +77,12 @@ function setHeader(feature, pageTitle = "", { page = false } = {}) {
   $title.textContent = pageTitle;
   $title.hidden = !pageTitle;
   document.getElementById("bar").classList.toggle("page", page);
-  requestAnimationFrame(layoutBar);
+  repaintBar();
 }
-window.addEventListener("resize", layoutBar);
+window.addEventListener("resize", repaintBar);
+window.addEventListener("orientationchange", repaintBar);
+window.addEventListener("pageshow", repaintBar);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintBar(); });
 
 async function loadProfileIcon() {
   try { $profileIcon.textContent = (await api("/profile")).emoji; } catch (_) { /* offline */ }
