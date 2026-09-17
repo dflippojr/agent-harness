@@ -32,7 +32,7 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.3"
+API_VERSION = "1.4"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
@@ -352,7 +352,7 @@ def register(app: FastAPI, mgr) -> None:
         return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
                 "projects": [{"name": p.name, "description": p.description, "target": p.target}
                              for p in m.cfg.projects.values()],
-                "models": list(m.cfg.models), "backends": backends, "features": {
+                "models": list(m.cfg.models), "backends": backends, "capabilities": m.cfg.capabilities(), "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
                     "remote_control": m.remote_control is not None, "browser_pairing": True,

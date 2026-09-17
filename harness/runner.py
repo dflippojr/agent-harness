@@ -297,6 +297,8 @@ class Runner:
             if s.get("backend", "local") != "local":
                 await self._run_cli(sid, recovered=recovered)
                 return
+            if not self.cfg.modules.local_model:
+                raise CliBackendError("the local model is disabled in this service profile")
             if recovered:
                 self.bus.emit(sid, "resumed", {"status": s["status"]})
                 if (s["run"].get("executing") or {}).get("name") in ("run_shell", "git_clone"):

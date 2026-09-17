@@ -1,15 +1,16 @@
 # Installing the agent harness
 
-Run AI agents on your own Windows PC with a local model, and drive them from a browser or your phone. Agents work in
-Docker sandboxes, ask before risky actions, and never leave your machine for inference.
+Run AI agents on your own Windows PC and drive them from a browser or your phone. Use either a local model or your
+own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky actions.
 
-This iteration supports **Windows 10/11 with an NVIDIA GPU** only. Other platforms are planned.
+This iteration supports **Windows 10/11**. The full local-model profile needs an NVIDIA GPU; the hosted-provider
+service profile does not.
 
 ## Requirements
 
 | | Minimum | Tested |
 | --- | --- | --- |
-| GPU | NVIDIA, 12 GB VRAM, driver 580+ | RTX 4070 Ti Super 16 GB, driver 616.92 |
+| GPU | Service: none. Full: NVIDIA, 12 GB VRAM, driver 580+ | RTX 4070 Ti Super 16 GB, driver 616.92 |
 | RAM | 16 GB (32 GB for the Qwen model) | 32 GB DDR5 |
 | Disk | ~20 GB (gpt-oss) or ~30 GB (Qwen) free | NVMe SSD for models |
 | Software | [Docker Desktop](https://www.docker.com/products/docker-desktop/) running, [Git](https://git-scm.com/) | Docker 29.7, Git for Windows |
@@ -21,6 +22,26 @@ Models picked automatically:
 
 Both are Apache 2.0.
 
+## Hosted-provider service profile
+
+The service profile installs the daemon, Control Center, provider CLI image, and provider-specific egress proxies.
+It skips llama.cpp, model downloads, GPU checks, and every optional integration unless selected:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install\install.ps1 -Profile Service
+ops\backends\login.ps1 claude  # repeat for codex or cursor as wanted
+```
+
+Docker Desktop and at least one provider login are the operational minimum. The installer configures Claude, Codex,
+and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example
+`-EnableModules jobs,backup`. `endpoint`, `images`, and `gpu_guard` automatically opt into `local_model` and restore
+the GPU/model requirements. The complete module catalog and security boundary are in
+[`service-profile.md`](service-profile.md).
+
+On an existing install, `-Profile Service` writes only `config\profile.yaml`; it preserves `harness.yaml`, local
+overrides, paths, and secrets. Run with `-Profile Full` to restore the full profile. With no `-Profile`, upgrades
+preserve the existing choice (and use Full for a new install).
+
 ## Install
 
 ```powershell
@@ -31,18 +52,18 @@ powershell -ExecutionPolicy Bypass -File install\install.ps1
 
 No administrator rights are needed. The installer:
 
-1. checks the GPU, driver, RAM, disk, Docker and Git;
+1. checks Windows, disk, Docker and Git, plus GPU/driver/RAM for a local model;
 2. downloads [uv](https://github.com/astral-sh/uv) and creates a Python 3.12 environment;
-3. downloads llama.cpp (build b10950, CUDA 13.3) and the model;
+3. for the full profile, downloads llama.cpp (build b10950, CUDA 13.3) and the model;
 4. builds the sandbox image `agent-harness-sandbox:py312`;
 5. writes a config to `%LOCALAPPDATA%\agent-harness\config`;
-6. registers two logon tasks (`AgentHarness-Main-LlamaServer`, `AgentHarness-Main-Daemon`) and starts them;
+6. registers the daemon logon task and, when enabled, the llama-server task, then starts them;
 7. runs `python -m harness.doctor`.
 
 Downloads resume if interrupted: run the installer again. Running it again later also repairs an install and keeps your
 config (`-Force` rewrites it).
 
-Useful options: `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
+Useful options: `-Profile Service`, `-EnableModules jobs,backup`, `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
 `-LlamaDir <existing llama.cpp>`, `-Port 8100`, `-NoTasks`, `-DryRun`. See `Get-Help .\install\install.ps1 -Full`.
 
 Then open **http://127.0.0.1:8100**. The first model load takes a minute or two.

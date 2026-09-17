@@ -6,9 +6,8 @@ apps keep using [`/api/v1`](app-api.md); they cannot call this surface, even wit
 Base path: `/api/admin/v1`. Versioning is in the path (`/api/admin/v2` for breaking changes). FastAPI
 serves the machine-readable schema at `/openapi.json`.
 
-The bundled PWA still uses the unversioned operator routes (`/sessions`, `/jobs`, `/gpu`, …) until
-issue #23 migrates it. Those routes stay as a compatibility surface and keep Tailscale owner/guest
-rules. This document is the versioned owner contract.
+The bundled and separately hosted Control Center use this contract. Unversioned operator routes remain a
+compatibility surface and keep Tailscale owner/guest rules.
 
 ## Credentials
 
@@ -34,7 +33,7 @@ also checks that the presented token was approved for the request's origin. See 
 ### `GET /api/admin/v1`
 
 Requires owner credentials. Returns `api_version`, the `admin` scope description, accepted `auth`
-methods, and the versioned `operations` list (`method` + `path`).
+methods, the daemon `capabilities`, and the versioned `operations` list (`method` + `path`).
 
 ## Operations
 
@@ -90,5 +89,6 @@ loopback development and contain no path, query, fragment, or credentials.
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.2 | 2026-09-16 | Daemon profile and optional-module capability discovery |
 | 1.1 | 2026-09-16 | Origin-bound Control Center owner tokens and cross-origin browser access |
 | 1.0 | 2026-09-16 | First release: versioned owner operations, `admin` scope, owner tokens (`ho-`) |
