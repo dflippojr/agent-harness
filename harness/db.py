@@ -182,6 +182,16 @@ CREATE TABLE IF NOT EXISTS app_provider_credentials (
     created_at REAL NOT NULL,
     revoked_at REAL
 );
+CREATE TABLE IF NOT EXISTS runner_pairing_codes ( -- owner-approved Mac client + runner bootstrap codes
+    id TEXT PRIMARY KEY,
+    hash TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    runner TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    used_at REAL,
+    key_id TEXT NOT NULL DEFAULT ''
+);
 CREATE UNIQUE INDEX IF NOT EXISTS app_provider_credentials_active
 ON app_provider_credentials(app_id, backend) WHERE revoked_at IS NULL;
 -- Session search (search.py): one row per indexed event.
@@ -673,6 +683,57 @@ class Database:
             self.conn.execute("UPDATE pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
                               (now, key["id"], pairing["id"]))
         return key, secret, ""
+
+    # Native Mac client pairing is separate from browser origin pairing. The code authorizes one owner CLI token;
+    # the runner token remains in its configured owner file and never enters SQLite.
+    def create_runner_pairing_code(self, name: str, runner: str, ttl_seconds: int) -> tuple[dict, str]:
+        import hashlib
+        now = time.time()
+        code = "hrp-" + secrets.token_urlsafe(18)
+        row = {"id": "rp-" + secrets.token_hex(4), "name": name, "runner": runner,
+               "created_at": now, "expires_at": now + ttl_seconds, "used_at": None, "key_id": ""}
+        with self.lock:
+            self.conn.execute("INSERT INTO runner_pairing_codes "
+                              "(id, hash, name, runner, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                              (row["id"], hashlib.sha256(code.encode()).hexdigest(), name, runner, now,
+                               row["expires_at"]))
+        return row, code
+
+    def list_runner_pairing_codes(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id, name, runner, created_at, expires_at, used_at, key_id "
+                "FROM runner_pairing_codes ORDER BY created_at DESC LIMIT 100").fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_runner_pairing_code(self, pid: str) -> bool:
+        now = time.time()
+        with self.lock:
+            return self.conn.execute("UPDATE runner_pairing_codes SET expires_at = ? WHERE id = ? "
+                                     "AND used_at IS NULL AND expires_at > ?", (now, pid, now)).rowcount == 1
+
+    def redeem_runner_pairing_code(self, code: str) -> tuple[dict | None, dict | None, str, str]:
+        """Atomically redeem a native-client code. Returns (pairing, owner key, secret, error)."""
+        import hashlib
+        digest, now = hashlib.sha256(code.encode()).hexdigest(), time.time()
+        with self.tx():
+            pairing = self.conn.execute("SELECT * FROM runner_pairing_codes WHERE hash = ?", (digest,)).fetchone()
+            if pairing is None:
+                return None, None, "", "invalid runner pairing code"
+            if pairing["used_at"] is not None:
+                return None, None, "", "runner pairing code already used"
+            if pairing["expires_at"] <= now:
+                return None, None, "", "runner pairing code expired"
+            secret = "ho-" + secrets.token_urlsafe(32)
+            key = {"id": "k-" + secrets.token_hex(4), "name": pairing["name"], "prefix": secret[:10],
+                   "created_at": now, "scopes": "admin", "kind": "owner", "origins": []}
+            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
+                              "VALUES (?, ?, ?, ?, ?, 'admin', 'owner', '[]')",
+                              (key["id"], key["name"], key["prefix"], hashlib.sha256(secret.encode()).hexdigest(),
+                               now))
+            self.conn.execute("UPDATE runner_pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
+                              (now, key["id"], pairing["id"]))
+        return dict(pairing), key, secret, ""
 
     def origin_allowed(self, origin: str, kind: str | None = None) -> bool:
         query = "SELECT origins FROM api_keys WHERE revoked_at IS NULL"

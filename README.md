@@ -151,9 +151,11 @@ Details and verification: `docs/phase4-results.md`.
   (`macrunner/sandbox.sb`): writes limited to the workspace, temp and build caches; credentials and personal
   folders unreadable; no network unless the command was approved with `network: true`. Binary files generated on
   the tower (`generate_image`) are copied into the Mac workspace with a `put_file` op (base64 in the poll request).
-- Install or update from the tower: `.\ops\macbook\deploy.ps1 -MacHost <host> -MacUser <user>` (needs Remote Login
-  on the Mac while deploying). Daemon side: `runners:` in `config/harness.yaml`; runner side:
-  `~/.agent-harness/runner/config.json` (`repo_roots` limits which Mac repos projects may use).
+- Install or update from **Settings → Apps → Pair Mac client**. Run the one-time command on the Mac; it creates a
+  venv and `harness` command under `~/.agent-harness`, pairs without SSH or token copying, and installs the runner as
+  a launchd agent. `harness projects add ~/Projects/<repo>` extends its allowed roots; `harness runner
+  status|restart|logs` manages it locally. The older `.\ops\macbook\deploy.ps1` SSH flow remains an update fallback.
+  See `docs/mac-client.md`.
 - Sessions for an offline or sleeping Mac wait (`waiting_target`) without holding the GPU, notify, and resume when
   the runner reconnects. While a Mac session runs, the runner holds `caffeinate -i`.
 - `GET /runners` shows runner state; so does the Settings screen's Disk card.

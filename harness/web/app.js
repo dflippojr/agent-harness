@@ -2399,17 +2399,23 @@ function appsCard(me) {
   const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
   const load = async () => {
     try {
-      const [keys, pairingCodes] = await Promise.all([api("/keys"), api("/pairing-codes")]);
+      const [keys, pairingCodes, runnerPairingCodes, runners] = await Promise.all([
+        api("/keys"), api("/pairing-codes"), api("/runner-pairing-codes"), api("/runners"),
+      ]);
       const apps = keys.filter((k) => k.kind === "app" && !k.revoked_at);
       const ownerClients = keys.filter((k) => k.kind === "owner" && !k.revoked_at);
       const pending = pairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
+      const pendingRunners = runnerPairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
       const form = h("div");
       const newBtn = h("button", { class: "btn", type: "button", onclick: () => {
-        newBtn.hidden = true; pairBtn.hidden = true; showForm();
+        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showForm();
       } }, "New app");
       const pairBtn = h("button", { class: "btn", type: "button", onclick: () => {
-        newBtn.hidden = true; pairBtn.hidden = true; showPairForm();
+        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showPairForm();
       } }, "Pair browser app");
+      const macBtn = h("button", { class: "btn", type: "button", hidden: !runners.length, onclick: () => {
+        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showMacPairForm();
+      } }, "Pair Mac client");
       const showForm = () => {
         const name = h("input", { type: "text", placeholder: "App name" });
         const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
@@ -2461,6 +2467,29 @@ function appsCard(me) {
               } catch (e) { toast(e.message); }
             } }, "Approve and create code")));
       };
+      const showMacPairForm = () => {
+        const name = h("input", { type: "text", value: "Mac client", placeholder: "Client name" });
+        const runner = h("select", {}, runners.map((item) => h("option", { value: item.name }, item.name)));
+        fill(form,
+          h("p", { class: "small" }, "Create a 10-minute, one-use code. The install command sets up the harness CLI, runner, and launchd without SSH."),
+          h("label", {}, "Name"), name,
+          h("label", {}, "Runner"), runner,
+          h("div", { class: "row", style: "margin-top:10px" },
+            h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
+            h("button", { class: "btn primary", onclick: async () => {
+              if (!name.value.trim()) return toast("Name the Mac client");
+              try {
+                const p = await api("/runner-pairing-codes", { method: "POST", body: { name: name.value, runner: runner.value } });
+                const command = `curl -fsSL ${base}/mac-client/install.sh | bash -s -- --server ${base} --code ${p.code}`;
+                const field = h("input", { type: "text", readonly: true, value: command, onclick: (e) => e.target.select() });
+                fill(form,
+                  h("p", { class: "small" }, `Run this in Terminal on the Mac. The code expires in 10 minutes and works once.`), field,
+                  h("div", { class: "row", style: "margin-top:8px" },
+                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(command); toast("Copied"); } catch (_) { field.select(); } } }, "Copy install command"),
+                    h("button", { class: "btn", onclick: load }, "Done")));
+              } catch (e) { toast(e.message); }
+            } }, "Create install command")));
+      };
       fill(body,
         h("p", { class: "small" }, "An app token lets another program start and follow sessions on this daemon — a script, a bot, or a separate browser client. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
@@ -2473,11 +2502,11 @@ function appsCard(me) {
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
-        ownerClients.length ? [h("p", { class: "section-label" }, "Control Centers"),
+        ownerClients.length ? [h("p", { class: "section-label" }, "Owner clients"),
           h("ul", { class: "small" }, ownerClients.map((k) => h("li", {},
             h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
             h("button", { class: "btn small bad", onclick: async () => {
-              if (!confirm(`Revoke “${k.name}”? That Control Center will stop working.`)) return;
+              if (!confirm(`Revoke “${k.name}”? That owner client will stop working.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,
         pending.length ? h("ul", { class: "small" }, pending.map((p) => h("li", {},
@@ -2485,7 +2514,12 @@ function appsCard(me) {
           h("button", { class: "btn small bad", onclick: async () => {
             try { await api(`/pairing-codes/${p.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
           } }, "Cancel")))) : null,
-        form, h("div", { class: "row", style: "margin-top:10px" }, newBtn, pairBtn));
+        pendingRunners.length ? h("ul", { class: "small" }, pendingRunners.map((p) => h("li", {},
+          `Mac pairing pending for ${p.name} (${p.runner}) Â· expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
+          h("button", { class: "btn small bad", onclick: async () => {
+            try { await api(`/runner-pairing-codes/${p.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+          } }, "Cancel")))) : null,
+        form, h("div", { class: "row", style: "margin-top:10px" }, newBtn, pairBtn, macBtn));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();

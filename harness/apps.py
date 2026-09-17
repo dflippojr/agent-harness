@@ -32,7 +32,7 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.6"
+API_VERSION = "1.7"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
@@ -157,6 +157,16 @@ class PairRequest(BaseModel):
     code: str = Field(min_length=8, max_length=200)
 
 
+class RunnerPairingCodeRequest(BaseModel):
+    name: str = Field(default="Mac client", min_length=1, max_length=60)
+    runner: str = Field(default="macbook", min_length=1, max_length=60)
+    ttl_seconds: int = Field(default=PAIRING_TTL_SECONDS, ge=60, le=PAIRING_TTL_SECONDS)
+
+
+class RunnerPairRequest(BaseModel):
+    code: str = Field(min_length=8, max_length=200)
+
+
 class AppImageRequest(BaseModel):
     prompt: str
     model: str = "fast"
@@ -260,6 +270,14 @@ class AcceptedResponse(BaseModel):
 class PairResponse(BaseModel):
     token: str
     app: dict
+    api_version: str
+
+
+class RunnerPairResponse(BaseModel):
+    server: str
+    owner_token: str
+    owner_key: dict
+    runner: dict
     api_version: str
 
 
@@ -441,6 +459,27 @@ def register(app: FastAPI, mgr) -> None:
         if not mgr(request).db.revoke_pairing_code(pid):
             raise HarnessError(404, "no such active pairing code")
 
+    @app.get("/runner-pairing-codes")
+    async def runner_pairing_codes(request: Request):
+        """Owner view. Native pairing codes and runner tokens are never included."""
+        return mgr(request).db.list_runner_pairing_codes()
+
+    @app.post("/runner-pairing-codes", status_code=201)
+    async def create_runner_pairing_code(body: RunnerPairingCodeRequest, request: Request):
+        m = mgr(request)
+        name = body.name.strip()
+        runner = body.runner.strip()
+        if not name or not runner:
+            raise HarnessError(400, "name and runner are required")
+        row, code = m.create_runner_pairing_code(name, runner, body.ttl_seconds)
+        return JSONResponse({**row, "code": code}, status_code=201,
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+    @app.delete("/runner-pairing-codes/{pid}", status_code=204)
+    async def revoke_runner_pairing_code(pid: str, request: Request):
+        if not mgr(request).db.revoke_runner_pairing_code(pid):
+            raise HarnessError(404, "no such active runner pairing code")
+
     @app.post("/api/v1/pair", status_code=201, response_model=PairResponse)
     async def pair_browser(body: PairRequest, request: Request):
         raw_origin = request.headers.get("origin", "")
@@ -456,6 +495,15 @@ def register(app: FastAPI, mgr) -> None:
         return JSONResponse({"token": secret, "app": key, "api_version": API_VERSION}, status_code=201,
                             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
+    @app.post("/api/v1/runner-pair", status_code=201, response_model=RunnerPairResponse)
+    async def pair_runner(body: RunnerPairRequest, request: Request):
+        """Redeem an owner-approved native Mac code without browser-origin authority."""
+        paired, error = mgr(request).redeem_runner_pairing_code(body.code, str(request.base_url))
+        if paired is None:
+            raise HarnessError(400, error)
+        return JSONResponse({**paired, "api_version": API_VERSION}, status_code=201,
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
     @app.get("/api/v1", response_model=AppRootResponse)
     async def api_root(request: Request):
         m = mgr(request)
@@ -468,6 +516,7 @@ def register(app: FastAPI, mgr) -> None:
                 "models": list(m.cfg.models), "backends": backends, "capabilities": m.cfg.capabilities(), "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
+                    "runner_pairing": bool(m.cfg.runners),
                     "remote_control": m.remote_control is not None, "browser_pairing": True,
                     "stream_tickets": True}}
 
