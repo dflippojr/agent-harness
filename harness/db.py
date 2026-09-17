@@ -309,14 +309,16 @@ MIGRATIONS = [
 ]
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data", "origins",
-                "models", "skills", "references", "examples", "manifest", "static_findings", "review", "findings"}
+                "models", "skills", "references", "examples", "manifest", "static_findings", "findings"}
+# skill_proposals.review is JSON; sessions.review is a plain merge/push/discard string.
+SKILL_JSON_COLUMNS = JSON_COLUMNS | {"review"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
     out = dict(row)
-    for key in JSON_COLUMNS & out.keys():
+    for key in SKILL_JSON_COLUMNS & out.keys():
         val = out[key]
         if isinstance(val, str) and val[:1] in "{[":
             try:
@@ -943,7 +945,7 @@ class Database:
         cols = ("id", "slug", "title", "purpose", "activation_suggestion", "content_hash", "status",
                 "source_session_id", "skill_md", "references", "examples", "manifest", "static_findings",
                 "review", "review_status", "target_slug", "diff", "created_at", "updated_at")
-        values = [json.dumps(row[c]) if c in JSON_COLUMNS else row[c] for c in cols]
+        values = [json.dumps(row[c]) if c in SKILL_JSON_COLUMNS else row[c] for c in cols]
         sql_cols = [f'"{c}"' if c == "references" else c for c in cols]
         with self.lock:
             self.conn.execute(
@@ -952,7 +954,7 @@ class Database:
     def update_skill_proposal(self, pid: str, **fields) -> None:
         fields["updated_at"] = time.time()
         sets = ", ".join(f'"{k}" = ?' if k == "references" else f"{k} = ?" for k in fields)
-        values = [json.dumps(v) if k in JSON_COLUMNS else v for k, v in fields.items()]
+        values = [json.dumps(v) if k in SKILL_JSON_COLUMNS else v for k, v in fields.items()]
         with self.lock:
             self.conn.execute(f"UPDATE skill_proposals SET {sets} WHERE id = ?", [*values, pid])
 

@@ -2468,7 +2468,7 @@ async function skillsPage(pid) {
             if (!confirm("Delete this draft?")) return;
             try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
             catch (e) { toast(e.message); }
-          } }, "Delete draft")));
+          } }, "Delete draft"))));
   }
   const proposals = (data.proposals || []).map((p) => h("a", { class: "card", href: `#/profile/skills/${p.id}` },
     h("h3", {}, p.title || p.slug),
