@@ -175,7 +175,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.exception_handler(HarnessError)
     async def harness_error(request: Request, exc: HarnessError):
-        return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+        return JSONResponse({"detail": str(exc), "error": {
+            "code": exc.code, "message": str(exc), "retryable": exc.status == 429 or exc.status >= 500,
+        }}, status_code=exc.status)
 
     # web app
     @app.get("/", include_in_schema=False)
