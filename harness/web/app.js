@@ -2309,6 +2309,8 @@ function gpuActionRow() {
     h("option", { value: "1800" }, "30 minutes"),
     h("option", { value: "3600" }, "1 hour"),
     h("option", { value: "10800" }, "3 hours"));
+  const durationRow = h("label", { class: "action-subitem disabled" },
+    h("span", {}, "Duration:"), duration);
   const act = async (action) => {
     const body = action === "pause" ? { duration_seconds: duration.value ? Number(duration.value) : null } : undefined;
     try { render(await api(`/gpu/${action}`, { method: "POST", body })); } catch (e) { toast(e.message); }
@@ -2318,25 +2320,32 @@ function gpuActionRow() {
     if (!g.enabled) {
       toggle.disabled = true;
       duration.disabled = true;
+      durationRow.classList.add("disabled");
       status.textContent = "GPU guard disabled";
       return;
     }
     const now = g.signals.map((s) => s.detail);
     toggle.checked = g.manual;
     if (g.manual && g.manual_duration_seconds) duration.value = String(g.manual_duration_seconds);
+    duration.disabled = isGuest() || !g.manual;
+    durationRow.classList.toggle("disabled", duration.disabled);
     const automatic = !g.manual && g.state !== "clear" ? ` · ${gpuText(g)}` : "";
     const using = now.length ? ` · ${now.join(", ")}${g.override ? " (ignored)" : ""}` : "";
     status.textContent = `${g.manual ? gpuText(g) : "Local models available"}${automatic}${using}`;
   };
   const load = async () => { try { render(await api("/gpu")); } catch (e) { status.textContent = e.message; status.classList.add("bad"); } };
-  toggle.addEventListener("change", () => act(toggle.checked ? "pause" : "resume"));
+  toggle.addEventListener("change", () => {
+    duration.disabled = isGuest() || !toggle.checked;
+    durationRow.classList.toggle("disabled", duration.disabled);
+    act(toggle.checked ? "pause" : "resume");
+  });
   duration.addEventListener("change", () => { if (toggle.checked) act("pause"); });
   load();
   const timer = setInterval(load, 5000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "action-item" },
     h("div", { class: "action-row" }, h("div", {}, h("strong", {}, "GPU"), status), toggle),
-    h("label", { class: "action-duration" }, "Hold for", duration),
+    durationRow,
     isGuest() ? h("div", { class: "muted small" }, "Demo access cannot change GPU hold.") : null);
 }
 
