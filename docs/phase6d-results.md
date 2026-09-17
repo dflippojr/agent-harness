@@ -72,3 +72,34 @@ Live on the tower (2026-09-15):
   inside the run. Endpoint clients get 503 during a batch.
 - The fast model misspells text; ask for `quality` when words matter.
 - Generated images live in `D:\Agents\harness\images-work\images` and are not part of the nightly backup.
+
+## Optional masked editing (issue #88)
+
+Owner-only Agent Harness Web work. Fast/quality text-to-image is unchanged. The optional `image_edit` component uses
+the official Apache-2.0 **Qwen-Image-Edit** family through ComfyUI's Qwen edit graph (fp8, same RAM-streaming pattern
+as `quality`):
+
+| | |
+| --- | --- |
+| Source | [Qwen/Qwen-Image-Edit](https://huggingface.co/Qwen/Qwen-Image-Edit) (Apache 2.0) |
+| ComfyUI package | [Comfy-Org/Qwen-Image-Edit_ComfyUI](https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI) revision `7d41107b653d3039be20972fb82398b01b3213eb` |
+| Artifact | `qwen_image_edit_fp8_e4m3fn.safetensors` (20,430,635,136 bytes) |
+| SHA-256 | `393c6743d1de2e9031b5197027b36116f2096958ccc0223526d34e1860266021` |
+
+It is never downloaded during an ordinary install or daemon upgrade. Enable with `-EnableModules image_edit` after
+the installer has checked disk (~22 GB extra), 16 GB GPU, and 32 GB RAM. CLIP (`qwen_2.5_vl_7b_fp8_scaled`) and VAE
+(`qwen_image_vae`) are shared with `quality`. Missing edit weights produce setup guidance; Generate still works.
+
+Edits start from a gallery PNG or an owner PNG/JPEG/WebP upload (metadata stripped, orientation/color normalized).
+The mask editor paints white=editable / black=preserved at the source's exact pixel size. The source is never
+overwritten; the result is a new row with `parent_id`. Uploads/masks/results are owner-private (no guest or app-token
+listing, no hosted-provider upload). Delete confirms and removes only the live files for that row.
+
+### 16 GB GPU exit test (required before closing the issue)
+
+Run on the tower after the weights are installed. Record peak VRAM, peak RAM, and end-to-end time for:
+
+1. a small source (around 1024×1024)
+2. a larger source (Qwen-Image high-res envelope, e.g. 1664×928)
+
+Keep real paths, logins, tokens, and tailnet names out of public comments.

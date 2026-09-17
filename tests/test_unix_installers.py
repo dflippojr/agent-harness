@@ -94,6 +94,17 @@ def test_linux_model_supervisor_is_gpu_isolated_and_pinned():
     assert "LLAMA_BUILD=b10830" in installer
 
 
+def test_linux_image_edit_opt_in_is_documented_and_not_default(tmp_path):
+    result = run_installer(tmp_path, "Linux", "x86_64", "--profile", "full")
+    assert result.returncode == 0, result.stderr
+    assert "qwen_image_edit_fp8_e4m3fn" not in result.stdout
+    opted = run_installer(tmp_path, "Linux", "x86_64", "--profile", "service", "--enable-modules", "image_edit")
+    assert opted.returncode == 0, opted.stderr
+    assert "Qwen-Image-Edit" in opted.stdout
+    assert "393c6743d1de2e9031b5197027b36116f2096958ccc0223526d34e1860266021" in opted.stdout
+    assert "qwen_image_edit_fp8_e4m3fn.safetensors" in opted.stdout
+
+
 def test_unix_hosted_provider_login_matches_isolation_contract():
     text = (ROOT / "ops/backends/login.sh").read_text(encoding="utf-8")
     for backend in ("claude", "codex", "cursor"):

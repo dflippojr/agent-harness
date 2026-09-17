@@ -90,6 +90,10 @@ def test_web_app_and_guard(tmp_path):
         assert "updateImageStatusView(phase, d.status)" in js
         assert "grid.dataset.keys" in js
         assert "Sampling ${Math.round(fraction * 100)}%" in js
+        assert "function maskEditor" in js and "viewImageEdit" in js
+        assert "canvas.width / r.width" in js
+        assert "Independent backups are not changed" in js
+        assert ".mask-stage" in css and "touch-action: none" in css
         assert 'href: "#/profile/account"' in js
         assert "gpuActionRow()" in js and "function gpuCard()" not in js
         assert 'h("span", {}, "Duration:")' in js and 'duration.disabled = isGuest() || !g.manual' in js

@@ -52,7 +52,7 @@ same; only the prefix and the owner credential check are new.
 | Mac pairing | `/runner-pairing-codes`, `/runner-pairing-codes/{pid}` |
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
-| Images | `/images`, `/images/warmup`, `/images/cooldown` |
+| Images | `/images`, `/images/uploads`, `/images/warmup`, `/images/cooldown`, `/images/{iid}`, `/images/{iid}/edit`, `/images/{iid}/cancel` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
 | Memory | `/memory`, `/memory/profile` |
 | Notifications | `/notify/test` |
@@ -143,6 +143,7 @@ runner token stays in its configured owner file and never enters SQLite, and nei
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.5 | 2026-09-17 | Owner masked inpainting: upload, edit, cancel, and delete |
 | 1.4 | 2026-09-16 | One-time native Mac client and runner pairing |
 | 1.3 | 2026-09-16 | Owner-managed per-app provider policy, opaque key-file references, and revocation |
 | 1.2 | 2026-09-16 | Daemon profile and optional-module capability discovery |

@@ -78,7 +78,7 @@ def build(args) -> dict:
                    "dir": f"{data}/backups", "at": "03:30", "keep_days": 14},
         "endpoint": {"enabled": args.profile == "full" or "endpoint" in enabled},
         "web": {"enabled": "web" in enabled},
-        "images": {"enabled": "images" in enabled},
+        "images": {"enabled": "images" in enabled or "image_edit" in enabled},
         "memory_library": {"enabled": "memory_library" in enabled},
         "search": {"enabled": "search" in enabled},
         "jobs": {"enabled": "jobs" in enabled},
@@ -91,6 +91,8 @@ def build(args) -> dict:
 
 def profile_overlay(args) -> dict:
     enabled = dict.fromkeys(args.enable_module, True) if args.profile == "service" else {}
+    if "image_edit" in args.enable_module:
+        enabled["image_edit"] = True
     overlay = {"profile": args.profile, "modules": enabled,
                **({"backends": SERVICE_BACKENDS} if args.profile == "service" else {})}
     if args.profile == "full" or "local_model" in enabled:
@@ -120,9 +122,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true")
     args = p.parse_args(argv)
     enabled = set(args.enable_module)
-    local_dependents = enabled & {"endpoint", "images", "gpu_guard"}
+    local_dependents = enabled & {"endpoint", "images", "image_edit", "gpu_guard"}
     if local_dependents:
         enabled.add("local_model")
+    if "image_edit" in enabled:
+        enabled.add("images")
     args.enable_module = sorted(enabled)
 
     config_dir = Path(args.config_dir)

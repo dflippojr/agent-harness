@@ -231,6 +231,11 @@ MIGRATIONS = [
     ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    # Issue #88: masked edits link to a preserved parent; uploads/edits are private owner rows.
+    ("images", "parent_id", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
+    ("images", "model_revision", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "feather", "INTEGER NOT NULL DEFAULT 0"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
 ]
@@ -593,10 +598,17 @@ class Database:
 
     # images
     def insert_image(self, job: dict) -> None:
-        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height", "seed"]
+        cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height",
+                "seed", "parent_id", "operation", "model_revision", "feather"]
+        defaults = {"session_id": "", "resolution": "auto", "parent_id": "", "operation": "generate",
+                    "model_revision": "", "feather": 0}
+        status = job.get("status") or "queued"
+        created = job.get("created_at") or time.time()
         with self.lock:
-            self.conn.execute(f"INSERT INTO images ({','.join(cols)}, status, created_at) VALUES "
-                              f"({','.join('?' * len(cols))}, 'queued', ?)", [job[c] for c in cols] + [time.time()])
+            self.conn.execute(
+                f"INSERT INTO images ({','.join(cols)}, status, created_at) VALUES "
+                f"({','.join('?' * len(cols))}, ?, ?)",
+                [job[c] if c in job else defaults[c] for c in cols] + [status, created])
 
     def update_image(self, iid: str, **fields) -> None:
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -607,6 +619,10 @@ class Database:
         with self.lock:
             row = self.conn.execute("SELECT * FROM images WHERE id = ?", (iid,)).fetchone()
         return dict(row) if row else None
+
+    def delete_image(self, iid: str) -> bool:
+        with self.lock:
+            return self.conn.execute("DELETE FROM images WHERE id = ?", (iid,)).rowcount == 1
 
     def list_images(self, limit: int = 60, status: tuple = ()) -> list[dict]:
         query, params = "SELECT * FROM images", []

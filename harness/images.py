@@ -19,7 +19,9 @@ Jobs come from the phone (POST /images) and from agents (the `generate_image` to
 templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; assets agents may ship) and `quality` = Qwen-Image-2512
 (Apache 2.0, 20B fp8, best text rendering; slower, part of it runs from RAM). Inputs the workflow doesn't support
 are ignored, upscaling isn't done by default (lessons from Hermes Agent's image tool, docs/phase6a-hermes-study.md).
-Results are PNGs under data_dir/images, served by GET /images/{id}.png.
+Masked inpainting is an optional owner-only component (`image_edit`) using Qwen-Image-Edit; it does not change the
+fast/quality defaults and is skipped when those weights are absent. Results are PNGs under data_dir/images, served by
+GET /images/{id}.png.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ import httpx
 
 from .config import ImagesConfig
 from .fileops import ToolError
+from . import image_edit
 
 log = logging.getLogger("harness.images")
 
@@ -176,11 +179,15 @@ class ComfyProcess:
         log_dir = Path(self.cfg.log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         out = open(log_dir / "comfyui.log", "ab")
+        work = Path(self.cfg.work_dir)
+        for sub in ("output", "temp", "input"):
+            (work / sub).mkdir(parents=True, exist_ok=True)
         args = [str(root / "python_embeded" / "python.exe"), "-s", str(root / "ComfyUI" / "main.py"),
                 "--listen", "127.0.0.1", "--port", str(self.cfg.port), "--disable-auto-launch",
                 "--extra-model-paths-config", str(root / "ComfyUI" / "extra_model_paths.yaml"),
-                "--output-directory", str(Path(self.cfg.work_dir) / "output"),
-                "--temp-directory", str(Path(self.cfg.work_dir) / "temp")]
+                "--output-directory", str(work / "output"),
+                "--temp-directory", str(work / "temp"),
+                "--input-directory", str(work / "input")]
         log.info("starting ComfyUI")
         self.proc = subprocess.Popen(args, cwd=str(root), stdout=out, stderr=subprocess.STDOUT,
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -239,6 +246,8 @@ class ImageService:
         self._guard_wake = asyncio.Event()
         self._drain_sessions: set[str] = set()
         self.images_dir = Path(cfg.work_dir) / "images"
+        self.input_dir = Path(cfg.work_dir) / "input"
+        self._cancel: set[str] = set()
         self.transport = None          # tests inject a fake ComfyUI
 
     def schemas(self) -> list[dict]:
@@ -292,7 +301,8 @@ class ImageService:
         width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
         job = {"id": uuid.uuid4().hex[:12], "session_id": session_id, "source": source, "prompt": prompt[:4000],
                "model": model, "aspect_ratio": aspect_ratio, "resolution": resolution, "width": width, "height": height,
-               "seed": seed if seed is not None else random.randrange(2**48)}
+               "seed": seed if seed is not None else random.randrange(2**48),
+               "parent_id": "", "operation": image_edit.OPERATION_GENERATE, "model_revision": "", "feather": 0}
         self.db.insert_image(job)
         self._done[job["id"]] = asyncio.Event()
         self.queue.put_nowait(job["id"])
@@ -302,7 +312,7 @@ class ImageService:
         event = self._done.setdefault(job_id, asyncio.Event())
         while True:
             job = self.db.get_image(job_id)
-            if job["status"] in ("done", "failed"):
+            if job["status"] in ("done", "failed", "cancelled"):
                 return job
             try:
                 await asyncio.wait_for(event.wait(), timeout=10)
@@ -311,6 +321,121 @@ class ImageService:
 
     def path(self, job: dict) -> Path:
         return self.images_dir / f"{job['id']}.png"
+
+    def source_path(self, job: dict) -> Path:
+        return self.images_dir / f"{job['id']}.source.png"
+
+    def mask_path(self, job: dict) -> Path:
+        return self.images_dir / f"{job['id']}.mask.png"
+
+    def _job_files(self, job: dict) -> list[Path]:
+        return [self.path(job), self.source_path(job), self.mask_path(job)]
+
+    def _require_edit(self) -> dict:
+        status = image_edit.assets_status(self.cfg)
+        status["enabled"] = bool(self.cfg.edit_enabled)
+        if not self.cfg.edit_enabled or not status["available"]:
+            raise ToolError(status["setup"] or image_edit.SETUP_GUIDANCE)
+        return status
+
+    def ingest_upload(self, data: bytes, source: str = "owner") -> dict:
+        """Normalize an owner upload into a gallery row. Never uses the client filename as a path."""
+        self._require_edit()
+        png, width, height = image_edit.normalize_source(
+            data, max_bytes=self.cfg.max_upload_bytes, max_pixels=self.cfg.max_pixels)
+        job_id = uuid.uuid4().hex[:12]
+        now = time.time()
+        job = {"id": job_id, "session_id": "", "source": source, "prompt": "Uploaded photo",
+               "model": image_edit.EDIT_MODEL_ID, "aspect_ratio": "1:1", "resolution": "upload",
+               "width": width, "height": height, "seed": 0, "parent_id": "",
+               "operation": image_edit.OPERATION_UPLOAD, "model_revision": "", "feather": 0,
+               "status": "done", "created_at": now}
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.path(job).write_bytes(png)
+        self.db.insert_image(job)
+        self.db.update_image(job_id, finished_at=now, bytes=len(png))
+        return self.db.get_image(job_id)
+
+    def submit_edit(self, parent_id: str, prompt: str, mask: bytes, feather: int | str = 0,
+                    source: str = "phone", seed: int | None = None) -> dict:
+        """Queue a masked edit. Source and mask are copied onto the new row before GPU work starts."""
+        edit = self._require_edit()
+        prompt = prompt.strip()
+        if not prompt:
+            raise ToolError("prompt is empty")
+        parent = self.db.get_image(parent_id)
+        if parent is None or parent["status"] != "done" or not self.path(parent).exists():
+            raise ToolError("source image is not available")
+        feather_n = image_edit.parse_feather(feather)
+        mask_png = image_edit.normalize_mask(
+            mask, parent["width"], parent["height"],
+            max_bytes=self.cfg.max_upload_bytes, max_pixels=self.cfg.max_pixels)
+        job_id = uuid.uuid4().hex[:12]
+        job = {"id": job_id, "session_id": "", "source": source, "prompt": prompt[:4000],
+               "model": image_edit.EDIT_MODEL_ID, "aspect_ratio": parent["aspect_ratio"],
+               "resolution": parent.get("resolution") or "auto",
+               "width": parent["width"], "height": parent["height"],
+               "seed": seed if seed is not None else random.randrange(2**48),
+               "parent_id": parent["id"], "operation": image_edit.OPERATION_EDIT,
+               "model_revision": edit["revision"], "feather": feather_n}
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.source_path(job).write_bytes(self.path(parent).read_bytes())
+        self.mask_path(job).write_bytes(mask_png)
+        self.db.insert_image(job)
+        self._done[job_id] = asyncio.Event()
+        self.queue.put_nowait(job_id)
+        return self.db.get_image(job_id)
+
+    def cancel(self, job_id: str) -> dict:
+        job = self.db.get_image(job_id)
+        if job is None:
+            raise ToolError("no such image")
+        if job["status"] in ("done", "failed", "cancelled"):
+            raise ToolError("nothing to cancel")
+        self._cancel.add(job_id)
+        self.db.update_image(job_id, status="cancelled", finished_at=time.time(), error="cancelled")
+        if self.active_job == job_id:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                loop.create_task(self.comfy.interrupt())
+        event = self._done.get(job_id)
+        if event:
+            event.set()
+        return self.db.get_image(job_id)
+
+    def delete(self, job_id: str, *, backup_dir: Path | None = None) -> dict:
+        """Remove this live row and its files. Never walks a backup/archive directory."""
+        job = self.db.get_image(job_id)
+        if job is None:
+            raise ToolError("no such image")
+        if job["status"] in ("queued", "running"):
+            self.cancel(job_id)
+            job = self.db.get_image(job_id)
+        backup_root = backup_dir.resolve() if backup_dir is not None else None
+        for path in self._job_files(job):
+            if not path.exists():
+                continue
+            resolved = path.resolve()
+            if backup_root is not None and (resolved == backup_root or backup_root in resolved.parents):
+                continue
+            if resolved.parent.resolve() != self.images_dir.resolve():
+                continue
+            path.unlink()
+        self.db.delete_image(job_id)
+        return {"deleted": job_id, "parent_id": job.get("parent_id") or ""}
+
+    def _stage_edit_inputs(self, job: dict) -> tuple[str, str]:
+        source = self.source_path(job).read_bytes()
+        mask = image_edit.apply_feather(self.mask_path(job).read_bytes(), int(job.get("feather") or 0))
+        source_name = f"{job['id']}-source.png"
+        mask_name = f"{job['id']}-mask.png"
+        self.input_dir.mkdir(parents=True, exist_ok=True)
+        (self.input_dir / source_name).write_bytes(source)
+        (self.input_dir / mask_name).write_bytes(mask)
+        return source_name, mask_name
 
     async def _loop(self) -> None:
         while True:
@@ -442,7 +567,7 @@ class ImageService:
         if not job_id:
             return
         job = self.db.get_image(job_id)
-        if job is None or job["status"] in ("done", "failed"):
+        if job is None or job["status"] in ("done", "failed", "cancelled"):
             return
         self.active_job = job_id
         self.phase = "generating"
@@ -453,7 +578,11 @@ class ImageService:
         listener = asyncio.create_task(self._listen_progress(job_id, started, stop_progress))
         try:
             prefix = f"harness/{job_id}"
-            graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix)
+            if (job.get("operation") or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_EDIT:
+                source_name, mask_name = self._stage_edit_inputs(job)
+                graph = image_edit.edit_workflow(job["prompt"], source_name, mask_name, job["seed"], prefix)
+            else:
+                graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix)
             async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
                 resp = await client.post(f"{self.comfy.url}/prompt", json={"prompt": graph,
                                                                              "client_id": "agent-harness"})
@@ -462,6 +591,9 @@ class ImageService:
                 prompt_id = resp.json()["prompt_id"]
                 deadline = time.monotonic() + self.cfg.job_timeout_seconds
                 while True:
+                    if job_id in self._cancel:
+                        await self.comfy.interrupt()
+                        raise ToolError("cancelled")
                     if time.monotonic() > deadline:
                         await self.comfy.interrupt()
                         raise ToolError("image generation timed out")
@@ -477,6 +609,8 @@ class ImageService:
                     self.progress = {**self.progress, "job": job_id, "stage": "generating",
                                      "seconds": round(time.time() - started)}
                     await asyncio.sleep(0.4)
+                if job_id in self._cancel:
+                    raise ToolError("cancelled")
                 images = [img for out in hist.get("outputs", {}).values() for img in out.get("images", [])]
                 if not images:
                     raise ToolError("ComfyUI finished without an image")
@@ -484,15 +618,19 @@ class ImageService:
                 data = await client.get(f"{self.comfy.url}/view", params={
                     "filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": img.get("type", "output")})
                 data.raise_for_status()
+            if job_id in self._cancel:
+                raise ToolError("cancelled")
             self.images_dir.mkdir(parents=True, exist_ok=True)
             self.path(job).write_bytes(data.content)
             self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=round(time.time() - started, 1),
                                  bytes=len(data.content))
             log.info("image %s (%s) done in %.0f s", job_id, job["model"], time.time() - started)
         except (ToolError, httpx.HTTPError, KeyError, ValueError) as e:
-            self.db.update_image(job_id, status="failed", finished_at=time.time(), error=str(e)[:1000])
-            log.warning("image %s failed: %s", job_id, e)
+            status = "cancelled" if job_id in self._cancel or str(e) == "cancelled" else "failed"
+            self.db.update_image(job_id, status=status, finished_at=time.time(), error=str(e)[:1000])
+            log.warning("image %s %s: %s", job_id, status, e)
         finally:
+            self._cancel.discard(job_id)
             stop_progress.set()
             listener.cancel()
             await asyncio.gather(listener, return_exceptions=True)
@@ -543,11 +681,18 @@ class ImageService:
                     pass
 
     def status(self) -> dict:
+        edit = image_edit.public_status(self.cfg)
+        edit["enabled"] = bool(self.cfg.edit_enabled)
+        if self.cfg.edit_enabled and not edit["available"]:
+            edit["setup"] = edit["setup"] or image_edit.SETUP_GUIDANCE
+        elif not self.cfg.edit_enabled:
+            edit["setup"] = image_edit.SETUP_GUIDANCE
         return {"enabled": self.cfg.enabled, "phase": self.phase, "active_job": self.active_job,
                 "queued": self.queue.qsize(), "progress": self.progress,
                 "models": {k: v["label"] for k, v in MODELS.items()}, "aspect_ratios": list(ASPECTS),
                 "resolutions": {name: {"label": label, "sizes": {aspect: list(size) for aspect, size in RESOLUTION_SIZES[name].items()}}
-                                for name, label in RESOLUTIONS.items()}}
+                                for name, label in RESOLUTIONS.items()},
+                "edit": edit}
 
     # agent tool
     async def call(self, name: str, args: dict, workspace_root: Path | None = None, put_bytes=None) -> str:

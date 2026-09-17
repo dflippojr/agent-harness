@@ -6,4 +6,5 @@ pytest>=8
 trafilatura>=2.0
 lxml_html_clean>=0.4
 pypdf>=5
-psutil>=5.9
+pillow>=10
+python-multipart>=0.0.9

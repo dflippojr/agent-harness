@@ -736,6 +736,9 @@ def register(app: FastAPI, mgr) -> None:
         job = m.db.get_image(iid.removesuffix(".png")) if m.images else None
         if job is None:
             raise HarnessError(404, "no such image")
+        from . import image_edit
+        if image_edit.is_private(job):
+            raise HarnessError(404, "no such image")
         if iid.endswith(".png"):
             if job["status"] != "done":
                 raise HarnessError(404, "image not ready")

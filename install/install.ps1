@@ -48,7 +48,7 @@ param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'agent-harness'),
     [string]$DataDir = '',
     [ValidateSet('Auto', 'Full', 'Service')][string]$Profile = 'Auto',
-    [ValidateSet('local_model', 'homelab', 'memory_library', 'images', 'jobs', 'gpu_guard', 'runners',
+    [ValidateSet('local_model', 'homelab', 'memory_library', 'images', 'image_edit', 'jobs', 'gpu_guard', 'runners',
                  'remote_control', 'web', 'search', 'endpoint', 'notifications', 'backup')]
     [string[]]$EnableModules = @(),
     [ValidateSet('auto', 'qwen', 'gpt-oss')][string]$Model = 'auto',
@@ -73,9 +73,12 @@ if ($EffectiveProfile -eq 'Auto') {
     $EffectiveProfile = if ((Test-Path $profilePath) -and
         (Select-String -Path $profilePath -Pattern '^profile:\s*service\s*$' -Quiet)) { 'Service' } else { 'Full' }
 }
-$localDependents = @('endpoint', 'images', 'gpu_guard')
+$localDependents = @('endpoint', 'images', 'image_edit', 'gpu_guard')
 if ($ExistingServer -or $ModelPath -or $LlamaDir -or @($EnableModules | Where-Object { $_ -in $localDependents }).Count) {
     $EnableModules = @($EnableModules + 'local_model' | Select-Object -Unique)
+}
+if ($EnableModules -contains 'image_edit') {
+    $EnableModules = @($EnableModules + 'images' | Select-Object -Unique)
 }
 $NeedsLocalModel = $EffectiveProfile -eq 'Full' -or $EnableModules -contains 'local_model'
 $LlamaBuild = 'b10950'   # tested build (docs/phase0-results.md)
@@ -146,6 +149,13 @@ Info "Docker engine $dockerVersion"
 
 $freeGB = [math]::Round((Get-PSDrive (Split-Path $InstallDir -Qualifier).TrimEnd(":")).Free / 1GB)
 $needGB = if (-not $NeedsLocalModel -or $ModelPath -or $ExistingServer) { 5 } else { [math]::Ceiling($m.gb) + 5 }
+if ($EnableModules -contains 'image_edit') {
+    $needGB += 22
+    if ($NeedsLocalModel) {
+        if ($vramGB -lt 15.5) { Die "image_edit needs about 16 GB of VRAM (this GPU reports $vramGB GB)." }
+        if ($ramGB -lt 30) { Warn "image_edit was tested with 32 GB RAM; this machine reports $ramGB GB." }
+    }
+}
 if ($freeGB -lt $needGB) { Die "Only $freeGB GB free on $(Split-Path $InstallDir -Qualifier); need about $needGB GB." }
 Info "disk: $freeGB GB free (need about $needGB GB)"
 
@@ -283,6 +293,25 @@ if (-not $NoTasks) {
             Start-Sleep -Seconds 2
             try { if ((Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 3).ok) { Info "daemon up after $($i * 2) s"; break } } catch { }
         }
+    }
+}
+
+# ---------------------------------------------------------------- optional Qwen-Image-Edit weights (never part of an ordinary install)
+if ($EnableModules -contains 'image_edit') {
+    Step 'Optional image-edit component (Qwen-Image-Edit, Apache 2.0)'
+    $editRev = '7d41107b653d3039be20972fb82398b01b3213eb'
+    $editSha = '393c6743d1de2e9031b5197027b36116f2096958ccc0223526d34e1860266021'
+    $editUrl = "https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/$editRev/split_files/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"
+    $modelsRoot = if (Test-Path 'C:\AI\comfy-models') { 'C:\AI\comfy-models' } else { Join-Path $InstallDir 'comfy-models' }
+    $editDest = Join-Path $modelsRoot 'diffusion_models\qwen_image_edit_fp8_e4m3fn.safetensors'
+    Info "artifact sha256 $editSha (revision $editRev)"
+    if ($DryRun) {
+        Info "[dry run] download $editUrl -> $editDest"
+    } else {
+        Download $editUrl $editDest 19.0
+        $hash = (Get-FileHash -Algorithm SHA256 $editDest).Hash.ToLowerInvariant()
+        if ($hash -ne $editSha) { Die "image-edit checksum mismatch: got $hash want $editSha" }
+        Info "verified $editDest"
     }
 }
 

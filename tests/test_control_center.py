@@ -117,6 +117,7 @@ def test_control_center_shell_includes_transport_module():
     worker = (web / "sw.js").read_text(encoding="utf-8")
     assert 'from "./client.mjs"' in app
     assert '"/api/v1"' in client and '"/api/admin/v1"' in client
+    assert "body instanceof FormData" in client
     index = (web / "index.html").read_text(encoding="utf-8")
     assert 'src="/app.js"' in index and 'href="/style.css"' in index
     assert '"/client.mjs"' in worker

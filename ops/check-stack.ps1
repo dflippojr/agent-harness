@@ -51,7 +51,9 @@ Check 'Image generation' {
         Where-Object { -not (Test-Path (Join-Path 'C:\AI\comfy-models' $_)) }
     if ($files) { throw "missing models: $($files -join ', ')" }
     if (-not (Test-Path 'C:\AI\ComfyUI\python_embeded\python.exe')) { throw 'ComfyUI portable missing at C:\AI\ComfyUI' }
-    "phase $($s.phase); models present; ComfyUI starts on demand"
+    $edit = Join-Path 'C:\AI\comfy-models' 'diffusion_models\qwen_image_edit_fp8_e4m3fn.safetensors'
+    $editNote = if (Test-Path $edit) { 'image-edit present' } else { 'image-edit optional, not installed' }
+    "phase $($s.phase); models present; ComfyUI starts on demand; $editNote"
 }
 Check 'Harness daemon :8100' {
     $null = Get-Json 'http://127.0.0.1:8100/health'

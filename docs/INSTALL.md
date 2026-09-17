@@ -43,8 +43,9 @@ all platforms.
 
 Docker (Docker Desktop on Windows/macOS) and at least one provider login are the operational minimum. The installer configures Claude, Codex,
 and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example
-`-EnableModules jobs,backup`. `endpoint`, `images`, and `gpu_guard` automatically opt into `local_model` and restore
-the GPU/model requirements. The complete module catalog and security boundary are in
+`-EnableModules jobs,backup`. `endpoint`, `images`, `image_edit`, and `gpu_guard` automatically opt into `local_model` and restore
+the GPU/model requirements. `image_edit` is a separate ~20 GB Qwen-Image-Edit download; ordinary installs and daemon
+upgrades never fetch it. The complete module catalog and security boundary are in
 [`service-profile.md`](service-profile.md).
 
 On an existing install, `-Profile Service` writes only `config\profile.yaml`; it preserves `harness.yaml`, local

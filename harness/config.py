@@ -12,9 +12,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE_NAMES = (
-    "local_model", "homelab", "memory_library", "images", "jobs", "gpu_guard", "runners",
+    "local_model", "homelab", "memory_library", "images", "image_edit", "jobs", "gpu_guard", "runners",
     "remote_control", "web", "search", "endpoint", "notifications", "backup",
 )
+# Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
+OPT_IN_MODULES = frozenset({"image_edit"})
 
 
 @dataclass
@@ -193,13 +195,17 @@ class EndpointConfig:
 class ImagesConfig:
     """Local image generation with ComfyUI (images.py). The language model is unloaded while jobs run."""
     enabled: bool = False
+    edit_enabled: bool = False                 # optional Qwen-Image-Edit; never implied by images.enabled
     comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
+    models_dir: str = "C:/AI/comfy-models"    # extra_model_paths root (diffusion_models / text_encoders / vae)
     port: int = 8188
     work_dir: str = "D:/Agents/harness/images-work"  # ComfyUI output/temp and the harness's PNGs (images/)
     log_dir: str = "D:/Agents/harness/logs"
     linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
+    max_upload_bytes: int = 20 * 2**20
+    max_pixels: int = 20_000_000
 
 
 @dataclass
@@ -218,6 +224,7 @@ class ModulesConfig:
     homelab: bool = True
     memory_library: bool = True
     images: bool = True
+    image_edit: bool = False     # optional Qwen-Image-Edit; off until explicitly enabled
     jobs: bool = True
     gpu_guard: bool = True
     runners: bool = True
@@ -446,7 +453,13 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     if unknown_modules:
         raise ValueError(f"unknown modules {unknown_modules}; known: {', '.join(MODULE_NAMES)}")
     module_defaults = profile == "full"
-    selected = ModulesConfig(**{name: bool(raw_modules.get(name, module_defaults)) for name in MODULE_NAMES})
+    selected = ModulesConfig(**{
+        name: bool(raw_modules.get(name, False if name in OPT_IN_MODULES else module_defaults))
+        for name in MODULE_NAMES
+    })
+    if selected.image_edit:
+        selected.images = True
+        selected.local_model = True
     provider_secret_files = raw.get("provider_secret_files") or {}
     if not isinstance(provider_secret_files, dict) or any(not isinstance(k, str) or not isinstance(v, str)
                                                           for k, v in provider_secret_files.items()):
@@ -520,7 +533,8 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     memory_library.enabled = module_enabled("memory_library", memory_library.enabled)
     web.enabled = module_enabled("web", web.enabled)
     endpoint.enabled = module_enabled("endpoint", endpoint.enabled)
-    images.enabled = module_enabled("images", images.enabled)
+    images.enabled = module_enabled("images", images.enabled) or selected.image_edit
+    images.edit_enabled = bool(selected.image_edit)
     search.enabled = module_enabled("search", search.enabled)
     jobs.enabled = module_enabled("jobs", jobs.enabled)
     remote_control.enabled = module_enabled("remote_control", remote_control.enabled)
@@ -529,6 +543,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         homelab=selected.homelab,
         memory_library=memory_library.enabled,
         images=images.enabled,
+        image_edit=images.edit_enabled,
         jobs=jobs.enabled,
         gpu_guard=gpu_guard.enabled,
         runners=selected.runners,

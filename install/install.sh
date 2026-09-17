@@ -105,7 +105,7 @@ if [[ -n $enable_modules ]]; then
     for requested_module in "${requested_modules[@]}"; do
         [[ -z $requested_module ]] && continue
         case "$requested_module" in
-            local_model|homelab|memory_library|images|jobs|gpu_guard|runners|remote_control|web|search|endpoint|notifications|backup) ;;
+            local_model|homelab|memory_library|images|image_edit|jobs|gpu_guard|runners|remote_control|web|search|endpoint|notifications|backup) ;;
             *) echo "unknown module: $requested_module" >&2; exit 64 ;;
         esac
     done
@@ -113,7 +113,8 @@ fi
 needs_local=0
 [[ $profile == full ]] && needs_local=1
 contains_module local_model && needs_local=1
-for dependent in endpoint images gpu_guard; do contains_module "$dependent" && needs_local=1; done
+for dependent in endpoint images image_edit gpu_guard; do contains_module "$dependent" && needs_local=1; done
+contains_module image_edit && enable_modules=${enable_modules:+$enable_modules,}images
 
 if [[ $platform == macos && $needs_local -eq 1 ]]; then
     echo "macOS Apple Silicon supports the hosted-provider service profile only; local_model is unavailable" >&2
@@ -205,6 +206,13 @@ if [[ $dry_run -eq 0 ]]; then
     if [[ $needs_local -eq 1 && -z $model_path && -z $existing_server ]]; then
         [[ $model == qwen ]] && need_gib=28 || need_gib=18
     fi
+    if contains_module image_edit; then
+        need_gib=$((need_gib + 22))
+        if [[ $needs_local -eq 1 ]]; then
+            [[ $vram_mib -ge 15872 ]] || die "image_edit needs about 16 GB of VRAM"
+            [[ $ram_gib -ge 30 ]] || info "warning: image_edit was tested with 32 GB RAM; this machine reports ${ram_gib} GiB"
+        fi
+    fi
     [[ $free_gib -ge $need_gib ]] || die "only $free_gib GiB free at $install_dir; about $need_gib GiB is required"
     info "disk: $free_gib GiB free (need about $need_gib GiB)"
 fi
@@ -284,6 +292,24 @@ else
     (cd "$app_dir" && "$python" "${config_args[@]}")
     install -m 0755 "$script_dir/run-daemon.sh" "$bin_dir/run-daemon.sh"
     [[ $needs_local -eq 1 && -z $existing_server ]] && install -m 0755 "$script_dir/run-server.sh" "$bin_dir/run-server.sh"
+fi
+
+if contains_module image_edit; then
+    step "Optional image-edit component (Qwen-Image-Edit, Apache 2.0)"
+    edit_rev=7d41107b653d3039be20972fb82398b01b3213eb
+    edit_sha=393c6743d1de2e9031b5197027b36116f2096958ccc0223526d34e1860266021
+    edit_url="https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/$edit_rev/split_files/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"
+    models_root="$install_dir/comfy-models"
+    edit_dest="$models_root/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"
+    info "artifact sha256 $edit_sha (revision $edit_rev)"
+    if [[ $dry_run -eq 1 ]]; then
+        info "[dry run] download $edit_url"
+    else
+        download "$edit_url" "$edit_dest"
+        got=$(sha256sum "$edit_dest" | awk '{print $1}')
+        [[ $got == "$edit_sha" ]] || die "image-edit checksum mismatch: got $got want $edit_sha"
+        info "verified $edit_dest"
+    fi
 fi
 
 safe_instance=$(printf '%s' "$instance" | tr '[:upper:]' '[:lower:]')

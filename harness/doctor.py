@@ -198,6 +198,32 @@ def main(argv: list[str] | None = None) -> int:
         py = Path(cfg.images.comfy_dir) / "python_embeded" / "python.exe"
         (r.ok if py.exists() else r.fail)("Image generation", f"ComfyUI at {cfg.images.comfy_dir}"
                                           + ("" if py.exists() else " not found"))
+        from . import image_edit
+        edit = image_edit.assets_status(cfg.images)
+        if cfg.images.edit_enabled:
+            if edit["available"] and edit["hash_ok"] is not False:
+                extra = "checksum verified" if edit["hash_ok"] else "stub or unpackaged file present"
+                r.ok("Image editing", f"{edit['model']} {edit['revision'][:12]} ({extra})")
+            else:
+                missing = ", ".join(edit["missing"]) or "checksum mismatch"
+                r.fail("Image editing", f"image_edit is enabled but assets are not ready ({missing}). {edit['setup']}")
+            try:
+                import psutil
+                ram_gb = psutil.virtual_memory().total / 2**30
+                (r.ok if ram_gb >= 30 else r.warn)(
+                    "Image editing RAM", f"{ram_gb:.0f} GB (Qwen-Image-Edit fp8 was tested with 32 GB)")
+            except (ImportError, OSError):
+                r.warn("Image editing RAM", "could not read installed RAM")
+            models = image_edit.models_dir(cfg.images)
+            try:
+                free = shutil.disk_usage(models if models.exists() else cfg.data_dir).free / 2**30
+                need = 22 if not edit["available"] else 1
+                (r.ok if free >= need else r.fail)(
+                    "Image editing disk", f"{free:.0f} GB free at {models} (need about {need} GB)")
+            except OSError as e:
+                r.warn("Image editing disk", str(e))
+        elif not edit["available"]:
+            r.ok("Image editing", "optional component not installed; text-to-image is unchanged")
     code, out = run(["tailscale", "serve", "status", "--json"])
     if code == 0 and str(cfg.port) in out:
         r.ok("Phone access", "tailscale serve publishes the daemon")

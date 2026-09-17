@@ -206,6 +206,8 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 ### `POST /api/v1/images`, `GET /api/v1/images/{id}`, `GET /api/v1/images/{id}.png`  (scope `images`)
 `{"prompt": "...", "model": "fast" | "quality", "aspect_ratio": "1:1"}` queues a job; poll the job until `status` is
 `done`, then download the PNG. While images generate, the language model is unloaded for a few minutes.
+App tokens can only create and read **generated** images (`fast` / `quality`). Uploaded photos, masks, and masked
+edits are owner-only Agent Harness Web data and return 404 on this surface.
 
 ### `GET /api/v1/remote-control`, `POST /api/v1/remote-control/{project}`, `POST /api/v1/remote-control/{project}/stop`  (scope `remote_control`)
 Starts the unmodified `claude remote-control --spawn worktree` in a tower project's folder, so the user can work there

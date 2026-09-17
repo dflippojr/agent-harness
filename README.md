@@ -130,7 +130,8 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
   llama.cpp embedding server/model is configured.
 - Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`)
   and Qwen-Image-2512 (`quality`), both Apache 2.0. A batch unloads the language model, generates, and restores it.
-  Phone: Images screen; agents: `generate_image` (tower and MacBook sessions).
+  Phone: Images screen; agents: `generate_image` (tower and MacBook sessions). Optional `image_edit` adds owner-only
+  masked inpainting with Qwen-Image-Edit; it is not downloaded unless that component is enabled.
 - Distributable (`docs/phase6e-results.md`): app API `/api/v1` with scoped tokens, context, app-registered tools and
   events (`harness/apps.py`, `sdk/harness_client.py`); installer, uninstaller and `python -m harness.doctor`.
 

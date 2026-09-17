@@ -229,9 +229,12 @@ endpoint:
 # and start ComfyUI from C:/AI/ComfyUI. Opening the Images tab warms ComfyUI without loading a checkpoint; the GPU
 # is given back as soon as the queue is empty.
 # Models in C:/AI/comfy-models: fast = Z-Image-Turbo, quality = Qwen-Image-2512 (both Apache 2.0).
+# Masked editing is the optional image_edit component (Qwen-Image-Edit fp8); it is off unless explicitly enabled
+# and is never downloaded by an ordinary install or daemon upgrade.
 images:
   enabled: true
   comfy_dir: C:/AI/ComfyUI
+  models_dir: C:/AI/comfy-models
   port: 8188
   work_dir: D:/Agents/harness/images-work
   linger_seconds: 0
