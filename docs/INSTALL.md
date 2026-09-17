@@ -1,8 +1,12 @@
-# Installing the agent harness
+# Installing Agent Harness
 
 Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from a browser or your phone. Use either a
 local model or your own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky
 actions.
+
+The installer sets up **Agent Harness Server**, which hosts the APIs and normally serves **Agent Harness Web**. An
+**Agent Harness App** is a third-party API integration. **Agent Harness for Mac** installs the `harness` command
+(**Agent Harness CLI**) and a **Mac Runner** together; the Python library in `sdk/` is **Agent Harness SDK**.
 
 The full local-model profile supports Windows 10/11 and x86-64 Linux with an NVIDIA GPU. Apple Silicon macOS uses
 the hosted-provider service profile (Claude, Codex, or Cursor) and does not download a local model.
@@ -29,7 +33,8 @@ Both are Apache 2.0.
 
 ## Hosted-provider service profile
 
-The service profile installs the daemon, Control Center, provider CLI image, and provider-specific egress proxies.
+The service profile installs Agent Harness Server, Agent Harness Web, the provider CLI image, and provider-specific
+egress proxies.
 It skips llama.cpp, model downloads, GPU checks, and every optional integration unless selected:
 
 ```powershell
@@ -69,7 +74,7 @@ No administrator rights are needed. The installer:
 3. for the full profile, downloads llama.cpp (build b10950, CUDA 13.3) and the model;
 4. builds the sandbox image `agent-harness-sandbox:py312`;
 5. writes a config to `%LOCALAPPDATA%\agent-harness\config`;
-6. registers the daemon logon task and, when enabled, the llama-server task, then starts them;
+6. registers the Agent Harness Server logon task and, when enabled, the llama-server task, then starts them;
 7. runs `python -m harness.doctor`.
 
 Downloads resume if interrupted: run the installer again. Running it again later also repairs an install and keeps your
@@ -78,7 +83,7 @@ config (`-Force` rewrites it).
 Useful options: `-Profile Service`, `-EnableModules jobs,backup`, `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
 `-LlamaDir <existing llama.cpp>`, `-Port 8100`, `-NoTasks`, `-DryRun`. See `Get-Help .\install\install.ps1 -Full`.
 
-Then open **http://127.0.0.1:8100**. The first model load takes a minute or two.
+Then open **http://127.0.0.1:8100** in Agent Harness Web. The first model load takes a minute or two.
 
 > **Antivirus:** some engines flag `uv.exe` (Astral's Rust-based Python manager) as suspicious because it's unsigned
 > and downloads packages. It's a false positive; allow the `%LOCALAPPDATA%\agent-harness\bin` folder. You can check
@@ -96,7 +101,7 @@ install/install.sh
 
 The default is the full profile. The installer checks `nvidia-smi`, Docker GPU access, disk/RAM, and the Docker
 engine; installs a pinned uv/Python environment; downloads the selected resumable GGUF; builds the sandbox; and
-registers `systemd --user` services for llama.cpp and the daemon. llama.cpp runs from the pinned official
+registers `systemd --user` services for llama.cpp and Agent Harness Server. llama.cpp runs from the pinned official
 `server-cuda-b10830` image with the model mounted read-only and localhost port 8090 served through host networking.
 
 If the Docker GPU check fails, install NVIDIA Container Toolkit and restart Docker before rerunning the installer.
@@ -119,7 +124,8 @@ ops/backends/login.sh codex  # or claude / cursor
 ```
 
 macOS defaults to the service profile and rejects `full`, `local_model`, and modules that require a local model.
-It builds the hosted-provider sandbox and egress proxies and registers a per-user launchd agent for the daemon. No
+It builds the hosted-provider sandbox and egress proxies and registers a per-user launchd agent for Agent Harness
+Server. No
 Rosetta, local GPU model, or administrator privileges are required. Docker Desktop must be running before hosted
 sessions can start.
 
@@ -140,30 +146,34 @@ Linux/macOS:
 Logs are under `%LOCALAPPDATA%\agent-harness\logs` on Windows and
 `~/.local/share/agent-harness/logs` on Unix (`daemon.log`, `llama-server.log`, and supervisor logs).
 
-## Use it from your phone
+## Use Agent Harness Web from your phone
 
-The daemon only listens on localhost. To reach it from other devices, use [Tailscale](https://tailscale.com):
+Agent Harness Server listens only on localhost. To reach Agent Harness Web from other devices, use
+[Tailscale](https://tailscale.com):
 
 1. Install Tailscale on the PC and your phone, and sign in to both with the same account.
 2. In the Tailscale admin console, enable **HTTPS certificates** (DNS page) and Serve.
 3. On the PC: `tailscale serve --bg --https=443 http://127.0.0.1:8100`
 4. In `config\harness.yaml` (or `harness.local.yaml`) set `public_url: https://<pc-name>.<tailnet>.ts.net` and
-   `allowed_logins: [you@example.com]`, then restart the daemon task.
+   `allowed_logins: [you@example.com]`, then restart the Agent Harness Server task.
    To let a tailnet buddy look around for a couple of hours without owner powers, add them under `guests`
    in the untracked local file (`login` plus an ISO `until`), restart, and remove the entry when done.
    Guests can browse sessions, jobs and images; they cannot start tasks, approve, mint keys, or use GPU /
    Remote Control / Review. Default stays "this login is the owner."
-5. Open the URL on the phone, then Share → Add to Home Screen.
+5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Agent Harness Web icon is
+   labeled **Harness**. iOS may retain an older label until you remove that icon and add it again; no server or
+   browser data migration is required. See [`web.md`](web.md).
 
 Phone notifications (approvals with Approve/Deny buttons, task finished) use a self-hosted
 [ntfy](https://ntfy.sh) server: see `docs/phase2-results.md` for the container and the `notify:` section.
 
-## Add a Mac runner and CLI
+## Install Agent Harness for Mac
 
 After Tailscale and `public_url` are configured, add a `macbook` entry under `runners:` with an owner-side
-`token_file`, restart the daemon, then choose **Settings → Apps → Pair Mac client**. Run the generated one-time
-command in Terminal on the Mac. It installs a venv, the `harness` CLI and Python SDK, and the sandboxed outbound
-runner as a launchd agent—without SSH, sudo, or copying tokens. See [`mac-client.md`](mac-client.md).
+`token_file`, restart Agent Harness Server, then choose **Settings → Apps → Pair Agent Harness for Mac** in Agent
+Harness Web. Run the generated one-time command in Terminal on the Mac. It installs a venv, Agent Harness CLI and
+Agent Harness SDK, and the sandboxed Mac Runner as a launchd agent—without SSH, sudo, or copying tokens. See
+[`mac-client.md`](mac-client.md).
 
 ## What else you can turn on
 
@@ -180,7 +190,7 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
 | Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |
 | Scheduled jobs | `jobs` (on by default) | nothing |
-| Apps that start and drive sessions | always on | a token from Settings → Apps (`docs/app-api.md`) |
+| Agent Harness Apps that start and drive sessions | always on | a token from Settings → Apps (`docs/app-api.md`) |
 | Nightly backups | `backup` (on by default) | nothing |
 
 ## Update
@@ -207,10 +217,10 @@ install/uninstall.sh --remove-files  # also remove the install directory
 
 ## Security model, briefly
 
-- One owner per install. The web app and APIs trust localhost; other devices need a tailnet login plus, for the
-  inference endpoint and app API, a key or token. Optional `guests:` entries grant time-boxed read-only Control
-  Center access to a named tailnet login without owner powers.
+- One owner per install. Agent Harness Web and the APIs trust localhost; other devices need a tailnet login plus,
+  for the inference endpoint and App API, a key or token. Optional `guests:` entries grant time-boxed read-only
+  Agent Harness Web access to a named tailnet login without owner powers.
 - Agents are untrusted: shell commands run in a Docker container with only the workspace mounted and no network
   unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first.
-- Web fetches refuse private, tailnet and metadata addresses. App-provided context and web pages are marked as
+- Web fetches refuse private, tailnet and metadata addresses. Agent Harness App-provided context and web pages are marked as
   information, not instructions.
