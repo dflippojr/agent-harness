@@ -95,8 +95,9 @@ def _subscription_status(name: str, cfg) -> bool:
 
 
 def local_view(manager) -> dict:
+    available = bool(manager.cfg.modules.local_model and manager.cfg.models)
     return {
-        "name": "local", "available": True, "logged_in": True, "auth": "local", "billing": "local",
+        "name": "local", "available": available, "logged_in": available, "auth": "local", "billing": "local",
         "model": manager.cfg.default_model, "effort": "",
         "limits": {}, "today": {}, "week": {}, "notice": "Runs the local model on this server.",
         "billing_warning": "", "api_key_available": False,
@@ -159,6 +160,8 @@ def save_prefs(manager, name: str, model: str | None = None, effort: str | None 
     prefs = _prefs(manager)
     spec = dict(prefs.get(name) or {})
     if name == "local":
+        if not manager.cfg.modules.local_model:
+            raise ValueError("the local model is disabled by this service profile")
         if model is not None:
             model = model.strip()
             if model not in manager.cfg.models:

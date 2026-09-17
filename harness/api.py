@@ -200,7 +200,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     # API
     @app.get("/health")
     async def health():
-        return {"ok": True}
+        cfg = app.state.manager.cfg
+        return {"ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities()}
 
     @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
     async def metrics(request: Request):
@@ -318,6 +319,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def models_warm(request: Request):
         """Load the default model if it's asleep. The web app calls this when it opens."""
         m = mgr(request)
+        if not m.cfg.modules.local_model:
+            raise HarnessError(400, "the local model is disabled by this service profile")
         model = m.cfg.models[m.cfg.default_model]
         return {"name": model.name, "state": await m.warmer.warm(model)}
 

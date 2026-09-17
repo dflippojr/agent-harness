@@ -91,7 +91,10 @@ print(result.status, result.answer, notes)
 ## Endpoints
 
 ### `GET /api/v1`
-Server info: API version, scopes, projects, models, and enabled features. Doesn't need a token.
+Server info: API version, scopes, projects, models, hosted backends, enabled features, and `capabilities`. The
+capability object identifies the `full` or `service` profile, always-on daemon facilities, and effective optional
+modules. It contains no credentials and doesn't need a token. `GET /health` exposes the same capability object for
+lightweight discovery.
 
 ### `POST /api/v1/sessions`  (scope `sessions`)
 
@@ -267,3 +270,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.1 | 2026-09-15 | `remote_control` scope and endpoints; `ungrounded_quotes` in `run_finished` and as an event |
 | 1.2 | 2026-09-16 | Exact-origin browser pairing/CORS and short-lived authenticated SSE stream tickets |
 | 1.3 | 2026-09-16 | First-party Control Center owner identity/token support for ordinary session operations |
+| 1.4 | 2026-09-16 | Daemon profile and optional-module capability discovery |

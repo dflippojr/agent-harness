@@ -2,7 +2,7 @@
 
 Issue #24. The least-privilege app contract stays at /api/v1. This surface versions the daemon's
 operator routes (sessions, search, jobs, keys, GPU, maintenance, Remote Control trust, …) under a
-stable prefix. The bundled PWA still calls the unversioned paths until #23.
+stable prefix. The bundled and separately hosted Control Center both use this contract.
 
 Auth is an explicit owner credential:
 - Tailscale/localhost owner identity (no bearer token), same as today's Control Center; or
@@ -26,7 +26,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.1"
+API_VERSION = "1.2"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Control Center operations under /api/admin/v1"
@@ -182,6 +182,7 @@ def register(app: FastAPI, mgr) -> None:
         return {
             "api_version": API_VERSION,
             "server": "agent-harness",
+            "capabilities": mgr(request).cfg.capabilities(),
             "scopes": {ADMIN_SCOPE: ADMIN_SCOPE_HELP},
             "auth": {
                 "tailscale_owner": True,

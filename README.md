@@ -11,15 +11,23 @@ direction is to split the phone PWA (Control Center) from a separately distribut
 
 ## Install
 
-Windows 10/11 with an NVIDIA GPU (12 GB+), Docker Desktop and Git:
+Windows 10/11 with Docker Desktop and Git. The default full profile also needs an NVIDIA GPU (12 GB+):
 
 ```powershell
 git clone https://github.com/dflippojr/agent-harness; cd agent-harness
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
+For a hosted-provider-only daemon with no local model or GPU requirement:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install\install.ps1 -Profile Service
+ops\backends\login.ps1 codex # or claude / cursor
+```
+
 No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`);
-the owner API is `docs/admin-api.md`; and bundled/separate Control Center deployment is in `docs/control-center.md`.
+the owner API is `docs/admin-api.md`; profile details are in `docs/service-profile.md`; and bundled/separate Control
+Center deployment is in `docs/control-center.md`.
 
 ## Phase 8: subscription backends, Remote Control, answer checks
 

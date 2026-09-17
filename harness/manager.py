@@ -215,6 +215,8 @@ class Manager:
         if target != spec.target:
             raise HarnessError(400, f"project {project} runs on the {spec.target}, not the {target}")
         if backend == "local":
+            if not self.cfg.modules.local_model:
+                raise HarnessError(400, "the local model is disabled; choose an enabled hosted backend")
             model = model or self.cfg.default_model
             if model not in self.cfg.models:
                 raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
