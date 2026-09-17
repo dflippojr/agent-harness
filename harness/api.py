@@ -442,7 +442,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                 raise HarnessError(400, "duration_seconds must be between 1 and 86400")
             m.guard.pause(duration)
         elif action == "resume":
-            m.guard.resume()
+            # Turning off the manual hold must not suppress a live game/Plex trigger. A direct resume while only an
+            # automatic trigger is active retains the legacy "resume anyway" operator action.
+            m.guard.resume(override_signals=not m.guard.manual)
         else:
             raise HarnessError(404, "unknown action")
         return m.guard.status()

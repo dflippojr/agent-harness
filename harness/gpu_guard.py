@@ -302,13 +302,13 @@ class GpuGuard:
                     self.on_pause(self.reasons)
         self._wake.set()
 
-    def resume(self) -> None:
-        """Resume now: clears a manual pause and ignores the current triggers until they change."""
+    def resume(self, *, override_signals: bool = True) -> None:
+        """Clear a manual pause, optionally ignoring current automatic triggers until they change."""
         self.manual = False
         self.manual_until = None
         self.manual_duration_seconds = None
         keys = frozenset(s["key"] for s in self.signals)
-        self.override = keys or None
+        self.override = (keys or None) if override_signals else None
         self._resume_now = True
         self._wake.set()
 
@@ -338,7 +338,7 @@ class GpuGuard:
 
     async def check(self, startup: bool = False) -> None:
         if self.manual and self.manual_until is not None and time.time() >= self.manual_until:
-            self.resume()
+            self.resume(override_signals=False)
         self.signals = await self.detector()
         self.last_check = time.time()
         keys = frozenset(s["key"] for s in self.signals)
@@ -350,6 +350,8 @@ class GpuGuard:
         if want:
             self._clear_since = None
             self._resume_now = False
+            if self.state == PAUSED and not self.manual and self.signals:
+                self.reasons = list(self.signals)
             if self.state in (CLEAR, RESUMING):
                 self.reasons = list(self.signals) if self.signals else [
                     {"key": "manual", "kind": "manual", "detail": "paused from the app"}]

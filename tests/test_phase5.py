@@ -203,6 +203,32 @@ def test_guard_timed_manual_hold_expires_like_resume():
     asyncio.run(body())
 
 
+def test_manual_hold_release_and_expiry_preserve_automatic_guard():
+    async def release_body():
+        guard, detect, control, scheduler, _ = make_guard(resume_after_seconds=999)
+        detect.signals = [GAME]
+        guard.pause()
+        await guard.check()
+        assert guard.state == PAUSED and guard.manual
+        guard.resume(override_signals=False)
+        await guard.check()
+        assert guard.state == PAUSED and not guard.manual and guard.override is None
+        assert guard.reasons == [GAME] and scheduler.paused and control.starts == 0
+
+    async def expiry_body():
+        guard, detect, control, scheduler, _ = make_guard(resume_after_seconds=999)
+        guard.pause(duration_seconds=1)
+        await guard.check()
+        detect.signals = [GAME]
+        guard.manual_until = 0
+        await guard.check()
+        assert guard.state == PAUSED and not guard.manual and guard.override is None
+        assert guard.reasons == [GAME] and scheduler.paused and control.starts == 0
+
+    asyncio.run(release_body())
+    asyncio.run(expiry_body())
+
+
 def test_guard_does_not_restart_model_during_image_exclusive():
     async def body():
         busy = {"value": False}
@@ -229,6 +255,14 @@ def test_gpu_hold_api_accepts_optional_duration(tmp_path):
     cfg.gpu_guard = GpuGuardConfig(enabled=True, poll_seconds=3600)
     m = Manager(cfg, chat=Script([Completion(content="done")]))
     m.guard.detector, m.guard.control = FakeDetect(), FakeControl()
+    resume_calls = []
+    resume = m.guard.resume
+
+    def record_resume(*, override_signals=True):
+        resume_calls.append(override_signals)
+        return resume(override_signals=override_signals)
+
+    m.guard.resume = record_resume
     with TestClient(create_app(m)) as client:
         held = client.post("/gpu/pause", json={"duration_seconds": 1800}).json()
         assert held["manual"] and 1790 <= held["manual_remaining_seconds"] <= 1800
@@ -236,6 +270,9 @@ def test_gpu_hold_api_accepts_optional_duration(tmp_path):
         assert client.post("/gpu/pause", json={"duration_seconds": 0}).status_code == 400
         resumed = client.post("/gpu/resume").json()
         assert not resumed["manual"] and resumed["manual_until"] is None
+        assert resume_calls[-1] is False
+        client.post("/gpu/resume")
+        assert resume_calls[-1] is True
 
 
 def test_guard_startup_with_leftover_flag_resumes_when_clear():
