@@ -1,5 +1,6 @@
 # Files copied to the MacBook must keep LF endings (Git for Windows defaults to autocrlf=true).
 *.sh text eol=lf
+install/** text eol=lf
 macrunner/** text eol=lf
 # Files read inside Linux containers must keep LF endings (Git for Windows defaults to autocrlf).
 ops/egress/** text eol=lf

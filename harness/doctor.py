@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -55,23 +56,27 @@ def main(argv: list[str] | None = None) -> int:
     from . import config as config_mod
     try:
         cfg = config_mod.load(args.config_dir)
-        r.ok("Config", f"{args.config_dir or config_mod.ROOT / 'config'}; model {cfg.default_model}, port {cfg.port}")
+        mode = f"model {cfg.default_model}" if cfg.modules.local_model else "hosted providers only"
+        r.ok("Config", f"{args.config_dir or config_mod.ROOT / 'config'}; {cfg.profile} profile, {mode}, port {cfg.port}")
     except Exception as e:  # noqa: BLE001 - report any config problem
         r.fail("Config", f"{type(e).__name__}: {e}")
         return 1
 
     # machine
-    code, out = run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total,memory.used",
-                     "--format=csv,noheader"])
-    if code == 0:
-        name, driver, total, used = [x.strip() for x in out.splitlines()[0].split(",")]
-        mib = int(total.split()[0])
-        (r.ok if mib >= 15000 else r.warn)("NVIDIA GPU", f"{name}, driver {driver}, {total} ({used} used)"
-                                          + ("" if mib >= 15000 else "; under 16 GB, use the gpt-oss model"))
-        if int(driver.split(".")[0]) < 580:
-            r.warn("NVIDIA driver", f"{driver}; the CUDA 13 build of llama.cpp needs 580 or newer")
+    if cfg.modules.local_model:
+        code, out = run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total,memory.used",
+                         "--format=csv,noheader"])
+        if code == 0:
+            name, driver, total, used = [x.strip() for x in out.splitlines()[0].split(",")]
+            mib = int(total.split()[0])
+            (r.ok if mib >= 15000 else r.warn)("NVIDIA GPU", f"{name}, driver {driver}, {total} ({used} used)"
+                                              + ("" if mib >= 15000 else "; under 16 GB, use the gpt-oss model"))
+            if int(driver.split(".")[0]) < 580:
+                r.warn("NVIDIA driver", f"{driver}; the CUDA 13 build of llama.cpp needs 580 or newer")
+        else:
+            r.fail("NVIDIA GPU", "nvidia-smi not found or failed: install the NVIDIA driver")
     else:
-        r.fail("NVIDIA GPU", "nvidia-smi not found or failed: install the NVIDIA driver")
+        r.ok("NVIDIA GPU", "not required by the service profile")
 
     try:
         data = cfg.data_dir
@@ -88,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     # docker sandbox
     code, out = run(["docker", "version", "--format", "{{.Server.Version}}"])
     if code != 0:
-        r.fail("Docker", "engine not reachable: install and start Docker Desktop")
+        r.fail("Docker", "engine not reachable: install and start Docker Engine or Docker Desktop")
     else:
         r.ok("Docker", f"engine {out}")
         code, _ = run(["docker", "image", "inspect", cfg.sandbox.image])
@@ -96,30 +101,55 @@ def main(argv: list[str] | None = None) -> int:
             r.ok("Sandbox image", cfg.sandbox.image)
         else:
             r.fail("Sandbox image", f"{cfg.sandbox.image} missing: docker build -t {cfg.sandbox.image} sandbox")
+        if cfg.profile == "service":
+            images = sorted({backend.image for backend in cfg.backends.values() if backend.enabled})
+            for image in images:
+                code, _ = run(["docker", "image", "inspect", image])
+                (r.ok if code == 0 else r.fail)("Provider CLI image", image if code == 0 else f"{image} missing")
+            for name, backend in cfg.backends.items():
+                if not backend.enabled:
+                    continue
+                container = f"harness-egress-{name}"
+                code, status = run(["docker", "inspect", "--format", "{{.State.Status}}", container])
+                (r.ok if code == 0 and status == "running" else r.fail)(
+                    "Provider egress", f"{name}: {status}" if code == 0 else f"{container} missing")
 
     # model server
-    model = cfg.models[cfg.default_model]
-    try:
-        props = httpx.get(f"{model.base_url}/props", timeout=5).json()
-        n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
-        detail = f"{model.base_url}: {props.get('model_alias') or props.get('model_path', '?')}, n_ctx {n_ctx}"
-        if props.get("is_sleeping"):
-            detail += " (asleep; loads on the first request)"
-        if n_ctx and n_ctx < model.context_tokens:
-            r.warn("Model server", detail + f"; config expects {model.context_tokens}")
-        else:
-            r.ok("Model server", detail)
-    except (httpx.HTTPError, ValueError) as e:
-        paused = Path(cfg.gpu_guard.pause_flag).exists() if cfg.gpu_guard.enabled else False
-        (r.warn if paused else r.fail)("Model server", f"{model.base_url} not answering ({type(e).__name__})"
-                                       + ("; the GPU guard has it paused" if paused else ""))
+    if cfg.modules.local_model:
+        model = cfg.models[cfg.default_model]
+        try:
+            props = httpx.get(f"{model.base_url}/props", timeout=5).json()
+            n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
+            detail = f"{model.base_url}: {props.get('model_alias') or props.get('model_path', '?')}, n_ctx {n_ctx}"
+            if props.get("is_sleeping"):
+                detail += " (asleep; loads on the first request)"
+            if n_ctx and n_ctx < model.context_tokens:
+                r.warn("Model server", detail + f"; config expects {model.context_tokens}")
+            else:
+                r.ok("Model server", detail)
+        except (httpx.HTTPError, ValueError) as e:
+            paused = Path(cfg.gpu_guard.pause_flag).exists() if cfg.gpu_guard.enabled else False
+            (r.warn if paused else r.fail)("Model server", f"{model.base_url} not answering ({type(e).__name__})"
+                                           + ("; the GPU guard has it paused" if paused else ""))
+    else:
+        r.ok("Model server", "not installed by the hosted-provider service profile")
 
     # daemon
     base = f"http://127.0.0.1:{cfg.port}"
     try:
-        httpx.get(f"{base}/health", timeout=5).raise_for_status()
-        state = httpx.get(f"{base}/models/status", timeout=10).json()[0]["state"]
-        r.ok("Daemon", f"{base} up; model state {state}")
+        health = httpx.get(f"{base}/health", timeout=5).json()
+        if health.get("profile") != cfg.profile:
+            raise ValueError(f"daemon reports profile {health.get('profile')!r}, expected {cfg.profile!r}")
+        if cfg.modules.local_model:
+            state = httpx.get(f"{base}/models/status", timeout=10).json()[0]["state"]
+            r.ok("Daemon", f"{base} up; model state {state}")
+        else:
+            r.ok("Daemon", f"{base} up; {cfg.profile} profile")
+            backends = httpx.get(f"{base}/backends", timeout=100).json()
+            logged_in = [backend["name"] for backend in backends if backend.get("logged_in")]
+            (r.ok if logged_in else r.warn)(
+                "Provider login", ", ".join(logged_in) if logged_in else
+                "none detected; run ops/backends/login.sh (Unix) or ops\\backends\\login.ps1 (Windows)")
         gpu = httpx.get(f"{base}/gpu", timeout=5).json()
         if gpu.get("enabled"):
             flag = Path(cfg.gpu_guard.pause_flag).exists()
@@ -136,13 +166,25 @@ def main(argv: list[str] | None = None) -> int:
 
     # autostart
     if sys.platform == "win32" and args.instance:
-        for suffix in (("Daemon",) if args.existing_server else ("LlamaServer", "Daemon")):
+        for suffix in (("Daemon",) if args.existing_server or not cfg.modules.local_model else ("LlamaServer", "Daemon")):
             task = f"AgentHarness-{args.instance}-{suffix}"
             code, out = run(["schtasks", "/Query", "/TN", task, "/FO", "CSV", "/NH"])
             if code == 0:
                 r.ok("Autostart", f"{task}: {out.split(',')[-1].strip(chr(34))}")
             else:
                 r.warn("Autostart", f"{task} not registered (run install.ps1 without -NoTasks)")
+    elif sys.platform.startswith("linux") and args.instance:
+        suffixes = (("daemon",) if args.existing_server or not cfg.modules.local_model else ("llama", "daemon"))
+        safe_instance = args.instance.lower()
+        for suffix in suffixes:
+            unit = f"agent-harness-{safe_instance}-{suffix}.service"
+            code, status = run(["systemctl", "--user", "is-active", unit])
+            (r.ok if code == 0 and status == "active" else r.warn)(
+                "Autostart", f"{unit}: {status or 'not active'}")
+    elif sys.platform == "darwin" and args.instance:
+        label = f"com.agent-harness.{args.instance.lower()}.daemon"
+        code, _ = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
+        (r.ok if code == 0 else r.warn)("Autostart", f"{label}: " + ("loaded" if code == 0 else "not loaded"))
 
     # optional pieces
     if cfg.web.enabled:

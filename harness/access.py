@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from .config import Config, GuestAccess
 
-OWNER_GET_PREFIXES = ("/keys", "/metrics")
+OWNER_GET_PREFIXES = ("/keys", "/metrics", "/maintenance")
 RUNNER_PREFIX = "/runners/"
 
 
@@ -88,6 +88,8 @@ def guest_forbidden(access: Access, method: str, path: str) -> str | None:
     """Return an error detail if this guest request is refused, else None."""
     if access.role != "guest":
         return None
+    if path == "/api/admin" or path.startswith("/api/admin/"):
+        return "demo access cannot use the owner API"
     if method in ("GET", "HEAD", "OPTIONS"):
         if any(path == prefix or path.startswith(prefix + "/") for prefix in OWNER_GET_PREFIXES):
             return "demo access cannot view owner credentials"
