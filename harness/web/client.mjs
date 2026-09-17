@@ -87,3 +87,4 @@ export class AgentHarnessWebClient {
 // Compatibility for code that imported the pre-#91 class name directly.
 export const ControlCenterClient = AgentHarnessWebClient;
 export const agentHarnessWeb = new AgentHarnessWebClient();
+export const controlCenter = agentHarnessWeb;

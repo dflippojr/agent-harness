@@ -23,6 +23,8 @@ def test_web_metadata_and_compatibility_identifiers():
     assert '"harness.daemonUrl"' in transport
     assert '"harness.ownerToken"' in transport
     assert "Agent Harness Server URL" in transport
+    assert "export const ControlCenterClient = AgentHarnessWebClient;" in transport
+    assert "export const controlCenter = agentHarnessWeb;" in transport
 
 
 def test_readme_glossary_defines_every_first_party_surface():
