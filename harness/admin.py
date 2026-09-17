@@ -27,7 +27,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.3"
+API_VERSION = "1.4"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Control Center operations under /api/admin/v1"
@@ -85,6 +85,8 @@ ADMIN_PATHS = frozenset({
     "/keys/{kid}",
     "/pairing-codes",
     "/pairing-codes/{pid}",
+    "/runner-pairing-codes",
+    "/runner-pairing-codes/{pid}",
 })
 
 

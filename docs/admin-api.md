@@ -49,6 +49,7 @@ same; only the prefix and the owner credential check are new.
 | Projects and jobs | `/projects`, `/templates`, `/jobs` |
 | Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}` |
 | App provider policy | `/provider-credentials`, `/provider-credentials/{credential_id}` |
+| Mac pairing | `/runner-pairing-codes`, `/runner-pairing-codes/{pid}` |
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
 | Images | `/images`, `/images/warmup`, `/images/cooldown` |
@@ -127,10 +128,22 @@ curl -s http://127.0.0.1:8100/api/admin/v1/keys \
 For a browser client, add `"origins":["https://control.example"]`. Browser origins must be HTTPS except for
 loopback development and contain no path, query, fragment, or credentials.
 
+## Mac client pairing
+
+`POST /api/admin/v1/runner-pairing-codes` with `{"name":"My Mac","runner":"macbook"}` creates a code that
+expires after 10 minutes and works once. The owner response shows the code once; list responses contain only its
+metadata, and `DELETE /api/admin/v1/runner-pairing-codes/{id}` cancels it. Settings uses this operation to produce the
+install command documented in [`mac-client.md`](mac-client.md).
+
+The Mac redeems the code at `POST /api/v1/runner-pair`. That one response contains a new non-browser owner token and
+the selected runner's existing token. It is marked `Cache-Control: no-store`. The code is stored only as a hash, the
+runner token stays in its configured owner file and never enters SQLite, and neither token is printed by the CLI.
+
 ## Changelog
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.4 | 2026-09-16 | One-time native Mac client and runner pairing |
 | 1.3 | 2026-09-16 | Owner-managed per-app provider policy, opaque key-file references, and revocation |
 | 1.2 | 2026-09-16 | Daemon profile and optional-module capability discovery |
 | 1.1 | 2026-09-16 | Origin-bound Control Center owner tokens and cross-origin browser access |

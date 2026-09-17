@@ -308,3 +308,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.4 | 2026-09-16 | Daemon profile and optional-module capability discovery |
 | 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
 | 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
+| 1.7 | 2026-09-16 | Native Mac bootstrap pairing and capability discovery (owner-approved, not an app SDK operation) |

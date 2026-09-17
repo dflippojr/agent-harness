@@ -99,6 +99,13 @@ The daemon only listens on localhost. To reach it from other devices, use [Tails
 Phone notifications (approvals with Approve/Deny buttons, task finished) use a self-hosted
 [ntfy](https://ntfy.sh) server: see `docs/phase2-results.md` for the container and the `notify:` section.
 
+## Add a Mac runner and CLI
+
+After Tailscale and `public_url` are configured, add a `macbook` entry under `runners:` with an owner-side
+`token_file`, restart the daemon, then choose **Settings → Apps → Pair Mac client**. Run the generated one-time
+command in Terminal on the Mac. It installs a venv, the `harness` CLI and Python SDK, and the sandboxed outbound
+runner as a launchd agent—without SSH, sudo, or copying tokens. See [`mac-client.md`](mac-client.md).
+
 ## What else you can turn on
 
 Each is a section in `config\harness.yaml`, documented in the repository's `config/harness.yaml`:

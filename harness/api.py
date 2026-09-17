@@ -193,6 +193,19 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def manifest():
         return FileResponse(WEB / "manifest.webmanifest", media_type="application/manifest+json")
 
+    @app.get("/mac-client/install.sh", include_in_schema=False)
+    async def mac_client_installer():
+        return FileResponse(Path(__file__).parent.parent / "macrunner" / "install.sh",
+                            media_type="text/x-shellscript", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/mac-client/package.tar.gz", include_in_schema=False)
+    async def mac_client_package():
+        from .mac_client import package_bytes
+        return Response(package_bytes(), media_type="application/gzip", headers={
+            "Content-Disposition": 'attachment; filename="agent-harness-mac.tar.gz"',
+            "Cache-Control": "no-cache",
+        })
+
     app.mount("/static", StaticFiles(directory=WEB), name="static")
 
     from . import apps, endpoint
