@@ -1,4 +1,4 @@
-"""Build the version-matched Mac client/runner bundle served by the daemon."""
+"""Build the version-matched Agent Harness for Mac bundle served by the Server."""
 
 from __future__ import annotations
 

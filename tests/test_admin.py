@@ -32,6 +32,7 @@ def test_admin_root_and_unversioned_compat(tmp_path):
         assert root["api_version"] == API_VERSION
         assert root["server"] == "agent-harness"
         assert ADMIN_SCOPE in root["scopes"]
+        assert root["scopes"][ADMIN_SCOPE] == "owner-only Agent Harness Web operations under /api/admin/v1"
         assert root["auth"]["tailscale_owner"] is True
         paths = {op["path"] for op in root["operations"]}
         assert f"{PREFIX}/sessions" in paths

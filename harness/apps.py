@@ -101,7 +101,7 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
 
 
 def owner_key(key: dict | None) -> bool:
-    """An owner token can dogfood app operations as Control Center without becoming an app."""
+    """An owner token lets Agent Harness Web dogfood app operations without becoming an app."""
     return bool(key and key.get("kind") == "owner" and "admin" in set((key.get("scopes") or "").split()))
 
 
@@ -158,7 +158,7 @@ class PairRequest(BaseModel):
 
 
 class RunnerPairingCodeRequest(BaseModel):
-    name: str = Field(default="Mac client", min_length=1, max_length=60)
+    name: str = Field(default="Agent Harness for Mac", min_length=1, max_length=60)
     runner: str = Field(default="macbook", min_length=1, max_length=60)
     ttl_seconds: int = Field(default=PAIRING_TTL_SECONDS, ge=60, le=PAIRING_TTL_SECONDS)
 
@@ -389,8 +389,8 @@ def register(app: FastAPI, mgr) -> None:
         token = header[7:].strip() if header.lower().startswith("bearer ") else ""
         key = m.db.api_key_by_secret(token)
         if key is None:
-            # The bundled first-party client has the daemon's same-origin Tailscale/localhost owner identity.
-            # Cross-origin clients must use an origin-bound owner token; never promote an approved app origin.
+            # Bundled Agent Harness Web has the Server's same-origin Tailscale/localhost owner identity.
+            # Cross-origin Web connections need an origin-bound owner token; never promote an App origin.
             ident = getattr(request.state, "access", None)
             raw_origin = request.headers.get("origin", "")
             try:
@@ -398,7 +398,7 @@ def register(app: FastAPI, mgr) -> None:
             except ValueError:
                 same_origin = False
             if not token and ident is not None and ident.role == "owner" and ident.allowed and same_origin:
-                return {"id": "", "name": "Control Center", "kind": "owner", "scopes": "admin",
+                return {"id": "", "name": "Agent Harness Web", "kind": "owner", "scopes": "admin",
                         "scope_set": {"admin"}, "origins": [], "bundled": True}
             raise HarnessError(401, "missing or invalid app token")
         scopes = set((key.get("scopes") or "").split())

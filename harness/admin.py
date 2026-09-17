@@ -1,11 +1,11 @@
-"""Owner API (/api/admin/v1): Control Center operations that ordinary apps must not receive.
+"""Owner API (/api/admin/v1): Agent Harness Web operations that ordinary apps must not receive.
 
 Issue #24. The least-privilege app contract stays at /api/v1. This surface versions the daemon's
 operator routes (sessions, search, jobs, keys, GPU, maintenance, Remote Control trust, …) under a
-stable prefix. The bundled and separately hosted Control Center both use this contract.
+stable prefix. Bundled and separately hosted Agent Harness Web both use this contract.
 
 Auth is an explicit owner credential:
-- Tailscale/localhost owner identity (no bearer token), same as today's Control Center; or
+- Tailscale/localhost owner identity (no bearer token), same as bundled Agent Harness Web; or
 - a bearer token of kind ``owner`` holding the ``admin`` scope (prefix ``ho-``).
 
 App and device tokens are refused even when the request also has owner Tailscale identity, so a
@@ -30,7 +30,7 @@ log = logging.getLogger("harness.admin")
 API_VERSION = "1.4"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
-ADMIN_SCOPE_HELP = "owner-only Control Center operations under /api/admin/v1"
+ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
 PREFIX = "/api/admin/v1"
 
 # Candidate owner operations from issue #24. Runner poll/results and ntfy token buttons stay

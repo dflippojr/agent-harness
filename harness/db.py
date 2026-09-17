@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS app_provider_credentials (
     created_at REAL NOT NULL,
     revoked_at REAL
 );
-CREATE TABLE IF NOT EXISTS runner_pairing_codes ( -- owner-approved Mac client + runner bootstrap codes
+CREATE TABLE IF NOT EXISTS runner_pairing_codes ( -- owner-approved Agent Harness for Mac bootstrap codes
     id TEXT PRIMARY KEY,
     hash TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
@@ -217,7 +217,7 @@ MIGRATIONS = [
     ("sessions", "app_id", "TEXT NOT NULL DEFAULT ''"),
     ("sessions", "app_tools", "TEXT NOT NULL DEFAULT '[]'"),
     ("sessions", "app_metadata", "TEXT NOT NULL DEFAULT '{}'"),
-    # Issue #57: human-owned Control Center data. v1 has one stable owner; guests own nothing.
+    # Issue #57: human-owned Agent Harness Web data. v1 has one stable owner; guests own nothing.
     ("sessions", "owner_id", "TEXT NOT NULL DEFAULT 'owner'"),
     ("api_keys", "scopes", "TEXT NOT NULL DEFAULT 'inference'"),
     ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
@@ -688,7 +688,7 @@ class Database:
                               (now, key["id"], pairing["id"]))
         return key, secret, ""
 
-    # Native Mac client pairing is separate from browser origin pairing. The code authorizes one owner CLI token;
+    # Agent Harness for Mac pairing is separate from browser-origin pairing. It authorizes one owner CLI token;
     # the runner token remains in its configured owner file and never enters SQLite.
     def create_runner_pairing_code(self, name: str, runner: str, ttl_seconds: int) -> tuple[dict, str]:
         import hashlib
