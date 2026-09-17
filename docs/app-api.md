@@ -115,7 +115,8 @@ requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and
 Server info: API version, scopes, projects, models, hosted backends, enabled features, and `capabilities`. The
 capability object identifies the `full` or `service` profile, always-on daemon facilities, and effective optional
 modules. It contains no credentials and doesn't need a token. `GET /health` exposes the same capability object for
-lightweight discovery.
+lightweight discovery plus first-party release/protocol compatibility and update hints; see
+[`compatibility.md`](compatibility.md).
 
 ### `POST /api/v1/sessions`  (scope `sessions`)
 

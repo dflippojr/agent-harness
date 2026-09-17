@@ -3,6 +3,8 @@
 
 const BASE_KEY = "harness.daemonUrl";
 const TOKEN_KEY = "harness.ownerToken";
+export const WEB_BUILD_ID = "2026.09.17.1";
+export const WEB_PROTOCOL = 2;
 
 export function normalizeDaemonUrl(value) {
   const raw = String(value || "").trim();
@@ -44,7 +46,9 @@ export class ControlCenterClient {
   }
 
   headers(extra = {}) {
-    return this.token ? { ...extra, Authorization: `Bearer ${this.token}` } : { ...extra };
+    const headers = { ...extra, "X-Agent-Harness-Client": `web/${WEB_PROTOCOL}` };
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    return headers;
   }
 
   async request(path, { method = "GET", body, surface = "admin" } = {}) {
@@ -60,8 +64,18 @@ export class ControlCenterClient {
     if (resp.status === 204) return null;
     const type = resp.headers.get("content-type") || "";
     const data = type.includes("json") ? await resp.json() : await resp.text();
-    if (!resp.ok) throw new Error((data && data.detail) || `HTTP ${resp.status}`);
+    if (!resp.ok) {
+      const error = new Error((data && data.detail) || `HTTP ${resp.status}`);
+      error.status = resp.status;
+      error.code = data && data.error && data.error.code;
+      error.data = data;
+      throw error;
+    }
     return data;
+  }
+
+  compatibility() {
+    return this.request("/health", { surface: "" });
   }
 
   async blob(path, surface = "admin") {

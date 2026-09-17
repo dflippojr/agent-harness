@@ -14,7 +14,7 @@
 //   #/images/<id>/full       in-app fullscreen viewer
 //   #/jobs[/new|/<id>]       scheduled jobs
 
-import { controlCenter } from "./client.mjs";
+import { controlCenter, WEB_BUILD_ID, WEB_PROTOCOL } from "./client.mjs";
 
 const $app = document.getElementById("app");
 const $title = document.getElementById("title");
@@ -2668,12 +2668,29 @@ function diskCard() {
         device("Tower", u.free_gb, u.total_gb, towerExtra),
         (u.runners || []).map((r) => {
           const online = !!r.online;
+          const compatibility = r.compatibility || {};
+          const compatible = compatibility.state === "compatible";
+          const canUpdate = online && compatible && r.update_supported;
           const extra = h("div", { class: "disk-facts" },
             fact("Runner", online
-              ? `${r.info.version} · macOS ${r.info.macos}`
+              ? `${r.info.version} · protocol ${r.info.protocol ?? "not reported"} · macOS ${r.info.macos}`
               : (r.last_seen_seconds !== null
                 ? `last seen ${Math.round(r.last_seen_seconds / 60)} min ago`
-                : "not connected since the daemon started")));
+                : "not connected since the daemon started")),
+            fact("Compatibility", `${compatibility.state || "not reported"}${compatibility.supported ? ` · Server supports ${compatibility.supported.min}–${compatibility.supported.max}` : ""}`),
+            r.last_update ? fact("Last update", `${r.last_update.ok ? "succeeded" : "failed"}: ${r.last_update.message}`) : null,
+            isGuest() ? null : h("button", {
+              class: "btn", type: "button", disabled: !canUpdate,
+              onclick: async (ev) => {
+                ev.target.disabled = true;
+                try {
+                  const result = await api(`/runners/${r.name}/update`, { method: "POST" });
+                  toast(result.message || "Mac client update queued", 5000);
+                  setTimeout(load, 3000);
+                } catch (e) { toast(e.message, 8000); ev.target.disabled = false; }
+              },
+            }, "Update Mac client"),
+            !canUpdate ? h("p", { class: "muted small" }, `On the Mac, run: ${r.manual_update || "harness update"}`) : null);
           return device(TARGET_LABEL[r.name] || r.name,
             online ? r.info.free_gb : "—",
             online && r.info.total_gb != null ? r.info.total_gb : null,
@@ -2717,11 +2734,92 @@ async function warmModel(force = false) {
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") warmModel(); });
 
 // ---------- boot ----------
+const UPDATE_GUARD = "harness.webUpdateAttempt";
+
+function hasUnsavedInput() {
+  return [...document.querySelectorAll("input, textarea, select")].some((el) => {
+    if (el.id === "feature-nav") return false;
+    if (el.type === "checkbox" || el.type === "radio") return el.checked !== el.defaultChecked;
+    if (el.tagName === "SELECT") return [...el.options].some((option) => option.selected !== option.defaultSelected);
+    return el.value !== el.defaultValue;
+  });
+}
+
+async function reloadAndUpdate(buildId) {
+  if (hasUnsavedInput()) {
+    toast("Save or discard your form changes before reloading the app.", 6000);
+    return false;
+  }
+  const attempted = sessionStorage.getItem(UPDATE_GUARD);
+  if (attempted === buildId) {
+    fill($app, h("div", { class: "card" },
+      h("h2", {}, "Update did not load"),
+      h("p", {}, "Close every installed Agent Harness window, reopen it while online, and reload. If it still fails, remove and reinstall the home-screen app.")));
+    return false;
+  }
+  sessionStorage.setItem(UPDATE_GUARD, buildId);
+  if (window.caches) {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => key.startsWith("harness-shell-")).map((key) => caches.delete(key)));
+  }
+  const registration = await navigator.serviceWorker?.getRegistration();
+  registration?.active?.postMessage("PURGE_SHELL");
+  await registration?.update();
+  location.reload();
+  return true;
+}
+
+function blockingUpdate(meta, state) {
+  setHeader("agents", "Update required", { page: true });
+  const daemonIsOld = state === "daemon_update_required";
+  fill($app, h("div", { class: "card" },
+    h("h2", {}, daemonIsOld ? "Update Agent Harness Server" : "Update Agent Harness Web"),
+    h("p", {}, daemonIsOld
+      ? "This browser app uses a newer protocol than the connected server. Update the server, then reload."
+      : "This installed app is too old for the connected server."),
+    daemonIsOld ? null : h("button", { class: "btn primary", onclick: () => reloadAndUpdate(meta.update_hint?.web?.build_id || meta.build_id) }, "Reload and update"),
+    h("p", { class: "muted small" }, `Web protocol ${WEB_PROTOCOL}; server supports ${meta.protocols?.admin?.min}–${meta.protocols?.admin?.max}.`)));
+}
+
+async function checkCompatibility({ foreground = false } = {}) {
+  let meta;
+  try { meta = await controlCenter.compatibility(); }
+  catch (_) { return true; } // normal offline UI handles connection failures
+  const range = meta.protocols?.admin;
+  if (range && (WEB_PROTOCOL < range.min || WEB_PROTOCOL > range.max)) {
+    blockingUpdate(meta, WEB_PROTOCOL < range.min ? "client_update_required" : "daemon_update_required");
+    return false;
+  }
+  const available = meta.update_hint?.web?.build_id;
+  if (available && available !== WEB_BUILD_ID) {
+    try { await (await navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
+    const promptKey = `harness.webUpdatePrompt.${available}`;
+    if (!sessionStorage.getItem(promptKey) && (!foreground || !hasUnsavedInput())) {
+      sessionStorage.setItem(promptKey, "1");
+      if (confirm("A newer Agent Harness Web bundle is available. Reload and update now?")) {
+        await reloadAndUpdate(available);
+        return false;
+      }
+    }
+  } else {
+    sessionStorage.removeItem(UPDATE_GUARD);
+  }
+  return true;
+}
+
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
-currentUser().then(() => {
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") checkCompatibility({ foreground: true });
+});
+
+checkCompatibility().then((compatible) => compatible && currentUser()).then((user) => {
+  if (!user) return null;
   paintGuestChrome();
   if (!isGuest()) warmModel();
   return loadProfileIcon();
-}).then(() => applyAppIcon(readAppIcon())).then(() => route());
+}).then((ready) => {
+  if (ready === null) return null;
+  return applyAppIcon(readAppIcon());
+}).then((ready) => { if (ready !== null) route(); });

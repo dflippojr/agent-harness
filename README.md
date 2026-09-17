@@ -164,6 +164,9 @@ Details and verification: `docs/phase4-results.md`.
   venv and `harness` command under `~/.agent-harness`, pairs without SSH or token copying, and installs the runner as
   a launchd agent. `harness projects add ~/Projects/<repo>` extends its allowed roots; `harness runner
   status|restart|logs` manages it locally. The older `.\ops\macbook\deploy.ps1` SSH flow remains an update fallback.
+- First-party clients use an explicit current-plus-previous protocol contract. `harness version` shows the installed
+  Mac client and connected Server; `harness update` performs a hash-verified transactional update without replacing
+  credentials or configuration. See [`docs/compatibility.md`](docs/compatibility.md).
   See `docs/mac-client.md`.
 - Sessions for an offline or sleeping Mac wait (`waiting_target`) without holding the GPU, notify, and resume when
   the runner reconnects. While a Mac session runs, the runner holds `caffeinate -i`.

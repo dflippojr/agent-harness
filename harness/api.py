@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import access as access_mod
+from . import compat
 from . import config as config_mod
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
@@ -166,13 +167,25 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         if guest_block:
             log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
             return JSONResponse({"detail": guest_block}, status_code=403)
+        public_path = request.scope.get("harness_original_path", request.url.path)
+        surface = compat.surface_for_path(public_path)
+        compatibility = compat.check_client(request.headers.get(compat.CLIENT_HEADER, ""), surface) if surface else None
+        discovery = request.method in {"GET", "HEAD"} and public_path in {"/api/v1", "/api/admin/v1"}
+        if compatibility and not discovery and compatibility["state"] == "invalid":
+            return JSONResponse({"detail": "invalid first-party client identity", "error": {
+                "code": "invalid_client_identity", **compatibility,
+            }}, status_code=400)
+        if compatibility and not discovery and compatibility["state"] in {"client_update_required", "daemon_update_required"}:
+            return JSONResponse({"detail": compatibility["state"].replace("_", " "), "error": {
+                "code": compatibility["state"], **compatibility,
+            }}, status_code=426)
         raw_origin = request.headers.get("origin", "")
         try:
             origin = normalize_origin(raw_origin) if raw_origin else ""
         except ValueError:
             origin = ""
-        public_path = request.scope.get("harness_original_path", request.url.path)
-        browser_api = public_path.startswith("/api/v1") or public_path.startswith("/api/admin/v1")
+        browser_api = (public_path == "/health" or public_path.startswith("/api/v1")
+                       or public_path.startswith("/api/admin/v1"))
         cross_origin_api = bool(origin and origin not in daemon_origins(cfg)
                                 and browser_api and cors_origin_allowed(m, request, origin))
         cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_api else {}
@@ -182,11 +195,12 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             requested_headers = {h.strip().lower() for h in
                                  request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
             if (not cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
-                    or not requested_headers <= {"authorization", "content-type", "last-event-id"}):
+                    or not requested_headers <= {"authorization", "content-type", "last-event-id",
+                                                  "x-agent-harness-client"}):
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
             return Response(status_code=204, headers={**cors_headers,
                             "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-                            "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID",
+                            "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID, X-Agent-Harness-Client",
                             "Access-Control-Max-Age": "600"})
 
         if request.method not in ("GET", "HEAD", "OPTIONS"):
@@ -195,6 +209,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                     or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_api)):
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
         response = await call_next(request)
+        if compatibility and compatibility["state"] == "transition":
+            response.headers["X-Agent-Harness-Deprecation"] = "missing_client_version"
+            response.headers["Warning"] = '299 agent-harness "client version header will be required after this transition release"'
         for key, value in cors_headers.items():
             response.headers[key] = value
         return response
@@ -232,6 +249,11 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             "Cache-Control": "no-cache",
         })
 
+    @app.get("/mac-client/manifest.json", include_in_schema=False)
+    async def mac_client_manifest():
+        from .mac_client import package_manifest
+        return JSONResponse(package_manifest(), headers={"Cache-Control": "no-cache"})
+
     app.mount("/static", StaticFiles(directory=WEB), name="static")
 
     from . import apps, endpoint
@@ -242,7 +264,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/health")
     async def health():
         cfg = app.state.manager.cfg
-        return {"ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities()}
+        return {"ok": True, "profile": cfg.profile, **compat.metadata(cfg.capabilities())}
 
     @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
     async def metrics(request: Request):
@@ -328,6 +350,31 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         if int(request.headers.get("content-length") or 0) > RUNNER_BODY_LIMIT:
             raise HarnessError(413, "result too large")
         return {"accepted": m.hub.result(name, body.id, body.ok, body.value, body.error, body.kind)}
+
+    @app.post("/runners/{name}/update")
+    async def runner_update(name: str, request: Request):
+        m = mgr(request)
+        from .admin import require_admin
+        require_admin(request, mgr)
+        if name not in m.hub.state:
+            raise HarnessError(404, "unknown runner")
+        state = m.hub.state[name]
+        protocol = state.info.get("protocol")
+        public = m.cfg.public_url or str(request.base_url).rstrip("/")
+        fallback = (f"Run `harness update` on the Mac. If that command is unavailable, run "
+                    f"`curl -fsSL {public}/mac-client/install.sh | bash -s -- --server {public}`.")
+        if not m.hub.online(name):
+            raise HarnessError(409, f"runner is offline. {fallback}")
+        try:
+            remote_update_supported = int(protocol) == compat.PROTOCOLS["runner"]["max"]
+        except (TypeError, ValueError):
+            remote_update_supported = False
+        if not remote_update_supported:
+            raise HarnessError(409, f"runner is too old for remote update. {fallback}")
+        try:
+            return await m.hub.call(name, "update_client", {}, timeout=300, wait_if_offline=False)
+        except Exception as exc:
+            raise HarnessError(409, f"Mac client update failed: {exc}. {fallback}") from exc
 
     @app.get("/models")
     async def models(request: Request):

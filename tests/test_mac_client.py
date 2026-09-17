@@ -104,7 +104,10 @@ def test_cli_pairing_project_roots_and_launchd_commands(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(cli.httpx, "post", lambda url, **kwargs: seen.append((url, kwargs)) or Response())
     paired = cli.pair_native("https://tower.example/", "hrp-once", client_config, runner_config)
-    assert seen == [("https://tower.example/api/v1/runner-pair", {"json": {"code": "hrp-once"}, "timeout": 60})]
+    assert seen == [("https://tower.example/api/v1/runner-pair", {
+        "json": {"code": "hrp-once"}, "timeout": 60,
+        "headers": {"X-Agent-Harness-Client": "cli/2"},
+    })]
     assert json.loads(client_config.read_text()) == {"server": "https://tower.example", "token": "ho-secret"}
     assert json.loads(runner_config.read_text())["token"] == "runner-secret"
     assert paired["owner_key"]["id"] == "k-1"
@@ -140,7 +143,7 @@ def test_paired_cli_uses_owner_api_and_bearer_token(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.httpx, "request", request)
     assert cli.api("GET", "/sessions") == []
     assert seen == [("GET", "https://tower.example/api/admin/v1/sessions", 60,
-                     {"headers": {"Authorization": "Bearer ho-client"}})]
+                     {"headers": {"X-Agent-Harness-Client": "cli/2", "Authorization": "Bearer ho-client"}})]
 
 
 def test_mac_install_script_supports_pairing_and_legacy_update():
@@ -148,3 +151,4 @@ def test_mac_install_script_supports_pairing_and_legacy_update():
     assert "--server" in script and "--code" in script and "/api/v1/runner-pair" not in script
     assert "package.tar.gz" in script and "pip install" in script and "launchctl bootstrap" in script
     assert "agent_harness_client.pth" in script
+    assert "harness_update.py" in script and "harness_compat.py" in script

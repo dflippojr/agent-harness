@@ -34,6 +34,7 @@ also checks that the presented token was approved for the request's origin. See 
 
 Requires owner credentials. Returns `api_version`, the `admin` scope description, accepted `auth`
 methods, the daemon `capabilities`, and the versioned `operations` list (`method` + `path`).
+It also publishes the first-party protocol ranges and update hints described in [`compatibility.md`](compatibility.md).
 
 ## Operations
 

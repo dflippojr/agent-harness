@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .fileops import ToolError
+from . import compat
 
 log = logging.getLogger("harness.apps")
 
@@ -213,6 +214,11 @@ class AppRootResponse(BaseModel):
     backends: list[BackendResponse]
     capabilities: CapabilitiesResponse
     features: dict[str, bool | str]
+    release: str
+    build_id: str
+    protocols: dict
+    minimum_clients: dict
+    update_hint: dict
 
 
 class ProviderFailureResponse(BaseModel):
@@ -511,9 +517,10 @@ def register(app: FastAPI, mgr) -> None:
         backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, False, None, False)
                                                for name in m.cfg.backends]))
         return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
+                **compat.metadata(m.cfg.capabilities()),
                 "projects": [{"name": p.name, "description": p.description, "target": p.target}
                              for p in m.cfg.projects.values()],
-                "models": list(m.cfg.models), "backends": backends, "capabilities": m.cfg.capabilities(), "features": {
+                "models": list(m.cfg.models), "backends": backends, "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
                     "runner_pairing": bool(m.cfg.runners),

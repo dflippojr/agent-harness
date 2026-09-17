@@ -23,6 +23,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 
 from . import access as access_mod
+from . import compat
 from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
@@ -40,6 +41,7 @@ ADMIN_PATHS = frozenset({
     "/profile",
     "/projects",
     "/runners",
+    "/runners/{name}/update",
     "/models",
     "/models/status",
     "/models/warm",
@@ -198,7 +200,7 @@ def register(app: FastAPI, mgr) -> None:
         return {
             "api_version": API_VERSION,
             "server": "agent-harness",
-            "capabilities": mgr(request).cfg.capabilities(),
+            **compat.metadata(mgr(request).cfg.capabilities()),
             "scopes": {ADMIN_SCOPE: ADMIN_SCOPE_HELP},
             "auth": {
                 "tailscale_owner": True,
