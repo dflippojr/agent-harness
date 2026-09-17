@@ -1,0 +1,59 @@
+name: Automated Code Review
+
+# Trigger only on PR open (not every push) to keep this bounded to one pass
+# per PR by default; use workflow_dispatch for an on-demand re-review after
+# later commits. Runs on the self-hosted tower runner so it can reuse the
+# already-authenticated Claude Code subscription login instead of an API key
+# (no per-token billing).
+on:
+  pull_request:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+
+concurrency:
+  group: review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: [self-hosted, Windows, X64, agent-harness-tower]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve PR number
+        id: pr
+        shell: pwsh
+        env:
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
+        run: |
+          $num = $env:EVENT_PR_NUMBER
+          if ([string]::IsNullOrEmpty($num)) { $num = $env:INPUT_PR_NUMBER }
+          "number=$num" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Run Claude Code review
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          $prompt = "Run 'gh pr diff $env:PR_NUMBER' to see this pull request's diff, then review it for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so."
+          claude -p $prompt --permission-mode auto --output-format text | Out-File -FilePath review-output.md -Encoding utf8
+
+      - name: Post review as PR comment
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          gh pr comment $env:PR_NUMBER --body-file review-output.md
