@@ -65,6 +65,12 @@ def render(db: Database, sid: str) -> str:
         elif t == "approval_decided":
             note = f": {d['note']}" if d.get("note") else ""
             lines += [f"#### {at} · Approval `{d['id']}` {d['status']}{note}", ""]
+        elif t == "approval_auto_approved":
+            lines += [f"#### {at} · Auto-approved `{d.get('id', '')}`: deterministic gate and smart reviewer "
+                      f"both allowed this {d.get('tool') or 'call'} ({d.get('reason') or 'routine workspace work'})", ""]
+        elif t == "smart_review":
+            lines += [f"> {at} · smart review {d.get('outcome')} ({d.get('recommendation')} "
+                      f"{int(round((d.get('confidence') or 0) * 100))}%)", ""]
         elif t == "tool_result":
             status = "ok" if d["ok"] else "error"
             lines += [f"#### {at} · Result `{d['name']}` ({status}, {d['seconds']}s)", "", _block(d["output"]), ""]

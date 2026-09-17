@@ -248,6 +248,8 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .approval.decided { border-width: 1px; background: var(--panel); }
 .approval.focus { box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 35%, transparent); }
 .approval h4 { margin: 0 0 6px; font-size: 0.9375rem; }
+.smart-rec { margin: 0 0 8px; font-size: 0.8125rem; color: var(--muted); }
+.note.smart-auto { color: var(--ok); }
 .approval pre { background: var(--code-bg); padding: 8px; border-radius: 8px; overflow: auto; max-height: 50vh; font-family: var(--mono); font-size: 0.78125rem; white-space: pre-wrap; }
 .approval input { margin: 8px 0; }
 .approval-diff { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; max-height: 50vh; overflow: auto; font-size: 0.78125rem; }

@@ -22,6 +22,9 @@ SHELL_TOOLS = frozenset({"Bash", "run_shell", "exec_command"})
 RECOMMENDATIONS = frozenset({"approve", "deny", "escalate"})
 RISK_FLAGS = ("network", "destructive", "secrets", "privilege", "publication", "injection", "ambiguous", "other")
 BLOCKING_FLAGS = frozenset({"network", "destructive", "secrets", "privilege", "publication", "injection"})
+FAILURE_REASONS = frozenset({
+    "timeout", "malformed JSON", "provider error", "missing credential", "invalid output", "rate limited",
+})
 MODES = ("off", "shadow", "auto")
 PROVIDERS = ("openai", "anthropic")
 REASON_LIMIT = 140
@@ -311,8 +314,6 @@ def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool 
         return Eligibility(ok=False, reason="rule is not smart-eligible", tool=name, rule=rule)
     if name not in SHELL_TOOLS:
         return Eligibility(ok=False, reason="tool is not a hosted-backend shell", tool=name, rule=rule)
-    if name not in ("Bash",):  # v1: tagged default ASK is Claude Code Bash only
-        return Eligibility(ok=False, reason="tool is not smart-eligible in v1", tool=name, rule=rule)
     if args.get("network"):
         return Eligibility(ok=False, reason="networked command", tool=name, rule=rule, network=True)
     command = args.get("command")
@@ -550,8 +551,8 @@ class SmartReviewer:
                 review = await hosted_complete(settings, secret, payload)
         except FileNotFoundError:
             review = Review("escalate", escalate_reason="missing credential")
-        except TimeoutError:
-            review = Review("escalate", escalate_reason="timeout")
+        except TimeoutError as e:
+            review = Review("escalate", escalate_reason="rate limited" if "rate" in str(e).lower() else "timeout")
         except httpx.TimeoutException:
             review = Review("escalate", escalate_reason="timeout")
         except httpx.HTTPError:
@@ -573,6 +574,15 @@ class SmartReviewer:
             return False
         settings = getattr(self.cfg, "smart_approvals", SmartConfig())
         return review.auto_ok and review.confidence >= settings.min_confidence and not review.escalate_reason
+
+    def classify(self, review: Review, auto: bool) -> str:
+        if auto:
+            return "auto_approved"
+        if review.escalate_reason in FAILURE_REASONS:
+            return "failed"
+        if review.recommendation != "approve" or review.escalate_reason:
+            return "escalated"
+        return "human_asked"
 
 
 def persist_review(db, sid: str, approval_id: str, record: dict) -> str:

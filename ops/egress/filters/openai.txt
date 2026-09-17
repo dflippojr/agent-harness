@@ -1,0 +1,2 @@
+^api\.openai\.com$
+^([a-z0-9-]+\.)?openai\.com$

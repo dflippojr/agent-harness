@@ -256,6 +256,11 @@ class GuestAccess:
     until: str = ""  # ISO-8601 datetime; empty means until the entry is removed from config
 
 
+def _smart_approvals_default():
+    from .smart_approvals import SmartConfig
+    return SmartConfig()
+
+
 @dataclass
 class Config:
     host: str
@@ -287,6 +292,7 @@ class Config:
     search: SearchConfig = field(default_factory=SearchConfig)
     jobs: JobsConfig = field(default_factory=JobsConfig)
     remote_control: RemoteControlConfig = field(default_factory=RemoteControlConfig)
+    smart_approvals: object = field(default_factory=_smart_approvals_default)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -400,6 +406,7 @@ def _load_guests(raw) -> list[GuestAccess]:
 
 
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
+    from .smart_approvals import load_smart_config
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
     raw = yaml.safe_load((config_dir / "harness.yaml").read_text(encoding="utf-8")) or {}
     # Machine-specific values (tailnet URL, logins) live in an untracked harness.local.yaml; its top-level
@@ -570,6 +577,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         search=search,
         jobs=jobs,
         remote_control=remote_control,
+        smart_approvals=load_smart_config(raw.get("smart_approvals")),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),
