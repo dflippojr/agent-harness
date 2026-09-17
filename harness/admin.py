@@ -27,7 +27,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.4"
+API_VERSION = "1.5"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Control Center operations under /api/admin/v1"

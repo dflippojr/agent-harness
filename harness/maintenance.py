@@ -50,6 +50,8 @@ class Maintenance:
         self._task: asyncio.Task | None = None
         self.last_report: dict = {}
         self.last_backup: dict = self._read_backup_status()
+        if self.image_archive and isinstance(self.last_backup.get("image_archive"), dict):
+            self.image_archive.last_reconciliation = self.last_backup["image_archive"]
         self._lock = asyncio.Lock()
         self._backup_task: asyncio.Task | None = None
 

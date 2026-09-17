@@ -168,6 +168,7 @@ def test_archive_health_metrics_authorization_and_disabled_modules(tmp_path):
         assert client.post("/maintenance/image-archive/retention/preview",
                            headers={"Tailscale-User-Login": "guest@example.test"}).status_code == 403
         app_key = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["images"]}).json()["key"]
+        assert client.get("/maintenance", headers={"Authorization": f"Bearer {app_key}"}).status_code == 403
         refused = client.post("/api/admin/v1/maintenance/image-archive/retention/preview",
                               headers={"Authorization": f"Bearer {app_key}"})
         assert refused.status_code == 403

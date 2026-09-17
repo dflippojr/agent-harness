@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -500,7 +501,7 @@ class ImageService:
                 except FileNotFoundError:
                     pass
             self.db.update_image(job_id, finished_at=time.time(), seconds=round(time.time() - started, 1),
-                                 bytes=len(data.content))
+                                 bytes=len(data.content), sha256=hashlib.sha256(data.content).hexdigest())
             if self.archive and self.archive.enabled:
                 archive_job = self.db.get_image(job_id)
                 try:
