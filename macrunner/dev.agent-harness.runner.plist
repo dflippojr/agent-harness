@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- launchd agent for the agent-harness runner. install.sh replaces __HOME__. -->
+<!-- launchd agent for the agent-harness runner. install.sh replaces __HOME__ and __PYTHON__. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>dev.agent-harness.runner</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
+    <string>__PYTHON__</string>
     <string>-u</string>
     <string>__HOME__/.agent-harness/runner/app/harness_runner.py</string>
   </array>

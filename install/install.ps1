@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Installs the agent harness on a Windows PC with an NVIDIA GPU. No administrator rights needed.
+Installs the agent harness on a Windows PC. No administrator rights needed.
 
 .DESCRIPTION
 Run from a checkout of the repository:
@@ -8,15 +8,19 @@ Run from a checkout of the repository:
     git clone https://github.com/dflippojr/agent-harness; cd agent-harness
     powershell -ExecutionPolicy Bypass -File install\install.ps1
 
-It checks the machine, downloads uv (Python), llama.cpp's CUDA build and a model sized for the GPU, creates the
-Python environment, builds the Docker sandbox image, writes a config, registers per-user logon tasks for the model
-server and the daemon, starts them, and runs `python -m harness.doctor`. Downloads resume if interrupted; running it
-again repairs or updates an install and keeps the config. See docs/INSTALL.md.
+It checks the machine, creates the Python environment and Docker images, writes a config, registers per-user logon
+tasks, starts the daemon, and runs `python -m harness.doctor`. The Full profile also installs llama.cpp and a local
+model; Service configures hosted provider CLIs. Downloads resume if interrupted; running it again repairs or updates
+an install and keeps the detailed config. See docs/INSTALL.md.
 
 .PARAMETER InstallDir
 Where tools, models, config and logs go. Default %LOCALAPPDATA%\agent-harness.
 .PARAMETER DataDir
 Session database, workspaces and backups. Default <InstallDir>\data.
+.PARAMETER Profile
+Auto preserves an existing profile and otherwise installs Full. Service runs hosted providers without a local model.
+.PARAMETER EnableModules
+Optional modules to enable in the Service profile. Pass a comma-separated PowerShell array.
 .PARAMETER Model
 auto (16 GB+ VRAM: qwen, otherwise gpt-oss), qwen (Qwen3.6-35B-A3B, needs 16 GB VRAM + 32 GB RAM) or gpt-oss
 (gpt-oss-20b, 12 GB+ VRAM).
@@ -43,6 +47,10 @@ Rewrite the config files even if they exist.
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'agent-harness'),
     [string]$DataDir = '',
+    [ValidateSet('Auto', 'Full', 'Service')][string]$Profile = 'Auto',
+    [ValidateSet('local_model', 'homelab', 'memory_library', 'images', 'jobs', 'gpu_guard', 'runners',
+                 'remote_control', 'web', 'search', 'endpoint', 'notifications', 'backup')]
+    [string[]]$EnableModules = @(),
     [ValidateSet('auto', 'qwen', 'gpt-oss')][string]$Model = 'auto',
     [string]$ModelPath = '',
     [string]$LlamaDir = '',
@@ -59,6 +67,17 @@ $ProgressPreference = 'SilentlyContinue'
 
 $AppDir = Split-Path $PSScriptRoot -Parent
 if (-not $DataDir) { $DataDir = Join-Path $InstallDir 'data' }
+$profilePath = Join-Path $InstallDir 'config\profile.yaml'
+$EffectiveProfile = $Profile
+if ($EffectiveProfile -eq 'Auto') {
+    $EffectiveProfile = if ((Test-Path $profilePath) -and
+        (Select-String -Path $profilePath -Pattern '^profile:\s*service\s*$' -Quiet)) { 'Service' } else { 'Full' }
+}
+$localDependents = @('endpoint', 'images', 'gpu_guard')
+if ($ExistingServer -or $ModelPath -or $LlamaDir -or @($EnableModules | Where-Object { $_ -in $localDependents }).Count) {
+    $EnableModules = @($EnableModules + 'local_model' | Select-Object -Unique)
+}
+$NeedsLocalModel = $EffectiveProfile -eq 'Full' -or $EnableModules -contains 'local_model'
 $LlamaBuild = 'b10950'   # tested build (docs/phase0-results.md)
 $UvVersion = '0.12.14'
 $Models = @{
@@ -90,27 +109,32 @@ function Download($url, $dest, [double]$gb = 0) {
     }
 }
 
-Write-Host "Agent harness installer  (app: $AppDir, install: $InstallDir, instance: $Instance)" -ForegroundColor White
+Write-Host "Agent harness installer  (app: $AppDir, install: $InstallDir, instance: $Instance, profile: $EffectiveProfile)" -ForegroundColor White
 
 # ---------------------------------------------------------------- checks
 Step 'Checking the machine'
 if ([Environment]::OSVersion.Version.Major -lt 10 -or -not [Environment]::Is64BitOperatingSystem) {
     Die 'Windows 10 or 11, 64-bit, is required.'
 }
-$gpu = & nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits 2>$null
-if ($LASTEXITCODE -ne 0 -or -not $gpu) { Die 'No NVIDIA GPU found (nvidia-smi failed). Install the NVIDIA driver first.' }
-$gpuName, $driver, $vramMiB = ($gpu | Select-Object -First 1).Split(',') | ForEach-Object { $_.Trim() }
-$vramGB = [math]::Round([int]$vramMiB / 1024, 1)
-Info "GPU: $gpuName, $vramGB GB, driver $driver"
-if ([int]($driver.Split('.')[0]) -lt 580) { Die "NVIDIA driver $driver is too old for the CUDA 13 build; update to 580 or newer." }
-$ramGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
-Info "RAM: $ramGB GB"
-
-if ($Model -eq 'auto') { $Model = if ($vramGB -ge 15.5 -and $ramGB -ge 30) { 'qwen' } else { 'gpt-oss' } }
-if ($vramGB -lt 11.5 -and -not $ExistingServer) { Die "$vramGB GB of VRAM is not enough for the supported models (12 GB+)." }
-if ($Model -eq 'qwen' -and ($vramGB -lt 15.5 -or $ramGB -lt 30)) { Warn 'Qwen3.6-35B-A3B was tested with 16 GB VRAM and 32 GB RAM; expect slowdowns or failures.' }
-$m = $Models[$Model]
-Info "model: $($m.name)"
+$m = $null
+if ($NeedsLocalModel) {
+    $gpu = & nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $gpu) { Die 'The local_model module needs an NVIDIA GPU and driver (nvidia-smi failed).' }
+    $gpuName, $driver, $vramMiB = ($gpu | Select-Object -First 1).Split(',') | ForEach-Object { $_.Trim() }
+    $vramGB = [math]::Round([int]$vramMiB / 1024, 1)
+    Info "GPU: $gpuName, $vramGB GB, driver $driver"
+    if ([int]($driver.Split('.')[0]) -lt 580) { Die "NVIDIA driver $driver is too old for the CUDA 13 build; update to 580 or newer." }
+    $ramGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    Info "RAM: $ramGB GB"
+    if ($Model -eq 'auto') { $Model = if ($vramGB -ge 15.5 -and $ramGB -ge 30) { 'qwen' } else { 'gpt-oss' } }
+    if ($vramGB -lt 11.5 -and -not $ExistingServer) { Die "$vramGB GB of VRAM is not enough for the supported models (12 GB+)." }
+    if ($Model -eq 'qwen' -and ($vramGB -lt 15.5 -or $ramGB -lt 30)) { Warn 'Qwen3.6-35B-A3B was tested with 16 GB VRAM and 32 GB RAM; expect slowdowns or failures.' }
+    $m = $Models[$Model]
+    Info "model: $($m.name)"
+} else {
+    if ($Model -eq 'auto') { $Model = 'gpt-oss' } # setup_config requires a preset but omits it from service config
+    Info 'local model: disabled (hosted-provider service profile)'
+}
 
 $git = Get-Command git -ErrorAction SilentlyContinue
 if (-not $git) { Die 'Git is required: winget install Git.Git (then open a new terminal).' }
@@ -121,7 +145,7 @@ if ($LASTEXITCODE -ne 0 -or -not $dockerVersion) {
 Info "Docker engine $dockerVersion"
 
 $freeGB = [math]::Round((Get-PSDrive (Split-Path $InstallDir -Qualifier).TrimEnd(":")).Free / 1GB)
-$needGB = if ($ModelPath -or $ExistingServer) { 5 } else { [math]::Ceiling($m.gb) + 5 }
+$needGB = if (-not $NeedsLocalModel -or $ModelPath -or $ExistingServer) { 5 } else { [math]::Ceiling($m.gb) + 5 }
 if ($freeGB -lt $needGB) { Die "Only $freeGB GB free on $(Split-Path $InstallDir -Qualifier); need about $needGB GB." }
 Info "disk: $freeGB GB free (need about $needGB GB)"
 
@@ -145,7 +169,7 @@ Act "create $venv with Python 3.12 and install requirements" {
 }
 
 $llamaServer = ''
-if (-not $ExistingServer) {
+if ($NeedsLocalModel -and -not $ExistingServer) {
     Step "llama.cpp $LlamaBuild (CUDA 13.3)"
     if ($LlamaDir) {
         $llamaServer = Join-Path $LlamaDir 'llama-server.exe'
@@ -183,6 +207,19 @@ Act 'docker build -t agent-harness-sandbox:py312 sandbox' {
     & docker build -q -t agent-harness-sandbox:py312 (Join-Path $AppDir 'sandbox')
     if ($LASTEXITCODE -ne 0) { Die 'building the sandbox image failed' }
 }
+if ($EffectiveProfile -eq 'Service') {
+    Step 'Hosted-provider CLI image and egress proxies'
+    Act 'docker build -t agent-harness-cli:1 -f sandbox/cli.Dockerfile sandbox' {
+        & docker build -q -t agent-harness-cli:1 -f (Join-Path $AppDir 'sandbox\cli.Dockerfile') (Join-Path $AppDir 'sandbox')
+        if ($LASTEXITCODE -ne 0) { Die 'building the hosted-provider CLI image failed' }
+    }
+    Act 'create harness-egress network and start provider allowlist proxies' {
+        & docker network inspect harness-egress *> $null
+        if ($LASTEXITCODE -ne 0) { & docker network create harness-egress | Out-Null }
+        & docker compose -f (Join-Path $AppDir 'ops\egress\compose.yaml') up -d --build
+        if ($LASTEXITCODE -ne 0) { Die 'starting the provider egress proxies failed' }
+    }
+}
 
 Step 'Configuration'
 $configDir = Join-Path $InstallDir 'config'
@@ -191,8 +228,10 @@ $pauseFlag = Join-Path $InstallDir 'llama-server.paused'
 $serverUrl = if ($ExistingServer) { $ExistingServer.TrimEnd('/') } else { "http://127.0.0.1:$ServerPort" }
 Act "write config in $configDir" {
     $genArgs = @('-m', 'harness.setup_config', '--config-dir', $configDir, '--data-dir', $DataDir, '--model', $Model,
-        '--port', "$Port", '--llama-url', $serverUrl, '--pause-flag', $pauseFlag)
-    if ($ExistingServer) { $genArgs += '--no-gpu-guard' }
+        '--profile', $EffectiveProfile.ToLowerInvariant(), '--port', "$Port", '--llama-url', $serverUrl,
+        '--pause-flag', $pauseFlag)
+    foreach ($module in $EnableModules) { $genArgs += @('--enable-module', $module) }
+    if ($ExistingServer -or -not $NeedsLocalModel) { $genArgs += '--no-gpu-guard' }
     if ($Force) { $genArgs += '--force' }
     Push-Location $AppDir; try { & $python @genArgs } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { Die 'writing the config failed' }
@@ -200,8 +239,9 @@ Act "write config in $configDir" {
 $settingsPath = Join-Path $InstallDir 'settings.json'
 $settings = [ordered]@{
     instance = $Instance; app_dir = $AppDir; config_dir = $configDir; python = $python; log_dir = $logDir
-    llama_server = $llamaServer; model_path = $ModelPath; model_name = $m.name; port = $ServerPort
-    context_tokens = $m.context; sleep_idle_seconds = 1800; extra_args = $m.args; pause_flag = $pauseFlag
+    llama_server = $llamaServer; model_path = $ModelPath; model_name = $(if ($m) { $m.name } else { '' }); port = $ServerPort
+    context_tokens = $(if ($m) { $m.context } else { 0 }); sleep_idle_seconds = 1800
+    extra_args = $(if ($m) { $m.args } else { @() }); pause_flag = $pauseFlag
     existing_server = $ExistingServer
 }
 Act "write $settingsPath" {
@@ -212,11 +252,20 @@ Act "write $settingsPath" {
 # ---------------------------------------------------------------- autostart
 if (-not $NoTasks) {
     Step 'Logon tasks'
+    if (-not $NeedsLocalModel) {
+        $oldModelTask = "AgentHarness-$Instance-LlamaServer"
+        if (Get-ScheduledTask -TaskName $oldModelTask -ErrorAction SilentlyContinue) {
+            Act "stop and unregister disabled $oldModelTask" {
+                Stop-ScheduledTask -TaskName $oldModelTask -ErrorAction SilentlyContinue
+                Unregister-ScheduledTask -TaskName $oldModelTask -Confirm:$false
+            }
+        }
+    }
     $user = "$env:USERDOMAIN\$env:USERNAME"
     $taskSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
     $tasks = @(@{ name = "AgentHarness-$Instance-Daemon"; script = 'run-daemon.ps1'; desc = "Agent harness daemon (127.0.0.1:$Port)" })
-    if (-not $ExistingServer) {
+    if ($NeedsLocalModel -and -not $ExistingServer) {
         $tasks = @(@{ name = "AgentHarness-$Instance-LlamaServer"; script = 'run-server.ps1'; desc = "Agent harness model server (127.0.0.1:$ServerPort)" }) + $tasks
     }
     foreach ($t in $tasks) {
@@ -242,7 +291,7 @@ Step 'Checking the install (python -m harness.doctor)'
 if ($DryRun) { Info '[dry run] skipped' } else {
     Push-Location $AppDir
     $doctorArgs = @('-m', 'harness.doctor', '--config-dir', $configDir, '--instance', $(if ($NoTasks) { '' } else { $Instance }))
-    if ($ExistingServer) { $doctorArgs += '--existing-server' }
+    if ($ExistingServer -or -not $NeedsLocalModel) { $doctorArgs += '--existing-server' }
     try { & $python @doctorArgs } finally { Pop-Location }
 }
 
@@ -250,6 +299,9 @@ Write-Host "`nDone." -ForegroundColor Green
 Write-Host "  Web app:   http://127.0.0.1:$Port   (phone access: docs/INSTALL.md, 'Use it from your phone')"
 Write-Host "  Config:    $configDir"
 Write-Host "  Logs:      $logDir"
+if ($EffectiveProfile -eq 'Service') {
+    Write-Host "  Next:      ops\backends\login.ps1 claude|codex|cursor (run once per provider you use)"
+}
 if ($NoTasks) {
     Write-Host "  Start:     set HARNESS_CONFIG_DIR=$configDir; `"$python`" -m harness   (from $AppDir)"
 }
