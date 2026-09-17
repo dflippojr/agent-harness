@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -127,6 +127,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def guard(request: Request, call_next):
         m: Manager = request.app.state.manager
         cfg = m.cfg
+        from .apps import cors_origin_allowed, daemon_origins, normalize_origin
         # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
         login = request.headers.get("tailscale-user-login")
         ident = access_mod.resolve_access(cfg, login)
@@ -139,13 +140,37 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         if guest_block:
             log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
             return JSONResponse({"detail": guest_block}, status_code=403)
+        raw_origin = request.headers.get("origin", "")
+        try:
+            origin = normalize_origin(raw_origin) if raw_origin else ""
+        except ValueError:
+            origin = ""
+        cross_origin_app = bool(origin and origin not in daemon_origins(cfg)
+                                and request.url.path.startswith("/api/v1")
+                                and cors_origin_allowed(m, request, origin))
+        cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_app else {}
+
+        if request.method == "OPTIONS" and request.url.path.startswith("/api/v1") and raw_origin:
+            requested_method = request.headers.get("access-control-request-method", "").upper()
+            requested_headers = {h.strip().lower() for h in
+                                 request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
+            if (not cross_origin_app or requested_method not in {"GET", "POST"}
+                    or not requested_headers <= {"authorization", "content-type", "last-event-id"}):
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+            return Response(status_code=204, headers={**cors_headers,
+                            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                            "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID",
+                            "Access-Control-Max-Age": "600"})
+
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             # Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent).
-            origin = request.headers.get("origin")
-            allowed = {cfg.public_url, f"http://127.0.0.1:{cfg.port}", f"http://localhost:{cfg.port}"}
-            if origin and origin not in allowed or request.headers.get("sec-fetch-site") == "cross-site":
+            if ((raw_origin and origin not in daemon_origins(cfg) and not cross_origin_app)
+                    or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_app)):
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        for key, value in cors_headers.items():
+            response.headers[key] = value
+        return response
 
     @app.exception_handler(HarnessError)
     async def harness_error(request: Request, exc: HarnessError):

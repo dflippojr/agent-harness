@@ -2255,9 +2255,16 @@ function appsCard(me) {
   const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
   const load = async () => {
     try {
-      const apps = (await api("/keys")).filter((k) => k.kind === "app" && !k.revoked_at);
+      const [keys, pairingCodes] = await Promise.all([api("/keys"), api("/pairing-codes")]);
+      const apps = keys.filter((k) => k.kind === "app" && !k.revoked_at);
+      const pending = pairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
       const form = h("div");
-      const newBtn = h("button", { class: "btn", type: "button", onclick: () => { newBtn.hidden = true; showForm(); } }, "New app");
+      const newBtn = h("button", { class: "btn", type: "button", onclick: () => {
+        newBtn.hidden = true; pairBtn.hidden = true; showForm();
+      } }, "New app");
+      const pairBtn = h("button", { class: "btn", type: "button", onclick: () => {
+        newBtn.hidden = true; pairBtn.hidden = true; showPairForm();
+      } }, "Pair browser app");
       const showForm = () => {
         const name = h("input", { type: "text", placeholder: "App name" });
         const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
@@ -2283,11 +2290,37 @@ function appsCard(me) {
               },
             }, "Create")));
       };
+      const showPairForm = () => {
+        const name = h("input", { type: "text", placeholder: "App name" });
+        const origin = h("input", { type: "url", placeholder: "https://app.example.com" });
+        const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
+          h("input", { type: "checkbox", value: scope, checked: scope === "sessions" }), ` ${label}`));
+        fill(form,
+          h("p", { class: "small" }, "Approve one exact browser origin. The short-lived code is shown once and can only be redeemed from that origin."),
+          h("label", {}, "Name"), name,
+          h("label", {}, "Browser origin (scheme and host only)"), origin,
+          h("label", {}, "What it may do"), boxes,
+          h("div", { class: "row", style: "margin-top:10px" },
+            h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
+            h("button", { class: "btn primary", onclick: async () => {
+              const scopes = boxes.map((b) => b.querySelector("input")).filter((i) => i.checked).map((i) => i.value);
+              if (!name.value.trim() || !origin.value.trim() || !scopes.length) return toast("Name the app, enter its origin, and allow at least one thing");
+              try {
+                const p = await api("/pairing-codes", { method: "POST", body: { name: name.value, origin: origin.value, scopes } });
+                const field = h("input", { type: "text", readonly: true, value: p.code, onclick: (e) => e.target.select() });
+                fill(form,
+                  h("p", { class: "small" }, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`), field,
+                  h("div", { class: "row", style: "margin-top:8px" },
+                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(p.code); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                    h("button", { class: "btn", onclick: load }, "Done")));
+              } catch (e) { toast(e.message); }
+            } }, "Approve and create code")));
+      };
       fill(body,
-        h("p", { class: "small" }, "An app token lets another program start and follow sessions on this daemon — a script, a bot, or a future phone client. It is shown once and can be revoked later."),
+        h("p", { class: "small" }, "An app token lets another program start and follow sessions on this daemon — a script, a bot, or a separate browser client. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
@@ -2295,7 +2328,12 @@ function appsCard(me) {
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
-        form, newBtn);
+        pending.length ? h("ul", { class: "small" }, pending.map((p) => h("li", {},
+          `Pairing pending for ${p.name} at ${p.origin} · expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
+          h("button", { class: "btn small bad", onclick: async () => {
+            try { await api(`/pairing-codes/${p.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+          } }, "Cancel")))) : null,
+        form, h("div", { class: "row", style: "margin-top:10px" }, newBtn, pairBtn));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
