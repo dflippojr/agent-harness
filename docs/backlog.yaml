@@ -132,12 +132,24 @@ items:
 
   - key: image-flux2-klein
     kind: feature
-    title: "Images: optional FLUX.2 klein 9B workflow (gated, non-commercial)"
+    title: "Images: FLUX.2 klein 9B evaluation — no-go"
     body: |
-      Parked 2026-09-17. FLUX.2 klein 9B is gated and non-commercial, so it must not be bundled, auto-installed,
-      selected by default, or shown without a license notice. Before `ready`, confirm exact license/use cases,
-      decide whether this project wants a personal-use-only workflow, design token-safe gated download/acceptance,
-      benchmark the 16 GB GPU, define capability/UI labeling and metadata, and add asset uninstall/cleanup.
+      Closed as not planned 2026-09-17. The official 9B FP8 checkpoint is gated, licensed for non-commercial /
+      non-production use, and lists about 29 GB VRAM, so it is a poor fit for a distributable harness targeting
+      the 16 GB tower. No weights were downloaded and no gated-token flow was built. The public Apache-2.0 4B
+      replacement is tracked separately.
+
+  - key: image-flux2-klein-4b
+    kind: feature
+    title: "Images: add an optional FLUX.2 klein 4B fast workflow"
+    body: |
+      Add a distinct optional `flux-fast` text-to-image mode using the public Apache-2.0 distilled 4B FP8
+      checkpoint and official four-step ComfyUI graph. Keep Z-Image as the `fast` default and do not change
+      `quality`. Pin revisions/hashes and a compatible stable ComfyUI build; stage and regression-test that build
+      with rollback before promotion. Reuse the existing `qwen_3_4b.safetensors` encoder only on exact hash
+      identity. Provide explicit atomic install/status/remove lifecycle, availability metadata, provenance, doctor
+      output, and shared-asset-safe cleanup. Require non-networked tests plus an owner-approved 16 GB tower
+      comparison proving headroom, useful visual value, warmed performance, and no regression to existing modes.
 
   - key: installer-clean-machine
     kind: check
