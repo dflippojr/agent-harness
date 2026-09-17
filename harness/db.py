@@ -217,6 +217,8 @@ MIGRATIONS = [
     ("sessions", "app_id", "TEXT NOT NULL DEFAULT ''"),
     ("sessions", "app_tools", "TEXT NOT NULL DEFAULT '[]'"),
     ("sessions", "app_metadata", "TEXT NOT NULL DEFAULT '{}'"),
+    # Issue #57: human-owned Control Center data. v1 has one stable owner; guests own nothing.
+    ("sessions", "owner_id", "TEXT NOT NULL DEFAULT 'owner'"),
     ("api_keys", "scopes", "TEXT NOT NULL DEFAULT 'inference'"),
     ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
     ("api_keys", "origins", "TEXT NOT NULL DEFAULT '[]'"),
@@ -302,12 +304,14 @@ class Database:
             rows = self.conn.execute("SELECT id FROM sessions WHERE id LIKE ?", (prefix + "%",)).fetchall()
         return [r["id"] for r in rows]
 
-    def list_sessions(self, limit: int = 50) -> list[dict]:
+    def list_sessions(self, limit: int = 50, owner_id: str | None = None) -> list[dict]:
+        where = " WHERE owner_id = ?" if owner_id is not None else ""
+        params = (owner_id, limit) if owner_id is not None else (limit,)
         with self.lock:
             rows = self.conn.execute(
                 "SELECT id, project, target, model, backend, title, status, stop_reason, created_at, updated_at, totals, "
-                "branch, review, workspace_removed, app_id, job_id, job_status FROM sessions "
-                "ORDER BY created_at DESC LIMIT ?", (limit,)
+                "branch, review, workspace_removed, app_id, job_id, job_status, owner_id FROM sessions" + where +
+                " ORDER BY created_at DESC LIMIT ?", params
             ).fetchall()
         return [_row(r) for r in rows]
 

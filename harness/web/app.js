@@ -573,7 +573,7 @@ async function viewList() {
 // ---------- new task ----------
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
-  const [projects, models, allTemplates, backends] = await Promise.all([
+  let [projects, models, allTemplates, backends] = await Promise.all([
     api("/projects"), api("/models"), api("/templates"), api("/backends?auth=skip")]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
@@ -594,10 +594,11 @@ async function viewNew() {
   };
   fillChoices();
   const targetSwitch = targets.length > 1 ? h("div", { class: "row" }, targets.map((name) => h("button", {
-    type: "button", class: `btn small${name === target ? " primary" : ""}`,
+    type: "button", class: `btn small${name === target ? " primary" : ""}`, "data-target": name,
     onclick: (ev) => {
       target = name;
       try { localStorage.setItem(targetKey, name); } catch (_) { /* ignore */ }
+      newProjectTarget.value = target;
       for (const b of ev.currentTarget.parentNode.children) b.classList.toggle("primary", b === ev.currentTarget);
       fillChoices();
       showTarget();
@@ -625,6 +626,52 @@ async function viewNew() {
   project.addEventListener("change", () => { showTarget(); showProjectHint(); });
   showTarget();
   showProjectHint();
+  const newProjectName = h("input", { type: "text", placeholder: "my-project", maxlength: "64", required: true,
+    pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
+  const newProjectDescription = h("input", { type: "text", placeholder: "Optional description", maxlength: "240" });
+  const newProjectTarget = h("select", {}, targets.map((name) => h("option", { value: name },
+    name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
+  newProjectTarget.value = target;
+  const newProjectSource = h("select", {},
+    h("option", { value: "empty" }, "Empty workspace"),
+    h("option", { value: "repo" }, "Local folder or git URL"));
+  const newProjectRepo = h("input", { type: "text", placeholder: "D:\\Projects\\example or https://…", hidden: true });
+  newProjectSource.addEventListener("change", () => {
+    newProjectRepo.hidden = newProjectSource.value !== "repo";
+    newProjectRepo.required = newProjectSource.value === "repo";
+  });
+  const createProjectButton = h("button", { class: "btn primary", type: "submit" }, "Create project");
+  const projectCreator = h("details", { class: "card" }, h("summary", {}, "＋ New project"),
+    h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      createProjectButton.disabled = true;
+      try {
+        const created = await api("/projects", { method: "POST", body: {
+          name: newProjectName.value, description: newProjectDescription.value, target: newProjectTarget.value,
+          repo: newProjectSource.value === "repo" ? newProjectRepo.value : "",
+        } });
+        projects.push(created);
+        target = created.target;
+        try { localStorage.setItem(targetKey, target); } catch (_) { /* ignore */ }
+        fillChoices();
+        project.value = created.name;
+        if (targetSwitch) for (const b of targetSwitch.children) b.classList.toggle("primary", b.dataset.target === target);
+        showTarget();
+        showProjectHint();
+        projectCreator.open = false;
+        toast(`Project ${created.name} created`);
+      } catch (err) {
+        toast(err.message);
+      } finally {
+        createProjectButton.disabled = false;
+      }
+    } },
+    h("p", { class: "muted small" }, "Saved privately on this daemon. Use a lowercase project id; a git source gets a reviewable branch per task."),
+    h("label", {}, "Name"), newProjectName,
+    h("label", {}, "Description"), newProjectDescription,
+    h("label", {}, "Runs on"), newProjectTarget,
+    h("label", {}, "Workspace"), newProjectSource, newProjectRepo,
+    h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   let localModel = model.value;
   model.addEventListener("change", () => { localModel = model.value; });
@@ -729,7 +776,7 @@ route();
       },
     }, "Save as template"),
     h("span", { class: "spacer" }), start));
-  $app.append(form);
+  $app.append(projectCreator, form);
 
   if (allTemplates.length) {
     $app.append(h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),

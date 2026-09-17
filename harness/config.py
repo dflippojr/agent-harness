@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -243,6 +245,8 @@ class Project:
     web: bool = True             # give sessions web_search / web_fetch (when web is enabled)
     images: bool = True          # give sessions generate_image (when images is enabled)
     session_search: bool = True  # give sessions session_search / session_read (when search is enabled)
+    owner_id: str = "owner"     # stable v1 Control Center owner scope
+    managed: bool = False        # loaded from data_dir/projects.yaml rather than checked-in config
 
 
 @dataclass
@@ -301,6 +305,10 @@ class Config:
     def transcripts_dir(self) -> Path:
         return self.data_dir / "transcripts"
 
+    @property
+    def projects_overlay_path(self) -> Path:
+        return self.data_dir / "projects.yaml"
+
     def capabilities(self) -> dict:
         """Machine-readable service profile and module catalog for first- and third-party clients."""
         return {
@@ -312,6 +320,73 @@ class Config:
             "modules": asdict(self.modules),
             "hosted_backends": [name for name, cfg in self.backends.items() if cfg.enabled],
         }
+
+
+PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_PROJECT_WRITE_LOCK = threading.RLock()
+
+
+def _project_from_spec(name: str, spec: dict | None, *, owner_id: str = "owner", managed: bool = False) -> Project:
+    spec = spec or {}
+    return Project(
+        name=name,
+        description=str(spec.get("description") or ""),
+        instructions=str(spec.get("instructions") or ""),
+        rules=(spec.get("policy") or {}).get("rules") or [],
+        sandbox=spec.get("sandbox") or {},
+        repo=str(spec.get("repo") or ""),
+        base_branch=str(spec.get("base_branch") or ""),
+        homelab=bool(spec.get("homelab", False)),
+        quota_mb=int(spec.get("quota_mb") or 0),
+        target=str(spec.get("target") or "tower"),
+        memory_library=bool(spec.get("memory_library", True)),
+        web=bool(spec.get("web", True)),
+        images=bool(spec.get("images", True)),
+        session_search=bool(spec.get("session_search", True)),
+        owner_id=str(spec.get("owner_id") or owner_id),
+        managed=managed,
+    )
+
+
+def _project_spec(project: Project) -> dict:
+    return {
+        "description": project.description,
+        "target": project.target,
+        "repo": project.repo,
+        "owner_id": project.owner_id,
+    }
+
+
+def add_project(cfg: Config, project: Project) -> Project:
+    """Persist and hot-add one owner-created project without touching config/projects.yaml."""
+    project.name = project.name.strip().lower()
+    project.description = project.description.strip()
+    project.repo = project.repo.strip()
+    if not PROJECT_NAME.fullmatch(project.name):
+        raise ValueError("project name must be 1-64 lowercase letters, numbers, dots, dashes, or underscores")
+    if len(project.description) > 240:
+        raise ValueError("project description is too long")
+    if project.target not in ("tower", "macbook"):
+        raise ValueError("project target must be tower or macbook")
+    if len(project.repo) > 2048 or "\x00" in project.repo:
+        raise ValueError("project repository is invalid")
+    project.managed = True
+
+    path = cfg.projects_overlay_path
+    with _PROJECT_WRITE_LOCK:
+        if project.name in cfg.projects:
+            raise ValueError(f"project {project.name!r} already exists")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
+        saved = dict(raw.get("projects") or {})
+        if project.name in saved:
+            raise ValueError(f"project {project.name!r} already exists")
+        saved[project.name] = _project_spec(project)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(yaml.safe_dump({"projects": saved}, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        tmp.replace(path)
+        cfg.projects[project.name] = project
+    return project
 
 
 def _load_guests(raw) -> list[GuestAccess]:
@@ -376,36 +451,41 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     if not isinstance(provider_secret_files, dict) or any(not isinstance(k, str) or not isinstance(v, str)
                                                           for k, v in provider_secret_files.items()):
         raise ValueError("provider_secret_files must map opaque names to file paths")
+    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
     projects_file = config_dir / "projects.yaml"
     raw_projects = (yaml.safe_load(projects_file.read_text(encoding="utf-8")) or {}) if projects_file.exists() else {}
+    overlay_file = resolved_data_dir / "projects.yaml"
+    raw_overlay = (yaml.safe_load(overlay_file.read_text(encoding="utf-8")) or {}) if overlay_file.exists() else {}
 
     models = {
         name: ModelConfig(name=name, **spec) for name, spec in (raw.get("models") or {}).items()
     }
-    projects = {}
+    projects: dict[str, Project] = {}
     for name, spec in (raw_projects.get("projects") or {}).items():
         spec = spec or {}
         target = str(spec.get("target") or "tower")
         if target != "tower" and not selected.runners:
             continue
-        projects[name] = Project(
-            name=name,
-            description=spec.get("description", ""),
-            instructions=spec.get("instructions", ""),
-            rules=(spec.get("policy") or {}).get("rules") or [],
-            sandbox=spec.get("sandbox") or {},
-            repo=str(spec.get("repo") or ""),
-            base_branch=str(spec.get("base_branch") or ""),
-            homelab=bool(spec.get("homelab", False)) and selected.homelab,
-            quota_mb=int(spec.get("quota_mb") or 0),
-            target=target,
-            memory_library=bool(spec.get("memory_library", True)) and selected.memory_library,
-            web=bool(spec.get("web", True)) and selected.web,
-            images=bool(spec.get("images", True)) and selected.images,
-            session_search=bool(spec.get("session_search", True)),
-        )
+        project = _project_from_spec(name, spec)
+        project.homelab = project.homelab and selected.homelab
+        project.memory_library = project.memory_library and selected.memory_library
+        project.web = project.web and selected.web
+        project.images = project.images and selected.images
+        projects[name] = project
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
+    # The checked-in catalog wins if an owner later defines the same name there. The generated overlay is private
+    # daemon state and is deliberately never written back to config/projects.yaml.
+    for name, spec in (raw_overlay.get("projects") or {}).items():
+        if name not in projects:
+            project = _project_from_spec(name, spec, managed=True)
+            if project.target != "tower" and not selected.runners:
+                continue
+            project.homelab = project.homelab and selected.homelab
+            project.memory_library = project.memory_library and selected.memory_library
+            project.web = project.web and selected.web
+            project.images = project.images and selected.images
+            projects[name] = project
 
     raw_homelab = dict(raw.get("homelab") or {})
     services = {
@@ -464,7 +544,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     cfg = Config(
         host=listen.get("host", "127.0.0.1"),
         port=int(listen.get("port", 8100)),
-        data_dir=Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data")),
+        data_dir=resolved_data_dir,
         repos_dir=Path(raw.get("repos_dir", ROOT / "data" / "repos")),
         default_model=(raw.get("default_model") or next(iter(models), "")) if models else "",
         models=models,

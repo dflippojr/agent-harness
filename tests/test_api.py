@@ -8,6 +8,7 @@ import time
 from fastapi.testclient import TestClient
 
 from harness.api import create_app
+from harness import config as config_mod
 from harness.config import NotifyConfig
 from harness.llm import Completion
 from harness.manager import Manager
@@ -57,6 +58,7 @@ def test_web_app_and_guard(tmp_path):
         assert 'type: "color"' not in js
         assert "swatch split" in js
         assert "Scratch is a fresh empty folder" in js
+        assert '"＋ New project"' in js and 'api("/projects", { method: "POST"' in js
         assert "Only tower projects with a local folder appear" in js
         assert 'id="guest-banner"' in client.get("/").text
         assert 'id="bar"' in client.get("/").text
@@ -104,6 +106,51 @@ def test_web_app_and_guard(tmp_path):
         assert client.post("/sessions", json=body, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
         assert client.post("/sessions", json=body, headers={"Origin": PUBLIC}).status_code == 201
         assert client.post("/sessions", json=body).status_code == 201
+
+
+def test_owner_created_project_overlay_roundtrip(tmp_path):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    (config_dir / "harness.yaml").write_text(
+        "default_model: fake\nmodels:\n  fake:\n    base_url: http://127.0.0.1:1\n", encoding="utf-8")
+    public_projects = "projects:\n  scratch:\n    description: Built in\n"
+    (config_dir / "projects.yaml").write_text(public_projects, encoding="utf-8")
+
+    cfg = config_mod.load(config_dir, data_dir)
+    saved = config_mod.add_project(cfg, config_mod.Project(
+        name="My-Repo", description="  Reviewable work  ", target="tower",
+        repo="https://example.test/owner/repo.git", owner_id="owner"))
+    assert saved.name == "my-repo" and saved.managed
+    assert cfg.projects["my-repo"].repo.endswith("repo.git")
+    assert (config_dir / "projects.yaml").read_text(encoding="utf-8") == public_projects
+    assert "my-repo" in (data_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    reloaded = config_mod.load(config_dir, data_dir)
+    assert reloaded.projects["scratch"].managed is False
+    assert reloaded.projects["my-repo"].managed is True
+    assert reloaded.projects["my-repo"].owner_id == "owner"
+
+
+def test_create_project_api_is_hot_and_private(tmp_path):
+    client, m, _ = make_client(tmp_path, [Completion(content="hi")])
+    owner = {"Tailscale-User-Login": LOGIN}
+    with client:
+        created = client.post("/projects", headers=owner, json={
+            "name": "notes", "description": "Personal notes", "target": "tower", "repo": "",
+        })
+        assert created.status_code == 201
+        assert created.json() == {"name": "notes", "description": "Personal notes", "repo": False,
+                                  "homelab": False, "target": "tower", "managed": True}
+        assert any(p["name"] == "notes" for p in client.get("/projects", headers=owner).json())
+        assert (m.cfg.data_dir / "projects.yaml").exists()
+        session = client.post("/sessions", headers=owner, json={"prompt": "hello", "project": "notes"})
+        assert session.status_code == 201
+        assert m.db.get_session(session.json()["id"])["owner_id"] == "owner"
+        assert client.post("/projects", headers=owner, json={"name": "notes"}).status_code == 400
+        assert client.post("/projects", headers=owner, json={"name": "Not a slug"}).status_code == 400
+        assert client.post("/projects", headers=owner,
+                           json={"name": "away", "target": "macbook"}).status_code == 400
 
 
 def test_rename_session(tmp_path):
@@ -257,7 +304,12 @@ def test_guest_demo_access(tmp_path):
         assert me["role"] == "guest" and me["login"] == guest
         assert me["name"] == "Buddy" and me["notify"]["topic"] == ""
         assert me["guest_until"]
-        assert client.get("/sessions", headers=gh).status_code == 200
+        assert client.get("/projects", headers=gh).json() == []
+        assert client.get("/sessions", headers=gh).json() == []
+        assert client.get("/queue", headers=gh).json() == []
+        assert client.get("/search?q=hello", headers=gh).json()["results"] == []
+        assert client.get("/templates", headers=gh).json() == []
+        assert client.get("/maintenance", headers=gh).status_code == 403
         assert client.get("/keys", headers=gh).status_code == 403
         assert client.get("/metrics", headers=gh).status_code == 403
         assert client.get("/api/admin/v1", headers=gh).status_code == 403
@@ -269,8 +321,13 @@ def test_guest_demo_access(tmp_path):
         created = client.post("/sessions", json={"prompt": "hello"}, headers=oh)
         assert created.status_code == 201
         sid = created.json()["id"]
+        assert m.db.get_session(sid)["owner_id"] == "owner"
         assert client.patch(f"/sessions/{sid}", json={"title": "Nope"}, headers=gh).status_code == 403
-        assert client.get(f"/sessions/{sid}", headers=gh).json()["title"]
+        assert client.get(f"/sessions/{sid}", headers=gh).status_code == 404
+        assert client.get(f"/sessions/{sid}/transcript", headers=gh).status_code == 404
+        assert client.get(f"/sessions/{sid}/changes", headers=gh).status_code == 404
+        assert client.get(f"/sessions/{sid}/approvals", headers=gh).status_code == 404
+        assert client.get(f"/sessions/{sid}/events?follow=false", headers=gh).status_code == 404
         assert client.post(f"/sessions/{sid}/cancel", headers=gh).status_code == 403
         assert client.post("/a/not-a-token/approve", headers=gh).status_code == 403
 
