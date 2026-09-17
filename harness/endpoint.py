@@ -259,16 +259,9 @@ def register(app: FastAPI, mgr) -> None:
     @app.post("/keys", status_code=201)
     async def create_key(request: Request):
         body = await request.json()
-        from .apps import SCOPES
-        name = str((body or {}).get("name") or "").strip()
-        if not name:
-            return JSONResponse({"detail": "name is required"}, status_code=400)
-        scopes = body.get("scopes") or ["inference"]
-        unknown = [s for s in scopes if s not in SCOPES]
-        if unknown or not isinstance(scopes, list):
-            return JSONResponse({"detail": f"unknown scopes {unknown}; known: {', '.join(SCOPES)}"}, status_code=400)
-        kind = "app" if body.get("kind") == "app" else "device"
-        row, key = mgr(request).db.create_api_key(name[:60], " ".join(dict.fromkeys(scopes)), kind)
+        from .admin import parse_key_spec
+        name, scopes, kind = parse_key_spec(body)
+        row, key = mgr(request).db.create_api_key(name, scopes, kind)
         return {**row, "key": key}
 
     @app.delete("/keys/{kid}", status_code=204)

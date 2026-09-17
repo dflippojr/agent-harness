@@ -748,4 +748,6 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    from . import admin
+    admin.register(app, mgr)
     return app

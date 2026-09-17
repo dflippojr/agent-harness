@@ -2,7 +2,9 @@
 
 Other applications can start agent sessions on a harness, give them context, lend them tools, and follow their progress.
 Base path: `/api/v1`, on the daemon's address (`http://127.0.0.1:8100` locally, `https://<pc>.<tailnet>.ts.net` on
-a tailnet). FastAPI also serves the machine-readable schema at `/openapi.json`.
+a tailnet). FastAPI also serves the machine-readable schema at `/openapi.json`. Machine-owner operations (schedules,
+GPU, review/push, token management, maintenance, Remote Control trust) live on [`/api/admin/v1`](admin-api.md) and
+are not part of this app contract. App tokens cannot call them.
 
 A Python client lives in [`sdk/harness_client.py`](../sdk/harness_client.py) (one file, needs `httpx`), with an
 example in [`sdk/examples/shopping_list_app.py`](../sdk/examples/shopping_list_app.py).
