@@ -231,6 +231,12 @@ MIGRATIONS = [
     ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    # Issue #86: durable image archive state. The canonical digest detects later source corruption.
+    ("images", "sha256", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("images", "archived_at", "REAL"),
+    ("images", "archive_error", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_deleted_at", "REAL"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
 ]
@@ -615,6 +621,11 @@ class Database:
             params = list(status)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
+        return [dict(r) for r in rows]
+
+    def images_for_archive(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM images WHERE status = 'done' ORDER BY created_at, id").fetchall()
         return [dict(r) for r in rows]
 
     # inference endpoint keys and request log

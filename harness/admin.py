@@ -73,6 +73,8 @@ ADMIN_PATHS = frozenset({
     "/maintenance",
     "/maintenance/cleanup",
     "/maintenance/backup",
+    "/maintenance/image-archive/retention/preview",
+    "/maintenance/image-archive/retention/apply",
     "/jobs",
     "/jobs/preview",
     "/jobs/{jid}",

@@ -96,6 +96,10 @@ class MemoryProfileUpdate(BaseModel):
     summary: str = "Update agent profile"
 
 
+class ImageArchiveRetentionApply(BaseModel):
+    confirmation: str
+
+
 class Job(BaseModel):
     name: str
     prompt: str
@@ -593,6 +597,18 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.post("/maintenance/backup")
     async def maintenance_backup(request: Request):
         return await mgr(request).maintenance.backup()
+
+    @app.post("/maintenance/image-archive/retention/preview")
+    async def image_archive_retention_preview(request: Request):
+        return await asyncio.to_thread(mgr(request).image_archive.retention_preview)
+
+    @app.post("/maintenance/image-archive/retention/apply")
+    async def image_archive_retention_apply(body: ImageArchiveRetentionApply, request: Request):
+        from .image_archive import ImageArchiveError
+        try:
+            return await asyncio.to_thread(mgr(request).image_archive.apply_retention, body.confirmation)
+        except ImageArchiveError as e:
+            raise HarnessError(409, str(e))
 
     @app.get("/sessions/{ref}/approvals")
     async def approvals(ref: str, request: Request, all: bool = False):
