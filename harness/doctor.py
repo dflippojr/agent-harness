@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -92,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     # docker sandbox
     code, out = run(["docker", "version", "--format", "{{.Server.Version}}"])
     if code != 0:
-        r.fail("Docker", "engine not reachable: install and start Docker Desktop")
+        r.fail("Docker", "engine not reachable: install and start Docker Engine or Docker Desktop")
     else:
         r.ok("Docker", f"engine {out}")
         code, _ = run(["docker", "image", "inspect", cfg.sandbox.image])
@@ -148,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             logged_in = [backend["name"] for backend in backends if backend.get("logged_in")]
             (r.ok if logged_in else r.warn)(
                 "Provider login", ", ".join(logged_in) if logged_in else
-                "none detected; run ops\\backends\\login.ps1 claude|codex|cursor")
+                "none detected; run ops/backends/login.sh (Unix) or ops\\backends\\login.ps1 (Windows)")
         gpu = httpx.get(f"{base}/gpu", timeout=5).json()
         if gpu.get("enabled"):
             flag = Path(cfg.gpu_guard.pause_flag).exists()
@@ -172,6 +173,18 @@ def main(argv: list[str] | None = None) -> int:
                 r.ok("Autostart", f"{task}: {out.split(',')[-1].strip(chr(34))}")
             else:
                 r.warn("Autostart", f"{task} not registered (run install.ps1 without -NoTasks)")
+    elif sys.platform.startswith("linux") and args.instance:
+        suffixes = (("daemon",) if args.existing_server or not cfg.modules.local_model else ("llama", "daemon"))
+        safe_instance = args.instance.lower()
+        for suffix in suffixes:
+            unit = f"agent-harness-{safe_instance}-{suffix}.service"
+            code, status = run(["systemctl", "--user", "is-active", unit])
+            (r.ok if code == 0 and status == "active" else r.warn)(
+                "Autostart", f"{unit}: {status or 'not active'}")
+    elif sys.platform == "darwin" and args.instance:
+        label = f"com.agent-harness.{args.instance.lower()}.daemon"
+        code, _ = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
+        (r.ok if code == 0 else r.warn)("Autostart", f"{label}: " + ("loaded" if code == 0 else "not loaded"))
 
     # optional pieces
     if cfg.web.enabled:

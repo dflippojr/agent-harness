@@ -1,4 +1,4 @@
-"""Write a starter configuration for a new install (used by install/install.ps1).
+"""Write a starter configuration for a new install (used by the platform installers).
 
     python -m harness.setup_config --config-dir C:/.../config --data-dir C:/.../data --model qwen --port 8100
 
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     config_dir = Path(args.config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     Path(args.data_dir).mkdir(parents=True, exist_ok=True)
-    header = ("# Written by install/install.ps1 (harness/setup_config.py). Edit freely; the installer won't overwrite\n"
+    header = ("# Written by the agent-harness installer (harness/setup_config.py). Edit freely; it won't overwrite\n"
               "# it unless run with -Force. Every section is documented in the repository's config/harness.yaml.\n")
     for name, text in (("harness.yaml", header + yaml.safe_dump(build(args), sort_keys=False)),
                        ("projects.yaml", PROJECTS)):
@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         target.write_text(text, encoding="utf-8")
         print(f"wrote {target}")
     profile_path = config_dir / "profile.yaml"
-    profile_header = ("# Written by install/install.ps1 (harness/setup_config.py). The installer updates this\n"
+    profile_header = ("# Written by the agent-harness installer (harness/setup_config.py). It updates this\n"
                       "# reversible profile overlay on every run; put machine-specific settings in harness.local.yaml.\n")
     profile_path.write_text(profile_header + yaml.safe_dump(profile_overlay(args), sort_keys=False), encoding="utf-8")
     print(f"wrote {profile_path}")

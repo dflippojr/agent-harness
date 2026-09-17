@@ -11,7 +11,11 @@ powershell -ExecutionPolicy Bypass -File install\install.ps1 -Profile Service
 ops\backends\login.ps1 codex # or claude / cursor; credentials stay in a Docker volume
 ```
 
-Minimum runtime requirements are Windows 10/11, Git, Docker Desktop, and a login for at least one configured
+On Linux or Apple Silicon macOS, use `install/install.sh --profile service` and
+`ops/backends/login.sh codex` instead.
+
+Minimum runtime requirements are Windows 10/11, x86-64 Linux, or Apple Silicon macOS; Git; a running Docker engine;
+and a login for at least one configured
 provider. `GET /health`, `GET /api/v1`, and authenticated `GET /api/admin/v1` return the same `capabilities` object:
 
 ```json
