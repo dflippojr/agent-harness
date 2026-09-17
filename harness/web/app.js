@@ -122,7 +122,12 @@ function showFab(href, label) {
 let currentMe = { role: "owner" };
 async function currentUser() {
   const bootstrap = !controlCenter.token && !controlCenter.independent ? "legacy" : "admin";
-  try { currentMe = await api("/me", { surface: bootstrap }); } catch (_) { currentMe = { role: "owner" }; }
+  try {
+    currentMe = await api("/me", { surface: bootstrap });
+  } catch (_) {
+    try { currentMe = await api("/me", { surface: "app" }); }
+    catch (_) { currentMe = { role: "guest" }; }
+  }
   return currentMe;
 }
 function isGuest() { return currentMe.role === "guest"; }
@@ -179,7 +184,7 @@ async function api(path, { method = "GET", body, surface } = {}) {
   return controlCenter.request(path, { method, body, surface: surface || apiSurface(path, method) });
 }
 
-const ownerSurface = () => (isGuest() && !controlCenter.token ? "legacy" : "admin");
+const ownerSurface = () => (isMember() ? "app" : (isGuest() && !controlCenter.token ? "legacy" : "admin"));
 
 function daemonImage(path, attrs = {}) {
   const img = h("img", { ...attrs, alt: attrs.alt || "" });

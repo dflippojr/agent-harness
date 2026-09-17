@@ -208,22 +208,23 @@ class Maintenance:
             report["containers_removed"].append(item["Names"])
 
     def _workspace_roots(self) -> list:
-        from .storage import workspaces_dir
+        from .storage import is_reparse_point, workspaces_dir
         roots = [self.cfg.workspaces_dir]
         users = self.cfg.data_dir / "users"
-        if users.is_dir():
+        if users.is_dir() and not is_reparse_point(users):
             for child in users.iterdir():
-                if child.is_dir() and not child.is_symlink():
+                if child.is_dir() and not is_reparse_point(child):
                     roots.append(child / "workspaces")
         return roots
 
     def _workspaces(self, now: float, report: dict) -> None:
+        from .storage import is_reparse_point
         retention = self.cfg.cleanup.workspace_retention_days * 86400
         for root in self._workspace_roots():
             if not root.is_dir():
                 continue
             for path in sorted(root.iterdir()):
-                if not path.is_dir():
+                if not path.is_dir() or is_reparse_point(path):
                     continue
                 s = self.db.get_session(path.name)
                 if s is None:
@@ -289,8 +290,17 @@ class Maintenance:
         return "" if not projects.commits_ahead(ws, s["base_commit"]) else "branch was never pushed"
 
     def remove_workspace(self, sid: str) -> None:
+        from . import storage
+        from .principal import session_user_id
         s = self.db.get_session(sid)
-        remove_tree(Path(s["workspace"]))
+        path = Path(s["workspace"])
+        root = storage.workspaces_dir(self.cfg, session_user_id(s))
+        try:
+            storage.require_contained(path, root)
+        except storage.ContainmentError:
+            log.warning("refusing to delete workspace for %s: path escapes the account root", sid)
+            return
+        remove_tree(path)
         self.db.update_session(sid, workspace_removed=1)
 
     # reporting

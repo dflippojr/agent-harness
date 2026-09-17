@@ -1287,6 +1287,12 @@ class Runner:
             existing = await self._wait_approval(existing["id"])
             await self._acquire(sid)
         if existing["status"] == "approved":
+            if session_user_id(s) != OWNER_USER_ID:
+                allowed = {t["function"]["name"] for t in self.tool_schemas(s, ws)}
+                if name not in allowed:
+                    output = "Error: this account cannot use that tool."
+                    self._record_result(sid, call, name, output, ok=False)
+                    return output
             return None
         note = f" Their note: {existing['note']}" if existing.get("note") else ""
         output = f"Error: the user denied this {name} call.{note} Don't retry it; choose another approach or explain."

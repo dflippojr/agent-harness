@@ -428,23 +428,20 @@ def register(app: FastAPI, mgr) -> None:
 
     def own_session(request: Request, key: dict, ref: str) -> dict:
         m = mgr(request)
-        user_id = key.get("user_id") or "owner"
-        if key.get("kind") == "member":
-            try:
-                s = m.get(ref, user_id=user_id)
-            except HarnessError as e:
-                if e.status in (400, 404):
-                    raise HarnessError(404, "no session matches that id") from e
-                raise
-            if s.get("owner_id", "owner") != user_id:
-                raise HarnessError(404, "no session matches that id")
-            return s
-        s = m.get(ref)
-        if s.get("owner_id", "owner") != "owner":
+        user_id = key["user_id"] if key.get("kind") == "member" else "owner"
+        try:
+            s = m.get(ref, user_id=user_id)
+        except HarnessError as e:
+            if e.status in (400, 404):
+                raise HarnessError(404, "no session matches that id") from e
+            raise
+        if s.get("owner_id", "owner") != user_id:
             raise HarnessError(404, "no session matches that id")
+        if key.get("kind") == "member":
+            return s
         if (not owner_key(key) and s.get("app_id") != key["id"]
                 and "sessions:all" not in key["scope_set"]):
-            raise HarnessError(404, f"no session matches {ref!r}")
+            raise HarnessError(404, "no session matches that id")
         return s
 
     def view(m, s: dict) -> dict:
@@ -700,7 +697,8 @@ def register(app: FastAPI, mgr) -> None:
                         if key.get("kind") == "app" and "sessions:all" not in key["scope_set"] \
                                 and session.get("app_id") != key["id"]:
                             continue
-                        yield sse(e)
+                        # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
+                        yield sse({**e, "seq": None})
             finally:
                 m.bus.unsubscribe("*", sub)
 

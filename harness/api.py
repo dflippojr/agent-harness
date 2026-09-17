@@ -848,7 +848,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                     if e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope:
                         if e["type"] == "run_finished":
                             e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}
-                        yield sse(e)
+                        # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
+                        yield sse({**e, "seq": None})
             finally:
                 m.bus.unsubscribe("*", sub)
 

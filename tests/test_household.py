@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from harness.manager import HarnessError, Manager
 from harness.principal import OWNER_USER_ID, open_owner_mode, require_owner_allowlist, resolve_human
 from harness.scheduler import GpuScheduler
 from harness.storage import ContainmentError, account_usage_bytes, contained, ensure_user_dirs, require_contained, user_root
+from harness.tools import ToolError, Workspace
 
 from test_daemon import Script, make_cfg
 
@@ -184,8 +186,17 @@ def test_two_member_adversarial_matrix(tmp_path):
         same_404(client.get(f"/api/v1/sessions/{alice_s['id']}/transcript", headers=bh))
         same_404(client.get(f"/api/v1/sessions/{alice_s['id']}/changes", headers=bh))
         same_404(client.get(f"/api/v1/sessions/{alice_s['id']}/approvals", headers=bh))
+        same_404(client.get(f"/api/v1/sessions/{alice_s['id']}/events", params={"follow": False}, headers=bh))
+        same_404(client.get(f"/api/v1/sessions/{owner_s['id']}/transcript", headers=ah))
+        same_404(client.get(f"/api/v1/sessions/{bob_s['id']}/events", params={"follow": False}, headers=ah))
         assert client.post(f"/api/v1/sessions/{alice_s['id']}/cancel", headers=bh).status_code == 404
         assert client.post(f"/api/v1/sessions/{alice_s['id']}/review/merge", headers=bh).status_code == 404
+        alice_events = client.get(f"/api/v1/sessions/{alice_s['id']}/events",
+                                  params={"follow": False}, headers=ah)
+        assert alice_events.status_code == 200
+        assert "mango" in alice_events.text and "papaya" not in alice_events.text
+        alice_t = client.get(f"/api/v1/sessions/{alice_s['id']}/transcript", headers=ah)
+        assert alice_t.status_code == 200 and "mango" in alice_t.text and "papaya" not in alice_t.text
 
         alice_list = client.get("/api/v1/sessions", headers=ah).json()
         assert [s["id"] for s in alice_list] == [alice_s["id"]]
@@ -235,6 +246,8 @@ def test_two_member_adversarial_matrix(tmp_path):
         ids = {s["id"] for s in listed}
         assert alice_s["id"] not in ids and bob_s["id"] not in ids
         same_404(client.get(f"/api/v1/sessions/{alice_s['id']}", headers=bearer))
+        missing = client.get("/api/v1/sessions/nosuchidxx", headers=bearer)
+        same_404(missing)
         assert client.get("/api/v1/sessions", headers={"Authorization": f"Bearer {device['key']}"}).status_code == 403
         created_app = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "app work"})
         assert created_app.status_code == 201
@@ -246,7 +259,12 @@ def test_two_member_adversarial_matrix(tmp_path):
         page = client.get("/api/v1/sessions", params={"limit": 2}, headers=ah).json()
         assert len(page) == 2
         assert all(s["id"] != bob_s["id"] and s["id"] != owner_s["id"] for s in page)
-        _ = extra
+        from harness.search import SessionSearch
+        found = SessionSearch(m.db).session_search("zebra", _session=extra[0]["id"])
+        assert "No earlier sessions match" in found
+        assert owner_s["id"] not in found and bob_s["id"] not in found
+        own = SessionSearch(m.db).session_search("mango", _session=extra[0]["id"])
+        assert alice_s["id"] in own and bob_s["id"] not in own and owner_s["id"] not in own
 
 
 def test_member_cannot_use_hosted_or_owner_modules(tmp_path):
@@ -344,14 +362,31 @@ def test_filesystem_isolation_duplicate_slugs_and_containment(tmp_path):
         with pytest.raises(ContainmentError):
             require_contained(Path("/tmp"), ar)
 
+        with pytest.raises(ContainmentError):
+            user_root(m.cfg, "../owner")
+        with pytest.raises(ContainmentError):
+            user_root(m.cfg, "u-abc/../u-def")
+        with pytest.raises(ContainmentError):
+            user_root(m.cfg, "u-abc\\u-def")
+        cafe_nfc = ar / unicodedata.normalize("NFC", "café")
+        cafe_nfc.mkdir()
+        assert contained(cafe_nfc, ar)
+        cafe_nfd = ar / unicodedata.normalize("NFD", "café")
+        assert contained(cafe_nfd, ar) or not cafe_nfd.exists()
+        escaped_case = Path(str(ar).swapcase()) if os.name == "nt" else ar.parent / (ar.name.upper() + "-x")
+        if escaped_case != ar.resolve() and escaped_case.exists():
+            with pytest.raises(ContainmentError):
+                require_contained(escaped_case, ar)
+        assert not contained(ar / ".." / ".." / "scratch", ar)
+
         link = ar / "escape"
         try:
             link.symlink_to(m.cfg.data_dir)
+            assert not contained(link, ar)
+            with pytest.raises(ContainmentError):
+                require_contained(link, ar)
         except OSError:
-            pytest.skip("symlinks unavailable")
-        assert not contained(link, ar)
-        with pytest.raises(ContainmentError):
-            require_contained(link, ar)
+            pass
 
         if os.name == "nt":
             junction = ar / "junc"
@@ -359,9 +394,10 @@ def test_filesystem_isolation_duplicate_slugs_and_containment(tmp_path):
                 subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(m.cfg.data_dir)],
                                check=True, capture_output=True)
             except (OSError, subprocess.CalledProcessError):
-                return
-            with pytest.raises(ContainmentError):
-                require_contained(junction, ar)
+                junction = None
+            if junction is not None:
+                with pytest.raises(ContainmentError):
+                    require_contained(junction, ar)
 
 
 def test_quota_and_concurrency_and_disable(tmp_path):
@@ -418,6 +454,43 @@ def test_quota_and_concurrency_and_disable(tmp_path):
         assert me["user_id"] == alice["user_id"]
 
 
+def test_quota_ignores_links_and_cleanup_stays_contained(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        alice = create_member(client, ALICE, "Alice")
+        root = ensure_user_dirs(m.cfg, alice["user_id"])
+        owner_blob = m.cfg.workspaces_dir / "owner-secret.bin"
+        owner_blob.parent.mkdir(parents=True, exist_ok=True)
+        owner_blob.write_bytes(b"y" * 5000)
+        link = root / "artifacts" / "escape"
+        try:
+            link.symlink_to(owner_blob)
+            used = account_usage_bytes(m.cfg, alice["user_id"])
+            assert used < 4000
+        except OSError:
+            pass
+
+        sid = "keepdis01"
+        ws = root / "workspaces" / sid
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "notes.txt").write_text("keep", encoding="utf-8")
+        now = 1_700_000_000.0
+        m.db.insert_session({
+            "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
+            "title": sid, "status": "cancelled", "workspace": str(ws), "created_at": now, "updated_at": now,
+            "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
+        })
+        client.patch(f"{PREFIX}/accounts/{alice['user_id']}", json={"enabled": False}, headers=H(OWNER))
+        assert ws.exists()
+        planted = m.cfg.workspaces_dir / "owner-ws"
+        planted.mkdir(parents=True, exist_ok=True)
+        (planted / "secret.txt").write_text("owner", encoding="utf-8")
+        m.db.update_session(sid, workspace=str(planted))
+        m.maintenance.remove_workspace(sid)
+        assert planted.exists()
+        assert (planted / "secret.txt").read_text(encoding="utf-8") == "owner"
+
+
 def test_scheduler_skips_ineligible_without_reordering_eligible(tmp_path):
     async def body():
         eligible = {"a": False, "b": True, "c": True}
@@ -455,6 +528,26 @@ def test_scheduler_grants_non_session_gpu_holders(tmp_path):
     asyncio.run(body())
 
 
+def test_scheduler_gpu_hold_preserves_global_fifo(tmp_path):
+    async def body():
+        order = []
+        s = GpuScheduler()
+        s.set_paused(True)
+
+        async def worker(sid):
+            await s.acquire(sid)
+            order.append(sid)
+            s.release(sid)
+
+        tasks = [asyncio.create_task(worker(x)) for x in ("member-a", "owner-b")]
+        await asyncio.sleep(0.02)
+        assert s.holder is None
+        s.set_paused(False)
+        await asyncio.gather(*tasks)
+        assert order == ["member-a", "owner-b"]
+    asyncio.run(body())
+
+
 def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
     client, _ = household(tmp_path)
     with client:
@@ -462,6 +555,7 @@ def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
         assert "function isMember()" in js
         assert "accountsCard" in js
         assert "Household member" in js
+        assert 'isMember() ? "app"' in js
         accounts_js = js.split("async function accountsCard")[1].split("async function viewProfile")[0]
         assert "Delete" not in accounts_js
         create_member(client, ALICE, "Alice")
@@ -497,3 +591,42 @@ def test_no_secrets_in_sqlite(tmp_path):
         accounts = list(m.db.list_accounts())
         assert "token" not in accounts[0]
         assert ALICE in accounts[0]["login"]
+
+
+def test_member_git_clone_tool_refuses_private_and_local(tmp_path):
+    async def body():
+        root = tmp_path / "ws"
+        root.mkdir()
+        ws = Workspace(root, None, tmp_path / "repos", 8000, public_clone_only=True)
+        for url in ("local:demo", "file:///tmp/x", "C:/secret", "https://evil.example/o/r",
+                    "https://user:pass@github.com/o/r"):
+            with pytest.raises(ToolError):
+                await ws.git_clone(url)
+    asyncio.run(body())
+
+
+def test_member_approval_cannot_grant_owner_only_tool(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.allowed_logins = [OWNER]
+    m = Manager(cfg, chat=Script([Completion(content="done")]))
+    alice = AccountService(m).create(OWNER_USER_ID, ALICE, "Alice")
+    now = 1_700_000_000.0
+    sid = "membert001"
+    ws_path = ensure_user_dirs(m.cfg, alice["user_id"]) / "workspaces" / sid
+    ws_path.mkdir(parents=True, exist_ok=True)
+    row = {
+        "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
+        "title": sid, "status": "running", "workspace": str(ws_path), "created_at": now, "updated_at": now,
+        "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
+    }
+    m.db.insert_session(row)
+    m.db.insert_approval({
+        "id": "a-fake01", "session_id": sid, "tool_call_id": "c1",
+        "tool": "homelab_services", "args": {}, "reason": "injected",
+    })
+    assert m.db.decide_approval("a-fake01", "approved", "")
+    ws = m.runner.workspace(row)
+    out = asyncio.run(m.runner._authorize(row, {"id": "c1"}, "homelab_services", {}, ws))
+    assert out and "cannot use that tool" in out
+    names = {t["function"]["name"] for t in m.runner.tool_schemas(row, ws)}
+    assert "homelab_services" not in names

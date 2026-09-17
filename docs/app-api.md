@@ -66,6 +66,21 @@ or another user's data. Those capabilities are forced off in service/tool constr
 App tokens remain owner-managed: they cannot act as a member, mint member credentials, or attach sessions to a
 member. Device and runner tokens gain no member authority.
 
+## Capability matrix
+
+| Capability | owner | member | guest | app token | device/runner |
+| --- | --- | --- | --- | --- | --- |
+| Own sessions (create/list/steer/cancel/review) | yes | yes (local tower only) | read-only look around | own sessions, or owner-scope `sessions:all` | inference only; no member sessions |
+| `/api/v1/me`, scoped projects/search/events | yes | own account | no | owner scope | no |
+| Create projects | yes | empty or public HTTPS allowlist | no | no | no |
+| `/api/admin/v1`, `ho-` owner tokens | yes | 403 | 403 | 403 | 403 |
+| Hosted backends, images, jobs, runners, Remote Control | yes | no | no | scopes for images/remote_control only | no |
+| Homelab, memory library, notifications, backups, keys | yes | no | no | no | no |
+| Member prompts, transcripts, diffs, repo contents | no (aggregate metadata only) | own only | no | no | no |
+
+The machine owner remains inside the host/OS trust boundary and can read local storage. This matrix is about
+accidental or API/UI cross-account access, not a hostile administrator.
+
 ## Pair a separately hosted browser app
 
 Do not paste a long-lived app token into a browser URL. In **Settings → Apps → Pair browser app**, the owner enters
