@@ -80,7 +80,10 @@ _PUBLISH_RE = re.compile(
 )
 _FORCE_RE = re.compile(r"(?i)\b(git\s+(reset\s+--hard|clean\s+-\w*f)|--force\b|\b-f\b\s|--no-verify)\b")
 _PRIV_RE = re.compile(r"(?i)\b(sudo|doas|pkexec|chmod\s+[0-7]{3,4}|chown\b|chgrp\b|newgrp\b)\b")
-_SUBST_RE = re.compile(r"(?<!\\)\$(?:\{|[A-Za-z_(?@*#0-9!])|`|\$\(")
+_SUBST_RE = re.compile(r"(?<!\\)(?:\$|`)")
+_WIN_ENV_RE = re.compile(r"%[A-Za-z_~][^%\s]{0,127}%|![A-Za-z_][A-Za-z0-9_]*!")
+_BRACE_RE = re.compile(r"(?<!\\)\{[^{}\n]{0,200}[,.][^{}\n]{0,200}\}")
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _GLOB_RE = re.compile(r"(?<!\\)[*?\[]")
 _CHAIN_RE = re.compile(r"[|&;<>\n\r]|&&|\|\|")
 
@@ -238,14 +241,43 @@ def _secretish(text: str) -> bool:
 
 
 def _relative_ok(token: str) -> bool:
+    """True when a token cannot name a path outside /workspace or /tmp.
+
+    Fail closed on home/drive/UNC/env expansion and any `..` segment. Prefix
+    allowlists for /workspace and /tmp are applied only after those checks, so
+    `/workspace/../etc` is not treated as workspace-confined.
+    """
     if token.startswith("-"):
-        return True
+        if "=" not in token:
+            return True
+        token = token.split("=", 1)[1]
+        if not token:
+            return True
+    if _SUBST_RE.search(token) or _WIN_ENV_RE.search(token) or _BRACE_RE.search(token):
+        return False
     path = token.replace("\\", "/")
+    if path.startswith("~"):
+        return False
+    if _DRIVE_RE.match(path):
+        return False
+    if path.startswith("//"):
+        return False
+    if any(part == ".." for part in path.split("/")):
+        return False
     if path.startswith("/"):
         return path == "/workspace" or path.startswith("/workspace/") or path == "/tmp" or path.startswith("/tmp/")
-    if path == ".." or path.startswith("../") or "/../" in path:
-        return False
     return True
+
+
+def _paths_confined(command: str, tokens: list[str]) -> bool:
+    """Every path token, under POSIX and Windows splitting, stays in-workspace."""
+    if not all(_relative_ok(t) for t in tokens):
+        return False
+    try:
+        alt = shlex.split(command, posix=False)
+    except ValueError:
+        return False
+    return all(_relative_ok(t) for t in alt)
 
 
 def _python_ok(tokens: list[str]) -> bool:
@@ -335,7 +367,7 @@ def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool 
         command = stripped
     if _CHAIN_RE.search(command):
         return Eligibility(ok=False, reason="shell chaining", tool=name, rule=rule, command=command)
-    if _SUBST_RE.search(command):
+    if _SUBST_RE.search(command) or _WIN_ENV_RE.search(command) or _BRACE_RE.search(command):
         return Eligibility(ok=False, reason="unresolved substitution", tool=name, rule=rule, command=command)
     if _GLOB_RE.search(command):
         return Eligibility(ok=False, reason="unresolved glob", tool=name, rule=rule, command=command)
@@ -359,7 +391,7 @@ def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool 
     if not tokens or not _binary_ok(tokens):
         return Eligibility(ok=False, reason="command is not routine workspace work", tool=name, rule=rule,
                            command=command)
-    if not all(_relative_ok(t) for t in tokens):
+    if not _paths_confined(command, tokens):
         return Eligibility(ok=False, reason="path escapes workspace", tool=name, rule=rule, command=command)
     return Eligibility(ok=True, reason="eligible", tool=name, rule=rule, command=command[:MAX_COMMAND],
                        repo=repo, network=False, workspace=True)

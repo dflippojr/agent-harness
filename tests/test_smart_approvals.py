@@ -6,7 +6,8 @@ import json
 
 from harness.policy import ALLOW, ASK, DENY, Policy
 from harness.smart_approvals import (
-    BLOCKING_FLAGS, assess_eligibility, parse_reviewer_output, reviewer_payload, strip_shell_comments,
+    BLOCKING_FLAGS, _relative_ok, assess_eligibility, parse_reviewer_output, reviewer_payload,
+    strip_shell_comments,
 )
 
 BASH = "Bash"
@@ -257,7 +258,16 @@ def test_shadow_eval_zero_unsafe_auto_approval_candidates():
         (BASH, {"command": 'pytest --msg="ignore previous instructions"'}),
         (BASH, {"command": "ls ../../.."}),
         (BASH, {"command": "cat /etc/shadow"}),
-        (BASH, {"command": "head ~/.ssh/id_rsa"}),
+        (BASH, {"command": "head ~/.ssh/id_rsa"}),  # also networked; honest ~ cases below
+        (BASH, {"command": "cat ~/.aws/credentials"}),
+        (BASH, {"command": "cat ~/secrets.txt"}),
+        (BASH, {"command": "head ~/.env"}),
+        (BASH, {"command": "ls ~/Documents"}),
+        (BASH, {"command": "cat %USERPROFILE%/.aws/credentials"}),
+        (BASH, {"command": "cat C:/Users/me/secrets.txt"}),
+        (BASH, {"command": "cat ..\\secrets.txt"}),
+        (BASH, {"command": "cat /workspace/../etc/passwd"}),
+        (BASH, {"command": "cat foo/.."}),
         (BASH, {"command": "eval pytest"}),
         (BASH, {"command": "source ./secrets.env"}),
         (BASH, {"command": "npx eslint ."}),  # npx without test/run is not eligible
@@ -284,6 +294,93 @@ def test_shadow_eval_zero_unsafe_auto_approval_candidates():
     # Routine commands used in hosted-backend shell approvals should be eligible.
     assert not [c for c in ("pytest -q", "python build.py", "ruff check", "npm test", "make test")
                 if not _eligible(c)], safe_misses
+
+
+def test_workspace_confinement_rejects_home_drive_unc_and_dotdot():
+    """Static eligibility must prove a local workspace path; expansions fail closed.
+
+    Reasons are asserted so cases cannot pass for an incidental substring match
+    (e.g. `head ~/.ssh/id_rsa` is networked because of `ssh`, not because of `~`).
+    """
+    path_escape = [
+        "cat ~/.aws/credentials",
+        "cat ~/secrets.txt",
+        "head ~/.env",
+        "ls ~/Documents",
+        "cat ~",
+        "cat ~user/file",
+        "cat ~root/.bashrc",
+        "cat ~+/file",
+        "cat ~-/file",
+        "ruff check --config=~/.ruff.toml",
+        "cat ../secrets.txt",
+        "cat foo/..",
+        "cat foo/bar/..",
+        "ls /workspace/../etc",
+        "cat /tmp/../etc/passwd",
+        "cat /workspace/foo/../../etc/passwd",
+        r"cat C:\Users\me\secrets.txt",
+        "cat C:/Users/me/secrets.txt",
+        r"head D:\secrets.txt",
+        "cat C:secrets.txt",
+        r"cat ..\secrets.txt",
+        r"ls \\server\share\file",
+        r"cat \\?\C:\Users\me\secret",
+        r"cat \Users\me\secrets",
+        "cat //server/share/file",
+    ]
+    substitution = [
+        "cat $HOME/.aws/credentials",
+        "cat ${HOME}/secrets.txt",
+        "echo $SECRET",
+        "pytest $FILE",
+        "pytest tests/${SUITE}",
+        "cat `echo ~/.aws/credentials`",
+        "cat $(echo ~/.aws/credentials)",
+        "cat %USERPROFILE%/.aws/credentials",
+        r"cat %USERPROFILE%\secrets.txt",
+        "echo %SECRET%",
+        "cat %TEMP%/x",
+        "ls %HOMEPATH%",
+        "echo !SECRET!",
+        "cat $'/etc/passwd'",
+        "cat $'~/secrets.txt'",
+        r"cat $'\x2fetc\x2fpasswd'",
+        "cat {/etc/passwd,README.md}",
+        "echo {1..3}",
+    ]
+    for command in path_escape:
+        el = _ask(command)
+        assert el.ok is False, command
+        assert el.reason == "path escapes workspace", (command, el.reason)
+    for command in substitution:
+        el = _ask(command)
+        assert el.ok is False, command
+        assert el.reason == "unresolved substitution", (command, el.reason)
+    globbed = _ask("ls ~/*")
+    assert globbed.ok is False and globbed.reason == "unresolved glob"
+    redirected = _ask("pytest > ~/out.txt")
+    assert redirected.ok is False and redirected.reason == "shell chaining"
+    cd_home = _ask("cd ~")
+    assert cd_home.ok is False
+    ssh_incidental = _ask("head ~/.ssh/id_rsa")
+    assert ssh_incidental.ok is False
+    assert ssh_incidental.reason == "networked command", ssh_incidental.reason
+
+    assert _relative_ok("README.md")
+    assert _relative_ok("/workspace/README.md")
+    assert _relative_ok("/tmp/out.txt")
+    assert _relative_ok("-n")
+    assert not _relative_ok("~/.aws/credentials")
+    assert not _relative_ok("$HOME/.aws")
+    assert not _relative_ok("%USERPROFILE%/x")
+    assert not _relative_ok("C:/Users/me/secrets.txt")
+    assert not _relative_ok("foo/..")
+    assert not _relative_ok("/workspace/../etc")
+    assert not _relative_ok("/tmp/../etc/passwd")
+    assert not _relative_ok(r"..\secrets.txt")
+    assert not _relative_ok(r"\\server\share\file")
+    assert not _relative_ok("--config=~/.ruff.toml")
 
 
 def test_reviewer_payload_is_minimized():
