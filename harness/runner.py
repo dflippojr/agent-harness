@@ -142,8 +142,9 @@ class Runner:
         user_id = session_user_id(s)
         repos = storage.repos_dir(self.cfg, user_id)
         member = user_id != OWNER_USER_ID
+        budget = self._member_clone_budget(user_id) if member else None
         return Workspace(Path(s["workspace"]), self.sandbox(s), repos, model.context_tokens, homelab,
-                         public_clone_only=member)
+                         public_clone_only=member, clone_max_bytes=budget)
 
     def daemon_toolkits(self, s: dict) -> list:
         """Tools that run in the daemon for every target (memory library, web, session search), as enabled for the
@@ -181,6 +182,16 @@ class Runner:
         default = (self.cfg.runners[s["target"]].workspace_quota_mb if s["target"] in self.cfg.runners
                    else self.cfg.cleanup.workspace_quota_mb)
         return (project.quota_mb if project and project.quota_mb else 0) or default
+
+    def _member_clone_budget(self, user_id: str) -> int | None:
+        """Bytes a member clone may still write. None means uncapped (owner)."""
+        if user_id == OWNER_USER_ID:
+            return None
+        account = self.db.account_by_id(user_id)
+        if account is None:
+            return 0
+        from .storage import account_usage_bytes
+        return max(0, int(account["disk_quota_bytes"]) - account_usage_bytes(self.cfg, user_id))
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         with self.db.tx():
@@ -1230,8 +1241,14 @@ class Runner:
                                                                     "base_branch": project.base_branch}, timeout=900)
             elif member:
                 from . import clone, storage
-                root = storage.workspaces_dir(self.cfg, session_user_id(s))
-                info = await asyncio.to_thread(clone.isolated_prepare, ws, project.repo, s["id"], root)
+                uid = session_user_id(s)
+                root = storage.workspaces_dir(self.cfg, uid)
+                try:
+                    info = await asyncio.to_thread(
+                        clone.isolated_prepare, ws, project.repo, s["id"], root,
+                        self._member_clone_budget(uid))
+                except clone.QuotaExceeded as e:
+                    raise projects.GitError(str(e)) from e
             else:
                 info = await asyncio.to_thread(projects.prepare, project, ws, s["id"])
             s = self.db.get_session(s["id"])

@@ -222,11 +222,10 @@ def _remove_tree(path: Path) -> None:
         os.system(f'rmdir /s /q "{path}"')
 
 
-def isolated_prepare(workspace: Path, source: Path | str, sid: str, root: Path) -> dict:
+def isolated_prepare(workspace: Path, source: Path | str, sid: str, root: Path,
+                     max_bytes: int | None = None) -> dict:
     """Session checkout from a member-managed source, without owner git helpers."""
-    from .projects import branch_name, git as host_git  # noqa: F401 — kept for type parity
-    import subprocess
-    from .projects import AGENT_EMAIL, AGENT_NAME, GitError as GE
+    from .projects import AGENT_EMAIL, AGENT_NAME, branch_name
 
     require_contained(workspace, root, allow_missing=True)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -235,27 +234,10 @@ def isolated_prepare(workspace: Path, source: Path | str, sid: str, root: Path) 
         "git", "-c", "core.quotepath=off", "-c", "credential.helper=", "-c", "core.askPass=",
         "clone", "--no-hardlinks", "--config", "core.autocrlf=false", "--", src, str(workspace),
     ]
-    if Path(src).is_dir():
-        # Local managed copy: still isolate helpers so origin URLs cannot trigger host credentials.
-        pass
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
-        env=isolated_clone_env(), stdin=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if proc.returncode != 0:
-        raise GE(f"could not clone {src}: {(proc.stdout + proc.stderr).strip()[-1500:]}")
+    _run_clone(cmd, workspace, max_bytes=max_bytes)
     require_contained(workspace, root)
     def git_c(*args: str) -> str:
-        r = subprocess.run(
-            ["git", "-c", f"safe.directory={workspace.as_posix()}", "-C", str(workspace), *args],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-            env=isolated_clone_env(), stdin=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if r.returncode != 0:
-            raise GE(f"git {' '.join(args[:3])} failed: {(r.stdout + r.stderr).strip()[-1500:]}")
-        return r.stdout
+        return _isolated_git(workspace, *args)
     base_branch = git_c("rev-parse", "--abbrev-ref", "HEAD").strip()
     base_commit = git_c("rev-parse", "HEAD").strip()
     branch = branch_name(sid)

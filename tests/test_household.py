@@ -355,6 +355,20 @@ def test_run_clone_stops_when_dest_exceeds_max_bytes(tmp_path):
     assert not dest.exists()
 
 
+def test_isolated_prepare_stops_when_clone_exceeds_max_bytes(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+    (src / "blob.bin").write_bytes(b"x" * 80_000)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "big"],
+                   check=True)
+    dest = tmp_path / "ws" / "sessq01"
+    with pytest.raises(QuotaExceeded):
+        isolated_prepare(dest, src, "sessq01", tmp_path / "ws", max_bytes=2_000)
+    assert not dest.exists()
+
+
 def test_project_clone_is_removed_when_it_exceeds_quota(tmp_path):
     client, m = household(tmp_path)
     with client:
@@ -737,6 +751,56 @@ def test_member_git_clone_tool_refuses_private_and_local(tmp_path):
             with pytest.raises(ToolError):
                 await ws.git_clone(url)
     asyncio.run(body())
+
+
+def test_member_git_clone_tool_stops_when_over_budget(tmp_path):
+    async def body():
+        src = tmp_path / "src"
+        src.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+        (src / "blob.bin").write_bytes(b"x" * 80_000)
+        subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+        subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "big"],
+                       check=True)
+        root = tmp_path / "ws"
+        root.mkdir()
+        ws = Workspace(root, None, tmp_path / "repos", 8000, public_clone_only=True, clone_max_bytes=2_000)
+        import harness.clone as clone_mod
+        orig = clone_mod.public_https_url
+        clone_mod.public_https_url = lambda url: str(src)
+        try:
+            with pytest.raises(ToolError, match="quota"):
+                await ws.git_clone("https://github.com/octocat/Hello-World", dest="cloned")
+        finally:
+            clone_mod.public_https_url = orig
+        assert not (root / "cloned").exists()
+    asyncio.run(body())
+
+
+def test_member_workspace_clone_budget_is_remaining_quota(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        alice = create_member(client, ALICE, "Alice", disk_quota_bytes=100_000)
+        uid = alice["user_id"]
+        (repos_dir(m.cfg, uid) / "fat.bin").write_bytes(b"x" * 3_000)
+        now = 1_700_000_000.0
+        sid = "membudg01"
+        ws_path = workspaces_dir(m.cfg, uid) / sid
+        ws_path.mkdir(parents=True, exist_ok=True)
+        row = {
+            "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
+            "title": sid, "status": "queued", "workspace": str(ws_path), "created_at": now, "updated_at": now,
+            "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": uid,
+        }
+        remaining = 100_000 - account_usage_bytes(m.cfg, uid)
+        ws = m.runner.workspace(row)
+        assert ws.public_clone_only
+        assert ws.clone_max_bytes == remaining
+        owner_row = {**row, "owner_id": OWNER_USER_ID, "workspace": str(tmp_path / "owner-ws")}
+        (tmp_path / "owner-ws").mkdir()
+        owner_ws = m.runner.workspace(owner_row)
+        assert not owner_ws.public_clone_only
+        assert owner_ws.clone_max_bytes is None
 
 
 def test_member_approval_cannot_grant_owner_only_tool(tmp_path):

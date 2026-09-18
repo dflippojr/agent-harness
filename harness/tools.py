@@ -117,13 +117,14 @@ class Workspace:
     target = "tower"
 
     def __init__(self, root: Path, sandbox: Sandbox, repos_dir: Path, context_tokens: int, homelab=None,
-                 public_clone_only: bool = False):
+                 public_clone_only: bool = False, clone_max_bytes: int | None = None):
         self.files = FileOps(root, context_tokens)
         self.root = self.files.root
         self.sandbox = sandbox
         self.repos_dir = repos_dir
         self.homelab = homelab  # homelab.Homelab for projects with homelab: true
         self.public_clone_only = public_clone_only
+        self.clone_max_bytes = clone_max_bytes
         self.read_lines = self.files.read_lines
         self.output_chars = max(8000, int(context_tokens * 0.08 * 3.5))
 
@@ -147,7 +148,7 @@ class Workspace:
     async def git_clone(self, url: str, dest: str | None = None, branch: str | None = None) -> str:
         url = url.strip()
         if self.public_clone_only:
-            from .clone import CloneRefused, isolated_clone_env, public_https_url
+            from .clone import CloneRefused, public_https_url
             try:
                 url = public_https_url(url)
             except CloneRefused as e:
@@ -179,16 +180,17 @@ class Workspace:
                  str(source), str(target)], timeout=600)
             output = out + err
         elif self.public_clone_only:
-            import os
-            import subprocess
+            from .clone import QuotaExceeded, _run_clone
+            from .projects import GitError
             cmd = ["git", "-c", "core.quotepath=off", "-c", "credential.helper=", "-c", "core.askPass=",
                    "clone", "--config", "core.autocrlf=false", *branch_args, "--", url, str(target)]
-            proc = await asyncio.to_thread(
-                subprocess.run, cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=600, env=isolated_clone_env(), stdin=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            code, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-            _ = os
+            try:
+                await asyncio.to_thread(_run_clone, cmd, target, timeout=600, max_bytes=self.clone_max_bytes)
+            except QuotaExceeded as e:
+                raise ToolError(str(e)) from e
+            except GitError as e:
+                raise ToolError(str(e)) from e
+            return f"cloned {url} into {rel}"
         else:
             cmd = " ".join(shlex.quote(a) for a in ["git", "clone", *branch_args, "--", url, rel])
             code, output = await self.sandbox.exec(cmd, timeout=600, network=True)
