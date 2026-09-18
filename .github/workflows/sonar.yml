@@ -4,20 +4,27 @@ name: SonarQube
 # GitHub-hosted runners must not. Community Build does not decorate PRs;
 # this check is the public signal. Do not comment dashboard URLs on PRs.
 # Same trigger as CI: skip feature-branch pushes until a PR exists.
+#
+# Community Build is last-writer-wins on a single projectKey, and an unversioned
+# PREVIOUS_VERSION leak mixed in issues that already exist on main. A PR therefore
+# gets its own project: analyze the base SHA, pin New Code to that analysis, then
+# analyze the PR. The quality gate's new_violations are issues on code that
+# changed since base. The long-lived agent-harness project is updated from main
+# for local/overall review and does not fail GitHub on existing issues.
 on:
   push:
     branches: [main]
   pull_request:
 
 concurrency:
-  group: sonar-${{ github.ref }}
+  group: sonar-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   sonar:
-    # Shared Sonar project + localhost:9000. Keep this off the pytest runner.
+    # localhost:9000. Keep this off the pytest runner.
     runs-on: [self-hosted, Windows, X64, agent-harness-tower]
-    continue-on-error: true
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,6 +34,10 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         shell: powershell
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SONAR_TOKEN)) {
@@ -37,13 +48,66 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($hostUrl)) {
             $hostUrl = 'http://host.docker.internal:9000'
           }
-          docker run --rm `
-            -e "SONAR_HOST_URL=$hostUrl" `
-            -e "SONAR_TOKEN=$env:SONAR_TOKEN" `
-            -v "${PWD}:/usr/src" `
-            sonarsource/sonar-scanner-cli:11 `
-            "-Dsonar.qualitygate.wait=true"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "SonarQube scan or quality gate failed with exit $LASTEXITCODE (non-blocking)."
-            exit $LASTEXITCODE
+          $apiUrl = $hostUrl -replace 'host.docker.internal', '127.0.0.1'
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($env:SONAR_TOKEN):"))
+          $headers = @{ Authorization = "Basic $auth" }
+
+          function Invoke-Sonar([string]$projectKey, [string]$projectName, [string]$version, [bool]$allowGateFail) {
+            docker run --rm `
+              -e "SONAR_HOST_URL=$hostUrl" `
+              -e "SONAR_TOKEN=$env:SONAR_TOKEN" `
+              -v "${PWD}:/usr/src" `
+              sonarsource/sonar-scanner-cli:11 `
+              "-Dsonar.projectKey=$projectKey" `
+              "-Dsonar.projectName=$projectName" `
+              "-Dsonar.projectVersion=$version" `
+              "-Dsonar.qualitygate.wait=true"
+            $code = $LASTEXITCODE
+            Write-Host "scanner exit $code (project=$projectKey version=$version)"
+            if ($code -eq 0) { return }
+            if ($allowGateFail -and $code -eq 3) {
+              Write-Host 'Quality gate failed on the baseline scan (expected: existing issues count as new on a first analysis).'
+              return
+            }
+            throw "SonarQube scan failed with exit $code"
+          }
+
+          if ($env:EVENT_NAME -eq 'pull_request') {
+            if ([string]::IsNullOrWhiteSpace($env:BASE_SHA) -or [string]::IsNullOrWhiteSpace($env:PR_NUMBER)) {
+              throw 'pull_request scan needs BASE_SHA and PR_NUMBER'
+            }
+            $key = "agent-harness-pr-$($env:PR_NUMBER)"
+            $name = "agent-harness PR $($env:PR_NUMBER)"
+            $baseVer = "base-$($env:BASE_SHA.Substring(0, 8))"
+            $prVer = "pr-$($env:HEAD_SHA.Substring(0, 8))"
+
+            Write-Host "Baseline scan of $($env:BASE_SHA) into $key"
+            git checkout --force --detach $env:BASE_SHA
+            if ($LASTEXITCODE -ne 0) { throw "git checkout base $($env:BASE_SHA) failed" }
+            Invoke-Sonar $key $name $baseVer $true
+
+            $search = Invoke-RestMethod -Headers $headers -Uri "$apiUrl/api/project_analyses/search?project=$key&ps=1"
+            $analysis = $search.analyses[0].key
+            if ([string]::IsNullOrWhiteSpace($analysis)) {
+              throw "no Sonar analysis found for $key after baseline scan"
+            }
+            Write-Host "Pinning New Code for $key to baseline analysis $analysis"
+            Invoke-RestMethod -Method Post -Headers $headers `
+              -Uri "$apiUrl/api/new_code_periods/set?project=$key&type=SPECIFIC_ANALYSIS&value=$analysis" | Out-Null
+
+            Write-Host "PR scan of $($env:HEAD_SHA) into $key; new code is since $baseVer"
+            git checkout --force --detach $env:HEAD_SHA
+            if ($LASTEXITCODE -ne 0) { throw "git checkout head $($env:HEAD_SHA) failed" }
+            Invoke-Sonar $key $name $prVer $false
+          } else {
+            docker run --rm `
+              -e "SONAR_HOST_URL=$hostUrl" `
+              -e "SONAR_TOKEN=$env:SONAR_TOKEN" `
+              -v "${PWD}:/usr/src" `
+              sonarsource/sonar-scanner-cli:11 `
+              "-Dsonar.projectKey=agent-harness" `
+              "-Dsonar.qualitygate.wait=false"
+            if ($LASTEXITCODE -ne 0) {
+              throw "SonarQube scan failed with exit $LASTEXITCODE"
+            }
           }
