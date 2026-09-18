@@ -10,7 +10,7 @@ import pytest
 
 from harness.changes import workspace_changes
 from harness.config import Project
-from harness.projects import GitError, git, prepare, publish_local, snapshot
+from harness.projects import GitError, _copy_git_state, git, prepare, publish_local, refresh_origin, snapshot
 
 MARKER = "ISSUE104_GIT_EXEC_MARKER"
 
@@ -56,6 +56,16 @@ def plant_filter(repo: Path) -> None:
 def plant_textconv(repo: Path) -> None:
     (repo / ".gitattributes").write_text("* diff=issue104\n", encoding="utf-8")
     sh(repo, "config", "diff.issue104.textconv", f"sh -c 'echo {MARKER} >&2; cat'")
+
+
+def _force_loose_ref(repo: Path, ref: str) -> Path:
+    """Leave `ref` as a loose file so copy-back cannot hide behind packed-refs."""
+    sha = sh(repo, "rev-parse", ref).stdout.strip()
+    sh(repo, "update-ref", "-d", ref)
+    sh(repo, "update-ref", ref, sha)
+    path = repo / ".git" / ref
+    assert path.is_file()
+    return path
 
 
 def test_raw_git_status_runs_workspace_fsmonitor(tmp_path):
@@ -226,6 +236,58 @@ def test_changes_shows_untracked_files_without_running_fsmonitor(tmp_path):
     assert {"path": "new.txt", "status": "??"} in diff["files"]
     assert "+hello" in diff["diff"]
     assert not has_marker(diff["diff"])
+
+
+def test_copy_git_state_drops_refs_removed_from_source(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    for root in (src, dst):
+        (root / "refs" / "heads").mkdir(parents=True)
+        (root / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (root / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (root / "refs" / "heads" / "main").write_text("aaa\n", encoding="utf-8")
+    (src / "refs" / "remotes" / "origin" / "main").write_text("aaa\n", encoding="utf-8")
+    (dst / "refs" / "remotes" / "origin" / "main").write_text("old\n", encoding="utf-8")
+    (dst / "refs" / "remotes" / "origin" / "feature").write_text("bbb\n", encoding="utf-8")
+    (dst / "logs" / "refs" / "remotes" / "origin").mkdir(parents=True)
+    (dst / "logs" / "refs" / "remotes" / "origin" / "feature").write_text("log\n", encoding="utf-8")
+    (src / "logs" / "refs" / "heads").mkdir(parents=True)
+    (src / "logs" / "HEAD").write_text("headlog\n", encoding="utf-8")
+    (dst / "logs" / "HEAD").write_text("oldhead\n", encoding="utf-8")
+
+    _copy_git_state(src, dst)
+
+    assert (dst / "refs" / "heads" / "main").read_text(encoding="utf-8") == "aaa\n"
+    assert (dst / "refs" / "remotes" / "origin" / "main").read_text(encoding="utf-8") == "aaa\n"
+    assert not (dst / "refs" / "remotes" / "origin" / "feature").exists()
+    assert not (dst / "logs" / "refs" / "remotes" / "origin" / "feature").exists()
+    assert (dst / "logs" / "HEAD").read_text(encoding="utf-8") == "headlog\n"
+
+
+def test_fetch_prune_removes_loose_remote_tracking_ref(tmp_path):
+    """refresh()/fetch --prune must drop loose origin refs, not only packed-refs."""
+    src = make_repo(tmp_path / "src")
+    sh(src, "checkout", "-q", "-b", "feature")
+    (src / "app.py").write_text("VALUE = feature\n", encoding="utf-8")
+    sh(src, "-c", "user.name=t", "-c", "user.email=t@t", "add", ".")
+    sh(src, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "feature")
+    sh(src, "checkout", "-q", "main")
+
+    workspace = tmp_path / "ws"
+    prepare(Project(name="proj", repo=str(src)), workspace, "prune01")
+    plant_fsmonitor(workspace)
+    sh(workspace, "fetch", "-q", "origin", "refs/heads/feature:refs/remotes/origin/feature")
+    feature_ref = _force_loose_ref(workspace, "refs/remotes/origin/feature")
+    listed = sh(workspace, "branch", "-r").stdout
+    assert "origin/feature" in listed
+
+    sh(src, "branch", "-D", "feature")
+    err = refresh_origin(workspace)
+    assert err == ""
+    result = git(workspace, "status", "--porcelain", check=False)
+    assert not has_marker(result.out + result.err)
+    assert not feature_ref.exists()
+    listed = sh(workspace, "branch", "-r").stdout
+    assert "origin/feature" not in listed
 
 
 def test_trusted_source_operations_still_see_the_source_repo(tmp_path):
