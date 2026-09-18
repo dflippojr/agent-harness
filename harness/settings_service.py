@@ -496,17 +496,24 @@ class SettingsService:
                 if spec.apply_mode == "daemon_restart" and spec.key in live_values:
                     live_values.pop(spec.key, None)
 
+            apply_values = dict(live_values)
+            apply_values.update({
+                key: restart_merged[key] for key in restart_merged
+                if self.registry.get(key).apply_mode == "daemon_restart"
+            })
+            for key, value in parsed.items():
+                if value is RESET:
+                    apply_values[key] = RESET
+
             try:
-                self._apply_values(candidate_cfg, live_values | {
-                    key: restart_merged[key] for key in restart_merged
-                    if self.registry.get(key).apply_mode == "daemon_restart"
-                }, persist=False)
+                self._apply_values(candidate_cfg, apply_values, persist=False)
             except SettingsError as e:
                 plan.errors = e.keys
                 raise
 
-            proposed = {change.key: (None if change.action == "reset" else change.after) for change in plan.changes}
-            proposed_applied = {k: v for k, v in proposed.items() if v is not None}
+            # Include the inherited post-reset value so cross-field checks see the
+            # generation that would actually run, not the pre-reset overlay left on cfg.
+            proposed_applied = {change.key: change.after for change in plan.changes}
             cross = []
             for validator in self.registry.validators:
                 cross.extend(validator(candidate_cfg, proposed_applied))
@@ -681,6 +688,7 @@ class SettingsService:
             try:
                 parsed = parse_value(spec, value)
                 if parsed is RESET:
+                    spec.setter(cfg, self.inherited.get(key, spec.default))
                     continue
                 spec.setter(cfg, parsed)
             except ValueError as e:
