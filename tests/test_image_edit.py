@@ -214,11 +214,23 @@ def test_owner_guest_app_authorization(tmp_path):
         guest_list = client.get("/images", headers=gh).json()["images"]
         assert gen["id"] in {img["id"] for img in guest_list}
 
+        private_child = client.post(f"/images/{gen['id']}/edit", data={"prompt": "make it blue"},
+                                    files={"mask": ("mask.png", png_mask(gen["width"], gen["height"]),
+                                                     "image/png")}).json()
+        for _ in range(200):
+            if client.get(f"/images/{private_child['id']}").json()["status"] in ("done", "failed"):
+                break
+            time.sleep(0.02)
+
         app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["images"]}).json()
         auth = {"Authorization": f"Bearer {app['key']}"}
         assert client.get(f"/api/v1/images/{uid}", headers=auth).status_code == 404
         assert client.get(f"/api/v1/images/{eid}.png", headers=auth).status_code == 404
         assert client.get(f"/api/v1/images/{gen['id']}.png", headers=auth).status_code == 200
+        app_gen = client.get(f"/api/v1/images/{gen['id']}", headers=auth).json()
+        assert private_child["id"] not in {child["id"] for child in app_gen["children"]}
+        assert client.post(f"/api/v1/images/{uid}/upscale", headers=auth,
+                           json={"upscale": "2x"}).status_code == 404
 
 
 def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):

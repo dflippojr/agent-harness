@@ -76,6 +76,11 @@ class ImageRequest(BaseModel):
     aspect_ratio: str = "1:1"
     resolution: str = "auto"
     seed: int | None = None
+    upscale: str = "none"
+
+
+class ImageUpscaleRequest(BaseModel):
+    upscale: str = "2x"
 
 
 class GpuHoldRequest(BaseModel):
@@ -387,9 +392,19 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             raise HarnessError(400, "image generation is disabled in config/harness.yaml")
         return m.images
 
-    def image_payload(job: dict, svc) -> dict:
+    def image_payload(job: dict, svc, request: Request) -> dict:
         from . import image_edit
-        return {**job, "service": svc.status(), "private": image_edit.is_private(job)}
+        parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
+        children = svc.db.image_children(job["id"])
+        if request.state.access.role == "guest":
+            children = [child for child in children if not image_edit.is_private(child)]
+        return {**job, "service": svc.status(), "private": image_edit.is_private(job),
+                "parent": ({"id": parent["id"], "width": parent["width"], "height": parent["height"]}
+                           if parent else None),
+                "children": [{"id": child["id"], "operation": child.get("operation") or "generate",
+                              "scale": child.get("scale"), "status": child["status"],
+                              "upscale_model": child.get("upscale_model") or "", "width": child["width"],
+                              "height": child["height"]} for child in children]}
 
     def visible_job(job, request, svc):
         from . import image_edit
@@ -423,7 +438,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         svc = images_service(request)
         try:
             return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
-                              resolution=body.resolution, seed=body.seed)
+                              resolution=body.resolution, seed=body.seed, upscale=body.upscale)
         except ToolError as e:
             raise HarnessError(400, str(e))
 
@@ -455,6 +470,16 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         try:
             return svc.submit_edit(parent["id"], prompt, await read_upload(mask, svc.cfg.max_upload_bytes),
                                    feather=feather, seed=seed)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
+    @app.post("/images/{iid}/upscale", status_code=201)
+    async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
+        from .fileops import ToolError
+        svc = images_service(request)
+        parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+        try:
+            return svc.submit_upscale(parent["id"], body.upscale)
         except ToolError as e:
             raise HarnessError(400, str(e))
 
@@ -493,7 +518,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         job = visible_job(svc.db.get_image(raw), request, svc)
         owner = request.state.access.role == "owner"
         if variant == "json":
-            return image_payload(job, svc)
+            return image_payload(job, svc, request)
         from . import image_edit
         if variant in ("source", "mask") and not owner:
             raise HarnessError(404, "image not ready")

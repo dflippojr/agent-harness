@@ -224,6 +224,13 @@ def main(argv: list[str] | None = None) -> int:
                 r.warn("Image editing disk", str(e))
         elif not edit["available"]:
             r.ok("Image editing", "optional component not installed; text-to-image is unchanged")
+        from . import upscale as upscale_mod
+        missing = upscale_mod.missing_weights(cfg.images, verify_hash=True)
+        if missing:
+            r.warn("Image upscaling", upscale_mod.remediation(cfg.images))
+        else:
+            dest = upscale_mod.models_dir(cfg.images)
+            r.ok("Image upscaling", f"Real-ESRGAN x2plus/x4plus in {dest}")
     code, out = run(["tailscale", "serve", "status", "--json"])
     if code == 0 and str(cfg.port) in out:
         r.ok("Phone access", "tailscale serve publishes the daemon")

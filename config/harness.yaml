@@ -231,6 +231,8 @@ endpoint:
 # Models in C:/AI/comfy-models: fast = Z-Image-Turbo, quality = Qwen-Image-2512 (both Apache 2.0).
 # Masked editing is the optional image_edit component (Qwen-Image-Edit fp8); it is off unless explicitly enabled
 # and is never downloaded by an ordinary install or daemon upgrade.
+# Optional Real-ESRGAN 2×/4× weights (BSD-3-Clause) live in <comfy_dir>/ComfyUI/models/upscale_models
+# unless upscale_dir is set. Generation still works when they are absent.
 images:
   enabled: true
   comfy_dir: C:/AI/ComfyUI
@@ -238,3 +240,7 @@ images:
   port: 8188
   work_dir: D:/Agents/harness/images-work
   linger_seconds: 0
+  upscale_dir: ""
+  upscale_max_pixels: 36000000
+  upscale_tile: 512
+  upscale_overlap: 32

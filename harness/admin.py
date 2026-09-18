@@ -52,6 +52,7 @@ ADMIN_PATHS = frozenset({
     "/images/{iid}",
     "/images/{iid}/edit",
     "/images/{iid}/cancel",
+    "/images/{iid}/upscale",
     "/gpu",
     "/gpu/{action}",
     "/remote-control",

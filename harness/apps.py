@@ -32,12 +32,12 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.7"
+API_VERSION = "1.8"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     "sessions:all": "read every session, not only the app's own",
     "approvals": "approve or deny tool calls in the app's own sessions",
-    "images": "generate images and read them",
+    "images": "generate images, upscale them, and read them",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
     "remote_control": "start and stop Claude Code Remote Control servers in project folders",
 }
@@ -171,6 +171,11 @@ class AppImageRequest(BaseModel):
     prompt: str
     model: str = "fast"
     aspect_ratio: str = "1:1"
+    upscale: str = "none"
+
+
+class AppImageUpscaleRequest(BaseModel):
+    upscale: str = "2x"
 
 
 class CapabilitiesResponse(BaseModel):
@@ -515,6 +520,7 @@ def register(app: FastAPI, mgr) -> None:
                              for p in m.cfg.projects.values()],
                 "models": list(m.cfg.models), "backends": backends, "capabilities": m.cfg.capabilities(), "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
+                    "image_upscale": bool(m.images is not None),
                     "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
                     "runner_pairing": bool(m.cfg.runners),
                     "remote_control": m.remote_control is not None, "browser_pairing": True,
@@ -694,7 +700,24 @@ def register(app: FastAPI, mgr) -> None:
             raise HarnessError(400, "image generation is disabled on this harness")
         try:
             job = m.images.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
-                                  source=f"app:{key['name']}"[:40])
+                                  source=f"app:{key['name']}"[:40], upscale=body.upscale)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+        return {**job, "url": f"/api/v1/images/{job['id']}.png"}
+
+    @app.post("/api/v1/images/{iid}/upscale", status_code=201)
+    async def app_image_upscale(iid: str, body: AppImageUpscaleRequest, request: Request):
+        m = mgr(request)
+        key = auth(request, "images")
+        if m.images is None:
+            raise HarnessError(400, "image generation is disabled on this harness")
+        from . import image_edit
+        parent = m.db.get_image(iid.removesuffix(".png"))
+        if parent is None or image_edit.is_private(parent):
+            raise HarnessError(404, "no such image")
+        try:
+            job = m.images.submit_upscale(parent["id"], body.upscale,
+                                          source=f"app:{key['name']}"[:40])
         except ToolError as e:
             raise HarnessError(400, str(e))
         return {**job, "url": f"/api/v1/images/{job['id']}.png"}
@@ -743,4 +766,8 @@ def register(app: FastAPI, mgr) -> None:
             if job["status"] != "done":
                 raise HarnessError(404, "image not ready")
             return FileResponse(m.images.path(job), media_type="image/png")
-        return {**job, "url": f"/api/v1/images/{job['id']}.png" if job["status"] == "done" else None}
+        children = [child for child in m.db.image_children(job["id"])
+                    if not image_edit.is_private(child)] if m.images else []
+        return {**job, "url": f"/api/v1/images/{job['id']}.png" if job["status"] == "done" else None,
+                "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
+                              "upscale_model": c.get("upscale_model") or ""} for c in children]}

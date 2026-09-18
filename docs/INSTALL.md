@@ -176,13 +176,28 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Pause for games / Plex transcodes | `gpu_guard` (on by default) | nothing |
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |
-| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`) |
+| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`). Optional Real-ESRGAN 2×/4× weights; generation still works without them. |
 | Claude / Codex / Cursor as session backends | `backends` | `ops/backends/login.sh <backend>` on Unix or `login.ps1` on Windows (`docs/phase8a-design.md`) |
 | Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
 | Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |
 | Scheduled jobs | `jobs` (on by default) | nothing |
 | Apps that start and drive sessions | always on | a token from Settings → Apps (`docs/app-api.md`) |
 | Nightly backups | `backup` (on by default) | nothing |
+
+## Optional Real-ESRGAN upscaling
+
+Image generation does not upscale unless you ask. 2× and 4× use the upstream BSD-3-Clause general-image weights
+(`RealESRGAN_x2plus`, `RealESRGAN_x4plus`; no face restoration or anime models). Put them in
+`<comfy_dir>/ComfyUI/models/upscale_models` or set `images.upscale_dir`. `python -m harness.doctor` warns when they
+are missing and prints the URLs plus SHA-256; ordinary Generate still works.
+
+| File | URL | SHA-256 |
+| --- | --- | --- |
+| `RealESRGAN_x2plus.pth` | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth | `49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb` |
+| `RealESRGAN_x4plus.pth` | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth | `4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1` |
+
+Outputs above 36 million pixels are refused before allocation so a 16 GB GPU cannot host-OOM. License text:
+`third_party/Real-ESRGAN.LICENSE`.
 
 ## Update
 

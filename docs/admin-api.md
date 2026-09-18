@@ -52,7 +52,7 @@ same; only the prefix and the owner credential check are new.
 | Mac pairing | `/runner-pairing-codes`, `/runner-pairing-codes/{pid}` |
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
-| Images | `/images`, `/images/uploads`, `/images/warmup`, `/images/cooldown`, `/images/{iid}`, `/images/{iid}/edit`, `/images/{iid}/cancel` |
+| Images | `/images`, `/images/uploads`, `/images/warmup`, `/images/cooldown`, `/images/{iid}`, `/images/{iid}/edit`, `/images/{iid}/upscale`, `/images/{iid}/cancel` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
 | Memory | `/memory`, `/memory/profile` |
 | Notifications | `/notify/test` |

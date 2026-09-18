@@ -18,7 +18,7 @@ EDIT_MODEL_ID = "edit"
 OPERATION_GENERATE = "generate"
 OPERATION_UPLOAD = "upload"
 OPERATION_EDIT = "edit"
-PUBLIC_OPERATIONS = {OPERATION_GENERATE}
+PUBLIC_OPERATIONS = {OPERATION_GENERATE, "upscale"}
 
 # Official Apache-2.0 Qwen-Image-Edit, ComfyUI fp8 packaging for a 16 GB card (same RAM-streaming pattern as quality).
 EDIT_MODEL = {
