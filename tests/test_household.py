@@ -555,7 +555,9 @@ def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
         assert "function isMember()" in js
         assert "accountsCard" in js
         assert "Household member" in js
-        assert 'isMember() ? "app"' in js
+        assert "function ownerSurface()" in js
+        assert 'if (isMember()) return "app";' in js
+        assert 'agentHarnessWeb.url("/events", ownerSurface())' in js
         accounts_js = js.split("async function accountsCard")[1].split("async function viewProfile")[0]
         assert "Delete" not in accounts_js
         create_member(client, ALICE, "Alice")
