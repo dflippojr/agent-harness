@@ -216,28 +216,39 @@ class Maintenance:
             self.runner._sandboxes.pop(sid, None)
             report["containers_removed"].append(item["Names"])
 
+    def _workspace_roots(self) -> list:
+        from .storage import is_reparse_point, workspaces_dir
+        roots = [self.cfg.workspaces_dir]
+        users = self.cfg.data_dir / "users"
+        if users.is_dir() and not is_reparse_point(users):
+            for child in users.iterdir():
+                if child.is_dir() and not is_reparse_point(child):
+                    roots.append(child / "workspaces")
+        return roots
+
     def _workspaces(self, now: float, report: dict) -> None:
+        from .storage import is_reparse_point
         retention = self.cfg.cleanup.workspace_retention_days * 86400
-        root = self.cfg.workspaces_dir
-        if not root.is_dir():
-            return
-        for path in sorted(root.iterdir()):
-            if not path.is_dir():
+        for root in self._workspace_roots():
+            if not root.is_dir():
                 continue
-            s = self.db.get_session(path.name)
-            if s is None:
-                if now - path.stat().st_mtime > 3600:  # never race a session being created
-                    remove_tree(path)
-                    report["orphans_removed"].append(path.name)
-                continue
-            if s["status"] in ACTIVE or s["workspace_removed"] or now - s["updated_at"] < retention:
-                continue
-            reason = self.unsaved_work(s)
-            if reason:
-                report["kept"].append({"session": s["id"], "reason": reason})
-                continue
-            self.remove_workspace(s["id"])
-            report["workspaces_removed"].append(s["id"])
+            for path in sorted(root.iterdir()):
+                if not path.is_dir() or is_reparse_point(path):
+                    continue
+                s = self.db.get_session(path.name)
+                if s is None:
+                    if now - path.stat().st_mtime > 3600:  # never race a session being created
+                        remove_tree(path)
+                        report["orphans_removed"].append(path.name)
+                    continue
+                if s["status"] in ACTIVE or s["workspace_removed"] or now - s["updated_at"] < retention:
+                    continue
+                reason = self.unsaved_work(s)
+                if reason:
+                    report["kept"].append({"session": s["id"], "reason": reason})
+                    continue
+                self.remove_workspace(s["id"])
+                report["workspaces_removed"].append(s["id"])
 
     async def _remote_workspaces(self, now: float, report: dict) -> None:
         retention = self.cfg.cleanup.workspace_retention_days * 86400
@@ -248,7 +259,9 @@ class Maintenance:
                 continue
             if not hub.online(target):
                 continue
-            project = self.cfg.projects.get(s["project"])
+            from . import catalog
+            from .principal import session_user_id
+            project = catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
             try:
                 result = await hub.call(target, "cleanup_workspace", {
                     "session": s["id"], "repo": project.repo if project else "", "branch": s["branch"],
@@ -267,7 +280,9 @@ class Maintenance:
 
     def unsaved_work(self, s: dict) -> str:
         """Why deleting this workspace would lose work, or ''."""
-        project = self.cfg.projects.get(s["project"])
+        from . import catalog
+        from .principal import session_user_id
+        project = catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
         ws = Path(s["workspace"])
         if not project or not project.repo or not s["base_commit"] or not (ws / ".git").exists():
             return ""
@@ -284,8 +299,17 @@ class Maintenance:
         return "" if not projects.commits_ahead(ws, s["base_commit"]) else "branch was never pushed"
 
     def remove_workspace(self, sid: str) -> None:
+        from . import storage
+        from .principal import session_user_id
         s = self.db.get_session(sid)
-        remove_tree(Path(s["workspace"]))
+        path = Path(s["workspace"])
+        root = storage.workspaces_dir(self.cfg, session_user_id(s))
+        try:
+            storage.require_contained(path, root)
+        except storage.ContainmentError:
+            log.warning("refusing to delete workspace for %s: path escapes the account root", sid)
+            return
+        remove_tree(path)
         self.db.update_session(sid, workspace_removed=1)
 
     # reporting
