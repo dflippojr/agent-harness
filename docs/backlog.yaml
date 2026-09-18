@@ -52,9 +52,13 @@ items:
 
   - key: gpt-oss-secondary
     kind: feature
-    title: "gpt-oss-20b as a secondary model for summaries, compaction and cheap subtasks"
+    title: "gpt-oss-20b secondary local model — not planned"
     body: |
-      Phase 0 picked gpt-oss-20b as the fast secondary model, but only Qwen is served. Wiring in a second model is also a prerequisite for smart approvals. Memory is the constraint: both models don't fit in 32 GB RAM / 16 GB VRAM at once, so it needs a swap policy or a small context.
+      Closed as not planned 2026-09-17. Qwen already handles compaction, hosted Phase 8 backends cover cheap
+      subtasks, and #18 specifies a hosted smart-approval reviewer without a second local model. Qwen and
+      gpt-oss-20b cannot remain loaded together in 32 GB RAM / 16 GB VRAM, so a swap adds lifecycle latency and
+      scheduler complexity without a current product requirement. A materially smaller future helper with a new,
+      concrete unmet job should get a new benchmark-first issue rather than reopening this proposal.
 
   - key: flag-unsupported-quotes
     kind: deferred
@@ -86,14 +90,70 @@ items:
     kind: feature
     title: "Images: backups, upscaling and inpainting"
     body: |
-      Not included in Phase 6d: backing up generated images, opt-in upscaling, and inpainting/photo editing workflows.
+      Superseded 2026-09-17 by the focused image-backup-archive, image-upscale-realesrgan, and
+      image-inpainting-edit issues. This umbrella was closed to avoid duplicate work.
+
+  - key: image-backup-archive
+    kind: feature
+    title: "Images: archive generated PNGs without duplicating nightly snapshots"
+    body: |
+      Archive each successful PNG atomically under the configured backup root, separate from dated database
+      snapshots so a growing gallery is not copied 14 times. Store a metadata sidecar and verify size/SHA-256.
+      Nightly/on-demand backup reconciles missing rows idempotently; source errors warn without invalidating the
+      SQLite backup. Default image retention is indefinite and archive deletion requires an explicit owner preview
+      and action. Surface archive health, bytes, missing/error counts, free-space warnings, and metrics. Preserve
+      module and owner/guest boundaries; never expose backup paths to guests or apps.
+
+  - key: image-upscale-realesrgan
+    kind: feature
+    title: "Images: opt-in Real-ESRGAN 2x and 4x upscaling"
+    body: |
+      Add explicit 2x/4x upscaling with upstream BSD-3-Clause RealESRGAN_x2plus/x4plus. Default remains none;
+      preserve the original and store a linked derived artifact. Support gallery actions and an optional image API/
+      generate_image field. Use the existing GPU queue/hold/batching, tiled inference, pinned hashes, and a safe
+      pixel cap. Keep the component optional with doctor/install guidance; omit face enhancement and anime models.
+
+  - key: image-inpainting-edit
+    kind: feature
+    title: "Images: masked inpainting and photo editing with Qwen-Image-Edit"
+    body: |
+      Add an optional owner-facing masked edit workflow using the official Apache-2.0 Qwen-Image-Edit family,
+      pinned by revision/hash. Start from a gallery image or bounded PNG/JPEG/WebP upload; normalize and strip
+      metadata. Provide a mobile-safe draw/erase mask editor (white edits, black preserves), require a prompt, and
+      save a linked result without overwriting its source. Reuse the image queue/GPU guard and preserve private
+      source/mask data. Missing large model assets must not break text-to-image; require a real 16 GB GPU exit test.
 
   - key: images-more-models
     kind: feature
-    title: "Images: more workflows (Qwen-Image Lightning LoRA, FLUX.2 [klein] 9B)"
+    title: "Images: add opt-in Qwen-Image-2512 Lightning 4-step quality mode"
     body: |
-      - Qwen-Image Lightning 4-step LoRA as a faster quality mode.
-      - FLUX.2 [klein] 9B (gated on Hugging Face; non-commercial license).
+      Add the Apache-2.0 lightx2v Qwen-Image-2512 Lightning 4-step LoRA as a distinct `quality-fast` mode.
+      Reuse the installed Qwen FP8 base, encoder and VAE; pin the LoRA revision/hash and transcribe ComfyUI's
+      official 4-step graph. Do not change the existing Z-Image `fast` default or 50-step `quality` workflow.
+      Expose capability/mode metadata consistently and disable only `quality-fast` when the optional LoRA is absent.
+      Require graph/backward-compatibility tests plus a same-seed ten-prompt tower comparison with time/RAM/VRAM
+      measurements and a visual speed/quality check before closing.
+
+  - key: image-flux2-klein
+    kind: feature
+    title: "Images: FLUX.2 klein 9B evaluation — no-go"
+    body: |
+      Closed as not planned 2026-09-17. The official 9B FP8 checkpoint is gated, licensed for non-commercial /
+      non-production use, and lists about 29 GB VRAM, so it is a poor fit for a distributable harness targeting
+      the 16 GB tower. No weights were downloaded and no gated-token flow was built. The public Apache-2.0 4B
+      replacement is tracked separately.
+
+  - key: image-flux2-klein-4b
+    kind: feature
+    title: "Images: add an optional FLUX.2 klein 4B fast workflow"
+    body: |
+      Add a distinct optional `flux-fast` text-to-image mode using the public Apache-2.0 distilled 4B FP8
+      checkpoint and official four-step ComfyUI graph. Keep Z-Image as the `fast` default and do not change
+      `quality`. Pin revisions/hashes and a compatible stable ComfyUI build; stage and regression-test that build
+      with rollback before promotion. Reuse the existing `qwen_3_4b.safetensors` encoder only on exact hash
+      identity. Provide explicit atomic install/status/remove lifecycle, availability metadata, provenance, doctor
+      output, and shared-asset-safe cleanup. Require non-networked tests plus an owner-approved 16 GB tower
+      comparison proving headroom, useful visual value, warmed performance, and no regression to existing modes.
 
   - key: installer-clean-machine
     kind: check
@@ -121,13 +181,34 @@ items:
     kind: feature
     title: "Agent-written skills with background review"
     body: |
-      Hermes-style skills that agents write for themselves, reviewed in the background only when the GPU queue is idle, with every write approved.
+      Add instruction-only skill proposals: one `SKILL.md`, a manifest, and bounded Markdown references—no scripts,
+      binaries, packages, symlinks, remote includes, or new tool/policy authority. Owner sessions may create staged,
+      content-addressed proposals; apps, guests, jobs, and Chat cannot. Deterministic validation runs in a fresh
+      no-network/read-only sandbox, followed by advisory model review only when local GPU work is truly idle (or by
+      explicit owner action on hosted-only installs).
+
+      Installation is an explicit owner approval bound to the exact validated hash and enforced by the skill store.
+      Install atomically with version history, disable/rollback/uninstall, and default new skills off. V1 activation
+      is manual on New task or a deterministic project allowlist; freeze exact enabled versions into new sessions.
+      Skills never modify approval rules, permissions, tools, credentials, or running sessions. Executable skills,
+      semantic auto-selection, marketplace publishing, and autonomous install/update are future issues.
 
   - key: smart-approvals
     kind: feature
     title: "Smart approvals: rate commands with an auxiliary model"
     body: |
-      Have a small model rate risky vs. routine commands so fewer approvals need a human. Needs a second model (see the gpt-oss secondary issue).
+      Use an owner-configured small hosted API model after the deterministic policy returns a specifically tagged,
+      smart-eligible `ASK`. `ALLOW`/`DENY`, memory/Remote Control, destructive or networked commands, external
+      publication, credentials, host/admin actions, unknown tools, and ambiguous parsing remain human-only.
+      Static eligibility must establish local reversible workspace work before the reviewer runs. The model may
+      auto-approve only a strict high-confidence `approve`; every other result/error fails closed to one durable
+      human approval. It never auto-denies.
+
+      Keep credentials in opaque owner-managed secret files, use provider-only egress, send only normalized/redacted
+      tool data, require structured output, and persist sanitized audit/usage metrics. Default off; after setup default
+      to shadow mode and require the owner to enable auto explicitly. No decision cache. Validate with adversarial
+      injection/parser tests, at least 100 shadow cases with zero unsafe auto-approval candidates, and a live exit.
+      This is independent of parked #7: no second local model or GPU swap.
 
   - key: remote-control-launch
     kind: feature
@@ -156,7 +237,13 @@ items:
     kind: feature
     title: "Big-brain tool: queue questions for a very large MoE model streamed from SSD"
     body: |
-      An asynchronous tool that sends a question (e.g. "review this plan overnight") to a very large MoE model run with Colibri, which streams experts from disk. Decode is around 1 tok/s on this hardware, so it only suits overnight jobs. Benchmark first and check SSD space.
+      Blocked on the real-hardware Colibri benchmark in #90. Build no product integration unless that benchmark passes its correctness, throughput, stability, memory, disk, and thermal gates and the owner records a go decision. If viable, return here to settle model, job contract, cancellation, retention, privacy, GPU-hold, and scheduling behavior before implementation.
+
+  - key: colibri-hardware-benchmark
+    kind: check
+    title: "Benchmark Colibri expert streaming on the tower before building the overnight tool"
+    body: |
+      Pin and benchmark upstream Colibri on the tower before deciding whether #21 is viable. Phase A may build Colibri and run correctness plus synthetic/tiny/medium benchmarks, but must stop for an explicit owner checkpoint before downloading the roughly 372 GB GLM-5.2 int4 checkpoint. If authorized, Phase B runs 256- and 1024-token real-model trials plus a two-hour soak under the normal GPU hold, records reproducible sanitized measurements, and applies the issue's go/no-go thresholds. This issue is benchmark-only: do not add harness integration.
 
   - key: session-list-machine-filter
     kind: feature
@@ -187,6 +274,22 @@ items:
 
       A same-origin extraction is about 1–2 days. A genuinely independent authenticated browser client is expected to
       take about 3–5 days, excluding the owner API and pairing work tracked separately.
+
+  - key: ui-component-naming
+    kind: feature
+    title: "Adopt explicit names for Agent Harness UI and client components"
+    body: |
+      Retire ambiguous “Control Center” wording. Canonical names are Agent Harness (product), Agent Harness Server
+      (daemon/API), Agent Harness Web (browser/PWA), Agent Harness CLI (`harness`), Agent Harness Runner (remote
+      worker), Agent Harness SDK, Agent Harness App (third-party integration), and Agent Harness for Mac (CLI + Mac
+      Runner distribution). Technical code/logs may still say daemon; Claude Remote Control and Apple's Control
+      Center keep their upstream names.
+
+      Update PWA metadata (full name Agent Harness Web, short label Harness), active UI copy, README/docs, setup,
+      connection/account wording, and open-roadmap language. Make `docs/web.md` canonical while leaving the old
+      `docs/control-center.md` path as a compatibility pointer. Keep APIs, modules, routes, storage keys, service
+      names, credentials, and filesystem paths stable; legacy `control-center` owner tokens remain valid. Land
+      before or with #84. The full compatibility and acceptance contract is on the GitHub issue.
 
   - key: owner-admin-api
     kind: feature
@@ -262,20 +365,64 @@ items:
 
   - key: marketplace-review
     kind: feature
-    title: "Design the optional app marketplace and review process"
+    title: "Design the v1 curated app catalog, threat model, and review process"
     body: |
-      The original bring-your-own-agent vision includes a free catalog of apps that list the locally installed daemon
-      as a prerequisite. Design this only after the service/client split is stable.
+      Design-only issue on the merged app/API stack. Specify a curated discovery and review index, not a package
+      manager, artifact host, payment system, or execution service. Produce the architecture/lifecycle document,
+      threat model, strict versioned manifest schema, and ordinary/elevated example manifests. Cover immutable
+      versions and evidence, publisher/provenance data, every app scope's risk and disclosure, data flows, static and
+      human review, sandbox boundaries for future dynamic analysis, updates/re-consent, abuse/appeal, revocation, and
+      catalog/signing-key compromise. Pairing remains an explicit owner action; the catalog never handles Server or
+      provider credentials and cannot technically enforce external commercial behavior.
 
-      Planning constraints already decided:
-      - every user installs their own daemon and authenticates their own unmodified provider CLI
-      - apps never receive provider credentials or route multiple users through one person's subscription
-      - programmatic usage and provider billing/limit warnings must remain visible
-      - the daemon cannot technically enforce whether an external app is commercial
+      Include a dated official-source policy matrix for every hosted backend. Preserve owner-managed API-key
+      automation, treat subscription-authenticated marketplace use as provider-specific/revocable, and never expose
+      agent execution to an untrusted/public environment. Split storage/signing, review automation, Agent Harness Web
+      discovery/consent, and Agent Harness Server warning/revocation into later implementation issues; build none of them here.
 
-      Define submission metadata, requested scopes/capabilities, static and human review, permission disclosure,
-      update/revocation handling, abuse reporting and provider-policy review. Before public promotion, obtain current
-      provider guidance for subscription-authenticated third-party apps and preserve an official API-key path.
+  - key: marketplace-catalog-storage
+    kind: feature
+    title: "Implement signed catalog storage and key management"
+    body: |
+      Follow-up to #28. Build the append-only catalog index specified in docs/marketplace-design.md: immutable
+      per-version records, detached signatures over catalog_record_sha256, advisory flags, and audit retention.
+      Store links and hashes, not artifacts or credentials. Include catalog signing-key rotation without silent
+      owner uninstall or token revocation.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: marketplace-review-automation
+    kind: feature
+    title: "Automate catalog submission checks and optional review sandbox"
+    body: |
+      Follow-up to #28. Implement Stage A deterministic checks (schema, identifiers, URLs, license, hashes,
+      provenance, SBOM, secret scan, dependency confusion, permission-diff) and evidence packaging for Stage B.
+      If Stage C is added, run it only in a disposable sandbox with synthetic credentials and data, no host mounts,
+      and no network except the recorded allowlist. Do not execute untrusted submissions against a real daemon.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: marketplace-web-discovery
+    kind: feature
+    title: "Agent Harness Web catalog discovery and consent UI"
+    body: |
+      Follow-up to #28. Add discovery of signed catalog listings and conspicuous owner-facing consent copy for
+      every requested scope, origin, and hosted-provider mode. Catalog presence grants nothing. Pairing stays an
+      explicit daemon action; the Web UI may deep-link to Settings but must not mint, transport, or store ha-/ho-
+      tokens or provider credentials.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: marketplace-daemon-revocation-hooks
+    kind: feature
+    title: "Daemon warning and revocation hooks for catalog advisories"
+    body: |
+      Follow-up to #28. Teach the daemon to fetch a signed advisory feed and, when an optional catalog_app_id is
+      present on a key or pairing request: show warnings, block new pairing, and recommend token revocation.
+      Catalog decisions must not silently uninstall software, delete owner data, or revoke tokens without an
+      explicit owner action.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
 
   - key: per-app-provider-credentials
     kind: feature
@@ -314,11 +461,11 @@ items:
     title: "Install and verify Xcode prerequisites for native iOS client work"
     body: |
       Xcode is still required before building a native iOS client or companion for the harness. This is a user-machine
-      setup check, not a daemon code feature.
+      setup check, not an Agent Harness Server code feature.
 
       Verify Xcode and command-line tools on the MacBook, accept the license, select the active developer directory,
       and build/run a minimal Swift project. Record the supported macOS/Xcode versions before scoping any native iOS
-      Control Center work.
+      Agent Harness companion work.
 
   - key: session-header-tabs-quotes
     kind: feature
@@ -843,94 +990,143 @@ items:
 
   - key: household-user-accounts
     kind: feature
-    title: "Household user accounts on one daemon"
+    title: "Add owner-provisioned household accounts with strict isolation"
     body: |
-      Split from #57 (later). Not ready.
+      V1 owner-provisioned members authenticate by exact Tailscale identity and receive a stable opaque user ID.
+      Preserve existing owner data and paths as user `owner`; require an explicit owner allowlist before the first
+      member. Central principal resolution and repository/service-layer scoping isolate projects, sessions, events,
+      approvals, transcripts, review, search, workspaces, files, queue data, and counts. Owners administer member
+      status and aggregate usage but ordinary owner surfaces do not reveal member content.
 
-      A second person on the same machine (roommate / household) should get their own Control Center account, create their own projects, and run the local LLM without seeing the first user's projects, sessions, transcripts, workspaces, or Review.
-
-      Out of scope until refined:
-      - how the second account is created and approved by the owner
-      - workspace disk layout and quotas per user
-      - whether hosted provider CLIs are shared or strictly owner-only
-      - GPU guard, homelab tools, Remote Control, inference keys, and machine Settings stay owner/host operations unless a later issue says otherwise
-
-      Do not store provider or GitHub tokens in SQLite or return them from any API (same bar as #29).
-      Do not put real logins, tokens, or tailnet names in public comments.
-
-      Blocked on #57 v1 (owner create-project + guest isolation).
+      Add the member-safe first-party API/Agent Harness Web path without granting `/api/admin/v1`; bind App/device tokens
+      to owner scope and stop unauthenticated discovery from exposing projects. Member projects are tower-only empty
+      workspaces or credential-free public HTTPS clones on the existing host allowlist, rooted under opaque per-user
+      directories with traversal/symlink/junction protection. Hosted providers, private Git credentials, runners,
+      homelab, memory, images, Remote Control, inference keys, jobs, notifications, maintenance, and machine settings
+      remain owner-only. Default each member to 20 GiB aggregate storage, one running and two queued local sessions;
+      keep global FIFO/GPU controls. Disable cancels work and blocks access but retains data. #63 and #64 stay downstream.
 
   - key: per-user-github-clone
     kind: feature
-    title: "Per-user GitHub credentials for isolated project clones"
+    title: "Add isolated member GitHub authentication for private repositories"
     body: |
-      Split from #57 (later). Not ready.
+      After #62 lands, let an enabled member authorize their own GitHub account for private HTTPS clone/fetch
+      and the existing reviewed push flow. V1 uses an owner-pinned Git Credential Manager executable, forced
+      device flow, an approved OS-backed store, and `agent-harness/v1/<opaque-user_id>` credential namespaces.
+      A host-side broker relays the short-lived verification URL/code but never exposes token output to the
+      daemon or web app. Normal Git operations are noninteractive and never fall back to owner/default credentials.
 
-      Optionally, a household user connects *their* GitHub account and clones *their* repos into an isolated workspace, in the spirit of Cursor's cloud agent (their credentials, not the host git login).
+      Only the member can connect/disconnect; the owner sees coarse state and may perform an erase-only reset.
+      Persist non-secret state only. Revocation/401 erases the rejected namespace and requires reconnect. Disclose
+      that GCM's built-in GitHub OAuth grant is broad (`repo`, `gist`, `workflow`) rather than repository-scoped.
 
-      Constraints already decided:
-      - Do not store GitHub tokens in SQLite or return them from any API (same bar as #29).
-      - Prefer owner- or user-managed files / OS secret references over plaintext in the database.
-      - Distinct from #16 (`harness projects add` on the Mac CLI).
+      Accept only canonical `https://github.com/<owner>/<repo>[.git]` URLs. Every credentialed operation uses a
+      scrubbed environment, isolated configs, the pinned helper, explicit stored origin, disabled hooks/filters,
+      HTTPS-only transport, and revalidated member ownership/containment. Never initialize submodules, fetch LFS,
+      or put GCM/credentials in a sandbox. Push only the reviewed session branch to its stored origin after explicit
+      member confirmation. Public member clones remain credential-free; existing owner Git behavior is unchanged.
 
-      Needs refinement: auth flow, token storage, clone path isolation, and what happens on revocation.
-      Blocked on household-user-accounts.
+      The API/UX, adversarial two-member isolation matrix, store preflights, URL/config fuzzing, lifecycle races,
+      real-store smoke test, redaction checks, documentation, and full acceptance contract are specified on #63.
+      Keep `needs-refinement` until household-user-accounts (#62) merges; then move directly to `ready` after a
+      dependency audit rather than reopening product design.
 
   - key: google-signin-control-center
     kind: feature
-    title: "Google sign-in for the Control Center"
+    title: "Add Google sign-in for pre-provisioned members in Agent Harness Web"
     body: |
-      Split from #57 (later). Not ready.
+      After #62, Google OIDC may identify an already provisioned member in bundled, same-origin Agent Harness Web.
+      Tailscale Serve remains required network admission, but an allowed Google `sub` selects the member principal;
+      Google never self-provisions, becomes owner, bypasses a conflicting owner/member Tailscale identity, or enables
+      public/LAN access. Preserve direct exact-Tailscale member login.
 
-      Tailscale identity is enough for a single owner plus a named #54 guest. A second real user on the same tailnet, or a browser that is not Tailscale-authenticated, needs an account. Google OAuth is a candidate so the PWA is not only whoever `tailscale serve` says.
+      Use server-side authorization code + PKCE, exact HTTPS callback, state/nonce, discovery/JWKS validation, and
+      only `openid email profile`. Persist stable `sub` plus presentation metadata, never Google tokens. Enrollment
+      is member self-link or a hashed 15-minute single-use owner invitation for an existing member. Local sessions
+      use hashed opaque IDs and a Secure/HttpOnly/SameSite=Lax `__Host-` cookie with 7-day idle/30-day absolute
+      expiry, exact-origin CSRF protection, immediate revocation, and Tailscale/principal re-checks on every request.
 
-      Keep the tailnet as the network boundary. Distinct from #25 (app/browser pairing and CORS).
-
-      Needs refinement: whether Google is the only extra IdP, how it maps to owner vs household vs guest, and how Tailscale identity still gates the network.
-      Blocked on household-user-accounts.
+      V1 is bundled Web only; a separately hosted Web member session needs a later cross-origin design. Client secret
+      stays in an owner file, and setup fails closed if the exact tailnet callback cannot meet Google's domain policy.
+      Full identity matrices, OIDC/session adversarial tests, lifecycle UX, privacy rules, and docs are specified on
+      #64. Keep `needs-refinement` until household-user-accounts (#62) merges, then dependency-audit for `ready`.
 
   - key: daemon-config-ui
     kind: feature
-    title: "Daemon config UI: host settings/flags with app vs admin privilege"
+    title: "Add a typed Agent Harness Server configuration registry with safe App/admin boundaries"
     body: |
-      Eventually the hosting machine needs a UI for daemon settings and flags, not only YAML/local files.
+      Implement an explicit allowlisted SettingSpec registry; never generic dotted reflection or YAML editing. Safe
+      host operational values use a flat versioned data-directory JSON overlay with revision checks, transactional
+      validation/live hooks, pending restart values, and one last-known-good generation. Preserve the loader's actual
+      field-specific base/local/profile semantics. Existing backend preferences migrate into the registry.
 
-      Privilege split (decided 2026-09-16):
-      - Apps that build on the daemon may configure **most** flags through the app API (`/api/v1`).
-      - Some flags require **admin/owner input** in the first-party Control Center (or another owner surface) via `/api/admin/v1`. App tokens must not set those.
-      - This belongs in the daemon vs Control Center split (#23–#26), not a third product. Control Center is the first-party owner UI; implementing apps are not.
+      Agent Harness Apps get only per-token narrowing defaults (backend/model/effort, capped budgets, subsets of already-granted
+      capabilities, and notification silence) and can never mutate host settings or expand authority. Admin APIs and
+      schema-driven Agent Harness Web UI expose the exact safe registry; paths, secrets, identity, modules/profile,
+      sandbox/network/egress, providers, runners, homelab, memory, Remote Control, and unregistered values remain
+      installer/file-only. Restart-required candidates use the existing cross-platform supervisors without shelling
+      out or elevation; unsupervised runs refuse restart, and failed/unconfirmed candidates automatically restore
+      LKG without masking invalid base config. #67 consumes this registry later.
 
-      Likely surfaces:
-      - Control Center Settings as the owner/admin config UI once it dogfoods `/api/admin/v1` (#23/#24)
-      - App-writable flags exposed in capability/config discovery so implementing apps can set them without owner chrome
+  - key: chat-home
+    kind: feature
+    title: "Make Chat the Agent Harness Web home with model selection and a navigation drawer"
+    body: |
+      Make a lightweight, durable Chat experience the Agent Harness Web default landing page. It wraps configured
+      local or hosted backends for ordinary questions, search/fetch, and pasted-code review without creating
+      a project worktree, review branch, or agent workflow.
 
-      Out of scope until refined:
-      - the full flag catalog and defaults
-      - whether a host-local tray/installer UI is needed in addition to Control Center
-      - persistence (data-dir overlay vs committed YAML)
+      Decisions (2026-09-17):
+      - choose backend, model, and reasoning effort before the first send; they stay fixed for that chat
+      - persist an explicit non-agent conversation kind with resumable provider session ids and owner-only history
+      - use an empty non-project workspace and deny file, shell, git, edit, Remote Control, approval, and Review tools
+      - derive the initial title from the first message and allow owner rename/delete
+      - guests retain their current read-only role and cannot create/send chats or see owner chat history
+      - code is reviewed as text; execution is split to the chat-snippet-runner issue
 
-      Blocked on #24 (owner API) and the #23 Control Center client using it.
-      Distinct from #26 (which modules are installed) and from #29 (per-app provider keys).
+      The root route opens Chat. Its mobile-safe composer streams/cancels through the existing backend contract.
+      A left drawer links Chat, Agents, Tasks, Images, recent non-agent chats, and Profile; Profile also remains in
+      the Chat header. Preserve provider availability, usage/limit warnings, safe areas, accessibility, and large text.
+
+      Coordinate with the Agent Harness Web/Server/API stack (#23/#24/#27); implement from the settled merged stack.
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: chat-snippet-runner
+    kind: feature
+    title: "Chat: run pasted snippets in an isolated ephemeral sandbox"
+    body: |
+      Add an explicitly invoked snippet runner after Chat's conversation/API shape exists.
+
+      Decisions (2026-09-17):
+      - support Python, JavaScript, Java, C#, and C++; the owner explicitly selects the language
+      - scripts run directly; compiled languages use fixed compile/run commands with no arbitrary flags
+      - use pinned toolchain images/digests and report their exact versions
+      - standard libraries only: no packages, network, caches, user binaries, or host/project/secret mounts
+      - require an explicit Run action on a supported fenced block or manual editor; the model cannot invoke it
+      - each fresh sandbox is limited to 30 seconds, 1 vCPU, 1 GiB RAM, 64 PIDs, 128 MiB temp, and 1 MiB output
+      - persist source and bounded results in Chat; discard files, binaries, and compiler intermediates after every run
+      - guests cannot run snippets or access owner Chat history
+
+      Test successful and failing runs for every language plus network/mount denial, limits, cancellation, daemon
+      restart, process cleanup, output truncation, and untrusted rendering. Distinct from agent-session run_shell.
       Do not put real paths, logins, tokens, or tailnet names in public comments.
 
   - key: admin-fs-browse-remote-locations
     kind: feature
-    title: "Admin-only flag: browse the host filesystem for new Remote Control locations"
+    title: "Add bounded owner-only filesystem discovery for Remote Control folders"
     body: |
-      Later developer-oriented admin flag (2026-09-16). Not ready.
+      Implementation-grade but blocked on #66. Add a Windows-only, default-off owner setting with at most eight
+      validated local fixed-volume roots, depth 1–5, and hard scan/time/result/error limits. This is the sole narrow
+      exception to #66's file-only path rule; it must not become a generic path editor. Scans are single-flight,
+      cancellable, memory-only, no-follow, metadata/marker-only, and execute no Git, package, file-content, or network
+      operations. Skip reparse/sensitive/hidden/cache trees and cover Python, JavaScript, Rust, Go, Java, C#, and C++
+      markers.
 
-      When enabled by the **machine owner**, the daemon may browse the host filesystem to discover new folders that could be used as Remote Control (or similar host-local) locations — e.g. finding a project root the owner has not added yet.
-
-      Hard constraint (decided):
-      - This flag is **admin/owner-only**. Implementing apps must **never** be able to enable it, request it, or inherit it from an app token / pairing scope.
-      - Discovery is not the same as granting access: the owner still has to confirm a path before it becomes a Remote Control workspace (existing one-time Claude workspace-trust still applies).
-      - Default off. Treat it as a developer convenience on the hosting machine, not a capability of third-party apps.
-
-      Distinct from #48 (adding specific Remote Control folders for agent-harness and the memory library — do not change that issue). Distinct from #45 (homelab has no repo folder). Follows the daemon-config-ui privilege split and #24 admin API.
-
-      Needs refinement: browse roots/allowlists, depth, symlink/junction policy, what is shown vs opened, and how discovered paths are promoted to trusted RC locations.
-      Blocked on daemon-config-ui / #24.
-      Do not put real filesystem paths, logins, tokens, or tailnet names in public comments.
+      Promotion accepts only an unexpired opaque candidate ID, reopens it by canonical path plus Windows volume/file
+      identity, revalidates roots and reparse/sensitive boundaries, and atomically adds an owner-only managed Remote
+      Control folder. It never trusts, starts, initializes, or deletes anything. Promoted folders stay invisible to
+      apps, members, guests, devices, and agent tools; Claude trust remains a separate visible owner action, and every
+      trust/launch revalidates the folder. Keep `needs-refinement` until #66 merges.
 
   - key: profile-actions-menu
     kind: feature
@@ -999,5 +1195,44 @@ items:
       Remote Control, or run cleanup.
 
       Distinct from #1 (verify automatic game/Plex guard), #45, #48, closed #55/#56, #67.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: client-daemon-version-skew
+    kind: feature
+    title: "Version skew: Agent Harness Server should tolerate older first-party components"
+    body: |
+      User-reported incident (2026-09-16): an Agent Harness Server release shipped without the matching Web update,
+      so endpoints stopped working until the mismatch was caught by hand. The same risk exists for the
+      MacBook runner protocol — #43 already needed "a runner redeploy" just to surface a new `info.total_gb`
+      field, i.e. functionality silently lagged behind the Server until someone manually redeployed it.
+
+      There is currently no compatibility contract among first-party components (Agent Harness Server, Agent Harness
+      Web, Agent Harness CLI, Mac Runner, and eventually the native installers from #15/#16).
+      A Server upgrade can silently break an older component instead of prompting it to update.
+
+      Proposed direction (user, 2026-09-16):
+      1. The Server APIs should stay usable by first-party components that are not on the very latest release, not
+         assume every component is always current.
+      2. A component should be able to detect that the Server has moved past what it supports.
+      3. When that happens, it should show clear update instructions, and where possible a button that
+         performs or kicks off the update itself rather than just telling the user to go find one.
+
+      Needs refinement:
+      - Compatibility window: how many versions back (or how long) does the Server guarantee support for, and
+        what happens outside that window — degrade gracefully vs hard-refuse with a clear error?
+      - Version/capability handshake: how does each component learn the Server version, and how does the Server
+        learn a component version (a header, a `/health` field, something richer)?
+      - Confirm this is actually reachable for Agent Harness Web given it is already a served static
+        bundle behind a network-first service worker — design the UI for the case that can really occur.
+      - Update UX differs by component: Agent Harness Web may just need a reload/cache-bust, but the Mac Runner,
+        Agent Harness CLI, and any future native components (#15, #16) are installed binaries — "offer to update" there means
+        a real update mechanism (self-download/replace, or at minimum a documented one-liner), not a page reload.
+
+      Distinct from #27 (stabilizing the app SDK/OpenAPI contract for third-party integrating apps — that is
+      about the developer-facing API surface staying stable). This issue is about the daemon's own first-party
+      first-party components not breaking silently on Server upgrades, and proactively prompting an update. Related to #24's
+      "versioned owner-only API" — worth deciding this alongside #24 rather than after, and relevant background
+      for the native installers in #15/#16.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.

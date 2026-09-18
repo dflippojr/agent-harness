@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -34,6 +34,13 @@ class CreateSession(BaseModel):
     backend: str = "local"
     model: str | None = None
     title: str | None = None
+
+
+class CreateProject(BaseModel):
+    name: str
+    description: str = ""
+    target: str = "tower"
+    repo: str = ""  # empty workspace, or a local folder / git URL cloned for each session
 
 
 class SendMessage(BaseModel):
@@ -69,6 +76,15 @@ class ImageRequest(BaseModel):
     aspect_ratio: str = "1:1"
     resolution: str = "auto"
     seed: int | None = None
+    upscale: str = "none"
+
+
+class ImageUpscaleRequest(BaseModel):
+    upscale: str = "2x"
+
+
+class GpuHoldRequest(BaseModel):
+    duration_seconds: int | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -123,10 +139,26 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     def mgr(request: Request) -> Manager:
         return request.app.state.manager
 
+    def owner_id(request: Request) -> str:
+        ident = request.state.access
+        return "owner" if ident.role == "owner" else f"guest:{ident.login or 'unknown'}"
+
+    def owned_session(request: Request, ref: str) -> tuple[Manager, str, dict]:
+        """Resolve a human-facing session only inside the caller's durable owner scope."""
+        m = mgr(request)
+        if request.state.access.role == "guest":
+            raise HarnessError(404, "no session matches that id")
+        sid = m.resolve_id(ref)
+        session = m.db.get_session(sid)
+        if session is None or session.get("owner_id", "owner") != owner_id(request):
+            raise HarnessError(404, "no session matches that id")
+        return m, sid, session
+
     @app.middleware("http")
     async def guard(request: Request, call_next):
         m: Manager = request.app.state.manager
         cfg = m.cfg
+        from .apps import cors_origin_allowed, daemon_origins, normalize_origin
         # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
         login = request.headers.get("tailscale-user-login")
         ident = access_mod.resolve_access(cfg, login)
@@ -139,17 +171,44 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         if guest_block:
             log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
             return JSONResponse({"detail": guest_block}, status_code=403)
+        raw_origin = request.headers.get("origin", "")
+        try:
+            origin = normalize_origin(raw_origin) if raw_origin else ""
+        except ValueError:
+            origin = ""
+        public_path = request.scope.get("harness_original_path", request.url.path)
+        browser_api = public_path.startswith("/api/v1") or public_path.startswith("/api/admin/v1")
+        cross_origin_api = bool(origin and origin not in daemon_origins(cfg)
+                                and browser_api and cors_origin_allowed(m, request, origin))
+        cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_api else {}
+
+        if request.method == "OPTIONS" and browser_api and raw_origin:
+            requested_method = request.headers.get("access-control-request-method", "").upper()
+            requested_headers = {h.strip().lower() for h in
+                                 request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
+            if (not cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+                    or not requested_headers <= {"authorization", "content-type", "last-event-id"}):
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+            return Response(status_code=204, headers={**cors_headers,
+                            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                            "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID",
+                            "Access-Control-Max-Age": "600"})
+
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             # Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent).
-            origin = request.headers.get("origin")
-            allowed = {cfg.public_url, f"http://127.0.0.1:{cfg.port}", f"http://localhost:{cfg.port}"}
-            if origin and origin not in allowed or request.headers.get("sec-fetch-site") == "cross-site":
+            if ((raw_origin and origin not in daemon_origins(cfg) and not cross_origin_api)
+                    or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_api)):
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        for key, value in cors_headers.items():
+            response.headers[key] = value
+        return response
 
     @app.exception_handler(HarnessError)
     async def harness_error(request: Request, exc: HarnessError):
-        return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+        return JSONResponse({"detail": str(exc), "error": {
+            "code": exc.code, "message": str(exc), "retryable": exc.status == 429 or exc.status >= 500,
+        }}, status_code=exc.status)
 
     # web app
     @app.get("/", include_in_schema=False)
@@ -165,6 +224,19 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def manifest():
         return FileResponse(WEB / "manifest.webmanifest", media_type="application/manifest+json")
 
+    @app.get("/mac-client/install.sh", include_in_schema=False)
+    async def mac_client_installer():
+        return FileResponse(Path(__file__).parent.parent / "macrunner" / "install.sh",
+                            media_type="text/x-shellscript", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/mac-client/package.tar.gz", include_in_schema=False)
+    async def mac_client_package():
+        from .mac_client import package_bytes
+        return Response(package_bytes(), media_type="application/gzip", headers={
+            "Content-Disposition": 'attachment; filename="agent-harness-mac.tar.gz"',
+            "Cache-Control": "no-cache",
+        })
+
     app.mount("/static", StaticFiles(directory=WEB), name="static")
 
     from . import apps, endpoint
@@ -174,7 +246,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     # API
     @app.get("/health")
     async def health():
-        return {"ok": True}
+        cfg = app.state.manager.cfg
+        return {"ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities()}
 
     @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
     async def metrics(request: Request):
@@ -217,8 +290,23 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/projects")
     async def projects(request: Request):
         cfg = mgr(request).cfg
+        scope = owner_id(request)
         return [{"name": p.name, "description": p.description, "repo": bool(p.repo), "homelab": p.homelab,
-                 "target": p.target} for p in cfg.projects.values()]
+                 "target": p.target, "managed": p.managed} for p in cfg.projects.values() if p.owner_id == scope]
+
+    @app.post("/projects", status_code=201)
+    async def create_project(body: CreateProject, request: Request):
+        cfg = mgr(request).cfg
+        if body.target != "tower" and body.target not in cfg.runners:
+            raise HarnessError(400, f"runner {body.target!r} is not configured")
+        project = config_mod.Project(name=body.name, description=body.description, target=body.target,
+                                     repo=body.repo, owner_id=owner_id(request), managed=True)
+        try:
+            config_mod.add_project(cfg, project)
+        except (OSError, ValueError, TypeError) as e:
+            raise HarnessError(400, str(e))
+        return {"name": project.name, "description": project.description, "repo": bool(project.repo),
+                "homelab": False, "target": project.target, "managed": True}
 
     # runners (the MacBook): outbound long-polling, authenticated with a per-runner bearer token
     def runner_auth(request: Request, name: str) -> Manager:
@@ -292,6 +380,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def models_warm(request: Request):
         """Load the default model if it's asleep. The web app calls this when it opens."""
         m = mgr(request)
+        if not m.cfg.modules.local_model:
+            raise HarnessError(400, "the local model is disabled by this service profile")
         model = m.cfg.models[m.cfg.default_model]
         return {"name": model.name, "state": await m.warmer.warm(model)}
 
@@ -313,7 +403,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         svc = images_service(request)
         try:
             return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
-                              resolution=body.resolution, seed=body.seed)
+                              resolution=body.resolution, seed=body.seed, upscale=body.upscale)
         except ToolError as e:
             raise HarnessError(400, str(e))
 
@@ -327,6 +417,15 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         """Drop an unused Images-tab warmup so the language model can come back."""
         return images_service(request).cooldown()
 
+    @app.post("/images/{iid}/upscale", status_code=201)
+    async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
+        from .fileops import ToolError
+        svc = images_service(request)
+        try:
+            return svc.submit_upscale(iid.removesuffix(".png"), body.upscale)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
     @app.get("/images/{iid}")
     async def get_image(iid: str, request: Request):
         svc = images_service(request)
@@ -337,7 +436,12 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             if job["status"] != "done" or not svc.path(job).exists():
                 raise HarnessError(404, "image not ready")
             return FileResponse(svc.path(job), media_type="image/png", headers={"Cache-Control": "max-age=86400"})
-        return {**job, "service": svc.status()}
+        parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
+        return {**job, "service": svc.status(), "parent": ({"id": parent["id"], "width": parent["width"],
+                "height": parent["height"]} if parent else None),
+                "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
+                              "upscale_model": c.get("upscale_model") or "", "width": c["width"], "height": c["height"]}
+                             for c in svc.db.image_children(job["id"])]}
 
     # GPU contention guard
     @app.get("/gpu")
@@ -346,15 +450,20 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return m.guard.status() if m.guard else {"enabled": False, "state": "clear", "signals": []}
 
     @app.post("/gpu/{action}")
-    async def gpu_action(action: str, request: Request):
+    async def gpu_action(action: str, request: Request, body: GpuHoldRequest | None = None):
         """pause: hold the GPU for other uses until resumed. resume: reload now, ignoring the current triggers."""
         m = mgr(request)
         if m.guard is None:
             raise HarnessError(400, "the GPU guard is disabled in config/harness.yaml")
         if action == "pause":
-            m.guard.pause()
+            duration = body.duration_seconds if body else None
+            if duration is not None and not 1 <= duration <= 24 * 60 * 60:
+                raise HarnessError(400, "duration_seconds must be between 1 and 86400")
+            m.guard.pause(duration)
         elif action == "resume":
-            m.guard.resume()
+            # Turning off the manual hold must not suppress a live game/Plex trigger. A direct resume while only an
+            # automatic trigger is active retains the legacy "resume anyway" operator action.
+            m.guard.resume(override_signals=not m.guard.manual)
         else:
             raise HarnessError(404, "unknown action")
         return m.guard.status()
@@ -370,6 +479,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = mgr(request)
         if m.remote_control is None:
             return {"enabled": False, "projects": []}
+        if request.state.access.role == "guest":
+            return {"enabled": True, "projects": []}
         return {"enabled": True, "projects": m.remote_control.status()}
 
     @app.post("/remote-control/{project}")
@@ -399,29 +510,16 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/queue")
     async def queue(request: Request):
-        positions = mgr(request).scheduler.positions()
-        return [{"session_id": sid, "position": pos} for sid, pos in sorted(positions.items(), key=lambda x: x[1])]
+        m = mgr(request)
+        scope = owner_id(request)
+        positions = m.scheduler.positions()
+        return [{"session_id": sid, "position": pos} for sid, pos in sorted(positions.items(), key=lambda x: x[1])
+                if (m.db.get_session(sid) or {}).get("owner_id", "owner") == scope]
 
     @app.get("/sessions")
     async def list_sessions(request: Request, limit: int = 50):
         m = mgr(request)
-        out = []
-        for s in m.db.list_sessions(limit):
-            item = m.summary(s)
-            full = m.db.get_session(s["id"])
-            user_messages = [" ".join(e["data"].get("content", "").split()) for e in m.db.events(s["id"])
-                             if e["type"] == "user_message" and e["data"].get("content", "").strip()]
-            asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
-            if len(user_messages) > 3:
-                asks += f" · {len(user_messages) - 3} more follow-up{'s' if len(user_messages) > 4 else ''}"
-            answer = " ".join((full["answer"] or "").split())
-            if answer:
-                outcome = answer[:110] + ("…" if len(answer) > 110 else "")
-                item["chat_summary"] = f"{asks} — {outcome}" if asks else outcome
-            else:
-                item["chat_summary"] = asks
-            out.append(item)
-        return out
+        return [m.list_summary(s) for s in m.db.list_sessions(limit, owner_id=owner_id(request))]
 
     @app.get("/memory")
     async def memory(request: Request):
@@ -458,6 +556,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         """Full-text search over past sessions. Passages mark matches with \\u0002 ... \\u0003."""
         from . import search
         m = mgr(request)
+        if request.state.access.role == "guest":
+            return {"query": q, "mode": "all", "results": []}
         if not m.cfg.search.enabled:
             raise HarnessError(400, "session search is disabled in config/harness.yaml")
         return await asyncio.to_thread(search.search, m.db, q, project, max(1, min(limit, 50)))
@@ -466,39 +566,40 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def create_session(body: CreateSession, request: Request):
         m = mgr(request)
         s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
-                     model=body.model, title=body.title)
+                     model=body.model, title=body.title, owner_id=owner_id(request))
         return m.summary(s)
 
     @app.get("/sessions/{ref}")
     async def get_session(ref: str, request: Request):
-        m = mgr(request)
-        return m.summary(m.get(ref))
+        m, _, session = owned_session(request, ref)
+        return m.summary(session)
 
     @app.patch("/sessions/{ref}")
     @app.put("/sessions/{ref}")
     async def patch_session(ref: str, body: SessionUpdate, request: Request):
-        m = mgr(request)
-        return m.summary(m.rename(ref, body.title))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(m.rename(sid, body.title))
 
     @app.post("/sessions/{ref}/messages")
     async def send_message(ref: str, body: SendMessage, request: Request):
-        m = mgr(request)
-        return m.summary(await m.send(ref, body.content))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(await m.send(sid, body.content))
 
     @app.post("/sessions/{ref}/rerun", status_code=201)
     async def rerun(ref: str, request: Request):
-        m = mgr(request)
-        return m.summary(m.rerun(ref))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(m.rerun(sid))
 
     @app.get("/sessions/{ref}/changes")
     async def changes(ref: str, request: Request):
-        return await mgr(request).changes(ref)
+        m, sid, _ = owned_session(request, ref)
+        return await m.changes(sid)
 
     @app.post("/sessions/{ref}/review/{action}")
     async def review(ref: str, action: str, request: Request):
         """merge | push | discard the session's git branch."""
-        m = mgr(request)
-        return m.summary(await m.review(ref, action))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(await m.review(sid, action))
 
     @app.get("/maintenance")
     async def maintenance(request: Request):
@@ -514,8 +615,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/sessions/{ref}/approvals")
     async def approvals(ref: str, request: Request, all: bool = False):
-        m = mgr(request)
-        sid = m.resolve_id(ref)
+        m, sid, _ = owned_session(request, ref)
         rows = m.db.approvals(sid) if all else m.db.pending_approvals(sid)
         return [public_approval(a) for a in rows]
 
@@ -523,8 +623,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def decide(ref: str, approval_id: str, body: Decision, request: Request):
         if body.decision not in ("approve", "deny"):
             raise HarnessError(400, "decision must be approve or deny")
-        return mgr(request).decide(ref, None if approval_id == "pending" else approval_id,
-                                   body.decision == "approve", body.note)
+        m, sid, _ = owned_session(request, ref)
+        return m.decide(sid, None if approval_id == "pending" else approval_id,
+                        body.decision == "approve", body.note)
 
     @app.post("/a/{token}/{decision}")
     async def decide_by_token(token: str, decision: str, request: Request):
@@ -536,13 +637,13 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.post("/sessions/{ref}/cancel")
     async def cancel(ref: str, request: Request):
-        m = mgr(request)
-        return m.summary(await m.cancel(ref))
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(await m.cancel(sid))
 
     @app.get("/sessions/{ref}/transcript", response_class=PlainTextResponse)
     async def get_transcript(ref: str, request: Request):
-        m = mgr(request)
-        return transcript.render(m.db, m.resolve_id(ref))
+        m, sid, _ = owned_session(request, ref)
+        return transcript.render(m.db, sid)
 
     # scheduled jobs (jobs.py)
     def jobs_on(request: Request) -> Manager:
@@ -558,6 +659,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/jobs")
     async def list_jobs(request: Request):
         m = jobs_on(request)
+        if request.state.access.role == "guest":
+            return []
         return [job_view(m, j) for j in m.db.list_jobs()]
 
     @app.get("/jobs/preview")
@@ -592,6 +695,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/jobs/{jid}")
     async def get_job(jid: str, request: Request):
         m = jobs_on(request)
+        if request.state.access.role == "guest":
+            raise HarnessError(404, "no such job")
         job = m.db.get_job(jid)
         if job is None:
             raise HarnessError(404, "no such job")
@@ -633,6 +738,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     # templates
     @app.get("/templates")
     async def list_templates(request: Request):
+        if request.state.access.role == "guest":
+            return []
         return mgr(request).db.list_templates()
 
     @app.post("/templates", status_code=201)
@@ -680,6 +787,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def all_events(request: Request):
         """Status-level events for every session (the session list). Live only; reload the list to catch up."""
         m = mgr(request)
+        scope = owner_id(request)
 
         async def stream():
             sub = m.bus.subscribe("*")
@@ -693,7 +801,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                             return
                         yield ": keepalive\n\n"
                         continue
-                    if e["type"] in GLOBAL_TYPES:
+                    session = m.db.get_session(e["session_id"])
+                    if e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope:
                         if e["type"] == "run_finished":
                             e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}
                         yield sse(e)
@@ -707,8 +816,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
         """Server-sent events: replays persisted events after `after`, then streams live ones.
         Ephemeral events (token deltas, queue moves) have `seq: null` and are never replayed."""
-        m = mgr(request)
-        sid = m.resolve_id(ref)
+        m, sid, _ = owned_session(request, ref)
         if request.headers.get("last-event-id", "").isdigit():  # EventSource reconnects resume by itself
             after = max(after, int(request.headers["last-event-id"]))
 
@@ -748,4 +856,9 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    from . import admin
+    admin.register(app, mgr)
+    # Keep /static for installed bundled clients, while making harness/web directly deployable at a static-site root.
+    # This catch-all mount is last so daemon/API routes always win.
+    app.mount("/", StaticFiles(directory=WEB), name="web-root")
     return app

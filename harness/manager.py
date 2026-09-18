@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import secrets
 import shutil
 import time
 import uuid
@@ -48,9 +50,12 @@ def public_approval(a: dict | None) -> dict | None:
 
 
 class HarnessError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code: str = ""):
         super().__init__(message)
         self.status = status
+        self.code = code or {400: "invalid_request", 401: "authentication_required", 403: "forbidden",
+                             404: "not_found", 409: "conflict", 413: "payload_too_large",
+                             429: "rate_limited"}.get(status, "server_error" if status >= 500 else "http_error")
 
 
 class Manager:
@@ -101,20 +106,28 @@ class Manager:
         if cfg.gpu_guard.enabled:
             from .gpu_guard import GpuGuard
             self.guard = GpuGuard(cfg.gpu_guard, cfg.models[cfg.default_model], self.scheduler,
-                                  busy=lambda: bool(self.runner.generating) or self.runner.gate.busy,
+                                  busy=lambda: bool(self.runner.generating) or self.runner.gate.busy
+                                  or self.runner.gate.exclusive,
                                   on_pause=self._gpu_paused,
-                                  on_resume=self.runner.gpu_resumed)
+                                  on_resume=self._gpu_resumed)
             self.runner.guard = self.guard
-            self.warmer.blocked = lambda: self.guard.active or bool(self.images and self.images.gpu_taken)
+            self.warmer.blocked = lambda: self.guard.active or self.guard.manual or bool(self.images and self.images.gpu_taken)
         elif self.images is not None:
             self.warmer.blocked = lambda: self.images.gpu_taken
         from .backend_state import apply_prefs
         apply_prefs(self)
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
+        if self.images is not None:
+            self.images.hold()
         for s in self.db.sessions_with_status(*ACTIVE):
             if s.get("backend", "local") == "local" and s["status"] != "waiting_approval":
                 self.runner.note_gpu_pause(s["id"])
+
+    def _gpu_resumed(self, seconds: float) -> None:
+        if self.images is not None:
+            self.images.drain_after_sessions(self.scheduler.positions())
+        self.runner.gpu_resumed(seconds)
 
     def _remote_control_ready(self, payload: dict) -> None:
         self.notifier.send({"topic": self.cfg.notify.topic, **payload})
@@ -202,7 +215,7 @@ class Manager:
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
                backend: str = "local",
                title: str | None = None, app: dict | None = None, app_context: str = "", app_tools: list | None = None,
-               app_metadata: dict | None = None, job_id: str = "") -> dict:
+               app_metadata: dict | None = None, job_id: str = "", owner_id: str = "owner") -> dict:
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
         if project not in self.cfg.projects:
@@ -215,6 +228,8 @@ class Manager:
         if target != spec.target:
             raise HarnessError(400, f"project {project} runs on the {spec.target}, not the {target}")
         if backend == "local":
+            if not self.cfg.modules.local_model:
+                raise HarnessError(400, "the local model is disabled; choose an enabled hosted backend")
             model = model or self.cfg.default_model
             if model not in self.cfg.models:
                 raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
@@ -232,6 +247,14 @@ class Manager:
             model = model or backend_cfg.model
             if not model:
                 raise HarnessError(400, f"backend {backend!r} has no model configured")
+            if app is not None and self.db.app_provider_managed(app["id"]):
+                credential = self.db.app_provider_credential(app["id"], backend)
+                if credential is None:
+                    raise HarnessError(403, f"this app is not allowed to use backend {backend!r}",
+                                       "provider_not_allowed")
+                if credential["models"] and model not in credential["models"]:
+                    raise HarnessError(403, f"this app is not allowed to use model {model!r} on {backend}",
+                                       "provider_model_not_allowed")
         remote = target != "tower"
         if remote:
             free_gb = self.hub.state[target].info.get("free_gb")
@@ -310,9 +333,11 @@ class Manager:
             "title": title or (first_line[:80] + ("…" if len(first_line) > 80 else "")),
             "status": "queued", "workspace": str(workspace), "created_at": now, "updated_at": now,
             "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            "run": new_run(), "totals": {}, "inbox": [], "branch": branch,
+            "run": new_run(), "totals": {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                                             "total_cost_usd": 0.0},
+            "inbox": [], "branch": branch,
             "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
-            "job_id": job_id,
+            "job_id": job_id, "owner_id": owner_id,
         }
         with self.db.tx():
             self.db.insert_session(session)
@@ -360,7 +385,7 @@ class Manager:
         backend = s.get("backend", "local")
         model = s["model"] if backend != "local" or s["model"] in self.cfg.models else None
         return self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
-                           model=model, backend=backend, title=s["title"])
+                           model=model, backend=backend, title=s["title"], owner_id=s.get("owner_id", "owner"))
 
     async def remote(self, s: dict, op: str, params: dict, timeout: float = 300):
         """A request to a session's runner from a user action: fails fast instead of waiting for a sleeping Mac."""
@@ -496,6 +521,16 @@ class Manager:
 
     def summary(self, s: dict) -> dict:
         out = {k: v for k, v in s.items() if k not in ("context", "inbox")}
+        failure = (s.get("run") or {}).get("failure") or (s.get("run") or {}).get("provider_failure")
+        if s.get("status") == "failed" and not failure:
+            reason = str(s.get("stop_reason") or "failed")
+            prefix = reason.split(":", 1)[0]
+            code = {"sandbox_unavailable": "backend_unavailable", "workspace_error": "workspace_error",
+                    "quota_exceeded": "resource_limit", "internal_error": "internal_error"}.get(
+                        prefix, "provider_error" if s.get("backend", "local") != "local" else "model_error")
+            failure = {"code": code, "provider": s.get("backend", "local"), "message": reason,
+                       "retryable": code in ("backend_unavailable", "internal_error", "provider_error")}
+        out["failure"] = failure
         out["queue_position"] = self.scheduler.positions().get(s["id"])
         model = self.cfg.models.get(s["model"])
         out["context_used"] = (s.get("run") or {}).get("context_tokens", 0)
@@ -509,3 +544,117 @@ class Manager:
         if s["status"] == "waiting_approval":
             out["pending_approvals"] = [public_approval(a) for a in self.db.pending_approvals(s["id"])]
         return out
+
+    def list_summary(self, s: dict) -> dict:
+        """Session-card view shared by the owner UI and first-party app API client."""
+        item = self.summary(s)
+        full = self.db.get_session(s["id"])
+        user_messages = [" ".join(e["data"].get("content", "").split()) for e in self.db.events(s["id"])
+                         if e["type"] == "user_message" and e["data"].get("content", "").strip()]
+        asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
+        if len(user_messages) > 3:
+            asks += f" · {len(user_messages) - 3} more follow-up{'s' if len(user_messages) > 4 else ''}"
+        answer = " ".join((full["answer"] or "").split())
+        if answer:
+            outcome = answer[:110] + ("…" if len(answer) > 110 else "")
+            item["chat_summary"] = f"{asks} — {outcome}" if asks else outcome
+        else:
+            item["chat_summary"] = asks
+        return item
+
+    # owner-managed app provider credentials (issue #29)
+    def app_provider_status(self, app_id: str, backend: str) -> dict:
+        managed = self.db.app_provider_managed(app_id)
+        row = self.db.app_provider_credential(app_id, backend)
+        if row is None:
+            return {"managed": managed, "allowed": not managed, "policy": "server_default", "models": [],
+                    "credential_source": "server_default", "available": not managed}
+        path = self.cfg.provider_secret_files.get(row["secret_ref"], "") if row["secret_ref"] else ""
+        needs_file = row["policy"] in ("api_key", "subscription_then_api_key")
+        return {"managed": True, "allowed": True, "policy": row["policy"], "models": row["models"],
+                "credential_source": "app_file" if needs_file else "subscription",
+                "available": bool(path and Path(path).is_file()) if needs_file else True}
+
+    def set_app_provider_credential(self, app_id: str, backend: str, secret_ref: str, policy: str,
+                                    models: list[str]) -> dict:
+        app = self.db.get_api_key(app_id)
+        if app is None or app.get("kind") != "app" or app.get("revoked_at") is not None:
+            raise HarnessError(404, "no active app with that id")
+        if backend not in self.cfg.backends or not self.cfg.backends[backend].enabled:
+            raise HarnessError(400, f"unknown or disabled backend {backend!r}")
+        if policy not in ("subscription", "api_key", "subscription_then_api_key"):
+            raise HarnessError(400, "policy must be subscription, api_key, or subscription_then_api_key")
+        secret_ref = secret_ref.strip()
+        if policy == "subscription":
+            if secret_ref:
+                raise HarnessError(400, "subscription policy must not have a secret_ref")
+        elif not secret_ref or secret_ref not in self.cfg.provider_secret_files:
+            raise HarnessError(400, "secret_ref must name an entry in provider_secret_files")
+        clean_models = list(dict.fromkeys(str(model).strip() for model in models if str(model).strip()))
+        if any(len(model) > 100 for model in clean_models):
+            raise HarnessError(400, "model ids must be at most 100 characters")
+        return self.db.set_app_provider_credential(app_id, backend, secret_ref, policy, clean_models)
+
+    def provider_credentials(self) -> list[dict]:
+        rows = []
+        for row in self.db.list_app_provider_credentials():
+            path = self.cfg.provider_secret_files.get(row["secret_ref"], "") if row["secret_ref"] else ""
+            needs_file = row["policy"] in ("api_key", "subscription_then_api_key")
+            rows.append({k: row[k] for k in ("id", "app_id", "app_name", "backend", "secret_ref", "policy",
+                                                   "models", "created_at", "revoked_at")} |
+                        {"available": bool(path and Path(path).is_file()) if needs_file else True})
+        return rows
+
+    def revoke_app_provider_credential(self, cid: str) -> bool:
+        return self.db.revoke_app_provider_credential(cid)
+
+    # owner-approved Agent Harness for Mac pairing (issue #16)
+    def _runner_token(self, name: str, create: bool = False) -> str:
+        runner = self.cfg.runners.get(name)
+        if runner is None:
+            raise HarnessError(404, f"unknown runner {name!r}")
+        if not runner.token_file:
+            raise HarnessError(400, f"runner {name!r} has no token_file configured")
+        path = Path(runner.token_file).expanduser()
+        try:
+            token = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+            if not token and create:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                token = secrets.token_urlsafe(32)
+                path.write_text(token + "\n", encoding="utf-8")
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
+        except OSError as exc:
+            raise HarnessError(500, f"runner token file is unavailable: {exc}") from exc
+        if not token:
+            raise HarnessError(500, f"runner token file for {name!r} is empty")
+        return token
+
+    def create_runner_pairing_code(self, name: str, runner: str, ttl_seconds: int) -> tuple[dict, str]:
+        self._runner_token(runner, create=True)
+        return self.db.create_runner_pairing_code(name, runner, ttl_seconds)
+
+    def redeem_runner_pairing_code(self, code: str, request_base_url: str) -> tuple[dict | None, str]:
+        pairing, key, owner_token, error = self.db.redeem_runner_pairing_code(code)
+        if pairing is None or key is None:
+            return None, error
+        name = pairing["runner"]
+        runner = self.cfg.runners.get(name)
+        if runner is None:
+            return None, "paired runner is no longer configured"
+        runner_token = self._runner_token(name, create=True)
+        server = self.cfg.public_url or request_base_url.rstrip("/")
+        return {
+            "server": server,
+            "owner_token": owner_token,
+            "owner_key": key,
+            "runner": {
+                "server": server,
+                "name": name,
+                "token": runner_token,
+                "repo_roots": ["~/Projects"],
+                "min_free_gb": runner.min_free_gb,
+            },
+        }, ""

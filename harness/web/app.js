@@ -5,13 +5,16 @@
 //   #/s/<id>/approval/<aid>  same, focused on one approval (notification deep link)
 //   #/s/<id>/changes         diff viewer
 //   #/s/<id>/info            session details
-//   #/profile                identity, GPU, Claude Remote Control, and a Settings menu
+//   #/profile                identity plus Actions and Settings menus
 //   #/profile/account        icon picker, account info, connection details
+//   #/profile/remote-control native Claude Code Remote Control sessions
 //   #/profile/<section>      a Settings page (appearance, notifications, backends, …)
 //   #/images                 image generation and gallery
 //   #/images/<id>            one result (prompt, metadata, Another one)
 //   #/images/<id>/full       in-app fullscreen viewer
 //   #/jobs[/new|/<id>]       scheduled jobs
+
+import { agentHarnessWeb } from "./client.mjs";
 
 const $app = document.getElementById("app");
 const $title = document.getElementById("title");
@@ -56,6 +59,18 @@ function layoutBar() {
   document.documentElement.style.setProperty("--session-chrome-h", `${chrome ? chrome.offsetHeight : 0}px`);
 }
 
+let barPaintFrame = 0;
+let barPaintPhase = false;
+function repaintBar() {
+  cancelAnimationFrame(barPaintFrame);
+  barPaintFrame = requestAnimationFrame(() => {
+    const bar = document.getElementById("bar");
+    barPaintPhase = !barPaintPhase;
+    bar.classList.toggle("paint-refresh", barPaintPhase);
+    layoutBar();
+  });
+}
+
 function setHeader(feature, pageTitle = "", { page = false } = {}) {
   $feature.value = feature;
   $feature.hidden = page;
@@ -63,9 +78,12 @@ function setHeader(feature, pageTitle = "", { page = false } = {}) {
   $title.textContent = pageTitle;
   $title.hidden = !pageTitle;
   document.getElementById("bar").classList.toggle("page", page);
-  requestAnimationFrame(layoutBar);
+  repaintBar();
 }
-window.addEventListener("resize", layoutBar);
+window.addEventListener("resize", repaintBar);
+window.addEventListener("orientationchange", repaintBar);
+window.addEventListener("pageshow", repaintBar);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintBar(); });
 
 async function loadProfileIcon() {
   try { $profileIcon.textContent = (await api("/profile")).emoji; } catch (_) { /* offline */ }
@@ -103,7 +121,8 @@ function showFab(href, label) {
 
 let currentMe = { role: "owner" };
 async function currentUser() {
-  try { currentMe = await api("/me"); } catch (_) { currentMe = { role: "owner" }; }
+  const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
+  try { currentMe = await api("/me", { surface: bootstrap }); } catch (_) { currentMe = { role: "owner" }; }
   return currentMe;
 }
 function isGuest() { return currentMe.role === "guest"; }
@@ -135,23 +154,46 @@ function toast(text, ms = 2600) {
   toast.timer = setTimeout(() => { t.hidden = true; }, ms);
 }
 
-async function api(path, { method = "GET", body } = {}) {
-  const opts = { method, headers: {} };
-  if (body !== undefined) {
-    opts.headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(body);
+function apiSurface(path, method) {
+  if (isGuest() && !agentHarnessWeb.token) return "legacy";
+  const route = path.split("?")[0];
+  if (route === "/sessions" && (method === "GET" || method === "POST")) return "app";
+  if (/^\/sessions\/[^/]+$/.test(route) && method === "GET") return "app";
+  if (/^\/sessions\/[^/]+\/(messages|cancel)$/.test(route) && method === "POST") return "app";
+  if (/^\/sessions\/[^/]+\/approvals\/[^/]+$/.test(route) && method === "POST") return "app";
+  return "admin";
+}
+
+async function api(path, { method = "GET", body, surface } = {}) {
+  return agentHarnessWeb.request(path, { method, body, surface: surface || apiSurface(path, method) });
+}
+
+const ownerSurface = () => (isGuest() && !agentHarnessWeb.token ? "legacy" : "admin");
+
+function daemonImage(path, attrs = {}) {
+  const img = h("img", { ...attrs, alt: attrs.alt || "" });
+  if (!agentHarnessWeb.token) {
+    img.src = agentHarnessWeb.url(path, ownerSurface());
+  } else {
+    agentHarnessWeb.blob(path, "admin").then((blob) => {
+      const url = URL.createObjectURL(blob);
+      img.src = url;
+      img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
+    }).catch((e) => { img.alt = `${attrs.alt || "Image"} (${e.message})`; });
   }
-  let resp;
+  return img;
+}
+
+async function downloadDaemonFile(path, filename) {
   try {
-    resp = await fetch(path, opts);
-  } catch (e) {
-    throw new Error("Can't reach the tower. Is Tailscale connected?");
-  }
-  if (resp.status === 204) return null;
-  const type = resp.headers.get("content-type") || "";
-  const data = type.includes("json") ? await resp.json() : await resp.text();
-  if (!resp.ok) throw new Error((data && data.detail) || `HTTP ${resp.status}`);
-  return data;
+    const blob = await agentHarnessWeb.blob(path, ownerSurface());
+    const url = URL.createObjectURL(blob);
+    const link = h("a", { href: url, download: filename });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) { toast(e.message); }
 }
 
 function ago(ts) {
@@ -253,24 +295,71 @@ function md(src, pages) {
 }
 
 // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
-function openStream(urlFor, handlers) {
+function openStream(urlFor, handlers, { authorized = false } = {}) {
   let es = null;
+  let controller = null;
   let closed = false;
   let retry = null;
-  const connect = () => {
+  let generation = 0;
+  const dispatch = (block) => {
+    let type = "message";
+    const data = [];
+    for (const line of block.replace(/\r/g, "").split("\n")) {
+      if (line.startsWith("event:")) type = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+    }
+    if (data.length && handlers[type]) handlers[type](JSON.parse(data.join("\n")));
+  };
+  const fetchStream = async (url) => {
+    controller = new AbortController();
+    const resp = await fetch(url, { headers: agentHarnessWeb.headers(), cache: "no-store", signal: controller.signal });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+    $conn.classList.add("live");
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (!closed) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let end;
+      while ((end = buffer.search(/\r?\n\r?\n/)) >= 0) {
+        const block = buffer.slice(0, end);
+        buffer = buffer.slice(end).replace(/^\r?\n\r?\n/, "");
+        if (block && !block.startsWith(":")) dispatch(block);
+      }
+    }
+  };
+  const connect = async () => {
     if (closed) return;
+    const run = ++generation;
     es?.close();
-    es = new EventSource(urlFor());
-    es.onopen = () => $conn.classList.add("live");
-    es.onerror = () => {
+    controller?.abort();
+    let url;
+    try { url = await urlFor(); }
+    catch (_) {
       $conn.classList.remove("live");
-      if (es.readyState === EventSource.CLOSED) {
+      if (!closed && run === generation) retry = setTimeout(connect, 3000);
+      return;
+    }
+    if (authorized && agentHarnessWeb.token) {
+      try { await fetchStream(url); } catch (_) { /* retry below */ }
+      $conn.classList.remove("live");
+      if (!closed && run === generation) retry = setTimeout(connect, 3000);
+      return;
+    }
+    const source = new EventSource(url);
+    es = source;
+    source.onopen = () => $conn.classList.add("live");
+    source.onerror = () => {
+      $conn.classList.remove("live");
+      if (source.readyState === EventSource.CLOSED && run === generation) {
         clearTimeout(retry);
         retry = setTimeout(connect, 3000);
       }
     };
     for (const [type, fn] of Object.entries(handlers)) {
-      es.addEventListener(type, (msg) => fn(JSON.parse(msg.data)));
+      source.addEventListener(type, (msg) => fn(JSON.parse(msg.data)));
     }
   };
   const onVisible = () => { if (document.visibilityState === "visible") connect(); };
@@ -280,6 +369,7 @@ function openStream(urlFor, handlers) {
     closed = true;
     clearTimeout(retry);
     es?.close();
+    controller?.abort();
     $conn.classList.remove("live");
     document.removeEventListener("visibilitychange", onVisible);
   };
@@ -334,7 +424,8 @@ async function route() {
     else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
     else go("#/", true);
   } catch (e) {
-    $app.append(h("p", { class: "note bad" }, e.message));
+    $app.append(h("p", { class: "note bad" }, e.message),
+      h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings"));
   }
 }
 $back.addEventListener("click", () => {
@@ -451,7 +542,7 @@ async function viewList() {
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
       .sort((a, b) => (a === "tower" ? -1 : b === "tower" ? 1 : a.localeCompare(b)));
     const waiting = queue.filter((q) => q.position > 0).length;
-    const paused = gpu && gpu.state !== "clear";
+    const paused = gpu && (gpu.manual || gpu.state !== "clear");
     queueNote.replaceChildren(
       paused ? h("a", { href: "#/profile" }, `⏸ ${gpuText(gpu)}`) : "",
       paused && waiting ? " · " : "",
@@ -488,16 +579,27 @@ async function viewList() {
   for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
     handlers[type] = refresh;
   }
-  onLeave(openStream(() => "/events", handlers));
+  onLeave(openStream(() => agentHarnessWeb.url("/events", isGuest() && !agentHarnessWeb.token ? "legacy" : "admin"), handlers,
+    { authorized: !(isGuest() && !agentHarnessWeb.token) }));
   const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
   document.addEventListener("visibilitychange", onVisible);
   onLeave(() => document.removeEventListener("visibilitychange", onVisible));
 }
 
 // ---------- new task ----------
+async function confirmGpuQueue(label) {
+  try {
+    const gpu = await api("/gpu");
+    if (!gpu.manual) return true;
+    const remaining = gpu.manual_remaining_seconds === null ? "until you turn it off"
+      : `for about ${gpu.manual_remaining_seconds >= 90 ? `${Math.ceil(gpu.manual_remaining_seconds / 60)} min` : `${gpu.manual_remaining_seconds} s`}`;
+    return confirm(`GPU hold is on ${remaining}. ${label} can be queued, but nothing will be sent to the local model until the hold ends. Queue it?`);
+  } catch (_) { return true; }
+}
+
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
-  const [projects, models, allTemplates, backends] = await Promise.all([
+  let [projects, models, allTemplates, backends] = await Promise.all([
     api("/projects"), api("/models"), api("/templates"), api("/backends?auth=skip")]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
@@ -518,10 +620,11 @@ async function viewNew() {
   };
   fillChoices();
   const targetSwitch = targets.length > 1 ? h("div", { class: "row" }, targets.map((name) => h("button", {
-    type: "button", class: `btn small${name === target ? " primary" : ""}`,
+    type: "button", class: `btn small${name === target ? " primary" : ""}`, "data-target": name,
     onclick: (ev) => {
       target = name;
       try { localStorage.setItem(targetKey, name); } catch (_) { /* ignore */ }
+      newProjectTarget.value = target;
       for (const b of ev.currentTarget.parentNode.children) b.classList.toggle("primary", b === ev.currentTarget);
       fillChoices();
       showTarget();
@@ -549,6 +652,52 @@ async function viewNew() {
   project.addEventListener("change", () => { showTarget(); showProjectHint(); });
   showTarget();
   showProjectHint();
+  const newProjectName = h("input", { type: "text", placeholder: "my-project", maxlength: "64", required: true,
+    pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
+  const newProjectDescription = h("input", { type: "text", placeholder: "Optional description", maxlength: "240" });
+  const newProjectTarget = h("select", {}, targets.map((name) => h("option", { value: name },
+    name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
+  newProjectTarget.value = target;
+  const newProjectSource = h("select", {},
+    h("option", { value: "empty" }, "Empty workspace"),
+    h("option", { value: "repo" }, "Local folder or git URL"));
+  const newProjectRepo = h("input", { type: "text", placeholder: "D:\\Projects\\example or https://…", hidden: true });
+  newProjectSource.addEventListener("change", () => {
+    newProjectRepo.hidden = newProjectSource.value !== "repo";
+    newProjectRepo.required = newProjectSource.value === "repo";
+  });
+  const createProjectButton = h("button", { class: "btn primary", type: "submit" }, "Create project");
+  const projectCreator = h("details", { class: "card" }, h("summary", {}, "＋ New project"),
+    h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      createProjectButton.disabled = true;
+      try {
+        const created = await api("/projects", { method: "POST", body: {
+          name: newProjectName.value, description: newProjectDescription.value, target: newProjectTarget.value,
+          repo: newProjectSource.value === "repo" ? newProjectRepo.value : "",
+        } });
+        projects.push(created);
+        target = created.target;
+        try { localStorage.setItem(targetKey, target); } catch (_) { /* ignore */ }
+        fillChoices();
+        project.value = created.name;
+        if (targetSwitch) for (const b of targetSwitch.children) b.classList.toggle("primary", b.dataset.target === target);
+        showTarget();
+        showProjectHint();
+        projectCreator.open = false;
+        toast(`Project ${created.name} created`);
+      } catch (err) {
+        toast(err.message);
+      } finally {
+        createProjectButton.disabled = false;
+      }
+    } },
+    h("p", { class: "muted small" }, "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task."),
+    h("label", {}, "Name"), newProjectName,
+    h("label", {}, "Description"), newProjectDescription,
+    h("label", {}, "Runs on"), newProjectTarget,
+    h("label", {}, "Workspace"), newProjectSource, newProjectRepo,
+    h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   let localModel = model.value;
   model.addEventListener("change", () => { localModel = model.value; });
@@ -617,6 +766,7 @@ async function viewNew() {
     onsubmit: async (e) => {
       e.preventDefault();
       if (!prompt.value.trim()) return toast("Write a prompt first");
+      if (backend.value === "local" && !(await confirmGpuQueue("This task"))) return;
       start.disabled = true;
       try {
         const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
@@ -653,7 +803,7 @@ route();
       },
     }, "Save as template"),
     h("span", { class: "spacer" }), start));
-  $app.append(form);
+  $app.append(projectCreator, form);
 
   if (allTemplates.length) {
     $app.append(h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),
@@ -1126,7 +1276,7 @@ async function viewSession(sid, tab, focusApproval) {
       h("p", {}, `⚠ ${e.data.quotes.length === 1 ? "This quote" : "These quotes"} in the answer didn't appear in anything the agent read, so ${e.data.quotes.length === 1 ? "it" : "they"} may be made up:`),
       h("div", { class: "text", style: "white-space:pre-wrap" }, e.data.quotes.map((q) => `“${q}”`).join("\n")))),
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
-    resumed: () => add(h("p", { class: "note" }, "Daemon restarted — session resumed")),
+    resumed: () => add(h("p", { class: "note" }, "Agent Harness Server restarted — session resumed")),
     workspace_ready: (e) => add(h("p", { class: "note" }, `Checked out on branch ${e.data.branch} (from ${e.data.base_branch})`)),
     branch_saved: (e) => add(h("p", { class: "note" }, h("button", {
       class: "btn small", type: "button", onclick: () => go(`#/s/${sid}/changes`, true),
@@ -1196,7 +1346,9 @@ async function viewSession(sid, tab, focusApproval) {
       if (persisted && !finalAnswer && !TERMINAL.has(session.status)) maybeThinking();
     };
   }
-  onLeave(openStream(() => `/sessions/${sid}/events?after=${lastSeq}`, tracked));
+  onLeave(openStream(() => (isGuest() && !agentHarnessWeb.token
+    ? agentHarnessWeb.url(`/sessions/${sid}/events?after=${lastSeq}`, "legacy")
+    : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked));
   if (composer) onLeave(() => composer.remove());
 }
 
@@ -1328,7 +1480,8 @@ function viewInfo(s) {
   if (s.branch) rows.push(["Branch", `${s.branch}${s.base_branch ? ` from ${s.base_branch}` : ""}`], ["Review", s.review || "pending"]);
   $app.append(h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
     h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v))))),
-  h("a", { class: "btn", href: `/sessions/${s.id}/transcript`, target: "_blank" }, "Open Markdown transcript"));
+  h("button", { class: "btn", onclick: () => downloadDaemonFile(`/sessions/${s.id}/transcript`, `${s.id}.md`) },
+    "Download Markdown transcript"));
 }
 
 // ---------- images ----------
@@ -1341,9 +1494,11 @@ const IMAGE_BUSY = new Set(["waiting", "switching", "starting", "generating", "r
 
 function imageCard(img) {
   const ready = img.status === "done";
+  const scale = Number(img.scale) > 1 ? `${img.scale}×` : "";
   return h("a", { class: "card image-card", href: `#/images/${img.id}` },
-    ready ? h("img", { src: `/images/${img.id}.png`, alt: img.prompt, loading: "lazy" })
+    ready ? daemonImage(`/images/${img.id}.png`, { alt: img.prompt, loading: "lazy" })
       : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" ? "failed" : h("span", { class: "dots" }, img.status)),
+    scale ? h("span", { class: "image-scale" }, scale) : null,
     h("div", { class: "preview small" }, img.prompt));
 }
 
@@ -1356,7 +1511,8 @@ function updateImageStatusView(view, s) {
   const p = s.progress || {};
   const busy = IMAGE_BUSY.has(s.phase);
   const hasSteps = s.phase === "generating" && Number(p.max) > 0;
-  label.textContent = text + queued;
+  const upscaling = s.phase === "generating" && p.stage === "upscaling";
+  label.textContent = (upscaling ? "Upscaling" : text) + queued;
   label.classList.toggle("dots", busy);
   bar.hidden = !busy;
   detail.hidden = !hasSteps;
@@ -1365,7 +1521,7 @@ function updateImageStatusView(view, s) {
     if (hasSteps) {
       const fraction = Math.max(0, Math.min(1, Number(p.value || 0) / Number(p.max)));
       barFill.style.width = `${Math.max(2, fraction * 100).toFixed(1)}%`;
-      detail.textContent = `Sampling ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
+      detail.textContent = `${upscaling ? "Upscaling" : "Sampling"} ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
     } else {
       barFill.style.width = "";
       detail.textContent = "";
@@ -1432,6 +1588,11 @@ async function viewImages() {
     renderResolutions();
   });
   renderResolutions();
+  const upscaleInfo = data.status.upscale || {};
+  const upscale = h("select", {},
+    h("option", { value: "none", selected: true }, "Don't upscale"),
+    h("option", { value: "2x", disabled: !upscaleInfo.available }, "Upscale 2× after generate"),
+    h("option", { value: "4x", disabled: !upscaleInfo.available }, "Upscale 4× after generate"));
   const phase = imageStatusView(data.status);
   const grid = h("div", { class: "image-grid" });
   const imageGridKey = (img) => [img.id, img.status, img.error, img.prompt, img.finished_at].join("\0");
@@ -1452,11 +1613,12 @@ async function viewImages() {
       onsubmit: async (e) => {
         e.preventDefault();
         if (!prompt.value.trim()) return toast("Describe the image first");
+        if (!(await confirmGpuQueue("This image job"))) return;
         go.disabled = true;
         try {
           await startWarmup().catch(() => {});
           const resolution = resolutionInputs.find((choice) => choice.input.checked).name;
-          await api("/images", { method: "POST", body: { prompt: prompt.value, model: model.value, aspect_ratio: aspect.value, resolution } });
+          await api("/images", { method: "POST", body: { prompt: prompt.value, model: model.value, aspect_ratio: aspect.value, resolution, upscale: upscale.value } });
           try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
           render(await api("/images"));
         } catch (err) { toast(err.message); }
@@ -1468,7 +1630,10 @@ async function viewImages() {
       h("div", { style: "flex:1" }, h("label", {}, "Aspect ratio"), aspect)),
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
-    h("p", { class: "muted small" }, "The language model is unloaded while images generate; running tasks pause for a few minutes."),
+    h("div", { class: "row" }, h("div", { style: "flex:1" }, h("label", {}, "Upscale"), upscale)),
+    h("p", { class: "muted small" }, upscaleInfo.available
+      ? "The language model is unloaded while images generate; running tasks pause for a few minutes. Upscaling is off unless you choose 2× or 4×."
+      : "The language model is unloaded while images generate; running tasks pause for a few minutes. Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable."),
     h("div", { class: "row", style: "margin-top:12px" }, h("span", { class: "spacer" }), go)),
     phase, grid);
   let timer = 0;
@@ -1487,12 +1652,29 @@ async function viewImage(id) {
   const load = async () => {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
+    const meta = [`${img.model} · ${img.width}×${img.height}`];
+    if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
+    meta.push(`seed ${img.seed}`, img.source);
+    if (img.seconds) meta.push(`${Math.round(img.seconds)} s`);
+    meta.push(when);
+    const canUpscale = img.status === "done" && !isGuest() && Number(img.scale || 1) === 1;
+    const startUpscale = (choice) => async () => {
+      try {
+        if (!(await confirmGpuQueue("This upscale job"))) return;
+        const next = await api(`/images/${id}/upscale`, { method: "POST", body: { upscale: choice } });
+        location.hash = `#/images/${next.id}`;
+      } catch (e) { toast(e.message); }
+    };
     fill($app,
-      img.status === "done" ? h("a", { href: `#/images/${id}/full` }, h("img", { class: "image-full", src: `/images/${id}.png`, alt: img.prompt }))
+      img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
         : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : imageStatusView(img.service)),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
-        h("p", { class: "muted small" }, `${img.model} · ${img.width}×${img.height} · seed ${img.seed} · ${img.source}${img.seconds ? ` · ${Math.round(img.seconds)} s` : ""} · ${when}`),
+        h("p", { class: "muted small" }, meta.join(" · ")),
+        img.parent && img.parent.id ? h("p", { class: "muted small" }, "Upscaled from ",
+          h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
+        (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
+          ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` }, `${c.scale}×`)]))) : null,
         h("div", { class: "row" },
           isGuest() ? null : h("button", {
             class: "btn",
@@ -1503,7 +1685,9 @@ async function viewImage(id) {
               } catch (e) { toast(e.message); }
             },
           }, "Another one"),
-          img.status === "done" ? h("a", { class: "btn", href: `/images/${id}.png`, download: `${id}.png` }, "Download") : null,
+          canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
+          canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
+          img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
           img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null)));
     return img;
   };
@@ -1520,7 +1704,7 @@ async function viewImageFull(id) {
   if (img.status !== "done") { go(`#/images/${id}`, true); return; }
   setHeader("images", "Image", { page: true });
   fill($app, h("div", { class: "image-viewer" },
-    h("img", { src: `/images/${id}.png`, alt: img.prompt })));
+    daemonImage(`/images/${id}.png`, { alt: img.prompt })));
 }
 
 // ---------- scheduled jobs ----------
@@ -1634,6 +1818,7 @@ async function viewJob(id) {
   $app.append(h("form", {
     onsubmit: async (e) => {
       e.preventDefault();
+      if (isNew && backend.value === "local" && !(await confirmGpuQueue("This scheduled job"))) return;
       save.disabled = true;
       try {
         const saved = await api(isNew ? "/jobs" : `/jobs/${id}`, { method: isNew ? "POST" : "PUT", body: body() });
@@ -1664,6 +1849,7 @@ async function viewJob(id) {
     isGuest() ? null : !isNew ? h("button", {
       class: "btn", type: "button",
       onclick: async () => {
+        if (backend.value === "local" && !(await confirmGpuQueue("This job run"))) return;
         try { const s = await api(`/jobs/${id}/run`, { method: "POST" }); location.hash = `#/s/${s.id}`; } catch (err) { toast(err.message); }
       },
     }, "Run now") : null,
@@ -1682,6 +1868,7 @@ async function viewJob(id) {
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
 const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint"]);
 const PROFILE_PAGES = {
+  connection: "Connection",
   appearance: "Appearance",
   notifications: "Notifications",
   install: "Install",
@@ -1689,7 +1876,6 @@ const PROFILE_PAGES = {
   memory: "Memory",
   apps: "Apps",
   endpoint: "Inference endpoint",
-  disk: "Disk",
 };
 const THEMES = {
   auto: { label: "System", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
@@ -1794,14 +1980,17 @@ function accountCard(me, profile) {
     h("div", { class: "card" },
       h("h3", {}, "Connection"),
       me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
-      h("p", { class: "muted small" }, live ? "Live stream connected." : "Live stream is offline.")));
+      h("p", { class: "muted small" }, live
+        ? `Agent Harness Web is connected to Agent Harness Server at ${me.public_url || location.origin}.`
+        : `Agent Harness Web is not receiving the live stream from Agent Harness Server at ${me.public_url || location.origin}.`)));
 }
 
 async function viewProfile(page) {
-  const titles = { account: "Account", ...PROFILE_PAGES };
+  const titles = { account: "Account", "remote-control": "Claude Remote Control", disk: "Disk", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
   setHeader("agents", titles[page] || "Profile", { page: true });
+  if (page === "connection") return $app.append(connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
   if (page === "account") return $app.append(accountCard(me, profile));
   if (page === "appearance") return $app.append(appearanceCard());
@@ -1812,6 +2001,7 @@ async function viewProfile(page) {
   if (page === "apps") return $app.append(appsCard(me));
   if (page === "endpoint") return $app.append(endpointCard(me));
   if (page === "disk") return $app.append(diskCard());
+  if (page === "remote-control") return $app.append(remoteControlCard());
   $app.append(
     h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
@@ -1820,14 +2010,81 @@ async function viewProfile(page) {
           h("h3", {}, me.name || "You"),
           h("div", { class: "muted small" }, "Account and connection")),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    gpuCard(),
-    remoteControlCard(),
+    h("p", { class: "section-label" }, "Actions"),
+    h("div", { class: "card settings-list" },
+      gpuActionRow(),
+      h("a", { href: "#/profile/remote-control" }, "Claude Remote Control"),
+      h("a", { href: "#/profile/disk" }, "Disk")),
     h("p", { class: "section-label" }, "Settings"),
     h("div", { class: "card settings-list" },
       Object.entries(PROFILE_PAGES)
         .filter(([id]) => (id !== "install" || !isStandalone()) && !(isGuest() && GUEST_HIDDEN_PAGES.has(id)))
         .map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
   );
+}
+
+function connectionCard() {
+  const server = h("input", {
+    type: "url", inputmode: "url", value: agentHarnessWeb.baseUrl,
+    placeholder: "Blank for this server, or https://tower.example.ts.net",
+    autocomplete: "url", spellcheck: "false",
+  });
+  const token = h("input", {
+    type: "password", value: agentHarnessWeb.token, placeholder: "ho-… owner token",
+    autocomplete: "off", spellcheck: "false",
+  });
+  const serverUrl = agentHarnessWeb.baseUrl || location.origin;
+  const status = h("p", { class: "muted small" },
+    `Agent Harness Web connects to Agent Harness Server at ${serverUrl}.`);
+  const save = async () => {
+    try {
+      agentHarnessWeb.configure(server.value, token.value);
+      status.textContent = "Checking Agent Harness Server…";
+      const root = await agentHarnessWeb.request("", { surface: "admin" });
+      status.textContent = `Agent Harness Web is connected to Agent Harness Server at ${server.value || location.origin} (${root.server} owner API ${root.api_version}). Reloading…`;
+      setTimeout(() => location.reload(), 350);
+    } catch (e) {
+      status.className = "note bad";
+      status.textContent = `${e.message} Settings were saved so you can correct them here.`;
+    }
+  };
+  const origin = h("input", {
+    type: "url", inputmode: "url", value: location.origin,
+    placeholder: "https://harness-web.example.com", spellcheck: "false",
+  });
+  const minted = h("div");
+  const mint = async () => {
+    let approvedOrigin;
+    try { approvedOrigin = new URL(origin.value).origin; }
+    catch (_) { toast("Enter Agent Harness Web's complete origin"); return; }
+    try {
+      const key = await api("/keys", { method: "POST", surface: "admin", body: {
+        name: `agent-harness-web (${new URL(approvedOrigin).host})`, kind: "owner", scopes: ["admin"], origins: [approvedOrigin],
+      } });
+      const field = h("input", { type: "text", readonly: true, value: key.key, onclick: (e) => e.target.select() });
+      fill(minted,
+        h("p", { class: "note" }, "Copy this token now; it is not shown again."), field,
+        h("button", { class: "btn small", onclick: async () => {
+          try { await navigator.clipboard.writeText(key.key); toast("Copied"); } catch (_) { field.select(); }
+        } }, "Copy token"));
+    } catch (e) { toast(e.message, 5000); }
+  };
+  return h("div", {},
+    h("div", { class: "card" },
+      h("h3", {}, "This Agent Harness Web"),
+      h("p", { class: "muted small" }, "Leave the Agent Harness Server URL blank when this Web UI is bundled with the Server. For a separately hosted copy, enter the Server URL and an owner token approved for this Web origin."),
+      h("label", {}, "Agent Harness Server URL"), server,
+      h("label", {}, "Owner token"), token,
+      h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an Agent Harness App token; Agent Harness Web manages owner-only settings."),
+      h("div", { class: "row", style: "margin-top:10px" },
+        h("button", { class: "btn", onclick: () => { server.value = ""; token.value = ""; save(); } }, "Use bundled Server"),
+        h("span", { class: "spacer" }),
+        h("button", { class: "btn primary", onclick: save }, "Save and test")), status),
+    h("div", { class: "card" },
+      h("h3", {}, "Connect another Agent Harness Web"),
+      h("p", { class: "muted small" }, "Open this bundled copy as the owner, then mint an origin-bound token for a separately hosted copy. Revocation is available under Settings → Apps."),
+      h("label", {}, "Agent Harness Web origin"), origin,
+      h("button", { class: "btn", onclick: mint }, "Create owner token"), minted));
 }
 
 const APP_ICONS = [
@@ -1958,7 +2215,8 @@ function notificationsCard(me) {
 
 function installCard() {
   return h("div", { class: "card" },
-    h("p", {}, "In Safari: Share → Add to Home Screen. The app then opens full screen."));
+    h("p", {}, "Install Agent Harness Web in Safari: Share → Add to Home Screen. It appears as Harness and opens full screen."),
+    h("p", { class: "muted small" }, "An existing iPhone or iPad icon may keep its previous label until you remove it and add Agent Harness Web to the Home Screen again."));
 }
 
 function backendUsage(b) {
@@ -2066,38 +2324,63 @@ function backupLine(b) {
 
 function gpuText(g) {
   const why = (g.reasons || []).map((r) => r.detail).filter((d, i, a) => a.indexOf(d) === i).join(", ") || "GPU busy";
+  if (g.manual) {
+    if (g.manual_remaining_seconds === null) return "Local models held until you turn this off";
+    const left = g.manual_remaining_seconds;
+    return `Local models held for ${left >= 90 ? `${Math.ceil(left / 60)} min` : `${left} s`}`;
+  }
   if (g.state === "pausing") return `Pausing for ${why}: finishing the current model turn`;
-  if (g.state === "paused") return g.manual ? "Paused from the app" : `Paused for ${why}`;
+  if (g.state === "paused") return `Paused for ${why}`;
   if (g.state === "resuming") return "GPU free: reloading the model";
   return "Agents have the GPU";
 }
 
-function gpuCard() {
-  const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
+function gpuActionRow() {
+  const status = h("div", { class: "muted small" }, "Checking…");
+  const toggle = h("input", { class: "switch", type: "checkbox", role: "switch", "aria-label": "GPU hold", disabled: isGuest() });
+  const duration = h("select", { disabled: isGuest(), "aria-label": "GPU hold duration" },
+    h("option", { value: "" }, "Until I turn it off"),
+    h("option", { value: "1800" }, "30 minutes"),
+    h("option", { value: "3600" }, "1 hour"),
+    h("option", { value: "10800" }, "3 hours"));
+  const durationRow = h("label", { class: "action-subitem disabled" },
+    h("span", {}, "Duration:"), duration);
   const act = async (action) => {
-    try { render(await api(`/gpu/${action}`, { method: "POST" })); } catch (e) { toast(e.message); }
+    const body = action === "pause" ? { duration_seconds: duration.value ? Number(duration.value) : null } : undefined;
+    try { render(await api(`/gpu/${action}`, { method: "POST", body })); } catch (e) { toast(e.message); }
     setTimeout(load, 1500);
   };
   const render = (g) => {
-    if (!g.enabled) return fill(body, h("p", { class: "muted small" }, "The GPU guard is disabled in config/harness.yaml."));
+    if (!g.enabled) {
+      toggle.disabled = true;
+      duration.disabled = true;
+      durationRow.classList.add("disabled");
+      status.textContent = "GPU guard disabled";
+      return;
+    }
     const now = g.signals.map((s) => s.detail);
-    const left = g.resume_after_seconds - (g.clear_for_seconds || 0);
-    const reload = g.state === "paused" && !now.length && !g.manual && g.clear_for_seconds !== null
-      ? ` · reloads in ${left >= 90 ? `${Math.round(left / 60)} min` : `${Math.max(0, Math.round(left))} s`}` : "";
-    fill(body,
-      h("p", {}, `${g.state === "clear" ? "✓" : "⏸"} ${gpuText(g)}${reload}`),
-      h("p", { class: "muted small" }, now.length ? `Using the GPU now: ${now.join(", ")}${g.override ? " (ignored until that changes)" : ""}`
-        : "No game or Plex transcode detected. Desktop streaming doesn't pause agents."),
-      g.plex_error ? h("p", { class: "muted small" }, `Plex check: ${g.plex_error}`) : null,
-      isGuest() ? h("p", { class: "muted small" }, "Demo access cannot pause or resume the GPU.") : h("div", { class: "row" },
-        g.state === "clear" ? h("button", { class: "btn", onclick: () => act("pause") }, "Pause agents (I'm gaming)")
-          : h("button", { class: "btn", onclick: () => act("resume") }, now.length ? "Resume anyway" : "Resume now")));
+    toggle.checked = g.manual;
+    if (g.manual && g.manual_duration_seconds) duration.value = String(g.manual_duration_seconds);
+    duration.disabled = isGuest() || !g.manual;
+    durationRow.classList.toggle("disabled", duration.disabled);
+    const automatic = !g.manual && g.state !== "clear" ? ` · ${gpuText(g)}` : "";
+    const using = now.length ? ` · ${now.join(", ")}${g.override ? " (ignored)" : ""}` : "";
+    status.textContent = `${g.manual ? gpuText(g) : "Local models available"}${automatic}${using}`;
   };
-  const load = async () => { try { render(await api("/gpu")); } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); } };
+  const load = async () => { try { render(await api("/gpu")); } catch (e) { status.textContent = e.message; status.classList.add("bad"); } };
+  toggle.addEventListener("change", () => {
+    duration.disabled = isGuest() || !toggle.checked;
+    durationRow.classList.toggle("disabled", duration.disabled);
+    act(toggle.checked ? "pause" : "resume");
+  });
+  duration.addEventListener("change", () => { if (toggle.checked) act("pause"); });
   load();
   const timer = setInterval(load, 5000);
   onLeave(() => clearInterval(timer));
-  return h("div", { class: "card" }, h("h3", {}, "GPU"), body);
+  return h("div", { class: "action-item" },
+    h("div", { class: "action-row" }, h("div", {}, h("strong", {}, "GPU"), status), toggle),
+    durationRow,
+    isGuest() ? h("div", { class: "muted small" }, "Demo access cannot change GPU hold.") : null);
 }
 
 function remoteControlCard() {
@@ -2255,9 +2538,25 @@ function appsCard(me) {
   const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
   const load = async () => {
     try {
-      const apps = (await api("/keys")).filter((k) => k.kind === "app" && !k.revoked_at);
+      const [keys, pairingCodes, runnerPairingCodes, runners] = await Promise.all([
+        api("/keys"), api("/pairing-codes"), api("/runner-pairing-codes"), api("/runners"),
+      ]);
+      const apps = keys.filter((k) => k.kind === "app" && !k.revoked_at);
+      const ownerConnections = keys.filter((k) => k.kind === "owner" && !k.revoked_at);
+      const webConnections = ownerConnections.filter((k) => k.origins?.length);
+      const cliConnections = ownerConnections.filter((k) => !k.origins?.length);
+      const pending = pairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
+      const pendingRunners = runnerPairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
       const form = h("div");
-      const newBtn = h("button", { class: "btn", type: "button", onclick: () => { newBtn.hidden = true; showForm(); } }, "New app");
+      const newBtn = h("button", { class: "btn", type: "button", onclick: () => {
+        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showForm();
+      } }, "New app");
+      const pairBtn = h("button", { class: "btn", type: "button", onclick: () => {
+        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showPairForm();
+      } }, "Pair browser app");
+      const macBtn = h("button", { class: "btn", type: "button", hidden: !runners.length, onclick: () => {
+        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showMacPairForm();
+      } }, "Pair Agent Harness for Mac");
       const showForm = () => {
         const name = h("input", { type: "text", placeholder: "App name" });
         const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
@@ -2283,11 +2582,60 @@ function appsCard(me) {
               },
             }, "Create")));
       };
+      const showPairForm = () => {
+        const name = h("input", { type: "text", placeholder: "App name" });
+        const origin = h("input", { type: "url", placeholder: "https://app.example.com" });
+        const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
+          h("input", { type: "checkbox", value: scope, checked: scope === "sessions" }), ` ${label}`));
+        fill(form,
+          h("p", { class: "small" }, "Approve one exact browser origin. The short-lived code is shown once and can only be redeemed from that origin."),
+          h("label", {}, "Name"), name,
+          h("label", {}, "Browser origin (scheme and host only)"), origin,
+          h("label", {}, "What it may do"), boxes,
+          h("div", { class: "row", style: "margin-top:10px" },
+            h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
+            h("button", { class: "btn primary", onclick: async () => {
+              const scopes = boxes.map((b) => b.querySelector("input")).filter((i) => i.checked).map((i) => i.value);
+              if (!name.value.trim() || !origin.value.trim() || !scopes.length) return toast("Name the app, enter its origin, and allow at least one thing");
+              try {
+                const p = await api("/pairing-codes", { method: "POST", body: { name: name.value, origin: origin.value, scopes } });
+                const field = h("input", { type: "text", readonly: true, value: p.code, onclick: (e) => e.target.select() });
+                fill(form,
+                  h("p", { class: "small" }, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`), field,
+                  h("div", { class: "row", style: "margin-top:8px" },
+                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(p.code); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                    h("button", { class: "btn", onclick: load }, "Done")));
+              } catch (e) { toast(e.message); }
+            } }, "Approve and create code")));
+      };
+      const showMacPairForm = () => {
+        const name = h("input", { type: "text", value: "Agent Harness for Mac", placeholder: "Mac connection name" });
+        const runner = h("select", {}, runners.map((item) => h("option", { value: item.name }, item.name)));
+        fill(form,
+          h("p", { class: "small" }, "Create a 10-minute, one-use code. The install command sets up the harness CLI, runner, and launchd without SSH."),
+          h("label", {}, "Name"), name,
+          h("label", {}, "Runner"), runner,
+          h("div", { class: "row", style: "margin-top:10px" },
+            h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
+            h("button", { class: "btn primary", onclick: async () => {
+              if (!name.value.trim()) return toast("Name this Agent Harness for Mac connection");
+              try {
+                const p = await api("/runner-pairing-codes", { method: "POST", body: { name: name.value, runner: runner.value } });
+                const command = `curl -fsSL ${base}/mac-client/install.sh | bash -s -- --server ${base} --code ${p.code}`;
+                const field = h("input", { type: "text", readonly: true, value: command, onclick: (e) => e.target.select() });
+                fill(form,
+                  h("p", { class: "small" }, `Run this in Terminal on the Mac. The code expires in 10 minutes and works once.`), field,
+                  h("div", { class: "row", style: "margin-top:8px" },
+                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(command); toast("Copied"); } catch (_) { field.select(); } } }, "Copy install command"),
+                    h("button", { class: "btn", onclick: load }, "Done")));
+              } catch (e) { toast(e.message); }
+            } }, "Create install command")));
+      };
       fill(body,
-        h("p", { class: "small" }, "An app token lets another program start and follow sessions on this daemon — a script, a bot, or a future phone client. It is shown once and can be revoked later."),
+        h("p", { class: "small" }, "An Agent Harness App token lets a third-party integration start and follow sessions on Agent Harness Server. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
@@ -2295,7 +2643,31 @@ function appsCard(me) {
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
-        form, newBtn);
+        webConnections.length ? [h("p", { class: "section-label" }, "Web connections"),
+          h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
+            h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+            h("button", { class: "btn small bad", onclick: async () => {
+              if (!confirm(`Revoke “${k.name}”? That Agent Harness Web connection will stop working.`)) return;
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+            } }, "Revoke"))))] : null,
+        cliConnections.length ? [h("p", { class: "section-label" }, "CLI connections"),
+          h("ul", { class: "small" }, cliConnections.map((k) => h("li", {},
+            h("strong", {}, k.name), ` ${k.prefix}… · non-browser${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+            h("button", { class: "btn small bad", onclick: async () => {
+              if (!confirm(`Revoke “${k.name}”? That Agent Harness CLI connection will stop working.`)) return;
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+            } }, "Revoke"))))] : null,
+        pending.length ? h("ul", { class: "small" }, pending.map((p) => h("li", {},
+          `Pairing pending for ${p.name} at ${p.origin} · expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
+          h("button", { class: "btn small bad", onclick: async () => {
+            try { await api(`/pairing-codes/${p.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+          } }, "Cancel")))) : null,
+        pendingRunners.length ? h("ul", { class: "small" }, pendingRunners.map((p) => h("li", {},
+          `Mac pairing pending for ${p.name} (${p.runner}) Â· expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
+          h("button", { class: "btn small bad", onclick: async () => {
+            try { await api(`/runner-pairing-codes/${p.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+          } }, "Cancel")))) : null,
+        form, h("div", { class: "row", style: "margin-top:10px" }, newBtn, pairBtn, macBtn));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   load();
@@ -2344,7 +2716,7 @@ function diskCard() {
               ? `${r.info.version} · macOS ${r.info.macos}`
               : (r.last_seen_seconds !== null
                 ? `last seen ${Math.round(r.last_seen_seconds / 60)} min ago`
-                : "not connected since the daemon started")));
+                : "not connected since Agent Harness Server started")));
           return device(TARGET_LABEL[r.name] || r.name,
             online ? r.info.free_gb : "—",
             online && r.info.total_gb != null ? r.info.total_gb : null,
@@ -2378,8 +2750,12 @@ let lastWarm = 0;
 async function warmModel(force = false) {
   if (isGuest()) return;
   if (!force && Date.now() - lastWarm < 60_000) return;
-  lastWarm = Date.now();
-  try { await api("/models/warm", { method: "POST" }); } catch (_) { /* offline */ }
+  try {
+    const gpu = await api("/gpu");
+    if (gpu.manual) return;
+    lastWarm = Date.now();
+    await api("/models/warm", { method: "POST" });
+  } catch (_) { /* offline */ }
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") warmModel(); });
 

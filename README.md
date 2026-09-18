@@ -5,9 +5,20 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 MacBook over Tailscale. The phased plan lives in the agent memory library
 (`categories/project-ideas/capsules/local-agent-harness.md`).
 
-Phases 0–8 are built. Open work is GitHub issues, mirrored from `docs/backlog.yaml`. The longer-term
-direction is to split the phone PWA (Control Center) from a separately distributable daemon
-(issues #23–#29).
+Phases 0–8 are built. Open work is GitHub issues, mirrored from `docs/backlog.yaml`.
+
+## Product names
+
+| Name | Meaning |
+| --- | --- |
+| **Agent Harness** | The overall product, project, repository, and installed system |
+| **Agent Harness Server** | The host service and its APIs; technical code and service-manager material may call its process the daemon |
+| **Agent Harness Web** | The first-party browser UI and installable PWA in `harness/web` |
+| **Agent Harness CLI** | The installed `harness` command |
+| **Agent Harness Runner** | A remote execution worker, such as the **Mac Runner** |
+| **Agent Harness SDK** | The supported client library in `sdk/` |
+| **Agent Harness App** | A third-party integration that consumes the App API |
+| **Agent Harness for Mac** | The Mac distribution that installs the CLI and Mac Runner together |
 
 GitHub-hosted CI runs the full suite on pull requests and publishes tested sandbox images to GHCR after merges to
 `main`; a repository-scoped tower runner then performs the fail-closed deployment. See
@@ -15,14 +26,36 @@ GitHub-hosted CI runs the full suite on pull requests and publishes tested sandb
 
 ## Install
 
-Windows 10/11 with an NVIDIA GPU (12 GB+), Docker Desktop and Git:
+The default full profile runs on Windows 10/11 or x86-64 Linux and needs an NVIDIA GPU (12 GB+). Apple Silicon
+macOS uses the hosted-provider service profile. Docker and Git are required on every platform.
 
 ```powershell
 git clone https://github.com/dflippojr/agent-harness; cd agent-harness
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
-No admin rights needed. The guide is `docs/INSTALL.md`; the API for apps is `docs/app-api.md` (Python SDK in `sdk/`).
+For a hosted-provider-only Agent Harness Server with no local model or GPU requirement:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install\install.ps1 -Profile Service
+ops\backends\login.ps1 codex # or claude / cursor
+```
+
+Linux/NVIDIA or Apple Silicon macOS:
+
+```bash
+install/install.sh                         # Linux defaults full; macOS defaults service
+ops/backends/login.sh codex                # service profile: or claude / cursor
+```
+
+No admin rights needed. The guide is [`docs/INSTALL.md`](docs/INSTALL.md); the API for Agent Harness Apps is
+[`docs/app-api.md`](docs/app-api.md) (Agent Harness SDK in `sdk/`); the owner API is
+[`docs/admin-api.md`](docs/admin-api.md); profile details are in [`docs/service-profile.md`](docs/service-profile.md);
+and bundled/separate Agent Harness Web deployment is in [`docs/web.md`](docs/web.md).
+
+Machine owners can optionally isolate a hosted-provider API key and model allowlist per app. Key values remain in
+owner-managed files, apps receive only sanitized policy and their own usage, and revocation never falls back to
+another app's or the machine owner's key. See the per-app provider credentials section in `docs/admin-api.md`.
 
 ## Phase 8: subscription backends, Remote Control, answer checks
 
@@ -31,7 +64,8 @@ Terms and billing notes for app builders are in `docs/app-api.md`.
 
 - Hosted backends (`backends:` in `config/harness.yaml`): unmodified `claude`, `codex`, and Cursor
   `agent` CLIs run in a provider-only Docker sandbox under your own login. Sign in once with
-  `ops\backends\login.ps1 <backend>`. New task, templates and jobs pick a backend; Settings →
+  `ops\backends\login.ps1 <backend>` (Windows) or `ops/backends/login.sh <backend>` (Unix). New task, templates and
+  jobs pick a backend; Settings →
   Backends shows model/effort, 5h/7d usage and popular-model presets. CLI permission prompts become
   ordinary harness approvals (web, ntfy, or `/api/v1`). Optional user API-key fallback lives in
   `D:/Agents/harness/secrets/<backend>-api-key` and is never returned from an API. Cursor print mode
@@ -49,10 +83,10 @@ Terms and billing notes for app builders are in `docs/app-api.md`.
   notification. `web_fetch` reads GitHub repository and folder pages through the public API (license,
   README, file list) and file pages from `raw.githubusercontent.com`, falling back to HTML.
 
-## Control Center
+## Agent Harness Web
 
-The daemon serves an installable phone PWA (Agents, Jobs, Images, Profile/Settings). After Phase 8
-it grew into the first-party operator UI rather than a thin session list:
+Agent Harness Server serves Agent Harness Web as an installable phone PWA (Agents, Jobs, Images,
+Profile/Settings). After Phase 8 it grew into the first-party operator UI rather than a thin session list:
 
 - Agents / Jobs / Images are tabs; session Transcript / Changes / Info are tabs. Session titles sit
   on the page, stay sticky, and are editable (`PATCH`/`PUT /sessions/{id}`). Jump arrows appear when
@@ -70,6 +104,10 @@ it grew into the first-party operator UI rather than a thin session list:
 - Time-boxed guest/demo access (`guests:` in untracked `config/harness.local.yaml`): a named tailnet
   login can browse read-only until an ISO `until`. Requires `allowed_logins`. Guests cannot start or
   cancel work, approve, mint keys, pause the GPU, use Remote Control, edit memory, or Review.
+- Agent Harness Web is a first-party Server browser client ([`docs/web.md`](docs/web.md)). Bundled static serving
+  remains the default, while the same no-build PWA can be hosted separately with a configurable Server URL and an origin-bound
+  `ho-` owner token. Session work dogfoods `/api/v1`; owner operations dogfood `/api/admin/v1`. Authenticated SSE,
+  images, and downloads work without putting bearer tokens in URLs. App tokens cannot call the owner surface.
 
 Still open from that pass: **#48** (add agent-harness and the memory library to Remote Control) and
 **#56** (Images: warm ComfyUI when the tab opens, real step progress, unload immediately, in-app
@@ -108,7 +146,8 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
   llama.cpp embedding server/model is configured.
 - Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`)
   and Qwen-Image-2512 (`quality`), both Apache 2.0. A batch unloads the language model, generates, and restores it.
-  Phone: Images screen; agents: `generate_image` (tower and MacBook sessions).
+  Phone: Images screen; agents: `generate_image` (tower and MacBook sessions). Opt-in Real-ESRGAN 2×/4× upscaling
+  preserves the original PNG (`docs/INSTALL.md`).
 - Distributable (`docs/phase6e-results.md`): app API `/api/v1` with scoped tokens, context, app-registered tools and
   events (`harness/apps.py`, `sdk/harness_client.py`); installer, uninstaller and `python -m harness.doctor`.
 
@@ -133,14 +172,16 @@ Details and verification: `docs/phase5-results.md`.
 Projects with `target: macbook` run their tools on the MacBook; the model and agent loop stay on the tower.
 Details and verification: `docs/phase4-results.md`.
 
-- Runner: `macrunner/` (stdlib-only Python 3.9, launchd agent). It connects out to the daemon over the tailnet and
+- Agent Harness Runner: `macrunner/` (stdlib-only Python 3.9, launchd agent). It connects out to Agent Harness Server over the tailnet and
   long-polls `POST /runners/macbook/poll` with a bearer token. Shell commands run natively under `sandbox-exec`
   (`macrunner/sandbox.sb`): writes limited to the workspace, temp and build caches; credentials and personal
   folders unreadable; no network unless the command was approved with `network: true`. Binary files generated on
   the tower (`generate_image`) are copied into the Mac workspace with a `put_file` op (base64 in the poll request).
-- Install or update from the tower: `.\ops\macbook\deploy.ps1 -MacHost <host> -MacUser <user>` (needs Remote Login
-  on the Mac while deploying). Daemon side: `runners:` in `config/harness.yaml`; runner side:
-  `~/.agent-harness/runner/config.json` (`repo_roots` limits which Mac repos projects may use).
+- Install or update Agent Harness for Mac from **Settings → Apps → Pair Agent Harness for Mac**. Run the one-time
+  command on the Mac; it creates a venv and Agent Harness CLI under `~/.agent-harness`, pairs without SSH or token copying, and installs the Mac Runner as
+  a launchd agent. `harness projects add ~/Projects/<repo>` extends its allowed roots; `harness runner
+  status|restart|logs` manages it locally. The older `.\ops\macbook\deploy.ps1` SSH flow remains an update fallback.
+  See [`docs/mac-client.md`](docs/mac-client.md).
 - Sessions for an offline or sleeping Mac wait (`waiting_target`) without holding the GPU, notify, and resume when
   the runner reconnects. While a Mac session runs, the runner holds `caffeinate -i`.
 - `GET /runners` shows runner state; so does the Settings screen's Disk card.
@@ -150,15 +191,17 @@ Details and verification: `docs/phase4-results.md`.
 Git-backed projects with a branch per session, allowlisted homelab tools, cleanup and quotas.
 Details and verification: `docs/phase3-results.md`.
 
-- Projects: `config/projects.yaml` (`repo`, `base_branch`, `homelab`, `quota_mb`). Review a session's branch on the
-  Changes tab: merge (local repos), push (URL repos), or discard.
+- Projects: checked-in defaults live in `config/projects.yaml` (`repo`, `base_branch`, `homelab`, `quota_mb`). The
+  owner can add private projects from **New task → New project**; they persist in `<data_dir>/projects.yaml` and hot-
+  load without changing the public config. Review a git project's session branch on the Changes tab: merge (local
+  repos), push (URL repos), or discard. Guest/demo logins receive empty project and session views.
 - Homelab allowlist, cleanup and quota settings: `homelab:` and `cleanup:` in `config/harness.yaml`.
 - API: `POST /sessions/{id}/review/{merge|push|discard}`, `GET /maintenance`, `POST /maintenance/cleanup`.
 - After code or config changes: `.\ops\harness\restart-daemon.ps1`.
 
 ## Phase 2: phone control surface
 
-The daemon serves a mobile web app (installable PWA) and sends phone notifications through a self-hosted ntfy.
+Agent Harness Server serves Agent Harness Web (an installable PWA) and sends phone notifications through a self-hosted ntfy.
 Details, security model, and the exit-test checklist: `docs/phase2-results.md`.
 
 - Autostart: logon task `AgentHarness-Daemon` (`ops/harness/install-task.ps1`), logs in `D:\Agents\harness\logs`.
@@ -166,9 +209,9 @@ Details, security model, and the exit-test checklist: `docs/phase2-results.md`.
 - Notifications: `notify` in `config/harness.yaml`; ntfy lives in `D:\Docker\ntfy`.
 - Screenshots: `node scripts/ui-shot.mjs runs/shots "list=http://127.0.0.1:8100/#/"`.
 
-## Phase 1: harness daemon
+## Phase 1: Agent Harness Server
 
-The daemon runs agent sessions against the always-on model server, one sandbox container per session.
+Agent Harness Server runs agent sessions against the always-on model server, one sandbox container per session.
 Design notes and test results: `docs/phase1-results.md`.
 
 ```powershell

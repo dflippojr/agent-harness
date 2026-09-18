@@ -1,18 +1,28 @@
-# Installing the agent harness
+# Installing Agent Harness
 
-Run AI agents on your own Windows PC with a local model, and drive them from a browser or your phone. Agents work in
-Docker sandboxes, ask before risky actions, and never leave your machine for inference.
+Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from a browser or your phone. Use either a
+local model or your own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky
+actions.
 
-This iteration supports **Windows 10/11 with an NVIDIA GPU** only. Other platforms are planned.
+The installer sets up **Agent Harness Server**, which hosts the APIs and normally serves **Agent Harness Web**. An
+**Agent Harness App** is a third-party API integration. **Agent Harness for Mac** installs the `harness` command
+(**Agent Harness CLI**) and a **Mac Runner** together; the Python library in `sdk/` is **Agent Harness SDK**.
+
+The full local-model profile supports Windows 10/11 and x86-64 Linux with an NVIDIA GPU. Apple Silicon macOS uses
+the hosted-provider service profile (Claude, Codex, or Cursor) and does not download a local model.
 
 ## Requirements
 
 | | Minimum | Tested |
 | --- | --- | --- |
-| GPU | NVIDIA, 12 GB VRAM, driver 580+ | RTX 4070 Ti Super 16 GB, driver 616.92 |
+| GPU | Service: none. Full: NVIDIA, 12 GB VRAM, driver 580+ | RTX 4070 Ti Super 16 GB, driver 616.92 |
 | RAM | 16 GB (32 GB for the Qwen model) | 32 GB DDR5 |
 | Disk | ~20 GB (gpt-oss) or ~30 GB (Qwen) free | NVMe SSD for models |
-| Software | [Docker Desktop](https://www.docker.com/products/docker-desktop/) running, [Git](https://git-scm.com/) | Docker 29.7, Git for Windows |
+| Software | Docker running, Git, curl, tar | Docker 29.7; Docker Desktop on Windows/macOS |
+
+Linux local inference also needs
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+configured for Docker. The installer uses llama.cpp's pinned CUDA container, so a host CUDA compiler is not needed.
 
 Models picked automatically:
 
@@ -21,7 +31,32 @@ Models picked automatically:
 
 Both are Apache 2.0.
 
-## Install
+## Hosted-provider service profile
+
+The service profile installs Agent Harness Server, Agent Harness Web, the provider CLI image, and provider-specific
+egress proxies.
+It skips llama.cpp, model downloads, GPU checks, and every optional integration unless selected:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install\install.ps1 -Profile Service
+ops\backends\login.ps1 claude  # repeat for codex or cursor as wanted
+```
+
+On Linux or macOS, use `install/install.sh --profile service` and then
+`ops/backends/login.sh claude` (or `codex` / `cursor`). Credentials remain in provider-specific Docker volumes on
+all platforms.
+
+Docker (Docker Desktop on Windows/macOS) and at least one provider login are the operational minimum. The installer configures Claude, Codex,
+and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example
+`-EnableModules jobs,backup`. `endpoint`, `images`, and `gpu_guard` automatically opt into `local_model` and restore
+the GPU/model requirements. The complete module catalog and security boundary are in
+[`service-profile.md`](service-profile.md).
+
+On an existing install, `-Profile Service` writes only `config\profile.yaml`; it preserves `harness.yaml`, local
+overrides, paths, and secrets. Run with `-Profile Full` to restore the full profile. With no `-Profile`, upgrades
+preserve the existing choice (and use Full for a new install).
+
+## Install on Windows
 
 ```powershell
 git clone https://github.com/dflippojr/agent-harness
@@ -29,27 +64,70 @@ cd agent-harness
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
+On Linux/macOS, pull the checkout and rerun `install/install.sh` with the same options. Existing profile and config
+are preserved when `--profile auto` (the default) is used.
+
 No administrator rights are needed. The installer:
 
-1. checks the GPU, driver, RAM, disk, Docker and Git;
+1. checks Windows, disk, Docker and Git, plus GPU/driver/RAM for a local model;
 2. downloads [uv](https://github.com/astral-sh/uv) and creates a Python 3.12 environment;
-3. downloads llama.cpp (build b10950, CUDA 13.3) and the model;
+3. for the full profile, downloads llama.cpp (build b10950, CUDA 13.3) and the model;
 4. builds the sandbox image `agent-harness-sandbox:py312`;
 5. writes a config to `%LOCALAPPDATA%\agent-harness\config`;
-6. registers two logon tasks (`AgentHarness-Main-LlamaServer`, `AgentHarness-Main-Daemon`) and starts them;
+6. registers the Agent Harness Server logon task and, when enabled, the llama-server task, then starts them;
 7. runs `python -m harness.doctor`.
 
 Downloads resume if interrupted: run the installer again. Running it again later also repairs an install and keeps your
 config (`-Force` rewrites it).
 
-Useful options: `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
+Useful options: `-Profile Service`, `-EnableModules jobs,backup`, `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
 `-LlamaDir <existing llama.cpp>`, `-Port 8100`, `-NoTasks`, `-DryRun`. See `Get-Help .\install\install.ps1 -Full`.
 
-Then open **http://127.0.0.1:8100**. The first model load takes a minute or two.
+Then open **http://127.0.0.1:8100** in Agent Harness Web. The first model load takes a minute or two.
 
 > **Antivirus:** some engines flag `uv.exe` (Astral's Rust-based Python manager) as suspicious because it's unsigned
 > and downloads packages. It's a false positive; allow the `%LOCALAPPDATA%\agent-harness\bin` folder. You can check
 > the file against [uv's GitHub release](https://github.com/astral-sh/uv/releases) with `gh attestation verify`.
+
+## Install on Linux with NVIDIA
+
+From an x86-64 Linux checkout:
+
+```bash
+git clone https://github.com/dflippojr/agent-harness
+cd agent-harness
+install/install.sh
+```
+
+The default is the full profile. The installer checks `nvidia-smi`, Docker GPU access, disk/RAM, and the Docker
+engine; installs a pinned uv/Python environment; downloads the selected resumable GGUF; builds the sandbox; and
+registers `systemd --user` services for llama.cpp and Agent Harness Server. llama.cpp runs from the pinned official
+`server-cuda-b10830` image with the model mounted read-only and localhost port 8090 served through host networking.
+
+If the Docker GPU check fails, install NVIDIA Container Toolkit and restart Docker before rerunning the installer.
+On a headless host, an administrator may need to enable user lingering with `loginctl enable-linger <user>`.
+
+Useful options include `--profile service`, `--enable-modules jobs,backup`, `--model gpt-oss`,
+`--install-dir /srv/agent-harness`, `--data-dir /srv/agents`, `--model-path /models/model.gguf`,
+`--existing-server http://127.0.0.1:8090`, `--no-start`, and `--dry-run`. Run `install/install.sh --help` for the
+complete list. The installer is idempotent and does not overwrite base config unless `--force` is passed.
+
+## Install on Apple Silicon macOS
+
+Install and start Docker Desktop, then run:
+
+```bash
+git clone https://github.com/dflippojr/agent-harness
+cd agent-harness
+install/install.sh
+ops/backends/login.sh codex  # or claude / cursor
+```
+
+macOS defaults to the service profile and rejects `full`, `local_model`, and modules that require a local model.
+It builds the hosted-provider sandbox and egress proxies and registers a per-user launchd agent for Agent Harness
+Server. No
+Rosetta, local GPU model, or administrator privileges are required. Docker Desktop must be running before hosted
+sessions can start.
 
 ## Check it
 
@@ -58,25 +136,44 @@ cd agent-harness
 & "$env:LOCALAPPDATA\agent-harness\venv\Scripts\python.exe" -m harness.doctor --config-dir "$env:LOCALAPPDATA\agent-harness\config" --instance Main
 ```
 
-Logs: `%LOCALAPPDATA%\agent-harness\logs` (`daemon.log`, `llama-server.log`, and both supervisors').
+Linux/macOS:
 
-## Use it from your phone
+```bash
+~/.local/share/agent-harness/venv/bin/python -m harness.doctor \
+  --config-dir ~/.local/share/agent-harness/config --instance Main
+```
 
-The daemon only listens on localhost. To reach it from other devices, use [Tailscale](https://tailscale.com):
+Logs are under `%LOCALAPPDATA%\agent-harness\logs` on Windows and
+`~/.local/share/agent-harness/logs` on Unix (`daemon.log`, `llama-server.log`, and supervisor logs).
+
+## Use Agent Harness Web from your phone
+
+Agent Harness Server listens only on localhost. To reach Agent Harness Web from other devices, use
+[Tailscale](https://tailscale.com):
 
 1. Install Tailscale on the PC and your phone, and sign in to both with the same account.
 2. In the Tailscale admin console, enable **HTTPS certificates** (DNS page) and Serve.
 3. On the PC: `tailscale serve --bg --https=443 http://127.0.0.1:8100`
 4. In `config\harness.yaml` (or `harness.local.yaml`) set `public_url: https://<pc-name>.<tailnet>.ts.net` and
-   `allowed_logins: [you@example.com]`, then restart the daemon task.
+   `allowed_logins: [you@example.com]`, then restart the Agent Harness Server task.
    To let a tailnet buddy look around for a couple of hours without owner powers, add them under `guests`
    in the untracked local file (`login` plus an ISO `until`), restart, and remove the entry when done.
    Guests can browse sessions, jobs and images; they cannot start tasks, approve, mint keys, or use GPU /
    Remote Control / Review. Default stays "this login is the owner."
-5. Open the URL on the phone, then Share → Add to Home Screen.
+5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Agent Harness Web icon is
+   labeled **Harness**. iOS may retain an older label until you remove that icon and add it again; no server or
+   browser data migration is required. See [`web.md`](web.md).
 
 Phone notifications (approvals with Approve/Deny buttons, task finished) use a self-hosted
 [ntfy](https://ntfy.sh) server: see `docs/phase2-results.md` for the container and the `notify:` section.
+
+## Install Agent Harness for Mac
+
+After Tailscale and `public_url` are configured, add a `macbook` entry under `runners:` with an owner-side
+`token_file`, restart Agent Harness Server, then choose **Settings → Apps → Pair Agent Harness for Mac** in Agent
+Harness Web. Run the generated one-time command in Terminal on the Mac. It installs a venv, Agent Harness CLI and
+Agent Harness SDK, and the sandboxed Mac Runner as a launchd agent—without SSH, sudo, or copying tokens. See
+[`mac-client.md`](mac-client.md).
 
 ## What else you can turn on
 
@@ -88,13 +185,28 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Pause for games / Plex transcodes | `gpu_guard` (on by default) | nothing |
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |
-| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`) |
-| Claude / Codex / Cursor as session backends | `backends` | `ops\backends\login.ps1 <backend>` (`docs/phase8a-design.md`) |
+| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`). Optional Real-ESRGAN 2×/4× weights; generation still works without them. |
+| Claude / Codex / Cursor as session backends | `backends` | `ops/backends/login.sh <backend>` on Unix or `login.ps1` on Windows (`docs/phase8a-design.md`) |
 | Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
 | Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |
 | Scheduled jobs | `jobs` (on by default) | nothing |
-| Apps that start and drive sessions | always on | a token from Settings → Apps (`docs/app-api.md`) |
+| Agent Harness Apps that start and drive sessions | always on | a token from Settings → Apps (`docs/app-api.md`) |
 | Nightly backups | `backup` (on by default) | nothing |
+
+## Optional Real-ESRGAN upscaling
+
+Image generation does not upscale unless you ask. 2× and 4× use the upstream BSD-3-Clause general-image weights
+(`RealESRGAN_x2plus`, `RealESRGAN_x4plus`; no face restoration or anime models). Put them in
+`<comfy_dir>/ComfyUI/models/upscale_models` or set `images.upscale_dir`. `python -m harness.doctor` warns when they
+are missing and prints the URLs plus SHA-256; ordinary Generate still works.
+
+| File | URL | SHA-256 |
+| --- | --- | --- |
+| `RealESRGAN_x2plus.pth` | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth | `49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb` |
+| `RealESRGAN_x4plus.pth` | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth | `4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1` |
+
+Outputs above 36 million pixels are refused before allocation so a 16 GB GPU cannot host-OOM. License text:
+`third_party/Real-ESRGAN.LICENSE`.
 
 ## Update
 
@@ -111,12 +223,19 @@ powershell -ExecutionPolicy Bypass -File install\uninstall.ps1              # ta
 powershell -ExecutionPolicy Bypass -File install\uninstall.ps1 -RemoveFiles # also deletes %LOCALAPPDATA%\agent-harness
 ```
 
+Linux/macOS equivalents:
+
+```bash
+install/uninstall.sh                 # remove per-user services; keep data
+install/uninstall.sh --remove-files  # also remove the install directory
+```
+
 ## Security model, briefly
 
-- One owner per install. The web app and APIs trust localhost; other devices need a tailnet login plus, for the
-  inference endpoint and app API, a key or token. Optional `guests:` entries grant time-boxed read-only Control
-  Center access to a named tailnet login without owner powers.
+- One owner per install. Agent Harness Web and the APIs trust localhost; other devices need a tailnet login plus,
+  for the inference endpoint and App API, a key or token. Optional `guests:` entries grant time-boxed read-only
+  Agent Harness Web access to a named tailnet login without owner powers.
 - Agents are untrusted: shell commands run in a Docker container with only the workspace mounted and no network
   unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first.
-- Web fetches refuse private, tailnet and metadata addresses. App-provided context and web pages are marked as
+- Web fetches refuse private, tailnet and metadata addresses. Agent Harness App-provided context and web pages are marked as
   information, not instructions.

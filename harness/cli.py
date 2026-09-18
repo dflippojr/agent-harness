@@ -5,20 +5,100 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
+import subprocess
 import sys
 import time
 
 import httpx
 
-BASE = os.environ.get("HARNESS_URL", "http://127.0.0.1:8100")
+DEFAULT_CONFIG = Path.home() / ".agent-harness" / "client" / "config.json"
+DEFAULT_RUNNER_CONFIG = Path.home() / ".agent-harness" / "runner" / "config.json"
+BASE = "http://127.0.0.1:8100"
+TOKEN = ""
+CONFIG_PATH = DEFAULT_CONFIG
+ADMIN_PREFIX = "/api/admin/v1"
 TERMINAL = ("done", "cancelled", "failed")
 DIM, BOLD, YELLOW, GREEN, RED, CYAN, RESET = "\033[2m", "\033[1m", "\033[33m", "\033[32m", "\033[31m", "\033[36m", "\033[0m"
 
 
+def configure(path: Path | str = DEFAULT_CONFIG) -> dict:
+    """Load the paired native-client transport. Environment variables remain useful for development."""
+    global BASE, TOKEN, CONFIG_PATH
+    CONFIG_PATH = Path(path).expanduser()
+    data = {}
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        sys.exit(f"invalid client config {CONFIG_PATH}: {exc}")
+    BASE = str(os.environ.get("HARNESS_URL") or data.get("server") or "http://127.0.0.1:8100").rstrip("/")
+    TOKEN = str(os.environ.get("HARNESS_TOKEN") or data.get("token") or "").strip()
+    return data
+
+
+def _headers(extra: dict | None = None) -> dict:
+    return ({**(extra or {}), "Authorization": f"Bearer {TOKEN}"} if TOKEN else dict(extra or {}))
+
+
+def _write_private_json(path: Path, data: dict) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".new")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    tmp.replace(path)
+
+
+def pair_native(server: str, code: str, client_path: Path, runner_path: Path) -> dict:
+    """Redeem once, then persist the owner and runner credentials without printing either secret."""
+    server = server.rstrip("/")
+    try:
+        response = httpx.post(server + "/api/v1/runner-pair", json={"code": code}, timeout=60)
+    except httpx.TransportError as exc:
+        sys.exit(f"daemon not reachable at {server}: {exc}")
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail")
+        except ValueError:
+            detail = response.text
+        sys.exit(f"pairing failed ({response.status_code}): {detail}")
+    paired = response.json()
+    _write_private_json(client_path, {"server": paired["server"], "token": paired["owner_token"]})
+    _write_private_json(runner_path, paired["runner"])
+    return paired
+
+
+def add_project_root(path: str, runner_path: Path = DEFAULT_RUNNER_CONFIG) -> Path:
+    root = Path(path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"project directory does not exist: {root}")
+    try:
+        config = json.loads(runner_path.expanduser().read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError("pair this Mac before adding projects") from exc
+    roots = [str(Path(item).expanduser().resolve()) for item in config.get("repo_roots") or []]
+    if str(root) not in roots:
+        roots.append(str(root))
+    config["repo_roots"] = roots
+    _write_private_json(runner_path, config)
+    return root
+
+
+def launchctl(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+    domain = f"gui/{os.getuid()}/dev.agent-harness.runner"
+    return subprocess.run(["launchctl", *args, domain], check=check, text=True)
+
+
 def api(method: str, path: str, retries: int = 30, **kwargs) -> dict | list | str:
+    kwargs["headers"] = _headers(kwargs.get("headers"))
     for attempt in range(retries + 1):
         try:
-            resp = httpx.request(method, BASE + path, timeout=60, **kwargs)
+            resp = httpx.request(method, BASE + ADMIN_PREFIX + path, timeout=60, **kwargs)
             break
         except httpx.TransportError:
             if attempt == retries:
@@ -49,8 +129,8 @@ def iter_sse(sid: str, after: int):
 
 
 def _iter_sse(sid: str, after: int):
-    with httpx.stream("GET", f"{BASE}/sessions/{sid}/events", params={"after": after},
-                      timeout=httpx.Timeout(None, connect=10)) as resp:
+    with httpx.stream("GET", f"{BASE}{ADMIN_PREFIX}/sessions/{sid}/events", params={"after": after},
+                      headers=_headers(), timeout=httpx.Timeout(None, connect=10)) as resp:
         if resp.status_code != 200:
             sys.exit(f"error {resp.status_code}: {resp.read().decode()}")
         data = []
@@ -160,13 +240,20 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     os.system("")  # enable ANSI colors in the Windows console
-    parser = argparse.ArgumentParser(prog="python -m harness.cli", description="agent-harness client")
+    parser = argparse.ArgumentParser(prog="harness", description="agent-harness client")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG), help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("pair", help="pair this Mac using a one-time code from Settings")
+    p.add_argument("server")
+    p.add_argument("code")
+    p.add_argument("--runner-config", default=str(DEFAULT_RUNNER_CONFIG), help=argparse.SUPPRESS)
 
     p = sub.add_parser("new", help="start a session")
     p.add_argument("prompt")
     p.add_argument("--project", default="scratch")
     p.add_argument("--model")
+    p.add_argument("--backend", default="local")
     p.add_argument("--title")
     p.add_argument("--detach", action="store_true", help="don't watch")
     for name, help_ in (("watch", "stream a session's events"), ("show", "session details"),
@@ -188,11 +275,54 @@ def main() -> int:
         sp.add_argument("--note", default="")
     sub.add_parser("list", help="list sessions")
     sub.add_parser("queue", help="GPU queue")
+    projects = sub.add_parser("projects", help="manage Mac runner project roots").add_subparsers(
+        dest="projects_cmd", required=True)
+    add = projects.add_parser("add", help="allow a local project directory")
+    add.add_argument("path")
+    add.add_argument("--runner-config", default=str(DEFAULT_RUNNER_CONFIG), help=argparse.SUPPRESS)
+    runner = sub.add_parser("runner", help="manage the local launchd runner").add_subparsers(
+        dest="runner_cmd", required=True)
+    runner.add_parser("status")
+    runner.add_parser("restart")
+    logs = runner.add_parser("logs")
+    logs.add_argument("--follow", action="store_true")
+    logs.add_argument("--lines", type=int, default=80)
     args = parser.parse_args()
+    configure(args.config)
+
+    if args.cmd == "pair":
+        paired = pair_native(args.server, args.code, Path(args.config), Path(args.runner_config))
+        print(f"paired {paired['runner']['name']} with {paired['server']}")
+        return 0
+    if args.cmd == "projects":
+        try:
+            root = add_project_root(args.path, Path(args.runner_config))
+            launchctl("kickstart", "-k", check=True)
+        except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+            sys.exit(f"could not add project: {exc}")
+        print(f"allowed project root {root}")
+        return 0
+    if args.cmd == "runner":
+        if args.runner_cmd == "restart":
+            launchctl("kickstart", "-k", check=True)
+            print("runner restarted")
+            return 0
+        if args.runner_cmd == "logs":
+            log = Path.home() / ".agent-harness" / "logs" / "runner.log"
+            command = ["tail", "-n", str(max(1, args.lines))]
+            if args.follow:
+                command.append("-f")
+            return subprocess.call([*command, str(log)])
+        local = launchctl("print")
+        config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
+        remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
+        print(f"launchd: {'loaded' if local.returncode == 0 else 'not loaded'}")
+        print("daemon: " + (json.dumps(remote, indent=2) if remote else "runner not configured on daemon"))
+        return 0
 
     if args.cmd == "new":
         s = api("POST", "/sessions", json={"prompt": args.prompt, "project": args.project,
-                                           "model": args.model, "title": args.title})
+                                           "backend": args.backend, "model": args.model, "title": args.title})
         print(f"session {s['id']} ({s['project']}, {s['model']})")
         return 0 if args.detach else watch(s["id"], args)
     if args.cmd == "watch":

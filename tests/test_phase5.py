@@ -58,6 +58,26 @@ def test_scheduler_pause_holds_grants_and_front_requeue():
     asyncio.run(body())
 
 
+def test_scheduler_waits_for_snapshot_to_drain():
+    async def body():
+        s = GpuScheduler()
+        s.set_paused(True)
+        a = asyncio.create_task(s.acquire("a"))
+        b = asyncio.create_task(s.acquire("b"))
+        await asyncio.sleep(0)
+        snapshot = set(s.positions())
+        drained = asyncio.create_task(s.wait_for_drain(snapshot))
+        s.set_paused(False)
+        await a
+        assert not drained.done()
+        s.release("a")
+        await b
+        assert not drained.done()
+        s.release("b")
+        await asyncio.wait_for(drained, 1)
+    asyncio.run(body())
+
+
 # guard state machine
 class FakeControl:
     def __init__(self):
@@ -164,6 +184,95 @@ def test_guard_manual_pause_and_override_until_triggers_change():
         await guard.check()
         assert guard.state in (PAUSING, PAUSED)  # a new trigger ends the override
     asyncio.run(body())
+
+
+def test_guard_timed_manual_hold_expires_like_resume():
+    async def body():
+        guard, _, control, scheduler, log = make_guard(resume_after_seconds=999)
+        guard.pause(duration_seconds=1)
+        assert guard.state == PAUSING and scheduler.paused
+        await guard.check()
+        status = guard.status()
+        assert status["manual"] and 0 <= status["manual_remaining_seconds"] <= 1
+        assert guard.state == PAUSED and scheduler.paused
+        guard.manual_until = 0
+        await guard.check()
+        await guard.check()
+        assert guard.state == CLEAR and not guard.manual and not scheduler.paused
+        assert control.starts == 1 and [kind for kind, _ in log] == ["pause", "resume"]
+    asyncio.run(body())
+
+
+def test_manual_hold_release_and_expiry_preserve_automatic_guard():
+    async def release_body():
+        guard, detect, control, scheduler, _ = make_guard(resume_after_seconds=999)
+        detect.signals = [GAME]
+        guard.pause()
+        await guard.check()
+        assert guard.state == PAUSED and guard.manual
+        guard.resume(override_signals=False)
+        await guard.check()
+        assert guard.state == PAUSED and not guard.manual and guard.override is None
+        assert guard.reasons == [GAME] and scheduler.paused and control.starts == 0
+
+    async def expiry_body():
+        guard, detect, control, scheduler, _ = make_guard(resume_after_seconds=999)
+        guard.pause(duration_seconds=1)
+        await guard.check()
+        detect.signals = [GAME]
+        guard.manual_until = 0
+        await guard.check()
+        assert guard.state == PAUSED and not guard.manual and guard.override is None
+        assert guard.reasons == [GAME] and scheduler.paused and control.starts == 0
+
+    asyncio.run(release_body())
+    asyncio.run(expiry_body())
+
+
+def test_guard_does_not_restart_model_during_image_exclusive():
+    async def body():
+        busy = {"value": False}
+        guard, _, control, scheduler, _ = make_guard(busy=lambda: busy["value"], resume_after_seconds=0)
+        guard.pause()
+        await guard.check()
+        assert guard.state == PAUSED
+        busy["value"] = True
+        guard.resume()
+        await guard.check()
+        assert guard.state == PAUSED and control.starts == 0 and scheduler.paused
+        busy["value"] = False
+        await guard.check()
+        await guard.check()
+        assert guard.state == CLEAR and control.starts == 1
+    asyncio.run(body())
+
+
+def test_gpu_hold_api_accepts_optional_duration(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+
+    cfg = make_cfg(tmp_path)
+    cfg.gpu_guard = GpuGuardConfig(enabled=True, poll_seconds=3600)
+    m = Manager(cfg, chat=Script([Completion(content="done")]))
+    m.guard.detector, m.guard.control = FakeDetect(), FakeControl()
+    resume_calls = []
+    resume = m.guard.resume
+
+    def record_resume(*, override_signals=True):
+        resume_calls.append(override_signals)
+        return resume(override_signals=override_signals)
+
+    m.guard.resume = record_resume
+    with TestClient(create_app(m)) as client:
+        held = client.post("/gpu/pause", json={"duration_seconds": 1800}).json()
+        assert held["manual"] and 1790 <= held["manual_remaining_seconds"] <= 1800
+        assert held["manual_duration_seconds"] == 1800 and held["state"] == "pausing"
+        assert client.post("/gpu/pause", json={"duration_seconds": 0}).status_code == 400
+        resumed = client.post("/gpu/resume").json()
+        assert not resumed["manual"] and resumed["manual_until"] is None
+        assert resume_calls[-1] is False
+        client.post("/gpu/resume")
+        assert resume_calls[-1] is True
 
 
 def test_guard_startup_with_leftover_flag_resumes_when_clear():

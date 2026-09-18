@@ -370,7 +370,7 @@ class MemoryLibrary:
         return text
 
     async def owner_write(self, path: str, content: str, summary: str) -> dict:
-        """Control Center save: same git commit/push as an approved agent write. The owner is the approver."""
+        """Agent Harness Web save: same git commit/push as an approved agent write. The owner is the approver."""
         if not self.cfg.writes:
             raise ToolError("memory library writes are disabled")
         args = {"path": path, "content": content, "summary": summary}
@@ -379,7 +379,7 @@ class MemoryLibrary:
             f, rel, old, new = self._proposal("memory_write", args)
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(new, encoding="utf-8")
-            message = f"{' '.join(summary.split())[:150]}\n\nSaved from Control Center Settings."
+            message = f"{' '.join(summary.split())[:150]}\n\nSaved from Agent Harness Web Settings."
             for step in (("add", "--", rel), ("commit", "-q", "-m", message)):
                 code, out, err = await self._git(*step)
                 if code != 0:

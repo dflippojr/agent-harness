@@ -106,7 +106,18 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: calc(env(safe-area-inset-top, 0px) + 18px) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
   background: var(--bg);
   border-bottom: 1px solid var(--line);
+  /* Installed iOS PWAs can leave a sticky element's composited contents unpainted after
+     display changes, restore, or rotation even though its hit targets still work. Keep the
+     header on an isolated layer; repaintBar() alternates the sub-pixel Z value to invalidate it. */
+  -webkit-transform: translate3d(0, 0, 0);
+  transform: translate3d(0, 0, 0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  isolation: isolate;
+  will-change: transform;
 }
+#bar.paint-refresh { -webkit-transform: translate3d(0, 0, .001px); transform: translate3d(0, 0, .001px); }
+#bar > * { position: relative; z-index: 1; }
 #bar h1 {
   flex: 1; min-width: 0; margin: 0; font-size: 0.9375rem; font-weight: 500;
   overflow-wrap: break-word; color: var(--muted);
@@ -290,8 +301,12 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 
 /* images */
 .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-.image-card { display: block; padding: 6px; margin: 0; }
+.image-card { display: block; padding: 6px; margin: 0; position: relative; }
 .image-card img, .image-placeholder { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; display: block; }
+.image-scale {
+  position: absolute; top: 12px; right: 12px; background: rgba(0,0,0,.65); color: #fff;
+  font-size: 0.75rem; padding: 2px 6px; border-radius: 6px;
+}
 .image-placeholder { display: flex; align-items: center; justify-content: center; background: var(--bg-2, #1b2230); color: var(--muted); font-size: 0.8125rem; }
 .image-placeholder.failed { color: var(--bad); }
 .image-card .preview { -webkit-line-clamp: 2; margin-top: 6px; }
@@ -315,6 +330,7 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 @media (prefers-reduced-motion: reduce) {
   .progress > span { transition: none; }
   .progress.indeterminate > span, .dots::after { animation: none; }
+  .switch, .switch::after { transition: none; }
 }
 
 /* profile and image choices */
@@ -337,6 +353,26 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 }
 .settings-list a:last-child { border-bottom: 0; }
 .settings-list a::after { content: "›"; color: var(--muted); font-size: 1.375rem; font-weight: 400; line-height: 1; }
+.action-item { padding: 14px; border-bottom: 1px solid var(--line); }
+.action-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 34px; }
+.action-subitem {
+  display: flex; align-items: center; gap: 10px; margin: 12px 0 0 16px; padding: 10px 0 0 12px;
+  border-top: 1px solid var(--line); font-size: 0.8125rem; color: var(--muted);
+}
+.action-subitem select { width: auto; min-width: 0; margin-left: auto; }
+.action-subitem.disabled { opacity: .45; }
+.switch {
+  appearance: none; -webkit-appearance: none; position: relative; flex: 0 0 auto;
+  width: 51px; height: 31px; margin: 0; border: 0; border-radius: 999px;
+  background: rgba(120,120,128,.32); cursor: pointer; transition: background .15s ease;
+}
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.3); transition: transform .15s ease;
+}
+.switch:checked { background: #34c759; }
+.switch:checked::after { transform: translateX(20px); }
+.switch:disabled { opacity: .55; cursor: default; }
 .resolution-group { margin-top: 12px; }
 .field-label { font-size: 0.875rem; font-weight: 600; margin-bottom: 6px; }
 .resolution-options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
