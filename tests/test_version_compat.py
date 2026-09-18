@@ -170,21 +170,43 @@ def fake_download(monkeypatch, *, bad_hash: bool = False):
     monkeypatch.setattr(updater, "_download", download)
 
 
+def fake_launchctl(monkeypatch, *, fail_on: str | None = None, print_loaded: bool = False):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(list(args))
+        command = args[1] if len(args) > 1 else ""
+        if fail_on and command == fail_on:
+            raise subprocess.CalledProcessError(1, args)
+        if command == "print" and not print_loaded:
+            return subprocess.CompletedProcess(args, 1)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(updater.os, "getuid", lambda: 501, raising=False)
+    monkeypatch.setattr(updater.subprocess, "run", run)
+    monkeypatch.setattr(updater, "_BOOTOUT_POLL_SECONDS", 0)
+    return calls
+
+
 def test_mac_update_is_atomic_preserves_credentials_and_restarts(tmp_path, monkeypatch):
     home, base = installed_runtime(tmp_path)
     fake_download(monkeypatch)
-    calls = []
-    monkeypatch.setattr(updater.os, "getuid", lambda: 501, raising=False)
-    monkeypatch.setattr(updater.subprocess, "run", lambda args, **kwargs: calls.append(args)
-                        or subprocess.CompletedProcess(args, 0))
+    calls = fake_launchctl(monkeypatch)
     result = updater.apply_update("https://tower.example", base, home=home)
     assert result["ok"] and result["version"] == compat.MAC_CLIENT_VERSION
     assert (base / "runner/app/harness_runner.py").is_file()
     assert json.loads((base / "runner/config.json").read_text())["token"] == "runner-secret"
     assert json.loads((base / "client/config.json").read_text())["token"] == "owner-secret"
-    assert calls == [["launchctl", "kickstart", "-k", "gui/501/dev.agent-harness.runner"]]
+    plist = home / "Library/LaunchAgents/dev.agent-harness.runner.plist"
+    assert calls == [
+        ["launchctl", "bootout", "gui/501/dev.agent-harness.runner"],
+        ["launchctl", "print", "gui/501/dev.agent-harness.runner"],
+        ["launchctl", "bootstrap", "gui/501", str(plist)],
+        ["launchctl", "enable", "gui/501/dev.agent-harness.runner"],
+    ]
     assert json.loads((base / "runner/last-update.json").read_text())["ok"] is True
     assert not list(base.glob(".update-*"))
+    assert "ProgramArguments" in plist.read_text(encoding="utf-8")
 
 
 def test_mac_update_hash_failure_and_restart_failure_preserve_prior_runtime(tmp_path, monkeypatch):
@@ -196,13 +218,25 @@ def test_mac_update_hash_failure_and_restart_failure_preserve_prior_runtime(tmp_
     assert (base / "client/old.txt").read_text() == "old client"
 
     fake_download(monkeypatch)
-    monkeypatch.setattr(updater.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(
-        subprocess.CalledProcessError(1, "launchctl")))
+    fake_launchctl(monkeypatch, fail_on="bootstrap")
     with pytest.raises(RuntimeError, match="prior client preserved"):
         updater.apply_update("https://tower.example", base, home=home)
     assert (base / "runner/app/old.txt").read_text() == "old runner"
     assert (base / "client/old.txt").read_text() == "old client"
     assert json.loads((base / "client/config.json").read_text())["token"] == "owner-secret"
+    recorded = json.loads((base / "runner/last-update.json").read_text())
+    assert recorded["ok"] is False
+    assert "prior client preserved" in recorded["message"]
+
+
+def test_mac_update_stuck_launchd_job_is_not_reported_ok(tmp_path, monkeypatch):
+    home, base = installed_runtime(tmp_path)
+    fake_download(monkeypatch)
+    fake_launchctl(monkeypatch, print_loaded=True)
+    with pytest.raises(RuntimeError, match="did not unload after bootout"):
+        updater.apply_update("https://tower.example", base, home=home)
+    assert (base / "runner/app/old.txt").read_text() == "old runner"
+    assert json.loads((base / "runner/last-update.json").read_text())["ok"] is False
 
 
 def test_interrupted_mac_update_staging_leaves_runtime_and_credentials_untouched(tmp_path, monkeypatch):

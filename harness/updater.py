@@ -46,12 +46,44 @@ def _safe_extract(package: Path, destination: Path) -> None:
         archive.extractall(root)
 
 
+LAUNCH_AGENT_LABEL = "dev.agent-harness.runner"
+_BOOTOUT_ATTEMPTS = 5
+_BOOTOUT_POLL_SECONDS = 1.0
+
+
 def _write_result(base: Path, result: dict) -> None:
     path = base / "runner" / "last-update.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".new")
     temp.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temp, path)
+
+
+def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["launchctl", *args], check=check, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+def reload_launch_agent(plist: Path, *, uid: int | None = None) -> None:
+    """Unload the current launchd job and load the installed plist.
+
+    `kickstart -k` restarts the already-loaded definition and does not pick up
+    ProgramArguments or other plist changes. install.sh uses bootout + bootstrap
+    for the same reason.
+    """
+    uid = os.getuid() if uid is None else uid
+    domain = f"gui/{uid}"
+    target = f"{domain}/{LAUNCH_AGENT_LABEL}"
+    _launchctl("bootout", target, check=False)
+    for _ in range(_BOOTOUT_ATTEMPTS):
+        probe = _launchctl("print", target, check=False)
+        if probe.returncode != 0:
+            break
+        time.sleep(_BOOTOUT_POLL_SECONDS)
+    else:
+        raise RuntimeError(f"launchd job {target} did not unload after bootout")
+    _launchctl("bootstrap", domain, str(plist))
+    _launchctl("enable", target)
 
 
 def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
@@ -121,9 +153,7 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
             installed.append(target)
 
         if restart:
-            domain = f"gui/{os.getuid()}/dev.agent-harness.runner"
-            subprocess.run(["launchctl", "kickstart", "-k", domain], check=True, text=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            reload_launch_agent(plist_target)
         result = {"ok": True, "version": str(manifest["version"]), "build_id": manifest.get("build_id", ""),
                   "at": time.time(), "message": "Mac client updated"}
         _write_result(base, result)
