@@ -52,6 +52,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REVIEW_PROMPT: |
+            Run 'gh pr diff ${{ steps.pr.outputs.number }}' to see this pull request's diff, then review it for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
+
+            Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts stdout as the PR comment.
         run: |
           $base = Join-Path $env:LOCALAPPDATA 'cursor-agent'
           $versions = Join-Path $base 'versions'
@@ -65,15 +69,9 @@ jobs:
             throw "cursor-agent node.exe/index.js missing in $($latest.FullName)"
           }
 
-          $prompt = @"
-Run 'gh pr diff $env:PR_NUMBER' to see this pull request's diff, then review it for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
-
-Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts stdout as the PR comment.
-"@
-
           # Same Windows invocation as agent-loop: call node.exe + index.js
           # directly so the prompt is not re-parsed through cursor-agent.cmd.
-          & $node $index -p --output-format text --force --workspace $env:GITHUB_WORKSPACE $prompt |
+          & $node $index -p --output-format text --force --workspace $env:GITHUB_WORKSPACE $env:REVIEW_PROMPT |
             Out-File -FilePath review-output.md -Encoding utf8
           if ($LASTEXITCODE -ne 0) {
             throw "cursor-agent exited $LASTEXITCODE"
