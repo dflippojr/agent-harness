@@ -54,6 +54,7 @@ jobs:
       - name: Attach running check to the PR
         id: check
         if: github.event_name == 'workflow_dispatch'
+        continue-on-error: true
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,20 +63,21 @@ jobs:
           $sha = gh pr view $env:PR_NUMBER --json headRefOid --jq .headRefOid
           if ([string]::IsNullOrWhiteSpace($sha)) { throw "no head SHA for PR $($env:PR_NUMBER)" }
           $details = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          $payload = @{
-            name = "Automated Code Review"
-            head_sha = $sha
-            status = "in_progress"
-            started_at = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-            details_url = $details
-            output = @{
-              title = "Review in progress"
-              summary = "Cursor Agent is reviewing PR #$($env:PR_NUMBER)."
-            }
+          $started = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+          # Do not ConvertTo-Json + pipe: Windows PowerShell emits nested hashtables as
+          # Key/Value arrays and UTF-16 stdin, which the Check Runs API rejects (HTTP 400).
+          $id = gh api --method POST "repos/$env:GITHUB_REPOSITORY/check-runs" `
+            -f name="Automated Code Review" `
+            -f head_sha="$sha" `
+            -f status="in_progress" `
+            -f started_at="$started" `
+            -f details_url="$details" `
+            -f "output[title]=Review in progress" `
+            -f "output[summary]=Cursor Agent is reviewing PR #$($env:PR_NUMBER)." `
+            --jq .id
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($id) -or $id -notmatch '^\d+$') {
+            throw "failed to create check run"
           }
-          $json = $payload | ConvertTo-Json -Depth 6 -Compress
-          $id = $json | gh api --method POST "repos/$env:GITHUB_REPOSITORY/check-runs" --input - --jq .id
-          if ([string]::IsNullOrWhiteSpace($id)) { throw "failed to create check run" }
           "id=$id" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Check run $id on $sha ($details)"
 
@@ -123,7 +125,7 @@ jobs:
           gh pr comment $env:PR_NUMBER --body-file review-output.md
 
       - name: Complete PR check
-        if: always() && github.event_name == 'workflow_dispatch' && steps.check.outputs.id != ''
+        if: always() && github.event_name == 'workflow_dispatch' && steps.check.outcome == 'success' && steps.check.outputs.id != ''
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -138,14 +140,11 @@ jobs:
             $conclusion = 'cancelled'
           }
           $summary = "Cursor Agent review $conclusion."
-          $payload = @{
-            status = "completed"
-            conclusion = $conclusion
-            completed_at = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-            output = @{
-              title = "Review $conclusion"
-              summary = $summary
-            }
-          }
-          $json = $payload | ConvertTo-Json -Depth 6 -Compress
-          $json | gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/check-runs/$env:CHECK_ID" --input -
+          $completed = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/check-runs/$env:CHECK_ID" `
+            -f status="completed" `
+            -f conclusion="$conclusion" `
+            -f completed_at="$completed" `
+            -f "output[title]=Review $conclusion" `
+            -f "output[summary]=$summary"
+          if ($LASTEXITCODE -ne 0) { throw "failed to complete check run $($env:CHECK_ID)" }
