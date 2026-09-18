@@ -164,6 +164,35 @@ def _resolve_workspace_git(repo: Path) -> tuple[Path, Path, Path]:
     return git_dir, metadata, work_tree
 
 
+def _mirror_tree(src: Path, dst: Path) -> None:
+    """Copy `src` onto `dst`, then remove dest entries that `src` no longer has.
+
+    `shutil.copytree(..., dirs_exist_ok=True)` only adds/overwrites, so a fetch
+    `--prune` in the isolated git-dir would otherwise leave stale loose refs in
+    the real repository.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    seen = set()
+    for child in src.iterdir():
+        seen.add(child.name)
+        target = dst / child.name
+        if child.is_dir() and not child.is_symlink():
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            _mirror_tree(child, target)
+        else:
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            shutil.copy2(child, target)
+    for child in list(dst.iterdir()):
+        if child.name in seen:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def _copy_git_state(src: Path, dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     for name in _STATE_FILES:
@@ -173,7 +202,7 @@ def _copy_git_state(src: Path, dst: Path) -> None:
     for name in _STATE_DIRS:
         s = src / name
         if s.is_dir():
-            shutil.copytree(s, dst / name, dirs_exist_ok=True)
+            _mirror_tree(s, dst / name)
 
 
 def _write_isolated_config(real_config: Path, dest: Path, hooks: Path) -> None:
