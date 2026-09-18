@@ -716,6 +716,117 @@ def test_app_scopes_and_isolation(tmp_path):
         assert client.post("/v1/chat/completions", headers=H(a), json={"messages": []}).status_code == 401
 
 
+def test_sessions_all_read_vs_mutation_matrix(tmp_path):
+    client, m = app_client(tmp_path, [Completion(content="ok")])
+    with client:
+        a = client.post("/keys", json={"name": "app-a", "kind": "app",
+                                       "scopes": ["sessions", "approvals"]}).json()["key"]
+        b = client.post("/keys", json={"name": "app-b", "kind": "app", "scopes": ["sessions"]}).json()["key"]
+        reader = client.post("/keys", json={"name": "reader", "kind": "app",
+                                            "scopes": ["sessions:all"]}).json()["key"]
+        broad = client.post("/keys", json={"name": "broad", "kind": "app",
+                                           "scopes": ["sessions", "sessions:all"]}).json()["key"]
+        wide = client.post("/keys", json={"name": "wide", "kind": "app",
+                                          "scopes": ["sessions", "sessions:all", "approvals"]}).json()["key"]
+        owner = client.post("/keys", json={"name": "control-center", "kind": "owner",
+                                           "scopes": ["admin"]}).json()["key"]
+        H = lambda k: {"Authorization": f"Bearer {k}"}  # noqa: E731
+
+        owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
+        a_sid = client.post("/api/v1/sessions", headers=H(a), json={"prompt": "a task"}).json()["id"]
+        b_sid = client.post("/api/v1/sessions", headers=H(b), json={"prompt": "b task"}).json()["id"]
+        sessions = {"owner": owner_sid, "a": a_sid, "b": b_sid}
+        for sid in sessions.values():
+            wait_for(lambda sid=sid: client.get(f"/sessions/{sid}").json()["status"] == "done")
+
+        def event_count(sid, type_):
+            return sum(1 for e in m.db.events(sid) if e["type"] == type_)
+
+        read_rows = [
+            ("a", a, {"owner": 404, "a": 200, "b": 404}, {a_sid}),
+            ("b", b, {"owner": 404, "a": 404, "b": 200}, {b_sid}),
+            ("reader", reader, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
+            ("broad", broad, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
+            ("owner", owner, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
+        ]
+        read_paths = (
+            "/api/v1/sessions/{sid}",
+            "/api/v1/sessions/{sid}/events?follow=false",
+            "/api/v1/sessions/{sid}/tool_calls",
+            "/api/v1/sessions/{sid}/approvals",
+        )
+        for name, token, expected, listed in read_rows:
+            for label, sid in sessions.items():
+                for path in read_paths:
+                    r = client.get(path.format(sid=sid), headers=H(token))
+                    assert r.status_code == expected[label], (name, path, label, r.status_code, r.text)
+            assert {s["id"] for s in client.get("/api/v1/sessions", headers=H(token)).json()} == listed
+
+        mutate_rows = ((a, {a_sid}), (b, {b_sid}), (broad, set()), (owner, {owner_sid, a_sid, b_sid}))
+        for token, allowed_sids in mutate_rows:
+            for label, sid in sessions.items():
+                payload = f"injected-{token[-8:]}-{label}"
+                msg, ctx = {"content": payload}, {"context": [{"title": "Injected", "content": payload}]}
+                before_msg, before_ctx = event_count(sid, "user_message"), event_count(sid, "app_context")
+                cancel = client.post(f"/api/v1/sessions/{sid}/cancel", headers=H(token))
+                send = client.post(f"/api/v1/sessions/{sid}/messages", headers=H(token), json=msg)
+                added = client.post(f"/api/v1/sessions/{sid}/context", headers=H(token), json=ctx)
+                if sid in allowed_sids:
+                    assert cancel.status_code in (200, 409), (label, cancel.status_code, cancel.text)
+                    assert send.status_code == 200, (label, send.status_code, send.text)
+                    assert added.status_code == 200, (label, added.status_code, added.text)
+                    assert event_count(sid, "user_message") == before_msg + 1
+                    assert event_count(sid, "app_context") == before_ctx + 1
+                else:
+                    assert send.status_code == 404, (label, send.status_code, send.text)
+                    assert added.status_code == 404
+                    assert cancel.status_code == 404
+                    assert event_count(sid, "user_message") == before_msg
+                    assert event_count(sid, "app_context") == before_ctx
+                    assert not any(payload in (e["data"].get("content") or "") for e in m.db.events(sid)
+                                   if e["type"] in ("user_message", "app_context"))
+
+        reader_msg, reader_ctx = {"content": "reader-inject"}, {"context": [{"title": "x", "content": "y"}]}
+        for sid in sessions.values():
+            before = event_count(sid, "user_message")
+            assert client.post(f"/api/v1/sessions/{sid}/messages", headers=H(reader),
+                               json=reader_msg).status_code == 403
+            assert client.post(f"/api/v1/sessions/{sid}/context", headers=H(reader),
+                               json=reader_ctx).status_code == 403
+            assert client.post(f"/api/v1/sessions/{sid}/cancel", headers=H(reader)).status_code == 403
+            assert event_count(sid, "user_message") == before
+
+        m.db.insert_app_tool_call(a_sid, "call-a", "lookup", {"x": 1})
+        assert client.get(f"/api/v1/sessions/{a_sid}/tool_calls", headers=H(broad)).status_code == 200
+        assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(broad),
+                           json={"output": "nope"}).status_code == 404
+        assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(b),
+                           json={"output": "nope"}).status_code == 404
+        owner_tool = client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(owner),
+                                 json={"output": "nope"})
+        assert owner_tool.status_code == 403 and "only the app that registered" in owner_tool.json()["detail"]
+        assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(a),
+                           json={"output": "yes"}).status_code == 200
+
+        m.db.insert_approval({"id": "appr-a", "session_id": a_sid, "tool_call_id": "native-1",
+                              "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
+        m.db.insert_approval({"id": "appr-o", "session_id": owner_sid, "tool_call_id": "native-2",
+                              "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
+        assert client.get(f"/api/v1/sessions/{a_sid}/approvals", headers=H(broad)).status_code == 200
+        assert client.post(f"/api/v1/sessions/{a_sid}/approvals/appr-a", headers=H(wide),
+                           json={"decision": "approve"}).status_code == 404
+        assert client.post(f"/api/v1/sessions/{owner_sid}/approvals/appr-o", headers=H(wide),
+                           json={"decision": "approve"}).status_code == 404
+        assert client.post(f"/api/v1/sessions/{a_sid}/approvals/appr-a", headers=H(a),
+                           json={"decision": "approve", "note": "mine"}).status_code == 200
+        decided = client.post(f"/api/v1/sessions/{owner_sid}/approvals/appr-o", headers=H(owner),
+                              json={"decision": "deny", "note": "owner"})
+        assert decided.status_code == 200 and decided.json()["status"] == "denied"
+
+        bundled = client.post(f"/api/v1/sessions/{owner_sid}/messages", json={"content": "from bundled"})
+        assert bundled.status_code == 200
+
+
 def test_setup_config_writes_a_loadable_config(tmp_path, capsys):
     from harness import config, setup_config
     args = ["--config-dir", str(tmp_path / "cfg"), "--data-dir", str(tmp_path / "data"), "--model", "gpt-oss",
