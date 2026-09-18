@@ -4,8 +4,10 @@ managed-config.json holds only registered admin keys in a flat versioned envelop
 pending.json holds a restart-required candidate. lkg.json is the last confirmed good
 generation. Files never contain secrets or nested YAML.
 
-Overlay state machine (disk). Boot applies **active** only; pending is never loaded
-until an owner-confirmed restart copies it onto active.
+Overlay state machine (disk). Transitions go through ``overlay.next_overlay``;
+the only merge is ``effective_candidate`` (active overlaid by pending). Boot
+applies **active** only; pending is never loaded until an owner-confirmed
+restart copies it onto active.
 
 - **empty** — no active file. YAML/inherited values are effective. No LKG skip,
   because there is nothing to confirm.

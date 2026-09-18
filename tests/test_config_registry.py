@@ -913,3 +913,51 @@ def test_overlay_crash_injection_never_applies_unconfirmed_or_skips_lkg(tmp_path
     assert mid_boot.settings.store.quarantine_path.is_file()
     assert mid_boot.settings.store.read_active().confirmed is True
     assert mid_boot.settings.store.read_active().values.get("web.enabled") is False
+
+
+def test_live_patch_does_not_rewrite_pending_restart_candidate(tmp_path, monkeypatch):
+    """A live-only PATCH must not clobber a pending daemon_restart key with the
+    already-promoted value still sitting on confirmed active."""
+    monkeypatch.setenv("HARNESS_SUPERVISED", "1")
+    cfg_dir, data_dir = _web_loadable(tmp_path, installed=True, enabled=True)
+    store = ManagedStore(data_dir)
+    store.write_active(Envelope(revision=1, confirmed=True, values={"web.enabled": False}))
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"web.enabled": False}))
+    cfg = load(cfg_dir)
+    assert cfg.web.enabled is False
+    service = SettingsService(cfg)
+    service.patch_admin({"web.enabled": True}, 1)
+    pending = store.read_pending()
+    assert pending is not None and pending.values.get("web.enabled") is True
+    service.patch_admin({"sessions.max_turns": 40}, store.read_active().revision)
+    pending = store.read_pending()
+    assert pending is not None, "live PATCH dropped the pending restart candidate"
+    assert pending.values.get("web.enabled") is True, pending.values
+    assert store.read_active().values.get("web.enabled") is False
+    assert cfg.max_turns == 40
+    service.request_restart(None)
+    reloaded = _boot(cfg_dir)
+    reloaded.settings.confirm_startup()
+    assert reloaded.cfg.web.enabled is True
+    assert reloaded.cfg.max_turns == 40
+
+
+def test_rollback_clears_pending_only_restart_key(tmp_path, monkeypatch):
+    """Rollback must read pending, not only active ∪ LKG, and must clear the
+    pending file so a later restart cannot apply an unconfirmed first-time key."""
+    monkeypatch.setenv("HARNESS_SUPERVISED", "1")
+    cfg_dir, data_dir = _web_loadable(tmp_path, installed=True, enabled=False)
+    service = SettingsService(load(cfg_dir))
+    service.patch_admin({"web.enabled": True}, service.admin_view()["revision"])
+    pending = service.store.read_pending()
+    assert pending is not None and pending.values.get("web.enabled") is True
+    assert "web.enabled" not in (service.store.read_active().values if service.store.read_active() else {})
+    assert service.admin_view()["restart_required"] is True
+    service.rollback(service.admin_view()["revision"])
+    assert service.store.read_pending() is None
+    assert service.admin_view()["restart_required"] is False
+    reloaded = _boot(cfg_dir)
+    reloaded.settings.confirm_startup()
+    assert reloaded.cfg.web.enabled is False
+    assert reloaded.settings.store.read_pending() is None
+    assert reloaded.settings.store.read_status().get("recovery") != "lkg_restore"

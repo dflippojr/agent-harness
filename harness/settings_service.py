@@ -8,7 +8,7 @@ import os
 import signal
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +16,12 @@ import yaml
 
 from .config import Config
 from .managed_config import Envelope, ManagedConfigError, ManagedStore, OverlayCrash, UNSET
+from .overlay import (
+    OverlayRequest, OverlayState, apply_changes, effective_candidate, is_confirmed,
+    next_overlay, overlay_commit_args,
+)
 from .settings import (
-    RESET, SCHEMA_VERSION, SettingSpec, apply_spec, copy_cfg, frozen_app_defaults, inherited_source,
+    RESET, SCHEMA_VERSION, SettingSpec, copy_cfg, frozen_app_defaults, inherited_source,
     looks_hidden, parse_value, redact_value, schema_entry, spec_available, supervised_restart_supported,
     use_live_app_settings,
 )
@@ -112,6 +116,27 @@ class SettingsService:
                     self.inherited[spec.key] = spec.default
             self.sources[spec.key] = inherited_source(spec, self.yaml_files)
 
+    def _apply_mode(self, key: str) -> str:
+        spec = self.registry.specs.get(key)
+        return spec.apply_mode if spec is not None else "live"
+
+    def _overlay_state(self) -> OverlayState:
+        lkg = None
+        try:
+            lkg = self.store.read_lkg()
+        except ManagedConfigError:
+            lkg = None
+        return OverlayState(active=self._active(), pending=self._pending(), lkg=lkg)
+
+    def _commit_overlay(self, old: OverlayState, new: OverlayState, *, boot_tried=UNSET,
+                        quarantine_reason: str | None = None) -> None:
+        args = overlay_commit_args(old, new, boot_tried=boot_tried)
+        if quarantine_reason is not None:
+            args["quarantine_envelope"] = old.active
+            args["quarantine_reason"] = quarantine_reason
+            args["quarantine_raw"] = old.active is None
+        self.store.commit(**args)
+
     # --- load / recovery -------------------------------------------------
     def apply_overlay(self) -> dict[str, Any]:
         """Apply the active managed overlay, restoring LKG if a candidate is unconfirmed or invalid."""
@@ -135,10 +160,13 @@ class SettingsService:
                 # start from quarantining its own candidate.
                 tried_here = getattr(self.cfg, "_managed_boot_attempt", False)
                 if self.store.boot_tried() and not tried_here:
-                    restored = self.store.restore_lkg("unconfirmed managed generation did not finish startup")
+                    old = self._overlay_state()
+                    new = next_overlay(old, OverlayRequest(action="restore_lkg"), self._apply_mode)
+                    self._commit_overlay(old, new, boot_tried=False,
+                                         quarantine_reason="unconfirmed managed generation did not finish startup")
                     self._audit("system", "lkg_recovery", list((active.values or {}).keys()), "ok",
                                 extra={"reason": "unconfirmed", "revision": active.revision})
-                    active = restored
+                    active = new.active
                     status["recovery"] = "lkg_restore"
                     if active is None:
                         return status
@@ -146,26 +174,28 @@ class SettingsService:
                     self.store.mark_boot_tried()
                     self.cfg._managed_boot_attempt = True
             try:
+                # Boot applies active only. Pending is never the apply map.
                 self._apply_values(self.cfg, active.values, persist=False)
             except SettingsError as e:
-                restored = self.store.restore_lkg(str(e))
+                old = OverlayState(active=active, pending=self._pending(), lkg=self._overlay_state().lkg)
+                new = next_overlay(old, OverlayRequest(action="restore_lkg"), self._apply_mode)
+                self._commit_overlay(old, new, boot_tried=False, quarantine_reason=str(e))
                 self._audit("system", "lkg_recovery", list(active.values), "failure", extra={"reason": str(e)})
                 status["recovery"] = "lkg_restore"
-                if restored is not None:
-                    self._apply_values(self.cfg, restored.values, persist=False)
+                active = new.active
+                if active is not None:
+                    self._apply_values(self.cfg, active.values, persist=False)
             self._migrate_backend_prefs()
         return status
 
     def confirm_startup(self) -> None:
         with self.store.lock():
-            active = self.store.read_active()
-            if active is None:
+            old = self._overlay_state()
+            if old.active is None or is_confirmed(old.active):
                 return
-            if active.unconfirmed or not active.confirmed:
-                active.confirmed = True
-                active.unconfirmed = False
-                self.store.commit(active=active, pending=None, boot_tried=False)
-                self._audit("system", "confirm", list(active.values), "ok", revision=active.revision)
+            new = next_overlay(old, OverlayRequest(action="confirm_startup", now=time.time()), self._apply_mode)
+            self._commit_overlay(old, new, boot_tried=False)
+            self._audit("system", "confirm", list(new.active.values), "ok", revision=new.active.revision)
 
     def _migrate_backend_prefs(self) -> None:
         if self.db is None:
@@ -381,26 +411,93 @@ class SettingsService:
 
     def rollback(self, revision: int | None, dry_run: bool = False, actor: dict | None = None) -> dict[str, Any]:
         with self.store.lock():
-            lkg = self.store.read_lkg()
-            active = self._active()
-            if lkg is None:
+            old = self._overlay_state()
+            if old.lkg is None:
                 raise SettingsError(409, "no previous confirmed generation to restore", "nothing_to_rollback")
-            if revision is not None and active and revision != active.revision:
-                raise SettingsError(409, f"configuration revision {revision} is stale; current revision is {active.revision}",
+            if revision is not None and old.active and revision != old.active.revision:
+                raise SettingsError(409, f"configuration revision {revision} is stale; current revision is {old.active.revision}",
                                     "revision_conflict",
-                                    details={"expected_revision": revision, "current_revision": active.revision})
-            target = {spec.key: lkg.values[spec.key] if spec.key in lkg.values else RESET
-                      for spec in self.registry.writable_admin()
-                      if spec.key in (active.values if active else {}) or spec.key in lkg.values}
-            # Restore exactly the LKG map: keys not in LKG reset to inherited.
-            current_keys = set((active.values if active else {}) | lkg.values)
-            changes = {}
-            for key in current_keys:
-                if key in lkg.values:
-                    changes[key] = lkg.values[key]
+                                    details={"expected_revision": revision, "current_revision": old.active.revision})
+            candidate = effective_candidate(old.active, old.pending)
+            changes: dict[str, Any] = {}
+            for key in set(candidate) | set(old.lkg.values):
+                if key in old.lkg.values:
+                    changes[key] = old.lkg.values[key]
                 else:
                     changes[key] = None
-            return self.patch_admin(changes, active.revision if active else 0, dry_run=dry_run, actor=actor)
+            if dry_run:
+                return self._plan_admin(changes, old.active.revision if old.active else 0,
+                                        persist=False, apply=False, actor=actor)
+            current_revision = old.active.revision if old.active else 0
+            new = next_overlay(
+                old,
+                OverlayRequest(action="rollback", next_revision=current_revision + 1, now=time.time()),
+                self._apply_mode,
+            )
+            previous_active = old.active
+            previous_pending = old.pending
+            live_applied: list[tuple[SettingSpec, Any, Any]] = []
+            committed = False
+            try:
+                self._commit_overlay(old, new)
+                committed = True
+                if new.active is not None:
+                    self._apply_rollback_live(old, new, live_applied)
+                self._audit(_actor_kind(actor), "rollback", list(changes), "ok",
+                            revision=new.active.revision if new.active else current_revision, actor=actor)
+                plan = Plan(revision=current_revision,
+                            target_revision=new.active.revision if new.active else current_revision)
+                body = plan.as_dict(self.registry)
+                body.update({k: self.admin_view()[k] for k in
+                             ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
+                              "recovery", "etag")})
+                body["settings"] = self.admin_view()["settings"]
+                return body
+            except OverlayCrash:
+                raise
+            except Exception as e:
+                for spec, old_val, new_val in reversed(live_applied):
+                    try:
+                        spec.setter(self.cfg, old_val)
+                        if spec.live_undo and self.manager is not None:
+                            spec.live_undo(self.manager, new_val, old_val)
+                    except Exception:
+                        log.exception("failed to undo live hook for %s", spec.key)
+                try:
+                    if committed:
+                        if previous_active is not None and (previous_active.revision or previous_active.values):
+                            self.store.write_active(previous_active)
+                        else:
+                            self.store._unlink(self.store.active_path)
+                        if previous_pending is not None:
+                            self.store.write_pending(previous_pending)
+                        else:
+                            self.store.clear_pending()
+                except Exception:
+                    log.exception("failed to restore managed-config after rollback live-hook failure")
+                self._audit(_actor_kind(actor), "live_hook_rollback", list(changes), "failure",
+                            revision=current_revision, actor=actor, extra={"reason": str(e)})
+                if isinstance(e, SettingsError):
+                    raise
+                raise SettingsError(500, f"failed to apply configuration: {e}", "apply_failed") from e
+
+    def _apply_rollback_live(self, old: OverlayState, new: OverlayState,
+                             live_applied: list[tuple[SettingSpec, Any, Any]]) -> None:
+        new_values = new.active.values if new.active is not None else {}
+        for spec in self.registry.writable_admin():
+            if spec.apply_mode != "live":
+                continue
+            previous = spec.getter(self.cfg)
+            if spec.key in new_values:
+                target = new_values[spec.key]
+            else:
+                target = self.inherited.get(spec.key, spec.default)
+            if previous == target:
+                continue
+            spec.setter(self.cfg, target)
+            live_applied.append((spec, previous, target))
+            if spec.live_apply and self.manager is not None:
+                spec.live_apply(self.manager, previous, target)
 
     def request_restart(self, revision: int | None, actor: dict | None = None) -> dict[str, Any]:
         if not supervised_restart_supported():
@@ -412,8 +509,9 @@ class SettingsService:
                 details={"manual": "Stop this process, then start the installed supervisor or run python -m harness."},
             )
         with self.store.lock():
-            pending = self._pending()
-            active = self._active()
+            old = self._overlay_state()
+            pending = old.pending
+            active = old.active
             target = pending or active
             if target is None:
                 raise SettingsError(409, "there is no managed configuration to restart into", "nothing_to_restart")
@@ -422,17 +520,10 @@ class SettingsService:
                                     "revision_conflict",
                                     details={"expected_revision": revision,
                                              "current_revision": pending.revision})
+            new = next_overlay(old, OverlayRequest(action="confirm_restart", now=time.time()), self._apply_mode)
             if pending is not None:
-                pending.confirmed = False
-                pending.unconfirmed = True
-                pending.previous_revision = active.revision if active else None
-                if active is not None and active.confirmed:
-                    self.store.commit(lkg=active, active=pending, boot_tried=False)
-                else:
-                    self.store.commit(active=pending, boot_tried=False)
-                target_revision = pending.revision
-            else:
-                target_revision = active.revision if active else 0
+                self._commit_overlay(old, new, boot_tried=False)
+            target_revision = new.active.revision if new.active else (active.revision if active else 0)
             self._audit(_actor_kind(actor), "restart", [], "ok", revision=target_revision, actor=actor)
             self._restarting = True
         return {"accepted": True, "target_revision": target_revision, "status": "restarting"}
@@ -442,9 +533,10 @@ class SettingsService:
         if not isinstance(changes, dict):
             raise SettingsError(400, "changes must be an object", "invalid_request")
         with self.store.lock():
-            active = self._active() or Envelope()
-            pending = self._pending()
-            current_revision = active.revision
+            old = self._overlay_state()
+            active_file = old.active
+            pending = old.pending
+            current_revision = active_file.revision if active_file is not None else 0
             if revision is not None and revision != current_revision:
                 self._audit(_actor_kind(actor), "revision_conflict", list(changes), "failure",
                             revision=current_revision, actor=actor)
@@ -462,19 +554,14 @@ class SettingsService:
                 raise SettingsError(400, "configuration is invalid", "validation_error", keys=errors)
 
             candidate_cfg = copy_cfg(self.cfg)
-            merged = dict(active.values)
-            restart_merged = dict(pending.values) if pending else dict(active.values)
+            next_values = apply_changes(effective_candidate(active_file, pending), parsed)
             for key, value in parsed.items():
                 spec = self.registry.get(key)
                 before = spec.getter(self.cfg)
                 if value is RESET:
-                    merged.pop(key, None)
-                    restart_merged.pop(key, None)
                     after = self.inherited.get(key, spec.default)
                     action = "reset"
                 else:
-                    merged[key] = value
-                    restart_merged[key] = value
                     after = value
                     action = "set"
                 change = Change(key=key, before=before, after=after, apply=spec.apply_mode, action=action)
@@ -485,19 +572,7 @@ class SettingsService:
                 else:
                     plan.live.append(change)
 
-            live_values = {key: value for key, value in merged.items()
-                           if self.registry.get(key).apply_mode == "live"}
-            pending_values = dict(merged)
-            # Restart keys stay out of the running process until promotion.
-            for spec in self.registry.writable_admin():
-                if spec.apply_mode == "daemon_restart" and spec.key in live_values:
-                    live_values.pop(spec.key, None)
-
-            apply_values = dict(live_values)
-            apply_values.update({
-                key: restart_merged[key] for key in restart_merged
-                if self.registry.get(key).apply_mode == "daemon_restart"
-            })
+            apply_values = dict(next_values)
             for key, value in parsed.items():
                 if value is RESET:
                     apply_values[key] = RESET
@@ -521,96 +596,25 @@ class SettingsService:
             if not persist:
                 return plan
 
-            previous = copy_cfg(self.cfg)
-            previous_active = active
+            previous_active = active_file
             previous_pending = pending
             live_applied: list[tuple[SettingSpec, Any, Any]] = []
             committed = False
             try:
-                new_active = Envelope(
-                    revision=plan.target_revision,
-                    confirmed=True,
-                    values={k: v for k, v in merged.items()
-                            if self.registry.get(k).apply_mode == "live"},
-                    migrated_backend_prefs=True,
-                    previous_revision=current_revision if current_revision else None,
-                    updated_at=time.time(),
-                )
-                # Keep previously live keys that were not reset.
-                for key, value in active.values.items():
-                    spec = self.registry.specs.get(key)
-                    if spec and spec.apply_mode == "live" and key not in parsed:
-                        new_active.values[key] = value
-                # Confirmed active keeps already-promoted daemon_restart keys until
-                # request_restart copies pending onto active. A PATCH of a restart
-                # key must not drop or replace that key here (the candidate is pending).
-                for key, value in active.values.items():
-                    spec = self.registry.specs.get(key)
-                    if spec and spec.apply_mode == "daemon_restart":
-                        new_active.values[key] = value
-                for key, value in parsed.items():
-                    spec = self.registry.get(key)
-                    if spec.apply_mode == "daemon_restart":
-                        continue
-                    if value is RESET:
-                        new_active.values.pop(key, None)
-                    elif spec.apply_mode == "live":
-                        new_active.values[key] = value
-
-                new_pending = None
-                pending_map = dict(pending.values) if pending else dict(active.values)
-                restart_touched = False
-                for key, value in parsed.items():
-                    spec = self.registry.get(key)
-                    if spec.apply_mode != "daemon_restart":
-                        if value is RESET:
-                            pending_map.pop(key, None)
-                        else:
-                            pending_map[key] = value
-                        continue
-                    restart_touched = True
-                    if value is RESET:
-                        pending_map.pop(key, None)
-                    else:
-                        pending_map[key] = value
-                # Pending candidate is the full next generation (live from confirmed
-                # active + restart keys from pending_map, including this PATCH).
-                full_next = {k: v for k, v in new_active.values.items()
-                             if self.registry.get(k).apply_mode == "live"}
-                for key, value in pending_map.items():
-                    spec = self.registry.specs.get(key)
-                    if spec and spec.apply_mode == "daemon_restart":
-                        full_next[key] = value
-                if restart_touched or (pending and any(c.apply == "daemon_restart" for c in plan.changes)):
-                    new_pending = Envelope(
-                        revision=plan.target_revision,
-                        confirmed=False,
-                        unconfirmed=True,
-                        values=full_next,
+                new = next_overlay(
+                    old,
+                    OverlayRequest(
+                        action="patch",
+                        changes=parsed,
+                        next_revision=plan.target_revision,
+                        now=time.time(),
                         migrated_backend_prefs=True,
-                        previous_revision=current_revision or None,
-                        updated_at=time.time(),
-                    )
-
-                pending_arg = UNSET
-                if new_pending is not None:
-                    pending_arg = new_pending
+                    ),
+                    self._apply_mode,
+                )
+                if new.pending is not None:
                     plan.restart_required = True
-                elif pending is not None and not restart_touched:
-                    pending.values = {**pending.values, **new_active.values}
-                    pending.revision = plan.target_revision
-                    pending_arg = pending
-                elif not restart_touched:
-                    pending_arg = None
-
-                lkg_arg = UNSET
-                if active.confirmed and not active.unconfirmed:
-                    # Snapshot the generation we are replacing, including the empty initial
-                    # overlay, so rollback always restores the immediately previous confirmed map.
-                    lkg_arg = replace(active, values=dict(active.values))
-
-                committed = False
-                self.store.commit(lkg=lkg_arg, pending=pending_arg, active=new_active)
+                self._commit_overlay(old, new)
                 committed = True
 
                 if apply:
@@ -639,7 +643,7 @@ class SettingsService:
                         log.exception("failed to undo live hook for %s", spec.key)
                 try:
                     if committed:
-                        if previous_active.revision or previous_active.values:
+                        if previous_active is not None and (previous_active.revision or previous_active.values):
                             self.store.write_active(previous_active)
                         else:
                             self.store._unlink(self.store.active_path)
