@@ -676,7 +676,12 @@ class SettingsService:
         return parsed, errors
 
     def _apply_values(self, cfg: Config, values: dict[str, Any], persist: bool) -> None:
+        # Apply onto a copy first. Setters mutate key-by-key; committing only after the
+        # whole map validates keeps a failed overlay from leaving keys that LKG restore
+        # (or unlink) does not mention.
+        candidate = copy_cfg(cfg)
         errors: dict[str, dict] = {}
+        parsed_map: dict[str, Any] = {}
         for key, value in values.items():
             spec = self.registry.specs.get(key)
             if spec is None:
@@ -687,18 +692,25 @@ class SettingsService:
                 continue
             try:
                 parsed = parse_value(spec, value)
+                parsed_map[key] = parsed
                 if parsed is RESET:
-                    spec.setter(cfg, self.inherited.get(key, spec.default))
-                    continue
-                spec.setter(cfg, parsed)
+                    spec.setter(candidate, self.inherited.get(key, spec.default))
+                else:
+                    spec.setter(candidate, parsed)
             except ValueError as e:
                 errors[key] = {"code": "invalid_value", "message": str(e)}
         proposed = {k: v for k, v in values.items() if v is not RESET}
         for validator in self.registry.validators:
-            for item in validator(cfg, proposed):
+            for item in validator(candidate, proposed):
                 errors.setdefault(item["key"], {"code": item["code"], "message": item["message"]})
         if errors:
             raise SettingsError(400, "configuration is invalid", "validation_error", keys=errors)
+        for key, parsed in parsed_map.items():
+            spec = self.registry.get(key)
+            if parsed is RESET:
+                spec.setter(cfg, self.inherited.get(key, spec.default))
+            else:
+                spec.setter(cfg, parsed)
 
     # --- app -------------------------------------------------------------
     def patch_app(self, app_id: str, key: dict, changes: dict[str, Any], revision: int | None,

@@ -550,6 +550,34 @@ def test_web_settings_render_plan_and_phone_layout(tmp_path):
         assert client.get("/api/admin/v1/config").status_code == 200
 
 
+def test_failed_overlay_does_not_leave_keys_absent_from_lkg(tmp_path):
+    """_apply_values must not commit a partial overlay. A bad backends.local.model plus
+    sessions.max_turns must not leave max_turns applied after LKG restore/unlink."""
+    cfg = make_cfg(tmp_path)
+    assert cfg.max_turns == 80 and cfg.default_model == "fake"
+    store = ManagedStore(cfg.data_dir)
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={}))
+    store.write_active(Envelope(
+        revision=2, confirmed=True,
+        values={"backends.local.model": "removed-model", "sessions.max_turns": 12},
+    ))
+    status = SettingsService(cfg).apply_overlay()
+    assert status.get("recovery") == "lkg_restore"
+    assert cfg.max_turns == 80
+    assert cfg.default_model == "fake"
+
+    cfg_no_lkg = make_cfg(tmp_path / "nolkg")
+    store2 = ManagedStore(cfg_no_lkg.data_dir)
+    store2.write_active(Envelope(
+        revision=1, confirmed=True,
+        values={"backends.local.model": "removed-model", "sessions.max_turns": 12},
+    ))
+    SettingsService(cfg_no_lkg).apply_overlay()
+    assert cfg_no_lkg.max_turns == 80
+    assert cfg_no_lkg.default_model == "fake"
+    assert not store2.active_path.is_file()
+
+
 def test_disabling_web_does_not_mark_module_uninstalled(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.web.enabled = True
