@@ -64,6 +64,29 @@ def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
+def _launchd_target(uid: int | None = None) -> tuple[str, str]:
+    uid = os.getuid() if uid is None else uid
+    domain = f"gui/{uid}"
+    return domain, f"{domain}/{LAUNCH_AGENT_LABEL}"
+
+
+def unload_launch_agent(*, uid: int | None = None) -> None:
+    _, target = _launchd_target(uid)
+    _launchctl("bootout", target, check=False)
+    for _ in range(_BOOTOUT_ATTEMPTS):
+        probe = _launchctl("print", target, check=False)
+        if probe.returncode != 0:
+            return
+        time.sleep(_BOOTOUT_POLL_SECONDS)
+    raise RuntimeError(f"launchd job {target} did not unload after bootout")
+
+
+def load_launch_agent(plist: Path, *, uid: int | None = None) -> None:
+    domain, target = _launchd_target(uid)
+    _launchctl("bootstrap", domain, str(plist))
+    _launchctl("enable", target)
+
+
 def reload_launch_agent(plist: Path, *, uid: int | None = None) -> None:
     """Unload the current launchd job and load the installed plist.
 
@@ -71,19 +94,8 @@ def reload_launch_agent(plist: Path, *, uid: int | None = None) -> None:
     ProgramArguments or other plist changes. install.sh uses bootout + bootstrap
     for the same reason.
     """
-    uid = os.getuid() if uid is None else uid
-    domain = f"gui/{uid}"
-    target = f"{domain}/{LAUNCH_AGENT_LABEL}"
-    _launchctl("bootout", target, check=False)
-    for _ in range(_BOOTOUT_ATTEMPTS):
-        probe = _launchctl("print", target, check=False)
-        if probe.returncode != 0:
-            break
-        time.sleep(_BOOTOUT_POLL_SECONDS)
-    else:
-        raise RuntimeError(f"launchd job {target} did not unload after bootout")
-    _launchctl("bootstrap", domain, str(plist))
-    _launchctl("enable", target)
+    unload_launch_agent(uid=uid)
+    load_launch_agent(plist, uid=uid)
 
 
 def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
@@ -95,10 +107,12 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
     """
     base = (base or Path.home() / ".agent-harness").expanduser()
     home = (home or Path.home()).expanduser()
+    plist_target = home / "Library" / "LaunchAgents" / "dev.agent-harness.runner.plist"
     base.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=".update-", dir=str(base)))
     moved: list[tuple[Path, Path]] = []
     installed: list[Path] = []
+    launchd_unloaded = False
     result = {"ok": False, "version": "", "at": time.time(), "message": "update did not complete"}
     try:
         manifest_url = urllib.parse.urljoin(server.rstrip("/") + "/", "mac-client/manifest.json")
@@ -134,7 +148,6 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
             shutil.copy2(client_config, client_new / "config.json")
 
         targets = [(runner_new, base / "runner" / "app"), (client_new, base / "client")]
-        plist_target = home / "Library" / "LaunchAgents" / "dev.agent-harness.runner.plist"
         plist_new = work / "plist.new"
         plist_text = (extracted / "dev.agent-harness.runner.plist").read_text(encoding="utf-8")
         plist_text = plist_text.replace("__HOME__", str(home)).replace(
@@ -153,7 +166,9 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
             installed.append(target)
 
         if restart:
-            reload_launch_agent(plist_target)
+            unload_launch_agent()
+            launchd_unloaded = True
+            load_launch_agent(plist_target)
         result = {"ok": True, "version": str(manifest["version"]), "build_id": manifest.get("build_id", ""),
                   "at": time.time(), "message": "Mac client updated"}
         _write_result(base, result)
@@ -168,7 +183,13 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
         for prior, target in reversed(moved):
             if prior.exists():
                 os.replace(prior, target)
-        result.update({"at": time.time(), "message": f"update failed; prior client preserved: {exc}"})
+        message = f"update failed; prior client preserved: {exc}"
+        if launchd_unloaded and plist_target.is_file():
+            try:
+                reload_launch_agent(plist_target)
+            except Exception as reload_exc:
+                message = f"{message}; restored launchd job failed to reload: {reload_exc}"
+        result.update({"at": time.time(), "message": message})
         _write_result(base, result)
         raise RuntimeError(result["message"]) from exc
     finally:

@@ -170,13 +170,18 @@ def fake_download(monkeypatch, *, bad_hash: bool = False):
     monkeypatch.setattr(updater, "_download", download)
 
 
-def fake_launchctl(monkeypatch, *, fail_on: str | None = None, print_loaded: bool = False):
+def fake_launchctl(monkeypatch, *, fail_on: str | None = None, print_loaded: bool = False,
+                   fail_times: int | None = None):
     calls = []
+    remaining = fail_times
 
     def run(args, **kwargs):
+        nonlocal remaining
         calls.append(list(args))
         command = args[1] if len(args) > 1 else ""
-        if fail_on and command == fail_on:
+        if fail_on and command == fail_on and (remaining is None or remaining > 0):
+            if remaining is not None:
+                remaining -= 1
             raise subprocess.CalledProcessError(1, args)
         if command == "print" and not print_loaded:
             return subprocess.CompletedProcess(args, 1)
@@ -229,14 +234,40 @@ def test_mac_update_hash_failure_and_restart_failure_preserve_prior_runtime(tmp_
     assert "prior client preserved" in recorded["message"]
 
 
+def test_mac_update_reload_failure_restores_prior_plist_into_launchd(tmp_path, monkeypatch):
+    home, base = installed_runtime(tmp_path)
+    fake_download(monkeypatch)
+    plist = home / "Library/LaunchAgents/dev.agent-harness.runner.plist"
+    bootout = ["launchctl", "bootout", "gui/501/dev.agent-harness.runner"]
+    probe = ["launchctl", "print", "gui/501/dev.agent-harness.runner"]
+    bootstrap = ["launchctl", "bootstrap", "gui/501", str(plist)]
+    enable = ["launchctl", "enable", "gui/501/dev.agent-harness.runner"]
+    reload = [bootout, probe, bootstrap, enable]
+    expected = {
+        "bootstrap": [bootout, probe, bootstrap] + reload,
+        "enable": reload + reload,
+    }
+    for command, want in expected.items():
+        calls = fake_launchctl(monkeypatch, fail_on=command, fail_times=1)
+        with pytest.raises(RuntimeError, match="prior client preserved"):
+            updater.apply_update("https://tower.example", base, home=home)
+        assert (base / "runner/app/old.txt").read_text() == "old runner"
+        assert plist.read_text() == "old plist"
+        assert json.loads((base / "client/config.json").read_text())["token"] == "owner-secret"
+        recorded = json.loads((base / "runner/last-update.json").read_text())
+        assert recorded["ok"] is False
+        assert calls == want
+
+
 def test_mac_update_stuck_launchd_job_is_not_reported_ok(tmp_path, monkeypatch):
     home, base = installed_runtime(tmp_path)
     fake_download(monkeypatch)
-    fake_launchctl(monkeypatch, print_loaded=True)
+    calls = fake_launchctl(monkeypatch, print_loaded=True)
     with pytest.raises(RuntimeError, match="did not unload after bootout"):
         updater.apply_update("https://tower.example", base, home=home)
     assert (base / "runner/app/old.txt").read_text() == "old runner"
     assert json.loads((base / "runner/last-update.json").read_text())["ok"] is False
+    assert [call[1] for call in calls] == ["bootout"] + ["print"] * 5
 
 
 def test_interrupted_mac_update_staging_leaves_runtime_and_credentials_untouched(tmp_path, monkeypatch):
