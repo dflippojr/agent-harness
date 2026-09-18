@@ -621,6 +621,32 @@ def test_isolated_refresh_origin_refuses_rewritten_origin(tmp_path):
         assert "account-local" in isolated_refresh_origin(ws, root)
 
 
+def test_isolated_refresh_origin_stops_when_fetch_exceeds_max_bytes(tmp_path):
+    """A later fetch must not grow a member workspace past remaining quota (same class as clone caps)."""
+    from harness.fileops import dir_size
+
+    root = tmp_path / "user"
+    src = root / "repos" / "notes"
+    src.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+    (src / "small.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "small"],
+                   check=True)
+    dest = root / "workspaces" / "sessrf02"
+    isolated_prepare(dest, src, "sessrf02", root / "workspaces")
+    before = dir_size(dest)
+    (src / "blob.bin").write_bytes(os.urandom(80_000))
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "big"],
+                   check=True)
+    err = isolated_refresh_origin(dest, root, max_bytes=before + 2_000)
+    assert err, "uncapped fetch would grow the workspace by the new origin blob"
+    assert "quota" in err.lower()
+    assert dest.exists()
+    assert (dest / "small.txt").exists()
+
+
 def test_quota_ignores_links_and_cleanup_stays_contained(tmp_path):
     client, m = household(tmp_path)
     with client:
@@ -844,6 +870,47 @@ def test_member_workspace_clone_budget_is_remaining_quota(tmp_path):
         owner_ws = m.runner.workspace(owner_row)
         assert not owner_ws.public_clone_only
         assert owner_ws.clone_max_bytes is None
+
+
+def test_member_refresh_passes_remaining_quota_as_max_bytes(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        alice = create_member(client, ALICE, "Alice", disk_quota_bytes=100_000)
+        uid = alice["user_id"]
+        sid = "membudg02"
+        ws_path = workspaces_dir(m.cfg, uid) / sid
+        ws_path.mkdir(parents=True, exist_ok=True)
+        (ws_path / "keep.txt").write_text("stay", encoding="utf-8")
+        repo = repos_dir(m.cfg, uid) / "notes"
+        repo.mkdir(parents=True, exist_ok=True)
+        m.db.insert_member_project({
+            "user_id": uid, "slug": "notes", "description": "", "repo": str(repo), "source_url": "",
+        })
+        now = 1_700_000_000.0
+        m.db.insert_session({
+            "id": sid, "project": "notes", "target": "tower", "model": "fake", "backend": "local",
+            "title": sid, "status": "queued", "workspace": str(ws_path), "created_at": now, "updated_at": now,
+            "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": uid,
+            "base_commit": "abc123",
+        })
+        seen = {}
+
+        def fake_refresh(workspace, root, max_bytes=None):
+            seen["max_bytes"] = max_bytes
+            seen["workspace"] = workspace
+            return ""
+
+        import harness.clone as clone_mod
+        orig = clone_mod.isolated_refresh_origin
+        clone_mod.isolated_refresh_origin = fake_refresh
+        try:
+            asyncio.run(m.runner._prepare_repo(m.db.get_session(sid)))
+        finally:
+            clone_mod.isolated_refresh_origin = orig
+        from harness.fileops import dir_size
+        remaining = 100_000 - account_usage_bytes(m.cfg, uid)
+        assert seen["workspace"] == ws_path
+        assert seen["max_bytes"] == remaining + dir_size(ws_path)
 
 
 def test_member_approval_cannot_grant_owner_only_tool(tmp_path):

@@ -1262,8 +1262,12 @@ class Runner:
                 error = await self.hub.call(s["target"], "refresh_origin", {"session": s["id"]}, timeout=400)
             elif member:
                 from . import clone, storage
+                from .fileops import dir_size
+                uid = session_user_id(s)
+                remaining = self._member_clone_budget(uid)
+                cap = None if remaining is None else remaining + dir_size(ws)
                 error = await asyncio.to_thread(
-                    clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, session_user_id(s)))
+                    clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, uid), cap)
             else:
                 error = await asyncio.to_thread(projects.refresh_origin, ws)
             if error:

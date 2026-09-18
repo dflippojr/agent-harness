@@ -124,8 +124,12 @@ def clone_public(url: str, dest: Path, root: Path, max_bytes: int | None = None)
 
 
 def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
-               max_bytes: int | None = None) -> GitResult:
-    """Run an isolated git clone, optionally killing it if `dest` grows past `max_bytes`."""
+               max_bytes: int | None = None, remove_on_fail: bool = True) -> GitResult:
+    """Run an isolated git clone, optionally killing it if `dest` grows past `max_bytes`.
+
+    Fetch into an existing workspace passes `remove_on_fail=False` so a quota kill does not
+    delete the session tree.
+    """
     import subprocess
     import threading
     import time
@@ -169,7 +173,8 @@ def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
     except subprocess.TimeoutExpired:
         stop()
         stdout, stderr = proc.communicate()
-        _remove_tree(dest)
+        if remove_on_fail:
+            _remove_tree(dest)
         raise GitError("clone timed out") from None
     if max_bytes is not None:
         watcher.join(timeout=2)
@@ -177,10 +182,12 @@ def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
     result = GitResult(proc.returncode or 0, stdout or "", stderr or "")
     size = dir_size(dest) if dest.exists() else 0
     if over or (max_bytes is not None and size > max_bytes):
-        _remove_tree(dest)
+        if remove_on_fail:
+            _remove_tree(dest)
         raise QuotaExceeded(max_bytes or 0)
     if proc.returncode != 0:
-        _remove_tree(dest)
+        if remove_on_fail:
+            _remove_tree(dest)
         raise GitError(f"could not clone: {result.text[-1500:]}")
     return result
 
@@ -277,7 +284,7 @@ def _member_origin_allowed(origin: str, root: Path) -> bool:
         return False
 
 
-def isolated_refresh_origin(workspace: Path, root: Path) -> str:
+def isolated_refresh_origin(workspace: Path, root: Path, max_bytes: int | None = None) -> str:
     """Fetch origin without owner git helpers or credentials. Returns an error or ''."""
     require_contained(workspace, root)
     try:
@@ -286,8 +293,14 @@ def isolated_refresh_origin(workspace: Path, root: Path) -> str:
         return str(e)[-500:]
     if not _member_origin_allowed(origin, root):
         return "origin is not a public or account-local repository"
+    cmd = [
+        "git", "-c", f"safe.directory={workspace.as_posix()}", "-c", "credential.helper=",
+        "-c", "core.askPass=", "-C", str(workspace), "fetch", "--quiet", "--prune", "origin",
+    ]
     try:
-        _isolated_git(workspace, "fetch", "--quiet", "--prune", "origin", timeout=300)
+        _run_clone(cmd, workspace, timeout=300, max_bytes=max_bytes, remove_on_fail=False)
+    except QuotaExceeded as e:
+        return str(e)
     except GitError as e:
         return str(e)[-500:]
     return ""
