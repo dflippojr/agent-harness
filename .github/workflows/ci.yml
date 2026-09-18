@@ -1,7 +1,10 @@
 name: CI
 
+# Feature-branch pushes without a PR do not run. `pull_request` covers open and
+# later commits on a PR (`synchronize`); `push` to main still runs after merge.
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
