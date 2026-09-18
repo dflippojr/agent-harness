@@ -2322,6 +2322,37 @@ function backupLine(b) {
     failed ? ` · last attempt failed: ${b.error}` : "");
 }
 
+function imageArchiveBlock(a, reload) {
+  if (!a || !a.enabled) return null;
+  const count = Number(a.archived || 0);
+  const bytes = Number(a.bytes || 0);
+  const warning = a.free_space_warning || (a.errors ? `${a.errors} image archive error${a.errors === 1 ? "" : "s"}` : "");
+  const summary = h("div", {},
+    h("p", { class: `small${warning ? " bad" : ""}` },
+      h("strong", {}, "Image archive"), " ",
+      `${count} image${count === 1 ? "" : "s"} · ${Math.round(bytes / 2 ** 20)} MB · ${a.path}`),
+    a.last_reconciliation ? h("p", { class: "muted small" },
+      `Reconciled ${ago(a.last_reconciliation)} · ${a.missing || 0} missing · ${a.errors || 0} errors`) : null,
+    warning ? h("p", { class: "note bad" }, warning) : null);
+  if (!a.retention_days) return summary;
+  return h("div", {}, summary,
+    h("button", { class: "btn secondary", onclick: async (ev) => {
+      ev.target.disabled = true;
+      try {
+        const p = await api("/maintenance/image-archive/retention/preview", { method: "POST" });
+        if (!p.count) { toast("No archived images are old enough to remove"); return; }
+        const size = Math.round(p.bytes / 2 ** 20);
+        if (!confirm(`Permanently remove ${p.count} archived image${p.count === 1 ? "" : "s"} (${size} MB)? Live gallery images are not deleted.`)) return;
+        const r = await api("/maintenance/image-archive/retention/apply", {
+          method: "POST", body: JSON.stringify({ confirmation: p.confirmation }),
+        });
+        toast(`Removed ${r.removed} archived image${r.removed === 1 ? "" : "s"} (${Math.round(r.bytes / 2 ** 20)} MB)`);
+        reload();
+      } catch (e) { toast(e.message); }
+      finally { ev.target.disabled = false; }
+    } }, `Review ${a.retention_days}-day image retention`));
+}
+
 function gpuText(g) {
   const why = (g.reasons || []).map((r) => r.detail).filter((d, i, a) => a.indexOf(d) === i).join(", ") || "GPU busy";
   if (g.manual) {
@@ -2705,6 +2736,7 @@ function diskCard() {
         fact("Workspaces", `${mb(u.workspaces_mb)} · ${u.workspaces.length} session${u.workspaces.length === 1 ? "" : "s"} · ${u.quota_mb} MB quota each`),
         fact("Sandboxes", `${u.containers.length} container${u.containers.length === 1 ? "" : "s"}`),
         backupLine(u.backup),
+        isGuest() ? null : imageArchiveBlock(u.image_archive, load),
         top.length ? h("p", { class: "muted small", style: "margin-top:10px" }, "Largest workspaces") : null,
         top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null);
       fill(body,

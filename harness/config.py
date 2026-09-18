@@ -119,6 +119,8 @@ class BackupConfig:
     dir: str = "D:/My Backups/agent-harness"
     at: str = "03:30"        # local time
     keep_days: int = 14
+    image_archive_keep_days: int = 0       # owner-triggered retention only; 0 keeps images indefinitely
+    image_archive_min_free_gb: float = 1   # warn without invalidating a database snapshot
 
 
 @dataclass

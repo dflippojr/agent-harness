@@ -235,6 +235,12 @@ MIGRATIONS = [
     ("templates", "backend", TEXT_LOCAL),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    # Issue #86: durable image archive state. The canonical digest detects later source corruption.
+    ("images", "sha256", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("images", "archived_at", "REAL"),
+    ("images", "archive_error", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_deleted_at", "REAL"),
     # Issue #87: opt-in Real-ESRGAN derived images keep the original PNG unchanged.
     ("images", "parent_id", TEXT_EMPTY),
     ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
@@ -638,6 +644,11 @@ class Database:
             params = list(status)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
+        return [dict(r) for r in rows]
+
+    def images_for_archive(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM images WHERE status = 'done' ORDER BY created_at, id").fetchall()
         return [dict(r) for r in rows]
 
     def find_image_upscale(self, parent_id: str, upscale: str) -> dict | None:
