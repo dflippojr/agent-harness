@@ -349,20 +349,39 @@ def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx
     own_client = client is None
     timeout = timeout if timeout is not None else httpx.Timeout(60.0, read=600.0)
     client = client or httpx.Client(timeout=timeout, follow_redirects=True, headers=_headers())
+
+    def promote(*, resumed: bool) -> dict:
+        actual = part.stat().st_size
+        if actual != size:
+            part.unlink(missing_ok=True)
+            raise RuntimeError(f"{dest.name} size {actual} != {size}; partial file removed")
+        digest = sha256_file(part, size)
+        if digest.lower() != sha256.lower():
+            part.unlink(missing_ok=True)
+            raise RuntimeError(f"{dest.name} SHA-256 mismatch; partial file removed")
+        os.replace(part, dest)
+        return {"path": str(dest), "bytes": size, "sha256": digest, "resumed": resumed}
+
     try:
         have = part.stat().st_size if part.is_file() else 0
         if have > size:
             part.unlink(missing_ok=True)
             have = 0
+        if have == size:
+            # Finished streaming but crashed before os.replace: do not Range past EOF (HTTP 416).
+            return promote(resumed=True)
         headers = dict(_headers())
         if have:
             headers["Range"] = f"bytes={have}-"
         log.info("downloading %s (%s bytes, resume %s)", redact_url(url), size, have)
         with client.stream("GET", url, headers=headers) as resp:
             if resp.status_code == 416:
-                have = 0
+                have_now = part.stat().st_size if part.is_file() else 0
+                if have_now == size:
+                    return promote(resumed=True)
                 part.unlink(missing_ok=True)
-            elif resp.status_code not in (200, 206):
+                raise RuntimeError(f"download failed HTTP 416 for {redact_url(url)}")
+            if resp.status_code not in (200, 206):
                 raise RuntimeError(f"download failed HTTP {resp.status_code} for {redact_url(url)}")
             if have and resp.status_code == 200:
                 have = 0
@@ -375,16 +394,7 @@ def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx
                     if chunk:
                         fh.write(chunk)
                         have += len(chunk)
-        actual = part.stat().st_size
-        if actual != size:
-            part.unlink(missing_ok=True)
-            raise RuntimeError(f"{dest.name} size {actual} != {size}; partial file removed")
-        digest = sha256_file(part, size)
-        if digest.lower() != sha256.lower():
-            part.unlink(missing_ok=True)
-            raise RuntimeError(f"{dest.name} SHA-256 mismatch; partial file removed")
-        os.replace(part, dest)
-        return {"path": str(dest), "bytes": size, "sha256": digest, "resumed": bool(headers.get("Range"))}
+        return promote(resumed=bool(headers.get("Range")))
     finally:
         if own_client:
             client.close()
