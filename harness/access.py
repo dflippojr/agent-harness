@@ -1,4 +1,4 @@
-"""Tailscale login roles for the Control Center: owner vs time-boxed guest.
+"""Tailscale login roles for Agent Harness Web: owner vs time-boxed guest.
 
 The PWA is an owner console. `allowed_logins` is the owner allowlist. `guests` lets a named
 tailnet login look around for a limited time without owner powers. Guests are ignored when

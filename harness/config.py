@@ -211,6 +211,10 @@ class ImagesConfig:
     linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
+    upscale_dir: str = ""                      # Real-ESRGAN weights; empty → <comfy_dir>/ComfyUI/models/upscale_models
+    upscale_max_pixels: int = 36_000_000       # refuse 2×/4× outputs above this before allocating
+    upscale_tile: int = 512                    # ComfyUI ImageUpscaleWithModel starting tile
+    upscale_overlap: int = 32
 
 
 @dataclass
@@ -257,13 +261,13 @@ class Project:
     web: bool = True             # give sessions web_search / web_fetch (when web is enabled)
     images: bool = True          # give sessions generate_image (when images is enabled)
     session_search: bool = True  # give sessions session_search / session_read (when search is enabled)
-    owner_id: str = "owner"     # stable v1 Control Center owner scope
+    owner_id: str = "owner"     # stable v1 Agent Harness Web owner scope
     managed: bool = False        # loaded from data_dir/projects.yaml rather than checked-in config
 
 
 @dataclass
 class GuestAccess:
-    """Time-boxed read-only Control Center access for a tailnet login that is not the owner."""
+    """Time-boxed read-only Agent Harness Web access for a tailnet login that is not the owner."""
     login: str
     until: str = ""  # ISO-8601 datetime; empty means until the entry is removed from config
 
