@@ -1,49 +1,40 @@
-name: SonarQube
+name: SonarCloud
 
-# Tower-only scan. The self-hosted runner can reach SonarQube on localhost;
-# GitHub-hosted runners must not. Community Build does not decorate PRs;
-# this check is the public signal. Do not comment dashboard URLs on PRs.
-# Same trigger as CI: skip feature-branch pushes until a PR exists.
+# SonarCloud (free for this public repo) on GitHub-hosted runners: real pull
+# request analysis, so the quality gate judges only what a PR changes against
+# its base, and nothing queues on the tower runner. Automatic analysis is
+# turned off in SonarCloud; this workflow is the analysis. The job id stays
+# `sonar` so the check keeps its name.
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
-  group: sonar-${{ github.ref }}
+  group: sonar-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   sonar:
-    # Shared Sonar project + localhost:9000. Keep this off the pytest runner.
-    runs-on: [self-hosted, Windows, X64, agent-harness-tower]
-    continue-on-error: true
+    runs-on: ubuntu-latest
+    # Secrets are not passed to pull requests from forks; skip rather than fail.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
         with:
+          # Full history so SonarCloud can blame lines and find the PR base.
           fetch-depth: 0
 
-      - name: Scan with SonarQube
+      - name: Scan with SonarCloud
+        uses: SonarSource/sonarqube-scan-action@v8
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-        shell: powershell
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:SONAR_TOKEN)) {
-            Write-Host 'SONAR_TOKEN is not set; skipping scan.'
-            exit 0
-          }
-          $hostUrl = $env:SONAR_HOST_URL
-          if ([string]::IsNullOrWhiteSpace($hostUrl)) {
-            $hostUrl = 'http://host.docker.internal:9000'
-          }
-          docker run --rm `
-            -e "SONAR_HOST_URL=$hostUrl" `
-            -e "SONAR_TOKEN=$env:SONAR_TOKEN" `
-            -v "${PWD}:/usr/src" `
-            sonarsource/sonar-scanner-cli:11 `
-            "-Dsonar.qualitygate.wait=true"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "SonarQube scan or quality gate failed with exit $LASTEXITCODE (non-blocking)."
-            exit $LASTEXITCODE
-          }
+          SONAR_TOKEN: ${{ secrets.SONARCLOUD_TOKEN }}
+        with:
+          args: >
+            -Dsonar.host.url=https://sonarcloud.io
+            -Dsonar.qualitygate.wait=true
