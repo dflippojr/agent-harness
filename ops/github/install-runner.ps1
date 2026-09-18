@@ -4,9 +4,9 @@
 
 .DESCRIPTION
   The registration token is used once and is not saved. Default values install
-  the original tower runner (SonarQube + automated review). Pass -Labels
+  the original tower runner (tower-only jobs). Pass -Labels
   agent-harness-ci and a distinct -InstallDir / -Name / -TaskName for the
-  pytest-only runner so those jobs do not share a queue with Sonar/review.
+  pytest-only runner so those jobs do not share a queue with other tower jobs.
 
 .EXAMPLE
   $token = gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
