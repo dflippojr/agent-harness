@@ -107,6 +107,7 @@ class SkillReviewer:
         self._current: asyncio.Task | None = None
         self._wake = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._stopping = False
 
     def enqueue(self, proposal_id: str, content_hash: str, mode: str = "local") -> dict:
         job = {
@@ -129,11 +130,13 @@ class SkillReviewer:
 
     def start(self) -> None:
         self.reconcile()
+        self._stopping = False
         self._loop = asyncio.get_running_loop()
         if self._task is None:
             self._task = asyncio.create_task(self._loop_main(), name="skill-review")
 
     async def stop(self) -> None:
+        self._stopping = True
         if self._current:
             self._current.cancel()
         if self._task:
@@ -196,6 +199,10 @@ class SkillReviewer:
             watcher = asyncio.create_task(self._preempt_if_busy(job, self._current))
             try:
                 await self._current
+            except asyncio.CancelledError:
+                if self._stopping:
+                    raise
+                # Child task was GPU-preempted; this loop task is still wanted.
             finally:
                 watcher.cancel()
                 self._current = None
@@ -238,8 +245,11 @@ class SkillReviewer:
             self.db.update_skill_proposal(job["proposal_id"], review=findings, review_status="done",
                                           status="reviewed" if proposal["status"] == "validated" else proposal["status"])
         except asyncio.CancelledError:
-            self.db.update_skill_review_job(job["id"], status="queued", error="preempted by real GPU work")
-            self.db.update_skill_proposal(job["proposal_id"], review_status="queued")
+            # GPU preempt: requeue local work immediately. stop() and hosted cancels
+            # leave status=running so reconcile() applies daemon-restart policy.
+            if job["mode"] == "local" and not self._stopping:
+                self.db.update_skill_review_job(job["id"], status="queued", error="preempted by real GPU work")
+                self.db.update_skill_proposal(job["proposal_id"], review_status="queued")
             raise
         except Exception as exc:
             log.info("skill review %s failed: %s", job["id"], exc)

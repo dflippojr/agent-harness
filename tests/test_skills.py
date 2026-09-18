@@ -34,6 +34,12 @@ EXAMPLES = [
     {"prompt": "I added login tests", "expected": "test: add login coverage"},
     {"prompt": "fixed the queue crash", "expected": "fix: prevent queue crash on empty waiters"},
 ]
+APPROVE_REVIEW = json.dumps({
+    "scope": {"ok": True, "notes": ""}, "trigger_precision": {"ok": True, "notes": ""},
+    "conflicts": {"ok": True, "notes": ""}, "prompt_injection": {"ok": True, "notes": ""},
+    "sensitive_data": {"ok": True, "notes": ""}, "examples": {"ok": True, "notes": ""},
+    "recommendation": "approve", "summary": "Looks like a commit helper.",
+})
 
 
 def bundle(**overrides):
@@ -619,6 +625,161 @@ def test_background_review_only_at_idle_and_preempts(tmp_path):
         db.update_skill_review_job(jobs[0]["id"], status="running")
         reviewer.reconcile()
         assert db.list_skill_review_jobs()[0]["status"] in ("queued", "done", "error")
+
+    asyncio.run(body())
+
+
+def test_gpu_preempt_keeps_review_loop_alive(tmp_path):
+    """GPU preemption must requeue the local job without killing the skill-review task."""
+    db = Database(tmp_path / "harness.sqlite3")
+    idle = {"value": True}
+    runs = {"n": 0}
+    started = asyncio.Event()
+
+    async def chat(model, messages, tools=None, **kwargs):
+        runs["n"] += 1
+        started.set()
+        if runs["n"] == 1:
+            await asyncio.sleep(3600)
+        return Completion(content=APPROVE_REVIEW)
+
+    async def body():
+        reviewer = SkillReviewer(SkillsConfig(enabled=True, local_review=True), db, idle=lambda: idle["value"],
+                                 model=make_cfg(tmp_path).models["fake"], chat=chat, local_review=True)
+        store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox,
+                           reviewer=reviewer)
+        reviewer.start()
+        store._propose_locked(bundle(), "s1")
+        await asyncio.wait_for(started.wait(), timeout=3)
+        idle["value"] = False
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if reviewer._task.done():
+                break
+            jobs = db.list_skill_review_jobs()
+            if jobs and jobs[0]["status"] == "queued" and "preempted by real GPU work" in (jobs[0].get("error") or ""):
+                break
+            await asyncio.sleep(0.05)
+        assert reviewer._task is not None and not reviewer._task.done()
+        job = db.list_skill_review_jobs()[0]
+        assert job["status"] == "queued"
+        assert "preempted by real GPU work" in job["error"]
+        started.clear()
+        idle["value"] = True
+        reviewer._wake.set()
+        await asyncio.wait_for(started.wait(), timeout=3)
+        assert runs["n"] == 2
+        deadline = time.time() + 3
+        while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] != "done":
+            await asyncio.sleep(0.05)
+        assert db.list_skill_review_jobs()[0]["status"] == "done"
+        await reviewer.stop()
+
+    asyncio.run(body())
+
+
+def test_stop_does_not_requeue_hosted_review_as_gpu_preempt(tmp_path):
+    """Daemon stop must not treat hosted review cancellation as a local GPU preempt."""
+    db = Database(tmp_path / "harness.sqlite3")
+    started = asyncio.Event()
+    calls = []
+
+    async def hosted_chat(messages):
+        calls.append("run")
+        started.set()
+        await asyncio.sleep(3600)
+        return Completion(content=APPROVE_REVIEW)
+
+    async def body():
+        reviewer = SkillReviewer(
+            SkillsConfig(enabled=True, local_review=False, reviewer_base_url="https://example.invalid",
+                         reviewer_model="hosted-reviewer"),
+            db, idle=lambda: True, hosted_chat=hosted_chat, local_review=False,
+        )
+        store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox)
+        store._propose_locked(bundle(), "s1")
+        row = db.list_skill_proposals()[0]
+        reviewer.start()
+        reviewer.enqueue(row["id"], row["content_hash"], mode="hosted")
+        await asyncio.wait_for(started.wait(), timeout=3)
+        await reviewer.stop()
+        job = db.list_skill_review_jobs()[0]
+        assert job["status"] == "running"
+        assert "preempted by real GPU work" not in (job.get("error") or "")
+        started.clear()
+        reviewer.start()
+        await asyncio.sleep(0.4)
+        job = db.list_skill_review_jobs()[0]
+        assert job["status"] == "error"
+        assert "owner may retry" in job["error"]
+        assert db.skill_proposal(row["id"])["review_status"] == "error"
+        assert calls == ["run"]
+        await reviewer.stop()
+
+    asyncio.run(body())
+
+
+def test_stop_leaves_local_review_running_for_reconcile(tmp_path):
+    """stop() is daemon shutdown, not GPU preemption; reconcile() requeues local jobs."""
+    db = Database(tmp_path / "harness.sqlite3")
+    started = asyncio.Event()
+
+    async def chat(model, messages, tools=None, **kwargs):
+        started.set()
+        await asyncio.sleep(3600)
+        return Completion(content=APPROVE_REVIEW)
+
+    async def body():
+        reviewer = SkillReviewer(SkillsConfig(enabled=True, local_review=True), db, idle=lambda: True,
+                                 model=make_cfg(tmp_path).models["fake"], chat=chat, local_review=True)
+        store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox,
+                           reviewer=reviewer)
+        reviewer.start()
+        store._propose_locked(bundle(), "s1")
+        await asyncio.wait_for(started.wait(), timeout=3)
+        await reviewer.stop()
+        job = db.list_skill_review_jobs()[0]
+        assert job["status"] == "running"
+        assert "preempted by real GPU work" not in (job.get("error") or "")
+        reviewer.reconcile()
+        job = db.list_skill_review_jobs()[0]
+        assert job["status"] == "queued"
+        assert "daemon restart" in job["error"]
+        assert db.list_skill_proposals()[0]["review_status"] == "queued"
+
+    asyncio.run(body())
+
+
+def test_hosted_review_ignores_gpu_busy(tmp_path):
+    """Hosted reviews are owner-initiated quota spend; GPU busy must not cancel them."""
+    db = Database(tmp_path / "harness.sqlite3")
+    idle = {"value": True}
+    started = asyncio.Event()
+
+    async def hosted_chat(messages):
+        started.set()
+        idle["value"] = False
+        await asyncio.sleep(0.6)
+        return Completion(content=APPROVE_REVIEW)
+
+    async def body():
+        reviewer = SkillReviewer(
+            SkillsConfig(enabled=True, local_review=False, reviewer_base_url="https://example.invalid",
+                         reviewer_model="hosted-reviewer"),
+            db, idle=lambda: idle["value"], hosted_chat=hosted_chat, local_review=False,
+        )
+        store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox)
+        store._propose_locked(bundle(), "s1")
+        row = db.list_skill_proposals()[0]
+        reviewer.start()
+        reviewer.enqueue(row["id"], row["content_hash"], mode="hosted")
+        await asyncio.wait_for(started.wait(), timeout=3)
+        deadline = time.time() + 3
+        while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] != "done":
+            await asyncio.sleep(0.05)
+        assert db.list_skill_review_jobs()[0]["status"] == "done"
+        assert reviewer._task is not None and not reviewer._task.done()
+        await reviewer.stop()
 
     asyncio.run(body())
 
