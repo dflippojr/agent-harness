@@ -24,6 +24,7 @@ concurrency:
 
 jobs:
   review:
+    # Claude Code login on the original tower runner. Do not share with pytest.
     runs-on: [self-hosted, Windows, X64, agent-harness-tower]
     steps:
       - uses: actions/checkout@v4
