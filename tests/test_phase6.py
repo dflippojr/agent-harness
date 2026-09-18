@@ -286,6 +286,108 @@ def test_inference_gate_endpoint_first_with_fairness():
     asyncio.run(body())
 
 
+async def _wait_until(predicate, timeout=2):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out waiting for gate state")
+
+
+def test_inference_gate_queued_endpoint_refused_when_exclusive():
+    """A request already queued behind a starved agent must not enter once images hold the GPU."""
+    from harness.scheduler import GpuExclusive, InferenceGate
+
+    async def body():
+        gate = InferenceGate(fair_seconds=0)  # fairness is immediate; no GPU or model server
+        initial = await gate.endpoint_request()
+        assert gate.endpoint_active == 1
+
+        agent_task = asyncio.create_task(gate.agent_turn())
+        await _wait_until(lambda: bool(gate._agent_waiting_since))
+        endpoint_task = asyncio.create_task(gate.endpoint_request())
+        await _wait_until(lambda: gate.endpoint_waiting == 1)
+
+        exclusive_task = asyncio.create_task(gate.acquire_exclusive())
+        await _wait_until(lambda: gate.exclusive_waiting == 1)
+        assert not (gate.exclusive_active and gate.endpoint_active)
+
+        await initial.release()
+        exclusive = await asyncio.wait_for(exclusive_task, 2)
+        assert gate.exclusive_active is True
+        assert gate.endpoint_active == 0
+
+        agent_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await agent_task
+        assert not gate._agent_waiting_since
+        assert gate.agent_active == 0
+
+        with pytest.raises(GpuExclusive):
+            await asyncio.wait_for(endpoint_task, 2)
+        assert gate.exclusive_active is True
+        assert gate.endpoint_active == 0
+        assert gate.endpoint_waiting == 0
+        assert gate.agent_active == 0
+
+        await exclusive.release()
+        slot = await gate.endpoint_request()
+        assert gate.endpoint_active == 1 and not gate.exclusive
+        await slot.release()
+    asyncio.run(body())
+
+
+def test_inference_gate_cancellation_and_exclusive_rejection_counters():
+    from harness.scheduler import GpuExclusive, InferenceGate, QueueFull
+
+    async def body():
+        gate = InferenceGate(max_waiting=2, fair_seconds=90)
+
+        busy = await gate.agent_turn()
+        waiting = asyncio.create_task(gate.endpoint_request())
+        await _wait_until(lambda: gate.endpoint_waiting == 1)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+
+        queued = asyncio.create_task(gate.endpoint_request())
+        await _wait_until(lambda: gate.endpoint_waiting == 1)
+        extra = asyncio.create_task(gate.endpoint_request())
+        await _wait_until(lambda: gate.endpoint_waiting == 2)
+        with pytest.raises(QueueFull):
+            await gate.endpoint_request()
+        extra.cancel()
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await extra
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+        await busy.release()
+
+        exclusive = await gate.acquire_exclusive()
+        with pytest.raises(GpuExclusive):
+            await gate.endpoint_request()
+        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+        agent = asyncio.create_task(gate.agent_turn())
+        await _wait_until(lambda: bool(gate._agent_waiting_since))
+        agent.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await agent
+        assert not gate._agent_waiting_since and gate.agent_active == 0
+        await exclusive.release()
+        assert not gate.exclusive
+
+        slot = await gate.endpoint_request()
+        await slot.release()
+        turn = await gate.agent_turn()
+        await turn.release()
+        assert gate.endpoint_active == 0 and gate.agent_active == 0
+    asyncio.run(body())
+
+
 # 6d: image generation
 PNG = b"\x89PNG\r\n\x1a\nfake"
 
