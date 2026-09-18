@@ -12,7 +12,7 @@ from typing import Callable
 
 from .config import ModelConfig, SkillsConfig
 from .llm import chat as default_chat
-from .skills import SkillError
+from .skills import REVIEWABLE_STATUSES, SkillError
 
 log = logging.getLogger("harness.skill_review")
 
@@ -164,7 +164,7 @@ class SkillReviewer:
         row = self.db.skill_proposal(proposal_id)
         if row is None:
             raise SkillError(404, "no skill proposal with that id")
-        if row["status"] == "rejected":
+        if row["status"] == "rejected" or self.db.skill_hash_rejected(row["content_hash"]):
             raise SkillError(409, "rejected proposals are not reviewed")
         notice = ("This uses the configured hosted reviewer and counts against that provider's quota. "
                   "It is advisory and cannot install the skill.")
@@ -229,6 +229,10 @@ class SkillReviewer:
         if proposal is None:
             self.db.update_skill_review_job(job["id"], status="error", error="proposal disappeared")
             return
+        if proposal["status"] == "rejected" or self.db.skill_hash_rejected(proposal["content_hash"]):
+            self.db.update_skill_review_job(job["id"], status="error", error="proposal rejected",
+                                            finished_at=time.time())
+            return
         self.db.update_skill_review_job(job["id"], status="running", started_at=time.time())
         self.db.update_skill_proposal(job["proposal_id"], review_status="running")
         try:
@@ -239,11 +243,7 @@ class SkillReviewer:
                 completion = await self.chat(self.model, messages, tools=None, max_tokens=1200, timeout=180)
             text = getattr(completion, "content", None) or str(completion)
             findings = normalize_findings(_extract_json(text))
-            now = time.time()
-            self.db.update_skill_review_job(job["id"], status="done", findings=findings, error="",
-                                            finished_at=now)
-            self.db.update_skill_proposal(job["proposal_id"], review=findings, review_status="done",
-                                          status="reviewed" if proposal["status"] == "validated" else proposal["status"])
+            self._finish_review(job, findings)
         except asyncio.CancelledError:
             # GPU preempt: requeue local work immediately. stop() and hosted cancels
             # leave status=running so reconcile() applies daemon-restart policy.
@@ -257,3 +257,22 @@ class SkillReviewer:
                                             finished_at=time.time())
             self.db.update_skill_proposal(job["proposal_id"], review_status="error",
                                           review={"error": str(exc)[:500], "recommendation": "revise"})
+
+    def _finish_review(self, job: dict, findings: dict) -> None:
+        now = time.time()
+        with self.db.tx() as db:
+            latest = db.skill_proposal(job["proposal_id"])
+            if latest is None:
+                db.update_skill_review_job(job["id"], status="error", error="proposal disappeared",
+                                           finished_at=now)
+                return
+            db.update_skill_review_job(job["id"], status="done", findings=findings, error="",
+                                       finished_at=now)
+            fields = {"review": findings, "review_status": "done"}
+            installable = (latest["status"] in REVIEWABLE_STATUSES
+                           and not db.skill_hash_rejected(latest["content_hash"]))
+            if installable:
+                fields["status"] = "reviewed"
+                if db.update_skill_proposal(job["proposal_id"], expected_status=REVIEWABLE_STATUSES, **fields):
+                    return
+            db.update_skill_proposal(job["proposal_id"], review=findings, review_status="done")

@@ -390,6 +390,73 @@ def test_reject_during_review_stays_rejected_and_reopenable(tmp_path):
     asyncio.run(body())
 
 
+def test_delete_during_review_allows_repropose_and_install(tmp_path):
+    db = Database(tmp_path / "harness.sqlite3")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def chat(model, messages, tools=None, **kwargs):
+        started.set()
+        await release.wait()
+        return Completion(content=APPROVE_REVIEW)
+
+    async def body():
+        reviewer = SkillReviewer(SkillsConfig(enabled=True, local_review=True), db, idle=lambda: True,
+                                 model=make_cfg(tmp_path).models["fake"], chat=chat, local_review=True)
+        store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox,
+                           reviewer=reviewer)
+        reviewer.start()
+        store._propose_locked(bundle(), "s1")
+        await asyncio.wait_for(started.wait(), timeout=3)
+        row = db.list_skill_proposals()[0]
+        store.delete_draft(row["id"])
+        assert db.skill_proposal(row["id"]) is None
+        assert not db.skill_hash_rejected(row["content_hash"])
+        release.set()
+        deadline = time.time() + 3
+        while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] == "running":
+            await asyncio.sleep(0.05)
+        assert db.skill_proposal(row["id"]) is None
+        store._propose_locked(bundle(), "s1")
+        staged = db.list_skill_proposals()[0]
+        assert staged["id"] != row["id"]
+        installed = store.install(staged["id"], staged["content_hash"])
+        assert installed["slug"] == "commit-style"
+        await reviewer.stop()
+
+    asyncio.run(body())
+
+
+def test_review_complete_promotes_validated_when_not_rejected(tmp_path):
+    db = Database(tmp_path / "harness.sqlite3")
+
+    async def chat(model, messages, tools=None, **kwargs):
+        return Completion(content=APPROVE_REVIEW)
+
+    async def body():
+        reviewer = SkillReviewer(SkillsConfig(enabled=True, local_review=True), db, idle=lambda: True,
+                                 model=make_cfg(tmp_path).models["fake"], chat=chat, local_review=True)
+        store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox,
+                           reviewer=reviewer)
+        reviewer.start()
+        store._propose_locked(bundle(), "s1")
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            row = db.list_skill_proposals()[0]
+            if row["status"] == "reviewed" and row["review_status"] == "done":
+                break
+            await asyncio.sleep(0.05)
+        row = db.list_skill_proposals()[0]
+        assert row["status"] == "reviewed"
+        assert row["review"]["recommendation"] == "approve"
+        assert not db.skill_hash_rejected(row["content_hash"])
+        installed = store.install(row["id"], row["content_hash"])
+        assert installed["slug"] == "commit-style"
+        await reviewer.stop()
+
+    asyncio.run(body())
+
+
 def test_failed_validation_cannot_install(tmp_path):
     store = store_for(tmp_path)
     session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}

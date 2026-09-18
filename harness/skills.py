@@ -47,6 +47,25 @@ PROPOSAL_STATUSES = (
     "draft", "validating", "invalid", "validated", "review_pending", "reviewed", "rejected",
     "installed", "superseded",
 )
+# Row status is the proposal lifecycle; skill_rejected is the hash-level install ban.
+# They must stay aligned: a hash is banned iff a live proposal for it is rejected,
+# except inside the transaction that is moving both.
+#
+#   invalid | validated | reviewed | superseded
+#        \        |          /
+#         `--> rejected  (owner reject; writes skill_rejected)
+#                  |
+#              reopened --> validated (or draft if static findings remain); clears skill_rejected
+#                  |
+#              deleted  --> row gone AND skill_rejected cleared (hash may be proposed again)
+#   validated | reviewed --> installed (hash-bound; not if skill_rejected)
+#   review completion may set validated -> reviewed only when the row is still installable
+#   and the hash is not in skill_rejected. Advisory findings may still be stored.
+REJECTABLE_STATUSES = (
+    "draft", "validating", "invalid", "validated", "review_pending", "reviewed", "superseded",
+)
+REVIEWABLE_STATUSES = ("draft", "validating", "validated", "review_pending")
+INSTALL_FROM_STATUSES = REJECTABLE_STATUSES + ("installed",)
 INSTALL_LOCK_NAME = "install.lock"
 
 
@@ -262,8 +281,9 @@ class SkillStore:
         static = validate_bundle(bundle)
         content_hash = static.get("content_hash") or canonical_hash(bundle)
         existing = self.db.skill_proposal_by_hash(content_hash)
+        banned = self.db.skill_hash_rejected(content_hash)
         if existing:
-            if existing["status"] == "rejected":
+            if existing["status"] == "rejected" or banned:
                 return (f"This exact content hash {content_hash[:16]} was already proposed and rejected. "
                         "Change the skill or ask the owner to reopen that proposal. Nothing was installed.")
             live = self.db.skill_installed(existing["slug"])
@@ -272,6 +292,9 @@ class SkillStore:
                         f"(hash {content_hash[:16]}). Nothing was changed.")
             return (f"Identical proposal already staged as {existing['id']} for `{existing['slug']}` "
                     f"(hash {content_hash[:16]}, status {existing['status']}). Nothing new was written.")
+        if banned:
+            # Orphan ban (proposal row gone, hash still rejected): drop it so a new draft can be staged.
+            self.db.clear_rejected_skill_hash(content_hash)
         installed = self.db.skill_installed(bundle["slug"]) if bundle["slug"] else None
         diff = ""
         if installed:
@@ -423,29 +446,45 @@ class SkillStore:
         return public_proposal(row, include_body=include_body)
 
     def reject(self, pid: str, reason: str = "") -> dict:
-        row = self._require_proposal(pid)
-        if row["status"] == "installed":
-            raise SkillError(409, "an installed proposal cannot be rejected; uninstall it instead")
-        with self.db.tx():
-            self.db.update_skill_proposal(pid, status="rejected", review_status=row.get("review_status") or "")
-            self.db.reject_skill_hash(row["content_hash"], pid, reason)
+        with self.db.tx() as db:
+            row = db.skill_proposal(pid)
+            if row is None:
+                raise SkillError(404, "no skill proposal with that id")
+            if row["status"] == "installed":
+                raise SkillError(409, "an installed proposal cannot be rejected; uninstall it instead")
+            if row["status"] != "rejected":
+                if not db.update_skill_proposal(pid, expected_status=REJECTABLE_STATUSES, status="rejected"):
+                    latest = db.skill_proposal(pid)
+                    if latest and latest["status"] == "installed":
+                        raise SkillError(409, "an installed proposal cannot be rejected; uninstall it instead")
+                    raise SkillError(409, "this proposal could not be rejected")
+            db.reject_skill_hash(row["content_hash"], pid, reason)
         return self.get_proposal(pid, include_body=False)
 
     def reopen(self, pid: str) -> dict:
-        row = self._require_proposal(pid)
-        if row["status"] != "rejected":
-            raise SkillError(409, "only a rejected proposal can be reopened")
-        with self.db.tx():
-            self.db.clear_rejected_skill_hash(row["content_hash"])
-            self.db.update_skill_proposal(pid, status="validated" if not row.get("static_findings") else "draft")
+        with self.db.tx() as db:
+            row = db.skill_proposal(pid)
+            if row is None:
+                raise SkillError(404, "no skill proposal with that id")
+            banned = db.skill_hash_rejected(row["content_hash"])
+            if row["status"] != "rejected" and not banned:
+                raise SkillError(409, "only a rejected proposal can be reopened")
+            target = "validated" if not row.get("static_findings") else "draft"
+            if not db.update_skill_proposal(pid, expected_status=row["status"], status=target):
+                raise SkillError(409, "only a rejected proposal can be reopened")
+            db.clear_rejected_skill_hash(row["content_hash"])
         return self.get_proposal(pid, include_body=False)
 
     def delete_draft(self, pid: str) -> None:
-        row = self._require_proposal(pid)
-        if row["status"] == "installed":
-            raise SkillError(409, "delete the draft before install, or uninstall the skill")
-        with self.db.tx():
-            self.db.delete_skill_proposal(pid)
+        with self.db.tx() as db:
+            row = db.skill_proposal(pid)
+            if row is None:
+                raise SkillError(404, "no skill proposal with that id")
+            if row["status"] == "installed":
+                raise SkillError(409, "delete the draft before install, or uninstall the skill")
+            if not db.delete_skill_proposal(pid, not_status="installed"):
+                raise SkillError(409, "delete the draft before install, or uninstall the skill")
+            db.clear_rejected_skill_hash(row["content_hash"])
         shutil.rmtree(self.proposals_dir / pid, ignore_errors=True)
 
     def install(self, pid: str, content_hash: str) -> dict:
@@ -481,7 +520,7 @@ class SkillStore:
                         raise SkillError(409, "stale approval: the proposal hash does not match the reviewed bytes")
                     existing = db.skill_installed(latest["slug"])
                     if existing and existing.get("current_hash") == live_hash:
-                        db.update_skill_proposal(pid, status="installed")
+                        self._cas_status(db, pid, "installed", INSTALL_FROM_STATUSES)
                         return self._public_installed(existing)
                     already = db.skill_version_by_hash(live_hash)
                     if already:
@@ -495,7 +534,7 @@ class SkillStore:
                             "installed_at": existing["installed_at"] if existing else already["installed_at"],
                             "updated_at": now,
                         })
-                        db.update_skill_proposal(pid, status="installed")
+                        self._cas_status(db, pid, "installed", INSTALL_FROM_STATUSES)
                         return self._public_installed(db.skill_installed(latest["slug"]))
                     version = max((v["version"] for v in db.list_skill_versions(latest["slug"])), default=0) + 1
                     self._write_installed_version(latest["slug"], version, bundle, latest)
@@ -511,10 +550,12 @@ class SkillStore:
                         "current_version": version, "current_hash": live_hash, "enabled": 0,
                         "installed_at": existing["installed_at"] if existing else now, "updated_at": now,
                     })
-                    db.update_skill_proposal(pid, status="installed")
+                    self._cas_status(db, pid, "installed", INSTALL_FROM_STATUSES)
                     for other in db.list_skill_proposals(slug=latest["slug"]):
                         if other["id"] != pid and other["status"] in ("validated", "reviewed", "review_pending", "draft"):
-                            db.update_skill_proposal(other["id"], status="superseded")
+                            db.update_skill_proposal(
+                                other["id"], expected_status=("validated", "reviewed", "review_pending", "draft"),
+                                status="superseded")
             except sqlite3.IntegrityError as exc:
                 raise SkillError(409, "skill store constraint failed") from exc
             return self._public_installed(self.db.skill_installed(latest["slug"]))
@@ -641,6 +682,16 @@ class SkillStore:
         if row is None:
             raise SkillError(404, "no skill proposal with that id")
         return row
+
+    def _cas_status(self, db, pid: str, new_status: str, expected) -> None:
+        if db.update_skill_proposal(pid, expected_status=expected, status=new_status):
+            return
+        latest = db.skill_proposal(pid)
+        if latest is None:
+            raise SkillError(404, "no skill proposal with that id")
+        if latest["status"] == "rejected" or db.skill_hash_rejected(latest["content_hash"]):
+            raise SkillError(409, "this content hash is rejected")
+        raise SkillError(409, "proposal status changed")
 
     def _bundle_from_row(self, row: dict) -> dict:
         files = {"SKILL.md": row.get("skill_md") or ""}

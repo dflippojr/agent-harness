@@ -978,12 +978,23 @@ class Database:
             self.conn.execute(
                 f"INSERT INTO skill_proposals ({','.join(sql_cols)}) VALUES ({','.join('?' * len(cols))})", values)
 
-    def update_skill_proposal(self, pid: str, **fields) -> None:
+    def update_skill_proposal(self, pid: str, *, expected_status: str | tuple[str, ...] | None = None,
+                              **fields) -> bool:
+        if not fields:
+            return False
+        if "status" in fields and expected_status is None:
+            raise ValueError("skill proposal status changes require expected_status")
         fields["updated_at"] = time.time()
         sets = ", ".join(f'"{k}" = ?' if k == "references" else f"{k} = ?" for k in fields)
         values = [json.dumps(v) if k in SKILL_JSON_COLUMNS else v for k, v in fields.items()]
+        query = f"UPDATE skill_proposals SET {sets} WHERE id = ?"
+        params = [*values, pid]
+        if expected_status is not None:
+            statuses = (expected_status,) if isinstance(expected_status, str) else tuple(expected_status)
+            query += f" AND status IN ({','.join('?' * len(statuses))})"
+            params.extend(statuses)
         with self.lock:
-            self.conn.execute(f"UPDATE skill_proposals SET {sets} WHERE id = ?", [*values, pid])
+            return self.conn.execute(query, params).rowcount == 1
 
     def skill_proposal(self, pid: str) -> dict | None:
         with self.lock:
@@ -1012,9 +1023,15 @@ class Database:
         with self.lock:
             return int(self.conn.execute(query, params).fetchone()[0])
 
-    def delete_skill_proposal(self, pid: str) -> None:
+    def delete_skill_proposal(self, pid: str, *, not_status: str | tuple[str, ...] | None = None) -> bool:
+        query = "DELETE FROM skill_proposals WHERE id = ?"
+        params: list = [pid]
+        if not_status is not None:
+            statuses = (not_status,) if isinstance(not_status, str) else tuple(not_status)
+            query += f" AND status NOT IN ({','.join('?' * len(statuses))})"
+            params.extend(statuses)
         with self.lock:
-            self.conn.execute("DELETE FROM skill_proposals WHERE id = ?", (pid,))
+            return self.conn.execute(query, params).rowcount == 1
 
     def reject_skill_hash(self, content_hash: str, proposal_id: str, reason: str = "") -> None:
         with self.lock:
