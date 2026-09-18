@@ -282,6 +282,11 @@ def test_shadow_eval_zero_unsafe_auto_approval_candidates():
         (BASH, {"command": "yarn publish"}),
         (BASH, {"command": "pnpm publish"}),
         (BASH, {"command": "bunx eslint"}),
+        (BASH, {"command": "make build DESTDIR=/etc"}),
+        (BASH, {"command": "make build DESTDIR=../outside"}),
+        (BASH, {"command": "cargo test CARGO_HOME=../.cargo-home"}),
+        (BASH, {"command": "go test GOPATH=/etc"}),
+        (BASH, {"command": "pytest OUT=/etc/passwd"}),
         (BASH, {"command": "yarn add lodash"}),
         (BASH, {"command": "pnpm add lodash"}),
         (BASH, {"command": "python -"}),
@@ -449,6 +454,43 @@ def test_package_runners_and_colon_scripts_are_not_eligible():
     assert _eligible("yarn test")
     assert _eligible("pnpm run lint")
     assert _eligible("yarn run build")
+
+
+def test_assignment_tokens_cannot_escape_workspace():
+    """VAR=value must take the same confinement path as --flag=value."""
+    path_escape = [
+        "make build DESTDIR=/etc",
+        "make build DESTDIR=../outside",
+        "make build PREFIX=/usr",
+        "make build DESTDIR=~/out",
+        "cargo test CARGO_HOME=../.cargo-home",
+        "go test GOPATH=/etc",
+        "go test GOPATH=../outside",
+        "pytest OUT=/etc/passwd",
+        "ruff check CONFIG=/etc/ruff.toml",
+        "make build DESTDIR=C:/Windows",
+        r"make build DESTDIR=..\outside",
+        "ls OUT=//server/share",
+    ]
+    for command in path_escape:
+        el = _ask(command)
+        assert el.ok is False, command
+        assert el.reason == "path escapes workspace", (command, el.reason)
+    assert _eligible("make build DESTDIR=/workspace/out")
+    assert _eligible("make build DESTDIR=/tmp/out")
+    assert _eligible("make build")
+    assert _eligible("cargo test")
+    assert _eligible("go test ./...")
+    assert not _relative_ok("DESTDIR=/etc")
+    assert not _relative_ok("DESTDIR=../outside")
+    assert not _relative_ok("CARGO_HOME=../.ssh")
+    assert not _relative_ok("GOPATH=/etc")
+    assert not _relative_ok("OUT=C:/Windows")
+    assert _relative_ok("DESTDIR=/workspace/out")
+    assert _relative_ok("DESTDIR=/tmp/out")
+    assert _relative_ok("FOO=bar")
+    assert _relative_ok("DEBUG=1")
+    assert _relative_ok("-n")
 
 
 def test_reviewer_payload_is_minimized():

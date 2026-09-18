@@ -246,11 +246,13 @@ def _relative_ok(token: str) -> bool:
 
     Fail closed on home/drive/UNC/env expansion and any `..` segment. Prefix
     allowlists for /workspace and /tmp are applied only after those checks, so
-    `/workspace/../etc` is not treated as workspace-confined.
+    `/workspace/../etc` is not treated as workspace-confined. `VAR=value` and
+    `--flag=value` tokens are judged by the value, so `DESTDIR=/etc` cannot skip
+    the absolute-path and `..` checks.
     """
-    if token.startswith("-"):
-        if "=" not in token:
-            return True
+    if token.startswith("-") and "=" not in token:
+        return True
+    if "=" in token:
         token = token.split("=", 1)[1]
         if not token:
             return True
