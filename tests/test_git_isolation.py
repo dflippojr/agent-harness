@@ -213,6 +213,21 @@ def test_prepare_refresh_snapshot_and_publish_ignore_workspace_exec_config(tmp_p
     assert sh(src, "show", f"{info['branch']}:app.py").stdout == "VALUE = 2\n"
 
 
+def test_changes_shows_untracked_files_without_running_fsmonitor(tmp_path):
+    repo = tmp_path / "nested"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    plant_fsmonitor(repo)
+    (repo / "new.txt").write_text("hello\n", encoding="utf-8")
+    raw = sh(repo, "status", "--porcelain")
+    assert has_marker(raw.stderr)
+    diff = workspace_changes(tmp_path)["repos"][0]
+    assert diff["path"] == "nested"
+    assert {"path": "new.txt", "status": "??"} in diff["files"]
+    assert "+hello" in diff["diff"]
+    assert not has_marker(diff["diff"])
+
+
 def test_trusted_source_operations_still_see_the_source_repo(tmp_path):
     """Isolation must not break reviewed merge inputs: the source still has its own identity."""
     src = make_repo(tmp_path / "src")

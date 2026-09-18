@@ -210,6 +210,7 @@ def _isolated_flags(work_tree: Path, tmp: Path, hooks: Path) -> list[str]:
         "-c", "commit.gpgSign=false",
         "--git-dir", str(tmp),
         "--work-tree", str(work_tree),
+        "-C", str(work_tree),
     ]
 
 
