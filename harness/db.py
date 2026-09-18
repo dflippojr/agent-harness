@@ -305,9 +305,14 @@ class Database:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone())
 
-    def find_session_ids(self, prefix: str) -> list[str]:
+    def find_session_ids(self, prefix: str, app_id: str | None = None) -> list[str]:
+        sql = "SELECT id FROM sessions WHERE id LIKE ?"
+        params: list = [prefix + "%"]
+        if app_id is not None:
+            sql += " AND app_id = ?"
+            params.append(app_id)
         with self.lock:
-            rows = self.conn.execute("SELECT id FROM sessions WHERE id LIKE ?", (prefix + "%",)).fetchall()
+            rows = self.conn.execute(sql, params).fetchall()
         return [r["id"] for r in rows]
 
     def list_sessions(self, limit: int = 50, owner_id: str | None = None) -> list[dict]:
@@ -366,7 +371,8 @@ class Database:
                 raise
             self.conn.execute("COMMIT")
 
-    def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600) -> list[dict]:
+    def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600,
+                      app_id: str | None = None) -> list[dict]:
         sql = ("SELECT session_id, seq, kind, ts, bm25(search_index) AS rank, "
                "snippet(search_index, 0, char(2), char(3), '…', 16) AS snippet "
                "FROM search_index WHERE search_index MATCH ?")
@@ -374,6 +380,9 @@ class Database:
         if exclude:
             sql += " AND session_id != ?"
             params.append(exclude)
+        if app_id is not None:
+            sql += " AND session_id IN (SELECT id FROM sessions WHERE app_id = ?)"
+            params.append(app_id)
         with self.lock:
             try:
                 rows = self.conn.execute(sql + " ORDER BY rank LIMIT ?", [*params, max_rows]).fetchall()
