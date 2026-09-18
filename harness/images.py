@@ -19,7 +19,8 @@ Jobs come from the phone (POST /images) and from agents (the `generate_image` to
 templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; assets agents may ship), `quality` = Qwen-Image-2512
 (Apache 2.0, 20B fp8, 50 steps, best text rendering; slower, part of it runs from RAM), and optional `quality-fast` =
 the same Qwen base with the Apache-2.0 lightx2v Lightning 4-step LoRA. Inputs the workflow doesn't support
-are ignored, upscaling isn't done by default (lessons from Hermes Agent's image tool, docs/phase6a-hermes-study.md).
+are ignored. Upscaling is opt-in Real-ESRGAN 2×/4× (never the default). A requested upscale runs in the same GPU
+occupancy; a later gallery action is a queued image job. The original PNG is preserved; the result is a linked row.
 Results are PNGs under data_dir/images, served by GET /images/{id}.png.
 """
 
@@ -43,6 +44,7 @@ import yaml
 
 from .config import ImagesConfig
 from .fileops import ToolError
+from . import upscale as upscale_mod
 
 log = logging.getLogger("harness.images")
 
@@ -207,6 +209,8 @@ def schemas(cfg: ImagesConfig, available: list[str] | None = None) -> list[dict]
             "aspect_ratio": {"type": "string", "description": f"One of {', '.join(ASPECTS)}. Default 1:1."},
             "resolution": {"type": "string", "description": "standard or high. Defaults to the model's native size."},
             "model": {"type": "string", "description": model_help},
+            "upscale": {"type": "string", "description": "none (default), 2x, or 4x. Opt-in Real-ESRGAN; omitted or "
+                        "none leaves the generated PNG unchanged. Requires optional Real-ESRGAN weights."},
         }, "required": ["prompt", "filename"]},
     }}]
 
@@ -307,11 +311,15 @@ class ComfyProcess:
         log_dir = Path(self.cfg.log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         out = open(log_dir / "comfyui.log", "ab")
+        work = Path(self.cfg.work_dir)
+        for name in ("output", "temp", "input"):
+            (work / name).mkdir(parents=True, exist_ok=True)
         args = [str(root / "python_embeded" / "python.exe"), "-s", str(root / "ComfyUI" / "main.py"),
                 "--listen", "127.0.0.1", "--port", str(self.cfg.port), "--disable-auto-launch",
                 "--extra-model-paths-config", str(root / "ComfyUI" / "extra_model_paths.yaml"),
-                "--output-directory", str(Path(self.cfg.work_dir) / "output"),
-                "--temp-directory", str(Path(self.cfg.work_dir) / "temp")]
+                "--output-directory", str(work / "output"),
+                "--temp-directory", str(work / "temp"),
+                "--input-directory", str(work / "input")]
         log.info("starting ComfyUI")
         self.proc = subprocess.Popen(args, cwd=str(root), stdout=out, stderr=subprocess.STDOUT,
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -370,9 +378,11 @@ class ImageService:
         self._guard_wake = asyncio.Event()
         self._drain_sessions: set[str] = set()
         self.images_dir = Path(cfg.work_dir) / "images"
+        self.input_dir = Path(cfg.work_dir) / "input"
         self.transport = None          # tests inject a fake ComfyUI
         self._lora_available: bool | None = None  # tests force Lightning LoRA presence; None = inspect disk
         self._lora_hash_ok: bool | None = None
+        self.on_stored = None          # optional archive hook: callable(job) after a PNG is written
 
     def schemas(self) -> list[dict]:
         return schemas(self.cfg, available=[name for name in MODELS if self.mode_available(name)])
@@ -430,6 +440,19 @@ class ImageService:
             for job in self.db.list_images(status=("queued", "running")):  # interrupted by a daemon restart
                 self.db.update_image(job["id"], status="queued")
                 self.queue.put_nowait(job["id"])
+            for job in self.db.list_images(limit=500):
+                if job["status"] != "done":
+                    continue
+                requested = job.get("requested_upscale") or "none"
+                if job.get("operation", "generate") != "generate" or requested in ("", "none"):
+                    continue
+                if self.db.find_image_upscale(job["id"], requested) is None:
+                    try:
+                        child = self.submit_upscale(job["id"], requested, source=job.get("source") or "phone",
+                                                    session_id=job.get("session_id") or "")
+                        log.info("re-queued upscale %s for image %s after restart", child["id"], job["id"])
+                    except ToolError as e:
+                        log.warning("could not recover upscale for %s: %s", job["id"], e)
             self._task = asyncio.create_task(self._loop(), name="images")
 
     async def _stop_stray(self) -> None:
@@ -453,7 +476,8 @@ class ImageService:
 
     # jobs
     def submit(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", resolution: str = "auto",
-               source: str = "phone", session_id: str = "", seed: int | None = None) -> dict:
+               source: str = "phone", session_id: str = "", seed: int | None = None,
+               upscale: str = "none") -> dict:
         prompt = prompt.strip()
         if not prompt:
             raise ToolError("prompt is empty")
@@ -469,10 +493,52 @@ class ImageService:
             resolution = MODEL_RESOLUTION[model]
         if resolution not in RESOLUTIONS:
             raise ToolError(f"resolution must be one of {', '.join(RESOLUTIONS)}")
+        requested = upscale_mod.parse_choice(upscale)
+        if requested != "none":
+            scale = upscale_mod.SCALES[requested]
+            width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
+            upscale_mod.require_weights(self.cfg, scale)
+            upscale_mod.check_dimensions(width, height, scale, upscale_mod.max_pixels(self.cfg))
         width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
         job = {"id": uuid.uuid4().hex[:12], "session_id": session_id, "source": source, "prompt": prompt[:4000],
                "model": model, "aspect_ratio": aspect_ratio, "resolution": resolution, "width": width, "height": height,
-               "seed": seed if seed is not None else random.randrange(2**48), **mode_provenance(model)}
+               "seed": seed if seed is not None else random.randrange(2**48), **mode_provenance(model),
+               "parent_id": "", "operation": "generate", "scale": 1, "upscale_model": "",
+               "requested_upscale": requested}
+        self.db.insert_image(job)
+        self._done[job["id"]] = asyncio.Event()
+        self.queue.put_nowait(job["id"])
+        return self.db.get_image(job["id"])
+
+    def submit_upscale(self, parent_id: str, upscale: str, source: str = "phone", session_id: str = "") -> dict:
+        """Queue a 2×/4× Real-ESRGAN job from a completed gallery PNG. Idempotent per parent+scale."""
+        requested = upscale_mod.parse_choice(upscale)
+        if requested == "none":
+            raise ToolError("upscale must be 2x or 4x")
+        parent = self.db.get_image(parent_id)
+        if parent is None or parent["status"] != "done":
+            raise ToolError("upscale needs a completed image")
+        if not self.path(parent).is_file():
+            raise ToolError("upscale needs the original PNG")
+        scale = upscale_mod.SCALES[requested]
+        spec = upscale_mod.require_weights(self.cfg, scale)
+        out_w, out_h = upscale_mod.check_dimensions(
+            parent["width"], parent["height"], scale, upscale_mod.max_pixels(self.cfg))
+        existing = self.db.find_image_upscale(parent["id"], requested)
+        if existing is not None:
+            if existing["status"] in ("queued", "running", "done"):
+                return existing
+            self.db.update_image(existing["id"], status="queued", error="", started_at=None, finished_at=None,
+                                 seconds=0, bytes=0)
+            self._done[existing["id"]] = asyncio.Event()
+            self.queue.put_nowait(existing["id"])
+            return self.db.get_image(existing["id"])
+        job = {"id": uuid.uuid4().hex[:12], "session_id": session_id or parent.get("session_id") or "",
+               "source": source or parent.get("source") or "phone",
+               "prompt": parent["prompt"], "model": parent["model"], "aspect_ratio": parent["aspect_ratio"],
+               "resolution": parent.get("resolution") or "auto", "width": out_w, "height": out_h,
+               "seed": parent["seed"], "parent_id": parent["id"], "operation": "upscale", "scale": scale,
+               "upscale_model": spec.key, "requested_upscale": requested}
         self.db.insert_image(job)
         self._done[job["id"]] = asyncio.Event()
         self.queue.put_nowait(job["id"])
@@ -628,50 +694,29 @@ class ImageService:
         self.phase = "generating"
         started = time.time()
         self.db.update_image(job_id, status="running", started_at=started)
-        self.progress = {"job": job_id, "stage": "queued in ComfyUI"}
+        upscaling = job.get("operation") == "upscale"
+        self.progress = {"job": job_id, "stage": "upscaling" if upscaling else "queued in ComfyUI"}
         stop_progress = asyncio.Event()
         listener = asyncio.create_task(self._listen_progress(job_id, started, stop_progress))
         try:
-            if job["model"] == "quality-fast":
-                self._require_quality_fast()
-            prefix = f"harness/{job_id}"
-            graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix)
-            async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
-                resp = await client.post(f"{self.comfy.url}/prompt", json={"prompt": graph,
-                                                                             "client_id": "agent-harness"})
-                if resp.status_code != 200:
-                    raise ToolError(f"ComfyUI refused the workflow: {resp.text[:500]}")
-                prompt_id = resp.json()["prompt_id"]
-                deadline = time.monotonic() + self.cfg.job_timeout_seconds
-                while True:
-                    if time.monotonic() > deadline:
-                        await self.comfy.interrupt()
-                        raise ToolError("image generation timed out")
-                    hist = (await client.get(f"{self.comfy.url}/history/{prompt_id}")).json().get(prompt_id)
-                    if hist:
-                        status = hist.get("status") or {}
-                        if status.get("status_str") == "error":
-                            messages = [m for m in status.get("messages", []) if m and m[0] == "execution_error"]
-                            detail = messages[0][1].get("exception_message", "") if messages else "unknown error"
-                            raise ToolError(f"ComfyUI error: {detail[:500]}")
-                        if status.get("completed"):
-                            break
-                    self.progress = {**self.progress, "job": job_id, "stage": "generating",
-                                     "seconds": round(time.time() - started)}
-                    await asyncio.sleep(0.4)
-                images = [img for out in hist.get("outputs", {}).values() for img in out.get("images", [])]
-                if not images:
-                    raise ToolError("ComfyUI finished without an image")
-                img = images[0]
-                data = await client.get(f"{self.comfy.url}/view", params={
-                    "filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": img.get("type", "output")})
-                data.raise_for_status()
+            if upscaling:
+                content = await self._run_upscale(job, started)
+            else:
+                content = await self._run_generate(job, started)
             self.images_dir.mkdir(parents=True, exist_ok=True)
-            self.path(job).write_bytes(data.content)
+            self.path(job).write_bytes(content)
             self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=round(time.time() - started, 1),
-                                 bytes=len(data.content))
-            log.info("image %s (%s) done in %.0f s", job_id, job["model"], time.time() - started)
-        except (ToolError, httpx.HTTPError, KeyError, ValueError) as e:
+                                 bytes=len(content), width=job["width"], height=job["height"])
+            if self.on_stored:
+                try:
+                    self.on_stored(self.db.get_image(job_id))
+                except Exception:  # noqa: BLE001 - archive must not fail the image job
+                    log.exception("image archive hook failed for %s", job_id)
+            log.info("image %s (%s) done in %.0f s", job_id, job.get("upscale_model") or job["model"],
+                     time.time() - started)
+            if not upscaling:
+                await self._queue_requested_upscale(job)
+        except (ToolError, httpx.HTTPError, KeyError, ValueError, OSError) as e:
             self.db.update_image(job_id, status="failed", finished_at=time.time(), error=str(e)[:1000])
             log.warning("image %s failed: %s", job_id, e)
         finally:
@@ -684,7 +729,97 @@ class ImageService:
                 event.set()
             finished = self.db.get_image(job_id)
             if self.notify and finished and finished["source"] == "phone":
-                self.notify(finished)
+                if (finished.get("operation") == "generate" and finished.get("status") == "done"
+                        and (finished.get("requested_upscale") or "none") != "none"):
+                    pass  # notify when the derived upscale settles
+                else:
+                    self.notify(finished)
+
+    async def _queue_requested_upscale(self, job: dict) -> None:
+        requested = job.get("requested_upscale") or "none"
+        if requested in ("", "none"):
+            return
+        try:
+            self.submit_upscale(job["id"], requested, source=job.get("source") or "phone",
+                                session_id=job.get("session_id") or "")
+        except ToolError as e:
+            failed = {"id": uuid.uuid4().hex[:12], "session_id": job.get("session_id") or "",
+                      "source": job.get("source") or "phone", "prompt": job["prompt"], "model": job["model"],
+                      "aspect_ratio": job["aspect_ratio"], "resolution": job.get("resolution") or "auto",
+                      "width": job["width"], "height": job["height"], "seed": job["seed"],
+                      "parent_id": job["id"], "operation": "upscale", "scale": upscale_mod.SCALES.get(requested, 1),
+                      "upscale_model": "", "requested_upscale": requested}
+            self.db.insert_image(failed)
+            self.db.update_image(failed["id"], status="failed", finished_at=time.time(), error=str(e)[:1000])
+            event = self._done.pop(failed["id"], None)
+            if event:
+                event.set()
+            if self.notify and str(job.get("source") or "") == "phone":
+                self.notify({**failed, "status": "failed", "error": str(e)[:1000]})
+
+    async def _run_generate(self, job: dict, started: float) -> bytes:
+        if job["model"] == "quality-fast":
+            self._require_quality_fast()
+        prefix = f"harness/{job['id']}"
+        graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix)
+        return await self._comfy_png(job["id"], graph, started, stage="generating")
+
+    async def _run_upscale(self, job: dict, started: float) -> bytes:
+        parent = self.db.get_image(job["parent_id"])
+        if parent is None or not self.path(parent).is_file():
+            raise ToolError("upscale needs the original PNG")
+        source = self.path(parent).read_bytes()
+        spec = upscale_mod.require_weights(self.cfg, int(job.get("scale") or 0))
+        self.input_dir.mkdir(parents=True, exist_ok=True)
+        image_name = f"{parent['id']}.png"
+        (self.input_dir / image_name).write_bytes(source)
+        prefix = f"harness/{job['id']}"
+        graph = upscale_mod.workflow(image_name, spec.filename, job["width"], job["height"], prefix)
+        result = await self._comfy_png(job["id"], graph, started, stage="upscaling")
+        content = upscale_mod.preserve_alpha(source, result)
+        size = upscale_mod.png_size(content)
+        if size:
+            job["width"], job["height"] = size
+        if self.path(parent).read_bytes() != source:
+            raise ToolError("upscale refused to modify the original PNG")
+        return content
+
+    async def _comfy_png(self, job_id: str, graph: dict, started: float, stage: str) -> bytes:
+        async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
+            resp = await client.post(f"{self.comfy.url}/prompt", json={"prompt": graph,
+                                                                         "client_id": "agent-harness"})
+            if resp.status_code != 200:
+                raise ToolError(f"ComfyUI refused the workflow: {resp.text[:500]}")
+            prompt_id = resp.json()["prompt_id"]
+            deadline = time.monotonic() + self.cfg.job_timeout_seconds
+            hist = None
+            while True:
+                if time.monotonic() > deadline:
+                    await self.comfy.interrupt()
+                    raise ToolError("image generation timed out" if stage != "upscaling" else "upscale timed out")
+                hist = (await client.get(f"{self.comfy.url}/history/{prompt_id}")).json().get(prompt_id)
+                if hist:
+                    status = hist.get("status") or {}
+                    if status.get("status_str") == "error":
+                        messages = [m for m in status.get("messages", []) if m and m[0] == "execution_error"]
+                        detail = messages[0][1].get("exception_message", "") if messages else "unknown error"
+                        if "out of memory" in detail.lower() or "oom" in detail.lower():
+                            raise ToolError(f"upscale ran out of memory: {detail[:500]}" if stage == "upscaling"
+                                            else f"ComfyUI error: {detail[:500]}")
+                        raise ToolError(f"ComfyUI error: {detail[:500]}")
+                    if status.get("completed"):
+                        break
+                self.progress = {**self.progress, "job": job_id, "stage": stage,
+                                 "seconds": round(time.time() - started)}
+                await asyncio.sleep(0.4)
+            images = [img for out in hist.get("outputs", {}).values() for img in out.get("images", [])]
+            if not images:
+                raise ToolError("ComfyUI finished without an image")
+            img = images[0]
+            data = await client.get(f"{self.comfy.url}/view", params={
+                "filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": img.get("type", "output")})
+            data.raise_for_status()
+        return data.content
 
     async def _listen_progress(self, job_id: str, started: float, stop: asyncio.Event) -> None:
         """Read ComfyUI websocket progress until the job finishes. No-op in tests (MockTransport)."""
@@ -730,7 +865,8 @@ class ImageService:
                 "models": {k: v["label"] for k, v in MODELS.items()}, "modes": self.mode_catalog(),
                 "aspect_ratios": list(ASPECTS),
                 "resolutions": {name: {"label": label, "sizes": {aspect: list(size) for aspect, size in RESOLUTION_SIZES[name].items()}}
-                                for name, label in RESOLUTIONS.items()}}
+                                for name, label in RESOLUTIONS.items()},
+                "upscale": upscale_mod.status(self.cfg)}
 
     # agent tool
     async def call(self, name: str, args: dict, workspace_root: Path | None = None, put_bytes=None) -> str:
@@ -742,17 +878,31 @@ class ImageService:
                 raise ToolError(f"filename escapes the workspace: {filename}")
         elif put_bytes is None:
             raise ToolError("generate_image needs a workspace path or a runner transfer")
+        requested = upscale_mod.parse_choice(args.get("upscale"))
         job = self.submit(args["prompt"], model=args.get("model") or "fast",
                           aspect_ratio=args.get("aspect_ratio") or "1:1", resolution=args.get("resolution") or "auto",
                           source="agent",
-                          session_id=args.get("_session", ""))
+                          session_id=args.get("_session", ""), upscale=requested)
         job = await self.wait(job["id"])
         if job["status"] != "done":
             raise ToolError(f"image generation failed: {job['error']}")
+        result = job
+        if requested != "none":
+            child = self.db.find_image_upscale(job["id"], requested)
+            if child is None:
+                child = self.submit_upscale(job["id"], requested, source="agent",
+                                            session_id=args.get("_session", ""))
+            child = await self.wait(child["id"])
+            if child["status"] != "done":
+                raise ToolError(f"image generated but upscale failed: {child['error']}")
+            result = child
         if put_bytes is not None:
-            await put_bytes(filename, self.path(job).read_bytes())
+            await put_bytes(filename, self.path(result).read_bytes())
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(self.path(job), target)
-        return (f"Saved {filename} ({job['width']}x{job['height']}, {job['model']} model, seed {job['seed']}, "
-                f"{job['seconds']:.0f} s). The user can see it in the app's Images screen.")
+            shutil.copyfile(self.path(result), target)
+        extra = ""
+        if requested != "none":
+            extra = f", upscaled {requested} with {result.get('upscale_model') or 'Real-ESRGAN'}"
+        return (f"Saved {filename} ({result['width']}x{result['height']}, {job['model']} model, seed {job['seed']}, "
+                f"{result['seconds']:.0f} s{extra}). The user can see it in the app's Images screen.")

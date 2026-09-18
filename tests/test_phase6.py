@@ -306,7 +306,7 @@ class FakeServer:
         return True
 
 
-def fake_comfy(fail_prompts=()):
+def fake_comfy(fail_prompts=(), fail_upscale=False):
     state = {"graphs": []}
 
     def handler(request: httpx.Request):
@@ -317,6 +317,14 @@ def fake_comfy(fail_prompts=()):
         if request.url.path.startswith("/history/"):
             pid = request.url.path.rsplit("/", 1)[1]
             graph = state["graphs"][int(pid[1:]) - 1]
+            if any(n.get("class_type") == "ImageUpscaleWithModel" for n in graph.values()):
+                if fail_upscale:
+                    return httpx.Response(200, json={pid: {"status": {"status_str": "error", "completed": False,
+                        "messages": [["execution_error", {"exception_message": "CUDA out of memory"}]]}}})
+                return httpx.Response(200, json={pid: {"status": {"status_str": "success", "completed": True},
+                                                       "outputs": {"5": {"images": [{"filename": "up.png",
+                                                                                     "subfolder": "harness",
+                                                                                     "type": "output"}]}}}})
             text = next(n["inputs"]["text"] for n in graph.values() if n["class_type"] == "CLIPTextEncode")
             if text in fail_prompts:
                 return httpx.Response(200, json={pid: {"status": {"status_str": "error", "completed": False, "messages": [
@@ -325,20 +333,36 @@ def fake_comfy(fail_prompts=()):
                                                    "outputs": {"9": {"images": [{"filename": "x.png", "subfolder": "harness",
                                                                                   "type": "output"}]}}}})
         if request.url.path == "/view":
+            if request.url.params.get("filename") == "up.png":
+                graph = state["graphs"][-1]
+                node = next(n for n in graph.values() if n.get("class_type") == "ImageScale")
+                w, h = int(node["inputs"]["width"]), int(node["inputs"]["height"])
+                from PIL import Image
+                import io
+                buf = io.BytesIO()
+                Image.new("RGB", (w, h), (20, 40, 60)).save(buf, format="PNG")
+                return httpx.Response(200, content=buf.getvalue())
             return httpx.Response(200, content=PNG)
         return httpx.Response(404)
     return handler, state
 
 
-def image_manager(tmp_path, steps=None, fail_prompts=()):
+def image_manager(tmp_path, steps=None, fail_prompts=(), fail_upscale=False, weights=False):
     from harness.config import ImagesConfig
     cfg = make_cfg(tmp_path)
+    upscale_dir = tmp_path / "upscale-weights"
+    upscale_dir.mkdir(parents=True, exist_ok=True)
     cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2,
-                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"))
+                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"),
+                              upscale_dir=str(upscale_dir))
+    if weights:
+        from harness.upscale import MODELS
+        for spec in MODELS.values():
+            (upscale_dir / spec.filename).write_bytes(b"fake-weight")
     m = Manager(cfg, chat=Script(steps or [Completion(content="done")]))
     server = FakeServer()
     m.images.control = server
-    handler, state = fake_comfy(fail_prompts)
+    handler, state = fake_comfy(fail_prompts, fail_upscale=fail_upscale)
     m.images.transport = httpx.MockTransport(handler)
 
     async def no_process():
@@ -371,6 +395,7 @@ def test_image_batch_takes_gpu_and_gives_it_back(tmp_path):
         assert m.images.path(done[0]).read_bytes() == PNG
         steps = [next(n["inputs"]["steps"] for n in g.values() if n["class_type"] == "KSampler") for g in state["graphs"]]
         assert steps == [8, 50, 50]  # fast = Z-Image-Turbo, quality = Qwen-Image-2512
+        assert all(not any(n.get("class_type") == "ImageUpscaleWithModel" for n in g.values()) for g in state["graphs"])
         for _ in range(100):
             if m.images.phase == "idle":
                 break

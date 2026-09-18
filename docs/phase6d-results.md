@@ -45,11 +45,13 @@ that template's 4-step Lightning LoRA subgraph instead of inventing sampler valu
 - **Agents:** `generate_image(prompt, filename, aspect_ratio, model)` saves a PNG into the session workspace on the
   tower or, for MacBook sessions, copies it there with a `put_file` runner op. No approval needed. The tool
   description warns that it takes minutes.
-- **Inputs:** aspect ratio from a fixed list mapped to each model's native sizes; a random seed is recorded per job; no
-  upscaling (Hermes lesson: default-on upscaling degraded text and faces).
+- **Inputs:** aspect ratio from a fixed list mapped to each model's native sizes; a random seed is recorded per job;
+  upscaling is opt-in Real-ESRGAN 2×/4× (Hermes lesson: default-on upscaling degraded text and faces). The original
+  PNG is preserved; derived rows record parent, scale, model version, dimensions, duration and bytes.
 - **Metrics:** `harness_images_total{model,source,status}`, `harness_images_seconds_total`,
-  `harness_images_gpu_taken`, `harness_images_queued`; dashboard row "Images". `ops/check-stack.ps1` checks the
-  ComfyUI install and model files.
+  `harness_images_gpu_taken`, `harness_images_queued`, `harness_images_upscale_available`; dashboard row "Images".
+  `ops/check-stack.ps1` checks the ComfyUI install and model files. Doctor warns when optional Real-ESRGAN weights
+  are missing.
 
 ## Verification
 
