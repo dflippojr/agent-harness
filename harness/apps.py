@@ -433,8 +433,8 @@ def register(app: FastAPI, mgr) -> None:
         key["scope_set"] = scopes
         return key
 
-    def visible_session(request: Request, key: dict, ref: str) -> dict:
-        """Owner token, the creating app, or sessions:all may read a session."""
+    def _owned_session(request: Request, key: dict, ref: str) -> dict:
+        """Session visible to this principal's account, or 404. Members stop here."""
         m = mgr(request)
         user_id = key["user_id"] if key.get("kind") == "member" else "owner"
         try:
@@ -445,6 +445,11 @@ def register(app: FastAPI, mgr) -> None:
             raise
         if s.get("owner_id", "owner") != user_id:
             raise HarnessError(404, "no session matches that id")
+        return s
+
+    def visible_session(request: Request, key: dict, ref: str) -> dict:
+        """Owner token, the creating app, or sessions:all may read a session."""
+        s = _owned_session(request, key, ref)
         if key.get("kind") == "member":
             return s
         if (not owner_key(key) and s.get("app_id") != key["id"]
@@ -454,16 +459,7 @@ def register(app: FastAPI, mgr) -> None:
 
     def own_session(request: Request, key: dict, ref: str) -> dict:
         """Mutations require the owner token or the creating app; sessions:all is not enough."""
-        m = mgr(request)
-        user_id = key["user_id"] if key.get("kind") == "member" else "owner"
-        try:
-            s = m.get(ref, user_id=user_id)
-        except HarnessError as e:
-            if e.status in (400, 404):
-                raise HarnessError(404, "no session matches that id") from e
-            raise
-        if s.get("owner_id", "owner") != user_id:
-            raise HarnessError(404, "no session matches that id")
+        s = _owned_session(request, key, ref)
         if key.get("kind") == "member":
             return s
         if not owner_key(key) and s.get("app_id") != key["id"]:

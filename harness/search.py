@@ -131,6 +131,15 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
     return app_id
 
 
+def _term_coverage(db, query: str, exclude: str, user_id: str | None, app_id: str | None) -> dict[str, int]:
+    coverage: dict[str, int] = {}
+    for term in query.split(" OR "):
+        for sid in {r["session_id"] for r in db.search_events(term, exclude=exclude, max_rows=2000,
+                                                             user_id=user_id, app_id=app_id)}:
+            coverage[sid] = coverage.get(sid, 0) + 1
+    return coverage
+
+
 def search(db, query: str, project: str = "", limit: int = 20, exclude: str = "",
            user_id: str | None = None, app_id: str | None = None) -> dict:
     """Sessions ranked by their best-matching event. Falls back to matching any term when all of them don't.
@@ -147,18 +156,13 @@ def search(db, query: str, project: str = "", limit: int = 20, exclude: str = ""
         if not q:
             continue
         rows = db.search_events(q, exclude=exclude, max_rows=600, user_id=user_id, app_id=app_id)
-        if rows:
-            mode = "any" if any_term else "all"
-            coverage = None
-            if any_term:  # rank sessions that match more of the words first
-                coverage = {}
-                for term in q.split(" OR "):
-                    for sid in {r["session_id"] for r in db.search_events(term, exclude=exclude, max_rows=2000,
-                                                                         user_id=user_id, app_id=app_id)}:
-                        coverage[sid] = coverage.get(sid, 0) + 1
-            results = _group(db, rows, project, limit, coverage, user_id=user_id)
-            if results:
-                break
+        if not rows:
+            continue
+        mode = "any" if any_term else "all"
+        coverage = _term_coverage(db, q, exclude, user_id, app_id) if any_term else None
+        results = _group(db, rows, project, limit, coverage, user_id=user_id)
+        if results:
+            break
     return {"query": query, "mode": mode, "results": results}
 
 

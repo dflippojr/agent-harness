@@ -91,7 +91,6 @@ class GpuScheduler:
         if self.paused:
             return
         skipped: OrderedDict[str, asyncio.Future] = OrderedDict()
-        granted = False
         while self._waiters:
             nxt, fut = self._waiters.popitem(last=False)
             if fut.done():
@@ -101,13 +100,11 @@ class GpuScheduler:
                 continue
             self.holder = nxt
             fut.set_result(None)
-            granted = True
             break
         rest = OrderedDict(self._waiters)
         self._waiters = OrderedDict()
         self._waiters.update(skipped)
         self._waiters.update(rest)
-        _ = granted
 
 
 class QueueFull(Exception):
