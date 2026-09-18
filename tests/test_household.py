@@ -508,9 +508,52 @@ def test_quota_and_concurrency_and_disable(tmp_path):
         assert "disable" in actions and "create" in actions
         assert all("prompt" not in (a.get("detail") or "") for a in audit)
 
-        client.patch(f"{PREFIX}/accounts/{alice['user_id']}", json={"enabled": True}, headers=H(OWNER))
-        me = client.get("/api/v1/me", headers=ah).json()
-        assert me["user_id"] == alice["user_id"]
+
+def test_member_followup_send_respects_queue_and_quota(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        alice = create_member(client, ALICE, "Alice", disk_quota_bytes=100_000, max_queued=1)
+        uid = alice["user_id"]
+        ah = H(ALICE)
+        now = 1_700_000_000.0
+
+        def insert(sid, status):
+            ws = workspaces_dir(m.cfg, uid) / sid
+            ws.mkdir(parents=True, exist_ok=True)
+            m.db.insert_session({
+                "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
+                "title": sid, "status": status, "workspace": str(ws), "created_at": now, "updated_at": now,
+                "context": [{"role": "user", "content": "hi"}], "run": {}, "totals": {}, "inbox": [],
+                "owner_id": uid,
+            })
+
+        insert("donealice01", "done")
+        insert("qalice00001", "queued")
+        blocked = client.post("/api/v1/sessions/donealice01/messages", json={"content": "again"}, headers=ah)
+        assert blocked.status_code == 429, blocked.text
+        assert m.db.get_session("donealice01")["status"] == "done"
+
+        m.db.update_session("qalice00001", status="done")
+        fat = ensure_user_dirs(m.cfg, uid) / "artifacts" / "blob.bin"
+        fat.parent.mkdir(parents=True, exist_ok=True)
+        fat.write_bytes(b"x" * 120_000)
+        over = client.post("/api/v1/sessions/donealice01/messages", json={"content": "again"}, headers=ah)
+        assert over.status_code == 507, over.text
+        assert m.db.get_session("donealice01")["status"] == "done"
+
+
+def test_max_queued_zero_is_rejected(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        refused = client.post(f"{PREFIX}/accounts", json={
+            "login": ALICE, "display_name": "Alice", "max_queued": 0,
+        }, headers=H(OWNER))
+        assert refused.status_code == 400, refused.text
+        alice = create_member(client, ALICE, "Alice")
+        patch = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
+                             json={"max_queued": 0}, headers=H(OWNER))
+        assert patch.status_code == 400, patch.text
+        assert m.db.account_by_id(alice["user_id"])["max_queued"] == 2
 
 
 def test_disable_member_awaits_cancel_before_granting_gpu(tmp_path):

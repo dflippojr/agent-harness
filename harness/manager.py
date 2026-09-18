@@ -244,8 +244,7 @@ class Manager:
                 raise HarnessError(403, "household members can only run sessions on the tower")
             if app is not None:
                 raise HarnessError(403, "app tokens cannot create household member sessions")
-            self._enforce_member_caps(account)
-            self._enforce_member_quota(account, "session")
+            self._require_member_start(account, "session")
         # A project's repo is a path on one machine, so the project decides where its sessions run.
         target = target or spec.target
         if target not in TARGETS:
@@ -397,6 +396,10 @@ class Manager:
         if task and s["status"] not in ACTIVE:
             await asyncio.gather(task, return_exceptions=True)  # a finished run still wrapping up
             s = self.db.get_session(sid)
+        if s["status"] not in ACTIVE:
+            user_id = session_user_id(s)
+            if user_id != OWNER_USER_ID:
+                self._require_member_start(self.db.account_by_id(user_id), "session")
         with self.db.tx():
             self.bus.emit(sid, kind, {"content": content})
             if s["status"] in ACTIVE:
@@ -715,6 +718,12 @@ class Manager:
     def project_for_session(self, s: dict):
         from . import catalog
         return catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
+
+    def _require_member_start(self, account: dict | None, action: str) -> None:
+        if account is None or not account.get("enabled", 1):
+            raise HarnessError(403, "this household account is disabled")
+        self._enforce_member_caps(account)
+        self._enforce_member_quota(account, action)
 
     def _enforce_member_caps(self, account: dict) -> None:
         user_id = account["user_id"]

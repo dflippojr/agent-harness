@@ -87,6 +87,8 @@ class AccountService:
             raise HarnessError(400, "quota and concurrency limits must be non-negative")
         if running < 1:
             raise HarnessError(400, "max_running must be at least 1")
+        if queued < 1:
+            raise HarnessError(400, "max_queued must be at least 1")
         user_id = "u-" + secrets.token_hex(16)
         now = time.time()
         row = {
@@ -156,8 +158,8 @@ class AccountService:
                 raise HarnessError(400, "max_running must be at least 1")
             fields["max_running"] = int(max_running)
         if max_queued is not None:
-            if int(max_queued) < 0:
-                raise HarnessError(400, "max_queued cannot be negative")
+            if int(max_queued) < 1:
+                raise HarnessError(400, "max_queued must be at least 1")
             fields["max_queued"] = int(max_queued)
         if fields:
             self._db().update_account(user_id, **fields)
