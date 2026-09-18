@@ -28,6 +28,11 @@ def mac_manager(tmp_path):
 def test_owner_pairs_native_client_and_runner_once_without_storing_runner_secret(tmp_path):
     manager = mac_manager(tmp_path)
     with TestClient(create_app(manager)) as client:
+        default_name = client.post("/runner-pairing-codes", json={"runner": "macbook"})
+        assert default_name.status_code == 201
+        assert default_name.json()["name"] == "Agent Harness for Mac"
+        assert client.delete(f"/runner-pairing-codes/{default_name.json()['id']}").status_code == 204
+
         approved = client.post("/runner-pairing-codes", json={"name": "Dana's Mac", "runner": "macbook"})
         assert approved.status_code == 201
         code = approved.json()["code"]
