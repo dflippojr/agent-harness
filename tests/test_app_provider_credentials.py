@@ -130,6 +130,7 @@ def test_revoking_assignment_stops_an_active_provider_process(tmp_path):
         assert manager.revoke_app_provider_credential(credential["id"])
         failed = await wait_status(manager, sid, "failed")
         assert failed["run"]["failure"]["code"] == "provider_auth_required"
+        await asyncio.gather(*manager.tasks.values())
         assert sid not in manager.runner._cli_sessions
         await manager.stop()
     asyncio.run(body())
