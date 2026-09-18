@@ -15,7 +15,7 @@ from harness.config import Config, load
 from harness.llm import Completion
 from harness.managed_config import Envelope, ManagedStore
 from harness.manager import Manager
-from harness.settings import looks_hidden, parse_value, schema_entry
+from harness.settings import frozen_app_defaults, looks_hidden, parse_value, schema_entry, use_live_app_settings
 from harness.settings_keys import APP_SPECS, STATIC_ADMIN, assert_explicit_registry, build_registry
 from harness.settings_service import SettingsError, SettingsService
 
@@ -401,6 +401,133 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         assert follow.status_code == 200, follow.text
         assert manager.db.get_session(sid)["run"]["max_turns"] == 10
 
+        note = Notifier(manager.cfg, manager.db).build({
+            "session_id": sid, "type": "run_finished",
+            "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},
+        })
+        assert note is None
+
+
+def test_live_app_settings_discriminator_is_the_token_not_the_row():
+    """Freeze only after revoke/delete. Missing rows and empty snapshots stay live/inherited."""
+    active = {"id": "ha-1", "kind": "app", "revoked_at": None}
+    revoked = {"id": "ha-1", "kind": "app", "revoked_at": 1.0}
+    assert use_live_app_settings(active) is True
+    assert use_live_app_settings(revoked) is False
+    assert use_live_app_settings(None) is False
+    assert use_live_app_settings({"id": "hk-1", "kind": "owner"}) is False
+    assert frozen_app_defaults(None) == {}
+    assert frozen_app_defaults({}) == {}
+    narrowed = {"app.capabilities": ["search"], "app.notify.completion": "never"}
+    assert frozen_app_defaults(narrowed) == narrowed
+
+
+def test_never_patched_app_keeps_inherited_tools_and_notifications(tmp_path):
+    """An app that never PATCHed /api/v1/config has no app_settings row; sessions still
+    inherit project tools and completion notifications."""
+    from harness.config import Project
+    from harness.notify import Notifier
+
+    client, manager = _client(tmp_path)
+    manager.cfg.projects["lab"] = Project(
+        name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
+    )
+    manager.runner.web = _Toolkit(("web_search", "web_fetch"))
+    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.runner.images = _Toolkit(("generate_image",))
+    manager.runner.sessions = _Toolkit(("session_search", "session_read"))
+    with client:
+        app = client.post("/keys", json={
+            "name": "shop", "kind": "app", "scopes": ["sessions", "images"],
+        }).json()
+        h = bearer(app["key"])
+        assert manager.db.get_app_settings(app["id"]) is None
+        created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
+        assert created.status_code == 201, created.text
+        s = manager.db.get_session(created.json()["id"])
+        kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
+        assert {"web_search", "memory_index", "generate_image", "session_search"} <= kit_tools
+        ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
+        assert "restart_service" in ws_tools
+        note = Notifier(manager.cfg, manager.db).build({
+            "session_id": s["id"], "type": "run_finished",
+            "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},
+        })
+        assert note is not None and "Done" in note["title"]
+
+
+def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
+    """Sessions created before app_defaults existed store '{}'; after upgrade they must
+    not lock capabilities to [] / notify to never while the token is still active."""
+    from harness.config import Project
+    from harness.notify import Notifier
+
+    client, manager = _client(tmp_path)
+    manager.cfg.projects["lab"] = Project(
+        name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
+    )
+    manager.runner.web = _Toolkit(("web_search", "web_fetch"))
+    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.runner.images = _Toolkit(("generate_image",))
+    manager.runner.sessions = _Toolkit(("session_search", "session_read"))
+    with client:
+        app = client.post("/keys", json={
+            "name": "shop", "kind": "app", "scopes": ["sessions", "images"],
+        }).json()
+        h = bearer(app["key"])
+        created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
+        assert created.status_code == 201, created.text
+        sid = created.json()["id"]
+        manager.db.update_session(sid, app_defaults={})
+        assert manager.db.get_app_settings(app["id"]) is None
+        s = manager.db.get_session(sid)
+        assert s["app_defaults"] == {}
+        kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
+        assert {"web_search", "memory_index", "generate_image", "session_search"} <= kit_tools
+        ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
+        assert "restart_service" in ws_tools
+        note = Notifier(manager.cfg, manager.db).build({
+            "session_id": sid, "type": "run_finished",
+            "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},
+        })
+        assert note is not None and "Done" in note["title"]
+
+
+def test_active_app_follows_live_config_patch(tmp_path):
+    """While the token is active, a later PATCH applies to in-flight sessions."""
+    from harness.config import Project
+    from harness.notify import Notifier
+
+    client, manager = _client(tmp_path)
+    manager.cfg.projects["lab"] = Project(
+        name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
+    )
+    manager.runner.web = _Toolkit(("web_search", "web_fetch"))
+    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.runner.images = _Toolkit(("generate_image",))
+    manager.runner.sessions = _Toolkit(("session_search", "session_read"))
+    with client:
+        app = client.post("/keys", json={
+            "name": "shop", "kind": "app", "scopes": ["sessions", "images"],
+        }).json()
+        h = bearer(app["key"])
+        created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
+        assert created.status_code == 201, created.text
+        sid = created.json()["id"]
+        s = manager.db.get_session(sid)
+        kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
+        assert {"web_search", "session_search"} <= kit_tools
+
+        patched = client.patch("/api/v1/config", headers=h, json={
+            "revision": 0,
+            "changes": {"app.capabilities": ["search"], "app.notify.completion": "never"},
+        })
+        assert patched.status_code == 200, patched.text
+        s = manager.db.get_session(sid)
+        kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
+        assert kit_tools == {"session_search", "session_read"}
+        ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
+        assert "restart_service" not in ws_tools
         note = Notifier(manager.cfg, manager.db).build({
             "session_id": sid, "type": "run_finished",
             "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},

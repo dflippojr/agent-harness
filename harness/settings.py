@@ -30,16 +30,26 @@ def app_allows(defaults: dict, capability: str) -> bool:
     return enabled is None or capability in enabled
 
 
-def use_live_app_settings(key: dict | None, settings_exist: bool) -> bool:
-    """In-flight sessions follow live app_settings only while the app token is still active."""
-    return bool(key and key.get("kind") == "app" and not key.get("revoked_at") and settings_exist)
+def use_live_app_settings(key: dict | None) -> bool:
+    """Follow live app settings while the app token is still active.
+
+    Freeze is keyed off the token itself: ``revoked_at`` set, or the api_keys row gone.
+    A missing ``app_settings`` row (the app never PATCHed ``/api/v1/config``) is not a
+    freeze, and neither is an empty session snapshot (SQLite ``DEFAULT '{}'``).
+    """
+    return bool(key and key.get("kind") == "app" and not key.get("revoked_at"))
 
 
 def frozen_app_defaults(snapshot: dict | None) -> dict:
-    """Defaults to keep after revoke when a session snapshot exists; otherwise do not inherit owner-wide tools."""
+    """Keep a revoked app's in-flight session on the snapshot it started with.
+
+    Empty or missing snapshots (pre-upgrade sessions, SQLite ``DEFAULT '{}'``) fall
+    back to ``{}`` so callers inherit the same owner/project defaults as before this
+    freeze existed. Only a present, nonempty snapshot narrows a revoked app.
+    """
     if snapshot:
         return dict(snapshot)
-    return {"app.capabilities": [], "app.notify.completion": "never"}
+    return {}
 
 
 NOTIFY_COMPLETION = ("inherit", "never")

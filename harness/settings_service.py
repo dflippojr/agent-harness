@@ -817,13 +817,13 @@ class SettingsService:
         return out
 
     def app_defaults_for_session(self, session: dict) -> dict[str, Any]:
-        """Live app settings while the token is active; otherwise the snapshot from session start."""
+        """Live app settings while the token is active; snapshot only after revoke/delete."""
         app_id = session.get("app_id") or ""
         if not app_id or self.db is None:
             return {}
         key = self.db.get_api_key(app_id)
         snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
-        if use_live_app_settings(key, self.db.get_app_settings(app_id) is not None):
+        if use_live_app_settings(key):
             return self.app_defaults(key)
         return frozen_app_defaults(snapshot)
 
