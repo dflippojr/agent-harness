@@ -1494,9 +1494,11 @@ const IMAGE_BUSY = new Set(["waiting", "switching", "starting", "generating", "r
 
 function imageCard(img) {
   const ready = img.status === "done";
+  const scale = Number(img.scale) > 1 ? `${img.scale}×` : "";
   return h("a", { class: "card image-card", href: `#/images/${img.id}` },
     ready ? daemonImage(`/images/${img.id}.png`, { alt: img.prompt, loading: "lazy" })
       : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" ? "failed" : h("span", { class: "dots" }, img.status)),
+    scale ? h("span", { class: "image-scale" }, scale) : null,
     h("div", { class: "preview small" }, img.prompt));
 }
 
@@ -1509,7 +1511,8 @@ function updateImageStatusView(view, s) {
   const p = s.progress || {};
   const busy = IMAGE_BUSY.has(s.phase);
   const hasSteps = s.phase === "generating" && Number(p.max) > 0;
-  label.textContent = text + queued;
+  const upscaling = s.phase === "generating" && p.stage === "upscaling";
+  label.textContent = (upscaling ? "Upscaling" : text) + queued;
   label.classList.toggle("dots", busy);
   bar.hidden = !busy;
   detail.hidden = !hasSteps;
@@ -1518,7 +1521,7 @@ function updateImageStatusView(view, s) {
     if (hasSteps) {
       const fraction = Math.max(0, Math.min(1, Number(p.value || 0) / Number(p.max)));
       barFill.style.width = `${Math.max(2, fraction * 100).toFixed(1)}%`;
-      detail.textContent = `Sampling ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
+      detail.textContent = `${upscaling ? "Upscaling" : "Sampling"} ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
     } else {
       barFill.style.width = "";
       detail.textContent = "";
@@ -1585,6 +1588,11 @@ async function viewImages() {
     renderResolutions();
   });
   renderResolutions();
+  const upscaleInfo = data.status.upscale || {};
+  const upscale = h("select", {},
+    h("option", { value: "none", selected: true }, "Don't upscale"),
+    h("option", { value: "2x", disabled: !upscaleInfo.available }, "Upscale 2× after generate"),
+    h("option", { value: "4x", disabled: !upscaleInfo.available }, "Upscale 4× after generate"));
   const phase = imageStatusView(data.status);
   const grid = h("div", { class: "image-grid" });
   const imageGridKey = (img) => [img.id, img.status, img.error, img.prompt, img.finished_at].join("\0");
@@ -1610,7 +1618,7 @@ async function viewImages() {
         try {
           await startWarmup().catch(() => {});
           const resolution = resolutionInputs.find((choice) => choice.input.checked).name;
-          await api("/images", { method: "POST", body: { prompt: prompt.value, model: model.value, aspect_ratio: aspect.value, resolution } });
+          await api("/images", { method: "POST", body: { prompt: prompt.value, model: model.value, aspect_ratio: aspect.value, resolution, upscale: upscale.value } });
           try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
           render(await api("/images"));
         } catch (err) { toast(err.message); }
@@ -1622,7 +1630,10 @@ async function viewImages() {
       h("div", { style: "flex:1" }, h("label", {}, "Aspect ratio"), aspect)),
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
-    h("p", { class: "muted small" }, "The language model is unloaded while images generate; running tasks pause for a few minutes."),
+    h("div", { class: "row" }, h("div", { style: "flex:1" }, h("label", {}, "Upscale"), upscale)),
+    h("p", { class: "muted small" }, upscaleInfo.available
+      ? "The language model is unloaded while images generate; running tasks pause for a few minutes. Upscaling is off unless you choose 2× or 4×."
+      : "The language model is unloaded while images generate; running tasks pause for a few minutes. Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable."),
     h("div", { class: "row", style: "margin-top:12px" }, h("span", { class: "spacer" }), go)),
     phase, grid);
   let timer = 0;
@@ -1641,12 +1652,29 @@ async function viewImage(id) {
   const load = async () => {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
+    const meta = [`${img.model} · ${img.width}×${img.height}`];
+    if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
+    meta.push(`seed ${img.seed}`, img.source);
+    if (img.seconds) meta.push(`${Math.round(img.seconds)} s`);
+    meta.push(when);
+    const canUpscale = img.status === "done" && !isGuest() && Number(img.scale || 1) === 1;
+    const startUpscale = (choice) => async () => {
+      try {
+        if (!(await confirmGpuQueue("This upscale job"))) return;
+        const next = await api(`/images/${id}/upscale`, { method: "POST", body: { upscale: choice } });
+        location.hash = `#/images/${next.id}`;
+      } catch (e) { toast(e.message); }
+    };
     fill($app,
       img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
         : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : imageStatusView(img.service)),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
-        h("p", { class: "muted small" }, `${img.model} · ${img.width}×${img.height} · seed ${img.seed} · ${img.source}${img.seconds ? ` · ${Math.round(img.seconds)} s` : ""} · ${when}`),
+        h("p", { class: "muted small" }, meta.join(" · ")),
+        img.parent && img.parent.id ? h("p", { class: "muted small" }, "Upscaled from ",
+          h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
+        (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
+          ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` }, `${c.scale}×`)]))) : null,
         h("div", { class: "row" },
           isGuest() ? null : h("button", {
             class: "btn",
@@ -1657,6 +1685,8 @@ async function viewImage(id) {
               } catch (e) { toast(e.message); }
             },
           }, "Another one"),
+          canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
+          canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
           img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
           img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null)));
     return img;
