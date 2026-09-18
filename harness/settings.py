@@ -30,6 +30,18 @@ def app_allows(defaults: dict, capability: str) -> bool:
     return enabled is None or capability in enabled
 
 
+def use_live_app_settings(key: dict | None, settings_exist: bool) -> bool:
+    """In-flight sessions follow live app_settings only while the app token is still active."""
+    return bool(key and key.get("kind") == "app" and not key.get("revoked_at") and settings_exist)
+
+
+def frozen_app_defaults(snapshot: dict | None) -> dict:
+    """Defaults to keep after revoke when a session snapshot exists; otherwise do not inherit owner-wide tools."""
+    if snapshot:
+        return dict(snapshot)
+    return {"app.capabilities": [], "app.notify.completion": "never"}
+
+
 NOTIFY_COMPLETION = ("inherit", "never")
 EFFORTS = ("low", "medium", "high")
 SECRET_KEY_MARKERS = ("secret", "token", "password", "credential", "api_key", "auth")

@@ -251,6 +251,8 @@ MIGRATIONS = [
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
     # Issue #66: freeze hosted effort at session start; app-scoped settings live beside the token.
     ("sessions", "effort", "TEXT NOT NULL DEFAULT ''"),
+    # Issue #66: in-flight app sessions keep the defaults they started with if the app is revoked.
+    ("sessions", "app_defaults", "TEXT NOT NULL DEFAULT '{}'"),
 ]
 
 
@@ -263,8 +265,8 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 """
 
-JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data", "origins",
-                "models"}
+JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "app_defaults", "data",
+                "origins", "models"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:

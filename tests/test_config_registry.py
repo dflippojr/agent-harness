@@ -344,6 +344,70 @@ def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
         assert "restart_service" in owner_ws
 
 
+def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
+    """Revoking an app deletes app_settings; in-flight sessions must keep the narrowed
+    settings they started with (not stop, and not widen to owner defaults)."""
+    import time
+
+    from harness.config import Project
+    from harness.notify import Notifier
+    from harness.runner import ACTIVE
+
+    client, manager = _client(tmp_path)
+    manager.cfg.projects["lab"] = Project(
+        name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
+    )
+    manager.runner.web = _Toolkit(("web_search", "web_fetch"))
+    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.runner.images = _Toolkit(("generate_image",))
+    manager.runner.sessions = _Toolkit(("session_search", "session_read"))
+    with client:
+        app = client.post("/keys", json={
+            "name": "shop", "kind": "app", "scopes": ["sessions", "images"],
+        }).json()
+        h = bearer(app["key"])
+        patched = client.patch("/api/v1/config", headers=h, json={
+            "revision": 0,
+            "changes": {
+                "app.capabilities": ["search"],
+                "app.sessions.max_turns": 10,
+                "app.notify.completion": "never",
+            },
+        })
+        assert patched.status_code == 200, patched.text
+        created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
+        assert created.status_code == 201, created.text
+        sid = created.json()["id"]
+        s = manager.db.get_session(sid)
+        assert s["run"]["max_turns"] == 10
+        kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
+        assert kit_tools == {"session_search", "session_read"}
+
+        assert client.delete(f"/keys/{app['id']}").status_code == 204
+        assert manager.db.get_api_key(app["id"])["revoked_at"]
+        assert manager.db.get_app_settings(app["id"]) is None
+
+        s = manager.db.get_session(sid)
+        assert s["status"] in ACTIVE or s["status"] in ("done", "failed", "cancelled")
+        kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
+        assert kit_tools == {"session_search", "session_read"}
+        ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
+        assert "restart_service" not in ws_tools and "homelab_services" not in ws_tools
+
+        deadline = time.time() + 10
+        while time.time() < deadline and manager.db.get_session(sid)["status"] in ACTIVE:
+            time.sleep(0.05)
+        follow = client.post(f"/sessions/{sid}/messages", json={"content": "continue"})
+        assert follow.status_code == 200, follow.text
+        assert manager.db.get_session(sid)["run"]["max_turns"] == 10
+
+        note = Notifier(manager.cfg, manager.db).build({
+            "session_id": sid, "type": "run_finished",
+            "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},
+        })
+        assert note is None
+
+
 def test_live_hook_failure_restores_disk_and_memory(tmp_path, monkeypatch):
     client, manager = _client(tmp_path)
     calls = []

@@ -17,8 +17,9 @@ import yaml
 from .config import Config
 from .managed_config import Envelope, ManagedConfigError, ManagedStore
 from .settings import (
-    RESET, SCHEMA_VERSION, SettingSpec, apply_spec, copy_cfg, inherited_source, looks_hidden,
-    parse_value, redact_value, schema_entry, spec_available, supervised_restart_supported,
+    RESET, SCHEMA_VERSION, SettingSpec, apply_spec, copy_cfg, frozen_app_defaults, inherited_source,
+    looks_hidden, parse_value, redact_value, schema_entry, spec_available, supervised_restart_supported,
+    use_live_app_settings,
 )
 from .settings_keys import APP_SPECS, build_registry
 
@@ -815,15 +816,30 @@ class SettingsService:
             out[spec.key] = effective
         return out
 
-    def session_budgets(self, app_key: dict | None) -> tuple[int, int]:
+    def app_defaults_for_session(self, session: dict) -> dict[str, Any]:
+        """Live app settings while the token is active; otherwise the snapshot from session start."""
+        app_id = session.get("app_id") or ""
+        if not app_id or self.db is None:
+            return {}
+        key = self.db.get_api_key(app_id)
+        snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
+        if use_live_app_settings(key, self.db.get_app_settings(app_id) is not None):
+            return self.app_defaults(key)
+        return frozen_app_defaults(snapshot)
+
+    def session_budgets(self, app_key: dict | None, session: dict | None = None) -> tuple[int, int]:
         turns = self.cfg.max_turns
         tokens = self.cfg.max_completion_tokens
-        if app_key and app_key.get("kind") == "app":
+        if session is not None:
+            defaults = self.app_defaults_for_session(session)
+        elif app_key and app_key.get("kind") == "app":
             defaults = self.app_defaults(app_key)
-            if defaults.get("app.sessions.max_turns") is not None:
-                turns = int(defaults["app.sessions.max_turns"])
-            if defaults.get("app.sessions.max_completion_tokens") is not None:
-                tokens = int(defaults["app.sessions.max_completion_tokens"])
+        else:
+            defaults = {}
+        if defaults.get("app.sessions.max_turns") is not None:
+            turns = int(defaults["app.sessions.max_turns"])
+        if defaults.get("app.sessions.max_completion_tokens") is not None:
+            tokens = int(defaults["app.sessions.max_completion_tokens"])
         return turns, tokens
 
     # --- persistence helpers --------------------------------------------

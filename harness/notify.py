@@ -18,6 +18,7 @@ import httpx
 
 from .config import Config
 from .db import Database
+from .settings import frozen_app_defaults, use_live_app_settings
 
 log = logging.getLogger("harness.notify")
 
@@ -222,8 +223,13 @@ class Notifier:
         app_id = session.get("app_id") or ""
         if not app_id:
             return False
+        key = self.db.get_api_key(app_id)
+        snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
         row = self.db.get_app_settings(app_id)
-        values = (row or {}).get("values") or {}
+        if use_live_app_settings(key, row is not None):
+            values = (row or {}).get("values") or {}
+        else:
+            values = frozen_app_defaults(snapshot)
         return values.get("app.notify.completion") == "never"
 
     def _job_finished(self, sid: str, title: str, d: dict, base: dict) -> dict | None:

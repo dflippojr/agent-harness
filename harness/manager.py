@@ -366,6 +366,7 @@ class Manager:
                                              "total_cost_usd": 0.0},
             "inbox": [], "branch": branch,
             "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
+            "app_defaults": dict(defaults) if app else {},
             "job_id": job_id, "owner_id": owner_id,
         }
         with self.db.tx():
@@ -398,7 +399,7 @@ class Manager:
                 run = new_run(carry=s["run"])
                 app_key = self.db.get_api_key(s["app_id"]) if s.get("app_id") else None
                 if getattr(self, "settings", None):
-                    turns, tokens = self.settings.session_budgets(app_key)
+                    turns, tokens = self.settings.session_budgets(app_key, session=s)
                     run["max_turns"] = turns
                     run["max_completion_tokens"] = tokens
                 self.db.update_session(sid, context=s["context"] + [{"role": "user", "content": content}],

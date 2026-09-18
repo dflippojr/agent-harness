@@ -161,13 +161,9 @@ class Runner:
         return kits
 
     def _app_defaults_for_session(self, s: dict) -> dict:
-        app_id = s.get("app_id") or ""
-        if not app_id or self.settings is None or self.db is None:
+        if self.settings is None:
             return {}
-        key = self.db.get_api_key(app_id)
-        if not key or key.get("kind") != "app":
-            return {}
-        return self.settings.app_defaults(key)
+        return self.settings.app_defaults_for_session(s)
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:
         schemas = ws.schemas()
