@@ -376,6 +376,50 @@ items:
       agent execution to an untrusted/public environment. Split storage/signing, review automation, Control Center
       discovery/consent, and daemon warning/revocation into later implementation issues; build none of them here.
 
+  - key: marketplace-catalog-storage
+    kind: feature
+    title: "Implement signed catalog storage and key management"
+    body: |
+      Follow-up to #28. Build the append-only catalog index specified in docs/marketplace-design.md: immutable
+      per-version records, detached signatures over catalog_record_sha256, advisory flags, and audit retention.
+      Store links and hashes, not artifacts or credentials. Include catalog signing-key rotation without silent
+      owner uninstall or token revocation.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: marketplace-review-automation
+    kind: feature
+    title: "Automate catalog submission checks and optional review sandbox"
+    body: |
+      Follow-up to #28. Implement Stage A deterministic checks (schema, identifiers, URLs, license, hashes,
+      provenance, SBOM, secret scan, dependency confusion, permission-diff) and evidence packaging for Stage B.
+      If Stage C is added, run it only in a disposable sandbox with synthetic credentials and data, no host mounts,
+      and no network except the recorded allowlist. Do not execute untrusted submissions against a real daemon.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: marketplace-web-discovery
+    kind: feature
+    title: "Agent Harness Web catalog discovery and consent UI"
+    body: |
+      Follow-up to #28. Add discovery of signed catalog listings and conspicuous owner-facing consent copy for
+      every requested scope, origin, and hosted-provider mode. Catalog presence grants nothing. Pairing stays an
+      explicit daemon action; the Web UI may deep-link to Settings but must not mint, transport, or store ha-/ho-
+      tokens or provider credentials.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: marketplace-daemon-revocation-hooks
+    kind: feature
+    title: "Daemon warning and revocation hooks for catalog advisories"
+    body: |
+      Follow-up to #28. Teach the daemon to fetch a signed advisory feed and, when an optional catalog_app_id is
+      present on a key or pairing request: show warnings, block new pairing, and recommend token revocation.
+      Catalog decisions must not silently uninstall software, delete owner data, or revoke tokens without an
+      explicit owner action.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
   - key: per-app-provider-credentials
     kind: feature
     title: "Isolate per-app provider API keys and billing policy"
