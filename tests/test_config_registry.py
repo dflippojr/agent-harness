@@ -123,6 +123,39 @@ def test_live_patch_reset_and_stale_revision(tmp_path):
         assert "sessions.max_turns" not in (manager.settings.store.read_active().values)
 
 
+def test_rollback_restores_immediately_previous_generation(tmp_path):
+    client, manager = _client(tmp_path)
+    with client:
+        first = client.patch("/api/admin/v1/config", json={
+            "revision": 0, "changes": {"sessions.max_turns": 40},
+        })
+        assert first.status_code == 200
+        undo_first = client.post("/api/admin/v1/config/rollback", json={
+            "confirm": True, "revision": first.json()["revision"],
+        })
+        assert undo_first.status_code == 200, undo_first.text
+        assert manager.cfg.max_turns == 80
+
+        forty = client.patch("/api/admin/v1/config", json={
+            "revision": undo_first.json()["revision"], "changes": {"sessions.max_turns": 40},
+        })
+        assert forty.status_code == 200
+        fifty = client.patch("/api/admin/v1/config", json={
+            "revision": forty.json()["revision"], "changes": {"sessions.max_turns": 50},
+        })
+        assert fifty.status_code == 200
+        sixty = client.patch("/api/admin/v1/config", json={
+            "revision": fifty.json()["revision"], "changes": {"sessions.max_turns": 60},
+        })
+        assert sixty.status_code == 200
+        assert manager.cfg.max_turns == 60
+        rolled = client.post("/api/admin/v1/config/rollback", json={
+            "confirm": True, "revision": sixty.json()["revision"],
+        })
+        assert rolled.status_code == 200, rolled.text
+        assert manager.cfg.max_turns == 50
+
+
 def test_yaml_semantics_and_managed_precedence(tmp_path):
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()

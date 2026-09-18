@@ -8,7 +8,7 @@ import os
 import signal
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -585,10 +585,10 @@ class SettingsService:
                         updated_at=time.time(),
                     )
 
-                if current_revision and active.values and active.confirmed:
-                    # Keep LKG as last confirmed generation unless this write is itself the first.
-                    if not self.store.lkg_exists():
-                        self.store.write_lkg(active)
+                if active.confirmed and not active.unconfirmed:
+                    # Snapshot the generation we are replacing, including the empty initial
+                    # overlay, so rollback always restores the immediately previous confirmed map.
+                    self.store.write_lkg(replace(active, values=dict(active.values)))
 
                 committed = False
                 self.store.write_active(new_active)
