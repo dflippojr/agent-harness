@@ -67,6 +67,26 @@ copying a default.
 - Owner rollback restores the single previous confirmed managed generation through the same
   validation path (live or pending according to the keys).
 
+### Overlay state machine
+
+Boot applies **active** only. Pending is never loaded until an owner-confirmed restart
+copies it onto active. Every generation change is a single `ManagedStore.commit`
+(write temp → fsync → replace; active is the commit point).
+
+| Disk state | Meaning | Next boot |
+| --- | --- | --- |
+| no active | YAML only | YAML; nothing to confirm |
+| confirmed active | live keys + last *promoted* restart keys | apply active; do not restore LKG |
+| pending file | candidate after a `daemon_restart` PATCH | ignore pending; keep applying confirmed active |
+| unconfirmed active, boot-tried clear | owner confirmed restart; first start | try candidate once |
+| unconfirmed active, boot-tried set | previous start died before `/health` confirm | quarantine candidate; restore LKG |
+| quarantine + restored LKG | failed generation | apply confirmed LKG |
+
+A PATCH of a restart key (for example `web.enabled`) must not drop that key from
+confirmed active. The new value lives in pending until restart. If the process dies
+before `POST /config/restart`, the next start still applies the last confirmed
+overlay (YAML cannot turn the feature back on behind a confirmed `false`).
+
 ## Admin keys (v1)
 
 Writable live (new sessions pick up new defaults; an active run's frozen model/backend/effort and
@@ -95,7 +115,9 @@ budget are not increased):
 
 Restart-required feature switches (installed module + valid file config; enabling fails if required
 URLs, token files, models, or platform support are missing). These change effective daemon features,
-not `modules.*` installation:
+not `modules.*` installation. `capabilities.modules.<name>`, `/health`, `/api/v1` `features`, and
+the Manager's tool construction are derived from `installed AND <section>.enabled` in one place
+(`module_effective`); overlay setters never write `cfg.modules`.
 
 `web.enabled`, `search.enabled`, `jobs.enabled`, `endpoint.enabled`, `images.enabled`,
 `gpu_guard.enabled`, `notifications.enabled`, `backup.enabled`.

@@ -75,8 +75,6 @@ class Manager:
         self.warmer = ModelWarmer()
         self.hub = RunnerHub(cfg.runners, keep_awake=self._keep_awake)
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
-        self.runner.gate.max_waiting = cfg.endpoint.max_waiting
-        self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
         self.tasks: dict[str, asyncio.Task] = {}
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
@@ -85,17 +83,25 @@ class Manager:
         from .apps import AppToolBroker
         self.app_tools = AppToolBroker(self.db, self.bus)
         self.runner.app_tools = self.app_tools
-        if cfg.memory_library.enabled:
+        from .settings_service import SettingsService
+        from .config import module_effective
+        self.settings = SettingsService(cfg, db=self.db)
+        self.settings.apply_overlay()
+        self.settings.manager = self
+        self.runner.settings = self.settings
+        self.runner.gate.max_waiting = cfg.endpoint.max_waiting
+        self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
+        if module_effective(cfg, "memory_library"):
             from .memory_library import MemoryLibrary
             self.runner.memory = MemoryLibrary(cfg.memory_library, db=self.db)
-        if cfg.web.enabled:
+        if module_effective(cfg, "web"):
             from .web_tools import WebTools
             self.runner.web = WebTools(cfg.web)
-        if cfg.search.enabled:
+        if module_effective(cfg, "search"):
             from .search import SessionSearch
             self.runner.sessions = SessionSearch(self.db)
         self.images = None
-        if cfg.images.enabled:
+        if module_effective(cfg, "images"):
             from .gpu_guard import ServerControl
             from .images import ImageService
             self.images = ImageService(cfg.images, self.db, self.runner,
@@ -103,16 +109,16 @@ class Manager:
                                        notify=self._image_finished, archive=self.image_archive)
             self.runner.images = self.images
         self.remote_control = None
-        if cfg.remote_control.enabled:
+        if module_effective(cfg, "remote_control"):
             from .remote_control import RemoteControl
             self.remote_control = RemoteControl(cfg, cfg.remote_control, notify=self._remote_control_ready)
             self.runner.remote_control = self.remote_control
         self.jobs = None
-        if cfg.jobs.enabled:
+        if module_effective(cfg, "jobs"):
             from .jobs import JobScheduler
             self.jobs = JobScheduler(self.db, self.create, active=self._is_active, poll_seconds=cfg.jobs.poll_seconds)
         self.guard = None
-        if cfg.gpu_guard.enabled:
+        if module_effective(cfg, "gpu_guard"):
             from .gpu_guard import GpuGuard
             self.guard = GpuGuard(cfg.gpu_guard, cfg.models[cfg.default_model], self.scheduler,
                                   busy=lambda: bool(self.runner.generating) or self.runner.gate.busy
@@ -123,10 +129,6 @@ class Manager:
             self.warmer.blocked = lambda: self.guard.active or self.guard.manual or bool(self.images and self.images.gpu_taken)
         elif self.images is not None:
             self.warmer.blocked = lambda: self.images.gpu_taken
-        from .settings_service import SettingsService
-        self.settings = SettingsService(cfg, db=self.db, manager=self)
-        self.settings.apply_overlay()
-        self.runner.settings = self.settings
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
         if self.images is not None:

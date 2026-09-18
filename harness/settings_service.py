@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 
 from .config import Config
-from .managed_config import Envelope, ManagedConfigError, ManagedStore
+from .managed_config import Envelope, ManagedConfigError, ManagedStore, OverlayCrash, UNSET
 from .settings import (
     RESET, SCHEMA_VERSION, SettingSpec, apply_spec, copy_cfg, frozen_app_defaults, inherited_source,
     looks_hidden, parse_value, redact_value, schema_entry, spec_available, supervised_restart_supported,
@@ -164,9 +164,7 @@ class SettingsService:
             if active.unconfirmed or not active.confirmed:
                 active.confirmed = True
                 active.unconfirmed = False
-                self.store.write_active(active)
-                self.store.clear_pending()
-                self.store.clear_boot_tried()
+                self.store.commit(active=active, pending=None, boot_tried=False)
                 self._audit("system", "confirm", list(active.values), "ok", revision=active.revision)
 
     def _migrate_backend_prefs(self) -> None:
@@ -425,15 +423,13 @@ class SettingsService:
                                     details={"expected_revision": revision,
                                              "current_revision": pending.revision})
             if pending is not None:
-                if active is not None and active.confirmed:
-                    self.store.write_lkg(active)
                 pending.confirmed = False
                 pending.unconfirmed = True
                 pending.previous_revision = active.revision if active else None
-                self.store.write_active(pending)
-                self.store.mark_boot_tried()  # cleared after we actually start; first boot after this still tries once
-                # First attempt: delete boot-tried so the next process treats this as the first try.
-                self.store.clear_boot_tried()
+                if active is not None and active.confirmed:
+                    self.store.commit(lkg=active, active=pending, boot_tried=False)
+                else:
+                    self.store.commit(active=pending, boot_tried=False)
                 target_revision = pending.revision
             else:
                 target_revision = active.revision if active else 0
@@ -545,17 +541,18 @@ class SettingsService:
                     spec = self.registry.specs.get(key)
                     if spec and spec.apply_mode == "live" and key not in parsed:
                         new_active.values[key] = value
-                # Also copy restart keys that are already effective (were promoted earlier) into active
-                # only after restart. Active file stores all currently effective managed keys plus live updates.
+                # Confirmed active keeps already-promoted daemon_restart keys until
+                # request_restart copies pending onto active. A PATCH of a restart
+                # key must not drop or replace that key here (the candidate is pending).
                 for key, value in active.values.items():
                     spec = self.registry.specs.get(key)
-                    if spec and spec.apply_mode == "daemon_restart" and key not in parsed:
+                    if spec and spec.apply_mode == "daemon_restart":
                         new_active.values[key] = value
                 for key, value in parsed.items():
                     spec = self.registry.get(key)
                     if spec.apply_mode == "daemon_restart":
-                        new_active.values.pop(key, None) if value is RESET else None
-                    elif value is RESET:
+                        continue
+                    if value is RESET:
                         new_active.values.pop(key, None)
                     elif spec.apply_mode == "live":
                         new_active.values[key] = value
@@ -576,8 +573,10 @@ class SettingsService:
                         pending_map.pop(key, None)
                     else:
                         pending_map[key] = value
-                # Pending candidate is the full next generation (live+restart).
-                full_next = dict(new_active.values)
+                # Pending candidate is the full next generation (live from confirmed
+                # active + restart keys from pending_map, including this PATCH).
+                full_next = {k: v for k, v in new_active.values.items()
+                             if self.registry.get(k).apply_mode == "live"}
                 for key, value in pending_map.items():
                     spec = self.registry.specs.get(key)
                     if spec and spec.apply_mode == "daemon_restart":
@@ -593,22 +592,25 @@ class SettingsService:
                         updated_at=time.time(),
                     )
 
-                if active.confirmed and not active.unconfirmed:
-                    # Snapshot the generation we are replacing, including the empty initial
-                    # overlay, so rollback always restores the immediately previous confirmed map.
-                    self.store.write_lkg(replace(active, values=dict(active.values)))
-
-                committed = False
-                self.store.write_active(new_active)
+                pending_arg = UNSET
                 if new_pending is not None:
-                    self.store.write_pending(new_pending)
+                    pending_arg = new_pending
                     plan.restart_required = True
                 elif pending is not None and not restart_touched:
                     pending.values = {**pending.values, **new_active.values}
                     pending.revision = plan.target_revision
-                    self.store.write_pending(pending)
+                    pending_arg = pending
                 elif not restart_touched:
-                    self.store.clear_pending()
+                    pending_arg = None
+
+                lkg_arg = UNSET
+                if active.confirmed and not active.unconfirmed:
+                    # Snapshot the generation we are replacing, including the empty initial
+                    # overlay, so rollback always restores the immediately previous confirmed map.
+                    lkg_arg = replace(active, values=dict(active.values))
+
+                committed = False
+                self.store.commit(lkg=lkg_arg, pending=pending_arg, active=new_active)
                 committed = True
 
                 if apply:
@@ -625,6 +627,8 @@ class SettingsService:
                             revision=plan.target_revision, actor=actor,
                             extra={"changes": plan.as_dict(self.registry)["changes"]})
                 return plan
+            except OverlayCrash:
+                raise
             except Exception as e:
                 for spec, old, new in reversed(live_applied):
                     try:

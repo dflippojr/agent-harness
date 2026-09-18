@@ -106,6 +106,10 @@ ENABLE_CHECKS = {
 
 
 def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
+    """Switch ``cfg.<section>.enabled`` only. Never write ``cfg.modules`` or
+    ``cfg.installed`` — those are installer/profile selection. Effective
+    capability is ``module_effective(cfg, name)`` (installed AND enabled).
+    """
     if name == "notifications":
         cfg.notify.enabled = enabled
     elif name == "web":

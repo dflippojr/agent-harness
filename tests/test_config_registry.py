@@ -11,9 +11,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from harness.api import create_app
-from harness.config import Config, load
+from harness.config import load, module_effective
 from harness.llm import Completion
-from harness.managed_config import Envelope, ManagedStore
+from harness.managed_config import Envelope, ManagedStore, OverlayCrash
 from harness.manager import Manager
 from harness.settings import frozen_app_defaults, looks_hidden, parse_value, schema_entry, use_live_app_settings
 from harness.settings_keys import APP_SPECS, STATIC_ADMIN, assert_explicit_registry, build_registry
@@ -779,9 +779,137 @@ def test_disabling_web_does_not_mark_module_uninstalled(tmp_path):
     manager = Manager(cfg, chat=Script([Completion(content="hi")]))
     assert manager.cfg.web.enabled is False
     assert manager.cfg.installed.web is True
-    assert manager.cfg.modules.web is True
-    assert manager.cfg.capabilities()["modules"]["web"] is True
+    assert manager.cfg.modules.web is True  # setter must not flip the install snapshot
+    assert module_effective(manager.cfg, "web") is False
+    assert manager.cfg.capabilities()["modules"]["web"] is False
+    assert manager.runner.web is None
     client = TestClient(create_app(manager))
     with client:
         health = client.get("/health").json()
-        assert health["capabilities"]["modules"]["web"] is True
+        api = client.get("/api/v1").json()
+        assert health["capabilities"]["modules"]["web"] is False
+        assert api["capabilities"]["modules"]["web"] is False
+        assert api["features"]["web"] is False
+
+
+def _web_loadable(tmp_path, *, installed=True, enabled=True):
+    extra = (
+        f"web: {{enabled: {str(bool(enabled)).lower()}}}\n"
+        f"modules:\n  web: {str(bool(installed)).lower()}\n"
+    )
+    return _write_loadable_config(tmp_path, extra=extra)
+
+
+def _boot(cfg_dir):
+    return Manager(load(cfg_dir), chat=Script([Completion(content="hi")]))
+
+
+def _assert_web_surfaces(manager, *, on: bool, installed: bool, yaml_enabled: bool):
+    assert manager.cfg.installed.web is installed
+    # cfg.modules is the YAML-time snapshot, not rewritten by overlay setters.
+    assert manager.cfg.modules.web is (installed and yaml_enabled)
+    assert manager.cfg.web.enabled is on
+    assert module_effective(manager.cfg, "web") is on
+    assert manager.cfg.capabilities()["modules"]["web"] is on
+    assert (manager.runner.web is not None) is on
+    client = TestClient(create_app(manager))
+    with client:
+        health = client.get("/health").json()
+        api = client.get("/api/v1").json()
+        assert health["capabilities"]["modules"]["web"] is on
+        assert api["capabilities"]["modules"]["web"] is on
+        assert api["features"]["web"] is on
+
+
+@pytest.mark.parametrize("installed,yaml_enabled,overlay,restart,expect_on", [
+    (False, True, None, False, False),
+    (True, False, None, False, False),
+    (True, False, True, False, False),   # pending, no restart: YAML stays off
+    (True, False, True, True, True),     # pending promoted by restart
+    (True, True, False, True, False),    # confirmed overlay turns YAML-on web off
+    (True, True, None, False, True),
+])
+def test_web_installed_enabled_overlay_matrix(tmp_path, monkeypatch,
+                                              installed, yaml_enabled, overlay, restart, expect_on):
+    """/health, /api/v1, and Manager tool construction agree: installed AND enabled."""
+    cfg_dir, data_dir = _web_loadable(tmp_path, installed=installed, enabled=yaml_enabled)
+    if overlay is not None:
+        monkeypatch.setenv("HARNESS_SUPERVISED", "1")
+        cfg = load(cfg_dir)
+        service = SettingsService(cfg)
+        service.patch_admin({"web.enabled": overlay}, service.admin_view()["revision"])
+        if restart:
+            service.request_restart(None)
+    manager = _boot(cfg_dir)
+    if restart:
+        manager.settings.confirm_startup()
+    _assert_web_surfaces(manager, on=expect_on, installed=installed, yaml_enabled=yaml_enabled)
+
+
+def test_crash_after_restart_patch_does_not_drop_confirmed_key(tmp_path):
+    """YAML web on + confirmed overlay web off; PATCH web on then die before restart
+    must keep the confirmed overlay key so YAML cannot turn web back on."""
+    cfg_dir, data_dir = _web_loadable(tmp_path, installed=True, enabled=True)
+    store = ManagedStore(data_dir)
+    confirmed = Envelope(revision=1, confirmed=True, values={"web.enabled": False})
+    store.write_active(confirmed)
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"web.enabled": False}))
+    cfg = load(cfg_dir)
+    assert cfg.web.enabled is False
+    SettingsService(cfg).patch_admin({"web.enabled": True}, 1)
+    active = store.read_active()
+    assert active is not None and active.confirmed is True
+    assert active.values.get("web.enabled") is False
+    pending = store.read_pending()
+    assert pending is not None and pending.values.get("web.enabled") is True
+    # Process dies before POST /config/restart. Next boot applies confirmed active.
+    reloaded = _boot(cfg_dir)
+    assert reloaded.cfg.web.enabled is False
+    assert reloaded.runner.web is None
+    assert reloaded.settings.store.read_status().get("recovery") != "lkg_restore"
+    assert reloaded.settings.store.read_lkg().values.get("web.enabled") is False
+
+
+def test_overlay_crash_injection_never_applies_unconfirmed_or_skips_lkg(tmp_path, monkeypatch):
+    """Die after PATCH (pending written), after restart confirm, and mid-boot."""
+    monkeypatch.setenv("HARNESS_SUPERVISED", "1")
+    cfg_dir, data_dir = _web_loadable(tmp_path, installed=True, enabled=True)
+    store = ManagedStore(data_dir)
+    store.write_active(Envelope(revision=1, confirmed=True, values={"web.enabled": False}))
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"web.enabled": False}))
+
+    # Die after pending is on disk, before active is replaced.
+    cfg = load(cfg_dir)
+    service = SettingsService(cfg)
+    service.store.crash_at = "pending"
+    with pytest.raises(OverlayCrash):
+        service.patch_admin({"web.enabled": True}, 1)
+    service.store.crash_at = None
+    after_patch_crash = load(cfg_dir)
+    assert after_patch_crash.web.enabled is False
+    assert store.read_active().values.get("web.enabled") is False
+    assert store.read_active().confirmed is True
+    assert store.read_status().get("recovery") != "lkg_restore"
+
+    # Finish the PATCH, then crash during restart before active is replaced.
+    SettingsService(load(cfg_dir)).patch_admin({"web.enabled": True}, store.read_active().revision)
+    during_restart = SettingsService(load(cfg_dir))
+    during_restart.store.crash_at = "boot_tried"
+    with pytest.raises(OverlayCrash):
+        during_restart.request_restart(None)
+    during_restart.store.crash_at = None
+    assert load(cfg_dir).web.enabled is False
+    assert store.read_active().confirmed is True
+    assert store.read_active().values.get("web.enabled") is False
+
+    # Restart confirm commits (unconfirmed active). First boot may try the candidate;
+    # a crash mid-boot (boot-tried set, no confirm_startup) must restore LKG.
+    SettingsService(load(cfg_dir)).request_restart(None)
+    first = load(cfg_dir)
+    assert first.web.enabled is True  # first start after owner-confirmed restart tries the candidate
+    mid_boot = _boot(cfg_dir)
+    assert mid_boot.cfg.web.enabled is False
+    assert mid_boot.settings.store.read_status().get("recovery") == "lkg_restore"
+    assert mid_boot.settings.store.quarantine_path.is_file()
+    assert mid_boot.settings.store.read_active().confirmed is True
+    assert mid_boot.settings.store.read_active().values.get("web.enabled") is False

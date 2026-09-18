@@ -551,6 +551,7 @@ def register(app: FastAPI, mgr) -> None:
     async def api_root(request: Request):
         m = mgr(request)
         from .backend_state import view as backend_view
+        from .config import module_effective
         backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, False, None, False)
                                                for name in m.cfg.backends]))
         return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
@@ -558,7 +559,7 @@ def register(app: FastAPI, mgr) -> None:
                 "models": list(m.cfg.models), "backends": backends, "capabilities": m.cfg.capabilities(), "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "image_upscale": bool(m.images is not None),
-                    "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
+                    "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                     "runner_pairing": bool(m.cfg.runners),
                     "remote_control": m.remote_control is not None, "browser_pairing": True,
                     "stream_tickets": True, "scoped_projects": True, "household_accounts": True}}

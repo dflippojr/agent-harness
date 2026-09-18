@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -16,6 +16,38 @@ MODULE_NAMES = (
     "local_model", "homelab", "memory_library", "images", "jobs", "gpu_guard", "runners",
     "remote_control", "web", "search", "endpoint", "notifications", "backup",
 )
+# Optional modules whose on/off switch is ``cfg.<section>.enabled``. The rest
+# (local_model, homelab, runners) are install-selected only.
+MODULE_ENABLE_SECTIONS = {
+    "web": "web",
+    "search": "search",
+    "jobs": "jobs",
+    "endpoint": "endpoint",
+    "images": "images",
+    "gpu_guard": "gpu_guard",
+    "notifications": "notify",
+    "backup": "backup",
+    "memory_library": "memory_library",
+    "remote_control": "remote_control",
+}
+
+
+def module_effective(cfg: "Config", name: str) -> bool:
+    """True when the module is installed and switched on.
+
+    ``cfg.installed.<name>`` is installer/profile selection. ``cfg.<section>.enabled``
+    is the operational switch (YAML, then managed overlay). ``cfg.modules`` stays the
+    YAML-time snapshot and is not written by overlay setters. Capabilities, /health,
+    /api/v1 features, and Manager tool construction all use this function.
+    """
+    installed = getattr(cfg, "installed", None)
+    if installed is None or not bool(getattr(installed, name, False)):
+        return False
+    section_name = MODULE_ENABLE_SECTIONS.get(name)
+    if section_name is None:
+        return True
+    section = getattr(cfg, section_name, None)
+    return bool(getattr(section, "enabled", False))
 
 
 @dataclass
@@ -318,6 +350,10 @@ class Config:
     def projects_overlay_path(self) -> Path:
         return self.data_dir / PROJECTS_FILE
 
+    def module_effective(self, name: str) -> bool:
+        """Installed AND switched on. The single source for capabilities/features/Manager."""
+        return module_effective(self, name)
+
     def capabilities(self) -> dict:
         """Machine-readable service profile and module catalog for first- and third-party clients."""
         return {
@@ -326,7 +362,7 @@ class Config:
                 "sessions": True, "provider_adapters": True, "approvals": True, "events": True,
                 "scoped_tokens": True, "storage": True, "capability_discovery": True,
             },
-            "modules": asdict(self.modules),
+            "modules": {name: module_effective(self, name) for name in MODULE_NAMES},
             "hosted_backends": [name for name, cfg in self.backends.items() if cfg.enabled],
             "config_registry": True,
             "supervised_restart": os.environ.get("HARNESS_SUPERVISED", "").strip() in ("1", "true", "yes"),
