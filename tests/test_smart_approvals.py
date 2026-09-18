@@ -643,6 +643,65 @@ def test_owner_settings_and_live_disable(tmp_path):
     asyncio.run(disabled_claude())
 
 
+def test_hosted_complete_does_not_trust_env_proxy(monkeypatch):
+    """Env proxies must not see the reviewer API key or command payload.
+
+    Same class: this is the only outbound client in smart_approvals; explicit
+    smart_approvals.proxy still mounts, but HTTP(S)_PROXY from the environment
+    does not. Sibling outbound clients in other modules are out of this PR.
+    """
+    seen = {}
+    ok = json.dumps({"recommendation": "approve", "confidence": 0.9, "reason": "ok", "risk_flags": []})
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": ok}}],
+                "content": [{"text": ok}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "input_tokens": 1, "output_tokens": 1},
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen["kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            seen["url"] = url
+            seen["headers"] = headers
+            seen["body"] = json
+            return FakeResp()
+
+    import harness.smart_approvals as sa
+    monkeypatch.setattr(sa.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:9")
+    cfg = SmartConfig(enabled=True, provider="openai", model="gpt-4.1-mini", proxy="")
+    review = asyncio.run(sa.hosted_complete(cfg, "sk-test-reviewer-key", {"command": "pytest -q"}))
+    assert seen["kwargs"].get("trust_env") is False
+    assert seen["kwargs"].get("proxy") in (None, "")
+    assert "sk-test-reviewer-key" in str(seen["headers"].get("Authorization", ""))
+    assert review.recommendation == "approve"
+
+    seen.clear()
+    cfg = SmartConfig(enabled=True, provider="anthropic", model="claude-haiku",
+                      proxy="http://127.0.0.1:8080")
+    review = asyncio.run(sa.hosted_complete(cfg, "sk-anth-key", {"command": "pytest -q"}))
+    assert seen["kwargs"].get("trust_env") is False
+    assert seen["kwargs"].get("proxy") == "http://127.0.0.1:8080"
+    assert seen["headers"].get("x-api-key") == "sk-anth-key"
+    assert review.recommendation == "approve"
+
+
 def test_missing_credential_fails_closed(tmp_path):
     async def body():
         m, _, _ = _claude_manager(tmp_path, "ask")

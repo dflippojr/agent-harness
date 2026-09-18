@@ -488,7 +488,8 @@ async def hosted_complete(cfg: SmartConfig, secret: str, payload: dict) -> Revie
                 "response_format": {"type": "json_object"},
                 "messages": [{"role": "system", "content": SYSTEM_PROMPT},
                              {"role": "user", "content": user}]}
-    async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+    # trust_env=False: HTTP(S)_PROXY must not intercept the reviewer key + command.
+    async with httpx.AsyncClient(timeout=timeout, proxy=proxy, trust_env=False) as client:
         resp = await client.post(url, headers=headers, json=body)
     if resp.status_code == 429:
         raise TimeoutError("rate limited")
