@@ -51,7 +51,11 @@ Check 'Image generation' {
         Where-Object { -not (Test-Path (Join-Path 'C:\AI\comfy-models' $_)) }
     if ($files) { throw "missing models: $($files -join ', ')" }
     if (-not (Test-Path 'C:\AI\ComfyUI\python_embeded\python.exe')) { throw 'ComfyUI portable missing at C:\AI\ComfyUI' }
-    "phase $($s.phase); models present; ComfyUI starts on demand"
+    $upDir = Join-Path 'C:\AI\ComfyUI\ComfyUI\models' 'upscale_models'
+    $up = @('RealESRGAN_x2plus.pth', 'RealESRGAN_x4plus.pth') |
+        Where-Object { -not (Test-Path (Join-Path $upDir $_)) }
+    $upNote = if ($up) { '; Real-ESRGAN optional (generation still works)' } else { '; Real-ESRGAN 2x/4x present' }
+    "phase $($s.phase); models present; ComfyUI starts on demand$upNote"
 }
 # Optional component: warn (never FAIL) when flux-fast assets or nodes are missing.
 try {

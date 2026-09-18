@@ -10,7 +10,7 @@ listen:
 public_url: ""          # e.g. https://tower.your-tailnet.ts.net
 # Requests arriving through `tailscale serve` carry the caller's login; anyone else is refused.
 allowed_logins: []      # e.g. [you@example.com]
-# Time-boxed read-only Control Center access for a tailnet buddy. Put this in harness.local.yaml.
+# Time-boxed read-only Agent Harness Web access for a tailnet buddy. Put this in harness.local.yaml.
 # Requires allowed_logins (otherwise every tailnet login is already owner). Restart after changing.
 # until is ISO-8601 (timezone preferred). Omit until to last until you remove the entry.
 guests: []
@@ -230,9 +230,15 @@ endpoint:
 # is given back as soon as the queue is empty.
 # Models in C:/AI/comfy-models: fast = Z-Image-Turbo, quality = Qwen-Image-2512, optional flux-fast =
 # FLUX.2 klein 4B FP8 (Apache 2.0; ops/images-models.ps1 install flux-fast). Never downloaded on daemon start.
+# Optional Real-ESRGAN 2×/4× weights (BSD-3-Clause) live in <comfy_dir>/ComfyUI/models/upscale_models
+# unless upscale_dir is set. Generation still works when they are absent.
 images:
   enabled: true
   comfy_dir: C:/AI/ComfyUI
   port: 8188
   work_dir: D:/Agents/harness/images-work
   linger_seconds: 0
+  upscale_dir: ""
+  upscale_max_pixels: 36000000
+  upscale_tile: 512
+  upscale_overlap: 32
