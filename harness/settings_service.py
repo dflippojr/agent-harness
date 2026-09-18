@@ -129,7 +129,11 @@ class SettingsService:
                 self._migrate_backend_prefs()
                 return status
             if active.unconfirmed or not active.confirmed:
-                if self.store.boot_tried():
+                # boot-tried is a cross-process crash flag. load() then Manager.__init__ both
+                # call apply_overlay on the same cfg; the in-process marker keeps the first
+                # start from quarantining its own candidate.
+                tried_here = getattr(self.cfg, "_managed_boot_attempt", False)
+                if self.store.boot_tried() and not tried_here:
                     restored = self.store.restore_lkg("unconfirmed managed generation did not finish startup")
                     self._audit("system", "lkg_recovery", list((active.values or {}).keys()), "ok",
                                 extra={"reason": "unconfirmed", "revision": active.revision})
@@ -139,6 +143,7 @@ class SettingsService:
                         return status
                 else:
                     self.store.mark_boot_tried()
+                    self.cfg._managed_boot_attempt = True
             try:
                 self._apply_values(self.cfg, active.values, persist=False)
             except SettingsError as e:

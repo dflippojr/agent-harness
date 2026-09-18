@@ -31,6 +31,24 @@ def _client(tmp_path, **cfg_kw):
     return TestClient(create_app(manager)), manager
 
 
+def _write_loadable_config(tmp_path, extra=""):
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    (cfg_dir / "harness.yaml").write_text(
+        "listen: {host: 127.0.0.1, port: 8100}\n"
+        f"data_dir: {data_dir.as_posix()}\n"
+        "default_model: fake\n"
+        "models: {fake: {base_url: http://unused, context_tokens: 1024}}\n"
+        "sandbox: {image: agent-harness-sandbox:py312}\n"
+        "search: {enabled: true}\n"
+        f"{extra}",
+        encoding="utf-8",
+    )
+    return cfg_dir, data_dir
+
+
 # ---------- registry coverage ----------
 def test_registry_specs_are_explicit_and_reject_unknown_keys(tmp_path):
     cfg = make_cfg(tmp_path)
@@ -250,6 +268,26 @@ def test_supervised_restart_promotes_pending_and_confirms(tmp_path, monkeypatch)
     reloaded.settings.confirm_startup()
     assert reloaded.settings.store.read_active().confirmed is True
     assert reloaded.settings.store.read_pending() is None
+
+
+def test_load_then_manager_applies_unconfirmed_candidate_once(tmp_path):
+    """Production boot is load() then Manager(cfg). The unconfirmed candidate must not be
+    treated as a failed retry just because apply_overlay runs twice in the same process."""
+    cfg_dir, data_dir = _write_loadable_config(tmp_path)
+    store = ManagedStore(data_dir)
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"search.enabled": True}))
+    store.write_active(Envelope(revision=2, confirmed=False, unconfirmed=True,
+                                values={"search.enabled": False}))
+    cfg = load(cfg_dir)
+    assert cfg.search.enabled is False
+    assert store.boot_tried()
+    manager = Manager(cfg, chat=Script([Completion(content="hi")]))
+    assert manager.cfg.search.enabled is False
+    assert manager.settings.store.read_status().get("recovery") != "lkg_restore"
+    assert not manager.settings.store.quarantine_path.is_file()
+    active = manager.settings.store.read_active()
+    assert active is not None and active.values.get("search.enabled") is False
+    assert active.confirmed is False
 
 
 def test_unconfirmed_candidate_restores_lkg(tmp_path):
