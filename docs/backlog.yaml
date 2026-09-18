@@ -52,9 +52,13 @@ items:
 
   - key: gpt-oss-secondary
     kind: feature
-    title: "gpt-oss-20b as a secondary model for summaries, compaction and cheap subtasks"
+    title: "gpt-oss-20b secondary local model — not planned"
     body: |
-      Phase 0 picked gpt-oss-20b as the fast secondary model, but only Qwen is served. Wiring in a second model is also a prerequisite for smart approvals. Memory is the constraint: both models don't fit in 32 GB RAM / 16 GB VRAM at once, so it needs a swap policy or a small context.
+      Closed as not planned 2026-09-17. Qwen already handles compaction, hosted Phase 8 backends cover cheap
+      subtasks, and #18 specifies a hosted smart-approval reviewer without a second local model. Qwen and
+      gpt-oss-20b cannot remain loaded together in 32 GB RAM / 16 GB VRAM, so a swap adds lifecycle latency and
+      scheduler complexity without a current product requirement. A materially smaller future helper with a new,
+      concrete unmet job should get a new benchmark-first issue rather than reopening this proposal.
 
   - key: flag-unsupported-quotes
     kind: deferred

@@ -132,6 +132,8 @@ class InferenceGate:
     released.
     """
 
+    _recheck_seconds = 5  # re-check fairness / exclusivity even if nobody notifies
+
     def __init__(self, max_waiting: int = 4, fair_seconds: float = 90):
         self.max_waiting = max_waiting
         self.fair_seconds = fair_seconds
@@ -154,14 +156,37 @@ class InferenceGate:
     def exclusive(self) -> bool:
         return self.exclusive_active or bool(self.exclusive_waiting)
 
+    async def _wait(self) -> None:
+        """Wait for a notify or a periodic recheck. Caller must hold self._cond.
+
+        Do not wrap Condition.wait() in asyncio.wait_for: on Python 3.10 that runs wait()
+        in a nested task and cancelling the waiter can deadlock the lock. The timer is
+        cancelled without being awaited so it cannot block on this same lock.
+        """
+        timer = asyncio.create_task(self._recheck_timer())
+        try:
+            await self._cond.wait()
+        finally:
+            timer.cancel()
+
+    async def _recheck_timer(self) -> None:
+        try:
+            await asyncio.sleep(self._recheck_seconds)
+        except asyncio.CancelledError:
+            return
+        async with self._cond:
+            self._cond.notify_all()
+
     async def acquire_exclusive(self):
         async with self._cond:
             self.exclusive_waiting += 1
+            self._cond.notify_all()  # queued endpoint requests recheck and raise GpuExclusive
             try:
                 while self.agent_active or self.endpoint_active or self.exclusive_active:
                     await self._cond.wait()
             finally:
                 self.exclusive_waiting -= 1
+                self._cond.notify_all()
             self.exclusive_active = True
         return _Release(self, "exclusive")
 
@@ -172,12 +197,10 @@ class InferenceGate:
             try:
                 # Endpoint requests that are only waiting because this agent call is starved don't block it.
                 while self.exclusive or self.endpoint_active or (self.endpoint_waiting and not self._agent_starved()):
-                    try:
-                        await asyncio.wait_for(self._cond.wait(), timeout=5)  # re-check fairness periodically
-                    except asyncio.TimeoutError:
-                        pass
+                    await self._wait()
             finally:
                 self._agent_waiting_since.remove(since)
+                self._cond.notify_all()
             self.agent_active += 1
         return _Release(self, "agent")
 
@@ -189,11 +212,14 @@ class InferenceGate:
                 raise QueueFull()
             self.endpoint_waiting += 1
             try:
-                while self.agent_active or self._agent_starved():
-                    try:
-                        await asyncio.wait_for(self._cond.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        pass
+                while True:
+                    # Recheck after every wait and immediately before admitting: an exclusive
+                    # holder can acquire while this request is queued behind a starved agent.
+                    if self.exclusive:
+                        raise GpuExclusive()
+                    if not (self.agent_active or self._agent_starved()):
+                        break
+                    await self._wait()
             finally:
                 self.endpoint_waiting -= 1
                 self._cond.notify_all()

@@ -42,13 +42,16 @@ def remove_tree(path: Path) -> None:
 
 
 class Maintenance:
-    def __init__(self, cfg: Config, db: Database, runner: Runner):
+    def __init__(self, cfg: Config, db: Database, runner: Runner, image_archive=None):
         self.cfg = cfg
         self.db = db
         self.runner = runner
+        self.image_archive = image_archive
         self._task: asyncio.Task | None = None
         self.last_report: dict = {}
         self.last_backup: dict = self._read_backup_status()
+        if self.image_archive and isinstance(self.last_backup.get("image_archive"), dict):
+            self.image_archive.last_reconciliation = self.last_backup["image_archive"]
         self._lock = asyncio.Lock()
         self._backup_task: asyncio.Task | None = None
 
@@ -109,6 +112,12 @@ class Maintenance:
         """Online copy of the SQLite database plus transcripts and project config into backup.dir/<date>, then
         delete dated folders older than keep_days."""
         result = await asyncio.to_thread(self._backup_sync, time.time())
+        if self.image_archive and self.image_archive.enabled:
+            # Image failures are warnings: the already-verified SQLite snapshot remains a successful backup.
+            try:
+                result["image_archive"] = await asyncio.to_thread(self.image_archive.reconcile)
+            except Exception as e:  # noqa: BLE001 - report archive health without invalidating the snapshot
+                result["image_archive"] = {"enabled": True, "errors": 1, "warnings": [str(e)]}
         self.last_backup = result
         self._write_backup_status()
         log.info("backup written to %s (%d bytes)", result["path"], result["bytes"])
@@ -326,4 +335,5 @@ class Maintenance:
         out["runners"] = self.runner.hub.status()
         out["last_cleanup"] = self.last_report
         out["backup"] = {**self.last_backup, "enabled": self.cfg.backup.enabled, "dir": self.cfg.backup.dir}
+        out["image_archive"] = self.image_archive.health() if self.image_archive else {"enabled": False}
         return out

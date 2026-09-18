@@ -235,20 +235,24 @@ CREATE TABLE IF NOT EXISTS member_projects (
 CREATE INDEX IF NOT EXISTS member_projects_user ON member_projects(user_id);
 """
 
+# Column definitions reused across the migration table below.
+TEXT_EMPTY = "TEXT NOT NULL DEFAULT ''"
+TEXT_LOCAL = "TEXT NOT NULL DEFAULT 'local'"
+
 # Columns added after a table first shipped: (table, column, definition).
 MIGRATIONS = [
     # Secret for deciding one approval from a notification button, without a session cookie or JSON body.
-    ("approvals", "token", "TEXT NOT NULL DEFAULT ''"),
+    ("approvals", "token", TEXT_EMPTY),
     # Phase 3: git-backed projects. `review` is '' | merged | pushed | discarded.
-    ("sessions", "branch", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "base_branch", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "base_commit", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "review", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "review_detail", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "branch", TEXT_EMPTY),
+    ("sessions", "base_branch", TEXT_EMPTY),
+    ("sessions", "base_commit", TEXT_EMPTY),
+    ("sessions", "review", TEXT_EMPTY),
+    ("sessions", "review_detail", TEXT_EMPTY),
     # Set when cleanup deleted the workspace (or the user discarded it).
     ("sessions", "workspace_removed", "INTEGER NOT NULL DEFAULT 0"),
     # Phase 6e: sessions created through the app API, their registered tools and metadata; key scopes.
-    ("sessions", "app_id", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "app_id", TEXT_EMPTY),
     ("sessions", "app_tools", "TEXT NOT NULL DEFAULT '[]'"),
     ("sessions", "app_metadata", "TEXT NOT NULL DEFAULT '{}'"),
     # Issue #57: human-owned Agent Harness Web data. v1 has one stable owner; guests own nothing.
@@ -257,19 +261,25 @@ MIGRATIONS = [
     ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
     ("api_keys", "origins", "TEXT NOT NULL DEFAULT '[]'"),
     # Phase 7d: sessions started by a scheduled job, and the STATUS the job's answer ended with (ok | attention).
-    ("sessions", "job_id", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "job_status", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "job_id", TEXT_EMPTY),
+    ("sessions", "job_status", TEXT_EMPTY),
     # Phase 8a: local inference or a hosted CLI session backend.
-    ("sessions", "backend", "TEXT NOT NULL DEFAULT 'local'"),
-    ("jobs", "backend", "TEXT NOT NULL DEFAULT 'local'"),
-    ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
+    ("sessions", "backend", TEXT_LOCAL),
+    ("jobs", "backend", TEXT_LOCAL),
+    ("templates", "backend", TEXT_LOCAL),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    # Issue #86: durable image archive state. The canonical digest detects later source corruption.
+    ("images", "sha256", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("images", "archived_at", "REAL"),
+    ("images", "archive_error", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_deleted_at", "REAL"),
     # Issue #87: opt-in Real-ESRGAN derived images keep the original PNG unchanged.
-    ("images", "parent_id", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "parent_id", TEXT_EMPTY),
     ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
     ("images", "scale", "INTEGER NOT NULL DEFAULT 1"),
-    ("images", "upscale_model", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "upscale_model", TEXT_EMPTY),
     ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
@@ -345,13 +355,17 @@ class Database:
             return _row(self.conn.execute(
                 "SELECT * FROM sessions WHERE id = ? AND owner_id = ?", (sid, user_id)).fetchone())
 
-    def find_session_ids(self, prefix: str, user_id: str | None = None) -> list[str]:
-        if user_id is None:
-            query, params = "SELECT id FROM sessions WHERE id LIKE ?", (prefix + "%",)
-        else:
-            query, params = "SELECT id FROM sessions WHERE id LIKE ? AND owner_id = ?", (prefix + "%", user_id)
+    def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None) -> list[str]:
+        sql = "SELECT id FROM sessions WHERE id LIKE ?"
+        params: list = [prefix + "%"]
+        if user_id is not None:
+            sql += " AND owner_id = ?"
+            params.append(user_id)
+        if app_id is not None:
+            sql += " AND app_id = ?"
+            params.append(app_id)
         with self.lock:
-            rows = self.conn.execute(query, params).fetchall()
+            rows = self.conn.execute(sql, params).fetchall()
         return [r["id"] for r in rows]
 
     def list_sessions(self, limit: int = 50, owner_id: str | None = None) -> list[dict]:
@@ -449,7 +463,7 @@ class Database:
             self.conn.execute("COMMIT")
 
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600,
-                      user_id: str | None = None) -> list[dict]:
+                      user_id: str | None = None, app_id: str | None = None) -> list[dict]:
         sql = ("SELECT session_id, seq, kind, ts, bm25(search_index) AS rank, "
                "snippet(search_index, 0, char(2), char(3), '…', 16) AS snippet "
                "FROM search_index WHERE search_index MATCH ?")
@@ -460,6 +474,9 @@ class Database:
         if exclude:
             sql += " AND session_id != ?"
             params.append(exclude)
+        if app_id is not None:
+            sql += " AND session_id IN (SELECT id FROM sessions WHERE app_id = ?)"
+            params.append(app_id)
         with self.lock:
             try:
                 rows = self.conn.execute(sql + " ORDER BY rank LIMIT ?", [*params, max_rows]).fetchall()
@@ -721,6 +738,11 @@ class Database:
             params = list(status)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
+        return [dict(r) for r in rows]
+
+    def images_for_archive(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM images WHERE status = 'done' ORDER BY created_at, id").fetchall()
         return [dict(r) for r in rows]
 
     def find_image_upscale(self, parent_id: str, upscale: str) -> dict | None:

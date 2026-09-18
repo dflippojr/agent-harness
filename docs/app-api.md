@@ -45,9 +45,10 @@ Create an Agent Harness App token in **Settings → Apps** (or `POST /keys` from
 | `inference` | use the OpenAI/Anthropic-compatible endpoint under `/v1` |
 | `remote_control` | start and stop Claude Code Remote Control servers in project folders |
 
-Apps see only the sessions they created, unless they hold `sessions:all`. `sessions:all` means all sessions in the
-machine-owner scope (`user_id = owner`), never household member accounts. Cross-user object ids return an
-indistinguishable 404. Errors are `{"detail": "..."}`, with 401
+Apps see only the sessions they created, unless they hold `sessions:all`. That scope expands reads only:
+sending messages, adding context, cancelling, and answering tool calls still require owning the session.
+`sessions:all` means all sessions in the machine-owner scope (`user_id = owner`), never household member
+accounts. Cross-user object ids return an indistinguishable 404. Errors are `{"detail": "..."}`, with 401
 (bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual. Harness-generated errors also
 include `error: {code, message, retryable}`; `detail` remains for compatibility. The SDK exposes these as
 `HarnessError.code`, `.detail`, and `.retryable`.
@@ -228,11 +229,14 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 
 ### `POST /api/v1/sessions/{id}/messages`
 `{"content": "..."}`. Delivered before the agent's next step, or starts a new run if the session had finished.
+Requires owning the session (or an owner token); `sessions:all` does not authorize this.
 
 ### `POST /api/v1/sessions/{id}/context`
 `{"context": [{"title": "...", "content": "..."}]}`. Same as a message, but marked as context from the app.
+Requires owning the session (or an owner token); `sessions:all` does not authorize this.
 
 ### `POST /api/v1/sessions/{id}/cancel`
+Requires owning the session (or an owner token); `sessions:all` does not authorize this.
 
 ### `GET /api/v1/sessions/{id}/approvals`, `POST /api/v1/sessions/{id}/approvals/{approval_id}`  (scope `approvals` to decide)
 `{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name.
@@ -350,4 +354,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
 | 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
 | 1.8 | 2026-09-17 | Opt-in Real-ESRGAN 2×/4× upscaling (`upscale` on create; `POST /api/v1/images/{id}/upscale`) |
-| 1.9 | 2026-09-17 | Household members: scoped `/me`, `/projects`, search, events, local-only backends; discovery hides project names |
+| 1.9 | 2026-09-17 | Household members: scoped `/me`, `/projects`, search, events, local-only backends; discovery hides project names. `sessions:all` expands owner-scope reads only; messages, context, and cancel require owning the session |
