@@ -149,6 +149,21 @@ def test_generate_plus_upscale_holds_gpu_once(tmp_path):
     asyncio.run(body())
 
 
+def test_failed_phone_generate_with_upscale_notifies(tmp_path):
+    async def body():
+        m, _, _ = image_manager(tmp_path, weights=True, fail_prompts=("broken",))
+        notifications = []
+        m.images.notify = notifications.append
+        await m.start(maintenance=False)
+        job = m.images.submit("broken", source="phone", upscale="2x")
+        failed = await m.images.wait(job["id"])
+        assert failed["status"] == "failed" and "out of memory" in failed["error"]
+        assert notifications == [failed]
+        assert m.db.image_children(job["id"]) == []
+        await m.stop()
+    asyncio.run(body())
+
+
 def test_missing_weights_keep_generation_and_refuse_upscale(tmp_path):
     async def body():
         m, _, _ = image_manager(tmp_path, weights=False)

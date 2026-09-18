@@ -549,7 +549,8 @@ class ImageService:
                 event.set()
             finished = self.db.get_image(job_id)
             if self.notify and finished and finished["source"] == "phone":
-                if finished.get("operation") == "generate" and (finished.get("requested_upscale") or "none") != "none":
+                if (finished.get("operation") == "generate" and finished.get("status") == "done"
+                        and (finished.get("requested_upscale") or "none") != "none"):
                     pass  # notify when the derived upscale settles
                 else:
                     self.notify(finished)
