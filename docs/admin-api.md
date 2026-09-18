@@ -1,39 +1,42 @@
-# Owner API (admin v1)
+# Agent Harness Server owner API (admin v1)
 
-Machine-owner operations for the Control Center and other first-party operator clients. Ordinary
-apps keep using [`/api/v1`](app-api.md); they cannot call this surface, even with every app scope.
+Machine-owner operations for Agent Harness Web and other first-party operator surfaces. Agent Harness Apps keep
+using [`/api/v1`](app-api.md); they cannot call this surface, even with every App scope.
 
 Base path: `/api/admin/v1`. Versioning is in the path (`/api/admin/v2` for breaking changes). FastAPI
 serves the machine-readable schema at `/openapi.json`.
 
-The bundled and separately hosted Control Center use this contract. Unversioned operator routes remain a
-compatibility surface and keep Tailscale owner/guest rules.
+Bundled and separately hosted Agent Harness Web use this contract. Unversioned Agent Harness Server operator routes
+remain a compatibility surface and keep Tailscale owner/guest rules.
 
 ## Credentials
 
 Two owner credentials are accepted:
 
-1. **Tailscale/localhost owner identity**, with no `Authorization` header. Same trust as today's
-   Control Center: a missing `Tailscale-User-Login` is localhost; a listed `allowed_logins` entry is
+1. **Tailscale/localhost owner identity**, with no `Authorization` header. Same trust as bundled Agent Harness Web:
+   a missing `Tailscale-User-Login` is localhost; a listed `allowed_logins` entry is
    the owner. Guests (`guests:` in `harness.local.yaml`) are refused for every `/api/admin` path.
 2. **Owner bearer token.** `POST /keys` or `POST /api/admin/v1/keys` with
-   `{"name": "control-center", "kind": "owner", "scopes": ["admin"]}`. The secret is shown once,
+   `{"name": "agent-harness-web", "kind": "owner", "scopes": ["admin"]}`. The secret is shown once,
    starts with `ho-`, and is sent as `Authorization: Bearer ho-...`.
 
 App tokens (`ha-…`, kind `app`) and device/inference tokens (`hk-…`, kind `device`) receive **403**
 `app tokens cannot use the owner API`. The `admin` scope cannot be granted to those kinds.
 
-An owner token may include an exact browser-origin allowlist for a separately hosted Control Center. Create it from
-the bundled client's **Settings → Connection** page (or `POST /api/admin/v1/keys` with `kind: "owner"`, the `admin`
+An owner token may include an exact browser-origin allowlist for separately hosted Agent Harness Web. Create it from
+the bundled Web UI's **Settings → Connection** page (or `POST /api/admin/v1/keys` with `kind: "owner"`, the `admin`
 scope, and an `origins` array). Versioned API CORS is allowlisted by those live keys, and each actual owner request
-also checks that the presented token was approved for the request's origin. See [`control-center.md`](control-center.md).
+also checks that the presented token was approved for the request's origin. See [`web.md`](web.md).
+
+Existing owner records named `control-center` remain valid and visible as legacy Web connections. Agent Harness
+Server does not rename or revoke credentials for this terminology change.
 
 ## Discovery
 
 ### `GET /api/admin/v1`
 
 Requires owner credentials. Returns `api_version`, the `admin` scope description, accepted `auth`
-methods, the daemon `capabilities`, and the versioned `operations` list (`method` + `path`).
+methods, the Agent Harness Server `capabilities`, and the versioned `operations` list (`method` + `path`).
 
 ## Operations
 
@@ -53,7 +56,7 @@ same; only the prefix and the owner credential check are new.
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
 | Smart approvals | `/smart-approvals` (`GET` status, `PUT` `{mode: off\|shadow\|auto}`) |
-| Images | `/images`, `/images/warmup`, `/images/cooldown` |
+| Images | `/images`, `/images/warmup`, `/images/cooldown`, `/images/{iid}/upscale` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
 | Memory | `/memory`, `/memory/profile` |
 | Notifications | `/notify/test` |
@@ -64,8 +67,8 @@ and ntfy `POST /a/{token}/{decision}`.
 
 ## Per-app provider credentials
 
-The owner can give an app its own hosted-provider billing policy without giving either the daemon database or the
-app a plaintext provider key. First put the key in an owner-readable file and map an opaque name to it in
+The owner can give an Agent Harness App its own hosted-provider billing policy without giving either the Server
+database or the App a plaintext provider key. First put the key in an owner-readable file and map an opaque name to it in
 `harness.local.yaml`:
 
 ```yaml
@@ -105,7 +108,7 @@ this file-based contract; protect the files with OS permissions and rotate them 
 
 ## Examples
 
-Tailscale/localhost owner (Control Center today, no bearer token):
+Tailscale/localhost owner (bundled Agent Harness Web, no bearer token):
 
 ```http
 GET /api/admin/v1/sessions HTTP/1.1
@@ -123,18 +126,18 @@ Mint an owner token from the PC:
 ```bash
 curl -s http://127.0.0.1:8100/api/admin/v1/keys \
   -H "Content-Type: application/json" \
-  -d '{"name":"control-center","kind":"owner","scopes":["admin"]}'
+  -d '{"name":"agent-harness-web","kind":"owner","scopes":["admin"]}'
 ```
 
-For a browser client, add `"origins":["https://control.example"]`. Browser origins must be HTTPS except for
+For a separately hosted Agent Harness Web copy, add `"origins":["https://harness-web.example"]`. Browser origins must be HTTPS except for
 loopback development and contain no path, query, fragment, or credentials.
 
-## Mac client pairing
+## Agent Harness for Mac pairing
 
 `POST /api/admin/v1/runner-pairing-codes` with `{"name":"My Mac","runner":"macbook"}` creates a code that
 expires after 10 minutes and works once. The owner response shows the code once; list responses contain only its
 metadata, and `DELETE /api/admin/v1/runner-pairing-codes/{id}` cancels it. Settings uses this operation to produce the
-install command documented in [`mac-client.md`](mac-client.md).
+Agent Harness for Mac install command documented in [`mac-client.md`](mac-client.md).
 
 The Mac redeems the code at `POST /api/v1/runner-pair`. That one response contains a new non-browser owner token and
 the selected runner's existing token. It is marked `Cache-Control: no-store`. The code is stored only as a hash, the

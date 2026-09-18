@@ -627,7 +627,7 @@ class Manager:
     def revoke_app_provider_credential(self, cid: str) -> bool:
         return self.db.revoke_app_provider_credential(cid)
 
-    # owner-approved native Mac client + runner pairing (issue #16)
+    # owner-approved Agent Harness for Mac pairing (issue #16)
     def _runner_token(self, name: str, create: bool = False) -> str:
         runner = self.cfg.runners.get(name)
         if runner is None:
