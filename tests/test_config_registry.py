@@ -302,6 +302,47 @@ def test_unconfirmed_candidate_restores_lkg(tmp_path):
     assert manager.settings.store.quarantine_path.is_file()
 
 
+def test_managed_store_lock_is_reentrant(tmp_path):
+    store = ManagedStore(tmp_path / "data")
+    finished = threading.Event()
+
+    def nested():
+        with store.lock():
+            with store.lock():
+                store.write_active(Envelope(revision=1, values={"sessions.max_turns": 11}))
+        finished.set()
+
+    thread = threading.Thread(target=nested, daemon=True)
+    thread.start()
+    thread.join(timeout=3)
+    assert not thread.is_alive(), "ManagedStore.lock deadlocked on nested acquire"
+    assert finished.is_set()
+    assert store.read_active().values["sessions.max_turns"] == 11
+
+
+def test_rollback_does_not_deadlock_on_nested_store_lock(tmp_path):
+    cfg = make_cfg(tmp_path)
+    service = SettingsService(cfg)
+    store = service.store
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"sessions.max_turns": 40}))
+    store.write_active(Envelope(revision=2, confirmed=True, values={"sessions.max_turns": 50}))
+    cfg.max_turns = 50
+    result = {}
+
+    def run():
+        try:
+            result["body"] = service.rollback(2, actor={"id": "owner", "kind": "owner"})
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=3)
+    assert not thread.is_alive(), "rollback deadlocked holding ManagedStore.lock across patch_admin"
+    assert "error" not in result, result.get("error")
+    assert cfg.max_turns == 40
+
+
 def test_corrupt_and_concurrent_writes(tmp_path):
     cfg = make_cfg(tmp_path)
     store = ManagedStore(cfg.data_dir)

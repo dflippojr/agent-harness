@@ -103,6 +103,8 @@ class ManagedStore:
         self.boot_tried_path = self.data_dir / BOOT_TRIED_NAME
         self.status_path = self.data_dir / STATUS_NAME
         self._thread_lock = threading.RLock()
+        self._lock_depth = 0
+        self._lock_handle = None
 
     def exists(self) -> bool:
         return self.active_path.is_file()
@@ -117,13 +119,23 @@ class ManagedStore:
     def lock(self) -> Iterator[None]:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         with self._thread_lock:
-            handle = open(self.lock_path, "a+b")
+            if self._lock_depth == 0:
+                handle = open(self.lock_path, "a+b")
+                try:
+                    _acquire(handle)
+                except Exception:
+                    handle.close()
+                    raise
+                self._lock_handle = handle
+            self._lock_depth += 1
             try:
-                _acquire(handle)
                 yield
             finally:
-                _release(handle)
-                handle.close()
+                self._lock_depth -= 1
+                if self._lock_depth == 0 and self._lock_handle is not None:
+                    _release(self._lock_handle)
+                    self._lock_handle.close()
+                    self._lock_handle = None
 
     def read_active(self) -> Envelope | None:
         return self._read(self.active_path)
