@@ -70,10 +70,15 @@ def test_discovery_is_always_reachable_and_omitted_header_has_transition_notice(
         assert legacy.headers["x-agent-harness-deprecation"] == "missing_client_version"
 
 
-def test_separately_hosted_web_can_preflight_and_read_health(tmp_path):
+def hosted_web_client(tmp_path):
     manager = manager_with_runner(tmp_path)
     origin = "https://web.example"
-    manager.db.create_api_key("Agent Harness Web", "admin", "owner", [origin])
+    _, token = manager.db.create_api_key("Agent Harness Web", "admin", "owner", [origin])
+    return manager, origin, {"Authorization": f"Bearer {token}", "Origin": origin}
+
+
+def test_separately_hosted_web_can_preflight_and_read_health(tmp_path):
+    manager, origin, headers = hosted_web_client(tmp_path)
     with TestClient(create_app(manager)) as client:
         preflight = client.options("/health", headers={
             "Origin": origin,
@@ -82,10 +87,32 @@ def test_separately_hosted_web_can_preflight_and_read_health(tmp_path):
         })
         assert preflight.status_code == 204
         response = client.get("/health", headers={
-            "Origin": origin, compat.CLIENT_HEADER: "web/2",
+            **headers, compat.CLIENT_HEADER: "web/2",
         })
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == origin
+
+
+def test_hosted_web_compatibility_errors_keep_cors_headers(tmp_path):
+    manager, origin, headers = hosted_web_client(tmp_path)
+    with TestClient(create_app(manager)) as client:
+        compatible = client.get("/api/admin/v1/me", headers={**headers, compat.CLIENT_HEADER: "web/2"})
+        assert compatible.status_code == 200
+        assert compatible.headers["access-control-allow-origin"] == origin
+
+        for path, header, status, code in (
+            ("/api/admin/v1/me", "web/99", 426, "daemon_update_required"),
+            ("/api/v1/backends", "web/99", 426, "daemon_update_required"),
+            ("/api/admin/v1/me", "web/0", 426, "client_update_required"),
+            ("/api/v1/backends", "web/0", 426, "client_update_required"),
+            ("/api/admin/v1/me", "not-a-client", 400, "invalid_client_identity"),
+            ("/api/v1/backends", "web", 400, "invalid_client_identity"),
+        ):
+            response = client.get(path, headers={**headers, compat.CLIENT_HEADER: header})
+            assert response.status_code == status, response.text
+            assert response.headers["access-control-allow-origin"] == origin
+            assert response.headers["vary"] == "Origin"
+            assert response.json()["error"]["code"] == code
 
 
 def test_mac_package_manifest_is_version_matched_and_hash_verified(tmp_path):

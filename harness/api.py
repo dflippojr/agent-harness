@@ -160,30 +160,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m: Manager = request.app.state.manager
         cfg = m.cfg
         from .apps import cors_origin_allowed, daemon_origins, normalize_origin
-        # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
-        login = request.headers.get("tailscale-user-login")
-        ident = access_mod.resolve_access(cfg, login)
-        request.state.access = ident
-        if not ident.allowed:
-            log.warning("refused %s %s from tailnet login %s (%s)",
-                        request.method, request.url.path, login, ident.detail)
-            return JSONResponse({"detail": ident.detail or "this tailnet login is not allowed"}, status_code=403)
-        guest_block = access_mod.guest_forbidden(ident, request.method, request.url.path)
-        if guest_block:
-            log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
-            return JSONResponse({"detail": guest_block}, status_code=403)
         public_path = request.scope.get("harness_original_path", request.url.path)
-        surface = compat.surface_for_path(public_path)
-        compatibility = compat.check_client(request.headers.get(compat.CLIENT_HEADER, ""), surface) if surface else None
-        discovery = request.method in {"GET", "HEAD"} and public_path in {"/api/v1", "/api/admin/v1"}
-        if compatibility and not discovery and compatibility["state"] == "invalid":
-            return JSONResponse({"detail": "invalid first-party client identity", "error": {
-                "code": "invalid_client_identity", **compatibility,
-            }}, status_code=400)
-        if compatibility and not discovery and compatibility["state"] in {"client_update_required", "daemon_update_required"}:
-            return JSONResponse({"detail": compatibility["state"].replace("_", " "), "error": {
-                "code": compatibility["state"], **compatibility,
-            }}, status_code=426)
         raw_origin = request.headers.get("origin", "")
         try:
             origin = normalize_origin(raw_origin) if raw_origin else ""
@@ -194,6 +171,30 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         cross_origin_api = bool(origin and origin not in daemon_origins(cfg)
                                 and browser_api and cors_origin_allowed(m, request, origin))
         cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_api else {}
+        # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
+        login = request.headers.get("tailscale-user-login")
+        ident = access_mod.resolve_access(cfg, login)
+        request.state.access = ident
+        if not ident.allowed:
+            log.warning("refused %s %s from tailnet login %s (%s)",
+                        request.method, request.url.path, login, ident.detail)
+            return JSONResponse({"detail": ident.detail or "this tailnet login is not allowed"},
+                                status_code=403, headers=cors_headers)
+        guest_block = access_mod.guest_forbidden(ident, request.method, request.url.path)
+        if guest_block:
+            log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
+            return JSONResponse({"detail": guest_block}, status_code=403, headers=cors_headers)
+        surface = compat.surface_for_path(public_path)
+        compatibility = compat.check_client(request.headers.get(compat.CLIENT_HEADER, ""), surface) if surface else None
+        discovery = request.method in {"GET", "HEAD"} and public_path in {"/api/v1", "/api/admin/v1"}
+        if compatibility and not discovery and compatibility["state"] == "invalid":
+            return JSONResponse({"detail": "invalid first-party client identity", "error": {
+                "code": "invalid_client_identity", **compatibility,
+            }}, status_code=400, headers=cors_headers)
+        if compatibility and not discovery and compatibility["state"] in {"client_update_required", "daemon_update_required"}:
+            return JSONResponse({"detail": compatibility["state"].replace("_", " "), "error": {
+                "code": compatibility["state"], **compatibility,
+            }}, status_code=426, headers=cors_headers)
 
         if request.method == "OPTIONS" and browser_api and raw_origin:
             requested_method = request.headers.get("access-control-request-method", "").upper()
@@ -202,7 +203,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             if (not cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
                     or not requested_headers <= {"authorization", "content-type", "last-event-id",
                                                   "x-agent-harness-client"}):
-                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403, headers=cors_headers)
             return Response(status_code=204, headers={**cors_headers,
                             "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
                             "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID, X-Agent-Harness-Client",
@@ -212,7 +213,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             # Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent).
             if ((raw_origin and origin not in daemon_origins(cfg) and not cross_origin_api)
                     or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_api)):
-                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403, headers=cors_headers)
         response = await call_next(request)
         if compatibility and compatibility["state"] == "transition":
             response.headers["X-Agent-Harness-Deprecation"] = "missing_client_version"
