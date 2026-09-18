@@ -119,8 +119,9 @@ def test_control_center_shell_includes_transport_module():
     assert '"/api/v1"' in client and '"/api/admin/v1"' in client
     assert "body instanceof FormData" in client
     index = (web / "index.html").read_text(encoding="utf-8")
-    assert 'src="/app.js"' in index and 'href="/style.css"' in index
+    assert 'src="/app.js?v=4"' in index and 'href="/style.css?v=4"' in index
     assert '"/client.mjs"' in worker
+    assert 'fetch(event.request, { cache: "no-cache" })' in worker
 
 
 def test_control_center_assets_work_at_static_root_and_compatibility_alias(tmp_path):
