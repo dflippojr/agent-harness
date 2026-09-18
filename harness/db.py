@@ -201,20 +201,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
 );
 """
 
+# Column definitions reused across the migration table below.
+TEXT_EMPTY = "TEXT NOT NULL DEFAULT ''"
+TEXT_LOCAL = "TEXT NOT NULL DEFAULT 'local'"
+
 # Columns added after a table first shipped: (table, column, definition).
 MIGRATIONS = [
     # Secret for deciding one approval from a notification button, without a session cookie or JSON body.
-    ("approvals", "token", "TEXT NOT NULL DEFAULT ''"),
+    ("approvals", "token", TEXT_EMPTY),
     # Phase 3: git-backed projects. `review` is '' | merged | pushed | discarded.
-    ("sessions", "branch", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "base_branch", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "base_commit", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "review", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "review_detail", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "branch", TEXT_EMPTY),
+    ("sessions", "base_branch", TEXT_EMPTY),
+    ("sessions", "base_commit", TEXT_EMPTY),
+    ("sessions", "review", TEXT_EMPTY),
+    ("sessions", "review_detail", TEXT_EMPTY),
     # Set when cleanup deleted the workspace (or the user discarded it).
     ("sessions", "workspace_removed", "INTEGER NOT NULL DEFAULT 0"),
     # Phase 6e: sessions created through the app API, their registered tools and metadata; key scopes.
-    ("sessions", "app_id", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "app_id", TEXT_EMPTY),
     ("sessions", "app_tools", "TEXT NOT NULL DEFAULT '[]'"),
     ("sessions", "app_metadata", "TEXT NOT NULL DEFAULT '{}'"),
     # Issue #57: human-owned Agent Harness Web data. v1 has one stable owner; guests own nothing.
@@ -223,19 +227,19 @@ MIGRATIONS = [
     ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
     ("api_keys", "origins", "TEXT NOT NULL DEFAULT '[]'"),
     # Phase 7d: sessions started by a scheduled job, and the STATUS the job's answer ended with (ok | attention).
-    ("sessions", "job_id", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "job_status", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "job_id", TEXT_EMPTY),
+    ("sessions", "job_status", TEXT_EMPTY),
     # Phase 8a: local inference or a hosted CLI session backend.
-    ("sessions", "backend", "TEXT NOT NULL DEFAULT 'local'"),
-    ("jobs", "backend", "TEXT NOT NULL DEFAULT 'local'"),
-    ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
+    ("sessions", "backend", TEXT_LOCAL),
+    ("jobs", "backend", TEXT_LOCAL),
+    ("templates", "backend", TEXT_LOCAL),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
     # Issue #87: opt-in Real-ESRGAN derived images keep the original PNG unchanged.
-    ("images", "parent_id", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "parent_id", TEXT_EMPTY),
     ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
     ("images", "scale", "INTEGER NOT NULL DEFAULT 1"),
-    ("images", "upscale_model", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "upscale_model", TEXT_EMPTY),
     ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
