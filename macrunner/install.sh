@@ -1,7 +1,7 @@
 #!/bin/bash
 # Installs or updates the Mac CLI and runner. Run as the logged-in user; no sudo.
 # Fresh install from Settings:
-#   curl -fsSL https://<daemon>/mac-client/install.sh | bash -s -- --server https://<daemon> --code hrp-...
+#   curl -fsSL https://<server>/mac-client/install.sh | bash -s -- --server https://<server> --code hrp-...
 # An unpacked package (or the legacy SSH deploy) works without downloads and preserves an existing pairing.
 set -euo pipefail
 

@@ -1,23 +1,24 @@
-# App API (v1)
+# Agent Harness App API (v1)
 
-Other applications can start agent sessions on a harness, give them context, lend them tools, and follow their progress.
-Base path: `/api/v1`, on the daemon's address (`http://127.0.0.1:8100` locally, `https://<pc>.<tailnet>.ts.net` on
-a tailnet). FastAPI also serves the machine-readable schema at `/openapi.json`. Machine-owner operations (schedules,
+An **Agent Harness App** is a third-party integration that starts agent sessions, gives them context, lends them
+tools, and follows their progress. Base path: `/api/v1`, on Agent Harness Server's address
+(`http://127.0.0.1:8100` locally, `https://<pc>.<tailnet>.ts.net` on a tailnet). FastAPI also serves the
+machine-readable schema at `/openapi.json`. Machine-owner operations (schedules,
 GPU, review/push, token management, maintenance, Remote Control trust) live on [`/api/admin/v1`](admin-api.md) and
-are not part of this app contract. App tokens cannot call them.
+are not part of this App contract. App tokens cannot call them.
 
-The first-party [Control Center](control-center.md) also uses this surface for ordinary session operations. A
-same-origin bundled Control Center may use its Tailscale/localhost owner identity; a separately hosted copy uses an
-origin-bound owner token. Owner-created sessions are not assigned to an app. This first-party privilege does not
-change app-token scoping: app tokens still see only their own sessions unless granted read-only `sessions:all`.
+First-party [Agent Harness Web](web.md) also uses this surface for ordinary session operations. A same-origin bundled
+Web UI may use its Tailscale/localhost owner identity; a separately hosted copy uses an origin-bound owner token.
+Owner-created sessions are not assigned to an Agent Harness App. This first-party privilege does not change App-token
+scoping: App tokens still see only their own sessions unless granted read-only `sessions:all`.
 
-A Python client lives in [`sdk/harness_client.py`](../sdk/harness_client.py) (one file, needs `httpx`), with an
+A one-file Agent Harness SDK lives in [`sdk/harness_client.py`](../sdk/harness_client.py) (requires `httpx`), with an
 example in [`sdk/examples/shopping_list_app.py`](../sdk/examples/shopping_list_app.py).
 
-The client is the supported Python surface. It covers discovery and pairing, every session backend, initial and
+Agent Harness SDK is the supported Python surface. It covers discovery and pairing, every session backend, initial and
 incremental context, app tools, approvals, cancellation, resumable events, provider status, and images. Call
 `Harness.validate_openapi()` during an integration check to verify that its operation and request types still match
-the daemon's live `/openapi.json`; the repository test suite performs the same check against every change.
+Agent Harness Server's live `/openapi.json`; the repository test suite performs the same check against every change.
 
 `GET /api/v1/backends` is authenticated and app-specific. Its `today`, `week`, and `usage_by_source` fields contain
 only the calling app's usage. `provider_policy` reports whether that app may use the backend, its billing policy and
@@ -30,7 +31,7 @@ assignment. A managed app receives limits reported by its own provider process i
 
 ## Tokens and scopes
 
-Create a token in **Settings → Apps** (or `POST /keys` from the PC:
+Create an Agent Harness App token in **Settings → Apps** (or `POST /keys` from the PC:
 `{"name": "my-app", "kind": "app", "scopes": ["sessions"]}`). It's shown once; only its hash is stored. Send it as
 `Authorization: Bearer ha-...`.
 
@@ -56,8 +57,8 @@ cannot impersonate this surface. The allowlist and cap rules are in [`config-reg
 
 ## Pair a separately hosted browser app
 
-Do not paste a long-lived app token into a browser URL. In **Settings → Apps → Pair browser app**, the owner enters
-the client's exact origin (for example `https://control.example`) and scopes, then approves a bootstrap code. The
+Do not paste a long-lived App token into a browser URL. In **Settings → Apps → Pair browser app**, the owner enters
+the Agent Harness App's exact origin (for example `https://app.example`) and scopes, then approves a bootstrap code. The
 code expires after 10 minutes, works once, and can only be redeemed from that exact `Origin`. Browser origins must
 use HTTPS; HTTP is accepted only for loopback development (`localhost`, `127.0.0.1`, or `[::1]`):
 
@@ -70,11 +71,11 @@ const paired = await fetch(`${daemon}/api/v1/pair`, {
 const token = paired.token;
 ```
 
-The resulting `ha-...` credential is scoped, revocable, and bound to the approved origin. It is an Agent Harness app
+The resulting `ha-...` credential is scoped, revocable, and bound to the approved origin. It is an Agent Harness App
 credential, never a Claude, Codex, Cursor, or other provider credential. Keep it out of URLs and logs; send it in
-`Authorization: Bearer ...`. The daemon emits `Access-Control-Allow-Origin` only for the exact paired origin, never
+`Authorization: Bearer ...`. Agent Harness Server emits `Access-Control-Allow-Origin` only for the exact paired origin, never
 uses wildcard CORS, and does not allow credentials/cookies. This means ordinary browser mutations cannot ride ambient
-cookies as CSRF. A non-browser client can continue to use the same bearer API without an `Origin` header.
+cookies as CSRF. A non-browser Agent Harness App can continue to use the same bearer API without an `Origin` header.
 
 For native `EventSource`, first mint a short-lived stream ticket with the bearer credential:
 
@@ -111,7 +112,7 @@ print(result.status, result.answer, notes)
 ```
 
 `Harness.pair(url, code, origin)` redeems an owner-approved browser pairing code. `capabilities()` and `backends()`
-discover what a daemon can run; pass `backend="claude"`, `"codex"`, or `"cursor"` to `run()` / `create_session()`
+discover what Agent Harness Server can run; pass `backend="claude"`, `"codex"`, or `"cursor"` to `run()` / `create_session()`
 instead of the default `"local"`. `pending_approvals()` / `decide_approval()` expose native provider permission
 requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and `.failure` normalize run outcomes.
 
@@ -119,7 +120,7 @@ requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and
 
 ### `GET /api/v1`
 Server info: API version, scopes, projects, models, hosted backends, enabled features, and `capabilities`. The
-capability object identifies the `full` or `service` profile, always-on daemon facilities, and effective optional
+capability object identifies the `full` or `service` profile, always-on Server facilities, and effective optional
 modules. It contains no credentials and doesn't need a token. `GET /health` exposes the same capability object for
 lightweight discovery.
 
@@ -209,9 +210,14 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 ### `GET /api/v1/sessions/{id}/approvals`, `POST /api/v1/sessions/{id}/approvals/{approval_id}`  (scope `approvals` to decide)
 `{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name.
 
-### `POST /api/v1/images`, `GET /api/v1/images/{id}`, `GET /api/v1/images/{id}.png`  (scope `images`)
-`{"prompt": "...", "model": "fast" | "quality", "aspect_ratio": "1:1"}` queues a job; poll the job until `status` is
-`done`, then download the PNG. While images generate, the language model is unloaded for a few minutes.
+### `POST /api/v1/images`, `GET /api/v1/images/{id}`, `GET /api/v1/images/{id}.png`, `POST /api/v1/images/{id}/upscale`  (scope `images`)
+`{"prompt": "...", "model": "fast" | "quality", "aspect_ratio": "1:1", "upscale": "none" | "2x" | "4x"}` queues a
+job; `upscale` defaults to `none` and must stay that way unless the caller asks. Poll until `status` is `done`, then
+download the PNG. When `upscale` is `2x` or `4x`, the original is kept and a linked derived image is generated in the
+same GPU occupancy (Real-ESRGAN general-image weights, optional). `POST /api/v1/images/{id}/upscale` with
+`{"upscale": "2x" | "4x"}` does the same from a completed gallery image and is idempotent per parent and scale.
+While images generate or upscale, the language model is unloaded for a few minutes. Missing Real-ESRGAN weights do
+not break ordinary generation; the upscale routes return a clear install error.
 
 ### `GET /api/v1/remote-control`, `POST /api/v1/remote-control/{project}`, `POST /api/v1/remote-control/{project}/stop`  (scope `remote_control`)
 Starts the unmodified `claude remote-control --spawn worktree` in a tower project's folder, so the user can work there
@@ -220,8 +226,8 @@ harness: no queue, sandbox or harness approvals, and Claude Code asks for permis
 shows each eligible project with `trusted`, `running`, `pairing_url` (open it to pair), `session_urls` and
 `active_sessions`. Starting returns the same object once the server is connected (up to 30 s), with
 `already_running: true` if it was. It fails with 400 when the folder hasn't been trusted in Claude Code yet (the
-user runs `claude` there once) or isn't a git repository. Servers keep running until stopped, including across
-daemon restarts.
+user runs `claude` there once) or isn't a git repository. Remote Control servers keep running until stopped,
+including across Agent Harness Server restarts.
 
 ## Subscription backends (Claude Code, Codex, Cursor): terms and billing
 
@@ -232,20 +238,22 @@ daemon restarts.
 > billing change, so check the sources at the end.
 
 A harness will be able to run a session on the user's own Claude, ChatGPT or Cursor subscription instead of a local
-model. The daemon runs the unmodified `claude`, `codex` or Cursor `agent` CLI inside the session sandbox. The user
+model. Agent Harness Server runs the unmodified `claude`, `codex` or Cursor `agent` CLI inside the session sandbox. The user
 signs in once, on their own machine, through the provider's own login flow.
 
-### What the daemon guarantees
+### What Agent Harness Server guarantees
 
-- **Only the daemon talks to the CLI.** Apps never launch it, never see its credentials, and can't reach its login.
-  An app that needs particular agent context sends it to the daemon (`context`, `tools`), which sets up the session.
+- **Only Agent Harness Server talks to the provider CLI.** Agent Harness Apps never launch it, see its credentials,
+  or reach its login. An App that needs particular agent context sends it to the Server (`context`, `tools`), which
+  sets up the session.
 - **The CLI is never modified.** It runs as published by Anthropic, OpenAI or Cursor.
 - **Programmatic use is labeled as programmatic.** Sessions run in the CLI's non-interactive mode (`claude -p`,
-  `codex exec`, `agent -p`). The daemon never drives the interactive terminal UI to look like a person typing.
+  `codex exec`, `agent -p`). Agent Harness Server never drives the interactive terminal UI to look like a person typing.
 - **Each user's usage is billed to that user.** A harness serves its owner. It must not route other people's apps or
   users through one person's subscription.
-- **Usage is visible.** The daemon reports rate-limit state, and a running tally of programmatic usage, through this
-  API and the web app. It warns when that usage is billed from separate credits instead of subscription limits.
+- **Usage is visible.** Agent Harness Server reports rate-limit state, and a running tally of programmatic usage,
+  through this API and Agent Harness Web. It warns when that usage is billed from separate credits instead of
+  subscription limits.
 - **API keys are optional and configurable.** An Anthropic, OpenAI or Cursor API key can be the machine default, or
   the owner can assign an isolated key file and billing policy to one app. Apps never submit or retrieve those keys.
 
@@ -261,7 +269,7 @@ signs in once, on their own machine, through the provider's own login flow.
   native Anthropic applications". Developers building products on Claude "should use API key authentication" and may
   not offer Claude.ai login in their own apps, "route requests through Free, Pro, or Max plan credentials on behalf
   of their users", or collect or store Claude.ai credentials or session tokens. An app that sends prompts through a
-  user's daemon can be read either way.
+  user's Agent Harness Server can be read either way.
 - **Billing:** Anthropic announced that Agent SDK, `claude -p` and third-party app usage would draw from a separate
   monthly credit, with overage at API rates, instead of subscription limits. As of 2026-09-15 that change is
   **paused**, but it may return. Usage limits also assume "ordinary, individual usage".
@@ -280,7 +288,7 @@ The harness can't control how apps present this, so these are strong recommendat
   > there. That usage counts against your plan's limits, and your provider may bill it separately or restrict it.
   > You can switch to your own API key in the harness settings.
 
-- **Show the daemon's usage and rate-limit information** instead of hiding it, and pass on its credit warnings.
+- **Show Agent Harness Server's usage and rate-limit information** instead of hiding it, and pass on its credit warnings.
 - **Offer an API-key path** for users who don't want to risk their subscription, and use it for anything that
   runs unattended at volume.
 - **Don't** ask users for provider credentials or tokens, bundle or patch the CLIs, or run one harness for many users.
@@ -314,5 +322,5 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.4 | 2026-09-16 | Daemon profile and optional-module capability discovery |
 | 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
 | 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
-| 1.7 | 2026-09-16 | Native Mac bootstrap pairing and capability discovery (owner-approved, not an app SDK operation) |
-| 1.8 | 2026-09-17 | Per-app configuration registry (`/api/v1/config`); values may only narrow owner/token authority |
+| 1.8 | 2026-09-17 | Opt-in Real-ESRGAN 2×/4× upscaling (`upscale` on create; `POST /api/v1/images/{id}/upscale`) |
+| 1.9 | 2026-09-17 | Per-app configuration registry (`/api/v1/config`); values may only narrow owner/token authority |

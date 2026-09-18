@@ -1,5 +1,5 @@
-// Control Center transport: the PWA can be bundled with the daemon or hosted independently.
-// Connection settings are intentionally browser-local and never sent anywhere except the chosen daemon.
+// Agent Harness Web transport: the PWA can be bundled with Agent Harness Server or hosted independently.
+// Connection settings are intentionally browser-local and never sent anywhere except the chosen Server.
 
 const BASE_KEY = "harness.daemonUrl";
 const TOKEN_KEY = "harness.ownerToken";
@@ -8,15 +8,15 @@ export function normalizeDaemonUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   let url;
-  try { url = new URL(raw); } catch (_) { throw new Error("Daemon URL must be a complete http(s) URL"); }
+  try { url = new URL(raw); } catch (_) { throw new Error("Agent Harness Server URL must be a complete http(s) URL"); }
   if (!(["http:", "https:"].includes(url.protocol)) || url.username || url.password || url.search || url.hash) {
-    throw new Error("Daemon URL must contain only http(s), host, port, and an optional path");
+    throw new Error("Agent Harness Server URL must contain only http(s), host, port, and an optional path");
   }
   url.pathname = url.pathname.replace(/\/+$/, "");
   return url.toString().replace(/\/$/, "");
 }
 
-export class ControlCenterClient {
+export class AgentHarnessWebClient {
   constructor(storage = window.localStorage) {
     this.storage = storage;
     this.baseUrl = normalizeDaemonUrl(this._get(BASE_KEY));
@@ -56,7 +56,7 @@ export class ControlCenterClient {
     }
     let resp;
     try { resp = await fetch(this.url(path, surface), opts); }
-    catch (_) { throw new Error("Can't reach the daemon. Check Connection settings and Tailscale."); }
+    catch (_) { throw new Error("Can't reach Agent Harness Server. Check Connection settings and Tailscale."); }
     if (resp.status === 204) return null;
     const type = resp.headers.get("content-type") || "";
     const data = type.includes("json") ? await resp.json() : await resp.text();
@@ -74,7 +74,7 @@ export class ControlCenterClient {
   async blob(path, surface = "admin") {
     let resp;
     try { resp = await fetch(this.url(path, surface), { headers: this.headers(), cache: "no-store" }); }
-    catch (_) { throw new Error("Can't reach the daemon. Check Connection settings and Tailscale."); }
+    catch (_) { throw new Error("Can't reach Agent Harness Server. Check Connection settings and Tailscale."); }
     if (!resp.ok) {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) { /* binary/text response */ }
@@ -91,4 +91,7 @@ export class ControlCenterClient {
   }
 }
 
-export const controlCenter = new ControlCenterClient();
+// Compatibility for code that imported the pre-#91 class name directly.
+export const ControlCenterClient = AgentHarnessWebClient;
+export const agentHarnessWeb = new AgentHarnessWebClient();
+export const controlCenter = agentHarnessWeb;

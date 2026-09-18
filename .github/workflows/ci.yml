@@ -1,0 +1,29 @@
+name: CI
+
+# Feature-branch pushes without a PR do not run. `pull_request` covers open and
+# later commits on a PR (`synchronize`); `push` to main still runs after merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: [self-hosted, Windows, X64, agent-harness-tower]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up virtualenv
+        shell: powershell
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python -m pip install --upgrade pip
+          .venv\Scripts\python -m pip install -r requirements.txt
+
+      - name: Run test suite
+        shell: powershell
+        run: .venv\Scripts\python -m pytest tests -q
