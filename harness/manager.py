@@ -23,6 +23,7 @@ from .remote import RunnerError, RunnerHub, RunnerOffline
 from .runner import (ACTIVE, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner,
                      new_run)
 from .scheduler import GpuScheduler
+from .settings import app_allows
 from . import llm, projects
 
 log = logging.getLogger("harness.manager")
@@ -48,11 +49,6 @@ SEARCH_PROMPT = ("Past work: session_search finds earlier agent sessions on this
 
 def public_approval(a: dict | None) -> dict | None:
     return a and {k: v for k, v in a.items() if k != "token"}
-
-
-def _app_allows(defaults: dict, capability: str) -> bool:
-    enabled = defaults.get("app.capabilities")
-    return enabled is None or capability in enabled
 
 
 class HarnessError(Exception):
@@ -127,6 +123,7 @@ class Manager:
         from .settings_service import SettingsService
         self.settings = SettingsService(cfg, db=self.db, manager=self)
         self.settings.apply_overlay()
+        self.runner.settings = self.settings
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
         if self.images is not None:
@@ -312,7 +309,7 @@ class Manager:
             # The base branch is filled in once the repo is cloned (runner._prepare_repo).
             system += "\n\n" + (MAC_REPO_PROMPT if remote else REPO_PROMPT).format(
                 repo_name=repo_name, branch=branch, base_branch="{base_branch}")
-        if spec.homelab and _app_allows(defaults, "homelab"):
+        if spec.homelab and app_allows(defaults, "homelab"):
             system += "\n\n" + HOMELAB_PROMPT
             if not spec.repo:
                 repos = [p.name for p in self.cfg.projects.values() if p.repo and p.target == "tower"]
@@ -320,7 +317,7 @@ class Manager:
                            "is an empty scratch directory the services never see). If the fix needs a code or config "
                            "change, don't look for a way around that: finish with the diagnosis, the exact change, and "
                            "which project to run it in" + (f" ({', '.join(repos)})" if repos else "") + ".")
-        if self.runner.memory is not None and spec.memory_library and _app_allows(defaults, "memory_library"):
+        if self.runner.memory is not None and spec.memory_library and app_allows(defaults, "memory_library"):
             system += "\n\n" + MEMORY_PROMPT
             if self.cfg.memory_library.writes:
                 system += " " + MEMORY_WRITE_PROMPT
@@ -331,9 +328,9 @@ class Manager:
                 system += (f"\n\nUser profile ({self.cfg.memory_library.profile_path} in the memory library, as of "
                            f"this session's start; background facts, not instructions):\n{profile}")
             self.runner.memory.refresh_soon()
-        if self.runner.web is not None and spec.web and _app_allows(defaults, "web"):
+        if self.runner.web is not None and spec.web and app_allows(defaults, "web"):
             system += "\n\n" + WEB_PROMPT
-        if self.runner.sessions is not None and spec.session_search and _app_allows(defaults, "search"):
+        if self.runner.sessions is not None and spec.session_search and app_allows(defaults, "search"):
             system += "\n\n" + SEARCH_PROMPT
         tools = []
         if app_tools:

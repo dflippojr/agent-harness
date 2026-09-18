@@ -123,6 +123,48 @@ def test_live_patch_reset_and_stale_revision(tmp_path):
         assert "sessions.max_turns" not in (manager.settings.store.read_active().values)
 
 
+def test_reset_live_compaction_key_revalidates_inherited_thresholds(tmp_path):
+    """Resetting one live compaction key must validate against YAML/inherited siblings,
+    not the pre-reset overlay still sitting on candidate_cfg."""
+    client, manager = _client(tmp_path)
+    with client:
+        saved = client.patch("/api/admin/v1/config", json={
+            "revision": 0,
+            "changes": {"compaction.elide_at": 0.20, "compaction.summarize_at": 0.50},
+        })
+        assert saved.status_code == 200, saved.text
+        assert manager.cfg.elide_at == 0.20 and manager.cfg.summarize_at == 0.50
+        # Inherited elide_at is 0.55; leaving summarize_at=0.50 would violate elide < summarize.
+        reset_elide = client.patch("/api/admin/v1/config", json={
+            "revision": saved.json()["revision"], "reset": ["compaction.elide_at"],
+        })
+        assert reset_elide.status_code == 400, reset_elide.text
+        assert reset_elide.json()["error"]["code"] == "validation_error"
+        assert "compaction.summarize_at" in reset_elide.json()["error"]["keys"]
+        assert manager.cfg.elide_at == 0.20 and manager.cfg.summarize_at == 0.50
+        assert "compaction.elide_at" in manager.settings.store.read_active().values
+
+        # Symmetric: overlay elide_at=0.80 with inherited summarize_at=0.65 is also invalid.
+        high = client.patch("/api/admin/v1/config", json={
+            "revision": saved.json()["revision"],
+            "changes": {"compaction.elide_at": 0.80, "compaction.summarize_at": 0.90},
+        })
+        assert high.status_code == 200, high.text
+        reset_summarize = client.patch("/api/admin/v1/config", json={
+            "revision": high.json()["revision"], "reset": ["compaction.summarize_at"],
+        })
+        assert reset_summarize.status_code == 400, reset_summarize.text
+        assert "compaction.summarize_at" in reset_summarize.json()["error"]["keys"]
+        assert manager.cfg.elide_at == 0.80 and manager.cfg.summarize_at == 0.90
+
+        # Resetting the overlay sibling that restores a valid pair still works.
+        ok = client.patch("/api/admin/v1/config", json={
+            "revision": high.json()["revision"], "reset": ["compaction.elide_at"],
+        })
+        assert ok.status_code == 200, ok.text
+        assert manager.cfg.elide_at == 0.55 and manager.cfg.summarize_at == 0.90
+
+
 def test_rollback_restores_immediately_previous_generation(tmp_path):
     client, manager = _client(tmp_path)
     with client:
@@ -232,6 +274,74 @@ def test_app_caps_and_admin_auth_boundaries(tmp_path):
             if method != "GET":
                 kwargs["json"] = {"revision": 0, "changes": {}, "confirm": True}
             assert getattr(client, method.lower())(path, **kwargs).status_code == 403
+
+
+class _Toolkit:
+    def __init__(self, names):
+        self.tool_names = names
+
+    def schemas(self):
+        return []
+
+    def profile_text(self):
+        return ""
+
+    def refresh_soon(self):
+        return None
+
+
+def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
+    """app.capabilities must strip daemon toolkits and homelab tools, not only system-prompt text."""
+    from harness.config import Project
+
+    client, manager = _client(tmp_path)
+    manager.cfg.projects["lab"] = Project(
+        name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
+    )
+    manager.runner.web = _Toolkit(("web_search", "web_fetch"))
+    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.runner.images = _Toolkit(("generate_image",))
+    manager.runner.sessions = _Toolkit(("session_search", "session_read"))
+    with client:
+        app = client.post("/keys", json={
+            "name": "shop", "kind": "app", "scopes": ["sessions", "images"],
+        }).json()
+        h = bearer(app["key"])
+        patched = client.patch("/api/v1/config", headers=h, json={
+            "revision": 0, "changes": {"app.capabilities": ["search"]},
+        })
+        assert patched.status_code == 200, patched.text
+        created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
+        assert created.status_code == 201, created.text
+        s = manager.db.get_session(created.json()["id"])
+        prompt = s["context"][0]["content"]
+        assert "Web access" not in prompt and "Homelab access" not in prompt
+        assert "User context:" not in prompt
+        assert "Past work:" in prompt
+        kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
+        assert kit_tools == {"session_search", "session_read"}
+        ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
+        assert "restart_service" not in ws_tools and "homelab_services" not in ws_tools
+
+        empty = client.patch("/api/v1/config", headers=h, json={
+            "revision": patched.json()["revision"], "changes": {"app.capabilities": []},
+        })
+        assert empty.status_code == 200, empty.text
+        created_empty = client.post("/api/v1/sessions", headers=h, json={"prompt": "again", "project": "lab"})
+        assert created_empty.status_code == 201, created_empty.text
+        s_empty = manager.db.get_session(created_empty.json()["id"])
+        assert "Past work:" not in s_empty["context"][0]["content"]
+        assert manager.runner.daemon_toolkits(s_empty) == []
+        empty_ws = {t["function"]["name"] for t in manager.runner.workspace(s_empty).schemas()}
+        assert "restart_service" not in empty_ws
+
+        owner = client.post("/sessions", json={"prompt": "owner hello", "project": "lab"})
+        assert owner.status_code == 201, owner.text
+        owner_s = manager.db.get_session(owner.json()["id"])
+        owner_tools = {name for kit in manager.runner.daemon_toolkits(owner_s) for name in kit.tool_names}
+        assert {"web_search", "memory_index", "generate_image", "session_search"} <= owner_tools
+        owner_ws = {t["function"]["name"] for t in manager.runner.workspace(owner_s).schemas()}
+        assert "restart_service" in owner_ws
 
 
 def test_live_hook_failure_restores_disk_and_memory(tmp_path, monkeypatch):

@@ -22,6 +22,14 @@ APPLY_MODES = ("live", "daemon_restart", "installer_only")
 VALUE_TYPES = ("bool", "int", "float", "string", "enum", "string_list")
 SENSITIVITIES = ("public", "redact", "hidden")
 APP_CAPABILITIES = ("web", "images", "search", "memory_library", "remote_control", "homelab")
+
+
+def app_allows(defaults: dict, capability: str) -> bool:
+    """None (unset) inherits every granted capability; a list is an explicit subset."""
+    enabled = defaults.get("app.capabilities")
+    return enabled is None or capability in enabled
+
+
 NOTIFY_COMPLETION = ("inherit", "never")
 EFFORTS = ("low", "medium", "high")
 SECRET_KEY_MARKERS = ("secret", "token", "password", "credential", "api_key", "auth")

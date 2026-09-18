@@ -26,6 +26,7 @@ from .policy import ALLOW, ASK, Policy
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
+from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
 from .tools import ToolError, Workspace, truncate_middle, validate_args
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
@@ -112,6 +113,7 @@ class Runner:
         self.sessions = None                    # search.SessionSearch, set by the manager when enabled
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
+        self.settings = None                    # settings_service.SettingsService, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
 
@@ -132,25 +134,40 @@ class Runner:
         if s["target"] != "tower":
             return RemoteWorkspace(self.hub, s["target"], s["id"], model.context_tokens)
         project = self.cfg.projects.get(s["project"])
-        homelab = Homelab(self.cfg.homelab) if project and project.homelab else None
+        defaults = self._app_defaults_for_session(s)
+        homelab = (Homelab(self.cfg.homelab)
+                   if project and project.homelab and app_allows(defaults, "homelab") else None)
         return Workspace(Path(s["workspace"]), self.sandbox(s), self.cfg.repos_dir, model.context_tokens, homelab)
 
     def daemon_toolkits(self, s: dict) -> list:
         """Tools that run in the daemon for every target (memory library, web, session search), as enabled for the
-        project."""
+        project and narrowed by app.capabilities."""
         project = self.cfg.projects.get(s["project"])
+        defaults = self._app_defaults_for_session(s)
         kits = []
-        if self.memory is not None and (project is None or project.memory_library):
+        if (self.memory is not None and (project is None or project.memory_library)
+                and app_allows(defaults, "memory_library")):
             kits.append(self.memory)
-        if self.web is not None and (project is None or project.web):
+        if self.web is not None and (project is None or project.web) and app_allows(defaults, "web"):
             kits.append(self.web)
-        if self.images is not None and (project is None or project.images):
+        if self.images is not None and (project is None or project.images) and app_allows(defaults, "images"):
             kits.append(self.images)
-        if self.sessions is not None and (project is None or project.session_search):
+        if (self.sessions is not None and (project is None or project.session_search)
+                and app_allows(defaults, "search")):
             kits.append(self.sessions)
-        if self.remote_control is not None and s["target"] == "tower" and s.get("app_id") is None:
+        if (self.remote_control is not None and s["target"] == "tower" and s.get("app_id") is None
+                and app_allows(defaults, "remote_control")):
             kits.append(self.remote_control)  # not for app sessions: apps launch through /api/v1/remote-control
         return kits
+
+    def _app_defaults_for_session(self, s: dict) -> dict:
+        app_id = s.get("app_id") or ""
+        if not app_id or self.settings is None or self.db is None:
+            return {}
+        key = self.db.get_api_key(app_id)
+        if not key or key.get("kind") != "app":
+            return {}
+        return self.settings.app_defaults(key)
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:
         schemas = ws.schemas()
