@@ -16,14 +16,15 @@ from harness.accounts import AccountService, DEFAULT_DISK_QUOTA_BYTES
 from harness.admin import API_VERSION as ADMIN_API_VERSION, PREFIX
 from harness.api import create_app
 from harness.apps import API_VERSION as APP_API_VERSION
-from harness.clone import CloneRefused, isolated_clone_env, public_https_url
+from harness.clone import CloneRefused, isolated_clone_env, isolated_prepare, isolated_refresh_origin, public_https_url
 from harness.config import GuestAccess, Project
 from harness.db import Database
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import OWNER_USER_ID, open_owner_mode, require_owner_allowlist, resolve_human
 from harness.scheduler import GpuScheduler
-from harness.storage import ContainmentError, account_usage_bytes, contained, ensure_user_dirs, require_contained, user_root
+from harness.storage import (ContainmentError, account_usage_bytes, contained, ensure_user_dirs, repos_dir,
+                             require_contained, user_root, workspaces_dir)
 from harness.tools import ToolError, Workspace
 
 from test_daemon import Script, make_cfg
@@ -453,6 +454,71 @@ def test_quota_and_concurrency_and_disable(tmp_path):
         client.patch(f"{PREFIX}/accounts/{alice['user_id']}", json={"enabled": True}, headers=H(OWNER))
         me = client.get("/api/v1/me", headers=ah).json()
         assert me["user_id"] == alice["user_id"]
+
+
+def test_disable_member_awaits_cancel_before_granting_gpu(tmp_path):
+    async def body():
+        _, m = household(tmp_path)
+        alice = AccountService(m).create(OWNER_USER_ID, ALICE, "Alice")
+        sid = "alicerun01"
+        ws = workspaces_dir(m.cfg, alice["user_id"]) / sid
+        ws.mkdir(parents=True, exist_ok=True)
+        now = 1_700_000_000.0
+        m.db.insert_session({
+            "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
+            "title": sid, "status": "running", "workspace": str(ws), "created_at": now, "updated_at": now,
+            "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
+        })
+        started = asyncio.Event()
+        still_running = asyncio.Event()
+
+        async def fake_run():
+            await m.scheduler.acquire(sid)
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                still_running.set()
+                await asyncio.sleep(0.05)
+                raise
+            finally:
+                m.scheduler.release(sid)
+
+        m.tasks[sid] = asyncio.create_task(fake_run())
+        await started.wait()
+        owner = asyncio.create_task(m.scheduler.acquire("owner-run"))
+        await asyncio.sleep(0.02)
+        assert m.scheduler.holder == sid
+        assert not owner.done()
+        await m.disable_member(alice["user_id"])
+        assert still_running.is_set()
+        await asyncio.wait_for(owner, timeout=1)
+        assert m.scheduler.holder == "owner-run"
+        m.scheduler.release("owner-run")
+    asyncio.run(body())
+
+
+def test_isolated_refresh_origin_refuses_rewritten_origin(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        alice = create_member(client, ALICE, "Alice")
+        uid = alice["user_id"]
+        root = user_root(m.cfg, uid)
+        src = repos_dir(m.cfg, uid) / "notes"
+        src.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+        (src / "README").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+        subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+                       check=True)
+        ws = workspaces_dir(m.cfg, uid) / "sessrf01"
+        isolated_prepare(ws, src, "sessrf01", workspaces_dir(m.cfg, uid))
+        assert isolated_refresh_origin(ws, root) == ""
+        subprocess.run(["git", "-C", str(ws), "remote", "set-url", "origin", str(m.cfg.data_dir)], check=True)
+        assert "account-local" in isolated_refresh_origin(ws, root)
+        subprocess.run(["git", "-C", str(ws), "remote", "set-url", "origin",
+                        "git@github.com:octocat/Hello-World.git"], check=True)
+        assert "account-local" in isolated_refresh_origin(ws, root)
 
 
 def test_quota_ignores_links_and_cleanup_stays_contained(tmp_path):

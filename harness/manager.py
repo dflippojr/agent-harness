@@ -739,20 +739,29 @@ class Manager:
         from .storage import account_usage_bytes
         return account_usage_bytes(self.cfg, user_id) >= int(account["disk_quota_bytes"])
 
-    def disable_member(self, user_id: str, actor_id: str = OWNER_USER_ID) -> None:
-        """Deny requests, revoke streams, cancel queued and running work. Data remains."""
+    async def disable_member(self, user_id: str, actor_id: str = OWNER_USER_ID) -> None:
+        """Deny requests, revoke streams, cancel queued and running work. Data remains.
+
+        Live tasks are cancelled and awaited before this returns so the GPU slot is not granted to
+        the next waiter while the disabled account's run is still executing.
+        """
         self.stream_epoch[user_id] = self.stream_epoch.get(user_id, 0) + 1
         from .runner import ACTIVE
+        waiting = []
         for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):
             sid = s["id"]
-            self.scheduler.release(sid)
             task = self.tasks.get(sid)
             if task is not None:
                 self.runner.user_cancelled.add(sid)
                 task.cancel()
-            elif s["status"] in ACTIVE:
-                self.runner.set_status(sid, "cancelled", stop_reason="account_disabled")
+                waiting.append(task)
+            else:
+                if s["status"] in ACTIVE:
+                    self.runner.set_status(sid, "cancelled", stop_reason="account_disabled")
+                self.scheduler.release(sid)
             self.db.insert_audit(actor_id, user_id, "cancel", "ok")
+        if waiting:
+            await asyncio.gather(*waiting, return_exceptions=True)
 
     def create_member_project(self, user_id: str, name: str, description: str = "", repo: str = "") -> dict:
         from . import catalog, clone, storage

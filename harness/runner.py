@@ -1241,8 +1241,14 @@ class Runner:
                 self.db.update_session(s["id"], context=context, **info)
                 self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
         elif not s["run"].get("origin_refreshed"):
-            error = (await self.hub.call(s["target"], "refresh_origin", {"session": s["id"]}, timeout=400) if remote
-                     else await asyncio.to_thread(projects.refresh_origin, ws))
+            if remote:
+                error = await self.hub.call(s["target"], "refresh_origin", {"session": s["id"]}, timeout=400)
+            elif member:
+                from . import clone, storage
+                error = await asyncio.to_thread(
+                    clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, session_user_id(s)))
+            else:
+                error = await asyncio.to_thread(projects.refresh_origin, ws)
             if error:
                 self.bus.emit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
             run = self.db.get_session(s["id"])["run"]

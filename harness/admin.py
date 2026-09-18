@@ -294,7 +294,7 @@ def register(app: FastAPI, mgr) -> None:
         if body.login is not None:
             row = svc.rebind_login(actor, user_id, body.login)
         if body.enabled is not None:
-            row = svc.set_enabled(actor, user_id, body.enabled)
+            row = await svc.set_enabled(actor, user_id, body.enabled)
         if body.disk_quota_bytes is not None:
             row = svc.set_quota(actor, user_id, body.disk_quota_bytes)
         if body.max_running is not None or body.max_queued is not None:

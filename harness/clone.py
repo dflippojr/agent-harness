@@ -166,5 +166,51 @@ def isolated_prepare(workspace: Path, source: Path | str, sid: str, root: Path) 
     return {"branch": branch, "base_branch": base_branch, "base_commit": base_commit}
 
 
+def _isolated_git(workspace: Path, *args: str, timeout: int = 60) -> str:
+    import subprocess
+    r = subprocess.run(
+        ["git", "-c", f"safe.directory={workspace.as_posix()}", "-c", "credential.helper=",
+         "-c", "core.askPass=", "-C", str(workspace), *args],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        env=isolated_clone_env(), stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if r.returncode != 0:
+        raise GitError(f"git {' '.join(args[:3])} failed: {(r.stdout + r.stderr).strip()[-1500:]}")
+    return r.stdout
+
+
+def _member_origin_allowed(origin: str, root: Path) -> bool:
+    text = (origin or "").strip()
+    if not text:
+        return False
+    try:
+        public_https_url(text)
+        return True
+    except CloneRefused:
+        pass
+    try:
+        require_contained(Path(text), root)
+        return True
+    except (ContainmentError, OSError, ValueError):
+        return False
+
+
+def isolated_refresh_origin(workspace: Path, root: Path) -> str:
+    """Fetch origin without owner git helpers or credentials. Returns an error or ''."""
+    require_contained(workspace, root)
+    try:
+        origin = _isolated_git(workspace, "remote", "get-url", "origin").strip()
+    except GitError as e:
+        return str(e)[-500:]
+    if not _member_origin_allowed(origin, root):
+        return "origin is not a public or account-local repository"
+    try:
+        _isolated_git(workspace, "fetch", "--quiet", "--prune", "origin", timeout=300)
+    except GitError as e:
+        return str(e)[-500:]
+    return ""
+
+
 # tempfile imported for future scratch configs; keep the name used in tests via isolated_clone_env.
 _ = tempfile

@@ -126,7 +126,7 @@ class AccountService:
         self._db().insert_audit(actor_id, user_id, "rebind", "ok")
         return self.public_account(self._db().account_by_id(user_id))
 
-    def set_enabled(self, actor_id: str, user_id: str, enabled: bool) -> dict:
+    async def set_enabled(self, actor_id: str, user_id: str, enabled: bool) -> dict:
         account = self._require(user_id)
         was = bool(account.get("enabled", 1))
         if was == enabled:
@@ -134,7 +134,7 @@ class AccountService:
         self._db().update_account(user_id, enabled=int(enabled))
         self._db().insert_audit(actor_id, user_id, "enable" if enabled else "disable", "ok")
         if not enabled:
-            self.m.disable_member(user_id, actor_id=actor_id)
+            await self.m.disable_member(user_id, actor_id=actor_id)
         return self.public_account(self._db().account_by_id(user_id))
 
     def set_quota(self, actor_id: str, user_id: str, disk_quota_bytes: int) -> dict:
