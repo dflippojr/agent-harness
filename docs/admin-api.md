@@ -53,7 +53,7 @@ same; only the prefix and the owner credential check are new.
 | Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}` |
 | App provider policy | `/provider-credentials`, `/provider-credentials/{credential_id}` |
 | Mac pairing | `/runner-pairing-codes`, `/runner-pairing-codes/{pid}` |
-| Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` |
+| Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup`, image-archive retention preview/apply |
 | Configuration | `/config`, `/config/schema`, `/config/validate`, `/config/rollback`, `/config/restart` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
 | Images | `/images`, `/images/warmup`, `/images/cooldown`, `/images/{iid}/upscale` |
@@ -153,7 +153,8 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
-| 1.5 | 2026-09-17 | Typed configuration registry, managed overlay, supervised restart/rollback |
+| 1.6 | 2026-09-18 | Typed configuration registry, managed overlay, supervised restart/rollback |
+| 1.5 | 2026-09-17 | Image archive health and explicit retention preview/apply operations |
 | 1.4 | 2026-09-16 | One-time native Mac client and runner pairing |
 | 1.3 | 2026-09-16 | Owner-managed per-app provider policy, opaque key-file references, and revocation |
 | 1.2 | 2026-09-16 | Daemon profile and optional-module capability discovery |

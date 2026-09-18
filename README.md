@@ -158,7 +158,9 @@ Details and verification: `docs/phase5-results.md`.
   llama-server is stopped (pause flag `C:\AI\llama-server.paused`, honored by `ops/llama-server/run-qwen.ps1`). It
   reloads after 3 min clear. Settings → GPU pauses or resumes by hand. API: `GET /gpu`, `POST /gpu/{pause|resume}`.
 - Metrics: `GET /metrics`, scraped as Prometheus job `agent_harness`; Grafana dashboard "Agent Harness".
-- Backups (`backup:`): nightly to `D:/My Backups/agent-harness/<date>`, 14 days; `POST /maintenance/backup`.
+- Backups (`backup:`): nightly dated database/transcript snapshots, 14 days; `POST /maintenance/backup`. Generated
+  PNGs are verified into the separate `images/YYYY/MM` archive once, with JSON metadata. Image retention defaults to
+  indefinite (`image_archive_keep_days: 0`) and deletion requires an owner preview and apply action.
 - Memory library (`memory_library:`; repo URL in `harness.local.yaml`): tools `memory_index`, `memory_search`,
   `memory_read` over allowlisted categories of a daemon-owned clone. Projects opt out with `memory_library: false`.
 - Homelab: `rebuild_service` (`docker compose up -d --build`, always asks).

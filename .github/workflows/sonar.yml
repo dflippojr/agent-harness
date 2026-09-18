@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   sonar:
+    # Shared Sonar project + localhost:9000. Keep this off the pytest runner.
     runs-on: [self-hosted, Windows, X64, agent-harness-tower]
     continue-on-error: true
     steps:

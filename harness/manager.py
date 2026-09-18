@@ -14,6 +14,7 @@ from pathlib import Path
 from .bus import EventBus
 from .changes import workspace_changes
 from .maintenance import Maintenance
+from .image_archive import ImageArchive
 from .notify import Notifier
 from .warmup import ModelWarmer
 from .config import Config
@@ -80,7 +81,8 @@ class Manager:
         self.tasks: dict[str, asyncio.Task] = {}
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
-        self.maintenance = Maintenance(cfg, self.db, self.runner)
+        self.image_archive = ImageArchive(cfg, self.db)
+        self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
         from .apps import AppToolBroker
         self.app_tools = AppToolBroker(self.db, self.bus)
         self.runner.app_tools = self.app_tools
@@ -99,7 +101,7 @@ class Manager:
             from .images import ImageService
             self.images = ImageService(cfg.images, self.db, self.runner,
                                        ServerControl(cfg.gpu_guard, cfg.models[cfg.default_model]),
-                                       notify=self._image_finished)
+                                       notify=self._image_finished, archive=self.image_archive)
             self.runner.images = self.images
         self.remote_control = None
         if cfg.remote_control.enabled:

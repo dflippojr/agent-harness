@@ -10,8 +10,9 @@ An app is a key with scopes (Settings → Apps, or POST /keys with `scopes`). Wi
 - decide approvals on its own sessions (`approvals`, off by default: normally the user approves from the phone);
 - generate images (`images`) and use the inference endpoint (`inference`).
 
-Apps only see sessions they created unless they hold `sessions:all`. The shape follows Hermes Agent's /v1/runs
-(docs/phase6a-hermes-study.md). The API is versioned by path; breaking changes go to /api/v2 and docs/app-api.md.
+Apps only see sessions they created unless they hold `sessions:all`, which expands reads only. The shape follows
+Hermes Agent's /v1/runs (docs/phase6a-hermes-study.md). The API is versioned by path; breaking changes go to /api/v2
+and docs/app-api.md.
 """
 
 from __future__ import annotations
@@ -32,10 +33,11 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.9"
+API_VERSION = "1.10"
+SESSIONS_ALL = "sessions:all"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
-    "sessions:all": "read every session, not only the app's own",
+    SESSIONS_ALL: "read every session, not only the app's own",
     "approvals": "approve or deny tool calls in the app's own sessions",
     "images": "generate images, upscale them, and read them",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
@@ -409,7 +411,7 @@ def register(app: FastAPI, mgr) -> None:
             raise HarnessError(401, "missing or invalid app token")
         scopes = set((key.get("scopes") or "").split())
         if (not owner_key(key) and scope not in scopes
-                and not (scope == "sessions" and "sessions:all" in scopes and request.method == "GET")):
+                and not (scope == "sessions" and SESSIONS_ALL in scopes and request.method == "GET")):
             raise HarnessError(403, f"this token lacks the {scope!r} scope")
         raw_origin = request.headers.get("origin", "")
         if raw_origin:
@@ -422,11 +424,20 @@ def register(app: FastAPI, mgr) -> None:
         key["scope_set"] = scopes
         return key
 
-    def own_session(request: Request, key: dict, ref: str) -> dict:
+    def visible_session(request: Request, key: dict, ref: str) -> dict:
+        """Owner token, the creating app, or sessions:all may read a session."""
         m = mgr(request)
         s = m.get(ref)
         if (not owner_key(key) and s.get("app_id") != key["id"]
-                and "sessions:all" not in key["scope_set"]):
+                and SESSIONS_ALL not in key["scope_set"]):
+            raise HarnessError(404, f"no session matches {ref!r}")
+        return s
+
+    def own_session(request: Request, key: dict, ref: str) -> dict:
+        """Mutations require the owner token or the creating app; sessions:all is not enough."""
+        m = mgr(request)
+        s = m.get(ref)
+        if not owner_key(key) and s.get("app_id") != key["id"]:
             raise HarnessError(404, f"no session matches {ref!r}")
         return s
 
@@ -554,14 +565,14 @@ def register(app: FastAPI, mgr) -> None:
         m = mgr(request)
         key = auth(request, "sessions")
         rows = m.db.list_sessions(limit * 5)
-        mine = [r for r in rows if owner_key(key) or "sessions:all" in key["scope_set"]
+        mine = [r for r in rows if owner_key(key) or SESSIONS_ALL in key["scope_set"]
                 or r.get("app_id") == key["id"]][:limit]
         return [m.list_summary(r) for r in mine]
 
     @app.get("/api/v1/sessions/{ref}", response_model=SessionResponse)
     async def get_session(ref: str, request: Request):
         m = mgr(request)
-        return view(m, own_session(request, auth(request, "sessions"), ref))
+        return view(m, visible_session(request, auth(request, "sessions"), ref))
 
     @app.post("/api/v1/sessions/{ref}/messages", response_model=SessionResponse)
     async def send(ref: str, body: AppMessage, request: Request):
@@ -588,7 +599,7 @@ def register(app: FastAPI, mgr) -> None:
     @app.get("/api/v1/sessions/{ref}/tool_calls", response_model=list[AppToolCallResponse])
     async def tool_calls(ref: str, request: Request, status: str = "pending"):
         m = mgr(request)
-        s = own_session(request, auth(request, "sessions"), ref)
+        s = visible_session(request, auth(request, "sessions"), ref)
         return m.db.app_tool_calls(s["id"], status or None)
 
     @app.post("/api/v1/sessions/{ref}/tool_calls/{call_id}", response_model=AcceptedResponse)
@@ -607,7 +618,7 @@ def register(app: FastAPI, mgr) -> None:
     @app.get("/api/v1/sessions/{ref}/approvals", response_model=list[ApprovalResponse])
     async def approvals(ref: str, request: Request):
         m = mgr(request)
-        s = own_session(request, auth(request, "sessions"), ref)
+        s = visible_session(request, auth(request, "sessions"), ref)
         return [public_approval(a) for a in m.db.pending_approvals(s["id"])]
 
     @app.post("/api/v1/sessions/{ref}/approvals/{approval_id}", response_model=ApprovalResponse)
@@ -627,7 +638,7 @@ def register(app: FastAPI, mgr) -> None:
         """Mint a short-lived query credential so native EventSource need not receive a bearer token in its URL."""
         m = mgr(request)
         key = auth(request, "sessions")
-        s = own_session(request, key, ref)
+        s = visible_session(request, key, ref)
         try:
             origin = normalize_origin(request.headers.get("origin", ""))
         except ValueError:
@@ -654,11 +665,11 @@ def register(app: FastAPI, mgr) -> None:
                 raise HarnessError(401, "invalid or expired stream ticket")
             key["scope_set"] = set((key.get("scopes") or "").split())
             if (not owner_key(key) and "sessions" not in key["scope_set"]
-                    and "sessions:all" not in key["scope_set"]):
+                    and SESSIONS_ALL not in key["scope_set"]):
                 raise HarnessError(403, "this token lacks the 'sessions' scope")
         else:
             key = auth(request, "sessions")
-        s = own_session(request, key, ref)
+        s = visible_session(request, key, ref)
         sid = s["id"]
         if request.headers.get("last-event-id", "").isdigit():
             after = max(after, int(request.headers["last-event-id"]))

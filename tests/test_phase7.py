@@ -39,12 +39,13 @@ def test_fts_query_quotes_everything():
     assert fts_query("   ") == ""
 
 
-def seed(db: Database, sid: str, project: str, title: str, texts: list[tuple[str, dict]], created: float = 0) -> None:
+def seed(db: Database, sid: str, project: str, title: str, texts: list[tuple[str, dict]], created: float = 0,
+         app_id: str = "") -> None:
     import time
     now = created or time.time()
     db.insert_session({"id": sid, "project": project, "target": "tower", "model": "fake", "title": title,
                        "status": "done", "workspace": "", "created_at": now, "updated_at": now, "context": [],
-                       "answer": ""})
+                       "answer": "", "app_id": app_id})
     db.insert_event(sid, "session_created", {"title": title, "project": project})
     for type_, data in texts:
         db.insert_event(sid, type_, data)

@@ -20,6 +20,8 @@ from . import config as config_mod
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
 
+NO_SUCH_JOB = "no such job"
+
 log = logging.getLogger("harness.api")
 WEB = Path(__file__).parent / "web"
 # Session-list stream: status-level events only, no tool output or token deltas.
@@ -101,6 +103,10 @@ class MemoryProfileUpdate(BaseModel):
     summary: str = "Update agent profile"
 
 
+class ImageArchiveRetentionApply(BaseModel):
+    confirmation: str
+
+
 class Job(BaseModel):
     name: str
     prompt: str
@@ -153,6 +159,13 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         if session is None or session.get("owner_id", "owner") != owner_id(request):
             raise HarnessError(404, "no session matches that id")
         return m, sid, session
+
+    def require_owner(request: Request) -> Manager:
+        # Compatibility routes normally rely on Tailscale identity. If a bearer credential is supplied, enforce
+        # its kind too so an app/device token can never reveal owner-only paths or operate maintenance.
+        from .admin import require_admin
+        require_admin(request, mgr)
+        return mgr(request)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -618,15 +631,27 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/maintenance")
     async def maintenance(request: Request):
-        return await mgr(request).maintenance.usage()
+        return await require_owner(request).maintenance.usage()
 
     @app.post("/maintenance/cleanup")
     async def maintenance_cleanup(request: Request):
-        return await mgr(request).maintenance.cleanup()
+        return await require_owner(request).maintenance.cleanup()
 
     @app.post("/maintenance/backup")
     async def maintenance_backup(request: Request):
-        return await mgr(request).maintenance.backup()
+        return await require_owner(request).maintenance.backup()
+
+    @app.post("/maintenance/image-archive/retention/preview")
+    async def image_archive_retention_preview(request: Request):
+        return await asyncio.to_thread(require_owner(request).image_archive.retention_preview)
+
+    @app.post("/maintenance/image-archive/retention/apply")
+    async def image_archive_retention_apply(body: ImageArchiveRetentionApply, request: Request):
+        from .image_archive import ImageArchiveError
+        try:
+            return await asyncio.to_thread(require_owner(request).image_archive.apply_retention, body.confirmation)
+        except ImageArchiveError as e:
+            raise HarnessError(409, str(e))
 
     @app.get("/sessions/{ref}/approvals")
     async def approvals(ref: str, request: Request, all: bool = False):
@@ -711,10 +736,10 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def get_job(jid: str, request: Request):
         m = jobs_on(request)
         if request.state.access.role == "guest":
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         job = m.db.get_job(jid)
         if job is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         return job_view(m, job, runs=15)
 
     @app.put("/jobs/{jid}")
@@ -724,7 +749,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = jobs_on(request)
         old = m.db.get_job(jid)
         if old is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         try:
             job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
         except (ValueError, CronError) as e:
@@ -736,7 +761,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.delete("/jobs/{jid}", status_code=204)
     async def delete_job(jid: str, request: Request):
         if not jobs_on(request).db.delete_job(jid):
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
 
     @app.post("/jobs/{jid}/run", status_code=201)
     async def run_job(jid: str, request: Request):
@@ -744,7 +769,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = jobs_on(request)
         job = m.db.get_job(jid)
         if job is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         if job["last_session_id"] and m._is_active(job["last_session_id"]):
             raise HarnessError(409, "the previous run is still going")
         sid = m.jobs.run(job, manual=True)
