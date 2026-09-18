@@ -328,7 +328,16 @@ class ImageService:
                         log.info("re-queued upscale %s for image %s after restart", child["id"], job["id"])
                     except ToolError as e:
                         log.warning("could not recover upscale for %s: %s", job["id"], e)
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, self._warm_flux_status)
             self._task = asyncio.create_task(self._loop(), name="images")
+
+    def _warm_flux_status(self) -> None:
+        """Hash flux-fast assets off the event loop so the first status poll is O(stat)."""
+        try:
+            self.flux_status()
+        except (OSError, ValueError, RuntimeError):
+            log.debug("flux-fast inspect warmup failed", exc_info=True)
 
     async def _stop_stray(self) -> None:
         """A ComfyUI left running by a daemon that crashed mid-batch holds the GPU: stop it and restore the model."""

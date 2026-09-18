@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,8 +16,9 @@ import pytest
 from harness.config import ImagesConfig
 from harness.fileops import ToolError
 from harness.images import workflow
+from harness import images_models as images_models_mod
 from harness.images_models import (
-    RESERVE_BYTES, doctor_warning, install_flux_fast, inspect_flux_fast, load_manifest,
+    RESERVE_BYTES, doctor_warning, file_state, install_flux_fast, inspect_flux_fast, load_manifest,
     preflight_graphs, promote_comfyui, redact_url, remove_flux_fast, rollback_comfyui,
     stage_comfyui, validate_comfyui,
 )
@@ -179,6 +181,86 @@ def test_capability_missing_corrupt_shared_and_missing_nodes(tmp_path):
     assert missing_node["available"] is False and "Flux2Scheduler" in missing_node["unavailable_reason"]
     ready = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for())
     assert ready["available"] and doctor_warning(ready) is None
+
+
+def _count_sha256(monkeypatch):
+    calls = {"n": 0}
+    real = images_models_mod.sha256_file
+
+    def counting(path, expected=None):
+        calls["n"] += 1
+        return real(path, expected)
+
+    monkeypatch.setattr(images_models_mod, "sha256_file", counting)
+    return calls
+
+
+def test_file_state_caches_hash_and_invalidates_on_change(tmp_path, monkeypatch):
+    images_models_mod.clear_file_state_cache()
+    calls = _count_sha256(monkeypatch)
+    path = tmp_path / "asset.bin"
+    body = b"hello-asset"
+    path.write_bytes(body)
+    digest = _sha(body)
+    assert file_state(path, digest, len(body)) == "ok"
+    assert calls["n"] == 1
+    assert file_state(path, digest, len(body)) == "ok"
+    assert calls["n"] == 1
+    assert file_state(path, digest, len(body) + 1) == "corrupt"
+    assert calls["n"] == 1
+    path.write_bytes(b"HELLO-ASSET")
+    os.utime(path, ns=(time.time_ns(), time.time_ns()))
+    assert file_state(path, digest, len(body)) == "corrupt"
+    assert calls["n"] == 2
+    path.unlink()
+    assert file_state(path, digest, len(body)) == "missing"
+    assert calls["n"] == 2
+
+
+def test_repeated_inspect_and_status_do_not_rehash_unchanged_files(tmp_path, monkeypatch):
+    images_models_mod.clear_file_state_cache()
+    calls = _count_sha256(monkeypatch)
+    cfg = cfg_for(tmp_path)
+    payloads = {"checkpoint": b"ckpt-data", "vae": b"vae-bytes", "encoder": b"enc-shared"}
+    manifest = tiny_manifest("http://unused", payloads)
+    plant_comfy(Path(cfg.comfy_dir))
+    root = Path(cfg.models_dir)
+    plant_asset(root / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors", payloads["checkpoint"])
+    plant_asset(root / "vae" / "flux2-vae.safetensors", payloads["vae"])
+    plant_asset(root / "text_encoders" / "qwen_3_4b.safetensors", payloads["encoder"])
+    first = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for())
+    assert first["available"]
+    hashed = calls["n"]
+    assert hashed >= 1
+    for _ in range(5):
+        again = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for())
+        assert again["available"]
+    assert calls["n"] == hashed
+
+    from test_phase6 import image_manager
+    m, _, _ = image_manager(tmp_path / "svc")
+    m.cfg.images.models_dir = str(root)
+    m.cfg.images.comfy_dir = str(cfg.comfy_dir)
+    m.images.cfg.models_dir = str(root)
+    m.images.cfg.comfy_dir = str(cfg.comfy_dir)
+    m.images.flux_manifest = manifest
+    m.images.object_info = object_info_for()
+    before_status = calls["n"]
+    for _ in range(8):
+        listing = m.images.status()
+        flux = next(x for x in listing["modes"] if x["key"] == "flux-fast")
+        assert flux["available"] is True
+    assert calls["n"] == before_status
+
+    ckpt = root / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors"
+    ckpt.write_bytes(b"XXXX-data")
+    os.utime(ckpt, ns=(time.time_ns(), time.time_ns()))
+    broken = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for())
+    assert broken["available"] is False and "corrupt" in broken["unavailable_reason"]
+    assert calls["n"] > hashed
+    listing = m.images.status()
+    flux = next(x for x in listing["modes"] if x["key"] == "flux-fast")
+    assert flux["available"] is False
 
 
 # --- install / remove ---

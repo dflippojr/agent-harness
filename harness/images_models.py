@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import urllib.parse
 from pathlib import Path
 
@@ -83,20 +84,60 @@ def sha256_file(path: Path, expected: int | None = None) -> str:
     return digest.hexdigest()
 
 
+# Verified (and fail-closed corrupt) results keyed by identity of the bytes on disk.
+# Status polling must stay O(stat): a 4 GB checkpoint is hashed once, not every GET /images/{id}.
+_FILE_STATE_CACHE: dict[tuple, str] = {}
+_FILE_STATE_LOCK = threading.Lock()
+
+
+def clear_file_state_cache() -> None:
+    with _FILE_STATE_LOCK:
+        _FILE_STATE_CACHE.clear()
+
+
+def _mtime_ns(st) -> int:
+    return int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+
+
+def _cache_path_key(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
 def file_state(path: Path, sha256: str, size: int) -> str:
-    """ok | missing | corrupt."""
+    """ok | missing | corrupt. Unchanged files are not re-hashed."""
     if not path.is_file():
         return "missing"
     try:
-        actual = path.stat().st_size
+        st = path.stat()
     except OSError:
         return "corrupt"
-    if actual != size:
+    if st.st_size != size:
         return "corrupt"
+    pin = sha256.lower()
+    key = (_cache_path_key(path), st.st_size, _mtime_ns(st), pin, size)
+    with _FILE_STATE_LOCK:
+        cached = _FILE_STATE_CACHE.get(key)
+        if cached is not None:
+            return cached
     try:
-        return "ok" if sha256_file(path, size).lower() == sha256.lower() else "corrupt"
+        state = "ok" if sha256_file(path, size).lower() == pin else "corrupt"
     except (OSError, ValueError):
+        state = "corrupt"
+    try:
+        st2 = path.stat()
+    except OSError:
         return "corrupt"
+    if st2.st_size != st.st_size or _mtime_ns(st2) != _mtime_ns(st):
+        return state
+    with _FILE_STATE_LOCK:
+        stale = [old for old in _FILE_STATE_CACHE if old[0] == key[0] and old != key]
+        for old in stale:
+            _FILE_STATE_CACHE.pop(old, None)
+        _FILE_STATE_CACHE[key] = state
+    return state
 
 
 def _free_bytes(path: Path) -> int:
