@@ -184,7 +184,11 @@ async function api(path, { method = "GET", body, surface } = {}) {
   return agentHarnessWeb.request(path, { method, body, surface: surface || apiSurface(path, method) });
 }
 
-const ownerSurface = () => (isMember() ? "app" : (isGuest() && !agentHarnessWeb.token ? "legacy" : "admin"));
+function ownerSurface() {
+  if (isMember()) return "app";
+  if (isGuest() && !agentHarnessWeb.token) return "legacy";
+  return "admin";
+}
 
 function daemonImage(path, attrs = {}) {
   const img = h("img", { ...attrs, alt: attrs.alt || "" });
@@ -600,8 +604,7 @@ async function viewList() {
   for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
     handlers[type] = refresh;
   }
-  onLeave(openStream(() => agentHarnessWeb.url("/events",
-    isMember() ? "app" : (isGuest() && !agentHarnessWeb.token ? "legacy" : "admin")), handlers,
+  onLeave(openStream(() => agentHarnessWeb.url("/events", ownerSurface()), handlers,
     { authorized: !(isGuest() && !agentHarnessWeb.token) }));
   const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
   document.addEventListener("visibilitychange", onVisible);
@@ -2112,7 +2115,9 @@ async function viewProfile(page) {
   if (page === "endpoint") return $app.append(endpointCard(me));
   if (page === "disk") return $app.append(diskCard());
   if (page === "remote-control") return $app.append(remoteControlCard());
-  const hidden = isGuest() ? GUEST_HIDDEN_PAGES : isMember() ? MEMBER_HIDDEN_PAGES : new Set();
+  let hidden = new Set();
+  if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
+  else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
   $app.append(
     h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
