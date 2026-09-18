@@ -907,12 +907,14 @@ def register(app: FastAPI, mgr) -> None:
             key = auth(request, "sessions")
         s = visible_session(request, key, ref)
         sid = s["id"]
+        owner = s.get("owner_id") or "owner"
         if request.headers.get("last-event-id", "").isdigit():
             after = max(after, int(request.headers["last-event-id"]))
 
         async def stream():
             sub = m.bus.subscribe(sid)
             last = after
+            epoch = m.stream_epoch.get(owner, 0)
             try:
                 yield ": connected\n\n"
                 for e in m.db.events(sid, after):
@@ -921,6 +923,8 @@ def register(app: FastAPI, mgr) -> None:
                 if not follow:
                     return
                 while True:
+                    if m.stream_epoch.get(owner, 0) != epoch:
+                        return
                     try:
                         e = await asyncio.wait_for(sub.queue.get(), timeout=15)
                     except asyncio.TimeoutError:

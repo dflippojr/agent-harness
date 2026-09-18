@@ -26,6 +26,14 @@ class CloneRefused(ValueError):
     """The URL is not a credential-free public HTTPS repository on the allowlist."""
 
 
+class QuotaExceeded(Exception):
+    """A clone wrote past the account disk quota; the destination was removed."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        super().__init__("this clone exceeded the account disk quota")
+
+
 def public_https_url(url: str) -> str:
     """Return a canonical https URL or raise CloneRefused."""
     text = (url or "").strip()
@@ -87,8 +95,12 @@ def isolated_clone_env() -> dict[str, str]:
     return env
 
 
-def clone_public(url: str, dest: Path, root: Path) -> GitResult:
-    """Clone `url` into `dest`, which must be contained in `root`. Destination must not exist."""
+def clone_public(url: str, dest: Path, root: Path, max_bytes: int | None = None) -> GitResult:
+    """Clone `url` into `dest`, which must be contained in `root`. Destination must not exist.
+
+    `max_bytes`, when set, is the most the destination tree may occupy. The clone is killed and
+    deleted if it grows past that, so a public repo cannot fill the owner's disk.
+    """
     canonical = public_https_url(url)
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -97,23 +109,11 @@ def clone_public(url: str, dest: Path, root: Path) -> GitResult:
         raise CloneRefused(str(e)) from e
     if dest.exists():
         raise CloneRefused(f"clone destination already exists: {dest}")
-    # Isolated git: -c overrides plus a clean env. `git()` uses the host environment, so call git here.
-    import subprocess
     cmd = [
         "git", "-c", "core.quotepath=off", "-c", "credential.helper=", "-c", "core.askPass=",
         "-c", "http.extraHeader=", "clone", "--config", "core.autocrlf=false", "--", canonical, str(dest),
     ]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
-        env=isolated_clone_env(), stdin=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    result = GitResult(proc.returncode, proc.stdout, proc.stderr)
-    if proc.returncode != 0:
-        if dest.exists():
-            import shutil
-            shutil.rmtree(dest, ignore_errors=True)
-        raise GitError(f"could not clone {canonical}: {result.text[-1500:]}")
+    result = _run_clone(cmd, dest, max_bytes=max_bytes)
     try:
         require_contained(dest, root)
     except ContainmentError:
@@ -121,6 +121,105 @@ def clone_public(url: str, dest: Path, root: Path) -> GitResult:
         shutil.rmtree(dest, ignore_errors=True)
         raise CloneRefused("clone resolved outside the account root")
     return result
+
+
+def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
+               max_bytes: int | None = None) -> GitResult:
+    """Run an isolated git clone, optionally killing it if `dest` grows past `max_bytes`."""
+    import subprocess
+    import threading
+    import time
+
+    from .fileops import dir_size
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", env=isolated_clone_env(), stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    over = False
+
+    def stop() -> None:
+        if proc.poll() is not None:
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+    def watch() -> None:
+        nonlocal over
+        while proc.poll() is None:
+            if max_bytes is not None and dest.exists() and dir_size(dest) > max_bytes:
+                over = True
+                stop()
+                return
+            time.sleep(0.05)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    if max_bytes is not None:
+        watcher.start()
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        stop()
+        stdout, stderr = proc.communicate()
+        _remove_tree(dest)
+        raise GitError("clone timed out") from None
+    if max_bytes is not None:
+        watcher.join(timeout=2)
+        stop()
+    result = GitResult(proc.returncode or 0, stdout or "", stderr or "")
+    size = dir_size(dest) if dest.exists() else 0
+    if over or (max_bytes is not None and size > max_bytes):
+        _remove_tree(dest)
+        raise QuotaExceeded(max_bytes or 0)
+    if proc.returncode != 0:
+        _remove_tree(dest)
+        raise GitError(f"could not clone: {result.text[-1500:]}")
+    return result
+
+
+def _remove_tree(path: Path) -> None:
+    import os
+    import shutil
+    import stat
+    import time
+
+    def writable(p: str) -> None:
+        try:
+            os.chmod(p, stat.S_IWRITE)
+        except OSError:
+            pass
+
+    def onerror(func, p, _exc) -> None:
+        writable(p)
+        try:
+            func(p)
+        except OSError:
+            pass
+
+    for _ in range(15):
+        if not path.exists():
+            return
+        try:
+            for root, dirs, files in os.walk(path):
+                for name in files + dirs:
+                    writable(os.path.join(root, name))
+                writable(root)
+        except OSError:
+            pass
+        shutil.rmtree(path, onerror=onerror)
+        if not path.exists():
+            return
+        time.sleep(0.1)
+    if os.name == "nt" and path.exists():
+        os.system(f'rmdir /s /q "{path}"')
 
 
 def isolated_prepare(workspace: Path, source: Path | str, sid: str, root: Path) -> dict:

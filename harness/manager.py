@@ -730,6 +730,10 @@ class Manager:
         if used >= limit:
             raise HarnessError(507, f"cannot start a {action}: {quota_message(used, limit)}")
 
+    def revoke_member_streams(self, user_id: str) -> None:
+        """Close follow=true SSE generators for this account (rebind or disable)."""
+        self.stream_epoch[user_id] = self.stream_epoch.get(user_id, 0) + 1
+
     def member_over_quota(self, user_id: str) -> bool:
         if user_id == OWNER_USER_ID:
             return False
@@ -745,7 +749,7 @@ class Manager:
         Live tasks are cancelled and awaited before this returns so the GPU slot is not granted to
         the next waiter while the disabled account's run is still executing.
         """
-        self.stream_epoch[user_id] = self.stream_epoch.get(user_id, 0) + 1
+        self.revoke_member_streams(user_id)
         from .runner import ACTIVE
         waiting = []
         for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):
@@ -786,12 +790,24 @@ class Manager:
                 raise HarnessError(400, str(e)) from e
             dest = catalog.member_managed_repo(self.cfg, user_id, slug)
             root = storage.repos_dir(self.cfg, user_id)
+            used = storage.account_usage_bytes(self.cfg, user_id)
+            limit = int(account["disk_quota_bytes"])
+            remaining = limit - used
             try:
-                clone.clone_public(source_url, dest, root)
+                clone.clone_public(source_url, dest, root, max_bytes=remaining)
+            except clone.QuotaExceeded:
+                import shutil
+                shutil.rmtree(dest, ignore_errors=True)
+                raise HarnessError(507, "cannot start a project: this clone exceeded the account disk quota") from None
             except clone.GitError as e:
                 raise HarnessError(e.status if hasattr(e, "status") else 400, str(e)) from e
             except clone.CloneRefused as e:
                 raise HarnessError(400, str(e)) from e
+            used = storage.account_usage_bytes(self.cfg, user_id)
+            if used > limit:
+                import shutil
+                shutil.rmtree(dest, ignore_errors=True)
+                raise HarnessError(507, f"cannot start a project: {storage.quota_message(used, limit)}")
             managed = str(dest)
         self.db.insert_member_project({
             "user_id": user_id, "slug": slug, "description": description,

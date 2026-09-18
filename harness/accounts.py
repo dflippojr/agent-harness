@@ -124,6 +124,7 @@ class AccountService:
             raise HarnessError(409, "a household account already uses that login")
         self._db().update_account(user_id, login=login)
         self._db().insert_audit(actor_id, user_id, "rebind", "ok")
+        self.m.revoke_member_streams(user_id)
         return self.public_account(self._db().account_by_id(user_id))
 
     async def set_enabled(self, actor_id: str, user_id: str, enabled: bool) -> dict:

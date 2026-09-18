@@ -16,7 +16,7 @@ from harness.accounts import AccountService, DEFAULT_DISK_QUOTA_BYTES
 from harness.admin import API_VERSION as ADMIN_API_VERSION, PREFIX
 from harness.api import create_app
 from harness.apps import API_VERSION as APP_API_VERSION
-from harness.clone import CloneRefused, isolated_clone_env, isolated_prepare, isolated_refresh_origin, public_https_url
+from harness.clone import CloneRefused, QuotaExceeded, isolated_clone_env, isolated_prepare, isolated_refresh_origin, public_https_url
 from harness.config import GuestAccess, Project
 from harness.db import Database
 from harness.llm import Completion
@@ -138,6 +138,7 @@ def test_identity_precedence_and_single_role(tmp_path):
         rebound = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
                                json={"login": "alice2@example.com"}, headers=H(OWNER)).json()
         assert rebound["login"] == "alice2@example.com" and rebound["user_id"] == alice["user_id"]
+        assert m.stream_epoch.get(alice["user_id"], 0) >= 1
         old = client.get("/me", headers=H(ALICE))
         assert old.status_code == 403
         me = client.get("/me", headers=H("alice2@example.com")).json()
@@ -317,7 +318,7 @@ def test_member_clone_allows_only_public_https(tmp_path):
             r = client.post("/api/v1/projects", json={"name": "p", "repo": url}, headers=ah)
             assert r.status_code == 400, url
 
-        def fake_clone(url, dest, root):
+        def fake_clone(url, dest, root, max_bytes=None):
             dest.mkdir(parents=True)
             (dest / "README.md").write_text("public\n", encoding="utf-8")
             from harness.projects import GitResult
@@ -335,6 +336,48 @@ def test_member_clone_allows_only_public_https(tmp_path):
                 client.get("/api/v1/me", headers=ah).json()["user_id"], "pub")["repo"])
             assert dest.is_relative_to(user_root(m.cfg, client.get("/api/v1/me", headers=ah).json()["user_id"]))
             assert dest.name == "pub"
+        finally:
+            clone_mod.clone_public = orig
+
+
+def test_run_clone_stops_when_dest_exceeds_max_bytes(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+    (src / "blob.bin").write_bytes(b"x" * 80_000)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "big"],
+                   check=True)
+    dest = tmp_path / "dest"
+    from harness.clone import _run_clone
+    with pytest.raises(QuotaExceeded):
+        _run_clone(["git", "clone", "--", str(src), str(dest)], dest, max_bytes=2_000)
+    assert not dest.exists()
+
+
+def test_project_clone_is_removed_when_it_exceeds_quota(tmp_path):
+    client, m = household(tmp_path)
+    with client:
+        alice = create_member(client, ALICE, "Alice", disk_quota_bytes=4096)
+        ah = H(ALICE)
+
+        def fat_clone(url, dest, root, max_bytes=None):
+            dest.mkdir(parents=True)
+            (dest / "blob.bin").write_bytes(b"x" * 20_000)
+            from harness.clone import QuotaExceeded as QE
+            raise QE(max_bytes or 0)
+
+        import harness.clone as clone_mod
+        orig = clone_mod.clone_public
+        clone_mod.clone_public = fat_clone
+        try:
+            r = client.post("/api/v1/projects", json={
+                "name": "linux", "repo": "https://github.com/org/repo",
+            }, headers=ah)
+            assert r.status_code == 507, r.text
+            assert m.db.get_member_project(alice["user_id"], "linux") is None
+            dest = repos_dir(m.cfg, alice["user_id"]) / "linux"
+            assert not dest.exists()
         finally:
             clone_mod.clone_public = orig
 
