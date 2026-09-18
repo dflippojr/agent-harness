@@ -244,14 +244,25 @@ def test_hash_bound_install_and_stale_approval(tmp_path):
     assert again["enabled"] is False
 
 
+OWNER_SESSION = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
+PROPOSE_ARGS = {
+    "slug": "commit-style", "title": "Commit style",
+    "purpose": "Keep git commit messages conventional and short.",
+    "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
+}
+
+
+def _stage(store, session=None, **overrides):
+    args = dict(PROPOSE_ARGS)
+    args.update(overrides)
+    message = asyncio.run(store.propose_from_tool(args, session or OWNER_SESSION))
+    rows = store.db.list_skill_proposals()
+    return message, (rows[0] if rows else None)
+
+
 def test_rejected_hash_cannot_install_until_reopened(tmp_path):
     store = store_for(tmp_path)
-    session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
-    asyncio.run(store.propose_from_tool({
-        "slug": "commit-style", "title": "Commit style",
-        "purpose": "Keep git commit messages conventional and short.",
-        "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
-    }, session))
+    _stage(store)
     row = store.db.list_skill_proposals()[0]
     store.reject(row["id"], "nope")
     with pytest.raises(SkillError, match="rejected"):
@@ -259,6 +270,124 @@ def test_rejected_hash_cannot_install_until_reopened(tmp_path):
     store.reopen(row["id"])
     installed = store.install(row["id"], row["content_hash"])
     assert installed["slug"] == "commit-style"
+
+
+@pytest.mark.parametrize("steps,want", [
+    (("reject", "reopen", "install"), {"installed": True, "hash_rejected": False}),
+    (("reject", "install"), {"error": "rejected", "hash_rejected": True, "status": "rejected"}),
+    (("reject", "delete", "repropose", "install"), {"installed": True, "hash_rejected": False}),
+    (("reject", "repropose"), {"proposals": 1, "status": "rejected", "hash_rejected": True, "message": "reopen"}),
+    (("reject", "repropose", "reopen", "install"), {"installed": True, "hash_rejected": False, "proposals": 1}),
+    (("delete", "repropose", "install"), {"installed": True, "hash_rejected": False}),
+    (("reopen",), {"error": "reopened", "status": "validated"}),
+])
+def test_proposal_lifecycle_interleavings(tmp_path, steps, want):
+    """Reject/delete/reopen/install must keep proposal.status and skill_rejected aligned."""
+    store = store_for(tmp_path)
+    message, row = _stage(store)
+    content_hash = row["content_hash"]
+    pid = row["id"]
+    error = None
+    for step in steps:
+        try:
+            if step == "reject":
+                store.reject(pid, "nope")
+            elif step == "reopen":
+                target = store.db.skill_proposal(pid) or store.db.skill_proposal_by_hash(content_hash)
+                store.reopen(target["id"])
+                pid = target["id"]
+            elif step == "delete":
+                store.delete_draft(pid)
+            elif step == "repropose":
+                message, staged = _stage(store)
+                if staged is not None:
+                    pid = staged["id"]
+            elif step == "install":
+                target = store.db.skill_proposal(pid) or store.db.skill_proposal_by_hash(content_hash)
+                store.install(target["id"], target["content_hash"])
+                pid = target["id"]
+        except SkillError as exc:
+            error = str(exc)
+            break
+    latest = store.db.skill_proposal(pid)
+    proposals = store.db.list_skill_proposals()
+    if "error" in want:
+        assert error and want["error"] in error.lower()
+    else:
+        assert error is None, error
+    if "status" in want:
+        assert latest is not None and latest["status"] == want["status"]
+    if "hash_rejected" in want:
+        assert store.db.skill_hash_rejected(content_hash) is want["hash_rejected"]
+    if "installed" in want:
+        live = store.db.skill_installed("commit-style")
+        assert (live is not None) is want["installed"]
+        if want["installed"]:
+            assert live["current_hash"] == content_hash
+            assert latest is not None and latest["status"] == "installed"
+    if "proposals" in want:
+        assert len(proposals) == want["proposals"]
+    if "message" in want:
+        assert want["message"] in message.lower()
+
+
+def test_reject_then_delete_does_not_orphan_rejected_hash(tmp_path):
+    """Finding: delete_draft dropped the row but left skill_rejected, so the hash could never be installed again."""
+    store = store_for(tmp_path)
+    _stage(store)
+    row = store.db.list_skill_proposals()[0]
+    store.reject(row["id"], "nope")
+    store.delete_draft(row["id"])
+    assert store.db.skill_proposal(row["id"]) is None
+    assert not store.db.skill_hash_rejected(row["content_hash"])
+    message, staged = _stage(store)
+    assert "staged" in message.lower()
+    assert staged["id"] != row["id"]
+    assert staged["status"] != "rejected"
+    installed = store.install(staged["id"], staged["content_hash"])
+    assert installed["slug"] == "commit-style"
+
+
+def test_reject_during_review_stays_rejected_and_reopenable(tmp_path):
+    """Finding: review completion must not overwrite an in-flight owner reject."""
+    db = Database(tmp_path / "harness.sqlite3")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def chat(model, messages, tools=None, **kwargs):
+        started.set()
+        await release.wait()
+        return Completion(content=APPROVE_REVIEW)
+
+    async def body():
+        reviewer = SkillReviewer(SkillsConfig(enabled=True, local_review=True), db, idle=lambda: True,
+                                 model=make_cfg(tmp_path).models["fake"], chat=chat, local_review=True)
+        store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox,
+                           reviewer=reviewer)
+        reviewer.start()
+        store._propose_locked(bundle(), "s1")
+        await asyncio.wait_for(started.wait(), timeout=3)
+        row = db.list_skill_proposals()[0]
+        store.reject(row["id"], "nope")
+        assert db.skill_proposal(row["id"])["status"] == "rejected"
+        assert db.skill_hash_rejected(row["content_hash"])
+        release.set()
+        deadline = time.time() + 3
+        while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] == "running":
+            await asyncio.sleep(0.05)
+        latest = db.skill_proposal(row["id"])
+        assert latest["status"] == "rejected"
+        assert db.skill_hash_rejected(row["content_hash"])
+        assert latest.get("review") and latest["review"].get("recommendation") == "approve"
+        with pytest.raises(SkillError, match="rejected"):
+            store.install(row["id"], row["content_hash"])
+        store.reopen(row["id"])
+        assert not db.skill_hash_rejected(row["content_hash"])
+        installed = store.install(row["id"], row["content_hash"])
+        assert installed["slug"] == "commit-style"
+        await reviewer.stop()
+
+    asyncio.run(body())
 
 
 def test_failed_validation_cannot_install(tmp_path):
