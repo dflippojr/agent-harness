@@ -106,7 +106,6 @@ ENABLE_CHECKS = {
 
 
 def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
-    setattr(cfg.modules, name, enabled)
     if name == "notifications":
         cfg.notify.enabled = enabled
     elif name == "web":

@@ -438,3 +438,21 @@ def test_web_settings_render_plan_and_phone_layout(tmp_path):
         js = client.get("/static/app.js").text
         assert "Server" in js or "daemon" in js
         assert client.get("/api/admin/v1/config").status_code == 200
+
+
+def test_disabling_web_does_not_mark_module_uninstalled(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.web.enabled = True
+    cfg.modules.web = True
+    cfg.installed.web = True
+    store = ManagedStore(cfg.data_dir)
+    store.write_active(Envelope(revision=1, confirmed=True, values={"web.enabled": False}))
+    manager = Manager(cfg, chat=Script([Completion(content="hi")]))
+    assert manager.cfg.web.enabled is False
+    assert manager.cfg.installed.web is True
+    assert manager.cfg.modules.web is True
+    assert manager.cfg.capabilities()["modules"]["web"] is True
+    client = TestClient(create_app(manager))
+    with client:
+        health = client.get("/health").json()
+        assert health["capabilities"]["modules"]["web"] is True
