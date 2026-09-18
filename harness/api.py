@@ -76,6 +76,11 @@ class ImageRequest(BaseModel):
     aspect_ratio: str = "1:1"
     resolution: str = "auto"
     seed: int | None = None
+    upscale: str = "none"
+
+
+class ImageUpscaleRequest(BaseModel):
+    upscale: str = "2x"
 
 
 class GpuHoldRequest(BaseModel):
@@ -409,7 +414,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         svc = images_service(request)
         try:
             return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
-                              resolution=body.resolution, seed=body.seed)
+                              resolution=body.resolution, seed=body.seed, upscale=body.upscale)
         except ToolError as e:
             raise HarnessError(400, str(e))
 
@@ -423,6 +428,15 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         """Drop an unused Images-tab warmup so the language model can come back."""
         return images_service(request).cooldown()
 
+    @app.post("/images/{iid}/upscale", status_code=201)
+    async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
+        from .fileops import ToolError
+        svc = images_service(request)
+        try:
+            return svc.submit_upscale(iid.removesuffix(".png"), body.upscale)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
     @app.get("/images/{iid}")
     async def get_image(iid: str, request: Request):
         svc = images_service(request)
@@ -433,7 +447,12 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             if job["status"] != "done" or not svc.path(job).exists():
                 raise HarnessError(404, "image not ready")
             return FileResponse(svc.path(job), media_type="image/png", headers={"Cache-Control": "max-age=86400"})
-        return {**job, "service": svc.status()}
+        parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
+        return {**job, "service": svc.status(), "parent": ({"id": parent["id"], "width": parent["width"],
+                "height": parent["height"]} if parent else None),
+                "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
+                              "upscale_model": c.get("upscale_model") or "", "width": c["width"], "height": c["height"]}
+                             for c in svc.db.image_children(job["id"])]}
 
     # GPU contention guard
     @app.get("/gpu")

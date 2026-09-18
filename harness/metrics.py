@@ -125,14 +125,18 @@ def render(m: Manager) -> str:
         with db.lock:
             images = db.conn.execute("SELECT model, source, status, COUNT(*), COALESCE(SUM(seconds), 0) FROM images "
                                      "GROUP BY 1, 2, 3").fetchall()
-        out.metric("harness_images_total", "counter", "Image generation jobs by model, source and status.",
+        out.metric("harness_images_total", "counter", "Image jobs by model, source and status.",
                    [({"model": mo, "source": so, "status": st}, n) for mo, so, st, n, _ in images])
-        out.metric("harness_images_seconds_total", "counter", "Time spent generating images (ComfyUI execution).",
+        out.metric("harness_images_seconds_total", "counter", "Time spent on image jobs (ComfyUI execution).",
                    [({"model": mo}, sum(s for mo2, _, st, _, s in images if mo2 == mo and st == "done"))
                     for mo in sorted({row[0] for row in images})])
-        out.metric("harness_images_gpu_taken", "gauge", "1 while image generation has the GPU (language model unloaded).",
+        out.metric("harness_images_gpu_taken", "gauge", "1 while image generation or upscaling has the GPU (language model unloaded).",
                    [({}, 1 if m.images.gpu_taken else 0)])
         out.metric("harness_images_queued", "gauge", "Image jobs waiting.", [({}, m.images.queue.qsize())])
+        upscale = m.images.status().get("upscale") or {}
+        out.metric("harness_images_upscale_available", "gauge",
+                   "1 when optional Real-ESRGAN 2×/4× weights are installed.",
+                   [({}, 1 if upscale.get("available") else 0)])
 
     hub = m.hub.status()
     out.metric("harness_runner_online", "gauge", "1 while a runner (the MacBook) is connected.",
