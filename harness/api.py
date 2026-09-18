@@ -20,6 +20,8 @@ from . import config as config_mod
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
 
+NO_SUCH_JOB = "no such job"
+
 log = logging.getLogger("harness.api")
 WEB = Path(__file__).parent / "web"
 # Session-list stream: status-level events only, no tool output or token deltas.
@@ -696,10 +698,10 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def get_job(jid: str, request: Request):
         m = jobs_on(request)
         if request.state.access.role == "guest":
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         job = m.db.get_job(jid)
         if job is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         return job_view(m, job, runs=15)
 
     @app.put("/jobs/{jid}")
@@ -709,7 +711,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = jobs_on(request)
         old = m.db.get_job(jid)
         if old is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         try:
             job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
         except (ValueError, CronError) as e:
@@ -721,7 +723,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.delete("/jobs/{jid}", status_code=204)
     async def delete_job(jid: str, request: Request):
         if not jobs_on(request).db.delete_job(jid):
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
 
     @app.post("/jobs/{jid}/run", status_code=201)
     async def run_job(jid: str, request: Request):
@@ -729,7 +731,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = jobs_on(request)
         job = m.db.get_job(jid)
         if job is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         if job["last_session_id"] and m._is_active(job["last_session_id"]):
             raise HarnessError(409, "the previous run is still going")
         sid = m.jobs.run(job, manual=True)

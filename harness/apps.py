@@ -33,9 +33,10 @@ from .fileops import ToolError
 log = logging.getLogger("harness.apps")
 
 API_VERSION = "1.8"
+SESSIONS_ALL = "sessions:all"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
-    "sessions:all": "read every session, not only the app's own",
+    SESSIONS_ALL: "read every session, not only the app's own",
     "approvals": "approve or deny tool calls in the app's own sessions",
     "images": "generate images, upscale them, and read them",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
@@ -408,7 +409,7 @@ def register(app: FastAPI, mgr) -> None:
             raise HarnessError(401, "missing or invalid app token")
         scopes = set((key.get("scopes") or "").split())
         if (not owner_key(key) and scope not in scopes
-                and not (scope == "sessions" and "sessions:all" in scopes and request.method == "GET")):
+                and not (scope == "sessions" and SESSIONS_ALL in scopes and request.method == "GET")):
             raise HarnessError(403, f"this token lacks the {scope!r} scope")
         raw_origin = request.headers.get("origin", "")
         if raw_origin:
@@ -425,7 +426,7 @@ def register(app: FastAPI, mgr) -> None:
         m = mgr(request)
         s = m.get(ref)
         if (not owner_key(key) and s.get("app_id") != key["id"]
-                and "sessions:all" not in key["scope_set"]):
+                and SESSIONS_ALL not in key["scope_set"]):
             raise HarnessError(404, f"no session matches {ref!r}")
         return s
 
@@ -553,7 +554,7 @@ def register(app: FastAPI, mgr) -> None:
         m = mgr(request)
         key = auth(request, "sessions")
         rows = m.db.list_sessions(limit * 5)
-        mine = [r for r in rows if owner_key(key) or "sessions:all" in key["scope_set"]
+        mine = [r for r in rows if owner_key(key) or SESSIONS_ALL in key["scope_set"]
                 or r.get("app_id") == key["id"]][:limit]
         return [m.list_summary(r) for r in mine]
 
@@ -653,7 +654,7 @@ def register(app: FastAPI, mgr) -> None:
                 raise HarnessError(401, "invalid or expired stream ticket")
             key["scope_set"] = set((key.get("scopes") or "").split())
             if (not owner_key(key) and "sessions" not in key["scope_set"]
-                    and "sessions:all" not in key["scope_set"]):
+                    and SESSIONS_ALL not in key["scope_set"]):
                 raise HarnessError(403, "this token lacks the 'sessions' scope")
         else:
             key = auth(request, "sessions")
