@@ -101,10 +101,17 @@ Profile/Settings). After Phase 8 it grew into the first-party operator UI rather
 - Time-boxed guest/demo access (`guests:` in untracked `config/harness.local.yaml`): a named tailnet
   login can browse read-only until an ISO `until`. Requires `allowed_logins`. Guests cannot start or
   cancel work, approve, mint keys, pause the GPU, use Remote Control, edit memory, or Review.
+- Household members (Settings → Accounts): the owner provisions a Tailscale login with a disk quota and
+  session caps. Members authenticate only with that exact `Tailscale-User-Login`, see only their own
+  projects/sessions, and run local-model tower tasks. Owner Home/search/review never show member prompts
+  or diffs. Open-owner mode (empty `allowed_logins`) remains only while no members exist. The machine
+  owner can still read local storage; this isolation is API/UI, not a hostile-administrator boundary.
+  See `docs/admin-api.md` and `docs/app-api.md`.
 - Agent Harness Web is a first-party Server browser client ([`docs/web.md`](docs/web.md)). Bundled static serving
   remains the default, while the same no-build PWA can be hosted separately with a configurable Server URL and an origin-bound
   `ho-` owner token. Session work dogfoods `/api/v1`; owner operations dogfood `/api/admin/v1`. Authenticated SSE,
   images, and downloads work without putting bearer tokens in URLs. App tokens cannot call the owner surface.
+  Members never construct `/api/admin/v1` requests.
 
 Still open from that pass: **#48** (add agent-harness and the memory library to Remote Control) and
 **#56** (Images: warm ComfyUI when the tab opens, real step progress, unload immediately, in-app

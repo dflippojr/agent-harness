@@ -196,9 +196,43 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_provider_credentials_active
 ON app_provider_credentials(app_id, backend) WHERE revoked_at IS NULL;
 -- Session search (search.py): one row per indexed event.
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-    text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED,
+    text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED, user_id UNINDEXED,
     tokenize = 'porter unicode61 remove_diacritics 2'
 );
+CREATE TABLE IF NOT EXISTS accounts (
+    user_id TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    login TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    disk_quota_bytes INTEGER NOT NULL,
+    max_running INTEGER NOT NULL DEFAULT 1,
+    max_queued INTEGER NOT NULL DEFAULT 2,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    last_activity_at REAL
+);
+CREATE TABLE IF NOT EXISTS account_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    actor_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS account_audit_ts ON account_audit(ts);
+CREATE TABLE IF NOT EXISTS member_projects (
+    user_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    repo TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (user_id, slug)
+);
+CREATE INDEX IF NOT EXISTS member_projects_user ON member_projects(user_id);
 """
 
 # Column definitions reused across the migration table below.
@@ -293,6 +327,7 @@ class Database:
             existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        self._ensure_search_index_columns()
         self.lock = threading.RLock()
         self._build_search_index()
 
@@ -330,9 +365,17 @@ class Database:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone())
 
-    def find_session_ids(self, prefix: str, app_id: str | None = None) -> list[str]:
+    def get_session_for_user(self, sid: str, user_id: str) -> dict | None:
+        with self.lock:
+            return _row(self.conn.execute(
+                "SELECT * FROM sessions WHERE id = ? AND owner_id = ?", (sid, user_id)).fetchone())
+
+    def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None) -> list[str]:
         sql = "SELECT id FROM sessions WHERE id LIKE ?"
         params: list = [prefix + "%"]
+        if user_id is not None:
+            sql += " AND owner_id = ?"
+            params.append(user_id)
         if app_id is not None:
             sql += " AND app_id = ?"
             params.append(app_id)
@@ -351,13 +394,25 @@ class Database:
             ).fetchall()
         return [_row(r) for r in rows]
 
-    def sessions_with_status(self, *statuses: str) -> list[dict]:
+    def sessions_with_status(self, *statuses: str, user_id: str | None = None) -> list[dict]:
+        marks = ",".join("?" * len(statuses))
+        query = f"SELECT * FROM sessions WHERE status IN ({marks})"
+        params: list = list(statuses)
+        if user_id is not None:
+            query += " AND owner_id = ?"
+            params.append(user_id)
+        with self.lock:
+            rows = self.conn.execute(query + " ORDER BY updated_at", params).fetchall()
+        return [_row(r) for r in rows]
+
+    def count_sessions(self, user_id: str, *statuses: str) -> int:
         marks = ",".join("?" * len(statuses))
         with self.lock:
-            rows = self.conn.execute(
-                f"SELECT * FROM sessions WHERE status IN ({marks}) ORDER BY updated_at", statuses
-            ).fetchall()
-        return [_row(r) for r in rows]
+            row = self.conn.execute(
+                f"SELECT COUNT(*) AS n FROM sessions WHERE owner_id = ? AND status IN ({marks})",
+                (user_id, *statuses),
+            ).fetchone()
+        return int(row["n"] if row else 0)
 
     # events
     def insert_event(self, sid: str, type_: str, data: dict) -> dict:
@@ -370,13 +425,36 @@ class Database:
             self._index_event(sid, cur.lastrowid, ts, type_, data)
         return {"seq": cur.lastrowid, "session_id": sid, "ts": ts, "type": type_, "data": data}
 
+    def _session_user_id(self, sid: str) -> str:
+        row = self.conn.execute("SELECT owner_id FROM sessions WHERE id = ?", (sid,)).fetchone()
+        return (row["owner_id"] if row and row["owner_id"] else "owner")
+
+    def _ensure_search_index_columns(self) -> None:
+        """FTS5 tables cannot ALTER; rebuild when the household user_id column is missing."""
+        try:
+            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(search_index)")}
+        except sqlite3.DatabaseError:
+            cols = set()
+        if "user_id" in cols:
+            return
+        self.conn.execute("DROP TABLE IF EXISTS search_index")
+        self.conn.execute(
+            "CREATE VIRTUAL TABLE search_index USING fts5("
+            "text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED, user_id UNINDEXED, "
+            "tokenize = 'porter unicode61 remove_diacritics 2')"
+        )
+        self.conn.execute("DELETE FROM meta WHERE key = 'search_index'")
+
     # session search (search.py)
-    def _index_event(self, sid: str, seq: int, ts: float, type_: str, data: dict) -> None:
+    def _index_event(self, sid: str, seq: int, ts: float, type_: str, data: dict, user_id: str | None = None) -> None:
         from .search import event_text
         item = event_text(type_, data)
         if item and item[1].strip():
-            self.conn.execute("INSERT INTO search_index (text, session_id, seq, kind, ts) VALUES (?, ?, ?, ?, ?)",
-                              (item[1], sid, seq, item[0], ts))
+            uid = user_id if user_id is not None else self._session_user_id(sid)
+            self.conn.execute(
+                "INSERT INTO search_index (text, session_id, seq, kind, ts, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (item[1], sid, seq, item[0], ts, uid),
+            )
 
     def _build_search_index(self) -> None:
         """Index events written before search existed (or by an older index version). Runs once."""
@@ -388,8 +466,11 @@ class Database:
             self.conn.execute("BEGIN IMMEDIATE")
             try:
                 self.conn.execute("DELETE FROM search_index")
+                owners = {r["id"]: (r["owner_id"] or "owner")
+                          for r in self.conn.execute("SELECT id, owner_id FROM sessions")}
                 for r in self.conn.execute("SELECT seq, session_id, ts, type, data FROM events ORDER BY seq").fetchall():
-                    self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]))
+                    self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]),
+                                      user_id=owners.get(r["session_id"], "owner"))
                 self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('search_index', ?)", (INDEX_VERSION,))
             except BaseException:
                 self.conn.execute("ROLLBACK")
@@ -397,11 +478,14 @@ class Database:
             self.conn.execute("COMMIT")
 
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600,
-                      app_id: str | None = None) -> list[dict]:
+                      user_id: str | None = None, app_id: str | None = None) -> list[dict]:
         sql = ("SELECT session_id, seq, kind, ts, bm25(search_index) AS rank, "
                "snippet(search_index, 0, char(2), char(3), '…', 16) AS snippet "
                "FROM search_index WHERE search_index MATCH ?")
         params: list = [fts_query]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
         if exclude:
             sql += " AND session_id != ?"
             params.append(exclude)
@@ -415,11 +499,15 @@ class Database:
                 return []
         return [dict(r) for r in rows]
 
-    def session_brief(self, sid: str) -> dict | None:
+    def session_brief(self, sid: str, user_id: str | None = None) -> dict | None:
+        query = ("SELECT id, project, target, title, status, created_at, updated_at, branch, "
+                 "review, owner_id, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?")
+        params: tuple = (sid,)
+        if user_id is not None:
+            query += " AND owner_id = ?"
+            params = (sid, user_id)
         with self.lock:
-            row = self.conn.execute("SELECT id, project, target, title, status, created_at, updated_at, branch, "
-                                    "review, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?",
-                                    (sid,)).fetchone()
+            row = self.conn.execute(query, params).fetchone()
         return dict(row) if row else None
 
     def events(self, sid: str, after: int = 0) -> list[dict]:
@@ -461,14 +549,20 @@ class Database:
                 (sid, call_id),
             ).fetchone())
 
-    def pending_approvals(self, sid: str | None = None) -> list[dict]:
-        query = "SELECT * FROM approvals WHERE status = 'pending'"
-        params: tuple = ()
+    def pending_approvals(self, sid: str | None = None, user_id: str | None = None) -> list[dict]:
+        query = "SELECT a.* FROM approvals a"
+        params: list = []
+        where = ["a.status = 'pending'"]
         if sid:
-            query += " AND session_id = ?"
-            params = (sid,)
+            where.append("a.session_id = ?")
+            params.append(sid)
+        if user_id is not None:
+            query += " JOIN sessions s ON s.id = a.session_id"
+            where.append("s.owner_id = ?")
+            params.append(user_id)
+        query += " WHERE " + " AND ".join(where)
         with self.lock:
-            return [_row(r) for r in self.conn.execute(query + " ORDER BY created_at", params).fetchall()]
+            return [_row(r) for r in self.conn.execute(query + " ORDER BY a.created_at", params).fetchall()]
 
     def approvals(self, sid: str) -> list[dict]:
         with self.lock:
@@ -952,3 +1046,100 @@ class Database:
                 (status, note, time.time(), aid),
             )
         return cur.rowcount == 1
+
+    # household accounts (non-secret metadata only: never tokens, credentials, or session material)
+    def member_count(self) -> int:
+        with self.lock:
+            row = self.conn.execute("SELECT COUNT(*) AS n FROM accounts WHERE role = 'member'").fetchone()
+        return int(row["n"] if row else 0)
+
+    def account_by_login(self, login: str) -> dict | None:
+        if not login:
+            return None
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM accounts WHERE login = ?", (login,)).fetchone()
+        return dict(row) if row else None
+
+    def account_by_id(self, user_id: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM accounts WHERE user_id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_accounts(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM accounts WHERE role = 'member' ORDER BY created_at").fetchall()
+        return [dict(r) for r in rows]
+
+    def insert_account(self, row: dict) -> None:
+        cols = ("user_id", "role", "login", "display_name", "enabled", "disk_quota_bytes",
+                "max_running", "max_queued", "created_at", "updated_at", "last_activity_at")
+        with self.lock:
+            self.conn.execute(
+                f"INSERT INTO accounts ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                [row.get(c) for c in cols],
+            )
+
+    def update_account(self, user_id: str, **fields) -> bool:
+        if not fields:
+            return False
+        fields["updated_at"] = time.time()
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self.lock:
+            return self.conn.execute(
+                f"UPDATE accounts SET {sets} WHERE user_id = ?", [*fields.values(), user_id]
+            ).rowcount == 1
+
+    def touch_account(self, user_id: str) -> None:
+        if not user_id or user_id == "owner":
+            return
+        with self.lock:
+            self.conn.execute("UPDATE accounts SET last_activity_at = ? WHERE user_id = ?",
+                              (time.time(), user_id))
+
+    def insert_audit(self, actor_id: str, target_id: str, action: str, outcome: str, detail: str = "") -> None:
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO account_audit (ts, actor_id, target_id, action, outcome, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (time.time(), actor_id, target_id, action, outcome, detail),
+            )
+            cutoff = time.time() - 365 * 86400
+            self.conn.execute("DELETE FROM account_audit WHERE ts < ?", (cutoff,))
+
+    def list_audit(self, limit: int = 200) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id, ts, actor_id, target_id, action, outcome, detail FROM account_audit "
+                "ORDER BY ts DESC LIMIT ?", (max(1, min(limit, 500)),)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_member_project(self, user_id: str, slug: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM member_projects WHERE user_id = ? AND slug = ?", (user_id, slug)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_member_projects(self, user_id: str) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM member_projects WHERE user_id = ? ORDER BY slug", (user_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def insert_member_project(self, row: dict) -> None:
+        now = time.time()
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO member_projects (user_id, slug, description, repo, source_url, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (row["user_id"], row["slug"], row.get("description") or "", row.get("repo") or "",
+                 row.get("source_url") or "", now, now),
+            )
+
+    def delete_member_project(self, user_id: str, slug: str) -> bool:
+        with self.lock:
+            return self.conn.execute(
+                "DELETE FROM member_projects WHERE user_id = ? AND slug = ?", (user_id, slug)
+            ).rowcount == 1

@@ -23,8 +23,9 @@ Agent Harness Server's live `/openapi.json`; the repository test suite performs 
 `GET /api/v1/backends` is authenticated and app-specific. Its `today`, `week`, and `usage_by_source` fields contain
 only the calling app's usage. `provider_policy` reports whether that app may use the backend, its billing policy and
 model allowlist, and whether the assigned credential source is available. It never contains a provider key, key-file
-path, or owner-only opaque reference. The unauthenticated discovery document at `GET /api/v1` likewise does not
-report key-file availability or usage.
+path, or owner-only opaque reference. The unauthenticated discovery document at `GET /api/v1` does not list project
+names (`projects` is always `[]`); an authenticated principal enumerates usable projects at `GET /api/v1/projects`.
+It likewise does not report key-file availability or usage.
 
 Machine-wide cached provider-limit data is also hidden from managed apps because it could belong to a different
 assignment. A managed app receives limits reported by its own provider process in that session's `rate_limit` events.
@@ -38,15 +39,17 @@ Create an Agent Harness App token in **Settings → Apps** (or `POST /keys` from
 | Scope | Allows |
 | --- | --- |
 | `sessions` | create sessions, send messages and context, answer tool calls, cancel; read the app's own sessions and events |
-| `sessions:all` | read every session (not only the app's own) |
+| `sessions:all` | read every session visible to that app's owner scope (never other household accounts) |
 | `approvals` | approve or deny tool calls in the app's own sessions (normally the user approves from the phone) |
 | `images` | generate and download images |
 | `inference` | use the OpenAI/Anthropic-compatible endpoint under `/v1` |
 | `remote_control` | start and stop Claude Code Remote Control servers in project folders |
 
 Apps see only the sessions they created, unless they hold `sessions:all`. That scope expands reads only:
-sending messages, adding context, cancelling, and answering tool calls still require owning the session. Errors are
-`{"detail": "..."}`, with 401 (bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual. Harness-generated errors also
+sending messages, adding context, cancelling, and answering tool calls still require owning the session.
+`sessions:all` means all sessions in the machine-owner scope (`user_id = owner`), never household member
+accounts. Cross-user object ids return an indistinguishable 404. Errors are `{"detail": "..."}`, with 401
+(bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual. Harness-generated errors also
 include `error: {code, message, retryable}`; `detail` remains for compatibility. The SDK exposes these as
 `HarnessError.code`, `.detail`, and `.retryable`.
 
@@ -55,6 +58,36 @@ include `error: {code, message, retryable}`; `detail` remains for compatibility.
 `GET /api/v1/config/schema`, `GET /api/v1/config`, and `PATCH /api/v1/config` require a live app token. They return
 only that app's registered settings and effective caps. Owner, device, runner, guest, and anonymous credentials
 cannot impersonate this surface. The allowlist and cap rules are in [`config-registry.md`](config-registry.md).
+
+## Household members on `/api/v1`
+
+An enabled Tailscale member is a human principal on the same-origin `/api/v1` surface. `GET /api/v1/me` returns
+`role`, opaque `user_id`, and usage. Members may create empty tower projects or clone credential-free public HTTPS
+repositories from github.com, gitlab.com, or codeberg.org into their own managed area (`POST /api/v1/projects`,
+ambient Tailscale human only — never an app token). They create, list, steer, cancel, approve, and review only
+their own local-model tower sessions, search only their own transcripts, and receive only their own live events.
+
+Members cannot use hosted-provider subscriptions, owner/app/device tokens, Mac runners, homelab or memory-library
+tools, image generation, Remote Control, inference keys, scheduled jobs, app management, notifications, backups,
+or another user's data. Those capabilities are forced off in service/tool construction, not only in the UI.
+
+App tokens remain owner-managed: they cannot act as a member, mint member credentials, or attach sessions to a
+member. Device and runner tokens gain no member authority.
+
+## Capability matrix
+
+| Capability | owner | member | guest | app token | device/runner |
+| --- | --- | --- | --- | --- | --- |
+| Own sessions (create/list/steer/cancel/review) | yes | yes (local tower only) | read-only look around | own sessions, or owner-scope `sessions:all` | inference only; no member sessions |
+| `/api/v1/me`, scoped projects/search/events | yes | own account | no | owner scope | no |
+| Create projects | yes | empty or public HTTPS allowlist | no | no | no |
+| `/api/admin/v1`, `ho-` owner tokens | yes | 403 | 403 | 403 | 403 |
+| Hosted backends, images, jobs, runners, Remote Control | yes | no | no | scopes for images/remote_control only | no |
+| Homelab, memory library, notifications, backups, keys | yes | no | no | no | no |
+| Member prompts, transcripts, diffs, repo contents | no (aggregate metadata only) | own only | no | no | no |
+
+The machine owner remains inside the host/OS trust boundary and can read local storage. This matrix is about
+accidental or API/UI cross-account access, not a hostile administrator.
 
 ## Pair a separately hosted browser app
 
@@ -328,4 +361,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
 | 1.8 | 2026-09-17 | Opt-in Real-ESRGAN 2×/4× upscaling (`upscale` on create; `POST /api/v1/images/{id}/upscale`) |
 | 1.10 | 2026-09-18 | Per-app configuration registry (`/api/v1/config`); values may only narrow owner/token authority |
-| 1.9 | 2026-09-17 | `sessions:all` expands reads only; messages, context, and cancel require owning the session |
+| 1.9 | 2026-09-17 | Household members: scoped `/me`, `/projects`, search, events, local-only backends; discovery hides project names. `sessions:all` expands owner-scope reads only; messages, context, and cancel require owning the session |
