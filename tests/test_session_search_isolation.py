@@ -80,6 +80,27 @@ def test_restrict_app_id_matches_api_scopes(tmp_path):
         restrict_app_id(db, "missing")
 
 
+def test_revoked_sessions_all_does_not_unrestrict(tmp_path):
+    db, tools = _tools(tmp_path)
+    app_a, app_b, reader = _apps(db)
+    _history(db, app_a, app_b, reader)
+
+    assert restrict_app_id(db, "dddd00000r") is None
+    assert db.revoke_api_key(reader["id"])
+    assert restrict_app_id(db, "dddd00000r") == reader["id"]
+    with pytest.raises(ToolError, match="no session matches"):
+        tools.session_read("aaaa000001", _session="dddd00000r")
+    hidden = tools.session_search(OWNER_MARKER, _session="dddd00000r")
+    assert_no_hit(hidden, "aaaa000001")
+
+    # A non-elevated revoked app keeps its own-app boundary; in-flight sessions are not cancelled.
+    assert db.revoke_api_key(app_a["id"])
+    assert restrict_app_id(db, "bbbb00000a") == app_a["id"]
+    own = tools.session_search(APP_A_MARKER, _session="bbbb00000a")
+    assert "aaaa00000a" in own and APP_A_MARKER in own
+    assert "aaaa000001" not in own
+
+
 def test_direct_tools_isolate_owner_two_apps_and_read_all(tmp_path):
     db, tools = _tools(tmp_path)
     app_a, app_b, reader = _apps(db)

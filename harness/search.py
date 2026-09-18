@@ -111,7 +111,7 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
     """App id to restrict search/read to, or None if the caller may see every session.
 
     Matches `/api/v1`: owner sessions (no app_id) are unrestricted; an app session sees only its
-    own sessions unless that app holds `sessions:all`.
+    own sessions unless that app holds `sessions:all` on an unrevoked key.
     """
     if not caller_session_id:
         return None
@@ -122,7 +122,9 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
     if not app_id:
         return None
     key = db.get_api_key(app_id)
-    scopes = set((key.get("scopes") or "").split()) if key else set()
+    if key is None or key.get("revoked_at") is not None:
+        return app_id
+    scopes = set((key.get("scopes") or "").split())
     if "sessions:all" in scopes:
         return None
     return app_id
