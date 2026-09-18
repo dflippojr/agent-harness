@@ -239,7 +239,7 @@ The publisher lists:
 
 - `required_capabilities.profile`: `full`, `service`, or `any`;
 - `required_capabilities.modules`: subset of `local_model`, `homelab`, `memory_library`, `images`, `jobs`,
-  `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, `backup`;
+  `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, `backup`, `skills`;
 - `required_backends`: subset of `local`, `claude`, `codex`, `cursor`.
 
 Discovery uses `GET /api/v1` / `GET /health` `capabilities` and authenticated `GET /api/v1/backends`
