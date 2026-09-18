@@ -14,7 +14,7 @@
 //   #/images/<id>/full       in-app fullscreen viewer
 //   #/jobs[/new|/<id>]       scheduled jobs
 
-import { controlCenter } from "./client.mjs";
+import { agentHarnessWeb } from "./client.mjs";
 
 const $app = document.getElementById("app");
 const $title = document.getElementById("title");
@@ -121,7 +121,7 @@ function showFab(href, label) {
 
 let currentMe = { role: "owner" };
 async function currentUser() {
-  const bootstrap = !controlCenter.token && !controlCenter.independent ? "legacy" : "admin";
+  const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
   try { currentMe = await api("/me", { surface: bootstrap }); } catch (_) { currentMe = { role: "owner" }; }
   return currentMe;
 }
@@ -155,7 +155,7 @@ function toast(text, ms = 2600) {
 }
 
 function apiSurface(path, method) {
-  if (isGuest() && !controlCenter.token) return "legacy";
+  if (isGuest() && !agentHarnessWeb.token) return "legacy";
   const route = path.split("?")[0];
   if (route === "/sessions" && (method === "GET" || method === "POST")) return "app";
   if (/^\/sessions\/[^/]+$/.test(route) && method === "GET") return "app";
@@ -165,17 +165,17 @@ function apiSurface(path, method) {
 }
 
 async function api(path, { method = "GET", body, surface } = {}) {
-  return controlCenter.request(path, { method, body, surface: surface || apiSurface(path, method) });
+  return agentHarnessWeb.request(path, { method, body, surface: surface || apiSurface(path, method) });
 }
 
-const ownerSurface = () => (isGuest() && !controlCenter.token ? "legacy" : "admin");
+const ownerSurface = () => (isGuest() && !agentHarnessWeb.token ? "legacy" : "admin");
 
 function daemonImage(path, attrs = {}) {
   const img = h("img", { ...attrs, alt: attrs.alt || "" });
-  if (!controlCenter.token) {
-    img.src = controlCenter.url(path, ownerSurface());
+  if (!agentHarnessWeb.token) {
+    img.src = agentHarnessWeb.url(path, ownerSurface());
   } else {
-    controlCenter.blob(path, "admin").then((blob) => {
+    agentHarnessWeb.blob(path, "admin").then((blob) => {
       const url = URL.createObjectURL(blob);
       img.src = url;
       img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
@@ -186,7 +186,7 @@ function daemonImage(path, attrs = {}) {
 
 async function downloadDaemonFile(path, filename) {
   try {
-    const blob = await controlCenter.blob(path, ownerSurface());
+    const blob = await agentHarnessWeb.blob(path, ownerSurface());
     const url = URL.createObjectURL(blob);
     const link = h("a", { href: url, download: filename });
     document.body.append(link);
@@ -312,7 +312,7 @@ function openStream(urlFor, handlers, { authorized = false } = {}) {
   };
   const fetchStream = async (url) => {
     controller = new AbortController();
-    const resp = await fetch(url, { headers: controlCenter.headers(), cache: "no-store", signal: controller.signal });
+    const resp = await fetch(url, { headers: agentHarnessWeb.headers(), cache: "no-store", signal: controller.signal });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
     $conn.classList.add("live");
     const reader = resp.body.getReader();
@@ -342,7 +342,7 @@ function openStream(urlFor, handlers, { authorized = false } = {}) {
       if (!closed && run === generation) retry = setTimeout(connect, 3000);
       return;
     }
-    if (authorized && controlCenter.token) {
+    if (authorized && agentHarnessWeb.token) {
       try { await fetchStream(url); } catch (_) { /* retry below */ }
       $conn.classList.remove("live");
       if (!closed && run === generation) retry = setTimeout(connect, 3000);
@@ -579,8 +579,8 @@ async function viewList() {
   for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
     handlers[type] = refresh;
   }
-  onLeave(openStream(() => controlCenter.url("/events", isGuest() && !controlCenter.token ? "legacy" : "admin"), handlers,
-    { authorized: !(isGuest() && !controlCenter.token) }));
+  onLeave(openStream(() => agentHarnessWeb.url("/events", isGuest() && !agentHarnessWeb.token ? "legacy" : "admin"), handlers,
+    { authorized: !(isGuest() && !agentHarnessWeb.token) }));
   const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
   document.addEventListener("visibilitychange", onVisible);
   onLeave(() => document.removeEventListener("visibilitychange", onVisible));
@@ -692,7 +692,7 @@ async function viewNew() {
         createProjectButton.disabled = false;
       }
     } },
-    h("p", { class: "muted small" }, "Saved privately on this daemon. Use a lowercase project id; a git source gets a reviewable branch per task."),
+    h("p", { class: "muted small" }, "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task."),
     h("label", {}, "Name"), newProjectName,
     h("label", {}, "Description"), newProjectDescription,
     h("label", {}, "Runs on"), newProjectTarget,
@@ -1276,7 +1276,7 @@ async function viewSession(sid, tab, focusApproval) {
       h("p", {}, `⚠ ${e.data.quotes.length === 1 ? "This quote" : "These quotes"} in the answer didn't appear in anything the agent read, so ${e.data.quotes.length === 1 ? "it" : "they"} may be made up:`),
       h("div", { class: "text", style: "white-space:pre-wrap" }, e.data.quotes.map((q) => `“${q}”`).join("\n")))),
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
-    resumed: () => add(h("p", { class: "note" }, "Daemon restarted — session resumed")),
+    resumed: () => add(h("p", { class: "note" }, "Agent Harness Server restarted — session resumed")),
     workspace_ready: (e) => add(h("p", { class: "note" }, `Checked out on branch ${e.data.branch} (from ${e.data.base_branch})`)),
     branch_saved: (e) => add(h("p", { class: "note" }, h("button", {
       class: "btn small", type: "button", onclick: () => go(`#/s/${sid}/changes`, true),
@@ -1346,9 +1346,9 @@ async function viewSession(sid, tab, focusApproval) {
       if (persisted && !finalAnswer && !TERMINAL.has(session.status)) maybeThinking();
     };
   }
-  onLeave(openStream(() => (isGuest() && !controlCenter.token
-    ? controlCenter.url(`/sessions/${sid}/events?after=${lastSeq}`, "legacy")
-    : controlCenter.sessionStreamUrl(sid, lastSeq)), tracked));
+  onLeave(openStream(() => (isGuest() && !agentHarnessWeb.token
+    ? agentHarnessWeb.url(`/sessions/${sid}/events?after=${lastSeq}`, "legacy")
+    : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked));
   if (composer) onLeave(() => composer.remove());
 }
 
@@ -1980,7 +1980,9 @@ function accountCard(me, profile) {
     h("div", { class: "card" },
       h("h3", {}, "Connection"),
       me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
-      h("p", { class: "muted small" }, live ? "Live stream connected." : "Live stream is offline.")));
+      h("p", { class: "muted small" }, live
+        ? `Agent Harness Web is connected to Agent Harness Server at ${me.public_url || location.origin}.`
+        : `Agent Harness Web is not receiving the live stream from Agent Harness Server at ${me.public_url || location.origin}.`)));
 }
 
 async function viewProfile(page) {
@@ -2022,23 +2024,24 @@ async function viewProfile(page) {
 }
 
 function connectionCard() {
-  const daemon = h("input", {
-    type: "url", inputmode: "url", value: controlCenter.baseUrl,
+  const server = h("input", {
+    type: "url", inputmode: "url", value: agentHarnessWeb.baseUrl,
     placeholder: "Blank for this server, or https://tower.example.ts.net",
     autocomplete: "url", spellcheck: "false",
   });
   const token = h("input", {
-    type: "password", value: controlCenter.token, placeholder: "ho-… owner token",
+    type: "password", value: agentHarnessWeb.token, placeholder: "ho-… owner token",
     autocomplete: "off", spellcheck: "false",
   });
-  const status = h("p", { class: "muted small" }, controlCenter.independent
-    ? `This app connects to ${controlCenter.baseUrl}.` : "This bundled app connects to the server that served it.");
+  const serverUrl = agentHarnessWeb.baseUrl || location.origin;
+  const status = h("p", { class: "muted small" },
+    `Agent Harness Web connects to Agent Harness Server at ${serverUrl}.`);
   const save = async () => {
     try {
-      controlCenter.configure(daemon.value, token.value);
-      status.textContent = "Checking the daemon…";
-      const root = await controlCenter.request("", { surface: "admin" });
-      status.textContent = `Connected to ${root.server} owner API ${root.api_version}. Reloading…`;
+      agentHarnessWeb.configure(server.value, token.value);
+      status.textContent = "Checking Agent Harness Server…";
+      const root = await agentHarnessWeb.request("", { surface: "admin" });
+      status.textContent = `Agent Harness Web is connected to Agent Harness Server at ${server.value || location.origin} (${root.server} owner API ${root.api_version}). Reloading…`;
       setTimeout(() => location.reload(), 350);
     } catch (e) {
       status.className = "note bad";
@@ -2047,16 +2050,16 @@ function connectionCard() {
   };
   const origin = h("input", {
     type: "url", inputmode: "url", value: location.origin,
-    placeholder: "https://control-center.example.com", spellcheck: "false",
+    placeholder: "https://harness-web.example.com", spellcheck: "false",
   });
   const minted = h("div");
   const mint = async () => {
     let approvedOrigin;
     try { approvedOrigin = new URL(origin.value).origin; }
-    catch (_) { toast("Enter the Control Center's complete origin"); return; }
+    catch (_) { toast("Enter Agent Harness Web's complete origin"); return; }
     try {
       const key = await api("/keys", { method: "POST", surface: "admin", body: {
-        name: `Control Center (${new URL(approvedOrigin).host})`, kind: "owner", scopes: ["admin"], origins: [approvedOrigin],
+        name: `agent-harness-web (${new URL(approvedOrigin).host})`, kind: "owner", scopes: ["admin"], origins: [approvedOrigin],
       } });
       const field = h("input", { type: "text", readonly: true, value: key.key, onclick: (e) => e.target.select() });
       fill(minted,
@@ -2068,19 +2071,19 @@ function connectionCard() {
   };
   return h("div", {},
     h("div", { class: "card" },
-      h("h3", {}, "This Control Center"),
-      h("p", { class: "muted small" }, "Leave the daemon URL blank when this app is bundled with the daemon. For a separately hosted copy, enter the daemon URL and an owner token approved for this app's exact origin."),
-      h("label", {}, "Daemon URL"), daemon,
+      h("h3", {}, "This Agent Harness Web"),
+      h("p", { class: "muted small" }, "Leave the Agent Harness Server URL blank when this Web UI is bundled with the Server. For a separately hosted copy, enter the Server URL and an owner token approved for this Web origin."),
+      h("label", {}, "Agent Harness Server URL"), server,
       h("label", {}, "Owner token"), token,
-      h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an ordinary app token; Control Center manages owner-only settings."),
+      h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an Agent Harness App token; Agent Harness Web manages owner-only settings."),
       h("div", { class: "row", style: "margin-top:10px" },
-        h("button", { class: "btn", onclick: () => { daemon.value = ""; token.value = ""; save(); } }, "Use bundled server"),
+        h("button", { class: "btn", onclick: () => { server.value = ""; token.value = ""; save(); } }, "Use bundled Server"),
         h("span", { class: "spacer" }),
         h("button", { class: "btn primary", onclick: save }, "Save and test")), status),
     h("div", { class: "card" },
-      h("h3", {}, "Authorize another Control Center"),
+      h("h3", {}, "Connect another Agent Harness Web"),
       h("p", { class: "muted small" }, "Open this bundled copy as the owner, then mint an origin-bound token for a separately hosted copy. Revocation is available under Settings → Apps."),
-      h("label", {}, "Control Center origin"), origin,
+      h("label", {}, "Agent Harness Web origin"), origin,
       h("button", { class: "btn", onclick: mint }, "Create owner token"), minted));
 }
 
@@ -2212,7 +2215,8 @@ function notificationsCard(me) {
 
 function installCard() {
   return h("div", { class: "card" },
-    h("p", {}, "In Safari: Share → Add to Home Screen. The app then opens full screen."));
+    h("p", {}, "Install Agent Harness Web in Safari: Share → Add to Home Screen. It appears as Harness and opens full screen."),
+    h("p", { class: "muted small" }, "An existing iPhone or iPad icon may keep its previous label until you remove it and add Agent Harness Web to the Home Screen again."));
 }
 
 function backendUsage(b) {
@@ -2538,7 +2542,9 @@ function appsCard(me) {
         api("/keys"), api("/pairing-codes"), api("/runner-pairing-codes"), api("/runners"),
       ]);
       const apps = keys.filter((k) => k.kind === "app" && !k.revoked_at);
-      const ownerClients = keys.filter((k) => k.kind === "owner" && !k.revoked_at);
+      const ownerConnections = keys.filter((k) => k.kind === "owner" && !k.revoked_at);
+      const webConnections = ownerConnections.filter((k) => k.origins?.length);
+      const cliConnections = ownerConnections.filter((k) => !k.origins?.length);
       const pending = pairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
       const pendingRunners = runnerPairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
       const form = h("div");
@@ -2550,7 +2556,7 @@ function appsCard(me) {
       } }, "Pair browser app");
       const macBtn = h("button", { class: "btn", type: "button", hidden: !runners.length, onclick: () => {
         newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showMacPairForm();
-      } }, "Pair Mac client");
+      } }, "Pair Agent Harness for Mac");
       const showForm = () => {
         const name = h("input", { type: "text", placeholder: "App name" });
         const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
@@ -2603,7 +2609,7 @@ function appsCard(me) {
             } }, "Approve and create code")));
       };
       const showMacPairForm = () => {
-        const name = h("input", { type: "text", value: "Mac client", placeholder: "Client name" });
+        const name = h("input", { type: "text", value: "Agent Harness for Mac", placeholder: "Mac connection name" });
         const runner = h("select", {}, runners.map((item) => h("option", { value: item.name }, item.name)));
         fill(form,
           h("p", { class: "small" }, "Create a 10-minute, one-use code. The install command sets up the harness CLI, runner, and launchd without SSH."),
@@ -2612,7 +2618,7 @@ function appsCard(me) {
           h("div", { class: "row", style: "margin-top:10px" },
             h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
             h("button", { class: "btn primary", onclick: async () => {
-              if (!name.value.trim()) return toast("Name the Mac client");
+              if (!name.value.trim()) return toast("Name this Agent Harness for Mac connection");
               try {
                 const p = await api("/runner-pairing-codes", { method: "POST", body: { name: name.value, runner: runner.value } });
                 const command = `curl -fsSL ${base}/mac-client/install.sh | bash -s -- --server ${base} --code ${p.code}`;
@@ -2626,7 +2632,7 @@ function appsCard(me) {
             } }, "Create install command")));
       };
       fill(body,
-        h("p", { class: "small" }, "An app token lets another program start and follow sessions on this daemon — a script, a bot, or a separate browser client. It is shown once and can be revoked later."),
+        h("p", { class: "small" }, "An Agent Harness App token lets a third-party integration start and follow sessions on Agent Harness Server. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
           h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
@@ -2637,11 +2643,18 @@ function appsCard(me) {
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
-        ownerClients.length ? [h("p", { class: "section-label" }, "Owner clients"),
-          h("ul", { class: "small" }, ownerClients.map((k) => h("li", {},
+        webConnections.length ? [h("p", { class: "section-label" }, "Web connections"),
+          h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
             h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
             h("button", { class: "btn small bad", onclick: async () => {
-              if (!confirm(`Revoke “${k.name}”? That owner client will stop working.`)) return;
+              if (!confirm(`Revoke “${k.name}”? That Agent Harness Web connection will stop working.`)) return;
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+            } }, "Revoke"))))] : null,
+        cliConnections.length ? [h("p", { class: "section-label" }, "CLI connections"),
+          h("ul", { class: "small" }, cliConnections.map((k) => h("li", {},
+            h("strong", {}, k.name), ` ${k.prefix}… · non-browser${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+            h("button", { class: "btn small bad", onclick: async () => {
+              if (!confirm(`Revoke “${k.name}”? That Agent Harness CLI connection will stop working.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,
         pending.length ? h("ul", { class: "small" }, pending.map((p) => h("li", {},
@@ -2703,7 +2716,7 @@ function diskCard() {
               ? `${r.info.version} · macOS ${r.info.macos}`
               : (r.last_seen_seconds !== null
                 ? `last seen ${Math.round(r.last_seen_seconds / 60)} min ago`
-                : "not connected since the daemon started")));
+                : "not connected since Agent Harness Server started")));
           return device(TARGET_LABEL[r.name] || r.name,
             online ? r.info.free_gb : "—",
             online && r.info.total_gb != null ? r.info.total_gb : null,

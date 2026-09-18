@@ -368,13 +368,13 @@ items:
       threat model, strict versioned manifest schema, and ordinary/elevated example manifests. Cover immutable
       versions and evidence, publisher/provenance data, every app scope's risk and disclosure, data flows, static and
       human review, sandbox boundaries for future dynamic analysis, updates/re-consent, abuse/appeal, revocation, and
-      catalog/signing-key compromise. Pairing remains an explicit owner action; the catalog never handles daemon or
+      catalog/signing-key compromise. Pairing remains an explicit owner action; the catalog never handles Server or
       provider credentials and cannot technically enforce external commercial behavior.
 
       Include a dated official-source policy matrix for every hosted backend. Preserve owner-managed API-key
       automation, treat subscription-authenticated marketplace use as provider-specific/revocable, and never expose
-      agent execution to an untrusted/public environment. Split storage/signing, review automation, Control Center
-      discovery/consent, and daemon warning/revocation into later implementation issues; build none of them here.
+      agent execution to an untrusted/public environment. Split storage/signing, review automation, Agent Harness Web
+      discovery/consent, and Agent Harness Server warning/revocation into later implementation issues; build none of them here.
 
   - key: marketplace-catalog-storage
     kind: feature
@@ -457,11 +457,11 @@ items:
     title: "Install and verify Xcode prerequisites for native iOS client work"
     body: |
       Xcode is still required before building a native iOS client or companion for the harness. This is a user-machine
-      setup check, not a daemon code feature.
+      setup check, not an Agent Harness Server code feature.
 
       Verify Xcode and command-line tools on the MacBook, accept the license, select the active developer directory,
       and build/run a minimal Swift project. Record the supported macOS/Xcode versions before scoping any native iOS
-      Control Center work.
+      Agent Harness companion work.
 
   - key: session-header-tabs-quotes
     kind: feature
@@ -994,7 +994,7 @@ items:
       approvals, transcripts, review, search, workspaces, files, queue data, and counts. Owners administer member
       status and aggregate usage but ordinary owner surfaces do not reveal member content.
 
-      Add the member-safe first-party API/Control Center path without granting `/api/admin/v1`; bind app/device tokens
+      Add the member-safe first-party API/Agent Harness Web path without granting `/api/admin/v1`; bind App/device tokens
       to owner scope and stop unauthenticated discovery from exposing projects. Member projects are tower-only empty
       workspaces or credential-free public HTTPS clones on the existing host allowlist, rooted under opaque per-user
       directories with traversal/symlink/junction protection. Hosted providers, private Git credentials, runners,
@@ -1049,16 +1049,16 @@ items:
 
   - key: daemon-config-ui
     kind: feature
-    title: "Add a typed daemon configuration registry with safe app/admin boundaries"
+    title: "Add a typed Agent Harness Server configuration registry with safe App/admin boundaries"
     body: |
       Implement an explicit allowlisted SettingSpec registry; never generic dotted reflection or YAML editing. Safe
       host operational values use a flat versioned data-directory JSON overlay with revision checks, transactional
       validation/live hooks, pending restart values, and one last-known-good generation. Preserve the loader's actual
       field-specific base/local/profile semantics. Existing backend preferences migrate into the registry.
 
-      Apps get only per-token narrowing defaults (backend/model/effort, capped budgets, subsets of already-granted
+      Agent Harness Apps get only per-token narrowing defaults (backend/model/effort, capped budgets, subsets of already-granted
       capabilities, and notification silence) and can never mutate host settings or expand authority. Admin APIs and
-      schema-driven Control Center UI expose the exact safe registry; paths, secrets, identity, modules/profile,
+      schema-driven Agent Harness Web UI expose the exact safe registry; paths, secrets, identity, modules/profile,
       sandbox/network/egress, providers, runners, homelab, memory, Remote Control, and unregistered values remain
       installer/file-only. Restart-required candidates use the existing cross-platform supervisors without shelling
       out or elevation; unsupervised runs refuse restart, and failed/unconfirmed candidates automatically restore
@@ -1068,7 +1068,7 @@ items:
     kind: feature
     title: "Make Chat the Agent Harness Web home with model selection and a navigation drawer"
     body: |
-      Make a lightweight, durable Chat experience the webapp's default landing page. It wraps configured
+      Make a lightweight, durable Chat experience the Agent Harness Web default landing page. It wraps configured
       local or hosted backends for ordinary questions, search/fetch, and pasted-code review without creating
       a project worktree, review branch, or agent workflow.
 
@@ -1196,38 +1196,38 @@ items:
 
   - key: client-daemon-version-skew
     kind: feature
-    title: "Version skew: daemon should tolerate older clients, and clients should offer to update"
+    title: "Version skew: Agent Harness Server should tolerate older first-party components"
     body: |
-      User-reported incident (2026-09-16): a daemon release shipped without the matching webapp update,
+      User-reported incident (2026-09-16): an Agent Harness Server release shipped without the matching Web update,
       so endpoints stopped working until the mismatch was caught by hand. The same risk exists for the
       MacBook runner protocol — #43 already needed "a runner redeploy" just to surface a new `info.total_gb`
-      field, i.e. functionality silently lagged behind the daemon until someone manually redeployed it.
+      field, i.e. functionality silently lagged behind the Server until someone manually redeployed it.
 
-      There is currently no compatibility contract between the daemon and any of its clients (Control Center
-      webapp, MacBook runner, and eventually the native installers from #15/#16 and the extracted PWA in #23).
-      A daemon upgrade can silently break an older client instead of prompting it to update.
+      There is currently no compatibility contract among first-party components (Agent Harness Server, Agent Harness
+      Web, Agent Harness CLI, Mac Runner, and eventually the native installers from #15/#16).
+      A Server upgrade can silently break an older component instead of prompting it to update.
 
       Proposed direction (user, 2026-09-16):
-      1. The daemon's API(s) should stay usable by clients that are not on the very latest release, not assume
-         every client is always current.
-      2. A client should be able to detect that it is talking to a daemon that has moved past what it supports.
-      3. When that happens, the client should show clear update instructions, and where possible a button that
+      1. The Server APIs should stay usable by first-party components that are not on the very latest release, not
+         assume every component is always current.
+      2. A component should be able to detect that the Server has moved past what it supports.
+      3. When that happens, it should show clear update instructions, and where possible a button that
          performs or kicks off the update itself rather than just telling the user to go find one.
 
       Needs refinement:
-      - Compatibility window: how many versions back (or how long) does the daemon guarantee support for, and
+      - Compatibility window: how many versions back (or how long) does the Server guarantee support for, and
         what happens outside that window — degrade gracefully vs hard-refuse with a clear error?
-      - Version/capability handshake: how does a client learn the daemon's version, and how does the daemon
-        learn a client's version (a header, a `/health` field, something richer)?
-      - Confirm this is actually reachable for the Control Center webapp given it is already a served static
+      - Version/capability handshake: how does each component learn the Server version, and how does the Server
+        learn a component version (a header, a `/health` field, something richer)?
+      - Confirm this is actually reachable for Agent Harness Web given it is already a served static
         bundle behind a network-first service worker — design the UI for the case that can really occur.
-      - Update UX differs by client type: the webapp case may just be a reload/cache-bust, but the MacBook
-        runner and any future native clients (#15, #16) are installed binaries — "offer to update" there means
+      - Update UX differs by component: Agent Harness Web may just need a reload/cache-bust, but the Mac Runner,
+        Agent Harness CLI, and any future native components (#15, #16) are installed binaries — "offer to update" there means
         a real update mechanism (self-download/replace, or at minimum a documented one-liner), not a page reload.
 
       Distinct from #27 (stabilizing the app SDK/OpenAPI contract for third-party integrating apps — that is
       about the developer-facing API surface staying stable). This issue is about the daemon's own first-party
-      clients not breaking silently on daemon upgrades, and proactively prompting an update. Related to #24's
+      first-party components not breaking silently on Server upgrades, and proactively prompting an update. Related to #24's
       "versioned owner-only API" — worth deciding this alongside #24 rather than after, and relevant background
       for the native installers in #15/#16.
 

@@ -249,13 +249,13 @@ class Project:
     web: bool = True             # give sessions web_search / web_fetch (when web is enabled)
     images: bool = True          # give sessions generate_image (when images is enabled)
     session_search: bool = True  # give sessions session_search / session_read (when search is enabled)
-    owner_id: str = "owner"     # stable v1 Control Center owner scope
+    owner_id: str = "owner"     # stable v1 Agent Harness Web owner scope
     managed: bool = False        # loaded from data_dir/projects.yaml rather than checked-in config
 
 
 @dataclass
 class GuestAccess:
-    """Time-boxed read-only Control Center access for a tailnet login that is not the owner."""
+    """Time-boxed read-only Agent Harness Web access for a tailnet login that is not the owner."""
     login: str
     until: str = ""  # ISO-8601 datetime; empty means until the entry is removed from config
 

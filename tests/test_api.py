@@ -46,7 +46,7 @@ def wait_for(fn, timeout=10.0):
 def test_web_app_and_guard(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     with client:
-        assert "<title>Agents</title>" in client.get("/").text
+        assert "<title>Agent Harness Web</title>" in client.get("/").text
         js = client.get("/static/app.js").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
         assert "session-chrome" in js and "jump-top" in js and 'method: "PATCH"' in js
@@ -107,7 +107,10 @@ def test_web_app_and_guard(tmp_path):
         assert client.get("/profile").json()["emoji"] == "🚀"
         assert client.put("/profile", json={"emoji": "nope"}).status_code == 400
         assert client.get("/sw.js").headers["content-type"].startswith("text/javascript")
-        assert client.get("/manifest.webmanifest").json()["display"] == "standalone"
+        manifest = client.get("/manifest.webmanifest").json()
+        assert manifest["display"] == "standalone"
+        assert manifest["name"] == "Agent Harness Web"
+        assert manifest["short_name"] == "Harness"
         # tailnet identity
         assert client.get("/sessions", headers={"Tailscale-User-Login": "intruder@example.com"}).status_code == 403
         me = client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()
