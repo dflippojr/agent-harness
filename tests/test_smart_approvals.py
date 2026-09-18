@@ -270,7 +270,18 @@ def test_shadow_eval_zero_unsafe_auto_approval_candidates():
         (BASH, {"command": "cat foo/.."}),
         (BASH, {"command": "eval pytest"}),
         (BASH, {"command": "source ./secrets.env"}),
-        (BASH, {"command": "npx eslint ."}),  # npx without test/run is not eligible
+        (BASH, {"command": "npx eslint ."}),  # npx fetches/executes registry packages
+        (BASH, {"command": "npx test"}),
+        (BASH, {"command": "npx run lint"}),
+        (BASH, {"command": "npm run build:publish"}),
+        (BASH, {"command": "yarn run build:publish"}),
+        (BASH, {"command": "pnpm run lint:fix"}),
+        (BASH, {"command": "npm exec eslint"}),
+        (BASH, {"command": "yarn dlx cowsay"}),
+        (BASH, {"command": "pnpm dlx cowsay"}),
+        (BASH, {"command": "yarn publish"}),
+        (BASH, {"command": "pnpm publish"}),
+        (BASH, {"command": "bunx eslint"}),
         (BASH, {"command": "yarn add lodash"}),
         (BASH, {"command": "pnpm add lodash"}),
         (BASH, {"command": "python -"}),
@@ -381,6 +392,63 @@ def test_workspace_confinement_rejects_home_drive_unc_and_dotdot():
     assert not _relative_ok(r"..\secrets.txt")
     assert not _relative_ok(r"\\server\share\file")
     assert not _relative_ok("--config=~/.ruff.toml")
+
+
+def test_package_runners_and_colon_scripts_are_not_eligible():
+    """npx/exec/dlx fetch registry packages; npm run must match the whole script name."""
+    networked = [
+        "npx test",
+        "npx run lint",
+        "npx run build",
+        "npx eslint .",
+        "npm exec eslint",
+        "npm exec -- eslint .",
+        "yarn dlx create-react-app",
+        "pnpm dlx create-react-app",
+        "pnpm exec eslint",
+        "pnpm fetch",
+        "yarn create vite",
+        "pnpm create vite",
+        "bunx test",
+        "bun x eslint",
+        "yarn add lodash",
+        "pnpm add lodash",
+        "npm install leftpad",
+        "npm publish",
+    ]
+    publication = [
+        "yarn publish",
+        "pnpm publish",
+    ]
+    colon_scripts = [
+        "npm run build:publish",
+        "npm run lint:fix",
+        "npm run test:e2e",
+        "yarn run build:publish",
+        "pnpm run build:publish",
+        "npm run format:publish",
+        "npm run check:publish",
+    ]
+    for command in networked:
+        el = _ask(command)
+        assert el.ok is False, command
+        assert el.reason == "networked command", (command, el.reason)
+    for command in publication:
+        el = _ask(command)
+        assert el.ok is False, command
+        assert el.reason == "publication or force operation", (command, el.reason)
+    for command in colon_scripts:
+        el = _ask(command)
+        assert el.ok is False, command
+        assert el.reason == "command is not routine workspace work", (command, el.reason)
+    assert _eligible("npm test")
+    assert _eligible("npm run lint")
+    assert _eligible("npm run build")
+    assert _eligible("npm run typecheck")
+    assert _eligible("pnpm test")
+    assert _eligible("yarn test")
+    assert _eligible("pnpm run lint")
+    assert _eligible("yarn run build")
 
 
 def test_reviewer_payload_is_minimized():

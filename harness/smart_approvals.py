@@ -49,7 +49,7 @@ _PYTHON = frozenset({"python", "python3", "py"})
 _PYTHON_MODULES = frozenset({
     "pytest", "ruff", "mypy", "unittest", "py_compile", "compileall", "black", "isort", "pylint", "pyright",
 })
-_NPM = frozenset({"npm", "npx", "pnpm", "yarn"})
+_NPM = frozenset({"npm", "pnpm", "yarn"})
 _NPM_SCRIPTS = frozenset({"test", "lint", "build", "typecheck", "check", "format", "fmt", "tsc"})
 _GIT_READ = frozenset({"status", "diff", "log", "show", "rev-parse", "describe", "branch"})
 _MAKE = frozenset({"test", "check", "lint", "build", "all"})
@@ -71,12 +71,13 @@ _INJECTION_RE = re.compile(
 )
 _NETWORK_RE = re.compile(
     r"(?i)\b(curl|wget|nc\b|ncat|netcat|ssh\b|scp\b|sftp|rsync|ftp\b|aria2c|httpie)\b"
-    r"|https?://|\bgit\s+clone\b|\bgit\s+push\b|\bpip3?\s+install\b|\bnpm\s+(install|ci|publish)\b"
-    r"|\byarn\s+add\b|\bpnpm\s+add\b|\bapt(-get)?\s+install\b|\bbrew\s+install\b"
+    r"|https?://|\bgit\s+clone\b|\bgit\s+push\b|\bpip3?\s+install\b|\bnpm\s+(install|ci|publish|exec)\b"
+    r"|\bnpx\b|\byarn\s+(add|dlx|create)\b|\bpnpm\s+(add|dlx|create|exec|fetch)\b"
+    r"|\bbunx\b|\bbun\s+x\b|\bapt(-get)?\s+install\b|\bbrew\s+install\b"
 )
 _PUBLISH_RE = re.compile(
-    r"(?i)\b(git\s+push|git\s+merge|git\s+rebase|npm\s+publish|twine\s+upload|gh\s+release"
-    r"|hub\s+release|docker\s+push|cargo\s+publish)\b"
+    r"(?i)\b(git\s+push|git\s+merge|git\s+rebase|npm\s+publish|yarn\s+publish|pnpm\s+publish"
+    r"|twine\s+upload|gh\s+release|hub\s+release|docker\s+push|cargo\s+publish)\b"
 )
 _FORCE_RE = re.compile(r"(?i)\b(git\s+(reset\s+--hard|clean\s+-\w*f)|--force\b|\b-f\b\s|--no-verify)\b")
 _PRIV_RE = re.compile(r"(?i)\b(sudo|doas|pkexec|chmod\s+[0-7]{3,4}|chown\b|chgrp\b|newgrp\b)\b")
@@ -299,7 +300,7 @@ def _npm_ok(tokens: list[str]) -> bool:
     if sub in ("test", "run"):
         if sub == "test":
             return True
-        return len(tokens) >= 3 and tokens[2].split(":")[0] in _NPM_SCRIPTS
+        return len(tokens) >= 3 and tokens[2] in _NPM_SCRIPTS
     return False
 
 
