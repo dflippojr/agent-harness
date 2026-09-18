@@ -1,0 +1,197 @@
+{
+  "manifest_schema_version": "1.0",
+  "app": {
+    "app_id": "com.example.ops-console",
+    "version": "2.1.0",
+    "display_name": "Ops Console",
+    "summary": "Owner-operated status board that can read every session, decide its own approvals, and start Claude Remote Control in a named project.",
+    "publisher": {
+      "id": "pub-112233445566",
+      "name": "Example Ops",
+      "website_url": "https://ops.example.com",
+      "security_email": "security@ops.example.com",
+      "support_email": "help@ops.example.com",
+      "security_url": "https://ops.example.com/security"
+    },
+    "urls": {
+      "source": "https://ops.example.com/src/ops-console",
+      "release": "https://ops.example.com/releases/ops-console/2.1.0",
+      "install": "https://ops.example.com/ops-console/install",
+      "uninstall": "https://ops.example.com/ops-console/uninstall",
+      "privacy_policy": "https://ops.example.com/ops-console/privacy",
+      "issue_reporting": "https://ops.example.com/ops-console/issues"
+    },
+    "platforms": [
+      {
+        "os": "windows",
+        "arch": "x86_64"
+      },
+      {
+        "os": "linux",
+        "arch": "x86_64"
+      },
+      {
+        "os": "macos",
+        "arch": "arm64"
+      }
+    ],
+    "min_daemon_api": "1.6",
+    "max_daemon_api": "1.7",
+    "artifacts": [
+      {
+        "filename": "ops-console-2.1.0.tar.gz",
+        "url": "https://ops.example.com/releases/ops-console/2.1.0/ops-console-2.1.0.tar.gz",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "signature_status": "signed",
+        "provenance_status": "slsa",
+        "signature_url": "https://ops.example.com/releases/ops-console/2.1.0/ops-console-2.1.0.tar.gz.sig",
+        "public_key_url": "https://ops.example.com/.well-known/ops-console-minisign.pub",
+        "provenance_url": "https://ops.example.com/releases/ops-console/2.1.0/provenance.json"
+      }
+    ],
+    "license": {
+      "spdx": "Apache-2.0",
+      "url": "https://ops.example.com/src/ops-console/LICENSE"
+    },
+    "sbom": {
+      "url": "https://ops.example.com/releases/ops-console/2.1.0/sbom.spdx.json",
+      "format": "spdx-json"
+    },
+    "monetization": {
+      "model": "free",
+      "disclosure": "The console is free software. Claude/Codex/Cursor usage is billed to the owner by those providers through the owner's Agent Harness assignment. This publisher charges nothing and does not intermediate provider billing.",
+      "commercial_use": "allowed"
+    },
+    "source_matches_distributed_build": true,
+    "scopes": [
+      {
+        "scope": "sessions",
+        "justification": "Create operator-initiated hosted-provider sessions from the console when the owner starts a task, and follow those sessions' events.",
+        "risk_tier": "standard"
+      },
+      {
+        "scope": "sessions:all",
+        "justification": "Read every session on this harness so the owner can see Control Center and other-app work beside console-started tasks on one status board. The console does not modify sessions it did not create.",
+        "risk_tier": "elevated"
+      },
+      {
+        "scope": "approvals",
+        "justification": "Decide tool-call approvals only for sessions this console created, when the owner has enabled auto-decision for a named allowlist of Read/Grep tools. Shell and write tools still show an in-console confirm step.",
+        "risk_tier": "elevated"
+      },
+      {
+        "scope": "remote_control",
+        "justification": "Start or stop Claude Code Remote Control in one owner-selected trusted project after a dedicated confirm screen. The console never spawns Remote Control in the background.",
+        "risk_tier": "elevated"
+      }
+    ],
+    "browser_origins": [
+      "https://ops.example.com"
+    ],
+    "required_capabilities": {
+      "profile": "any",
+      "modules": [
+        "remote_control"
+      ]
+    },
+    "required_backends": [
+      "claude"
+    ],
+    "provider_auth": {
+      "never_handles_provider_credentials": true,
+      "modes": [
+        {
+          "backend": "claude",
+          "policy": "subscription_then_api_key",
+          "classification": "unresolved",
+          "notes": "Daemon-mediated Claude sessions. Marketplace default remains owner-managed API key; subscription is owner-opt-in, disclosed, and revocable. Anthropic has not stated that a third-party catalog app calling /api/v1 is ordinary Claude Code use."
+        }
+      ],
+      "usage_disclosure": "This app runs AI tasks through your Agent Harness, using the Claude subscription you signed in to there unless you assigned an API key. That usage counts against your plan's limits, and your provider may bill it separately or restrict it. You can switch to your own API key in the harness settings. The app shows daemon rate_limit and billing_warning events and never asks for Claude credentials."
+    },
+    "network_destinations": [
+      {
+        "id": "ops-api",
+        "host": "ops.example.com",
+        "scheme": "https",
+        "port": 443,
+        "purpose": "Same-origin browser app static assets and the publisher issue form. No session transcripts are sent."
+      }
+    ],
+    "data_collected": [
+      {
+        "category": "session_transcript",
+        "sent_to": "local_only",
+        "retained": "session",
+        "purpose": "The browser keeps the current board in memory and origin-bound local storage on the owner's machine. Transcripts are not uploaded to ops.example.com."
+      },
+      {
+        "category": "approval_payload",
+        "sent_to": "local_only",
+        "retained": "none",
+        "purpose": "Approval tool names and arguments are shown in the confirm UI and posted only to the owner's daemon."
+      },
+      {
+        "category": "identifier",
+        "sent_to": "ops-api",
+        "retained": "until_account_delete",
+        "purpose": "Optional crash reports, off by default, send the app version and a random install id. They never include tokens, prompts, or provider data."
+      }
+    ],
+    "telemetry": {
+      "default": "off",
+      "description": "Crash reports default off. If the owner opts in, only version and install id go to ops.example.com.",
+      "opt_out_url": "https://ops.example.com/ops-console/privacy#telemetry"
+    },
+    "subprocesses": [
+      {
+        "name": "ops-console-helper",
+        "purpose": "Optional native helper that stores the ha- token in the OS keychain. It exits with the browser session and does not survive logout.",
+        "persists_after_exit": false
+      }
+    ],
+    "filesystem_access": [
+      {
+        "class": "app_config",
+        "mode": "readwrite",
+        "purpose": "Origin-bound local storage for UI preferences. Token storage is OS keychain via the helper, not a plaintext file."
+      }
+    ],
+    "handles_daemon_token": {
+      "storage": "os_keychain",
+      "description": "The pairing response token is stored in the OS keychain through the helper. It is sent only as Authorization: Bearer on daemon requests, never in URLs, logs, or telemetry."
+    }
+  },
+  "review": {
+    "decision": "publish",
+    "checklist_version": "1.0",
+    "reviewed_at": "2026-09-17T18:30:00Z",
+    "reviewer_ids": [
+      "rev-11112222",
+      "rev-33334444"
+    ],
+    "evidence_urls": [
+      "https://example.com/catalog/reviews/com.example.ops-console/2.1.0",
+      "https://example.com/catalog/reviews/com.example.ops-console/2.1.0/consent-screens"
+    ],
+    "publisher_manifest_sha256": "fc7fc4a6fb09a0d4f706d1191f98a5ccba7d8e807d7d136b42b6e672d7226ead",
+    "artifact_digests": [
+      {
+        "filename": "ops-console-2.1.0.tar.gz",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ],
+    "permission_diff": {
+      "kind": "expansion",
+      "summary": "Adds remote_control versus 2.0.0. sessions:all and approvals were already present and remain elevated with separate owner re-consent."
+    },
+    "provider_policy_labels": [
+      {
+        "backend": "claude",
+        "classification": "unresolved",
+        "notes": "Do not treat listing as Anthropic permission for subscription routing. Owner-managed API key remains the supported programmatic path."
+      }
+    ],
+    "notes": "Elevated-risk listing. Two reviewers. Consent screens must show sessions:all, approvals, and Remote Control as separate toggles. Catalog presence still grants no token."
+  }
+}

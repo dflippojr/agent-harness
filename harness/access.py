@@ -1,4 +1,4 @@
-"""Tailscale login roles: owner, household member, and time-boxed guest.
+"""Tailscale login roles for Agent Harness Web: owner, household member, and time-boxed guest.
 
 The PWA is the first-party Agent Harness Web. `allowed_logins` is the owner allowlist. Household
 members are owner-provisioned SQLite accounts keyed by opaque `user_id` and authenticated only by

@@ -14,7 +14,7 @@
 
 `run` creates a session, answers the agent's calls to your tools as they arrive, and returns when the session ends.
 Everything else (pair, capabilities, backends, create_session, events, send, add_context, approvals, cancel,
-submit_tool_result, generate_image) is a thin wrapper over the HTTP API described in docs/app-api.md. Run
+submit_tool_result, generate_image, upscale_image) is a thin wrapper over the HTTP API described in docs/app-api.md. Run
 `Harness.validate_openapi()` in an integration check to detect client/server contract drift.
 """
 
@@ -44,6 +44,7 @@ SDK_OPERATIONS = {
     "decide_approval": ("post", "/api/v1/sessions/{ref}/approvals/{approval_id}"),
     "events": ("get", "/api/v1/sessions/{ref}/events"),
     "generate_image": ("post", "/api/v1/images"),
+    "upscale_image": ("post", "/api/v1/images/{iid}/upscale"),
 }
 SDK_REQUEST_FIELDS = {
     ("post", "/api/v1/pair"): {"code"},
@@ -52,7 +53,8 @@ SDK_REQUEST_FIELDS = {
     ("post", "/api/v1/sessions/{ref}/context"): {"context"},
     ("post", "/api/v1/sessions/{ref}/tool_calls/{call_id}"): {"output", "ok"},
     ("post", "/api/v1/sessions/{ref}/approvals/{approval_id}"): {"decision", "note"},
-    ("post", "/api/v1/images"): {"prompt", "model", "aspect_ratio"},
+    ("post", "/api/v1/images"): {"prompt", "model", "aspect_ratio", "upscale"},
+    ("post", "/api/v1/images/{iid}/upscale"): {"upscale"},
 }
 
 
@@ -417,13 +419,33 @@ class Harness:
 
     # images
     def generate_image(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", wait: bool = True,
-                       poll_seconds: float = 3) -> bytes | dict:
-        job = self._call("POST", "/images", json={"prompt": prompt, "model": model, "aspect_ratio": aspect_ratio})
+                       poll_seconds: float = 3, upscale: str = "none") -> bytes | dict:
+        job = self._call("POST", "/images", json={"prompt": prompt, "model": model, "aspect_ratio": aspect_ratio,
+                                                 "upscale": upscale})
         if not wait:
             return job
+        job = self._wait_image(job, poll_seconds)
+        requested = (upscale or "none").strip().lower()
+        if requested not in ("", "none"):
+            detail = self._call("GET", f"/images/{job['id']}")
+            children = detail.get("children") or []
+            if children:
+                derived = self._wait_image(self._call("GET", f"/images/{children[0]['id']}"), poll_seconds)
+                return self._call("GET", f"/images/{derived['id']}.png")
+        return self._call("GET", f"/images/{job['id']}.png")
+
+    def upscale_image(self, image_id: str, upscale: str = "2x", wait: bool = True,
+                      poll_seconds: float = 3) -> bytes | dict:
+        job = self._call("POST", f"/images/{image_id}/upscale", json={"upscale": upscale})
+        if not wait:
+            return job
+        job = self._wait_image(job, poll_seconds)
+        return self._call("GET", f"/images/{job['id']}.png")
+
+    def _wait_image(self, job: dict, poll_seconds: float) -> dict:
         while job["status"] not in ("done", "failed"):
             time.sleep(poll_seconds)
             job = self._call("GET", f"/images/{job['id']}")
         if job["status"] == "failed":
-            raise HarnessError(500, job["error"])
-        return self._call("GET", f"/images/{job['id']}.png")
+            raise HarnessError(500, job.get("error") or "image job failed")
+        return job
