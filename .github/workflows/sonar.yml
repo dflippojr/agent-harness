@@ -5,12 +5,13 @@ name: SonarQube
 # this check is the public signal. Do not comment dashboard URLs on PRs.
 # Same trigger as CI: skip feature-branch pushes until a PR exists.
 #
-# Community Build is last-writer-wins on a single projectKey, and an unversioned
-# PREVIOUS_VERSION leak mixed in issues that already exist on main. A PR therefore
-# gets its own project: analyze the base SHA, pin New Code to that analysis, then
-# analyze the PR. The quality gate's new_violations are issues on code that
-# changed since base. The long-lived agent-harness project is updated from main
-# for local/overall review and does not fail GitHub on existing issues.
+# Community Build is last-writer-wins on a single projectKey, so a PR gets its
+# own project: analyze the base SHA, analyze the PR head, then fail the GitHub
+# check only when the head snapshot has unresolved issues or hotspots that the
+# base snapshot did not (rule + path + message, counting duplicates). The
+# scanner quality gate is not the verdict. The long-lived agent-harness project
+# is updated from main for local/overall review and does not fail GitHub on
+# existing issues.
 on:
   push:
     branches: [main]
@@ -49,10 +50,8 @@ jobs:
             $hostUrl = 'http://host.docker.internal:9000'
           }
           $apiUrl = $hostUrl -replace 'host.docker.internal', '127.0.0.1'
-          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($env:SONAR_TOKEN):"))
-          $headers = @{ Authorization = "Basic $auth" }
 
-          function Invoke-Sonar([string]$projectKey, [string]$projectName, [string]$version, [bool]$allowGateFail) {
+          function Invoke-Sonar([string]$projectKey, [string]$projectName, [string]$version) {
             docker run --rm `
               -e "SONAR_HOST_URL=$hostUrl" `
               -e "SONAR_TOKEN=$env:SONAR_TOKEN" `
@@ -61,15 +60,12 @@ jobs:
               "-Dsonar.projectKey=$projectKey" `
               "-Dsonar.projectName=$projectName" `
               "-Dsonar.projectVersion=$version" `
-              "-Dsonar.qualitygate.wait=true"
+              "-Dsonar.qualitygate.wait=false"
             $code = $LASTEXITCODE
             Write-Host "scanner exit $code (project=$projectKey version=$version)"
-            if ($code -eq 0) { return }
-            if ($allowGateFail -and $code -eq 3) {
-              Write-Host 'Quality gate failed on the baseline scan (expected: existing issues count as new on a first analysis).'
-              return
+            if ($code -ne 0) {
+              throw "SonarQube scan failed with exit $code"
             }
-            throw "SonarQube scan failed with exit $code"
           }
 
           if ($env:EVENT_NAME -eq 'pull_request') {
@@ -80,25 +76,36 @@ jobs:
             $name = "agent-harness PR $($env:PR_NUMBER)"
             $baseVer = "base-$($env:BASE_SHA.Substring(0, 8))"
             $prVer = "pr-$($env:HEAD_SHA.Substring(0, 8))"
+            $tmp = $env:RUNNER_TEMP
+            if ([string]::IsNullOrWhiteSpace($tmp)) { $tmp = $env:TEMP }
+            $gateScript = Join-Path $tmp 'sonar_pr_gate.py'
+            $baseSnap = Join-Path $tmp 'sonar-base.json'
+            $headSnap = Join-Path $tmp 'sonar-head.json'
+            Copy-Item -Force (Join-Path $PWD 'scripts\sonar_pr_gate.py') $gateScript
+
+            function Invoke-Gate([string[]]$GateArgs) {
+              & python -u $gateScript @GateArgs
+              if ($LASTEXITCODE -ne 0) {
+                throw "sonar_pr_gate.py failed with exit $LASTEXITCODE"
+              }
+            }
 
             Write-Host "Baseline scan of $($env:BASE_SHA) into $key"
             git checkout --force --detach $env:BASE_SHA
             if ($LASTEXITCODE -ne 0) { throw "git checkout base $($env:BASE_SHA) failed" }
-            Invoke-Sonar $key $name $baseVer $true
+            $afterId = & python -u $gateScript latest-id --host $apiUrl --project $key
+            if ($LASTEXITCODE -ne 0) { throw "sonar_pr_gate.py latest-id failed with exit $LASTEXITCODE" }
+            Invoke-Sonar $key $name $baseVer
+            Invoke-Gate @('collect', '--host', $apiUrl, '--project', $key, ('--after-id=' + "$afterId".Trim()), '--out', $baseSnap)
 
-            $search = Invoke-RestMethod -Headers $headers -Uri "$apiUrl/api/project_analyses/search?project=$key&ps=1"
-            $analysis = $search.analyses[0].key
-            if ([string]::IsNullOrWhiteSpace($analysis)) {
-              throw "no Sonar analysis found for $key after baseline scan"
-            }
-            Write-Host "Pinning New Code for $key to baseline analysis $analysis"
-            Invoke-RestMethod -Method Post -Headers $headers `
-              -Uri "$apiUrl/api/new_code_periods/set?project=$key&type=SPECIFIC_ANALYSIS&value=$analysis" | Out-Null
-
-            Write-Host "PR scan of $($env:HEAD_SHA) into $key; new code is since $baseVer"
+            Write-Host "PR scan of $($env:HEAD_SHA) into $key"
             git checkout --force --detach $env:HEAD_SHA
             if ($LASTEXITCODE -ne 0) { throw "git checkout head $($env:HEAD_SHA) failed" }
-            Invoke-Sonar $key $name $prVer $false
+            $afterId = & python -u $gateScript latest-id --host $apiUrl --project $key
+            if ($LASTEXITCODE -ne 0) { throw "sonar_pr_gate.py latest-id failed with exit $LASTEXITCODE" }
+            Invoke-Sonar $key $name $prVer
+            Invoke-Gate @('collect', '--host', $apiUrl, '--project', $key, ('--after-id=' + "$afterId".Trim()), '--out', $headSnap)
+            Invoke-Gate @('diff', '--baseline', $baseSnap, '--head', $headSnap)
           } else {
             docker run --rm `
               -e "SONAR_HOST_URL=$hostUrl" `
