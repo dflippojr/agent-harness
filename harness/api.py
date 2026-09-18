@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -575,6 +576,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             return fn()
         except SkillError as e:
             raise HarnessError(e.status, str(e)) from e
+        except sqlite3.IntegrityError as e:
+            raise HarnessError(409, "skill store constraint failed") from e
 
     @app.get("/skills")
     async def skills_overview(request: Request):

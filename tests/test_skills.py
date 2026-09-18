@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -309,6 +310,122 @@ def test_enable_allowlist_rollback_uninstall(tmp_path):
     store.uninstall("commit-style")
     assert store.resolve_for_session("scratch", [], {"owner_id": "owner", "app_id": "", "job_id": ""}) == []
     assert store.resolve_for_session("scratch", [], {"owner_id": "owner", "app_id": "app", "job_id": ""}) == []
+
+
+def test_reinstall_after_uninstall_reuses_version_history(tmp_path):
+    store = store_for(tmp_path)
+    session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
+    args = {
+        "slug": "commit-style", "title": "Commit style",
+        "purpose": "Keep git commit messages conventional and short.",
+        "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
+    }
+    asyncio.run(store.propose_from_tool(args, session))
+    row = store.db.list_skill_proposals()[0]
+    first = store.install(row["id"], row["content_hash"])
+    assert first["version"] == 1
+    store.uninstall("commit-style")
+    assert store.db.skill_installed("commit-style") is None
+    assert len(store.db.list_skill_versions("commit-style")) == 1
+
+    again = store.install(row["id"], row["content_hash"])
+    assert again["slug"] == "commit-style"
+    assert again["version"] == 1
+    assert again["content_hash"] == row["content_hash"]
+    assert again["enabled"] is False
+    assert len(store.db.list_skill_versions("commit-style")) == 1
+    assert (store.installed_dir / "commit-style" / "v1" / "SKILL.md").is_file()
+
+    store.uninstall("commit-style")
+    restage = asyncio.run(store.propose_from_tool(args, session))
+    assert "already installed" not in restage.lower()
+    staged = store.db.skill_proposal_by_hash(row["content_hash"])
+    proposed = store.install(staged["id"], staged["content_hash"])
+    assert proposed["version"] == 1
+    assert proposed["content_hash"] == row["content_hash"]
+    assert len(store.db.list_skill_versions("commit-style")) == 1
+
+
+def test_reinstall_new_bytes_after_uninstall_keeps_rollback(tmp_path):
+    store = store_for(tmp_path)
+    session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
+    asyncio.run(store.propose_from_tool({
+        "slug": "commit-style", "title": "Commit style",
+        "purpose": "Keep git commit messages conventional and short.",
+        "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
+    }, session))
+    v1 = store.db.list_skill_proposals()[0]
+    store.install(v1["id"], v1["content_hash"])
+    asyncio.run(store.propose_from_tool({
+        "slug": "commit-style", "title": "Commit style",
+        "purpose": "Keep git commit messages conventional and short.",
+        "skill_md": SKILL_MD + "\nPrefer `fix:` for bugs.\n", "examples": json.dumps(EXAMPLES),
+    }, session))
+    v2 = [p for p in store.db.list_skill_proposals() if p["id"] != v1["id"]][0]
+    store.install(v2["id"], v2["content_hash"])
+    store.uninstall("commit-style")
+    restored = store.install(v2["id"], v2["content_hash"])
+    assert restored["version"] == 2
+    store.set_enabled("commit-style", True)
+    store.set_allowlist("commit-style", ["scratch"], ["scratch"])
+    frozen = store.resolve_for_session("scratch", [], {"owner_id": "owner", "app_id": "", "job_id": ""})
+    assert frozen[0]["version"] == 2
+    rolled = store.rollback("commit-style")
+    assert rolled["version"] == 1
+    assert rolled["content_hash"] == v1["content_hash"]
+
+
+def test_install_constraint_failure_is_skill_error(tmp_path, monkeypatch):
+    store = store_for(tmp_path)
+    session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
+    asyncio.run(store.propose_from_tool({
+        "slug": "commit-style", "title": "Commit style",
+        "purpose": "Keep git commit messages conventional and short.",
+        "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
+    }, session))
+    row = store.db.list_skill_proposals()[0]
+
+    def boom(*_args, **_kwargs):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: skill_versions.content_hash")
+
+    monkeypatch.setattr(store.db, "insert_skill_version", boom)
+    with pytest.raises(SkillError, match="constraint"):
+        store.install(row["id"], row["content_hash"])
+
+
+def test_owner_api_reinstall_after_uninstall_is_not_500(tmp_path):
+    cfg = enable_skills(make_cfg(tmp_path))
+    cfg.allowed_logins = ["me@example.com"]
+    m = Manager(cfg, chat=Script([Completion(content="hi")]))
+    m.skills._run_sandbox = in_process_sandbox
+    client = TestClient(create_app(m))
+    headers = {"Tailscale-User-Login": "me@example.com"}
+    with client:
+        m.skills._propose_locked(bundle(), "s1")
+        row = m.db.list_skill_proposals()[0]
+        assert client.post(f"/skills/proposals/{row['id']}/install",
+                           json={"content_hash": row["content_hash"]}, headers=headers).status_code == 200
+        assert client.post("/skills/commit-style/uninstall", headers=headers).status_code == 200
+        again = client.post(f"/skills/proposals/{row['id']}/install",
+                            json={"content_hash": row["content_hash"]}, headers=headers)
+        assert again.status_code == 200, again.text
+        assert again.json()["version"] == 1
+
+        def boom(*_args, **_kwargs):
+            raise sqlite3.IntegrityError("UNIQUE constraint failed: skill_versions.content_hash")
+
+        m.skills.db.insert_skill_version = boom
+        asyncio.run(m.skills.propose_from_tool({
+            "slug": "other-skill", "title": "Other skill",
+            "purpose": "Keep git commit messages conventional and short.",
+            "skill_md": SKILL_MD + "\nUse `docs:` for documentation-only changes.\n",
+            "examples": json.dumps(EXAMPLES),
+        }, {"id": "s2", "owner_id": "owner", "app_id": "", "job_id": ""}))
+        other = [p for p in m.db.list_skill_proposals() if p["slug"] == "other-skill"][0]
+        conflict = client.post(f"/skills/proposals/{other['id']}/install",
+                               json={"content_hash": other["content_hash"]}, headers=headers)
+        assert conflict.status_code == 409, conflict.text
+        assert conflict.status_code != 500
 
 
 def test_install_race_duplicate_clicks(tmp_path):

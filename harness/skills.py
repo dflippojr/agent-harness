@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import threading
 import time
 import uuid
@@ -265,7 +266,8 @@ class SkillStore:
             if existing["status"] == "rejected":
                 return (f"This exact content hash {content_hash[:16]} was already proposed and rejected. "
                         "Change the skill or ask the owner to reopen that proposal. Nothing was installed.")
-            if existing["status"] == "installed":
+            live = self.db.skill_installed(existing["slug"])
+            if existing["status"] == "installed" and live and live.get("current_hash") == content_hash:
                 return (f"This exact content is already installed as `{existing['slug']}` "
                         f"(hash {content_hash[:16]}). Nothing was changed.")
             return (f"Identical proposal already staged as {existing['id']} for `{existing['slug']}` "
@@ -468,54 +470,53 @@ class SkillStore:
             if not sandbox.get("ok"):
                 codes = ",".join(sandbox.get("codes") or [f.get("code", "") for f in sandbox.get("findings") or []])
                 raise SkillError(409, f"sandbox validation failed ({codes or 'invalid'}); nothing was installed")
-            with self.db.tx() as db:
-                latest = db.skill_proposal(pid)
-                if latest is None:
-                    raise SkillError(404, "no skill proposal with that id")
-                if latest["status"] == "rejected" or db.skill_hash_rejected(want):
-                    raise SkillError(409, "this content hash is rejected")
-                if latest["content_hash"].lower() != want or canonical_hash(self._bundle_from_row(latest)).lower() != want:
-                    raise SkillError(409, "stale approval: the proposal hash does not match the reviewed bytes")
-                existing = db.skill_installed(latest["slug"])
-                if existing and existing.get("current_hash") == live_hash:
-                    db.update_skill_proposal(pid, status="installed")
-                    return self._public_installed(existing)
-                already = db.skill_version_by_hash(live_hash)
-                if already and existing:
+            try:
+                with self.db.tx() as db:
+                    latest = db.skill_proposal(pid)
+                    if latest is None:
+                        raise SkillError(404, "no skill proposal with that id")
+                    if latest["status"] == "rejected" or db.skill_hash_rejected(want):
+                        raise SkillError(409, "this content hash is rejected")
+                    if latest["content_hash"].lower() != want or canonical_hash(self._bundle_from_row(latest)).lower() != want:
+                        raise SkillError(409, "stale approval: the proposal hash does not match the reviewed bytes")
+                    existing = db.skill_installed(latest["slug"])
+                    if existing and existing.get("current_hash") == live_hash:
+                        db.update_skill_proposal(pid, status="installed")
+                        return self._public_installed(existing)
+                    already = db.skill_version_by_hash(live_hash)
+                    if already:
+                        if already["slug"] != latest["slug"]:
+                            raise SkillError(409, "this content hash is already recorded under a different skill slug")
+                        self._write_installed_version(latest["slug"], already["version"], bundle, latest)
+                        now = time.time()
+                        db.upsert_skill_installed({
+                            "slug": latest["slug"], "title": already["title"], "purpose": already["purpose"],
+                            "current_version": already["version"], "current_hash": live_hash, "enabled": 0,
+                            "installed_at": existing["installed_at"] if existing else already["installed_at"],
+                            "updated_at": now,
+                        })
+                        db.update_skill_proposal(pid, status="installed")
+                        return self._public_installed(db.skill_installed(latest["slug"]))
+                    version = max((v["version"] for v in db.list_skill_versions(latest["slug"])), default=0) + 1
+                    self._write_installed_version(latest["slug"], version, bundle, latest)
+                    now = time.time()
+                    db.insert_skill_version({
+                        "slug": latest["slug"], "version": version, "content_hash": live_hash, "title": latest["title"],
+                        "purpose": latest["purpose"], "skill_md": bundle["files"]["SKILL.md"],
+                        "references": bundle_refs(bundle), "examples": bundle["examples"],
+                        "manifest": latest.get("manifest") or {}, "installed_at": now,
+                    })
                     db.upsert_skill_installed({
-                        **existing, "current_version": already["version"], "current_hash": live_hash,
-                        "title": already["title"], "purpose": already["purpose"], "enabled": 0,
-                        "updated_at": time.time(),
+                        "slug": latest["slug"], "title": latest["title"], "purpose": latest["purpose"],
+                        "current_version": version, "current_hash": live_hash, "enabled": 0,
+                        "installed_at": existing["installed_at"] if existing else now, "updated_at": now,
                     })
                     db.update_skill_proposal(pid, status="installed")
-                    return self._public_installed(db.skill_installed(latest["slug"]))
-                version = (existing["current_version"] + 1) if existing else 1
-                dest_parent = self.installed_dir / latest["slug"]
-                dest_parent.mkdir(parents=True, exist_ok=True)
-                dest = dest_parent / f"v{version}"
-                tmp = dest_parent / f"v{version}.partial"
-                if tmp.exists():
-                    shutil.rmtree(tmp)
-                self._materialize(tmp, bundle, latest)
-                if dest.exists():
-                    shutil.rmtree(dest)
-                tmp.replace(dest)
-                now = time.time()
-                db.insert_skill_version({
-                    "slug": latest["slug"], "version": version, "content_hash": live_hash, "title": latest["title"],
-                    "purpose": latest["purpose"], "skill_md": bundle["files"]["SKILL.md"],
-                    "references": bundle_refs(bundle), "examples": bundle["examples"],
-                    "manifest": latest.get("manifest") or {}, "installed_at": now,
-                })
-                db.upsert_skill_installed({
-                    "slug": latest["slug"], "title": latest["title"], "purpose": latest["purpose"],
-                    "current_version": version, "current_hash": live_hash, "enabled": 0,
-                    "installed_at": existing["installed_at"] if existing else now, "updated_at": now,
-                })
-                db.update_skill_proposal(pid, status="installed")
-                for other in db.list_skill_proposals(slug=latest["slug"]):
-                    if other["id"] != pid and other["status"] in ("validated", "reviewed", "review_pending", "draft"):
-                        db.update_skill_proposal(other["id"], status="superseded")
+                    for other in db.list_skill_proposals(slug=latest["slug"]):
+                        if other["id"] != pid and other["status"] in ("validated", "reviewed", "review_pending", "draft"):
+                            db.update_skill_proposal(other["id"], status="superseded")
+            except sqlite3.IntegrityError as exc:
+                raise SkillError(409, "skill store constraint failed") from exc
             return self._public_installed(self.db.skill_installed(latest["slug"]))
 
     def set_enabled(self, slug: str, enabled: bool) -> dict:
@@ -653,6 +654,18 @@ class SkillStore:
             "activation_suggestion": row.get("activation_suggestion") or "",
             "files": files, "examples": row.get("examples") or [],
         }
+
+    def _write_installed_version(self, slug: str, version: int, bundle: dict, row: dict) -> None:
+        dest_parent = self.installed_dir / slug
+        dest_parent.mkdir(parents=True, exist_ok=True)
+        dest = dest_parent / f"v{version}"
+        tmp = dest_parent / f"v{version}.partial"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        self._materialize(tmp, bundle, row)
+        if dest.exists():
+            shutil.rmtree(dest)
+        tmp.replace(dest)
 
     def _materialize(self, dest: Path, bundle: dict, row: dict) -> None:
         dest.mkdir(parents=True)
