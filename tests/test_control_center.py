@@ -1,4 +1,4 @@
-"""Issue #23: Control Center is a versioned first-party daemon client."""
+"""Agent Harness Web is a versioned first-party Agent Harness Server client."""
 
 from __future__ import annotations
 
@@ -22,26 +22,26 @@ def make_client(tmp_path):
     return TestClient(create_app(manager)), manager
 
 
-def test_bundled_control_center_dogfoods_app_api_without_becoming_an_app(tmp_path):
+def test_bundled_web_dogfoods_app_api_without_becoming_an_app(tmp_path):
     client, manager = make_client(tmp_path)
     with client:
-        created = client.post("/api/v1/sessions", json={"prompt": "from bundled control center"})
+        created = client.post("/api/v1/sessions", json={"prompt": "from bundled Agent Harness Web"})
         assert created.status_code == 201
         sid = created.json()["id"]
         assert manager.db.get_session(sid)["app_id"] == ""
         listed = client.get("/api/v1/sessions").json()[0]
         assert listed["id"] == sid
-        assert listed["chat_summary"] == "from bundled control center — done"
+        assert listed["chat_summary"] == "from bundled Agent Harness Web — done"
         assert client.get(f"/api/v1/sessions/{sid}").status_code == 200
         assert client.get(f"/api/v1/sessions/{sid}/events?follow=false").status_code == 200
 
 
-def test_independent_control_center_owner_token_cors_and_stream_ticket(tmp_path):
+def test_independent_web_owner_token_cors_and_stream_ticket(tmp_path):
     client, manager = make_client(tmp_path)
     with client:
         existing = client.post("/sessions", json={"prompt": "existing"}).json()["id"]
         minted = client.post("/api/admin/v1/keys", json={
-            "name": "Control Center", "kind": "owner", "scopes": ["admin"], "origins": [ORIGIN],
+            "name": "agent-harness-web", "kind": "owner", "scopes": ["admin"], "origins": [ORIGIN],
         })
         assert minted.status_code == 201
         assert minted.json()["origins"] == [ORIGIN]
@@ -104,13 +104,15 @@ def test_app_origin_cannot_use_ambient_owner_identity_on_admin_api(tmp_path):
 def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path):
     client, manager = make_client(tmp_path)
     with client:
-        manager.db.create_api_key("Control Center", "admin", "owner", [ORIGIN])
+        # A pre-#91 display name remains a valid, visible credential.
+        legacy, _ = manager.db.create_api_key("Control Center", "admin", "owner", [ORIGIN])
+        assert manager.db.get_api_key(legacy["id"])["name"] == "Control Center"
         response = client.get("/api/admin/v1/me", headers={"Origin": ORIGIN})
         assert response.status_code == 401
         assert "owner token" in response.json()["detail"]
 
 
-def test_control_center_shell_includes_transport_module():
+def test_web_shell_includes_transport_module_and_canonical_names():
     web = Path(__file__).parents[1] / "harness" / "web"
     app = (web / "app.js").read_text(encoding="utf-8")
     client = (web / "client.mjs").read_text(encoding="utf-8")
@@ -120,11 +122,20 @@ def test_control_center_shell_includes_transport_module():
     assert "body instanceof FormData" in client
     index = (web / "index.html").read_text(encoding="utf-8")
     assert 'src="/app.js?v=4"' in index and 'href="/style.css?v=4"' in index
+    assert "<title>Agent Harness Web</title>" in index
+    assert 'apple-mobile-web-app-title" content="Harness"' in index
+    manifest = (web / "manifest.webmanifest").read_text(encoding="utf-8")
+    assert '"name": "Agent Harness Web"' in manifest
+    assert '"short_name": "Harness"' in manifest
+    assert "Agent Harness Server URL" in app
+    assert "Connect another Agent Harness Web" in app
+    assert 'name: `agent-harness-web (' in app
     assert '"/client.mjs"' in worker
+    assert 'const SHELL = "harness-shell-v4"' in worker
     assert 'fetch(event.request, { cache: "no-cache" })' in worker
 
 
-def test_control_center_assets_work_at_static_root_and_compatibility_alias(tmp_path):
+def test_web_assets_work_at_static_root_and_compatibility_alias(tmp_path):
     client, _ = make_client(tmp_path)
     with client:
         for path in ("/app.js", "/client.mjs", "/style.css", "/static/app.js"):

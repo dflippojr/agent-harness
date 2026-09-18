@@ -10,7 +10,7 @@ listen:
 public_url: ""          # e.g. https://tower.your-tailnet.ts.net
 # Requests arriving through `tailscale serve` carry the caller's login; anyone else is refused.
 allowed_logins: []      # e.g. [you@example.com]
-# Time-boxed read-only Control Center access for a tailnet buddy. Put this in harness.local.yaml.
+# Time-boxed read-only Agent Harness Web access for a tailnet buddy. Put this in harness.local.yaml.
 # Requires allowed_logins (otherwise every tailnet login is already owner). Restart after changing.
 # until is ISO-8601 (timezone preferred). Omit until to last until you remove the entry.
 guests: []

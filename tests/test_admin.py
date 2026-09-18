@@ -32,6 +32,7 @@ def test_admin_root_and_unversioned_compat(tmp_path):
         assert root["api_version"] == API_VERSION
         assert root["server"] == "agent-harness"
         assert ADMIN_SCOPE in root["scopes"]
+        assert root["scopes"][ADMIN_SCOPE] == "owner-only Agent Harness Web operations under /api/admin/v1"
         assert root["auth"]["tailscale_owner"] is True
         paths = {op["path"] for op in root["operations"]}
         assert f"{PREFIX}/sessions" in paths
@@ -57,6 +58,7 @@ def test_app_tokens_cannot_use_admin_api(tmp_path):
         all_app_scopes = ["sessions", "sessions:all", "approvals", "images", "inference", "remote_control"]
         app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": all_app_scopes}).json()
         device = client.post("/keys", json={"name": "zed"}).json()
+        # Legacy pre-#91 display names remain valid owner credentials.
         owner = client.post("/keys", json={"name": "control-center", "kind": OWNER_KIND,
                                            "scopes": [ADMIN_SCOPE]}).json()
         assert app["kind"] == "app" and app["key"].startswith("ha-")

@@ -1,0 +1,144 @@
+{
+  "manifest_schema_version": "1.0",
+  "app": {
+    "app_id": "ahpub.example.shopping-list",
+    "version": "1.0.0",
+    "display_name": "Shopping List",
+    "summary": "Keeps a local shopping list and asks the owner's harness to plan meals from pantry context.",
+    "publisher": {
+      "id": "pub-0a1b2c3d4e5f",
+      "name": "Example Household Apps",
+      "website_url": "https://example.com/apps",
+      "security_email": "security@example.com",
+      "support_email": "support@example.com",
+      "security_url": "https://example.com/security"
+    },
+    "urls": {
+      "source": "https://example.com/apps/shopping-list",
+      "release": "https://example.com/apps/shopping-list/releases/1.0.0",
+      "install": "https://example.com/apps/shopping-list/install",
+      "uninstall": "https://example.com/apps/shopping-list/uninstall",
+      "privacy_policy": "https://example.com/apps/shopping-list/privacy",
+      "issue_reporting": "https://example.com/apps/shopping-list/issues"
+    },
+    "platforms": [
+      {
+        "os": "any",
+        "arch": "any"
+      }
+    ],
+    "min_daemon_api": "1.5",
+    "max_daemon_api": "1.7",
+    "artifacts": [
+      {
+        "filename": "shopping-list-1.0.0.py",
+        "url": "https://example.com/apps/shopping-list/releases/1.0.0/shopping-list-1.0.0.py",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "signature_status": "unsigned",
+        "provenance_status": "none"
+      }
+    ],
+    "license": {
+      "spdx": "MIT",
+      "url": "https://example.com/apps/shopping-list/LICENSE"
+    },
+    "sbom": {
+      "url": "https://example.com/apps/shopping-list/releases/1.0.0/sbom.cdx.json",
+      "format": "cyclonedx-json"
+    },
+    "monetization": {
+      "model": "free",
+      "disclosure": "The app is free. It does not sell data or charge for features. Hosted-provider usage, if the owner later points it at Claude/Codex/Cursor, is billed to the owner through Agent Harness, not through this app.",
+      "commercial_use": "forbidden_by_publisher"
+    },
+    "source_matches_distributed_build": true,
+    "scopes": [
+      {
+        "scope": "sessions",
+        "justification": "Create one meal-planning session, inject pantry context, register list/add tools, and read that session's events until it finishes.",
+        "risk_tier": "standard"
+      }
+    ],
+    "browser_origins": [],
+    "required_capabilities": {
+      "profile": "any",
+      "modules": []
+    },
+    "required_backends": [
+      "local"
+    ],
+    "provider_auth": {
+      "never_handles_provider_credentials": true,
+      "modes": [
+        {
+          "backend": "local",
+          "policy": "none",
+          "classification": "provider_fact",
+          "notes": "Uses the tower local model through POST /api/v1/sessions. No hosted-provider login."
+        }
+      ],
+      "usage_disclosure": "This app runs AI tasks through your Agent Harness using the local model. It does not start Claude, Codex, or Cursor sessions in v1.0.0. It never asks for provider keys; those stay in harness settings."
+    },
+    "network_destinations": [],
+    "data_collected": [
+      {
+        "category": "session_prompt",
+        "sent_to": "local_only",
+        "retained": "none",
+        "purpose": "The meal prompt is sent only to the owner's daemon and is not stored by the app after the process exits."
+      },
+      {
+        "category": "local_file",
+        "sent_to": "local_only",
+        "retained": "session",
+        "purpose": "The in-memory shopping list lives in the process until exit; it is not uploaded."
+      }
+    ],
+    "telemetry": {
+      "default": "off",
+      "description": "No telemetry, crash reports, or analytics."
+    },
+    "subprocesses": [],
+    "filesystem_access": [
+      {
+        "class": "workspace_via_daemon_only",
+        "mode": "read",
+        "purpose": "No direct filesystem access. Pantry text is passed as session context through /api/v1."
+      }
+    ],
+    "handles_daemon_token": {
+      "storage": "memory_only",
+      "description": "Reads HARNESS_TOKEN from the process environment and keeps it in memory. It is not logged, written to disk, or placed in URLs."
+    }
+  },
+  "review": {
+    "decision": "publish",
+    "checklist_version": "1.0",
+    "reviewed_at": "2026-09-17T18:00:00Z",
+    "reviewer_ids": [
+      "rev-aaaabbbb"
+    ],
+    "evidence_urls": [
+      "https://example.com/catalog/reviews/ahpub.example.shopping-list/1.0.0"
+    ],
+    "publisher_manifest_sha256": "15d85e9a2434c647c1af0faa9f93ba3dfb9afe602f4c6ae68d57dbe78b7f93dc",
+    "artifact_digests": [
+      {
+        "filename": "shopping-list-1.0.0.py",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "permission_diff": {
+      "kind": "initial",
+      "summary": "First published version. Standard sessions scope only; local backend; no browser origin."
+    },
+    "provider_policy_labels": [
+      {
+        "backend": "local",
+        "classification": "provider_fact",
+        "notes": "Local model is owner-hosted. No Anthropic/OpenAI/Cursor terms apply to this version."
+      }
+    ],
+    "notes": "Ordinary helper matching the in-repo shopping list example pattern. Unsigned artifact is allowed at standard tier and must be hash-verified by the owner."
+  }
+}

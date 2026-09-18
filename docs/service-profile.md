@@ -1,8 +1,9 @@
 # Hosted-provider service profile
 
-The `service` profile is a small, hosted-provider-first daemon. It keeps the same sessions, provider adapters,
-approval flow, event stream, scoped tokens, persistent storage, Control Center, and versioned APIs as the full
-install, without requiring a GPU or local model.
+The `service` profile is a small, hosted-provider-first Agent Harness Server. It keeps the same sessions, provider
+adapters, approval flow, event stream, scoped tokens, persistent storage, Agent Harness Web, and versioned APIs as
+the full install, without requiring a GPU or local model. Agent Harness Apps use the App API; Agent Harness SDK is
+the supported Python library for that API.
 
 ## Install and discover
 
@@ -28,7 +29,8 @@ provider. `GET /health`, `GET /api/v1`, and authenticated `GET /api/admin/v1` re
 }
 ```
 
-The actual response includes every module. Clients should use capability discovery instead of assuming that model,
+The actual response includes every module. Agent Harness Web, Apps, and SDK consumers should use capability
+discovery instead of assuming that model,
 GPU, jobs, image, memory, runner, or other optional routes are usable.
 
 ## Optional modules
@@ -51,13 +53,13 @@ An installer run without `-Profile` preserves an existing profile. It defaults t
 
 ## Threat boundary
 
-- The daemon binds to localhost; Tailscale Serve is the supported remote entry point. Owner and app APIs retain
+- Agent Harness Server binds to localhost; Tailscale Serve is the supported remote entry point. Owner and App APIs retain
   their existing identity, origin, scope, and token checks.
 - Provider CLIs are unmodified and run in workspace-mounted Docker containers. Each provider has a separate auth
-  volume and internal network. The daemon invokes those volumes but does not read credentials from them.
+  volume and internal network. Agent Harness Server invokes those volumes but does not read credentials from them.
 - Each provider network reaches the internet only through its own allowlist proxy. General sandbox network access
   remains approval-gated.
 - Capability responses list enabled facilities and provider names only; they never include tokens, API-key values,
   secret paths, or provider credentials.
-- Admin filesystem browsing is not a service-profile capability and remains disabled for app clients. The optional
+- Admin filesystem browsing is not a service-profile capability and remains disabled for Agent Harness Apps. The optional
   future work tracked in issue #67 does not change this profile's default boundary.
