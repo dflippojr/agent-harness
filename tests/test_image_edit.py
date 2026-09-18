@@ -109,6 +109,7 @@ def test_full_profile_does_not_enable_image_edit_by_default(tmp_path):
 
 def test_edit_status_is_setup_guidance_without_assets(tmp_path):
     m, _, _ = image_manager(tmp_path)
+    m.images.cfg.models_dir = str(tmp_path / "missing-models")
     status = m.images.status()["edit"]
     assert status["available"] is False and status["enabled"] is False
     assert "Qwen-Image-Edit" in status["setup"]
@@ -116,6 +117,19 @@ def test_edit_status_is_setup_guidance_without_assets(tmp_path):
     assert status["revision"] == image_edit.EDIT_MODEL["revision"]
     assert status["sha256"] == image_edit.EDIT_MODEL["unet"]["sha256"]
     assert not any(sep in status["setup"] for sep in ("C:\\", "/home/", "tailnet"))
+
+
+def test_routine_status_does_not_hash_twenty_gb_checkpoint(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "edit.safetensors"
+    checkpoint.write_bytes(b"stub-unet")
+    monkeypatch.setitem(image_edit.EDIT_MODEL["unet"], "bytes", checkpoint.stat().st_size)
+    calls = []
+    monkeypatch.setattr(image_edit, "file_sha256", lambda path: calls.append(path) or image_edit.EDIT_MODEL["unet"]["sha256"])
+
+    assert image_edit.unet_hash_ok(checkpoint) is None
+    assert calls == []
+    assert image_edit.unet_hash_ok(checkpoint, verify_hash=True) is True
+    assert calls == [checkpoint]
 
 
 def test_gallery_and_upload_edits_preserve_source(tmp_path):

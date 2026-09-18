@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         (r.ok if py.exists() else r.fail)("Image generation", f"ComfyUI at {cfg.images.comfy_dir}"
                                           + ("" if py.exists() else " not found"))
         from . import image_edit
-        edit = image_edit.assets_status(cfg.images)
+        edit = image_edit.assets_status(cfg.images, verify_hash=True)
         if cfg.images.edit_enabled:
             if edit["available"] and edit["hash_ok"] is not False:
                 extra = "checksum verified" if edit["hash_ok"] else "stub or unpackaged file present"

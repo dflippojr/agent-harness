@@ -88,23 +88,23 @@ def locate_assets(cfg: ImagesConfig) -> dict[str, Path | None]:
     return {key: find_asset(root, EDIT_MODEL[key]) for key in ("unet", "clip", "vae")}
 
 
-def unet_hash_ok(path: Path | None) -> bool | None:
-    """True/False when the real artifact is present; None for a missing or test stub file."""
+def unet_hash_ok(path: Path | None, *, verify_hash: bool = False) -> bool | None:
+    """Validate size cheaply; hash the 20 GB artifact only for an explicit verification."""
     if path is None or not path.is_file():
         return None
     size = path.stat().st_size
     expected = EDIT_MODEL["unet"]["bytes"]
     if size == expected:
-        return file_sha256(path) == EDIT_MODEL["unet"]["sha256"]
+        return file_sha256(path) == EDIT_MODEL["unet"]["sha256"] if verify_hash else None
     if size < 1_000_000:
         return None
     return False
 
 
-def assets_status(cfg: ImagesConfig) -> dict:
+def assets_status(cfg: ImagesConfig, *, verify_hash: bool = False) -> dict:
     files = locate_assets(cfg)
     missing = [key for key, path in files.items() if path is None]
-    hash_ok = unet_hash_ok(files.get("unet"))
+    hash_ok = unet_hash_ok(files.get("unet"), verify_hash=verify_hash)
     available = not missing and hash_ok is not False
     return {
         "available": available,
