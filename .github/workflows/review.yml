@@ -32,7 +32,7 @@ jobs:
 
       - name: Resolve PR number
         id: pr
-        shell: pwsh
+        shell: powershell
         env:
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
           INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
@@ -42,7 +42,7 @@ jobs:
           "number=$num" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Run Claude Code review
-        shell: pwsh
+        shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
@@ -51,7 +51,7 @@ jobs:
           claude -p $prompt --permission-mode auto --output-format text | Out-File -FilePath review-output.md -Encoding utf8
 
       - name: Post review as PR comment
-        shell: pwsh
+        shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
