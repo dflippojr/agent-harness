@@ -53,8 +53,11 @@ class GpuScheduler:
         """Wait for the slot. `front` puts the session first in line (it had the slot and stepped aside)."""
         if self.holder == sid:
             return
-        if self.holder is None and not self._waiters and not self.paused:
-            if self._eligible is None or self._eligible(sid):
+        if self.holder is None and not self.paused:
+            # Ineligible waiters stay queued but must not pin the slot empty: grant an already-queued
+            # eligible waiter first, then this session if the GPU is still free.
+            self._grant_next()
+            if self.holder is None and (self._eligible is None or self._eligible(sid)):
                 self.holder = sid
                 self._changed()
                 return
@@ -105,6 +108,14 @@ class GpuScheduler:
         self._waiters = OrderedDict()
         self._waiters.update(skipped)
         self._waiters.update(rest)
+
+    def recheck(self) -> None:
+        """Retry granting after eligibility may have changed (caps, status, account enabled)."""
+        if self.paused or self.holder is not None:
+            return
+        self._grant_next()
+        if self.holder is not None:
+            self._changed()
 
 
 class QueueFull(Exception):

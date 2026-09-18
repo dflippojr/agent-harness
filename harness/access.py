@@ -66,10 +66,8 @@ def member_forbidden(access: Access, method: str, path: str) -> str | None:
         return access.detail or "this household account is disabled"
     if path == "/api/admin" or path.startswith("/api/admin/"):
         return "members cannot use the owner API"
-    if path.startswith(RUNNER_PREFIX):
-        if method in ("GET", "HEAD", "OPTIONS") and path.rstrip("/") == "/runners":
-            return "members cannot use Mac or other runners"
-        # Runner poll/results use runner tokens, not member identity; those never reach here as members.
+    if path == "/runners" or path.startswith(RUNNER_PREFIX):
+        # GET /runners is the status list; /runners/{name}/… is poll/results (runner tokens, not members).
         return "members cannot use Mac or other runners"
     if any(path == prefix or path.startswith(prefix + "/") for prefix in MEMBER_FORBIDDEN_PREFIXES):
         if path.startswith("/jobs") or path == "/jobs":

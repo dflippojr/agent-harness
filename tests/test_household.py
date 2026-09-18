@@ -233,9 +233,10 @@ def test_two_member_adversarial_matrix(tmp_path):
         assert "accounts" not in admin.json().get("detail", "")
         for path in (f"{PREFIX}/accounts", f"{PREFIX}/sessions", f"{PREFIX}/keys", f"{PREFIX}/gpu",
                      f"{PREFIX}/jobs", f"{PREFIX}/maintenance", "/keys", "/jobs", "/images", "/gpu",
-                     "/memory", "/templates", "/metrics"):
+                     "/memory", "/templates", "/metrics", "/runners"):
             r = client.get(path, headers=ah)
             assert r.status_code == 403, path
+        assert "runners" in client.get("/runners", headers=ah).json()["detail"]
 
         app = client.post("/keys", json={"name": "shop", "kind": "app",
                                          "scopes": ["sessions", "sessions:all", "approvals"]},
@@ -489,6 +490,28 @@ def test_quota_ignores_links_and_cleanup_stays_contained(tmp_path):
         m.maintenance.remove_workspace(sid)
         assert planted.exists()
         assert (planted / "secret.txt").read_text(encoding="utf-8") == "owner"
+
+
+def test_scheduler_ineligible_waiters_do_not_block_eligible(tmp_path):
+    """A skipped member waiter must not pin holder=None so later owner sessions never run."""
+    async def body():
+        eligible = {"blocked": False}
+        s = GpuScheduler(eligible=lambda sid: eligible.get(sid, True))
+        await s.acquire("running-member")
+        blocked = asyncio.create_task(s.acquire("blocked"))
+        await asyncio.sleep(0)
+        s.release("running-member")
+        assert s.holder is None and not blocked.done()
+        await asyncio.wait_for(s.acquire("owner"), timeout=1)
+        assert s.holder == "owner" and not blocked.done()
+        s.release("owner")
+        assert s.holder is None
+        eligible["blocked"] = True
+        s.recheck()
+        await asyncio.wait_for(blocked, timeout=1)
+        assert s.holder == "blocked"
+        s.release("blocked")
+    asyncio.run(body())
 
 
 def test_scheduler_skips_ineligible_without_reordering_eligible(tmp_path):

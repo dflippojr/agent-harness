@@ -187,6 +187,8 @@ class Runner:
             self.db.update_session(sid, status=status, **fields)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
+        # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
+        self.scheduler.recheck()
 
     async def _acquire(self, sid: str, front: bool = False) -> None:
         if self.scheduler.holder == sid:
