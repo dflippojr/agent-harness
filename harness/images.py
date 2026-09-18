@@ -501,10 +501,25 @@ class ImageService:
     def path(self, job: dict) -> Path:
         return self.images_dir / f"{job['id']}.png"
 
+    def _live_job(self, job_id: str | None) -> bool:
+        if not job_id:
+            return False
+        job = self.db.get_image(job_id)
+        return job is not None and job["status"] not in ("done", "failed")
+
+    def _skip_dead_jobs(self, first: str | None) -> str | None:
+        """Drop cancelled/finished ids left in the queue so they never occupy the GPU."""
+        candidate = first
+        while candidate is not None and not self._live_job(candidate):
+            candidate = None if self.queue.empty() else self.queue.get_nowait()
+        return candidate
+
     async def _loop(self) -> None:
         while True:
             job_id = await self.queue.get()
             try:
+                if job_id is not None and not self._live_job(job_id):
+                    continue
                 await self._run_batch(job_id)
             except asyncio.CancelledError:
                 raise
@@ -569,6 +584,10 @@ class ImageService:
             drain = self._drain_sessions
             self._drain_sessions = set()
             await self.runner.scheduler.wait_for_drain(drain)
+        first = self._skip_dead_jobs(first)
+        if first is None and not self._keep_warm:
+            self.phase = "idle"
+            return
         slot = await self.runner.gate.acquire_exclusive()
         flagged = False
         ran_job = False
@@ -581,13 +600,14 @@ class ImageService:
             job_id: str | None = first
             while True:
                 if paused():
-                    if job_id:
+                    if self._live_job(job_id):
                         self.db.update_image(job_id, status="queued")
                         self.queue.put_nowait(job_id)
                     break
                 if job_id:
-                    await self._run_job(job_id)
-                    ran_job = True
+                    if self._live_job(job_id):
+                        await self._run_job(job_id)
+                        ran_job = True
                     job_id = None
                 if not self.queue.empty():
                     job_id = self.queue.get_nowait()

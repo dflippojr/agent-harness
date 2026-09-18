@@ -18,8 +18,8 @@ from harness.fileops import ToolError
 from harness.images import workflow
 from harness import images_models as images_models_mod
 from harness.images_models import (
-    RESERVE_BYTES, doctor_warning, file_state, install_flux_fast, inspect_flux_fast, load_manifest,
-    preflight_graphs, promote_comfyui, redact_url, remove_flux_fast, rollback_comfyui,
+    RESERVE_BYTES, doctor_warning, download_file, file_state, install_flux_fast, inspect_flux_fast,
+    load_manifest, preflight_graphs, promote_comfyui, redact_url, remove_flux_fast, rollback_comfyui,
     stage_comfyui, validate_comfyui,
 )
 
@@ -88,6 +88,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
             a, _, b = spec.partition("-")
             start = int(a or 0)
             end = int(b) + 1 if b else len(body)
+            if start >= len(body):
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{len(body)}")
+                self.end_headers()
+                return
             status = 206
         chunk = body[start:end]
         self.send_response(status)
@@ -332,6 +337,101 @@ def test_install_alt_encoder_when_shared_hash_differs(tmp_path):
         stop_fixture(server)
 
 
+def test_download_file_promotes_complete_part_without_reget(tmp_path):
+    """A .part already at the pinned size must not send Range: bytes={size}- (HTTP 416)."""
+    body = b"complete-encoder-bytes"
+    dest = tmp_path / "qwen_3_4b_flux2.safetensors"
+    part = dest.with_name(dest.name + ".part")
+    part.write_bytes(body)
+    hits = []
+
+    def handler(request: httpx.Request):
+        hits.append(request.headers.get("range") or request.headers.get("Range"))
+        return httpx.Response(416, content=b"",
+                              headers={"Content-Range": f"bytes */{len(body)}"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    out = download_file("http://example.test/encoder", dest, _sha(body), len(body), client=client)
+    assert dest.read_bytes() == body
+    assert not part.exists()
+    assert out["bytes"] == len(body)
+    assert hits == []
+
+
+def test_download_file_416_on_complete_part_still_promotes(tmp_path, monkeypatch):
+    """Defense: if a GET already went out, HTTP 416 must not delete a complete .part."""
+    body = b"already-finished-stream"
+    dest = tmp_path / "unet.safetensors"
+    part = dest.with_name(dest.name + ".part")
+    part.write_bytes(body)
+    remaining = {"n": 2}
+    real = Path.stat
+
+    def short_then_real(self, *args, **kwargs):
+        info = real(self, *args, **kwargs)
+        if self == part and remaining["n"] > 0:
+            remaining["n"] -= 1
+            return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink,
+                                   info.st_uid, info.st_gid, 1, int(info.st_atime),
+                                   int(info.st_mtime), int(info.st_ctime)))
+        return info
+
+    monkeypatch.setattr(Path, "stat", short_then_real)
+
+    def handler(request: httpx.Request):
+        assert (request.headers.get("range") or request.headers.get("Range")) == "bytes=1-"
+        return httpx.Response(416, content=b"",
+                              headers={"Content-Range": f"bytes */{len(body)}"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    out = download_file("http://example.test/unet", dest, _sha(body), len(body), client=client)
+    assert dest.read_bytes() == body
+    assert not part.exists()
+    assert out["bytes"] == len(body)
+
+
+def test_download_file_resumes_short_part_with_206(tmp_path):
+    body = b"hello-world-payload"
+    dest = tmp_path / "vae.safetensors"
+    part = dest.with_name(dest.name + ".part")
+    part.write_bytes(body[:5])
+
+    def handler(request: httpx.Request):
+        rng = request.headers.get("range") or request.headers.get("Range")
+        assert rng == "bytes=5-"
+        return httpx.Response(206, content=body[5:],
+                              headers={"Content-Range": f"bytes 5-{len(body) - 1}/{len(body)}"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    download_file("http://example.test/vae", dest, _sha(body), len(body), client=client)
+    assert dest.read_bytes() == body
+    assert not part.exists()
+
+
+def test_install_promotes_leftover_complete_parts(tmp_path):
+    payloads = {"checkpoint": b"CKPT-DATA", "vae": b"VAE-DATA", "encoder": b"ENC-DATA"}
+    server, url = start_fixture(payloads)
+    try:
+        cfg = cfg_for(tmp_path)
+        plant_comfy(Path(cfg.comfy_dir))
+        manifest = tiny_manifest(url, payloads)
+        root = Path(cfg.models_dir)
+        for key, asset in manifest["assets"].items():
+            dest = root / asset["subdir"] / asset["filename"]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.with_name(dest.name + ".part").write_bytes(payloads[key])
+        FixtureHandler.hits.clear()
+        out = install_flux_fast(cfg, manifest=manifest, free_bytes=lambda p: 10 * 1024 ** 3)
+        assert all(f["action"] == "installed" for f in out["files"])
+        for key, asset in manifest["assets"].items():
+            dest = root / asset["subdir"] / asset["filename"]
+            assert dest.read_bytes() == payloads[key]
+            assert not dest.with_name(dest.name + ".part").exists()
+        assert FixtureHandler.hits == []
+    finally:
+        stop_fixture(server)
+
+
 def test_redact_url_strips_query_and_fragment():
     assert redact_url("https://example/file?token=secret#x") == "https://example/file"
     assert "secret" not in redact_url("https://huggingface.co/x?authorization=Bearer+abc")
@@ -536,6 +636,73 @@ def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
                 break
             await asyncio.sleep(0.02)
         assert server.calls == ["stop", "start"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
+    async def body():
+        m, server, _ = image_manager(tmp_path / "direct")
+        job = m.images.submit("never run")
+        m.images.cancel(job["id"])
+        await m.images._run_batch(job["id"])
+        assert server.calls == []
+        assert m.images.phase == "idle" and not m.images.gpu_taken
+
+        m, server, _ = image_manager(tmp_path / "q")
+        job = m.images.submit("never run")
+        assert job["status"] == "queued"
+        cancelled = m.images.cancel(job["id"])
+        assert cancelled["status"] == "failed" and "cancelled" in cancelled["error"]
+        await m.start(maintenance=False)
+        done = await m.images.wait(job["id"])
+        assert done["status"] == "failed"
+        for _ in range(50):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.02)
+        assert server.calls == []
+        assert not m.images.gpu_taken and m.images.phase == "idle"
+        await m.stop()
+
+        m, server, _ = image_manager(tmp_path / "mix")
+        skipped = m.images.submit("skip me")
+        kept = m.images.submit("keep me")
+        m.images.cancel(skipped["id"])
+        await m.start(maintenance=False)
+        assert (await m.images.wait(skipped["id"]))["status"] == "failed"
+        assert (await m.images.wait(kept["id"]))["status"] == "done"
+        for _ in range(100):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.02)
+        assert server.calls == ["stop", "start"]
+        assert not m.images.gpu_taken
+        await m.stop()
+
+        class Hold:
+            active = True
+            manual = False
+
+        m, server, _ = image_manager(tmp_path / "hold")
+        await m.start(maintenance=False)
+        m.images.runner.guard = Hold()
+        held = m.images.submit("held while queued")
+        for _ in range(80):
+            if m.images.phase == "waiting":
+                break
+            await asyncio.sleep(0.02)
+        assert m.images.phase == "waiting"
+        m.images.cancel(held["id"])
+        Hold.active = False
+        m.images._guard_wake.set()
+        assert (await m.images.wait(held["id"]))["status"] == "failed"
+        for _ in range(50):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.02)
+        assert server.calls == []
+        assert m.images.phase == "idle"
         await m.stop()
     asyncio.run(body())
 
