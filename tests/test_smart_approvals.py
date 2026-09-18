@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from harness.policy import ALLOW, ASK, DENY, Policy
 from harness.smart_approvals import (
-    BLOCKING_FLAGS, _relative_ok, assess_eligibility, parse_reviewer_output, reviewer_payload,
-    strip_shell_comments,
+    BLOCKING_FLAGS, RISK_FLAGS, SmartConfig, SmartReviewer, _relative_ok, assess_eligibility,
+    parse_reviewer_output, reviewer_payload, strip_shell_comments,
 )
 
 BASH = "Bash"
@@ -89,6 +90,64 @@ def test_strict_schema_rejects_extra_text_and_unknown_keys():
     flagged = parse_reviewer_output(
         '{"recommendation":"approve","confidence":0.99,"reason":"ok","risk_flags":["network"]}')
     assert flagged.auto_ok is False and BLOCKING_FLAGS.intersection(flagged.risk_flags)
+
+
+def _auto_reviewer(complete):
+    cfg = type("Cfg", (), {"smart_approvals": SmartConfig(enabled=True, mode="auto", min_confidence=0.85)})()
+    return SmartReviewer(cfg, complete=complete)
+
+
+def _consider_auto(reply):
+    reviewer = _auto_reviewer(lambda _p: reply)
+    decision = Policy().decide(BASH, {"command": "pytest -q"})
+    el, review = asyncio.run(reviewer.consider(
+        type("Db", (), {"get_meta": lambda self, _k: ""})(),
+        Policy(), BASH, {"command": "pytest -q"}, decision,
+    ))
+    return el, review, reviewer.should_auto_approve(review)
+
+
+def test_auto_approve_requires_empty_risk_flags_and_fails_closed():
+    """Issue #18: deny/escalate/low confidence/ambiguity/any risk flag → human card.
+
+    Only approve + confidence above threshold + an explicit empty flag list auto-executes.
+    Unknown, extra, malformed, non-list, and case-variant flags fail closed.
+    """
+    empty = {"recommendation": "approve", "confidence": 0.92, "reason": "looks like tests", "risk_flags": []}
+    el, review, auto = _consider_auto(empty)
+    assert el.ok and review.auto_ok and auto and not review.escalate_reason and review.risk_flags == []
+
+    rows = []
+    for flag in RISK_FLAGS:
+        rows.append((f"flag {flag}", {**empty, "risk_flags": [flag]}, False))
+        rows.append((f"case {flag.upper()}", {**empty, "risk_flags": [flag.upper()]}, False))
+        rows.append((f"case {flag.title()}", {**empty, "risk_flags": [flag.title()]}, False))
+    rows.extend([
+        ("bot ambiguous", {**empty, "risk_flags": ["ambiguous"]}, False),
+        ("other", {**empty, "risk_flags": ["other"]}, False),
+        ("two flags", {**empty, "risk_flags": ["network", "ambiguous"]}, False),
+        ("unknown flag", {**empty, "risk_flags": ["surprise"]}, False),
+        ("missing flags", {k: v for k, v in empty.items() if k != "risk_flags"}, False),
+        ("flags None", {**empty, "risk_flags": None}, False),
+        ("flags str", {**empty, "risk_flags": "ambiguous"}, False),
+        ("flags obj", {**empty, "risk_flags": {"ambiguous": True}}, False),
+        ("nested flags", {**empty, "risk_flags": [["ambiguous"]]}, False),
+        ("extra key", {**empty, "extra": 1}, False),
+        ("deny", {**empty, "recommendation": "deny"}, False),
+        ("escalate rec", {**empty, "recommendation": "escalate"}, False),
+    ])
+    for name, reply, want_auto in rows:
+        el, review, auto = _consider_auto(reply)
+        assert el.ok, name
+        assert auto is want_auto, name
+        assert review.auto_ok is False, name
+        parsed = parse_reviewer_output(json.dumps(reply))
+        if isinstance(reply.get("risk_flags"), list) and reply["risk_flags"] and all(
+                isinstance(f, str) and f in RISK_FLAGS for f in reply["risk_flags"]):
+            assert parsed.auto_ok is False, name
+            assert review.escalate_reason == "risk flags", name
+        else:
+            assert parsed.escalate_reason or parsed.recommendation != "approve" or parsed.auto_ok is False, name
 
 
 # 100+ synthetic shadow cases. Unsafe classes must never be eligibility.ok.

@@ -46,9 +46,10 @@ allowlisting official OpenAI and Anthropic API hosts only.
    classes never call the model: `ALWAYS_ASK`, networked/clone/install/auth, secrets, deletion
    outside scratch, git push/reset/force/merge/release, privilege, Docker/mounts, substitutions,
    globs, chaining, unknown tools, and writes outside `/workspace`.
-4. Auto-approve only in `auto` mode when the strict JSON schema, `approve`, and the confidence
-   threshold all pass. `deny`, `escalate`, low confidence, risk flags, timeout, malformed JSON,
-   missing credential, or provider errors produce one durable human approval.
+4. Auto-approve only in `auto` mode when the strict JSON schema, `approve`, confidence above
+   threshold, and an explicit empty `risk_flags` list all pass. `deny`, `escalate`, low confidence,
+   any risk flag (including `ambiguous` and `other`), unknown/malformed flags, timeout, malformed
+   JSON, missing credential, or provider errors produce one durable human approval.
 
 ## Shadow evaluation (synthetic)
 

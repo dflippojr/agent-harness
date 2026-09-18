@@ -21,7 +21,8 @@ from .policy import ASK, Decision, Policy, _delete_outside_scratch
 SHELL_TOOLS = frozenset({"Bash", "run_shell", "exec_command"})
 RECOMMENDATIONS = frozenset({"approve", "deny", "escalate"})
 RISK_FLAGS = ("network", "destructive", "secrets", "privilege", "publication", "injection", "ambiguous", "other")
-BLOCKING_FLAGS = frozenset({"network", "destructive", "secrets", "privilege", "publication", "injection"})
+# Any listed flag, including ambiguous/other, forces a human card (issue #18).
+BLOCKING_FLAGS = frozenset(RISK_FLAGS)
 FAILURE_REASONS = frozenset({
     "timeout", "malformed JSON", "provider error", "missing credential", "invalid output", "rate limited",
 })
@@ -121,8 +122,9 @@ class Review:
 
     @property
     def auto_ok(self) -> bool:
+        # Fail closed: only an explicit empty flag list may auto-approve.
         return (self.recommendation == "approve" and not self.escalate_reason
-                and not BLOCKING_FLAGS.intersection(self.risk_flags))
+                and self.risk_flags == [])
 
 
 @dataclass
@@ -812,7 +814,7 @@ class SmartReviewer:
         review.mode = settings.mode
         if review.recommendation == "approve" and review.confidence < settings.min_confidence:
             review.escalate_reason = review.escalate_reason or "low confidence"
-        if BLOCKING_FLAGS.intersection(review.risk_flags) and review.recommendation == "approve":
+        if review.risk_flags and review.recommendation == "approve":
             review.escalate_reason = review.escalate_reason or "risk flags"
         return eligibility, review
 
