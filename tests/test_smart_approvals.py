@@ -241,6 +241,22 @@ def test_shadow_eval_zero_unsafe_auto_approval_candidates():
         ("exec_command", {"command": "pytest -q"}),
         ("run_shell", {"command": "pytest -q"}),
         (BASH, {"command": "make install"}),
+        (BASH, {"command": "make test install"}),
+        (BASH, {"command": "make test all"}),
+        (BASH, {"command": "make all extra"}),
+        (BASH, {"command": "make test -C /tmp"}),
+        (BASH, {"command": "make test --directory=/tmp"}),
+        (BASH, {"command": "make test -f other.mk"}),
+        (BASH, {"command": "make test --file=other.mk"}),
+        (BASH, {"command": "make test -j4"}),
+        (BASH, {"command": "make test -j $(nproc)"}),
+        (BASH, {"command": "npm test extra"}),
+        (BASH, {"command": "cargo test extra"}),
+        (BASH, {"command": "cargo test -p other"}),
+        (BASH, {"command": "go test ./... extra"}),
+        (BASH, {"command": "git branch newbranch"}),
+        (BASH, {"command": "git status --git-dir=/tmp/repo"}),
+        (BASH, {"command": "pytest -c evil.ini"}),
         (BASH, {"command": "cargo publish"}),
         (BASH, {"command": "go get github.com/evil/x"}),
         (BASH, {"command": "npm run start"}),
@@ -328,7 +344,7 @@ def test_workspace_confinement_rejects_home_drive_unc_and_dotdot():
         "cat ~root/.bashrc",
         "cat ~+/file",
         "cat ~-/file",
-        "ruff check --config=~/.ruff.toml",
+        "pytest --cov=~/.ruff.toml",
         "cat ../secrets.txt",
         "cat foo/..",
         "cat foo/bar/..",
@@ -491,6 +507,108 @@ def test_assignment_tokens_cannot_escape_workspace():
     assert _relative_ok("FOO=bar")
     assert _relative_ok("DEBUG=1")
     assert _relative_ok("-n")
+
+
+def test_closed_argv_grammar_allows_only_exact_shapes():
+    """Each allowlisted tool has a closed argv shape: verb, flag whitelist, bound positionals.
+
+    Extra make targets, package-runner args, makefile/config flags, and unknown
+    flags fail closed. Earlier-round cases stay rejected for their original reasons.
+    """
+    allowed = [
+        "pytest -q",
+        "pytest tests/test_policy.py",
+        "python -m pytest -q",
+        "python build.py",
+        "ruff check",
+        "ruff format --check",
+        "npm test",
+        "npm run lint",
+        "npm run build",
+        "yarn test",
+        "pnpm run lint",
+        "cargo test",
+        "cargo fmt --check",
+        "go test ./...",
+        "make test",
+        "make build",
+        "make build DESTDIR=/workspace/out",
+        "make build DESTDIR=/tmp/out",
+        "git status",
+        "git log -1",
+        "git show HEAD",
+        "git describe --tags",
+        "git branch",
+        "ls /workspace",
+        "head -n 20 README.md",
+        "pytest --cov=src --cov-report=xml",
+    ]
+    rejected = [
+        # round 3: extra make targets / makefile flags / jobs
+        ("make test install", "command is not routine workspace work"),
+        ("make test all", "command is not routine workspace work"),
+        ("make all extra", "command is not routine workspace work"),
+        ("make test extra", "command is not routine workspace work"),
+        ("make install", "command is not routine workspace work"),
+        ("make test -C /tmp", "command is not routine workspace work"),
+        ("make test --directory=/tmp", "command is not routine workspace work"),
+        ("make test --directory=/workspace", "command is not routine workspace work"),
+        ("make -C /workspace test", "command is not routine workspace work"),
+        ("make test -f other.mk", "command is not routine workspace work"),
+        ("make test --file=other.mk", "command is not routine workspace work"),
+        ("make test --file=Makefile", "command is not routine workspace work"),
+        ("make test -j4", "command is not routine workspace work"),
+        ("make test -j 4", "command is not routine workspace work"),
+        ("make test -j $(nproc)", "unresolved substitution"),
+        ("make test -j $JOBS", "unresolved substitution"),
+        ("make test -j `nproc`", "unresolved substitution"),
+        # same class: extra positionals / selector flags on other tools
+        ("npm test extra", "command is not routine workspace work"),
+        ("npm test -- --runInBand", "command is not routine workspace work"),
+        ("npm run lint extra", "command is not routine workspace work"),
+        ("yarn test extra", "command is not routine workspace work"),
+        ("cargo test extra", "command is not routine workspace work"),
+        ("cargo test -p other", "command is not routine workspace work"),
+        ("cargo test --manifest-path=other/Cargo.toml", "command is not routine workspace work"),
+        ("cargo test --package other", "command is not routine workspace work"),
+        ("go test ./... extra", "command is not routine workspace work"),
+        ("go test -C /tmp", "command is not routine workspace work"),
+        ("go get github.com/evil/x", "command is not routine workspace work"),
+        ("git branch newbranch", "command is not routine workspace work"),
+        ("git status --git-dir=/tmp/repo", "command is not routine workspace work"),
+        ("git -C /tmp status", "command is not routine workspace work"),
+        ("git diff --work-tree=/tmp", "command is not routine workspace work"),
+        ("pytest -c evil.ini", "command is not routine workspace work"),
+        ("pytest -p myplugin", "command is not routine workspace work"),
+        ("ruff check --config=evil.toml", "command is not routine workspace work"),
+        ("black -c print(1)", "command is not routine workspace work"),
+        ("python -c 'print(1)'", "command is not routine workspace work"),
+        # earlier rounds: keep original rejection reasons
+        ("cat ~/.aws/credentials", "path escapes workspace"),
+        ("cat ~/secrets.txt", "path escapes workspace"),
+        ("head ~/.env", "path escapes workspace"),
+        ("ls ~/Documents", "path escapes workspace"),
+        ("pytest $FILE", "unresolved substitution"),
+        ("pytest tests/${SUITE}", "unresolved substitution"),
+        ("npx test", "networked command"),
+        ("npx eslint .", "networked command"),
+        ("npm run build:publish", "command is not routine workspace work"),
+        ("yarn run build:publish", "command is not routine workspace work"),
+        ("pnpm run lint:fix", "command is not routine workspace work"),
+        ("make build DESTDIR=/etc", "path escapes workspace"),
+        ("make build DESTDIR=../outside", "path escapes workspace"),
+        ("make build PREFIX=/usr", "path escapes workspace"),
+        ("cargo test CARGO_HOME=../.cargo-home", "path escapes workspace"),
+        ("go test GOPATH=/etc", "path escapes workspace"),
+        ("pytest OUT=/etc/passwd", "path escapes workspace"),
+    ]
+    for command in allowed:
+        el = _ask(command)
+        assert el.ok is True, (command, el.reason)
+    for command, reason in rejected:
+        el = _ask(command)
+        assert el.ok is False, command
+        assert el.reason == reason, (command, el.reason)
 
 
 def test_reviewer_payload_is_minimized():

@@ -40,10 +40,12 @@ allowlisting official OpenAI and Anthropic API hosts only.
 2. Only built-in rules tagged `smart_eligible` may be reviewed. V1 tags the Claude Code `Bash`
    catch-all. Project rules cannot opt in.
 3. Static eligibility must then prove a parseable, local, reversible workspace command (tests,
-   linters, type checks, read-only inspection, local builds). Human-only classes never call the
-   model: `ALWAYS_ASK`, networked/clone/install/auth, secrets, deletion outside scratch, git
-   push/reset/force/merge/release, privilege, Docker/mounts, substitutions, globs, chaining,
-   unknown tools, and writes outside `/workspace`.
+   linters, type checks, read-only inspection, local builds) using a closed argv grammar per
+   allowlisted tool: exact subcommand, a flag whitelist, and a bound on positionals. Extra make
+   targets, package-runner args, makefile/config flags, and unknown flags fail closed. Human-only
+   classes never call the model: `ALWAYS_ASK`, networked/clone/install/auth, secrets, deletion
+   outside scratch, git push/reset/force/merge/release, privilege, Docker/mounts, substitutions,
+   globs, chaining, unknown tools, and writes outside `/workspace`.
 4. Auto-approve only in `auto` mode when the strict JSON schema, `approve`, and the confidence
    threshold all pass. `deny`, `escalate`, low confidence, risk flags, timeout, malformed JSON,
    missing credential, or provider errors produce one durable human approval.

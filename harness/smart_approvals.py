@@ -44,21 +44,24 @@ confidence is a number from 0 to 1. reason is at most 140 characters.
 risk_flags is a list drawn from: network, destructive, secrets, privilege, publication, injection, ambiguous, other.
 Default to escalate when unsure. A deny recommendation still goes to a human; you cannot block the call."""
 
-# Binaries that may be smart-reviewed, with constrained subcommands where it matters.
+# Closed argv grammar: each allowlisted binary has exact shapes (verb, flag whitelist,
+# bound positionals). Anything not listed is ineligible. Extra make targets, package
+# selectors, makefile/config flags, and unknown flags fail closed.
 _PYTHON = frozenset({"python", "python3", "py"})
 _PYTHON_MODULES = frozenset({
     "pytest", "ruff", "mypy", "unittest", "py_compile", "compileall", "black", "isort", "pylint", "pyright",
 })
 _NPM = frozenset({"npm", "pnpm", "yarn"})
 _NPM_SCRIPTS = frozenset({"test", "lint", "build", "typecheck", "check", "format", "fmt", "tsc"})
-_GIT_READ = frozenset({"status", "diff", "log", "show", "rev-parse", "describe", "branch"})
 _MAKE = frozenset({"test", "check", "lint", "build", "all"})
-_CARGO = frozenset({"test", "check", "build", "clippy", "fmt"})
+_CARGO = frozenset({"test", "check", "build", "clippy"})
 _GO = frozenset({"test", "vet", "build", "fmt"})
-_SIMPLE = frozenset({
-    "pytest", "ruff", "mypy", "pyright", "pylint", "black", "isort", "tsc", "eslint", "prettier",
-    "ls", "cat", "head", "tail", "wc", "pwd", "true", "false", "echo",
-})
+_GO_PKG_RE = re.compile(r"^\.(?:/.*)?$")
+_PY_SCRIPT_RE = re.compile(r".+\.py$")
+_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_NUMERIC_SHORT_RE = re.compile(r"^-[0-9]+$")
+_CLUSTER_RE = re.compile(r"^-[A-Za-z]+$")
+_GIT_FORCE_RE = re.compile(r"(?i)\s(-d|-D|--delete|--force|-f)\b")
 
 _SECRET_RE = re.compile(
     r"(?i)(sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-"
@@ -283,59 +286,267 @@ def _paths_confined(command: str, tokens: list[str]) -> bool:
     return all(_relative_ok(t) for t in alt)
 
 
+@dataclass(frozen=True)
+class _ArgvShape:
+    """Exact argv shape for one allowlisted binary. Unknown flags and extra words fail closed."""
+    verbs: frozenset[str] | None = None
+    run_verb: str | None = None
+    scripts: frozenset[str] | None = None
+    flags: frozenset[str] = frozenset()
+    value_flags: frozenset[str] = frozenset()
+    max_positionals: int = 0
+    min_positionals: int = 0
+    allowed_positionals: frozenset[str] | None = None
+    positional_re: re.Pattern[str] | None = None
+    assign_names: frozenset[str] = frozenset()
+    clustered: bool = False
+    numeric_short: bool = False
+    require_flags: frozenset[str] = frozenset()
+
+
+_LS_FLAGS = frozenset({"-l", "-a", "-1", "-h", "-A", "-F", "-t", "-r", "-d", "-R", "-s"})
+_PYTEST_FLAGS = frozenset({
+    "-q", "-v", "-vv", "-x", "-s", "--quiet", "--verbose", "--tb", "--color", "--no-header",
+    "--cov", "--cov-report",
+})
+_PYTEST_VALUE_FLAGS = frozenset({"-k", "--tb", "--color", "--cov", "--cov-report", "--maxfail"})
+_CARGO_FLAGS = frozenset({
+    "-q", "-v", "-vv", "--quiet", "--verbose", "--offline", "--locked", "--frozen",
+    "--release", "--all", "--workspace", "--lib", "--all-targets", "--all-features",
+    "--no-default-features",
+})
+_GIT_STATUS_FLAGS = frozenset({
+    "-s", "-b", "-v", "-u", "--short", "--branch", "--porcelain", "--verbose", "--show-stash",
+})
+_GIT_DIFF_FLAGS = frozenset({
+    "-u", "-w", "--stat", "--cached", "--staged", "--name-only", "--name-status",
+    "--ignore-all-space", "--quiet", "--color", "--no-color", "--shortstat", "--numstat",
+})
+_GIT_LOG_FLAGS = frozenset({
+    "--oneline", "--stat", "--all", "--decorate", "--graph", "--color", "--no-color",
+    "--reverse", "--name-only", "--quiet",
+})
+_GIT_SHOW_FLAGS = frozenset({
+    "--stat", "--name-only", "--oneline", "--quiet", "--color", "--no-color",
+})
+_NPM_FLAGS = frozenset({"-s", "--silent", "--quiet"})
+_PYTHON_SCRIPT_SHAPE = _ArgvShape(
+    min_positionals=1, max_positionals=1, positional_re=_PY_SCRIPT_RE,
+)
+_SHAPES: dict[str, tuple[_ArgvShape, ...]] = {
+    "pytest": (_ArgvShape(
+        flags=_PYTEST_FLAGS, value_flags=_PYTEST_VALUE_FLAGS, max_positionals=8,
+        assign_names=frozenset({"OUT"}),
+    ),),
+    "ruff": (
+        _ArgvShape(verbs=frozenset({"check"}), max_positionals=8, assign_names=frozenset({"CONFIG"})),
+        _ArgvShape(
+            verbs=frozenset({"format"}), max_positionals=8,
+            flags=frozenset({"--check"}), require_flags=frozenset({"--check"}),
+        ),
+    ),
+    "mypy": (_ArgvShape(max_positionals=8),),
+    "pyright": (_ArgvShape(max_positionals=8),),
+    "pylint": (_ArgvShape(max_positionals=8),),
+    "black": (_ArgvShape(
+        flags=frozenset({"--check", "--diff", "-q", "--quiet"}),
+        require_flags=frozenset({"--check"}), min_positionals=1, max_positionals=8,
+    ),),
+    "isort": (_ArgvShape(
+        flags=frozenset({"--check-only", "--diff", "-q"}),
+        require_flags=frozenset({"--check-only"}), min_positionals=1, max_positionals=8,
+    ),),
+    "tsc": (_ArgvShape(
+        flags=frozenset({"--noEmit", "--pretty"}),
+        require_flags=frozenset({"--noEmit"}), max_positionals=8,
+    ),),
+    "eslint": (_ArgvShape(
+        flags=frozenset({"--quiet", "--max-warnings", "--no-error-on-unmatched-pattern"}),
+        value_flags=frozenset({"--max-warnings"}), max_positionals=8,
+    ),),
+    "prettier": (_ArgvShape(
+        flags=frozenset({"--check", "--ignore-unknown"}),
+        require_flags=frozenset({"--check"}), max_positionals=8,
+    ),),
+    "ls": (_ArgvShape(
+        flags=_LS_FLAGS, max_positionals=8, clustered=True, assign_names=frozenset({"OUT"}),
+    ),),
+    "cat": (_ArgvShape(flags=frozenset({"-n", "-b", "-s"}), min_positionals=1, max_positionals=8),),
+    "head": (_ArgvShape(
+        flags=frozenset({"-q", "-v"}), value_flags=frozenset({"-n", "-c"}),
+        min_positionals=1, max_positionals=8,
+    ),),
+    "tail": (_ArgvShape(
+        flags=frozenset({"-q", "-v"}), value_flags=frozenset({"-n", "-c"}),
+        min_positionals=1, max_positionals=8,
+    ),),
+    "wc": (_ArgvShape(
+        flags=frozenset({"-l", "-c", "-w", "-m", "-L"}), min_positionals=1, max_positionals=8,
+    ),),
+    "pwd": (_ArgvShape(),),
+    "true": (_ArgvShape(),),
+    "false": (_ArgvShape(),),
+    "echo": (_ArgvShape(max_positionals=8),),
+    "make": (_ArgvShape(
+        min_positionals=1, max_positionals=1, allowed_positionals=_MAKE,
+        assign_names=frozenset({"DESTDIR", "PREFIX"}),
+    ),),
+    "cargo": (
+        _ArgvShape(verbs=_CARGO, flags=_CARGO_FLAGS, assign_names=frozenset({"CARGO_HOME"})),
+        _ArgvShape(
+            verbs=frozenset({"fmt"}), flags=_CARGO_FLAGS | frozenset({"--check"}),
+            require_flags=frozenset({"--check"}), assign_names=frozenset({"CARGO_HOME"}),
+        ),
+    ),
+    "go": (_ArgvShape(
+        verbs=_GO, flags=frozenset({"-short", "-v", "-n", "-x", "-race"}),
+        value_flags=frozenset({"-count", "-timeout"}), max_positionals=1,
+        positional_re=_GO_PKG_RE, assign_names=frozenset({"GOPATH"}),
+    ),),
+    "git": (
+        _ArgvShape(verbs=frozenset({"status"}), flags=_GIT_STATUS_FLAGS, max_positionals=8),
+        _ArgvShape(verbs=frozenset({"diff"}), flags=_GIT_DIFF_FLAGS, max_positionals=8),
+        _ArgvShape(
+            verbs=frozenset({"log"}), flags=_GIT_LOG_FLAGS, max_positionals=8, numeric_short=True,
+        ),
+        _ArgvShape(verbs=frozenset({"show"}), flags=_GIT_SHOW_FLAGS, max_positionals=8),
+        _ArgvShape(
+            verbs=frozenset({"rev-parse"}),
+            flags=frozenset({"--abbrev-ref", "--short", "--verify", "--show-toplevel",
+                             "--is-inside-work-tree", "--show-cdup"}),
+            max_positionals=1,
+        ),
+        _ArgvShape(
+            verbs=frozenset({"describe"}),
+            flags=frozenset({"--tags", "--always", "--long", "--dirty", "--all"}),
+            value_flags=frozenset({"--abbrev"}), max_positionals=1,
+        ),
+        _ArgvShape(
+            verbs=frozenset({"branch"}),
+            flags=frozenset({"-a", "-v", "-vv", "-r", "--list", "--all", "--show-current",
+                             "--color", "--no-color"}),
+        ),
+    ),
+    "unittest": (_ArgvShape(flags=frozenset({"-v", "-q", "--verbose", "-b", "-f"})),),
+    "py_compile": (_ArgvShape(
+        min_positionals=1, max_positionals=1, positional_re=_PY_SCRIPT_RE,
+    ),),
+    "compileall": (_ArgvShape(max_positionals=1),),
+}
+_SHAPES.update({name: (
+    _ArgvShape(
+        verbs=frozenset({"test", "run"}), run_verb="run", scripts=_NPM_SCRIPTS, flags=_NPM_FLAGS,
+    ),
+) for name in _NPM})
+
+
+def _parse_closed_argv(rest: list[str], shape: _ArgvShape) -> tuple[set[str], list[str]] | None:
+    """Split rest into (flags, positionals) or None if the argv is outside the shape."""
+    flags: set[str] = set()
+    positionals: list[str] = []
+    i, n = 0, len(rest)
+    while i < n:
+        tok = rest[i]
+        if tok in ("--", "-"):
+            return None
+        assign = _ASSIGN_RE.match(tok)
+        if assign:
+            if assign.group(1) not in shape.assign_names:
+                return None
+            i += 1
+            continue
+        if tok.startswith("-"):
+            name, eq, _val = tok.partition("=")
+            if eq:
+                if name not in shape.value_flags:
+                    return None
+                flags.add(name)
+                i += 1
+                continue
+            if shape.numeric_short and _NUMERIC_SHORT_RE.fullmatch(tok):
+                flags.add(tok)
+                i += 1
+                continue
+            if tok in shape.value_flags:
+                if i + 1 >= n:
+                    return None
+                flags.add(tok)
+                i += 2
+                continue
+            if tok in shape.flags:
+                flags.add(tok)
+                i += 1
+                continue
+            if len(tok) > 2 and tok[1] != "-" and tok[:2] in shape.value_flags:
+                flags.add(tok[:2])
+                i += 1
+                continue
+            if shape.clustered and _CLUSTER_RE.fullmatch(tok):
+                letters = [f"-{c}" for c in tok[1:]]
+                if all(letter in shape.flags for letter in letters):
+                    flags.update(letters)
+                    i += 1
+                    continue
+            return None
+        positionals.append(tok)
+        i += 1
+    return flags, positionals
+
+
+def _matches(tokens: list[str], shape: _ArgvShape) -> bool:
+    parsed = _parse_closed_argv(tokens[1:], shape)
+    if parsed is None:
+        return False
+    flags, positionals = parsed
+    if not shape.require_flags <= flags:
+        return False
+    extras = positionals
+    if shape.verbs is not None:
+        if not positionals or positionals[0] not in shape.verbs:
+            return False
+        extras = positionals[1:]
+        if shape.run_verb and positionals[0] == shape.run_verb:
+            if not extras or extras[0] not in (shape.scripts or frozenset()):
+                return False
+            extras = extras[1:]
+    if len(extras) < shape.min_positionals or len(extras) > shape.max_positionals:
+        return False
+    if shape.allowed_positionals is not None and any(p not in shape.allowed_positionals for p in extras):
+        return False
+    if shape.positional_re is not None and any(not shape.positional_re.fullmatch(p) for p in extras):
+        return False
+    return True
+
+
+def _shape_ok(tokens: list[str]) -> bool:
+    shapes = _SHAPES.get(tokens[0])
+    if not shapes:
+        return False
+    return any(_matches(tokens, shape) for shape in shapes)
+
+
 def _python_ok(tokens: list[str]) -> bool:
     rest = tokens[1:]
     if not rest:
         return False
-    if rest[0] == "-m" and len(rest) >= 2:
-        return rest[1] in _PYTHON_MODULES
-    if rest[0] in ("-c", "-"):
+    if rest[0] == "-m":
+        if len(rest) < 2 or rest[1] not in _PYTHON_MODULES:
+            return False
+        return _shape_ok([rest[1], *rest[2:]])
+    if rest[0].startswith("-"):
         return False
-    script = next((t for t in rest if not t.startswith("-")), "")
-    return bool(script) and script.endswith(".py") and _relative_ok(script)
-
-
-def _npm_ok(tokens: list[str]) -> bool:
-    if len(tokens) < 2:
-        return False
-    sub = tokens[1]
-    if sub in ("test", "run"):
-        if sub == "test":
-            return True
-        return len(tokens) >= 3 and tokens[2] in _NPM_SCRIPTS
-    return False
-
-
-def _git_ok(tokens: list[str]) -> bool:
-    if len(tokens) < 2 or tokens[1].startswith("-"):
-        return False
-    if tokens[1] not in _GIT_READ:
-        return False
-    joined = " ".join(tokens)
-    if re.search(r"(?i)\s(-d|-D|--delete|--force|-f)\b", joined):
-        return False
-    return True
+    return _matches(["python", *rest], _PYTHON_SCRIPT_SHAPE)
 
 
 def _binary_ok(tokens: list[str]) -> bool:
     binary = tokens[0]
     if "/" in binary or "\\" in binary or binary in (".", "..") or binary.startswith("."):
         return False
+    if binary == "git" and _GIT_FORCE_RE.search(" " + " ".join(tokens[1:])):
+        return False
     if binary in _PYTHON:
         return _python_ok(tokens)
-    if binary in _NPM:
-        return _npm_ok(tokens)
-    if binary == "git":
-        return _git_ok(tokens)
-    if binary == "make":
-        return len(tokens) >= 2 and tokens[1] in _MAKE
-    if binary == "cargo":
-        return len(tokens) >= 2 and tokens[1] in _CARGO
-    if binary == "go":
-        return len(tokens) >= 2 and tokens[1] in _GO
-    if binary in _SIMPLE:
-        return True
-    return False
+    return _shape_ok(tokens)
 
 
 def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool = False) -> Eligibility:
