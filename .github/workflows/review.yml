@@ -30,6 +30,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ensure GitHub CLI is on PATH
+        shell: powershell
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\GitHub CLI'
+
       - name: Resolve PR number
         id: pr
         shell: powershell
