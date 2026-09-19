@@ -1,0 +1,99 @@
+name: CI and container images
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: agent-harness-main-deployment
+  # Never interrupt a main deployment between updating code, retagging images, and restarting the daemon.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  SANDBOX_IMAGE: ghcr.io/${{ github.repository_owner }}/agent-harness-sandbox
+  CLI_IMAGE: ghcr.io/${{ github.repository_owner }}/agent-harness-cli
+
+jobs:
+  publish-images:
+    name: publish-images
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish session sandbox
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: sandbox
+          push: true
+          tags: |
+            ${{ env.SANDBOX_IMAGE }}:sha-${{ github.event.workflow_run.head_sha }}
+            ${{ env.SANDBOX_IMAGE }}:py312
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=sandbox
+          cache-to: type=gha,mode=max,scope=sandbox,ignore-error=true
+      - name: Build and publish subscription CLI sandbox
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: sandbox
+          file: sandbox/cli.Dockerfile
+          push: true
+          build-args: SANDBOX_IMAGE=${{ env.SANDBOX_IMAGE }}:sha-${{ github.event.workflow_run.head_sha }}
+          tags: |
+            ${{ env.CLI_IMAGE }}:sha-${{ github.event.workflow_run.head_sha }}
+            ${{ env.CLI_IMAGE }}:1
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=cli
+          cache-to: type=gha,mode=max,scope=cli,ignore-error=true
+
+  deploy-tower:
+    name: deploy-tower
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    needs: publish-images
+    runs-on: [self-hosted, Windows, X64, agent-harness-tower]
+    timeout-minutes: 15
+    environment: tower-production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Sign in to GHCR for this job
+        shell: powershell
+        run: $env:GITHUB_TOKEN | docker login ghcr.io -u $env:GITHUB_ACTOR --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull images, fast-forward the live checkout, and restart
+        shell: powershell
+        run: >-
+          .\ops\harness\deploy-ci.ps1
+          -Commit $env:DEPLOY_COMMIT
+          -ReleaseRoot $env:GITHUB_WORKSPACE
+          -Registry ghcr.io/${{ github.repository_owner }}
+        env:
+          DEPLOY_COMMIT: ${{ github.event.workflow_run.head_sha }}
