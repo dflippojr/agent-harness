@@ -64,14 +64,13 @@ function Test-ReviewRateLimit {
 function Test-ReviewAttemptRateLimit {
     [CmdletBinding()]
     param(
-        [int]$ExitCode,
         [AllowEmptyString()][string]$Stdout,
         [AllowEmptyString()][string]$Stderr,
         [int]$ShortStdoutThreshold = 600
     )
 
     if (Test-ReviewRateLimit -Text $Stderr) { return $true }
-    if ($ExitCode -ne 0 -or $Stdout.Length -lt $ShortStdoutThreshold) {
+    if ($Stdout.Length -lt $ShortStdoutThreshold) {
         return Test-ReviewRateLimit -Text $Stdout
     }
     return $false
@@ -109,14 +108,6 @@ function Get-CompletedReviewText {
     $review = $Text.Substring(0, $match.Index).Trim()
     if ([string]::IsNullOrWhiteSpace($review)) { return $null }
     return $review
-}
-
-function Test-ReviewUnableResponse {
-    [CmdletBinding()]
-    param([AllowEmptyString()][string]$Text)
-
-    return -not [string]::IsNullOrWhiteSpace($Text) -and
-        $Text -match '(?i)\b(?:unable to|cannot|could not)\s+(?:review|inspect|access|read)\b'
 }
 
 function Get-CursorAgentEntrypoint {
@@ -218,10 +209,21 @@ function Invoke-ReviewBackendProcess {
         try {
             $arguments = @($Command.Arguments)
             $previousErrorActionPreference = $ErrorActionPreference
+            # Native pipeline encoding is read from the global preference in
+            # Windows PowerShell 5.1; a function-local assignment is ignored.
+            $previousOutputEncoding = $global:OutputEncoding
+            $previousConsoleOutputEncoding = [Console]::OutputEncoding
+            $previousConsoleInputEncoding = [Console]::InputEncoding
             try {
                 # Windows PowerShell promotes native stderr to error records. Keep
                 # those records redirected without aborting before LASTEXITCODE is read.
                 $ErrorActionPreference = 'Continue'
+                # Windows PowerShell 5.1 otherwise encodes pipeline input as ASCII
+                # and decodes native stdout with the active console code page.
+                $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                $global:OutputEncoding = $utf8NoBom
+                [Console]::OutputEncoding = $utf8NoBom
+                [Console]::InputEncoding = $utf8NoBom
                 if ($null -ne $Command.InputText) {
                     $Command.InputText | & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
                 } else {
@@ -229,6 +231,9 @@ function Invoke-ReviewBackendProcess {
                 }
             } finally {
                 $ErrorActionPreference = $previousErrorActionPreference
+                $global:OutputEncoding = $previousOutputEncoding
+                [Console]::OutputEncoding = $previousConsoleOutputEncoding
+                [Console]::InputEncoding = $previousConsoleInputEncoding
             }
             $exitCode = $LASTEXITCODE
             if ($null -eq $exitCode) { $exitCode = 0 }
@@ -244,7 +249,7 @@ function Invoke-ReviewBackendProcess {
     if (Test-Path -LiteralPath $stdoutPath) { $stdout = [string](Get-Content -Raw -LiteralPath $stdoutPath) }
     if (Test-Path -LiteralPath $stderrPath) { $stderr = [string](Get-Content -Raw -LiteralPath $stderrPath) }
     if ($Command.ResultPath -and (Test-Path -LiteralPath $Command.ResultPath)) {
-        $stdout = [string](Get-Content -Raw -LiteralPath $Command.ResultPath)
+        $stdout = [string](Get-Content -Raw -LiteralPath $Command.ResultPath -Encoding utf8)
     }
     return [pscustomobject]@{
         ExitCode = [int]$exitCode
@@ -277,20 +282,20 @@ function Invoke-ReviewFallback {
             if (-not [string]::IsNullOrWhiteSpace($CursorBase)) { $commandArgs.CursorBase = $CursorBase }
             $command = Get-ReviewBackendCommand @commandArgs
             $attempt = & $Runner $command
-            $rateLimited = Test-ReviewAttemptRateLimit -ExitCode $attempt.ExitCode -Stdout ([string]$attempt.Stdout) -Stderr ([string]$attempt.Stderr)
             $reason = $null
             $completedReview = $null
-            if ($rateLimited) {
-                $reason = 'rate limit or quota response'
-            } elseif ([int]$attempt.ExitCode -ne 0) {
-                $reason = "exit code $($attempt.ExitCode)"
-            } elseif ([string]::IsNullOrWhiteSpace([string]$attempt.Stdout)) {
-                $reason = 'empty output'
-            } elseif (Test-ReviewUnableResponse -Text ([string]$attempt.Stdout)) {
-                $reason = 'backend reported that it was unable to review'
-            } else {
+            if ([int]$attempt.ExitCode -eq 0) {
                 $completedReview = Get-CompletedReviewText -Text ([string]$attempt.Stdout)
-                if ([string]::IsNullOrWhiteSpace([string]$completedReview)) {
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$completedReview)) {
+                $rateLimited = Test-ReviewAttemptRateLimit -Stdout ([string]$attempt.Stdout) -Stderr ([string]$attempt.Stderr)
+                if ($rateLimited) {
+                    $reason = 'rate limit or quota response'
+                } elseif ([int]$attempt.ExitCode -ne 0) {
+                    $reason = "exit code $($attempt.ExitCode)"
+                } elseif ([string]::IsNullOrWhiteSpace([string]$attempt.Stdout)) {
+                    $reason = 'empty output'
+                } else {
                     $reason = 'missing completion marker'
                 }
             }

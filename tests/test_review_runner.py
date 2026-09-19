@@ -261,7 +261,7 @@ $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_p
     assert value["backend"] == "claude"
     assert value["calls"] == ["codex", "claude"]
     assert "Unable to review" not in value["body"]
-    assert "unable to review" in result.stdout.lower()
+    assert "missing completion marker" in result.stdout.lower()
 
 
 def test_all_backends_without_completion_marker_fail(tmp_path):
@@ -307,6 +307,49 @@ Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{tmp_path}' | C
     assert value["ExitCode"] == 7
     assert value["Stdout"].strip() == "review"
     assert "diagnostic" in value["Stderr"]
+
+
+def test_process_launcher_round_trips_unicode_review_and_posts_it(tmp_path):
+    fake_backend = tmp_path / "fake-backend.ps1"
+    fake_backend.write_text(
+        "$utf8 = New-Object System.Text.UTF8Encoding($false)\n"
+        "[Console]::InputEncoding = $utf8\n"
+        "[Console]::OutputEncoding = $utf8\n"
+        "[Console]::Out.Write([Console]::In.ReadToEnd())\n",
+        encoding="ascii",
+    )
+    prompt_path = tmp_path / "prompt.md"
+    prompt = (
+        "- src/caf\u00e9.py:7: \u6f22\u5b57 identifier changed from na\u00efve "
+        "to \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac \u2014 regression.\nREVIEW_STATUS: COMPLETE"
+    )
+    prompt_path.write_text(prompt, encoding="utf-8")
+    output_path = tmp_path / "posted-review.md"
+    result = run_powershell(
+        tmp_path,
+        f"""
+$prompt = Get-Content -Raw -LiteralPath '{prompt_path}' -Encoding utf8
+$command = [pscustomobject]@{{
+    Backend = 'fake'
+    FilePath = (Get-Command powershell.exe).Source
+    Arguments = @('-NoLogo', '-NoProfile', '-File', '{fake_backend}')
+    InputText = $prompt
+    WorkingDirectory = '{tmp_path}'
+    ResultPath = $null
+    Model = $null
+}}
+$attempt = Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{tmp_path}'
+$runner = {{ param($ignored) $attempt }}
+$review = Invoke-ReviewFallback -Backends @('codex') -Workspace '{tmp_path}' -Prompt ignored -ScratchDirectory '{tmp_path}' -Runner $runner
+Write-ReviewResult -Result $review -OutputPath '{output_path}'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    posted = output_path.read_text(encoding="utf-8-sig")
+    assert posted.splitlines()[0] == prompt.splitlines()[0]
+    assert "src/caf\u00e9.py" in posted
+    assert "\u6f22\u5b57 identifier changed from na\u00efve to \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac \u2014 regression" in posted
+    assert "Automated review backend: **codex**." in posted
 
 
 def test_shared_prompt_contains_prefetched_diff(tmp_path):
@@ -390,12 +433,17 @@ $result | ConvertTo-Json -Compress
     assert "rate limit or quota response" in result.stdout
 
 
-def test_long_successful_review_can_discuss_rate_limits_and_quotas(tmp_path):
-    review = (
-        "This review explains why matching rate limit text such as quota exceeded "
-        "inside a pull request is not evidence of a provider failure. "
-    ) * 8
+@pytest.mark.parametrize(
+    "review",
+    [
+        "- src/api.py:9: the rate limit branch drops a completed review.",
+        "- src/api.py:12: quota exceeded is ordinary finding text here.",
+        "- src/auth.py:4: users cannot access the resource after this change.",
+    ],
+)
+def test_completed_review_trigger_words_are_accepted_and_posted(tmp_path, review):
     escaped_review = review.replace("'", "''")
+    output_path = tmp_path / "posted-review.md"
     result = run_powershell(
         tmp_path,
         f"""
@@ -407,14 +455,18 @@ $runner = {{
 REVIEW_STATUS: COMPLETE'; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
-[ordered]@{{ backend = $result.Backend; calls = @($script:calls); length = $result.Output.Length }} | ConvertTo-Json -Compress
+Write-ReviewResult -Result $result -OutputPath '{output_path}'
+[ordered]@{{ backend = $result.Backend; calls = @($script:calls); body = $result.Output }} | ConvertTo-Json -Compress
 """,
     )
     assert result.returncode == 0, output(result)
     value = json.loads(result.stdout.strip().splitlines()[-1])
     assert value["backend"] == "codex"
     assert value["calls"] == ["codex"]
-    assert value["length"] >= 600
+    assert value["body"] == review
+    posted = output_path.read_text(encoding="utf-8-sig")
+    assert review in posted
+    assert "Automated review backend: **codex**." in posted
 
 
 @pytest.mark.parametrize(
