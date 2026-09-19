@@ -39,6 +39,37 @@ trusted `main` workflow code the tower user's filesystem, Docker, credentials, a
 reserved for deployment; tests use `agent-harness-ci`, SonarCloud uses GitHub-hosted Ubuntu, and automated review uses
 the `agent-harness-review` pool.
 
+## Automated review backends
+
+`.github/workflows/review.yml` reviews a pull request once when it is opened and supports explicit re-reviews through
+`workflow_dispatch`. The optional `backend` dispatch input accepts `auto`, `cursor`, `codex`, or `claude`. An explicit
+provider runs only that provider, which is useful for verification and deliberate quota steering. Omitting the input
+or selecting `auto` tries the comma-separated `REVIEW_BACKENDS` repository variable in order. If the variable is empty,
+the order defaults to `codex,claude,cursor`.
+
+The runner falls through that ordered list when a CLI exits non-zero, returns no review, or reports a recognizable
+rate-limit or quota error. The successful backend is included in the PR comment footer and the manually created Check
+Run. Invalid backend names fail closed instead of silently changing provider.
+
+Set `REVIEW_BACKENDS` under repository **Settings > Secrets and variables > Actions > Variables**. For example,
+`claude,codex,cursor` spends Claude quota first while retaining two fallbacks; changing the variable does not require a
+workflow edit.
+
+All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
+with its sandbox enabled, Codex uses a read-only sandbox with approvals disabled, and Claude exposes only
+Read/Grep/Glob plus Bash commands matching `gh pr diff`. The wrapper, rather than a model, writes the final comment
+file. After installing or changing a CLI, verify each backend explicitly against a disposable pull request:
+
+```powershell
+gh workflow run review.yml -f pr_number=N -f backend=cursor
+gh workflow run review.yml -f pr_number=N -f backend=codex
+gh workflow run review.yml -f pr_number=N -f backend=claude
+```
+
+Inspect each run and its PR comment. Record any CLI that is not runnable under the runner service user plainly in the
+pull request verification notes; an interactive desktop login is not evidence that the runner service account is
+authenticated.
+
 `workflow_run` executes the workflow file from the default branch and can access secrets, so its jobs reject every
 event except a successful `CI` run caused by a push whose head branch is `main`. They check out and deploy only the
 reported `head_sha`; they never check out or execute pull-request code. Third-party actions are pinned to exact

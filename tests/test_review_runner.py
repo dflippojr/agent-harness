@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "ops" / "review" / "run-review.ps1"
 WORKFLOW = ROOT / ".github" / "workflows" / "review.yml"
+CI_DOCS = ROOT / "docs" / "CI-CD.md"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
 
 
@@ -205,3 +206,13 @@ def test_workflow_keeps_review_security_and_scheduling_contracts():
     assert "group: review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}" in workflow
     assert "cancel-in-progress: true" in workflow
     assert "types: [opened]" in workflow
+
+
+def test_ci_docs_explain_backend_configuration_and_manual_verification():
+    docs = CI_DOCS.read_text(encoding="utf-8")
+    assert "`REVIEW_BACKENDS`" in docs
+    assert "`codex,claude,cursor`" in docs
+    assert "`backend` dispatch input" in docs
+    for backend in ("cursor", "codex", "claude"):
+        assert f"gh workflow run review.yml -f pr_number=N -f backend={backend}" in docs
+    assert "runner service user" in docs
