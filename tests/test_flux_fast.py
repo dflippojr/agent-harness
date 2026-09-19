@@ -811,6 +811,73 @@ def hanging_comfy():
     return handler
 
 
+def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
+    async def body():
+        m, _, _ = image_manager(tmp_path)
+        interrupt_received = asyncio.Event()
+        deliver_interrupt = asyncio.Event()
+        state = {"prompts": [], "running": "", "interrupted": []}
+
+        async def handler(request: httpx.Request):
+            path = request.url.path
+            if path == "/prompt":
+                prompt_id = f"p{len(state['prompts']) + 1}"
+                state["prompts"].append(prompt_id)
+                state["running"] = prompt_id
+                return httpx.Response(200, json={"prompt_id": prompt_id})
+            if path == "/queue":
+                running = [[0, state["running"]]] if state["running"] else []
+                return httpx.Response(200, json={"queue_running": running, "queue_pending": []})
+            if path == "/interrupt":
+                interrupt_received.set()
+                await deliver_interrupt.wait()
+                if state["running"]:
+                    state["interrupted"].append(state["running"])
+                    state["running"] = ""
+                return httpx.Response(200)
+            if path.startswith("/history/"):
+                prompt_id = path.rsplit("/", 1)[1]
+                if prompt_id in state["interrupted"]:
+                    return httpx.Response(200, json={prompt_id: {
+                        "status": {"status_str": "error", "completed": False, "messages": []}}})
+                if prompt_id == "p2":
+                    state["running"] = ""
+                    return httpx.Response(200, json={prompt_id: {
+                        "status": {"status_str": "success", "completed": True},
+                        "outputs": {"9": {"images": [{"filename": "b.png", "subfolder": "harness",
+                                                           "type": "output"}]}}}})
+                return httpx.Response(200, json={})
+            if path == "/view":
+                return httpx.Response(200, content=PNG)
+            return httpx.Response(404)
+
+        m.images.transport = httpx.MockTransport(handler)
+        await m.start(maintenance=False)
+        first = m.images.submit("cancel A")
+        second = m.images.submit("finish B")
+        for _ in range(100):
+            if state["running"] == "p1":
+                break
+            await asyncio.sleep(0.01)
+        assert state["running"] == "p1"
+
+        cancelling = asyncio.create_task(m.images.cancel(first["id"]))
+        await asyncio.wait_for(interrupt_received.wait(), timeout=2)
+        assert not cancelling.done()
+        assert state["prompts"] == ["p1"]
+
+        deliver_interrupt.set()
+        cancelled = await asyncio.wait_for(cancelling, timeout=2)
+        completed = await asyncio.wait_for(m.images.wait(second["id"]), timeout=2)
+        assert cancelled["status"] == "failed" and cancelled["error"] == "cancelled"
+        assert completed["status"] == "done"
+        assert state["interrupted"] == ["p1"]
+        assert state["prompts"] == ["p1", "p2"]
+        await m.stop()
+
+    asyncio.run(body())
+
+
 def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
     async def body():
         m, server, _ = image_manager(tmp_path)
