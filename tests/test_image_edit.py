@@ -295,6 +295,73 @@ def test_owner_guest_app_authorization(tmp_path):
                            json={"upscale": "2x"}).status_code == 404
 
 
+def test_guest_gallery_limit_is_applied_after_private_filter(tmp_path):
+    m, _, _ = edit_manager(tmp_path)
+    m.cfg.allowed_logins = [LOGIN]
+    m.cfg.guests = [GuestAccess(login="buddy@example.com")]
+
+    def row(iid, operation, created):
+        return {"id": iid, "session_id": "", "source": "owner", "prompt": iid,
+                "model": "fast", "aspect_ratio": "1:1", "resolution": "standard",
+                "width": 64, "height": 64, "seed": created, "parent_id": "",
+                "operation": operation, "status": "done", "created_at": created}
+
+    for image in (row("public-old01", "generate", 1), row("public-old02", "generate", 2),
+                  row("private-new1", "upload", 3), row("private-new2", "edit", 4),
+                  row("private-new3", "upload", 5)):
+        m.db.insert_image(image)
+
+    with TestClient(create_app(m)) as client:
+        guest = client.get("/images?limit=2", headers={"Tailscale-User-Login": "buddy@example.com"})
+        assert guest.status_code == 200
+        assert [image["id"] for image in guest.json()["images"]] == ["public-old02", "public-old01"]
+
+
+def test_delete_queued_image_makes_wait_return_deleted(tmp_path):
+    async def body():
+        m, _, _ = image_manager(tmp_path)
+        job = m.images.submit("delete before the worker starts")
+        result = await m.images.delete(job["id"])
+        assert result == {"deleted": job["id"], "parent_id": ""}
+        assert m.db.get_image(job["id"]) is None
+        assert await m.images.wait(job["id"]) == {"id": job["id"], "status": "deleted"}
+
+    asyncio.run(body())
+
+
+def test_delete_running_image_waits_for_worker_before_removing_files(tmp_path):
+    async def body():
+        m, _, _ = image_manager(tmp_path)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_generate(job, started_at):
+            started.set()
+            await release.wait()
+            return png_rgb()
+
+        async def no_interrupt():
+            return None
+
+        m.images._run_generate = slow_generate
+        m.images.comfy.interrupt = no_interrupt
+        await m.start(maintenance=False)
+        job = m.images.submit("delete while running")
+        await asyncio.wait_for(started.wait(), timeout=2)
+        deleting = asyncio.create_task(m.images.delete(job["id"]))
+        await asyncio.sleep(0)
+        assert not deleting.done()
+        release.set()
+        result = await asyncio.wait_for(deleting, timeout=2)
+        assert result == {"deleted": job["id"], "parent_id": ""}
+        assert m.db.get_image(job["id"]) is None
+        assert not m.images.path(job).exists()
+        assert await m.images.wait(job["id"]) == {"id": job["id"], "status": "deleted"}
+        await m.stop()
+
+    asyncio.run(body())
+
+
 def test_household_member_cannot_reach_any_edit_data_or_route(tmp_path):
     member_login = "member@example.com"
     m, _, _ = edit_manager(tmp_path)
@@ -379,7 +446,7 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
         live = m.images.path(done)
         archived = backup / live.name
         archived.write_bytes(live.read_bytes())
-        m.images.delete(done["id"], backup_dir=tmp_path / "backups")
+        await m.images.delete(done["id"], backup_dir=tmp_path / "backups")
         assert m.db.get_image(done["id"]) is None
         assert not live.exists()
         assert archived.exists()

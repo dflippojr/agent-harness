@@ -588,9 +588,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def list_images(request: Request, limit: int = 60):
         from . import image_edit
         svc = images_service(request)
-        images = svc.db.list_images(limit=limit)
-        if request.state.access.role == "guest":
-            images = [img for img in images if not image_edit.is_private(img)]
+        visible_operations = tuple(image_edit.PUBLIC_OPERATIONS) if request.state.access.role == "guest" else ()
+        images = svc.db.list_images(limit=limit, operations=visible_operations)
         status = await asyncio.to_thread(svc.status)
         return {"status": status, "images": images}
 
@@ -666,7 +665,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
         backup = Path(mgr(request).cfg.backup.dir) if mgr(request).cfg.backup.dir else None
         try:
-            return svc.delete(job["id"], backup_dir=backup)
+            return await svc.delete(job["id"], backup_dir=backup)
         except ToolError as e:
             raise HarnessError(404, str(e))
 

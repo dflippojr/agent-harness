@@ -571,6 +571,7 @@ class ImageService:
             asyncio.get_running_loop().create_task(self._stop_stray())
             for job in self.db.list_images(status=("queued", "running")):  # interrupted by a daemon restart
                 self.db.update_image(job["id"], status="queued")
+                self._done.setdefault(job["id"], asyncio.Event())
                 self.queue.put_nowait(job["id"])
             for job in self.db.list_images(limit=500):
                 if job["status"] != "done":
@@ -814,11 +815,13 @@ class ImageService:
         return self.db.get_image(job["id"])
 
     async def wait(self, job_id: str) -> dict:
-        event = self._done.setdefault(job_id, asyncio.Event())
         while True:
             job = self.db.get_image(job_id)
+            if job is None:
+                return {"id": job_id, "status": "deleted"}
             if job["status"] in ("done", "failed", "cancelled"):
                 return job
+            event = self._done.setdefault(job_id, asyncio.Event())
             try:
                 await asyncio.wait_for(event.wait(), timeout=10)
             except asyncio.TimeoutError:
@@ -913,14 +916,21 @@ class ImageService:
             event.set()
         return self.db.get_image(job_id)
 
-    def delete(self, job_id: str, *, backup_dir: Path | None = None) -> dict:
+    async def delete(self, job_id: str, *, backup_dir: Path | None = None) -> dict:
         """Remove this live row and its files. Never walks a backup/archive directory."""
         job = self.db.get_image(job_id)
         if job is None:
             raise ToolError("no such image")
+        event = self._done.get(job_id)
         if job["status"] in ("queued", "running"):
             self.cancel(job_id)
-            job = self.db.get_image(job_id)
+        current = self.db.get_image(job_id)
+        worker_can_touch_files = self.active_job == job_id or bool(
+            current and current["status"] in ("queued", "running"))
+        if worker_can_touch_files:
+            event = event or self._done.setdefault(job_id, asyncio.Event())
+            await event.wait()
+        job = self.db.get_image(job_id) or job
         backup_root = backup_dir.resolve() if backup_dir is not None else None
         for path in self._job_files(job):
             if not path.exists():
@@ -1140,6 +1150,10 @@ class ImageService:
                 content = await self._run_edit(job, started)
             else:
                 content = await self._run_generate(job, started)
+            if job_id in self._cancel:
+                status = "cancelled" if job.get("operation") == image_edit.OPERATION_EDIT else "failed"
+                self.db.update_image(job_id, status=status, finished_at=time.time(), error="cancelled")
+                return
             self.images_dir.mkdir(parents=True, exist_ok=True)
             canonical = self.path(job)
             partial = canonical.with_name(canonical.name + ".partial")

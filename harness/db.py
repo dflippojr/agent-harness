@@ -881,11 +881,17 @@ class Database:
         with self.lock:
             return self.conn.execute("DELETE FROM images WHERE id = ?", (iid,)).rowcount == 1
 
-    def list_images(self, limit: int = 60, status: tuple = ()) -> list[dict]:
+    def list_images(self, limit: int = 60, status: tuple = (), operations: tuple = ()) -> list[dict]:
         query, params = "SELECT * FROM images", []
+        clauses = []
         if status:
-            query += f" WHERE status IN ({','.join('?' * len(status))})"
-            params = list(status)
+            clauses.append(f"status IN ({','.join('?' * len(status))})")
+            params.extend(status)
+        if operations:
+            clauses.append(f"COALESCE(operation, 'generate') IN ({','.join('?' * len(operations))})")
+            params.extend(operations)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
         return [self._image_row(r) for r in rows]
