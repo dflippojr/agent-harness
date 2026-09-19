@@ -18,6 +18,8 @@ MODULE_NAMES = (
 )
 # Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
 OPT_IN_MODULES = frozenset({"image_edit"})
+# extra_model_paths root shared by installer, doctor, and image components (Z-Image / quality / image_edit).
+DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
 # Optional modules whose on/off switch is ``cfg.<section>.enabled``. The rest
 # (local_model, homelab, runners) are install-selected only.
 MODULE_ENABLE_SECTIONS = {
@@ -246,7 +248,7 @@ class ImagesConfig:
     enabled: bool = False
     edit_enabled: bool = False                 # optional Qwen-Image-Edit; never implied by images.enabled
     comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
-    models_dir: str = "C:/AI/comfy-models"    # extra_model_paths root (diffusion_models / text_encoders / vae)
+    models_dir: str = DEFAULT_IMAGES_MODELS_DIR  # extra_model_paths root (diffusion_models / text_encoders / vae)
     port: int = 8188
     work_dir: str = "D:/Agents/harness/images-work"  # ComfyUI output/temp and the harness's PNGs (images/)
     log_dir: str = "D:/Agents/harness/logs"
@@ -473,6 +475,16 @@ def _load_guests(raw) -> list[GuestAccess]:
         elif isinstance(item, dict) and str(item.get("login") or "").strip():
             guests.append(GuestAccess(login=str(item["login"]).strip(), until=str(item.get("until") or "").strip()))
     return guests
+
+
+def resolve_images_models_dir(cfg=None) -> Path:
+    """Single models root used by installer, daemon, doctor, and image components."""
+    configured = getattr(cfg, "models_dir", None) if cfg is not None else None
+    return Path(configured or DEFAULT_IMAGES_MODELS_DIR)
+
+
+def images_models_dir_matches(left: str | Path, right: str | Path) -> bool:
+    return Path(left).as_posix().rstrip("/").casefold() == Path(right).as_posix().rstrip("/").casefold()
 
 
 def _read_yaml(path: Path) -> dict:

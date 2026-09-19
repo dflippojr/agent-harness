@@ -236,6 +236,10 @@ $configDir = Join-Path $InstallDir 'config'
 $logDir = Join-Path $InstallDir 'logs'
 $pauseFlag = Join-Path $InstallDir 'llama-server.paused'
 $serverUrl = if ($ExistingServer) { $ExistingServer.TrimEnd('/') } else { "http://127.0.0.1:$ServerPort" }
+# Same extra_model_paths root as harness.config.DEFAULT_IMAGES_MODELS_DIR / images.models_dir.
+$DefaultImagesModelsDir = 'C:\AI\comfy-models'
+$modelsRoot = if (Test-Path -LiteralPath $DefaultImagesModelsDir) { $DefaultImagesModelsDir } else { Join-Path $InstallDir 'comfy-models' }
+$modelsRootPosix = ([string]$modelsRoot).Replace('\', '/')
 Act "write config in $configDir" {
     $genArgs = @('-m', 'harness.setup_config', '--config-dir', $configDir, '--data-dir', $DataDir, '--model', $Model,
         '--profile', $EffectiveProfile.ToLowerInvariant(), '--port', "$Port", '--llama-url', $serverUrl,
@@ -243,6 +247,9 @@ Act "write config in $configDir" {
     foreach ($module in $EnableModules) { $genArgs += @('--enable-module', $module) }
     if ($ExistingServer -or -not $NeedsLocalModel) { $genArgs += '--no-gpu-guard' }
     if ($Force) { $genArgs += '--force' }
+    if ($EnableModules -contains 'image_edit' -and $modelsRootPosix -ne 'C:/AI/comfy-models') {
+        $genArgs += @('--images-models-dir', $modelsRoot)
+    }
     Push-Location $AppDir; try { & $python @genArgs } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { Die 'writing the config failed' }
 }
@@ -302,7 +309,6 @@ if ($EnableModules -contains 'image_edit') {
     $editRev = '7d41107b653d3039be20972fb82398b01b3213eb'
     $editSha = '393c6743d1de2e9031b5197027b36116f2096958ccc0223526d34e1860266021'
     $editUrl = "https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/$editRev/split_files/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"
-    $modelsRoot = if (Test-Path 'C:\AI\comfy-models') { 'C:\AI\comfy-models' } else { Join-Path $InstallDir 'comfy-models' }
     $editDest = Join-Path $modelsRoot 'diffusion_models\qwen_image_edit_fp8_e4m3fn.safetensors'
     Info "artifact sha256 $editSha (revision $editRev)"
     if ($DryRun) {

@@ -276,8 +276,18 @@ fi
 
 step "Configuration"
 server_url=${existing_server:-"http://127.0.0.1:$server_port"}
+# Same extra_model_paths root as harness.config.DEFAULT_IMAGES_MODELS_DIR / images.models_dir.
+default_images_models_dir="C:/AI/comfy-models"
+if [[ -d $default_images_models_dir ]]; then
+    models_root=$default_images_models_dir
+else
+    models_root="$install_dir/comfy-models"
+fi
 if [[ $dry_run -eq 1 ]]; then
     info "[dry run] write config in $config_dir"
+    if contains_module image_edit && [[ $models_root != "$default_images_models_dir" ]]; then
+        info "[dry run] images.models_dir $models_root"
+    fi
 else
     mkdir -p "$config_dir" "$data_dir" "$log_dir" "$bin_dir"
     config_args=(-m harness.setup_config --config-dir "$config_dir" --data-dir "$data_dir" --model "$model"
@@ -289,6 +299,9 @@ else
     fi
     [[ -n $existing_server || $needs_local -eq 0 ]] && config_args+=(--no-gpu-guard)
     [[ $force -eq 1 ]] && config_args+=(--force)
+    if contains_module image_edit && [[ $models_root != "$default_images_models_dir" ]]; then
+        config_args+=(--images-models-dir "$models_root")
+    fi
     (cd "$app_dir" && "$python" "${config_args[@]}")
     install -m 0755 "$script_dir/run-daemon.sh" "$bin_dir/run-daemon.sh"
     [[ $needs_local -eq 1 && -z $existing_server ]] && install -m 0755 "$script_dir/run-server.sh" "$bin_dir/run-server.sh"
@@ -299,11 +312,10 @@ if contains_module image_edit; then
     edit_rev=7d41107b653d3039be20972fb82398b01b3213eb
     edit_sha=393c6743d1de2e9031b5197027b36116f2096958ccc0223526d34e1860266021
     edit_url="https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/$edit_rev/split_files/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"
-    models_root="$install_dir/comfy-models"
     edit_dest="$models_root/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"
     info "artifact sha256 $edit_sha (revision $edit_rev)"
     if [[ $dry_run -eq 1 ]]; then
-        info "[dry run] download $edit_url"
+        info "[dry run] download $edit_url -> $edit_dest"
     else
         download "$edit_url" "$edit_dest"
         got=$(sha256sum "$edit_dest" | awk '{print $1}')

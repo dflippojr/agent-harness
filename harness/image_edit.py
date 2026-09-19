@@ -12,7 +12,7 @@ import io
 import threading
 from pathlib import Path
 
-from .config import ImagesConfig
+from .config import ImagesConfig, resolve_images_models_dir
 from .fileops import ToolError
 
 EDIT_MODEL_ID = "edit"
@@ -63,7 +63,7 @@ QWEN_EDIT_NEGATIVE = " "
 
 
 def models_dir(cfg: ImagesConfig) -> Path:
-    return Path(cfg.models_dir or (Path(cfg.comfy_dir) / "models"))
+    return resolve_images_models_dir(cfg)
 
 
 def find_asset(root: Path, spec: dict) -> Path | None:

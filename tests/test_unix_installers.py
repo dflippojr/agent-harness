@@ -103,6 +103,34 @@ def test_linux_image_edit_opt_in_is_documented_and_not_default(tmp_path):
     assert "Qwen-Image-Edit" in opted.stdout
     assert "393c6743d1de2e9031b5197027b36116f2096958ccc0223526d34e1860266021" in opted.stdout
     assert "qwen_image_edit_fp8_e4m3fn.safetensors" in opted.stdout
+    stdout = opted.stdout.replace("\\", "/")
+    assert "comfy-models/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors" in stdout
+    fallback = (tmp_path / "install" / "comfy-models").as_posix()
+    if fallback in stdout:
+        assert f"images.models_dir {fallback}" in stdout
+
+
+def test_installers_share_images_models_dir_with_daemon_and_doctor():
+    from harness.config import DEFAULT_IMAGES_MODELS_DIR, ImagesConfig, resolve_images_models_dir
+    from harness.images_models import models_dir as flux_models_dir
+    from harness import image_edit
+
+    default = resolve_images_models_dir(ImagesConfig())
+    assert default == Path(DEFAULT_IMAGES_MODELS_DIR)
+    assert image_edit.models_dir(ImagesConfig()) == default
+    assert flux_models_dir(ImagesConfig()) == default
+
+    ps1 = (ROOT / "install/install.ps1").read_text(encoding="utf-8")
+    sh = (ROOT / "install/install.sh").read_text(encoding="utf-8")
+    assert "--images-models-dir" in ps1 and "--images-models-dir" in sh
+    assert "DefaultImagesModelsDir = 'C:\\AI\\comfy-models'" in ps1
+    assert "Join-Path $InstallDir 'comfy-models'" in ps1
+    assert 'default_images_models_dir="C:/AI/comfy-models"' in sh
+    assert 'models_root="$install_dir/comfy-models"' in sh
+    assert "$modelsRoot 'diffusion_models\\qwen_image_edit_fp8_e4m3fn.safetensors'" in ps1
+    assert 'edit_dest="$models_root/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"' in sh
+    # Other installer-fetched artifacts (GGUF under $InstallDir/models, Docker images) do not use images.models_dir.
+    assert "qwen_image_edit" in ps1 and "qwen_image_edit" in sh
 
 
 def test_unix_hosted_provider_login_matches_isolation_contract():

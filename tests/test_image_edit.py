@@ -109,6 +109,33 @@ def test_full_profile_does_not_enable_image_edit_by_default(tmp_path):
     assert enabled.modules.image_edit and enabled.images.edit_enabled and enabled.modules.images
 
 
+def test_setup_config_records_non_default_images_models_dir(tmp_path):
+    from harness.config import DEFAULT_IMAGES_MODELS_DIR, resolve_images_models_dir
+    from harness.images_models import models_dir as flux_models_dir
+
+    custom = tmp_path / "opt" / "comfy-models"
+    args = ["--config-dir", str(tmp_path / "cfg"), "--data-dir", str(tmp_path / "data"), "--model", "gpt-oss",
+            "--pause-flag", str(tmp_path / "paused"), "--enable-module", "image_edit",
+            "--images-models-dir", str(custom)]
+    assert setup_config.main(args) == 0
+    cfg = config.load(tmp_path / "cfg")
+    assert Path(cfg.images.models_dir).resolve() == custom.resolve()
+    assert image_edit.models_dir(cfg.images).resolve() == custom.resolve()
+    assert flux_models_dir(cfg.images).resolve() == custom.resolve()
+    assert resolve_images_models_dir(cfg.images).resolve() == custom.resolve()
+    yaml_text = (tmp_path / "cfg" / "harness.yaml").read_text(encoding="utf-8")
+    assert "models_dir:" in yaml_text and DEFAULT_IMAGES_MODELS_DIR not in yaml_text.split("images:", 1)[-1]
+
+    default_dir = tmp_path / "cfg-default"
+    setup_config.main(["--config-dir", str(default_dir), "--data-dir", str(tmp_path / "data2"), "--model", "gpt-oss",
+                       "--pause-flag", str(tmp_path / "paused"), "--enable-module", "image_edit",
+                       "--images-models-dir", DEFAULT_IMAGES_MODELS_DIR])
+    default_cfg = config.load(default_dir)
+    assert default_cfg.images.models_dir == DEFAULT_IMAGES_MODELS_DIR
+    default_yaml = (default_dir / "harness.yaml").read_text(encoding="utf-8")
+    assert "models_dir" not in default_yaml
+
+
 def test_edit_status_is_setup_guidance_without_assets(tmp_path):
     m, _, _ = image_manager(tmp_path)
     m.images.cfg.models_dir = str(tmp_path / "missing-models")

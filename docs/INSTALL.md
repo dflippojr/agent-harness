@@ -50,7 +50,10 @@ Docker (Docker Desktop on Windows/macOS) and at least one provider login are the
 and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example
 `-EnableModules jobs,backup`. `endpoint`, `images`, `image_edit`, and `gpu_guard` automatically opt into `local_model` and restore
 the GPU/model requirements. `image_edit` is a separate ~20 GB Qwen-Image-Edit download; ordinary installs and daemon
-upgrades never fetch it. The complete module catalog and security boundary are in
+upgrades never fetch it. Those weights go in `images.models_dir` (default `C:/AI/comfy-models`, the same root as
+Z-Image/quality). If that directory is missing, the installer uses `<InstallDir>/comfy-models` and writes
+`images.models_dir` into the generated config so `python -m harness.doctor` and the daemon look in the same place.
+The complete module catalog and security boundary are in
 [`service-profile.md`](service-profile.md).
 
 On an existing install, `-Profile Service` writes only `config\profile.yaml`; it preserves `harness.yaml`, local
@@ -189,7 +192,7 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Pause for games / Plex transcodes | `gpu_guard` (on by default) | nothing |
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |
-| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`). Optional `quality-fast` needs the pinned Lightning LoRA in `models_dir/loras/` (`python -m harness.doctor` prints the filename, size, SHA-256, and path); optional `flux-fast` is installed with `ops/images-models.ps1` (`docs/flux-fast.md`). Optional Real-ESRGAN 2×/4× weights; generation still works without them. |
+| Image generation | `images` | ComfyUI portable + models in `images.models_dir` (`docs/phase6d-results.md`). Optional `quality-fast` needs the pinned Lightning LoRA in `models_dir/loras/` (`python -m harness.doctor` prints the filename, size, SHA-256, and path); optional `flux-fast` is installed with `ops/images-models.ps1` (`docs/flux-fast.md`). Optional `image_edit` stores Qwen-Image-Edit in that same `models_dir`. Optional Real-ESRGAN 2×/4× weights live under `images.upscale_dir` or `<comfy_dir>/ComfyUI/models/upscale_models`; generation still works without them. |
 | Claude / Codex / Cursor as session backends | `backends` | `ops/backends/login.sh <backend>` on Unix or `login.ps1` on Windows (`docs/phase8a-design.md`) |
 | Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
 | Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |
