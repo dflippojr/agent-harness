@@ -465,8 +465,12 @@ class ComfyProcess:
 class ImageService:
     tool_names = TOOLS
 
-    def __init__(self, cfg: ImagesConfig, db, runner, control, notify=None, archive=None):
+    def __init__(self, cfg: ImagesConfig, db, runner, control, notify=None, archive=None,
+                 edit_enabled: bool | None = None):
         self.cfg = cfg
+        # ``cfg.edit_enabled`` is the configured switch. Manager supplies the
+        # installed-AND-enabled state so an uninstalled component can never run.
+        self.edit_enabled = bool(cfg.edit_enabled if edit_enabled is None else edit_enabled)
         self.control = control         # gpu_guard.ServerControl for the language model server
         self.db = db
         self.runner = runner
@@ -590,7 +594,7 @@ class ImageService:
                     except ToolError as e:
                         log.warning("could not recover upscale for %s: %s", job["id"], e)
             self._schedule_flux_verify()
-            if self.cfg.edit_enabled:
+            if self.edit_enabled:
                 self.edit_status()
             self._task = asyncio.create_task(self._loop(), name="images")
 
@@ -659,7 +663,7 @@ class ImageService:
 
     def edit_status(self) -> dict:
         report = image_edit.public_status(self.cfg)
-        report["enabled"] = bool(self.cfg.edit_enabled)
+        report["enabled"] = self.edit_enabled
         if report.get("verifying"):
             self._schedule_edit_verify()
         with self._edit_verify_lock:
@@ -669,7 +673,7 @@ class ImageService:
         if error and not in_flight:
             report.update({"available": False, "verifying": False,
                            "setup": f"Verification failed: {error}. Verification will retry automatically."})
-        elif not self.cfg.edit_enabled:
+        elif not self.edit_enabled:
             report["setup"] = image_edit.SETUP_GUIDANCE
         return report
 
@@ -858,7 +862,7 @@ class ImageService:
 
     def _require_edit(self) -> dict:
         status = self.edit_status()
-        if not self.cfg.edit_enabled or not status["available"]:
+        if not self.edit_enabled or not status["available"]:
             raise ToolError(status["setup"] or image_edit.SETUP_GUIDANCE)
         return status
 

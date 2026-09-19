@@ -637,7 +637,6 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     web.enabled = module_enabled("web", web.enabled)
     endpoint.enabled = module_enabled("endpoint", endpoint.enabled)
     images.enabled = module_enabled("images", images.enabled) or selected.image_edit
-    images.edit_enabled = bool(selected.image_edit)
     search.enabled = module_enabled("search", search.enabled)
     jobs.enabled = module_enabled("jobs", jobs.enabled)
     skills.enabled = module_enabled("skills", skills.enabled)
@@ -647,7 +646,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         homelab=selected.homelab,
         memory_library=memory_library.enabled,
         images=images.enabled,
-        image_edit=images.edit_enabled,
+        image_edit=selected.image_edit and images.edit_enabled,
         jobs=jobs.enabled,
         gpu_guard=gpu_guard.enabled,
         runners=selected.runners,

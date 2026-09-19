@@ -67,6 +67,7 @@ def stub_edit_assets(tmp_path: Path, cfg) -> Path:
 def edit_manager(tmp_path):
     m, server, state = image_manager(tmp_path)
     stub_edit_assets(tmp_path, m.images.cfg)
+    m.images.edit_enabled = True
     return m, server, state
 
 
@@ -115,8 +116,11 @@ def test_full_profile_does_not_enable_image_edit_by_default(tmp_path):
     assert setup_config.main(args) == 0
     cfg = config.load(tmp_path / "cfg")
     assert not cfg.modules.image_edit and not cfg.images.edit_enabled
-    setup_config.main(args + ["--enable-module", "image_edit"])
-    enabled = config.load(tmp_path / "cfg")
+    enabled_args = ["--config-dir", str(tmp_path / "enabled-cfg"), "--data-dir", str(tmp_path / "enabled-data"),
+                    "--model", "gpt-oss", "--pause-flag", str(tmp_path / "enabled-paused"),
+                    "--enable-module", "image_edit"]
+    setup_config.main(enabled_args)
+    enabled = config.load(tmp_path / "enabled-cfg")
     assert enabled.modules.image_edit and enabled.images.edit_enabled and enabled.modules.images
 
 
@@ -591,6 +595,7 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
 
         fail_m, _, fail_state = image_manager(tmp_path / "fail", fail_prompts=("broken edit",))
         stub_edit_assets(tmp_path / "fail", fail_m.images.cfg)
+        fail_m.images.edit_enabled = True
         parent3 = fail_m.images.ingest_upload(png_rgb())
         failed = fail_m.images.submit_edit(parent3["id"], "broken edit", png_mask())
         await fail_m.start(maintenance=False)

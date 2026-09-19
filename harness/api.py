@@ -561,8 +561,10 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             children = [child for child in children if not image_edit.is_private(child)]
         eligibility = image_edit.edit_eligibility(
             job.get("width"), job.get("height"), max_pixels=svc.cfg.max_pixels)
+        editable = svc.edit_enabled and eligibility["editable"]
+        editable_reason = eligibility["reason"] if svc.edit_enabled else svc.edit_status().get("setup", "")
         return {**job, "service": status, "private": image_edit.is_private(job),
-                "editable": eligibility["editable"], "editable_reason": eligibility["reason"],
+                "editable": editable, "editable_reason": editable_reason,
                 "parent": ({"id": parent["id"], "width": parent["width"], "height": parent["height"]}
                            if parent else None),
                 "children": [{"id": child["id"], "operation": child.get("operation") or "generate",
