@@ -246,24 +246,18 @@ def _secretish(text: str) -> bool:
     return bool(_SECRET_RE.search(text))
 
 
-def _relative_ok(token: str) -> bool:
-    """True when a token cannot name a path outside /workspace or /tmp.
+_OPTION_SEPS = re.compile(r"[=:,]")
 
-    Fail closed on home/drive/UNC/env expansion and any `..` segment. Prefix
-    allowlists for /workspace and /tmp are applied only after those checks, so
-    `/workspace/../etc` is not treated as workspace-confined. `VAR=value` and
-    `--flag=value` tokens are judged by the value, so `DESTDIR=/etc` cannot skip
-    the absolute-path and `..` checks.
-    """
-    if token.startswith("-") and "=" not in token:
+
+def _path_piece_ok(piece: str) -> bool:
+    """True when one path fragment cannot name a location outside /workspace or /tmp."""
+    if not piece:
         return True
-    if "=" in token:
-        token = token.split("=", 1)[1]
-        if not token:
-            return True
-    if _SUBST_RE.search(token) or _WIN_ENV_RE.search(token) or _BRACE_RE.search(token):
+    if piece.startswith("-") and _OPTION_SEPS.search(piece) is None:
+        return True
+    if _SUBST_RE.search(piece) or _WIN_ENV_RE.search(piece) or _BRACE_RE.search(piece):
         return False
-    path = token.replace("\\", "/")
+    path = piece.replace("\\", "/")
     if path.startswith("~"):
         return False
     if _DRIVE_RE.match(path):
@@ -275,6 +269,23 @@ def _relative_ok(token: str) -> bool:
     if path.startswith("/"):
         return path == "/workspace" or path.startswith("/workspace/") or path == "/tmp" or path.startswith("/tmp/")
     return True
+
+
+def _relative_ok(token: str) -> bool:
+    """True when a token cannot name a path outside /workspace or /tmp.
+
+    Fail closed on home/drive/UNC/env expansion and any `..` segment. Prefix
+    allowlists for /workspace and /tmp are applied only after those checks, so
+    `/workspace/../etc` is not treated as workspace-confined. `VAR=value` and
+    `--flag=value` tokens are judged by every `=`, `:`, and `,` piece, so
+    `DESTDIR=/etc` and `--cov-report=html:../out` cannot skip the absolute-path
+    and `..` checks.
+    """
+    if token.startswith("-") and _OPTION_SEPS.search(token) is None:
+        return True
+    if not _path_piece_ok(token):
+        return False
+    return all(_path_piece_ok(piece) for piece in _OPTION_SEPS.split(token) if piece)
 
 
 def _paths_confined(command: str, tokens: list[str]) -> bool:

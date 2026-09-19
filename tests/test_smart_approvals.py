@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from harness.policy import ALLOW, ASK, DENY, Policy
 from harness.smart_approvals import (
     BLOCKING_FLAGS, RISK_FLAGS, SmartConfig, SmartReviewer, _relative_ok, assess_eligibility,
@@ -568,6 +570,57 @@ def test_assignment_tokens_cannot_escape_workspace():
     assert _relative_ok("-n")
 
 
+@pytest.mark.parametrize("token,ok", [
+    ("README.md", True),
+    ("-n", True),
+    ("FOO=bar", True),
+    ("DEBUG=1", True),
+    ("DESTDIR=/workspace/out", True),
+    ("DESTDIR=/tmp/out", True),
+    ("--cov=src", True),
+    ("--cov-report=xml", True),
+    ("--cov-report=html", True),
+    ("--cov-report=term-missing", True),
+    ("--cov-report=html:/workspace/out", True),
+    ("--cov-report=html,/workspace/out", True),
+    ("--cov-report=html:../out", False),
+    ("--cov-report=xml:/etc/x", False),
+    ("--cov-report=html,xml:/etc/x", False),
+    ("html:../out", False),
+    ("xml:/etc/x", False),
+    ("DESTDIR=/etc", False),
+    ("DESTDIR=../outside", False),
+    ("CARGO_HOME=../.ssh", False),
+    ("GOPATH=/etc", False),
+    ("OUT=C:/Windows", False),
+    ("C:secrets.txt", False),
+    ("C:/Users/me/secrets.txt", False),
+    ("--config=~/.ruff.toml", False),
+    ("foo/..", False),
+    ("/workspace/../etc", False),
+])
+def test_relative_ok_splits_equals_colon_and_comma(token, ok):
+    """Option values hide `/` and `..` unless every `=`, `:`, and `,` piece is checked."""
+    assert _relative_ok(token) is ok
+
+
+@pytest.mark.parametrize("command,ok", [
+    ("pytest --cov=src --cov-report=xml", True),
+    ("pytest --cov-report=html", True),
+    ("pytest --cov-report=html:/workspace/out", True),
+    ("pytest --cov-report=html:../out", False),
+    ("pytest --cov-report=xml:/etc/x", False),
+    ("pytest --cov-report=html,xml:/etc/x", False),
+    ("pytest --cov-report html:../out", False),
+    ("pytest --cov-report xml:/etc/passwd", False),
+])
+def test_cov_report_type_path_values_stay_workspace_confined(command, ok):
+    el = _ask(command)
+    assert el.ok is ok, (command, el.reason)
+    if not ok:
+        assert el.reason == "path escapes workspace", (command, el.reason)
+
+
 def test_closed_argv_grammar_allows_only_exact_shapes():
     """Each allowlisted tool has a closed argv shape: verb, flag whitelist, bound positionals.
 
@@ -928,6 +981,32 @@ def test_owner_settings_and_live_disable(tmp_path):
         assert m2.runner.smart.calls == []
         await m2.stop()
     asyncio.run(disabled_claude())
+
+
+def test_member_gets_403_on_every_smart_approvals_route(tmp_path):
+    """Household members must not read or change process-wide smart-approval mode.
+
+    This PR's HTTP surface is GET/PUT /smart-approvals (and the admin alias).
+    There are no shadow/eval or allowlist HTTP endpoints; those stay in-process.
+    """
+    from test_household import ALICE, H, OWNER, create_member, household
+    client, _mgr = household(tmp_path)
+    with client:
+        create_member(client, ALICE, "Alice")
+        ah = H(ALICE)
+        routes = (
+            ("GET", "/smart-approvals", None),
+            ("PUT", "/smart-approvals", {"mode": "auto"}),
+            ("GET", "/api/admin/v1/smart-approvals", None),
+            ("PUT", "/api/admin/v1/smart-approvals", {"mode": "auto"}),
+        )
+        for method, path, body in routes:
+            response = client.request(method, path, headers=ah, json=body)
+            assert response.status_code == 403, (method, path, response.text)
+            assert "mode" not in response.json()
+        owner = client.get("/smart-approvals", headers=H(OWNER))
+        assert owner.status_code == 200
+        assert owner.json()["mode"] in ("off", "shadow", "auto")
 
 
 def test_hosted_complete_does_not_trust_env_proxy(monkeypatch):

@@ -28,10 +28,11 @@ RUNNER_PREFIX = "/runners/"
 MEMBER_FORBIDDEN_PREFIXES = (
     "/keys", "/metrics", "/maintenance", "/jobs", "/images", "/gpu",
     "/remote-control", "/memory", "/templates", "/notify", "/pairing-codes",
-    "/runner-pairing-codes", "/api/admin", "/api/v1/images", "/api/v1/remote-control",
+    "/runner-pairing-codes", "/smart-approvals", "/api/admin", "/api/v1/images",
+    "/api/v1/remote-control",
 )
 MEMBER_FORBIDDEN_EXACT = frozenset({"/keys", "/metrics", "/maintenance", "/jobs", "/images", "/gpu",
-                                    "/memory", "/templates", "/notify/test"})
+                                    "/memory", "/templates", "/notify/test", "/smart-approvals"})
 
 
 def resolve_access(cfg, login: str | None, db=None) -> Access:
@@ -90,6 +91,8 @@ def member_forbidden(access: Access, method: str, path: str) -> str | None:
             return "members cannot use notifications"
         if path.startswith("/metrics"):
             return "members cannot view owner metrics"
+        if path.startswith("/smart-approvals") or path == "/smart-approvals":
+            return "members cannot use smart approvals"
         return "members cannot use owner-only operations"
     if path.startswith("/backends/") and method not in ("GET", "HEAD", "OPTIONS"):
         return "members cannot change machine settings"

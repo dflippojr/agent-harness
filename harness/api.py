@@ -462,11 +462,11 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/smart-approvals")
     async def smart_approvals(request: Request):
-        return mgr(request).smart_approvals_status()
+        return require_owner(request).smart_approvals_status()
 
     @app.put("/smart-approvals")
     async def update_smart_approvals(body: SmartApprovalsUpdate, request: Request):
-        return mgr(request).set_smart_approvals_mode(body.mode)
+        return require_owner(request).set_smart_approvals_mode(body.mode)
 
     @app.get("/models/status")
     async def models_status(request: Request):
