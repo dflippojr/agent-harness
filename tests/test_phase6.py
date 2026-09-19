@@ -714,7 +714,7 @@ def test_app_root_lists_quality_fast_without_enabling_it(tmp_path):
     m, _, _ = image_manager(tmp_path)
     with TestClient(create_app(m)) as client:
         root = client.get("/api/v1").json()
-        assert root["api_version"] == "1.12"
+        assert root["api_version"] == "1.13"
         assert root["image_modes"]["fast"]["available"] is True
         assert root["image_modes"]["quality-fast"]["available"] is False
         assert root["image_modes"]["quality-fast"]["label"] == "Qwen quality (fast, 4-step)"

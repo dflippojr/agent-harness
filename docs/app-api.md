@@ -156,7 +156,8 @@ requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and
 Server info: API version, scopes, projects, models, hosted backends, enabled features, `capabilities`, and
 `image_modes` (labels, availability, and setup text for optional Lightning `quality-fast` and FLUX `flux-fast`). The capability object
 identifies the `full` or `service` profile, always-on Server facilities, and effective optional modules. It contains
-no credentials and doesn't need a token. `GET /health` exposes the same capability object for lightweight discovery.
+no credentials and doesn't need a token. `GET /health` exposes the same capability object for lightweight discovery
+plus first-party release/protocol compatibility and update hints; see [`compatibility.md`](compatibility.md).
 
 ### `POST /api/v1/sessions`  (scope `sessions`)
 
@@ -373,3 +374,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.10 | 2026-09-18 | Per-app configuration registry (`/api/v1/config`); values may only narrow owner/token authority |
 | 1.11 | 2026-09-18 | Image mode discovery (`image_modes`) including optional `quality-fast` Lightning LoRA |
 | 1.12 | 2026-09-19 | Optional `flux-fast` FLUX.2 klein 4B mode discovery, pinned-asset preflight, and provenance |
+| 1.13 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |

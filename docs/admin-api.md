@@ -37,6 +37,7 @@ Server does not rename or revoke credentials for this terminology change.
 
 Requires owner credentials. Returns `api_version`, the `admin` scope description, accepted `auth`
 methods, the Agent Harness Server `capabilities`, and the versioned `operations` list (`method` + `path`).
+It also publishes the first-party protocol ranges and update hints described in [`compatibility.md`](compatibility.md).
 
 ## Operations
 
@@ -173,7 +174,8 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
-| 1.11 | 2026-09-19 | Owner masked inpainting: upload, edit, cancel, and delete |
+| 1.12 | 2026-09-19 | Owner masked inpainting: upload, edit, cancel, and delete |
+| 1.11 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |
 | 1.10 | 2026-09-19 | Smart-approval effective mode: last writer among PUT and Settings; `off` is truly off |
 | 1.9 | 2026-09-18 | Owner smart-approvals status and live mode (`off`/`shadow`/`auto`) |
 | 1.8 | 2026-09-18 | Owner-approved instruction skills: proposals, hash-bound install, enable/allowlist/rollback. `POST /sessions` `skills`: omit the field to inject the project's allowlisted enabled skills; send an explicit list (including `[]`) as the include set so an unchecked box is excluded |

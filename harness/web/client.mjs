@@ -3,6 +3,8 @@
 
 const BASE_KEY = "harness.daemonUrl";
 const TOKEN_KEY = "harness.ownerToken";
+export const WEB_BUILD_ID = "2026.09.17.1";
+export const WEB_PROTOCOL = 2;
 
 export function normalizeDaemonUrl(value) {
   const raw = String(value || "").trim();
@@ -44,7 +46,9 @@ export class AgentHarnessWebClient {
   }
 
   headers(extra = {}) {
-    return this.token ? { ...extra, Authorization: `Bearer ${this.token}` } : { ...extra };
+    const headers = { ...extra, "X-Agent-Harness-Client": `web/${WEB_PROTOCOL}` };
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    return headers;
   }
 
   async request(path, { method = "GET", body, surface = "admin" } = {}) {
@@ -70,9 +74,14 @@ export class AgentHarnessWebClient {
       err.code = data && data.error && data.error.code;
       err.keys = data && data.error && data.error.keys;
       err.details = data && data.error && data.error.details;
+      err.data = data;
       throw err;
     }
     return data;
+  }
+
+  compatibility() {
+    return this.request("/health", { surface: "" });
   }
 
   async blob(path, surface = "admin") {

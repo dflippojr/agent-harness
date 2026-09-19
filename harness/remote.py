@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Callable
 
 from .config import RunnerConfig
+from .compat import runner_compatibility
+from .compat import PROTOCOLS
 from .fileops import FILE_TOOLS, MAX_PUT_BYTES, ToolError
 from .tools import shell_result, tool_schemas
 
@@ -118,9 +120,20 @@ class RunnerHub:
 
     def status(self) -> list[dict]:
         now = time.monotonic()
-        return [{"name": n, "online": self.online(n),
-                 "last_seen_seconds": round(now - st.last_seen) if st.last_seen else None,
-                 "pending_requests": len(st.requests), "info": st.info} for n, st in self.state.items()]
+        out = []
+        for name, st in self.state.items():
+            try:
+                update_supported = int(st.info.get("protocol")) == PROTOCOLS["runner"]["max"]
+            except (TypeError, ValueError):
+                update_supported = False
+            out.append({"name": name, "online": self.online(name),
+                        "last_seen_seconds": round(now - st.last_seen) if st.last_seen else None,
+                        "pending_requests": len(st.requests), "info": st.info,
+                        "compatibility": runner_compatibility(st.info),
+                        "update_supported": update_supported,
+                        "manual_update": "harness update",
+                        "last_update": st.info.get("last_update")})
+        return out
 
     def close(self) -> None:
         self._closing = True

@@ -131,7 +131,9 @@ def test_web_shell_includes_transport_module_and_canonical_names():
     assert "Connect another Agent Harness Web" in app
     assert 'name: `agent-harness-web (' in app
     assert '"/client.mjs"' in worker
-    assert 'const SHELL = "harness-shell-v4"' in worker
+    # The shell cache name is derived from BUILD_ID so a client build bumps it automatically (#69).
+    assert 'const BUILD_ID = "' in worker
+    assert "const SHELL = `harness-shell-${BUILD_ID}`" in worker
     assert 'fetch(event.request, { cache: "no-cache" })' in worker
 
 
