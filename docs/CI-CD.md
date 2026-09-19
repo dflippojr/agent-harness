@@ -24,7 +24,10 @@ untouched for first-deployment rollback. Later successful deployments remove the
 Both builds read any available GitHub Actions cache, but cache export uses `ignore-error=true`. A `workflow_run` token
 may be unable to write the default branch's Actions cache; that optional optimization must never block GHCR publication
 or deployment. No later step consumes the exported cache. `publish-images` receives `contents: read` and
-`packages: write`; `deploy-tower` receives `contents: read` and `packages: read`.
+`packages: write`; `deploy-tower` receives only `contents: read`.
+The GHCR packages are public (this repository is public), so the tower pulls the immutable `sha-<commit>` images
+anonymously and does not sign in. The first production deployment showed why: `docker login ghcr.io` with the job's
+`GITHUB_TOKEN` was rejected (`denied: denied`) on the tower, which failed the deployment before anything was changed.
 
 ## Deployment boundary
 
