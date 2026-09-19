@@ -101,7 +101,7 @@ def test_backend_commands_enforce_read_only_review_access(tmp_path):
         tmp_path,
         f"""
 $commands = @(
-    Get-ReviewBackendCommand -Backend cursor -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}'
+    Get-ReviewBackendCommand -Backend cursor -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}' -WindowsPlatform $true
     Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
     Get-ReviewBackendCommand -Backend claude -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
 )
@@ -112,22 +112,75 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
     commands = {item["Backend"]: item for item in json.loads(result.stdout.strip())}
 
     cursor_args = commands["cursor"]["Arguments"]
-    assert ["--mode", "ask"] == cursor_args[cursor_args.index("--mode") : cursor_args.index("--mode") + 2]
-    assert "--force" not in cursor_args and "--yolo" not in cursor_args
-    assert ["--sandbox", "enabled"] == cursor_args[cursor_args.index("--sandbox") : cursor_args.index("--sandbox") + 2]
+    assert cursor_args == [
+        str(version / "index.js"),
+        "-p",
+        "--output-format",
+        "text",
+        "--mode",
+        "ask",
+        "--workspace",
+        str(workspace),
+        "prompt",
+    ]
 
     codex_args = commands["codex"]["Arguments"]
-    assert ["--sandbox", "read-only"] == codex_args[codex_args.index("--sandbox") : codex_args.index("--sandbox") + 2]
-    assert ["--ask-for-approval", "never"] == codex_args[codex_args.index("--ask-for-approval") : codex_args.index("--ask-for-approval") + 2]
-    assert "--ephemeral" in codex_args
-    assert "--ignore-user-config" in codex_args
-    assert Path(commands["codex"]["ResultPath"]).parent == scratch
+    result_path = str(scratch / "codex-review-output.md")
+    assert codex_args == [
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        str(workspace),
+        "--ephemeral",
+        "--ignore-user-config",
+        "--color",
+        "never",
+        "--output-last-message",
+        result_path,
+        "-",
+    ]
+    assert commands["codex"]["ResultPath"] == result_path
 
     claude_args = commands["claude"]["Arguments"]
     assert "Read,Grep,Glob,Bash" in claude_args
     assert "Read,Grep,Glob,Bash(gh pr diff:*)" in claude_args
     assert not {"Edit", "Write", "NotebookEdit"}.intersection(claude_args)
     assert "--strict-mcp-config" in claude_args
+
+
+def test_cursor_enables_sandbox_off_windows(tmp_path):
+    cursor_base = tmp_path / "cursor-agent"
+    version = cursor_base / "versions" / "2026.09.18"
+    version.mkdir(parents=True)
+    (version / "node.exe").touch()
+    (version / "index.js").touch()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    workspace = tmp_path / "checkout"
+    workspace.mkdir()
+
+    result = run_powershell(
+        tmp_path,
+        f"""
+$command = Get-ReviewBackendCommand -Backend cursor -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}' -WindowsPlatform $false
+$command.Arguments | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert json.loads(result.stdout.strip()) == [
+        str(version / "index.js"),
+        "-p",
+        "--output-format",
+        "text",
+        "--mode",
+        "ask",
+        "--sandbox",
+        "enabled",
+        "--workspace",
+        str(workspace),
+        "prompt",
+    ]
 
 
 def test_fallback_uses_claude_after_codex_failure_and_footer_names_it(tmp_path):

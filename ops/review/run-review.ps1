@@ -84,7 +84,8 @@ function Get-ReviewBackendCommand {
         [Parameter(Mandatory = $true)][string]$Workspace,
         [Parameter(Mandatory = $true)][string]$Prompt,
         [Parameter(Mandatory = $true)][string]$ScratchDirectory,
-        [string]$CursorBase = ''
+        [string]$CursorBase = '',
+        [bool]$WindowsPlatform = ($env:OS -eq 'Windows_NT')
     )
 
     $name = $Backend.Trim().ToLowerInvariant()
@@ -95,10 +96,15 @@ function Get-ReviewBackendCommand {
             } else {
                 $entrypoint = Get-CursorAgentEntrypoint -CursorBase $CursorBase
             }
+            $arguments = @($entrypoint.Index, '-p', '--output-format', 'text', '--mode', 'ask')
+            if (-not $WindowsPlatform) {
+                $arguments += @('--sandbox', 'enabled')
+            }
+            $arguments += @('--workspace', $Workspace, $Prompt)
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = $entrypoint.Node
-                Arguments = @($entrypoint.Index, '-p', '--output-format', 'text', '--mode', 'ask', '--sandbox', 'enabled', '--workspace', $Workspace, $Prompt)
+                Arguments = $arguments
                 InputText = $null
                 WorkingDirectory = $Workspace
                 ResultPath = $null
@@ -110,7 +116,7 @@ function Get-ReviewBackendCommand {
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'codex'
-                Arguments = @('exec', '--sandbox', 'read-only', '--ask-for-approval', 'never', '--cd', $Workspace, '--ephemeral', '--ignore-user-config', '--color', 'never', '--output-last-message', $resultPath, '-')
+                Arguments = @('exec', '--sandbox', 'read-only', '--cd', $Workspace, '--ephemeral', '--ignore-user-config', '--color', 'never', '--output-last-message', $resultPath, '-')
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $resultPath
