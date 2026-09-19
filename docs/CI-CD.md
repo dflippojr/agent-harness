@@ -17,6 +17,11 @@ after that workflow succeeds for the exact commit pushed to `main`:
 The SHA tags are immutable deployment inputs; the stable tags match the local names already expected by the daemon.
 The CLI Dockerfile accepts `SANDBOX_IMAGE` so its hosted build is based on the exact sandbox image from the same commit.
 
+Both builds read any available GitHub Actions cache, but cache export uses `ignore-error=true`. A `workflow_run` token
+may be unable to write the default branch's Actions cache; that optional optimization must never block GHCR publication
+or deployment. No later step consumes the exported cache. `publish-images` receives `contents: read` and
+`packages: write`; `deploy-tower` receives `contents: read` and `packages: read`.
+
 ## Deployment boundary
 
 The daemon itself is deliberately not containerized. It is a host Python process because it coordinates Windows
@@ -68,7 +73,7 @@ pass.
 ## Failure behavior
 
 - CI failure, cancellation, pull-request run, or non-`main` run: no images and no deployment.
-- Image build/push failure: no deployment.
+- Image build/push failure: no deployment. Actions cache export failure is ignored because the cache is optional.
 - Docker unavailable, live checkout dirty, wrong branch, non-fast-forward history, dependency install failure, or failed
   daemon health check: deployment fails visibly in Actions rather than forcing or discarding host state.
 - A newer `main` commit superseding an older queued deployment makes the older deployment exit without changing the

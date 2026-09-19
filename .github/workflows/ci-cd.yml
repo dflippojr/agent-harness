@@ -51,7 +51,7 @@ jobs:
             ${{ env.SANDBOX_IMAGE }}:py312
           labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=sandbox
-          cache-to: type=gha,mode=max,scope=sandbox
+          cache-to: type=gha,mode=max,scope=sandbox,ignore-error=true
       - name: Build and publish subscription CLI sandbox
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -64,7 +64,7 @@ jobs:
             ${{ env.CLI_IMAGE }}:1
           labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=cli
-          cache-to: type=gha,mode=max,scope=cli
+          cache-to: type=gha,mode=max,scope=cli,ignore-error=true
 
   deploy-tower:
     name: deploy-tower
