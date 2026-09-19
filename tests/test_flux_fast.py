@@ -631,6 +631,81 @@ def test_api_root_and_health_stay_responsive_during_cold_flux_hash(tmp_path, mon
     thread.join(timeout=8)
 
 
+def test_flux_status_hashes_files_installed_while_daemon_running(tmp_path):
+    """Pinned files that appear after start() must become available without a restart."""
+    async def body():
+        images_models_mod.clear_file_state_cache()
+        payloads = {"checkpoint": b"CKPT-DATA", "vae": b"VAE-DATA", "encoder": b"ENC-DATA"}
+        m, _, _ = image_manager(tmp_path)
+        m.cfg.images.models_dir = str(tmp_path / "models")
+        m.cfg.images.comfy_dir = str(tmp_path / "comfy")
+        m.images.cfg.models_dir = m.cfg.images.models_dir
+        m.images.cfg.comfy_dir = m.cfg.images.comfy_dir
+        manifest = tiny_manifest("http://unused", payloads)
+        m.images.flux_manifest = manifest
+        m.images.object_info = object_info_for()
+        await m.start(maintenance=False)
+        assert m.images.flux_status()["available"] is False
+        plant_comfy(Path(m.cfg.images.comfy_dir))
+        root = Path(m.cfg.images.models_dir)
+        plant_asset(root / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors", payloads["checkpoint"])
+        plant_asset(root / "vae" / "flux2-vae.safetensors", payloads["vae"])
+        plant_asset(root / "text_encoders" / "qwen_3_4b.safetensors", payloads["encoder"])
+        flux = None
+        for _ in range(80):
+            flux = m.images.flux_status()
+            if flux["available"]:
+                break
+            await asyncio.sleep(0.05)
+        assert flux is not None and flux["available"] is True
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_flux_warmup_error_surfaces_then_recovers(tmp_path, monkeypatch):
+    """A raised warmup must not stay 'verifying'; the next poll retries and can recover."""
+    images_models_mod.clear_file_state_cache()
+    payloads = {"checkpoint": b"CKPT-DATA", "vae": b"VAE-DATA", "encoder": b"ENC-DATA"}
+    m, _, _ = image_manager(tmp_path)
+    m.cfg.images.models_dir = str(tmp_path / "models")
+    m.cfg.images.comfy_dir = str(tmp_path / "comfy")
+    m.images.cfg.models_dir = m.cfg.images.models_dir
+    m.images.cfg.comfy_dir = m.cfg.images.comfy_dir
+    manifest = tiny_manifest("http://unused", payloads)
+    plant_comfy(Path(m.cfg.images.comfy_dir))
+    root = Path(m.cfg.images.models_dir)
+    plant_asset(root / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors", payloads["checkpoint"])
+    plant_asset(root / "vae" / "flux2-vae.safetensors", payloads["vae"])
+    plant_asset(root / "text_encoders" / "qwen_3_4b.safetensors", payloads["encoder"])
+    m.images.flux_manifest = manifest
+    m.images.object_info = object_info_for()
+
+    real = images_models_mod.inspect_flux_fast
+    fail_hash = True
+
+    def boom(cfg, **kwargs):
+        if kwargs.get("hash_if_needed", True) and fail_hash:
+            raise RuntimeError("hash boom")
+        return real(cfg, **kwargs)
+
+    monkeypatch.setattr(images_models_mod, "inspect_flux_fast", boom)
+    m.images._flux_verify_backoff = 0.05
+    m.images._warm_flux_status()
+    flux = m.images.flux_status()
+    assert flux["available"] is False
+    assert "hash boom" in (flux.get("unavailable_reason") or "")
+    assert flux.get("verifying") is False
+
+    fail_hash = False
+    recovered = None
+    for _ in range(80):
+        recovered = m.images.flux_status()
+        if recovered["available"]:
+            break
+        time.sleep(0.05)
+    assert recovered is not None and recovered["available"] is True
+
+
 def test_quality_fast_and_flux_fast_share_one_gpu_batch(tmp_path):
     """The two optional fast modes keep separate graphs while sharing one GPU occupancy."""
     async def body():
@@ -865,6 +940,47 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
         assert server.calls == []
         assert m.images.phase == "idle"
         await m.stop()
+    asyncio.run(body())
+
+
+def test_cancel_during_exclusive_gate_wait_does_not_boot_comfy(tmp_path):
+    """A queued job cancelled while waiting for the GPU gate must not unload the LLM."""
+    async def body():
+        m, server, _ = image_manager(tmp_path / "gate")
+        comfy_starts = []
+
+        async def track_start():
+            comfy_starts.append("start")
+
+        m.images.comfy.start = track_start
+
+        class BlockingGate:
+            def __init__(self):
+                self.waiting = asyncio.Event()
+                self.allow = asyncio.Event()
+                self.releases = 0
+
+            async def acquire_exclusive(self):
+                self.waiting.set()
+                await self.allow.wait()
+                return self
+
+            async def release(self):
+                self.releases += 1
+
+        gate = BlockingGate()
+        m.images.runner.gate = gate
+        job = m.images.submit("behind the language model")
+        task = asyncio.create_task(m.images._run_batch(job["id"]))
+        await asyncio.wait_for(gate.waiting.wait(), timeout=2)
+        m.images.cancel(job["id"])
+        gate.allow.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert (await m.images.wait(job["id"]))["status"] == "failed"
+        assert server.calls == []
+        assert comfy_starts == []
+        assert gate.releases == 1
+        assert m.images.phase == "idle" and not m.images.gpu_taken
     asyncio.run(body())
 
 

@@ -36,6 +36,7 @@ import os
 import random
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -485,6 +486,11 @@ class ImageService:
         self._lora_available: bool | None = None  # tests force Lightning LoRA presence; None = inspect disk
         self._lora_hash_ok: bool | None = None
         self.on_stored = None          # optional archive hook: callable(job) after a PNG is written
+        self._flux_verify_lock = threading.Lock()
+        self._flux_verify_in_flight = False
+        self._flux_verify_error: str | None = None
+        self._flux_verify_retry_at = 0.0
+        self._flux_verify_backoff = 1.0
 
     def schemas(self) -> list[dict]:
         return schemas(self.cfg, available=[name for name in MODELS if self.mode_available(name)])
@@ -570,9 +576,22 @@ class ImageService:
                         log.info("re-queued upscale %s for image %s after restart", child["id"], job["id"])
                     except ToolError as e:
                         log.warning("could not recover upscale for %s: %s", job["id"], e)
-            loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, self._warm_flux_status)
+            self._schedule_flux_verify()
             self._task = asyncio.create_task(self._loop(), name="images")
+
+    def _schedule_flux_verify(self) -> None:
+        """Hash matching-but-uncached flux-fast files once, off the event loop, with retry backoff."""
+        now = time.monotonic()
+        with self._flux_verify_lock:
+            if self._flux_verify_in_flight or now < self._flux_verify_retry_at:
+                return
+            self._flux_verify_in_flight = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            threading.Thread(target=self._warm_flux_status, name="flux-verify", daemon=True).start()
+            return
+        loop.run_in_executor(None, self._warm_flux_status)
 
     def _warm_flux_status(self) -> None:
         """Hash flux-fast assets off the event loop so the first status poll is O(stat)."""
@@ -580,8 +599,18 @@ class ImageService:
             from .images_models import inspect_flux_fast
             inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
                               hash_if_needed=True)
-        except (OSError, ValueError, RuntimeError):
+            self._flux_verify_error = None
+            self._flux_verify_backoff = 1.0
+            self._flux_verify_retry_at = 0.0
+        except Exception as e:  # noqa: BLE001 - surface then retry; never leave 'verifying' stuck
+            self._flux_verify_error = str(e).strip() or e.__class__.__name__
+            delay = self._flux_verify_backoff
+            self._flux_verify_backoff = min(self._flux_verify_backoff * 2, 30.0)
+            self._flux_verify_retry_at = time.monotonic() + delay
             log.debug("flux-fast inspect warmup failed", exc_info=True)
+        finally:
+            with self._flux_verify_lock:
+                self._flux_verify_in_flight = False
 
     async def _stop_stray(self) -> None:
         """A ComfyUI left running by a daemon that crashed mid-batch holds the GPU: stop it and restore the model."""
@@ -604,8 +633,18 @@ class ImageService:
 
     def flux_status(self) -> dict:
         from .images_models import inspect_flux_fast
-        return inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
-                                 hash_if_needed=False)
+        report = inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
+                                   hash_if_needed=False)
+        if report.get("verifying"):
+            self._schedule_flux_verify()
+        with self._flux_verify_lock:
+            in_flight = self._flux_verify_in_flight
+            error = self._flux_verify_error
+        if error and not in_flight:
+            reason = f"verification failed: {error}"
+            return {**report, "available": False, "verifying": False, "unavailable_reason": reason,
+                    "remediation": "verification will retry automatically"}
+        return report
 
     def mode_reports(self) -> list[dict]:
         """List-shaped compatibility view of the canonical mode catalog."""
@@ -751,6 +790,11 @@ class ImageService:
             candidate = None if self.queue.empty() else self.queue.get_nowait()
         return candidate
 
+    def _batch_is_empty(self, first: str | None) -> tuple[str | None, bool]:
+        """Return the next live id and whether the batch should exit without GPU side effects."""
+        first = self._skip_dead_jobs(first)
+        return first, first is None and not self._keep_warm
+
     async def _loop(self) -> None:
         while True:
             job_id = await self.queue.get()
@@ -821,19 +865,30 @@ class ImageService:
             drain = self._drain_sessions
             self._drain_sessions = set()
             await self.runner.scheduler.wait_for_drain(drain)
-        first = self._skip_dead_jobs(first)
-        if first is None and not self._keep_warm:
+        first, empty = self._batch_is_empty(first)
+        if empty:
             self.phase = "idle"
             return
         slot = await self.runner.gate.acquire_exclusive()
         flagged = False
         ran_job = False
+        took_over = False
         try:
+            first, empty = self._batch_is_empty(first)
+            if empty:
+                return
             self.phase = "switching"
             await self.control.stop()  # stop llama-server; its supervisor waits while the flag exists
             flagged = True
+            first, empty = self._batch_is_empty(first)
+            if empty:
+                return
             self.phase = "starting"
             await self.comfy.start()
+            took_over = True
+            first, empty = self._batch_is_empty(first)
+            if empty:
+                return
             job_id: str | None = first
             while True:
                 if paused():
@@ -842,7 +897,10 @@ class ImageService:
                         self.queue.put_nowait(job_id)
                     break
                 if job_id:
-                    if self._live_job(job_id):
+                    job_id, empty = self._batch_is_empty(job_id)
+                    if empty:
+                        return
+                    if job_id:
                         await self._run_job(job_id)
                         ran_job = True
                     job_id = None
@@ -872,9 +930,11 @@ class ImageService:
         finally:
             self._keep_warm = False
             self._wake = None
-            self.phase = "restoring"
-            await self.comfy.stop()
+            if took_over:
+                self.phase = "restoring"
+                await self.comfy.stop()
             if flagged and not paused():  # when the guard is paused it restores the model itself later
+                self.phase = "restoring"
                 await self.control.start()  # llama-server restarts and reloads the model
                 for _ in range(150):
                     if await self.control.healthy():
