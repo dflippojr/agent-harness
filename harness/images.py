@@ -1321,13 +1321,20 @@ class ImageService:
         return "missing"
 
     async def _interrupt_comfy_prompt(self, client: httpx.AsyncClient, prompt_id: str) -> None:
-        """Interrupt only this service's still-running prompt and wait for it to leave the runner."""
+        """Remove this service's pending prompt or interrupt it after it starts running."""
         try:
-            if await self._comfy_prompt_state(client, prompt_id) != "running":
+            state = await self._comfy_prompt_state(client, prompt_id)
+            deadline = time.monotonic() + 10
+            if state == "pending":
+                response = await client.post(f"{self.comfy.url}/queue", json={"delete": [prompt_id]})
+                response.raise_for_status()
+                while state == "pending" and time.monotonic() < deadline:
+                    await asyncio.sleep(0.05)
+                    state = await self._comfy_prompt_state(client, prompt_id)
+            if state != "running":
                 return
             response = await client.post(f"{self.comfy.url}/interrupt")
             response.raise_for_status()
-            deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if await self._comfy_prompt_state(client, prompt_id) != "running":
                     return

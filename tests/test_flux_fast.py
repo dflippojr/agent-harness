@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import time
 import threading
@@ -874,6 +875,35 @@ def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
         assert state["interrupted"] == ["p1"]
         assert state["prompts"] == ["p1", "p2"]
         await m.stop()
+
+    asyncio.run(body())
+
+
+def test_cancel_deletes_comfy_prompt_while_still_pending(tmp_path):
+    async def body():
+        m, _, _ = image_manager(tmp_path)
+        state = {"pending": ["p1"], "deleted": []}
+
+        async def handler(request: httpx.Request):
+            path = request.url.path
+            if path == "/history/p1":
+                return httpx.Response(200, json={})
+            if path == "/queue" and request.method == "GET":
+                pending = [[index, prompt_id] for index, prompt_id in enumerate(state["pending"])]
+                return httpx.Response(200, json={"queue_running": [], "queue_pending": pending})
+            if path == "/queue" and request.method == "POST":
+                prompt_ids = json.loads(request.content)["delete"]
+                state["deleted"].extend(prompt_ids)
+                state["pending"] = [prompt_id for prompt_id in state["pending"]
+                                    if prompt_id not in prompt_ids]
+                return httpx.Response(200)
+            return httpx.Response(404)
+
+        m.images.transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=m.images.transport) as client:
+            await m.images._interrupt_comfy_prompt(client, "p1")
+
+        assert state == {"pending": [], "deleted": ["p1"]}
 
     asyncio.run(body())
 
