@@ -365,6 +365,7 @@ import time
 mode = sys.argv[1]
 state = pathlib.Path(sys.argv[2])
 call_id = sys.argv[3] if len(sys.argv) > 3 else "tool-1"
+command = sys.argv[4] if len(sys.argv) > 4 else "python build.py"
 
 def read():
     line = sys.stdin.readline()
@@ -399,7 +400,7 @@ elif mode == "cancel":
     time.sleep(60)
 else:
     tool = "Read" if mode == "allow" else "Bash"
-    args = {"file_path": "/workspace/a.txt"} if tool == "Read" else {"command": "python build.py"}
+    args = {"file_path": "/workspace/a.txt"} if tool == "Read" else {"command": command}
     send({"type": "assistant", "message": {"role": "assistant", "content": [
         {"type": "text", "text": "Checking."},
         {"type": "tool_use", "id": call_id, "name": tool, "input": args}]}})
@@ -418,7 +419,7 @@ else:
 '''
 
 
-def _claude_manager(tmp_path, mode: str, state=None, max_sessions=2):
+def _claude_manager(tmp_path, mode: str, state=None, max_sessions=2, bash_command="python build.py"):
     tmp_path.mkdir(parents=True, exist_ok=True)
     fake = tmp_path / "fake_claude.py"
     fake.write_text(FAKE_CLAUDE, encoding="utf-8")
@@ -431,7 +432,8 @@ def _claude_manager(tmp_path, mode: str, state=None, max_sessions=2):
     def factory(**kwargs):
         made.append(kwargs)
         call_id = "tool-2" if kwargs.get("backend_session_id") else "tool-1"
-        return ClaudeSession(**kwargs, command=[sys.executable, "-u", str(fake), mode, str(state), call_id])
+        return ClaudeSession(**kwargs, command=[sys.executable, "-u", str(fake), mode, str(state), call_id,
+                                                bash_command])
 
     manager.runner.cli_factory = factory
     return manager, made, state

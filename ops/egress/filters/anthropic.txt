@@ -1,0 +1,2 @@
+^api\.anthropic\.com$
+^([a-z0-9-]+\.)?anthropic\.com$

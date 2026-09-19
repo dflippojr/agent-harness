@@ -33,8 +33,13 @@ def render(db: Database, sid: str) -> str:
         f"- Created {created} · status **{s['status']}** ({s['stop_reason'] or '-'})",
         f"- Totals: {totals.get('turns', 0)} model turns, {totals.get('prompt_tokens', 0)} prompt tokens, "
         f"{totals.get('completion_tokens', 0)} completion tokens",
-        "",
     ]
+    frozen = s.get("skills") or []
+    if frozen:
+        names = ", ".join(f"`{item.get('slug')}` v{item.get('version')} ({(item.get('content_hash') or '')[:12]})"
+                          for item in frozen)
+        lines += [f"- Frozen skills: {names}"]
+    lines += ["",]
     last_content = ""
     for e in db.events(sid):
         d, t, at = e["data"], e["type"], _clock(e["ts"])
@@ -65,6 +70,12 @@ def render(db: Database, sid: str) -> str:
         elif t == "approval_decided":
             note = f": {d['note']}" if d.get("note") else ""
             lines += [f"#### {at} · Approval `{d['id']}` {d['status']}{note}", ""]
+        elif t == "approval_auto_approved":
+            lines += [f"#### {at} · Auto-approved `{d.get('id', '')}`: deterministic gate and smart reviewer "
+                      f"both allowed this {d.get('tool') or 'call'} ({d.get('reason') or 'routine workspace work'})", ""]
+        elif t == "smart_review":
+            lines += [f"> {at} · smart review {d.get('outcome')} ({d.get('recommendation')} "
+                      f"{int(round((d.get('confidence') or 0) * 100))}%)", ""]
         elif t == "tool_result":
             status = "ok" if d["ok"] else "error"
             lines += [f"#### {at} · Result `{d['name']}` ({status}, {d['seconds']}s)", "", _block(d["output"]), ""]

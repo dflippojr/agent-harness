@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import threading
 import time
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from PIL import Image
 
 from harness import config, image_edit, setup_config
 from harness.api import create_app
+from harness.accounts import AccountService
 from harness.config import GuestAccess
 from harness.fileops import ToolError
 
@@ -132,6 +134,52 @@ def test_routine_status_does_not_hash_twenty_gb_checkpoint(tmp_path, monkeypatch
     assert calls == [checkpoint]
 
 
+def test_cold_edit_hash_runs_in_background_and_is_cached(tmp_path, monkeypatch):
+    async def body():
+        m, _, _ = edit_manager(tmp_path)
+        checkpoint = image_edit.locate_assets(m.images.cfg)["unet"]
+        monkeypatch.setitem(image_edit.EDIT_MODEL["unet"], "bytes", checkpoint.stat().st_size)
+        image_edit.clear_hash_cache()
+        started, release = threading.Event(), threading.Event()
+        calls = []
+
+        def slow_hash(path):
+            calls.append(path)
+            started.set()
+            release.wait(2)
+            return image_edit.EDIT_MODEL["unet"]["sha256"]
+
+        monkeypatch.setattr(image_edit, "file_sha256", slow_hash)
+        before = time.monotonic()
+        status = m.images.status()["edit"]
+        assert time.monotonic() - before < 0.5
+        assert status["verifying"] is True and status["available"] is False
+        assert started.wait(1) and m.images._edit_verify_in_flight
+        release.set()
+        for _ in range(100):
+            if m.images.status()["edit"]["available"]:
+                break
+            await asyncio.sleep(0.01)
+        assert m.images.status()["edit"]["available"] is True
+        assert calls == [checkpoint]
+        assert m.images.status()["edit"]["available"] is True and calls == [checkpoint]
+
+    asyncio.run(body())
+
+
+def test_remove_edit_assets_keeps_shared_files_and_parts(tmp_path):
+    m, _, _ = edit_manager(tmp_path)
+    files = image_edit.locate_assets(m.images.cfg)
+    unet_part = files["unet"].with_name(files["unet"].name + ".part")
+    clip_part = files["clip"].with_name(files["clip"].name + ".part")
+    unet_part.write_bytes(b"edit partial")
+    clip_part.write_bytes(b"shared partial")
+    result = image_edit.remove_assets(m.images.cfg)
+    assert not files["unet"].exists() and not unet_part.exists()
+    assert files["clip"].exists() and clip_part.exists() and files["vae"].exists()
+    assert str(files["clip"]) in result["skipped"] and str(clip_part) in result["skipped"]
+
+
 def test_gallery_and_upload_edits_preserve_source(tmp_path):
     async def body():
         m, _, state = edit_manager(tmp_path)
@@ -245,6 +293,29 @@ def test_owner_guest_app_authorization(tmp_path):
         assert private_child["id"] not in {child["id"] for child in app_gen["children"]}
         assert client.post(f"/api/v1/images/{uid}/upscale", headers=auth,
                            json={"upscale": "2x"}).status_code == 404
+
+
+def test_household_member_cannot_reach_any_edit_data_or_route(tmp_path):
+    member_login = "member@example.com"
+    m, _, _ = edit_manager(tmp_path)
+    m.cfg.allowed_logins = [LOGIN]
+    AccountService(m).create("owner", member_login, "Member")
+    headers = {"Tailscale-User-Login": member_login}
+    with TestClient(create_app(m)) as client:
+        routes = [
+            ("get", "/images"),
+            ("post", "/images/uploads"),
+            ("post", "/images/private123/edit"),
+            ("post", "/images/private123/cancel"),
+            ("delete", "/images/private123"),
+            ("get", "/images/private123.source.png"),
+            ("get", "/images/private123.mask.png"),
+            ("get", "/api/admin/v1/images/private123.mask.png"),
+            ("get", "/api/v1/images/private123"),
+        ]
+        for method, path in routes:
+            response = getattr(client, method)(path, headers=headers)
+            assert response.status_code == 403, (method, path, response.text)
 
 
 def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):

@@ -36,10 +36,11 @@ GPU, jobs, image, memory, runner, or other optional routes are usable.
 ## Optional modules
 
 All optional modules default off in the service profile: `local_model`, `homelab`, `memory_library`, `images`,
-`image_edit`, `jobs`, `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, and `backup`.
-Opt in during install with `-EnableModules jobs,backup`. The `endpoint`, `images`, `image_edit`, and `gpu_guard` modules depend on
-`local_model`; the installer enables it automatically and applies the full GPU/model checks. `image_edit` is never
-downloaded unless that module is listed: it is a ~20 GB Qwen-Image-Edit weight pack, separate from text-to-image.
+`image_edit`, `jobs`, `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, `backup`,
+and `skills`. Opt in during install with `-EnableModules jobs,backup`. The `endpoint`, `images`, `image_edit`, and
+`gpu_guard` modules depend on `local_model`; the installer enables it automatically and applies the full GPU/model
+checks. `image_edit` is never downloaded unless that module is listed: it is a ~20 GB Qwen-Image-Edit weight pack,
+separate from text-to-image.
 
 The profile overlay is `config\profile.yaml`. `harness.yaml` and `harness.local.yaml` retain detailed settings. This
 makes an upgrade reversible:

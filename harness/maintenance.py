@@ -42,13 +42,16 @@ def remove_tree(path: Path) -> None:
 
 
 class Maintenance:
-    def __init__(self, cfg: Config, db: Database, runner: Runner):
+    def __init__(self, cfg: Config, db: Database, runner: Runner, image_archive=None):
         self.cfg = cfg
         self.db = db
         self.runner = runner
+        self.image_archive = image_archive
         self._task: asyncio.Task | None = None
         self.last_report: dict = {}
         self.last_backup: dict = self._read_backup_status()
+        if self.image_archive and isinstance(self.last_backup.get("image_archive"), dict):
+            self.image_archive.last_reconciliation = self.last_backup["image_archive"]
         self._lock = asyncio.Lock()
         self._backup_task: asyncio.Task | None = None
 
@@ -56,6 +59,22 @@ class Maintenance:
         if self._task is None and self.cfg.cleanup.interval_minutes > 0:
             self._task = asyncio.create_task(self._loop(), name="maintenance")
         if self._backup_task is None and self.cfg.backup.enabled:
+            self._backup_task = asyncio.create_task(self._backup_loop(), name="backup")
+
+    def reschedule(self) -> None:
+        """Apply a live change to cleanup.interval_minutes by restarting the sweep task."""
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        if self.cfg.cleanup.interval_minutes > 0:
+            self._task = asyncio.create_task(self._loop(), name="maintenance")
+
+    def reschedule_backup(self) -> None:
+        """Pick up a live backup.at / keep_days change on the next wait."""
+        if self._backup_task is not None:
+            self._backup_task.cancel()
+            self._backup_task = None
+        if self.cfg.backup.enabled:
             self._backup_task = asyncio.create_task(self._backup_loop(), name="backup")
 
     async def stop(self) -> None:
@@ -109,6 +128,12 @@ class Maintenance:
         """Online copy of the SQLite database plus transcripts and project config into backup.dir/<date>, then
         delete dated folders older than keep_days."""
         result = await asyncio.to_thread(self._backup_sync, time.time())
+        if self.image_archive and self.image_archive.enabled:
+            # Image failures are warnings: the already-verified SQLite snapshot remains a successful backup.
+            try:
+                result["image_archive"] = await asyncio.to_thread(self.image_archive.reconcile)
+            except Exception as e:  # noqa: BLE001 - report archive health without invalidating the snapshot
+                result["image_archive"] = {"enabled": True, "errors": 1, "warnings": [str(e)]}
         self.last_backup = result
         self._write_backup_status()
         log.info("backup written to %s (%d bytes)", result["path"], result["bytes"])
@@ -145,6 +170,10 @@ class Maintenance:
         for name in ("harness.yaml", "harness.local.yaml", "projects.yaml"):
             if (ROOT / "config" / name).exists():
                 shutil.copy2(ROOT / "config" / name, config / name)
+        from .managed_config import ManagedStore
+        managed = ManagedStore(self.cfg.data_dir)
+        for path in managed.overlay_files():
+            shutil.copy2(path, tmp / path.name)
         remove_tree(dest)
         tmp.rename(dest)
 
@@ -207,28 +236,39 @@ class Maintenance:
             self.runner._sandboxes.pop(sid, None)
             report["containers_removed"].append(item["Names"])
 
+    def _workspace_roots(self) -> list:
+        from .storage import is_reparse_point, workspaces_dir
+        roots = [self.cfg.workspaces_dir]
+        users = self.cfg.data_dir / "users"
+        if users.is_dir() and not is_reparse_point(users):
+            for child in users.iterdir():
+                if child.is_dir() and not is_reparse_point(child):
+                    roots.append(child / "workspaces")
+        return roots
+
     def _workspaces(self, now: float, report: dict) -> None:
+        from .storage import is_reparse_point
         retention = self.cfg.cleanup.workspace_retention_days * 86400
-        root = self.cfg.workspaces_dir
-        if not root.is_dir():
-            return
-        for path in sorted(root.iterdir()):
-            if not path.is_dir():
+        for root in self._workspace_roots():
+            if not root.is_dir():
                 continue
-            s = self.db.get_session(path.name)
-            if s is None:
-                if now - path.stat().st_mtime > 3600:  # never race a session being created
-                    remove_tree(path)
-                    report["orphans_removed"].append(path.name)
-                continue
-            if s["status"] in ACTIVE or s["workspace_removed"] or now - s["updated_at"] < retention:
-                continue
-            reason = self.unsaved_work(s)
-            if reason:
-                report["kept"].append({"session": s["id"], "reason": reason})
-                continue
-            self.remove_workspace(s["id"])
-            report["workspaces_removed"].append(s["id"])
+            for path in sorted(root.iterdir()):
+                if not path.is_dir() or is_reparse_point(path):
+                    continue
+                s = self.db.get_session(path.name)
+                if s is None:
+                    if now - path.stat().st_mtime > 3600:  # never race a session being created
+                        remove_tree(path)
+                        report["orphans_removed"].append(path.name)
+                    continue
+                if s["status"] in ACTIVE or s["workspace_removed"] or now - s["updated_at"] < retention:
+                    continue
+                reason = self.unsaved_work(s)
+                if reason:
+                    report["kept"].append({"session": s["id"], "reason": reason})
+                    continue
+                self.remove_workspace(s["id"])
+                report["workspaces_removed"].append(s["id"])
 
     async def _remote_workspaces(self, now: float, report: dict) -> None:
         retention = self.cfg.cleanup.workspace_retention_days * 86400
@@ -239,7 +279,9 @@ class Maintenance:
                 continue
             if not hub.online(target):
                 continue
-            project = self.cfg.projects.get(s["project"])
+            from . import catalog
+            from .principal import session_user_id
+            project = catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
             try:
                 result = await hub.call(target, "cleanup_workspace", {
                     "session": s["id"], "repo": project.repo if project else "", "branch": s["branch"],
@@ -258,7 +300,9 @@ class Maintenance:
 
     def unsaved_work(self, s: dict) -> str:
         """Why deleting this workspace would lose work, or ''."""
-        project = self.cfg.projects.get(s["project"])
+        from . import catalog
+        from .principal import session_user_id
+        project = catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
         ws = Path(s["workspace"])
         if not project or not project.repo or not s["base_commit"] or not (ws / ".git").exists():
             return ""
@@ -275,8 +319,17 @@ class Maintenance:
         return "" if not projects.commits_ahead(ws, s["base_commit"]) else "branch was never pushed"
 
     def remove_workspace(self, sid: str) -> None:
+        from . import storage
+        from .principal import session_user_id
         s = self.db.get_session(sid)
-        remove_tree(Path(s["workspace"]))
+        path = Path(s["workspace"])
+        root = storage.workspaces_dir(self.cfg, session_user_id(s))
+        try:
+            storage.require_contained(path, root)
+        except storage.ContainmentError:
+            log.warning("refusing to delete workspace for %s: path escapes the account root", sid)
+            return
+        remove_tree(path)
         self.db.update_session(sid, workspace_removed=1)
 
     # reporting
@@ -302,4 +355,5 @@ class Maintenance:
         out["runners"] = self.runner.hub.status()
         out["last_cleanup"] = self.last_report
         out["backup"] = {**self.last_backup, "enabled": self.cfg.backup.enabled, "dir": self.cfg.backup.dir}
+        out["image_archive"] = self.image_archive.health() if self.image_archive else {"enabled": False}
         return out

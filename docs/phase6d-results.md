@@ -9,17 +9,21 @@ both a permissive default and a higher-quality model.
 | --- | --- | --- | --- | --- |
 | `fast` (default, agent assets) | **Z-Image-Turbo** | Apache 2.0, not gated | `z_image_turbo_bf16` (12 GB), `qwen_3_4b` text encoder (7.5 GB), `ae` VAE | 8 steps, fits in VRAM |
 | `quality` (phone) | **Qwen-Image-2512** | Apache 2.0, not gated | `qwen_image_2512_fp8_e4m3fn` (20 GB), `qwen_2.5_vl_7b_fp8_scaled` (8.8 GB), `qwen_image_vae` | 50 steps, cfg 4; best text rendering; ComfyUI streams part of it from RAM |
+| `flux-fast` (optional) | **FLUX.2 [klein] 4B FP8** | Apache 2.0, not gated | See `docs/flux-fast.md`. Disabled until `ops/images-models.ps1 install flux-fast`. | 4 steps; not a replacement for `fast` |
+| `quality-fast` (optional) | **Qwen-Image-2512 + Lightning 4-step LoRA** | Apache 2.0, not gated | same Qwen files plus `Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors` (1.6 GB, lightx2v, revision `a52649c9d0f6e1a248bff13f0df33bb8a2abdb52`) | Official ComfyUI 4-step subgraph: LoRA strength 1, 4 steps, cfg 1, euler/simple, shift 3.1. Missing LoRA disables only this mode. |
 
 The user allowed a personal-use license for the quality slot, but the best model that works here without extra steps
 is Apache-licensed anyway:
 
-- **FLUX.2 [klein] 9B** (non-commercial) is gated (needs a Hugging Face login and license acceptance), so it wasn't
-  installed. It can be added later as a third workflow.
+- **FLUX.2 [klein] 9B** (non-commercial) stays out: it is gated. The 4B Apache-2.0 distilled checkpoint is the
+  optional fourth workflow (`docs/flux-fast.md`, issue #92).
 - The "Qwen-Image 2.0" some 2026 articles mention couldn't be found on Hugging Face.
 
 ComfyUI: portable NVIDIA build **v0.35.0** (torch 2.13 + CUDA 13.0) in `C:\AI\ComfyUI`, models via
 `ComfyUI\extra_model_paths.yaml`. The workflows are transcribed from ComfyUI's bundled templates
-(`image_z_image_turbo.json`, `image_qwen_Image_2512.json`; the optional Lightning LoRA is left out).
+(`image_z_image_turbo.json`, `image_qwen_Image_2512.json`). `quality` is the 50-step graph; `quality-fast` transcribes
+that template's 4-step Lightning LoRA subgraph instead of inventing sampler values. Comparison notes:
+`docs/issue-13-lightning-results.md`.
 
 ## Design
 

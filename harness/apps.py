@@ -10,8 +10,9 @@ An app is a key with scopes (Settings → Apps, or POST /keys with `scopes`). Wi
 - decide approvals on its own sessions (`approvals`, off by default: normally the user approves from the phone);
 - generate images (`images`) and use the inference endpoint (`inference`).
 
-Apps only see sessions they created unless they hold `sessions:all`. The shape follows Hermes Agent's /v1/runs
-(docs/phase6a-hermes-study.md). The API is versioned by path; breaking changes go to /api/v2 and docs/app-api.md.
+Apps only see sessions they created unless they hold `sessions:all`, which expands reads only. The shape follows
+Hermes Agent's /v1/runs (docs/phase6a-hermes-study.md). The API is versioned by path; breaking changes go to /api/v2
+and docs/app-api.md.
 """
 
 from __future__ import annotations
@@ -32,10 +33,11 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.8"
+API_VERSION = "1.12"
+SESSIONS_ALL = "sessions:all"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
-    "sessions:all": "read every session, not only the app's own",
+    SESSIONS_ALL: "read every session, not only the app's own",
     "approvals": "approve or deny tool calls in the app's own sessions",
     "images": "generate images, upscale them, and read them",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
@@ -120,12 +122,16 @@ class AppTool(BaseModel):
 class CreateAppSession(BaseModel):
     prompt: str
     project: str = "scratch"
-    backend: str = "local"
+    backend: str | None = None
     model: str | None = None
     title: str | None = None
     context: list[ContextBlock] = []
     tools: list[AppTool] = []
     metadata: dict = {}
+
+
+class AppSessionUpdate(BaseModel):
+    title: str
 
 
 class AppMessage(BaseModel):
@@ -179,6 +185,7 @@ class AppImageUpscaleRequest(BaseModel):
 
 
 class CapabilitiesResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     profile: str
     required: dict[str, bool]
     modules: dict[str, bool]
@@ -218,6 +225,7 @@ class AppRootResponse(BaseModel):
     backends: list[BackendResponse]
     capabilities: CapabilitiesResponse
     features: dict[str, bool | str]
+    image_modes: dict[str, dict] = Field(default_factory=dict)
 
 
 class ProviderFailureResponse(BaseModel):
@@ -402,13 +410,19 @@ def register(app: FastAPI, mgr) -> None:
                 same_origin = not raw_origin or normalize_origin(raw_origin) in daemon_origins(m.cfg)
             except ValueError:
                 same_origin = False
-            if not token and ident is not None and ident.role == "owner" and ident.allowed and same_origin:
-                return {"id": "", "name": "Agent Harness Web", "kind": "owner", "scopes": "admin",
-                        "scope_set": {"admin"}, "origins": [], "bundled": True}
+            if not token and ident is not None and ident.allowed and same_origin:
+                if ident.role == "owner":
+                    return {"id": "", "name": "Agent Harness Web", "kind": "owner", "scopes": "admin",
+                            "scope_set": {"admin"}, "origins": [], "bundled": True, "user_id": "owner"}
+                if ident.role == "member":
+                    return {"id": ident.user_id, "name": ident.display_name or "Member", "kind": "member",
+                            "scopes": "sessions approvals", "scope_set": {"sessions", "approvals"},
+                            "origins": [], "bundled": True, "user_id": ident.user_id}
+                raise HarnessError(401, "missing or invalid app token")
             raise HarnessError(401, "missing or invalid app token")
         scopes = set((key.get("scopes") or "").split())
         if (not owner_key(key) and scope not in scopes
-                and not (scope == "sessions" and "sessions:all" in scopes and request.method == "GET")):
+                and not (scope == "sessions" and SESSIONS_ALL in scopes and request.method == "GET")):
             raise HarnessError(403, f"this token lacks the {scope!r} scope")
         raw_origin = request.headers.get("origin", "")
         if raw_origin:
@@ -421,12 +435,37 @@ def register(app: FastAPI, mgr) -> None:
         key["scope_set"] = scopes
         return key
 
-    def own_session(request: Request, key: dict, ref: str) -> dict:
+    def _owned_session(request: Request, key: dict, ref: str) -> dict:
+        """Session visible to this principal's account, or 404. Members stop here."""
         m = mgr(request)
-        s = m.get(ref)
+        user_id = key["user_id"] if key.get("kind") == "member" else "owner"
+        try:
+            s = m.get(ref, user_id=user_id)
+        except HarnessError as e:
+            if e.status in (400, 404):
+                raise HarnessError(404, "no session matches that id") from e
+            raise
+        if s.get("owner_id", "owner") != user_id:
+            raise HarnessError(404, "no session matches that id")
+        return s
+
+    def visible_session(request: Request, key: dict, ref: str) -> dict:
+        """Owner token, the creating app, or sessions:all may read a session."""
+        s = _owned_session(request, key, ref)
+        if key.get("kind") == "member":
+            return s
         if (not owner_key(key) and s.get("app_id") != key["id"]
-                and "sessions:all" not in key["scope_set"]):
-            raise HarnessError(404, f"no session matches {ref!r}")
+                and SESSIONS_ALL not in key["scope_set"]):
+            raise HarnessError(404, "no session matches that id")
+        return s
+
+    def own_session(request: Request, key: dict, ref: str) -> dict:
+        """Mutations require the owner token or the creating app; sessions:all is not enough."""
+        s = _owned_session(request, key, ref)
+        if key.get("kind") == "member":
+            return s
+        if not owner_key(key) and s.get("app_id") != key["id"]:
+            raise HarnessError(404, "no session matches that id")
         return s
 
     def view(m, s: dict) -> dict:
@@ -513,54 +552,265 @@ def register(app: FastAPI, mgr) -> None:
     async def api_root(request: Request):
         m = mgr(request)
         from .backend_state import view as backend_view
+        from .config import module_effective
         backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, False, None, False)
                                                for name in m.cfg.backends]))
         return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
-                "projects": [{"name": p.name, "description": p.description, "target": p.target}
-                             for p in m.cfg.projects.values()],
+                "projects": [],
                 "models": list(m.cfg.models), "backends": backends, "capabilities": m.cfg.capabilities(), "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "image_upscale": bool(m.images is not None),
-                    "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
+                    "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                     "runner_pairing": bool(m.cfg.runners),
                     "remote_control": m.remote_control is not None, "browser_pairing": True,
-                    "stream_tickets": True}}
+                    "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
+                "image_modes": (await asyncio.to_thread(m.images.mode_catalog)) if m.images is not None else {}}
 
     @app.get("/api/v1/backends", response_model=list[BackendResponse])
     async def backends(request: Request):
         m = mgr(request)
         key = auth(request, "sessions")
+        if key.get("kind") == "member":
+            from .backend_state import local_view
+            return [local_view(m)]
         app_id = None if owner_key(key) else key["id"]
         from .backend_state import view as backend_view
         return list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, True, app_id, True)
                                            for name in m.cfg.backends]))
 
+    @app.get("/api/v1/me")
+    async def api_me(request: Request):
+        """Authenticated principal. Unauthenticated callers receive 401 rather than a project list."""
+        key = auth(request, "sessions")
+        m = mgr(request)
+        ident = getattr(request.state, "access", None)
+        if key.get("kind") == "member":
+            from .storage import account_usage_bytes, quota_message
+            account = m.db.account_by_id(key["user_id"])
+            used = account_usage_bytes(m.cfg, key["user_id"]) if account else 0
+            limit = int(account["disk_quota_bytes"]) if account else 0
+            return {
+                "role": "member", "user_id": key["user_id"], "login": ident.login if ident else None,
+                "name": key.get("name") or "",
+                "public_url": m.cfg.public_url,
+                "capabilities": {
+                    "admin": False, "local_sessions": True, "hosted_backends": False, "images": False,
+                    "jobs": False, "runners": False, "accounts": False,
+                },
+                "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
+                          "disk_note": quota_message(used, limit) if limit else "",
+                          "running": m.db.count_sessions(key["user_id"], "running"),
+                          "queued": m.db.count_sessions(key["user_id"], "queued"),
+                          "account_hint": key["user_id"][2:10] if key["user_id"].startswith("u-") else key["user_id"][:8]},
+            }
+        return {"role": "owner" if owner_key(key) else key.get("kind"), "user_id": "owner",
+                "login": ident.login if ident else None, "name": key.get("name") or "",
+                "public_url": m.cfg.public_url,
+                "capabilities": {
+                    "admin": owner_key(key), "local_sessions": True, "hosted_backends": owner_key(key),
+                    "images": owner_key(key) or "images" in key.get("scope_set", ()),
+                    "jobs": owner_key(key), "runners": owner_key(key), "accounts": owner_key(key),
+                }}
+
+    @app.get("/api/v1/projects")
+    async def api_projects(request: Request):
+        from . import catalog
+        m = mgr(request)
+        key = auth(request, "sessions")
+        user_id = key["user_id"] if key.get("kind") == "member" else "owner"
+        return [catalog.public_project(p) for p in catalog.list_projects(m.cfg, m.db, user_id)]
+
+    @app.post("/api/v1/projects", status_code=201)
+    async def api_create_project(body: dict, request: Request):
+        key = auth(request, "sessions")
+        ident = getattr(request.state, "access", None)
+        if not ident or ident.kind not in ("owner", "member") or not ident.bundled:
+            raise HarnessError(403, "project creation is only for an ambient same-origin Tailscale human")
+        if key.get("kind") == "app":
+            raise HarnessError(403, "app tokens cannot create projects")
+        m = mgr(request)
+        name = str((body or {}).get("name") or "")
+        description = str((body or {}).get("description") or "")
+        repo = str((body or {}).get("repo") or "")
+        target = str((body or {}).get("target") or "tower")
+        if ident.role == "member":
+            return m.create_member_project(ident.user_id, name, description, repo)
+        from . import config as config_mod
+        if target != "tower" and target not in m.cfg.runners:
+            raise HarnessError(400, f"runner {target!r} is not configured")
+        project = config_mod.Project(name=name, description=description, target=target, repo=repo,
+                                     owner_id="owner", managed=True)
+        try:
+            config_mod.add_project(m.cfg, project)
+        except (OSError, ValueError, TypeError) as e:
+            raise HarnessError(400, str(e))
+        return {"name": project.name, "description": project.description, "repo": bool(project.repo),
+                "homelab": False, "target": project.target, "managed": True}
+
+    @app.get("/api/v1/models")
+    async def api_models(request: Request):
+        m = mgr(request)
+        auth(request, "sessions")
+        return [{"name": model.name, "context_tokens": model.context_tokens,
+                 "default": model.name == m.cfg.default_model} for model in m.cfg.models.values()]
+
+    @app.get("/api/v1/models/status")
+    async def api_models_status(request: Request):
+        m = mgr(request)
+        auth(request, "sessions")
+        return [{"name": mc.name, "state": await m.warmer.state(mc), "waking_seconds": m.warmer.waking_for(mc)}
+                for mc in m.cfg.models.values()]
+
+    @app.post("/api/v1/models/warm")
+    async def api_models_warm(request: Request):
+        m = mgr(request)
+        key = auth(request, "sessions")
+        if key.get("kind") == "app":
+            raise HarnessError(403, "app tokens cannot warm the local model")
+        if not m.cfg.modules.local_model:
+            raise HarnessError(400, "the local model is disabled by this service profile")
+        model = m.cfg.models[m.cfg.default_model]
+        return {"name": model.name, "state": await m.warmer.warm(model)}
+
+    @app.get("/api/v1/profile")
+    async def api_profile(request: Request):
+        m = mgr(request)
+        auth(request, "sessions")
+        return {"emoji": m.db.get_meta("profile_emoji", "🙂"), "choices": []}
+
+    @app.get("/api/v1/search")
+    async def api_search(request: Request, q: str = "", project: str = "", limit: int = 20):
+        from . import search as search_mod
+        m = mgr(request)
+        key = auth(request, "sessions")
+        user_id = key["user_id"] if key.get("kind") == "member" else "owner"
+        app_id = None
+        if key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"]:
+            app_id = key["id"]
+        if not m.cfg.search.enabled:
+            raise HarnessError(400, "session search is disabled in config/harness.yaml")
+        return await asyncio.to_thread(
+            search_mod.search, m.db, q, project, max(1, min(limit, 50)), "", user_id, app_id)
+
+    @app.get("/api/v1/queue")
+    async def api_queue(request: Request):
+        m = mgr(request)
+        key = auth(request, "sessions")
+        user_id = key["user_id"] if key.get("kind") == "member" else "owner"
+        positions = m.scheduler.positions()
+        return [{"session_id": sid, "position": pos} for sid, pos in sorted(positions.items(), key=lambda x: x[1])
+                if (m.db.get_session(sid) or {}).get("owner_id", "owner") == user_id]
+
+    @app.get("/api/v1/events")
+    async def api_events(request: Request):
+        from .api import GLOBAL_TYPES, sse
+        m = mgr(request)
+        key = auth(request, "sessions")
+        user_id = key["user_id"] if key.get("kind") == "member" else "owner"
+        epoch = m.stream_epoch.get(user_id, 0)
+
+        async def stream():
+            sub = m.bus.subscribe("*")
+            try:
+                yield ": connected\n\n"
+                while True:
+                    if m.stream_epoch.get(user_id, 0) != epoch:
+                        return
+                    try:
+                        e = await asyncio.wait_for(sub.queue.get(), timeout=15)
+                    except asyncio.TimeoutError:
+                        if await request.is_disconnected():
+                            return
+                        yield ": keepalive\n\n"
+                        continue
+                    session = m.db.get_session(e["session_id"])
+                    if e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == user_id:
+                        if key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"] \
+                                and session.get("app_id") != key["id"]:
+                            continue
+                        # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
+                        yield sse({**e, "seq": None})
+            finally:
+                m.bus.unsubscribe("*", sub)
+
+        from fastapi.responses import StreamingResponse
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/v1/sessions/{ref}/transcript")
+    async def api_transcript(ref: str, request: Request):
+        from . import transcript
+        from fastapi.responses import PlainTextResponse
+        m = mgr(request)
+        s = own_session(request, auth(request, "sessions"), ref)
+        return PlainTextResponse(transcript.render(m.db, s["id"]))
+
+    @app.get("/api/v1/sessions/{ref}/changes")
+    async def api_changes(ref: str, request: Request):
+        m = mgr(request)
+        s = own_session(request, auth(request, "sessions"), ref)
+        return await m.changes(s["id"])
+
+    @app.post("/api/v1/sessions/{ref}/review/{action}")
+    async def api_review(ref: str, action: str, request: Request):
+        m = mgr(request)
+        key = auth(request, "sessions")
+        if key.get("kind") == "app":
+            raise HarnessError(403, "app tokens cannot review sessions")
+        s = own_session(request, key, ref)
+        return m.summary(await m.review(s["id"], action))
+
     @app.post("/api/v1/sessions", status_code=201, response_model=SessionResponse)
     async def create_session(body: CreateAppSession, request: Request):
         m = mgr(request)
         key = auth(request, "sessions")
+        user_id = "owner"
+        app = None if owner_key(key) else key
+        backend = body.backend
+        if key.get("kind") == "member":
+            user_id = key["user_id"]
+            app = None
+            if backend not in (None, "", "local"):
+                raise HarnessError(403, "household members can only use the local model")
+            backend = "local"
+        elif app is not None:
+            user_id = "owner"
         blocks = [b.model_dump() for b in body.context]
         if sum(len(b["content"]) for b in blocks) > MAX_CONTEXT_CHARS:
             raise HarnessError(413, f"context is larger than {MAX_CONTEXT_CHARS} characters")
-        s = m.create(body.prompt, project=body.project, backend=body.backend, model=body.model, title=body.title,
-                     app=None if owner_key(key) else key,
-                     app_context=context_text(key["name"], blocks) if blocks else "", app_tools=body.tools,
-                     app_metadata=body.metadata)
+        s = m.create(body.prompt, project=body.project, backend=backend, model=body.model, title=body.title,
+                     app=app, app_context=context_text(key["name"], blocks) if blocks else "", app_tools=body.tools,
+                     app_metadata=body.metadata, owner_id=user_id)
         return view(m, s)
 
     @app.get("/api/v1/sessions", response_model=list[SessionResponse])
     async def list_sessions(request: Request, limit: int = 50):
         m = mgr(request)
         key = auth(request, "sessions")
-        rows = m.db.list_sessions(limit * 5)
-        mine = [r for r in rows if owner_key(key) or "sessions:all" in key["scope_set"]
+        if key.get("kind") == "member":
+            return [m.list_summary(r) for r in m.db.list_sessions(limit, owner_id=key["user_id"])]
+        rows = m.db.list_sessions(limit * 5, owner_id="owner")
+        mine = [r for r in rows if owner_key(key) or SESSIONS_ALL in key["scope_set"]
                 or r.get("app_id") == key["id"]][:limit]
         return [m.list_summary(r) for r in mine]
 
     @app.get("/api/v1/sessions/{ref}", response_model=SessionResponse)
     async def get_session(ref: str, request: Request):
         m = mgr(request)
-        return view(m, own_session(request, auth(request, "sessions"), ref))
+        return view(m, visible_session(request, auth(request, "sessions"), ref))
+
+    @app.patch("/api/v1/sessions/{ref}", response_model=SessionResponse)
+    @app.put("/api/v1/sessions/{ref}", response_model=SessionResponse)
+    async def patch_session(ref: str, body: AppSessionUpdate, request: Request):
+        m = mgr(request)
+        s = own_session(request, auth(request, "sessions"), ref)
+        return view(m, m.rename(s["id"], body.title))
+
+    @app.post("/api/v1/sessions/{ref}/rerun", status_code=201, response_model=SessionResponse)
+    async def rerun_session(ref: str, request: Request):
+        m = mgr(request)
+        s = own_session(request, auth(request, "sessions"), ref)
+        return view(m, m.rerun(s["id"]))
 
     @app.post("/api/v1/sessions/{ref}/messages", response_model=SessionResponse)
     async def send(ref: str, body: AppMessage, request: Request):
@@ -587,7 +837,7 @@ def register(app: FastAPI, mgr) -> None:
     @app.get("/api/v1/sessions/{ref}/tool_calls", response_model=list[AppToolCallResponse])
     async def tool_calls(ref: str, request: Request, status: str = "pending"):
         m = mgr(request)
-        s = own_session(request, auth(request, "sessions"), ref)
+        s = visible_session(request, auth(request, "sessions"), ref)
         return m.db.app_tool_calls(s["id"], status or None)
 
     @app.post("/api/v1/sessions/{ref}/tool_calls/{call_id}", response_model=AcceptedResponse)
@@ -606,7 +856,7 @@ def register(app: FastAPI, mgr) -> None:
     @app.get("/api/v1/sessions/{ref}/approvals", response_model=list[ApprovalResponse])
     async def approvals(ref: str, request: Request):
         m = mgr(request)
-        s = own_session(request, auth(request, "sessions"), ref)
+        s = visible_session(request, auth(request, "sessions"), ref)
         return [public_approval(a) for a in m.db.pending_approvals(s["id"])]
 
     @app.post("/api/v1/sessions/{ref}/approvals/{approval_id}", response_model=ApprovalResponse)
@@ -614,6 +864,10 @@ def register(app: FastAPI, mgr) -> None:
         m = mgr(request)
         key = auth(request, "approvals")
         s = own_session(request, key, ref)
+        if key.get("kind") == "member":
+            if body.decision not in ("approve", "deny"):
+                raise HarnessError(400, "decision must be approve or deny")
+            return m.decide(s["id"], approval_id, body.decision == "approve", body.note)
         if not owner_key(key) and s.get("app_id") != key["id"]:
             raise HarnessError(403, "apps can only decide approvals in their own sessions")
         if body.decision not in ("approve", "deny"):
@@ -626,7 +880,7 @@ def register(app: FastAPI, mgr) -> None:
         """Mint a short-lived query credential so native EventSource need not receive a bearer token in its URL."""
         m = mgr(request)
         key = auth(request, "sessions")
-        s = own_session(request, key, ref)
+        s = visible_session(request, key, ref)
         try:
             origin = normalize_origin(request.headers.get("origin", ""))
         except ValueError:
@@ -653,18 +907,20 @@ def register(app: FastAPI, mgr) -> None:
                 raise HarnessError(401, "invalid or expired stream ticket")
             key["scope_set"] = set((key.get("scopes") or "").split())
             if (not owner_key(key) and "sessions" not in key["scope_set"]
-                    and "sessions:all" not in key["scope_set"]):
+                    and SESSIONS_ALL not in key["scope_set"]):
                 raise HarnessError(403, "this token lacks the 'sessions' scope")
         else:
             key = auth(request, "sessions")
-        s = own_session(request, key, ref)
+        s = visible_session(request, key, ref)
         sid = s["id"]
+        owner = s.get("owner_id") or "owner"
         if request.headers.get("last-event-id", "").isdigit():
             after = max(after, int(request.headers["last-event-id"]))
 
         async def stream():
             sub = m.bus.subscribe(sid)
             last = after
+            epoch = m.stream_epoch.get(owner, 0)
             try:
                 yield ": connected\n\n"
                 for e in m.db.events(sid, after):
@@ -673,6 +929,8 @@ def register(app: FastAPI, mgr) -> None:
                 if not follow:
                     return
                 while True:
+                    if m.stream_epoch.get(owner, 0) != epoch:
+                        return
                     try:
                         e = await asyncio.wait_for(sub.queue.get(), timeout=15)
                     except asyncio.TimeoutError:
@@ -696,6 +954,8 @@ def register(app: FastAPI, mgr) -> None:
     async def app_image(body: AppImageRequest, request: Request):
         m = mgr(request)
         key = auth(request, "images")
+        if key.get("kind") == "member":
+            raise HarnessError(403, "members cannot use image generation")
         if m.images is None:
             raise HarnessError(400, "image generation is disabled on this harness")
         try:
@@ -725,7 +985,9 @@ def register(app: FastAPI, mgr) -> None:
     @app.get("/api/v1/remote-control")
     async def app_rc_status(request: Request):
         m = mgr(request)
-        auth(request, "remote_control")
+        key = auth(request, "remote_control")
+        if key.get("kind") == "member":
+            raise HarnessError(403, "members cannot use Remote Control")
         return {"enabled": m.remote_control is not None,
                 "projects": m.remote_control.status() if m.remote_control else []}
 
@@ -771,3 +1033,6 @@ def register(app: FastAPI, mgr) -> None:
         return {**job, "url": f"/api/v1/images/{job['id']}.png" if job["status"] == "done" else None,
                 "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
                               "upscale_model": c.get("upscale_model") or ""} for c in children]}
+
+    from . import config_api
+    config_api.register_app(app, mgr, auth, owner_key)

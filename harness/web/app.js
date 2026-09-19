@@ -33,7 +33,7 @@ const STATUS_LABEL = {
 const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
-  "approval_requested", "approval_decided", "compaction", "compacting", "error", "llm_retry", "resumed",
+  "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
   "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "app_context", "app_tool_call", "app_tool_result",
   "quote_check", "ungrounded_quotes",
@@ -123,15 +123,30 @@ function showFab(href, label) {
 let currentMe = { role: "owner" };
 async function currentUser() {
   const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
-  try { currentMe = await api("/me", { surface: bootstrap }); } catch (_) { currentMe = { role: "owner" }; }
+  try {
+    currentMe = await api("/me", { surface: bootstrap });
+  } catch (_) {
+    try { currentMe = await api("/me", { surface: "app" }); }
+    catch (_) { currentMe = { role: "guest" }; }
+  }
   return currentMe;
 }
 function isGuest() { return currentMe.role === "guest"; }
+function isMember() { return currentMe.role === "member"; }
+function isOwner() { return currentMe.role === "owner"; }
 
 function paintGuestChrome() {
   const banner = document.getElementById("guest-banner");
   const guest = isGuest();
+  const member = isMember();
   document.documentElement.classList.toggle("guest", guest);
+  document.documentElement.classList.toggle("member", member);
+  if ($feature) {
+    for (const opt of $feature.options) {
+      if (opt.value === "jobs" || opt.value === "images") opt.hidden = member || guest;
+    }
+    if (member && ($feature.value === "jobs" || $feature.value === "images")) $feature.value = "agents";
+  }
   if (!banner) return;
   if (!guest) {
     banner.hidden = true;
@@ -157,6 +172,7 @@ function toast(text, ms = 2600) {
 
 function apiSurface(path, method) {
   if (isGuest() && !agentHarnessWeb.token) return "legacy";
+  if (isMember()) return "app";
   const route = path.split("?")[0];
   if (route === "/sessions" && (method === "GET" || method === "POST")) return "app";
   if (/^\/sessions\/[^/]+$/.test(route) && method === "GET") return "app";
@@ -169,7 +185,11 @@ async function api(path, { method = "GET", body, surface } = {}) {
   return agentHarnessWeb.request(path, { method, body, surface: surface || apiSurface(path, method) });
 }
 
-const ownerSurface = () => (isGuest() && !agentHarnessWeb.token ? "legacy" : "admin");
+function ownerSurface() {
+  if (isMember()) return "app";
+  if (isGuest() && !agentHarnessWeb.token) return "legacy";
+  return "admin";
+}
 
 function daemonImage(path, attrs = {}) {
   const img = h("img", { ...attrs, alt: attrs.alt || "" });
@@ -411,11 +431,16 @@ async function route() {
     parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
     || ((parts[0] === "profile" || parts[0] === "settings")
       && ["notifications", "apps", "endpoint"].includes(parts[1])));
+  const memberBlocked = isMember() && (
+    parts[0] === "jobs" || parts[0] === "images"
+    || ((parts[0] === "profile" || parts[0] === "settings")
+      && ["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"].includes(parts[1])));
   if (guestBlocked) { go(parts[0] === "jobs" ? "#/jobs" : "#/profile", true); return; }
+  if (memberBlocked) { go(parts[0] === "profile" || parts[0] === "settings" ? "#/profile" : "#/", true); return; }
   try {
     if (parts.length === 0) await viewList();
     else if (parts[0] === "new") await viewNew();
-    else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1]);
+            else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1], parts[2]);
     else if (parts[0] === "images") {
       if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
       else if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
@@ -539,7 +564,7 @@ async function viewList() {
 
   const render = async () => {
     const [freshSessions, queue, gpu, projects] = await Promise.all([
-      api("/sessions"), api("/queue"), api("/gpu").catch(() => null), api("/projects")]);
+      api("/sessions"), api("/queue"), isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
     sessions = freshSessions;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
       .sort((a, b) => (a === "tower" ? -1 : b === "tower" ? 1 : a.localeCompare(b)));
@@ -581,7 +606,7 @@ async function viewList() {
   for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
     handlers[type] = refresh;
   }
-  onLeave(openStream(() => agentHarnessWeb.url("/events", isGuest() && !agentHarnessWeb.token ? "legacy" : "admin"), handlers,
+  onLeave(openStream(() => agentHarnessWeb.url("/events", ownerSurface()), handlers,
     { authorized: !(isGuest() && !agentHarnessWeb.token) }));
   const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
   document.addEventListener("visibilitychange", onVisible);
@@ -590,6 +615,7 @@ async function viewList() {
 
 // ---------- new task ----------
 async function confirmGpuQueue(label) {
+  if (isMember()) return true;
   try {
     const gpu = await api("/gpu");
     if (!gpu.manual) return true;
@@ -602,7 +628,9 @@ async function confirmGpuQueue(label) {
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
   let [projects, models, allTemplates, backends] = await Promise.all([
-    api("/projects"), api("/models"), api("/templates"), api("/backends?auth=skip")]);
+    api("/projects"), api("/models"),
+    isMember() ? Promise.resolve([]) : api("/templates").catch(() => []),
+    isMember() ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip")]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
   const targetKey = "harness.target";
@@ -657,13 +685,14 @@ async function viewNew() {
   const newProjectName = h("input", { type: "text", placeholder: "my-project", maxlength: "64", required: true,
     pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
   const newProjectDescription = h("input", { type: "text", placeholder: "Optional description", maxlength: "240" });
-  const newProjectTarget = h("select", {}, targets.map((name) => h("option", { value: name },
+  const newProjectTarget = isMember() ? h("input", { type: "hidden", value: "tower" }) : h("select", {}, targets.map((name) => h("option", { value: name },
     name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
-  newProjectTarget.value = target;
+  if (!isMember()) newProjectTarget.value = target;
   const newProjectSource = h("select", {},
     h("option", { value: "empty" }, "Empty workspace"),
-    h("option", { value: "repo" }, "Local folder or git URL"));
-  const newProjectRepo = h("input", { type: "text", placeholder: "D:\\Projects\\example or https://…", hidden: true });
+    h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"));
+  const newProjectRepo = h("input", { type: "text",
+    placeholder: isMember() ? "https://github.com/org/repo" : "D:\\Projects\\example or https://…", hidden: true });
   newProjectSource.addEventListener("change", () => {
     newProjectRepo.hidden = newProjectSource.value !== "repo";
     newProjectRepo.required = newProjectSource.value === "repo";
@@ -686,6 +715,7 @@ async function viewNew() {
         if (targetSwitch) for (const b of targetSwitch.children) b.classList.toggle("primary", b.dataset.target === target);
         showTarget();
         showProjectHint();
+        syncSkillChecks();
         projectCreator.open = false;
         toast(`Project ${created.name} created`);
       } catch (err) {
@@ -694,10 +724,12 @@ async function viewNew() {
         createProjectButton.disabled = false;
       }
     } },
-    h("p", { class: "muted small" }, "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task."),
+    h("p", { class: "muted small" }, isMember()
+      ? "Saved in your household account. Use a lowercase project id; a public HTTPS git source is cloned into your own area."
+      : "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task."),
     h("label", {}, "Name"), newProjectName,
     h("label", {}, "Description"), newProjectDescription,
-    h("label", {}, "Runs on"), newProjectTarget,
+    isMember() ? null : h("label", {}, "Runs on"), isMember() ? null : newProjectTarget,
     h("label", {}, "Workspace"), newProjectSource, newProjectRepo,
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
@@ -761,9 +793,28 @@ async function viewNew() {
     showTarget();
     showProjectHint();
     prompt.value = t.prompt;
+    syncSkillChecks();
   });
 
   const start = h("button", { class: "btn primary", type: "submit" }, "Start");
+  let enabledSkills = [];
+  try { enabledSkills = await api("/skills/enabled"); } catch (_) { enabledSkills = []; }
+  const skillInputs = [];
+  const skillBoxes = enabledSkills.map((sk) => {
+    const box = h("input", { type: "checkbox", class: "skill-opt", value: sk.slug });
+    skillInputs.push(box);
+    return h("label", { class: "row", style: "gap:8px;align-items:flex-start;margin:6px 0" }, box,
+      h("span", {}, h("strong", {}, sk.title || sk.slug),
+        h("div", { class: "muted small" }, sk.purpose || `v${sk.version} · ${sk.content_hash.slice(0, 12)}`)));
+  });
+  const syncSkillChecks = () => {
+    for (const box of skillInputs) {
+      const sk = enabledSkills.find((s) => s.slug === box.value);
+      box.checked = (sk?.projects || []).includes(project.value);
+    }
+  };
+  syncSkillChecks();
+  project.addEventListener("change", syncSkillChecks);
   const form = h("form", {
     onsubmit: async (e) => {
       e.preventDefault();
@@ -771,8 +822,10 @@ async function viewNew() {
       if (backend.value === "local" && !(await confirmGpuQueue("This task"))) return;
       start.disabled = true;
       try {
+        const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
         const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
-          backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null } });
+          backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null,
+          skills: selectedSkills } });
         try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
         location.hash = `#/s/${s.id}`;
       } catch (err) {
@@ -785,11 +838,12 @@ async function viewNew() {
   allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState, projectHint,
-  h("label", {}, "Backend"), backend, backendState,
+  isMember() ? null : h("label", {}, "Backend"), isMember() ? null : backend, isMember() ? null : backendState,
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
+  skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },
-    h("button", {
+    isMember() ? null : h("button", {
       class: "btn", type: "button",
       onclick: async () => {
         if (!prompt.value.trim()) return toast("Write a prompt first");
@@ -1120,9 +1174,14 @@ async function viewSession(sid, tab, focusApproval) {
         h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
         h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
     }
-    const what = a.tool === "run_shell" ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
+    const what = a.tool === "run_shell" || a.tool === "Bash" || a.tool === "exec_command"
+      ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
       : a.tool === "git_clone" ? `git clone ${a.args.url}`
         : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
+    const rec = a.smart && a.smart.recommendation
+      ? h("p", { class: "smart-rec" },
+          `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${a.smart.reason ? `: ${a.smart.reason}` : ""}`)
+      : null;
     // Memory library changes carry "summary\n\n<unified diff>"; file writes carry just the diff.
     const memory = a.tool === "memory_edit" || a.tool === "memory_write";
     const [summary, diff] = memory && a.detail.includes("\n\n") ? [a.detail.slice(0, a.detail.indexOf("\n\n")), a.detail.slice(a.detail.indexOf("\n\n") + 2)] : ["", a.detail || ""];
@@ -1131,6 +1190,7 @@ async function viewSession(sid, tab, focusApproval) {
       .map((line) => h("div", { class: line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "" }, line))) : null;
     const card = h("div", { class: "approval", id: `approval-${a.id}` },
       h("h4", {}, `Approval needed: ${a.reason || a.tool}`),
+      rec,
       summary ? h("p", { style: "margin:4px 0 8px" }, summary) : null,
       diffView || h("pre", {}, a.detail || what),
       a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args.path || ""}`) : null,
@@ -1210,6 +1270,14 @@ async function viewSession(sid, tab, focusApproval) {
       if (c) c.slot.append(card); else feed.append(h("div", { class: "ev" }, card));
       if (focusApproval !== e.data.id) grew();
     },
+    approval_auto_approved: (e) => {
+      const badge = h("p", { class: "note smart-auto" },
+        `Auto-approved: the deterministic gate and smart reviewer both allowed this ${e.data.tool || "call"} (${e.data.reason || "routine workspace work"}).`);
+      add(badge);
+      const c = calls.get(e.data.tool_call_id);
+      if (c) c.state.textContent = "auto-approved";
+    },
+    smart_review: () => {},
     approval_decided: (e) => {
       const a = approvals.get(e.data.id);
       if (!a) return;
@@ -1480,6 +1548,10 @@ function viewInfo(s) {
     ["Workspace", s.workspace_removed ? `${s.workspace} (removed)` : s.workspace],
   ];
   if (s.branch) rows.push(["Branch", `${s.branch}${s.base_branch ? ` from ${s.base_branch}` : ""}`], ["Review", s.review || "pending"]);
+  const frozen = s.skills || [];
+  if (frozen.length) {
+    rows.push(["Skills", frozen.map((sk) => `${sk.slug} v${sk.version} (${(sk.content_hash || "").slice(0, 12)})`).join(", ")]);
+  }
   $app.append(h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
     h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v))))),
   h("button", { class: "btn", onclick: () => downloadDaemonFile(`/sessions/${s.id}/transcript`, `${s.id}.md`) },
@@ -1544,6 +1616,15 @@ function imageStatusView(s) {
   return updateImageStatusView(view, s);
 }
 
+function imageModeEntries(status) {
+  if (status.modes) {
+    return Object.entries(status.modes);
+  }
+  return Object.entries(status.models || {}).map(([id, label]) => [id, {
+    label, available: true, resolution: id === "quality" || id === "quality-fast" ? "high" : "standard",
+  }]);
+}
+
 async function viewImages() {
   setHeader("images");
   let data;
@@ -1568,7 +1649,25 @@ async function viewImages() {
     try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ }
     if (prompt.value.trim()) startWarmup().catch(() => {});
   });
-  const model = h("select", {}, Object.entries(data.status.models).map(([k, label]) => h("option", { value: k }, label)));
+  const modeEntries = data.status.modes ? Object.entries(data.status.modes) : imageModeEntries(data.status);
+  const modes = Object.fromEntries(modeEntries);
+  const modelChoices = modeEntries.map(([key, spec]) => ({ key, ...spec, display_name: spec.label || spec }));
+  const model = h("select", {}, modeEntries.map(([key, spec]) => h("option", {
+    value: key, disabled: spec.available === false,
+  }, spec.available === false ? `${spec.label || spec} — not installed` : (spec.label || spec))));
+  const fluxHint = h("p", { class: "muted small" });
+  const updateFluxHint = () => {
+    const selected = modelChoices.find((m) => m.key === model.value);
+    if (selected && selected.available === false) {
+      fluxHint.hidden = false;
+      fluxHint.textContent = selected.setup || [selected.unavailable_reason, selected.remediation].filter(Boolean).join(". ");
+    } else {
+      fluxHint.hidden = true;
+      fluxHint.textContent = "";
+    }
+  };
+  model.addEventListener("change", updateFluxHint);
+  updateFluxHint();
   const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
   let resolutionTouched = false;
   const resolutionInputs = Object.entries(data.status.resolutions).map(([name, spec]) => {
@@ -1587,7 +1686,8 @@ async function viewImages() {
   aspect.addEventListener("change", renderResolutions);
   model.addEventListener("change", () => {
     if (!resolutionTouched) {
-      const recommended = model.value === "quality" ? "high" : "standard";
+      const recommended = (modes[model.value] && modes[model.value].resolution)
+        || (model.value === "quality" || model.value === "quality-fast" ? "high" : "standard");
       resolutionInputs.find((choice) => choice.name === recommended).input.checked = true;
     }
     renderResolutions();
@@ -1636,6 +1736,8 @@ async function viewImages() {
       onsubmit: async (e) => {
         e.preventDefault();
         if (!prompt.value.trim()) return toast("Describe the image first");
+        const selectedMode = modelChoices.find((m) => m.key === model.value);
+        if (selectedMode && selectedMode.available === false) return toast(selectedMode.unavailable_reason || "That image mode isn't installed");
         if (!(await confirmGpuQueue("This image job"))) return;
         go.disabled = true;
         try {
@@ -1651,6 +1753,7 @@ async function viewImages() {
     h("label", {}, "Prompt"), prompt,
     h("div", { class: "row" }, h("div", { style: "flex:2" }, h("label", {}, "Model"), model),
       h("div", { style: "flex:1" }, h("label", {}, "Aspect ratio"), aspect)),
+    fluxHint,
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
     h("div", { class: "row" }, h("div", { style: "flex:1" }, h("label", {}, "Upscale"), upscale)),
@@ -1685,6 +1788,8 @@ async function viewImage(id) {
     if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
     meta.push(`seed ${img.seed}`, img.source);
     if (img.seconds) meta.push(`${Math.round(img.seconds)} s`);
+    if (img.lora) meta.push(`LoRA ${img.lora}`);
+    if (img.lora_revision) meta.push(img.lora_revision.slice(0, 8));
     meta.push(when);
     const canUpscale = img.status === "done" && !isGuest() && !img.private && Number(img.scale || 1) === 1;
     const startUpscale = (choice) => async () => {
@@ -1701,6 +1806,11 @@ async function viewImage(id) {
       h("div", { class: "card" },
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, meta.join(" · ")),
+        img.provenance && (img.provenance.checkpoint_revision || img.provenance.steps) ? h("p", { class: "muted small" },
+          [img.provenance.mode || img.model, img.provenance.steps && `${img.provenance.steps} steps`,
+           img.provenance.sampler, img.provenance.scheduler, img.provenance.guidance != null && `cfg ${img.provenance.guidance}`,
+           img.provenance.checkpoint_revision && `ckpt ${String(img.provenance.checkpoint_revision).slice(0, 12)}`,
+           img.provenance.comfy_revision && `ComfyUI ${img.provenance.comfy_revision}`].filter(Boolean).join(" · ")) : null,
         img.parent && img.parent.id ? h("p", { class: "muted small" }, "Derived from ",
           h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
         (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
@@ -2047,14 +2157,18 @@ async function viewJob(id) {
 
 // ---------- profile ----------
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
-const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint"]);
+const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "smart-approvals", "skills"]);
+const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends", "smart-approvals", "skills"]);
 const PROFILE_PAGES = {
   connection: "Connection",
   appearance: "Appearance",
   notifications: "Notifications",
   install: "Install",
   backends: "Backends",
+  "smart-approvals": "Smart approvals",
+  daemon: "Server",
   memory: "Memory",
+  skills: "Skills",
   apps: "Apps",
   endpoint: "Inference endpoint",
 };
@@ -2146,10 +2260,11 @@ function emojiPicker(profile, onPick) {
 
 function accountCard(me, profile) {
   const live = $conn.classList.contains("live");
+  const usage = me.usage || {};
   return h("div", {},
-    isGuest() ? h("div", { class: "card" },
-      h("p", { class: "muted small" }, "Profile icon is owner-only during demo access."),
-      h("p", { style: "font-size:2rem;margin:0" }, profile.emoji))
+    isGuest() || isMember() ? h("div", { class: "card" },
+      h("p", { class: "muted small" }, isMember() ? "Household member identity." : "Profile icon is owner-only during demo access."),
+      h("p", { style: "font-size:2rem;margin:0" }, profile.emoji || "🙂"))
       : h("div", { class: "card" },
       h("p", { class: "muted small" }, "Shown at the top left of the app."),
       emojiPicker(profile)),
@@ -2157,7 +2272,10 @@ function accountCard(me, profile) {
       h("h3", {}, "Account"),
       h("p", {}, me.name || "You"),
       h("p", { class: "muted small" }, me.login || "Not identified by Tailscale on this request."),
-      isGuest() ? h("p", { class: "muted small" }, "Demo access — look around only.") : null),
+      me.user_id && isMember() ? h("p", { class: "muted small" }, `Account ${usage.account_hint || me.user_id}`) : null,
+      isGuest() ? h("p", { class: "muted small" }, "Demo access — look around only.") : null,
+      isMember() && usage.disk_note ? h("p", { class: "muted small" }, usage.disk_note) : null,
+      isMember() ? h("p", { class: "muted small" }, `${usage.running || 0} running · ${usage.queued || 0} queued`) : null),
     h("div", { class: "card" },
       h("h3", {}, "Connection"),
       me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
@@ -2166,40 +2284,128 @@ function accountCard(me, profile) {
         : `Agent Harness Web is not receiving the live stream from Agent Harness Server at ${me.public_url || location.origin}.`)));
 }
 
-async function viewProfile(page) {
-  const titles = { account: "Account", "remote-control": "Claude Remote Control", disk: "Disk", ...PROFILE_PAGES };
+function fmtBytes(n) {
+  if (!n && n !== 0) return "—";
+  if (n >= 2 ** 30) return `${(n / 2 ** 30).toFixed(1)} GiB`;
+  if (n >= 2 ** 20) return `${(n / 2 ** 20).toFixed(1)} MiB`;
+  return `${n} B`;
+}
+
+async function accountsCard() {
+  const wrap = h("div");
+  const render = async () => {
+    let rows = [];
+    try { rows = await api("/accounts", { surface: "admin" }); }
+    catch (e) { fill(wrap, h("p", { class: "note bad" }, e.message)); return; }
+    const login = h("input", { type: "email", placeholder: "member@example.com", required: true });
+    const name = h("input", { type: "text", placeholder: "Display name", required: true, maxlength: "80" });
+    const create = h("button", { class: "btn primary", type: "submit" }, "Create member");
+    fill(wrap,
+      h("p", { class: "muted small" }, "Household members authenticate with the exact Tailscale login you enter. The machine owner can still read local storage; this page prevents accidental API and UI cross-account access."),
+      h("form", { class: "card", onsubmit: async (e) => {
+        e.preventDefault();
+        create.disabled = true;
+        try {
+          await api("/accounts", { method: "POST", surface: "admin", body: {
+            login: login.value, display_name: name.value,
+          } });
+          toast("Member created");
+          await render();
+        } catch (err) { toast(err.message, 5000); create.disabled = false; }
+      } }, h("h3", {}, "New member"), login, name, h("div", { class: "row", style: "margin-top:12px" }, create)),
+      rows.length ? rows.map((a) => {
+        const patch = async (body, confirmText) => {
+          if (confirmText && !confirm(confirmText)) return;
+          try {
+            await api(`/accounts/${a.user_id}`, { method: "PATCH", surface: "admin", body });
+            await render();
+          } catch (err) { toast(err.message, 5000); }
+        };
+        return h("div", { class: "card" },
+          h("h3", {}, a.display_name),
+          h("p", { class: "muted small" }, a.login),
+          h("p", { class: "muted small" }, `id ${a.account_hint} · ${a.enabled ? "enabled" : "disabled"}`),
+          h("p", { class: "muted small" }, `${fmtBytes(a.disk_used_bytes)} / ${fmtBytes(a.disk_quota_bytes)} · ${a.running} running · ${a.queued} queued`),
+          a.last_activity_at ? h("p", { class: "muted small" }, `Last activity ${ago(a.last_activity_at)}`) : null,
+          h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
+            h("button", { class: "btn small", type: "button", onclick: () => {
+              const next = window.prompt("Display name", a.display_name);
+              if (next) patch({ display_name: next });
+            } }, "Rename"),
+            h("button", { class: "btn small", type: "button", onclick: () => {
+              const next = window.prompt("New Tailscale login", a.login);
+              if (next && next !== a.login && confirm(`Rebind this account to ${next}? The old login stops working immediately.`)) {
+                patch({ login: next });
+              }
+            } }, "Rebind login"),
+            h("button", { class: "btn small", type: "button", onclick: () => {
+              const next = window.prompt("Disk quota in GiB", String(Math.round(a.disk_quota_bytes / 2 ** 30)));
+              if (next) patch({ disk_quota_bytes: Math.round(Number(next) * 2 ** 30) });
+            } }, "Quota"),
+            h("button", { class: "btn small", type: "button", onclick: () => {
+              const running = window.prompt("Max running sessions", String(a.max_running));
+              const queued = window.prompt("Max queued sessions", String(a.max_queued));
+              if (running || queued) patch({
+                max_running: running ? Number(running) : a.max_running,
+                max_queued: queued ? Number(queued) : a.max_queued,
+              });
+            } }, "Concurrency"),
+            h("button", { class: "btn small", type: "button", onclick: () => patch(
+              { enabled: !a.enabled },
+              a.enabled ? `Disable ${a.display_name}? Running work will be cancelled.` : `Re-enable ${a.display_name}?`,
+            ) }, a.enabled ? "Disable" : "Re-enable")));
+      }) : h("p", { class: "muted small" }, "No household members yet."));
+  };
+  await render();
+  return wrap;
+}
+
+async function viewProfile(page, extra) {
+  const titles = { account: "Account", accounts: "Accounts", "remote-control": "Claude Remote Control", disk: "Disk", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
   setHeader("agents", titles[page] || "Profile", { page: true });
   if (page === "connection") return $app.append(connectionCard());
-  const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
+  const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
   if (page === "account") return $app.append(accountCard(me, profile));
+  if (page === "accounts" && isOwner()) return $app.append(await accountsCard());
   if (page === "appearance") return $app.append(appearanceCard());
   if (page === "notifications") return $app.append(notificationsCard(me));
   if (page === "install") return $app.append(installCard());
   if (page === "backends") return $app.append(await backendsCard());
+  if (page === "smart-approvals") return $app.append(await smartApprovalsCard());
+  if (page === "daemon") return $app.append(await daemonSettingsCard());
   if (page === "memory") return $app.append(memoryCard());
+  if (page === "skills") return $app.append(await skillsPage(extra));
   if (page === "apps") return $app.append(appsCard(me));
   if (page === "endpoint") return $app.append(endpointCard(me));
   if (page === "disk") return $app.append(diskCard());
   if (page === "remote-control") return $app.append(remoteControlCard());
+  let hidden = new Set();
+  if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
+  else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
   $app.append(
     h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
-        h("span", { class: "identity-emoji" }, profile.emoji),
+        h("span", { class: "identity-emoji" }, profile.emoji || "🙂"),
         h("div", { class: "spacer" },
           h("h3", {}, me.name || "You"),
-          h("div", { class: "muted small" }, "Account and connection")),
+          h("div", { class: "muted small" }, isMember() ? "Household member" : "Account and connection")),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    h("p", { class: "section-label" }, "Actions"),
-    h("div", { class: "card settings-list" },
+    isOwner() ? h("p", { class: "section-label" }, "Actions") : null,
+    isOwner() ? h("div", { class: "card settings-list" },
       gpuActionRow(),
       h("a", { href: "#/profile/remote-control" }, "Claude Remote Control"),
-      h("a", { href: "#/profile/disk" }, "Disk")),
+      h("a", { href: "#/profile/disk" }, "Disk"),
+      h("a", { href: "#/profile/accounts" }, "Accounts")) : null,
+    isMember() && me.usage ? h("div", { class: "card" },
+      h("h3", {}, "Usage"),
+      h("p", { class: "muted small" }, me.usage.disk_note || ""),
+      h("p", { class: "muted small" }, `${me.usage.running || 0} running · ${me.usage.queued || 0} queued`)) : null,
     h("p", { class: "section-label" }, "Settings"),
     h("div", { class: "card settings-list" },
       Object.entries(PROFILE_PAGES)
-        .filter(([id]) => (id !== "install" || !isStandalone()) && !(isGuest() && GUEST_HIDDEN_PAGES.has(id)))
+        .filter(([id]) => (id !== "install" || !isStandalone()) && !hidden.has(id))
         .map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
   );
 }
@@ -2412,6 +2618,41 @@ function backendUsage(b) {
   return `${b.logged_in ? "signed in" : "sign-in/key needed"} · ${sub} · ${req}${dollars}`;
 }
 
+async function smartApprovalsCard() {
+  let data;
+  try { data = await api("/smart-approvals"); }
+  catch (e) { return h("div", { class: "card" }, h("p", { class: "note bad" }, e.message)); }
+  const status = h("p", { class: "muted small" });
+  const setMode = async (mode) => {
+    try {
+      data = await api("/smart-approvals", { method: "PUT", body: { mode } });
+      toast(mode === "off" ? "Smart approvals off" : `Smart approvals ${mode}`);
+      go("#/profile/smart-approvals");
+    } catch (e) { toast(e.message); }
+  };
+  const configured = data.configured || data.enabled;
+  status.textContent = configured
+    ? `${data.provider || "provider"} · ${data.model || "model"} · mode ${data.mode}`
+    : "Off. The owner enables this in harness.yaml with a hosted API secret reference.";
+  const buttons = isGuest() ? h("p", { class: "muted small" }, "Demo access cannot change smart approvals.")
+    : h("div", { class: "row", style: "margin-top:10px; gap:8px; flex-wrap:wrap" },
+        configured ? h("button", { class: "btn", onclick: () => setMode("shadow") }, "Shadow") : null,
+        configured ? h("button", { class: "btn", onclick: () => setMode("auto") }, "Auto") : null,
+        h("button", { class: "btn", onclick: () => setMode("off") }, "Off"));
+  const stats = h("p", { class: "muted small" },
+    `${data.attempts || 0} reviews · ${data.auto_approvals || 0} auto-approved · ${data.escalations || 0} escalated · `
+    + `${data.latency_ms || 0} ms avg · $${Number(data.cost_usd || 0).toFixed(4)}`);
+  const recent = (data.recent || []).slice(0, 12).map((row) => h("div", { class: "muted small" },
+    `${row.outcome} · ${row.recommendation}${row.escalate_reason ? ` (${row.escalate_reason})` : ""} · `
+    + `${row.provider}/${row.model}`));
+  return h("div", {},
+    h("div", { class: "card" },
+      h("h3", {}, "Smart approvals"),
+      h("p", { class: "muted small" }, "A small hosted model can rate tagged, local, reversible shell asks after the deterministic policy. It never auto-denies. Shadow records a recommendation and still asks; auto only approves a high-confidence approve."),
+      status, stats, buttons),
+    recent.length ? h("div", { class: "card" }, h("h3", {}, "Recent reviews"), ...recent) : null);
+}
+
 async function backendsCard() {
   const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
   let failed = false;
@@ -2495,12 +2736,207 @@ async function backendsCard() {
     body);
 }
 
+function settingInput(spec, draft) {
+  const current = draft[spec.key] !== undefined ? draft[spec.key] : (spec.pending ?? spec.effective);
+  if (spec.type === "bool") {
+    const box = h("input", { type: "checkbox", class: "switch", checked: !!current, disabled: !spec.writable });
+    box.addEventListener("change", () => { draft[spec.key] = box.checked; });
+    return box;
+  }
+  if (spec.enum && spec.enum.length) {
+    const sel = h("select", { disabled: !spec.writable }, spec.enum.map((item) =>
+      h("option", { value: item, selected: item === current }, item)));
+    sel.addEventListener("change", () => { draft[spec.key] = sel.value; });
+    return sel;
+  }
+  const input = h("input", {
+    type: spec.type === "string" ? "text" : "number",
+    value: current == null ? "" : String(current),
+    disabled: !spec.writable,
+    min: spec.minimum, max: spec.maximum, step: spec.type === "int" ? "1" : "any",
+  });
+  input.addEventListener("change", () => {
+    if (input.value === "") { draft[spec.key] = null; return; }
+    draft[spec.key] = spec.type === "string" ? input.value : Number(input.value);
+  });
+  return input;
+}
+
+function settingMeta(spec) {
+  const bits = [];
+  bits.push(spec.apply === "live" ? "applies live" : spec.apply === "daemon_restart" ? "needs restart" : "file only");
+  if (spec.source) bits.push(`source: ${spec.source}`);
+  if (spec.pending != null && spec.apply === "daemon_restart") bits.push(`pending: ${spec.pending}`);
+  if (spec.capped_by) bits.push(`capped by ${spec.capped_by}`);
+  if (spec.file_only) bits.push(spec.guidance || "managed in local configuration");
+  return bits.join(" · ");
+}
+
+async function daemonSettingsCard() {
+  let view;
+  try { view = await api("/config"); }
+  catch (e) { return h("div", { class: "card" }, h("p", { class: "note bad" }, e.message)); }
+  const draft = {};
+  const status = h("p", { class: "muted small" },
+    `Revision ${view.revision}` +
+    (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
+    (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
+    (view.warning ? ` · ${view.warning}` :
+      view.recovery && view.recovery.recovery === "overlay_quarantined"
+        ? ` · ${view.recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`
+        : (view.recovery && view.recovery.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
+  const planBox = h("div", { class: "config-plan" });
+  const errorBox = h("div");
+  const groups = {};
+  for (const spec of view.settings || []) {
+    (groups[spec.category] ||= []).push(spec);
+  }
+  const rows = Object.entries(groups).map(([category, specs]) => h("div", { class: "card config-category" },
+    h("h3", {}, category),
+    specs.map((spec) => h("div", { class: "config-row" },
+      h("div", { class: "config-copy" },
+        h("label", { class: "field-label" }, spec.label),
+        h("p", { class: "muted small" }, spec.help),
+        h("p", { class: "muted small config-meta" }, settingMeta(spec)),
+        spec.file_only ? null : h("p", { class: "muted small" },
+          `effective ${spec.effective == null ? "—" : spec.effective}` +
+          (spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "") +
+          (spec.inherited != null ? ` · inherited ${spec.inherited}` : ""))),
+      spec.file_only ? h("span", { class: "muted small" }, "local config") : settingInput(spec, draft)))));
+
+  const apply = async ({ restart = false, rollback = false } = {}) => {
+    errorBox.replaceChildren();
+    planBox.replaceChildren();
+    const changes = {};
+    for (const [key, value] of Object.entries(draft)) changes[key] = value;
+    try {
+      if (rollback) {
+        if (!window.confirm("Restore the previous confirmed server configuration?")) return;
+        const result = await api("/config/rollback", { method: "POST", body: { revision: view.revision, confirm: true } });
+        toast("Rolled back");
+        if (result.restart_required) {
+          await confirmRestart(result.pending_revision || result.revision, status, errorBox);
+        } else { location.hash = "#/profile/daemon"; location.reload(); }
+        return;
+      }
+      const plan = await api("/config", { method: "PATCH", body: { revision: view.revision, dry_run: true, changes } });
+      planBox.append(
+        h("p", { class: "field-label" }, "Change plan"),
+        (plan.changes || []).length
+          ? h("ul", { class: "config-plan-list" }, plan.changes.map((c) =>
+            h("li", {}, `${c.key}: ${c.from} → ${c.action === "reset" ? "inherited" : c.to} (${c.apply})`)))
+          : h("p", { class: "muted small" }, "No changes."),
+      );
+      const enables = (plan.changes || []).filter((c) => c.to === true && String(c.key).endsWith(".enabled"));
+      if (enables.length && !window.confirm(`Enable ${enables.map((c) => c.key).join(", ")}?`)) return;
+      if (!(plan.changes || []).length) return;
+      if (!window.confirm("Apply these server settings?")) return;
+      const result = await api("/config", { method: "PATCH", body: { revision: view.revision, changes } });
+      toast("Saved");
+      if (result.restart_required || restart) {
+        await confirmRestart(result.pending_revision || result.target_revision || result.revision, status, errorBox);
+      } else { location.reload(); }
+    } catch (e) {
+      if (e.code === "revision_conflict") {
+        errorBox.append(h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
+      } else if (e.keys) {
+        errorBox.append(h("p", { class: "note bad" }, e.message),
+          h("ul", {}, Object.entries(e.keys).map(([key, info]) =>
+            h("li", {}, `${key}: ${info.message || info.code}`))));
+      } else {
+        errorBox.append(h("p", { class: "note bad" }, e.message));
+      }
+    }
+  };
+
+  return h("div", {},
+    h("div", { class: "card" },
+      h("p", { class: "muted small" }, "Operational settings for this daemon. Paths, secrets, modules, and network policy stay in local configuration."),
+      status),
+    ...rows,
+    planBox, errorBox,
+    isGuest() ? null : h("div", { class: "card config-actions" },
+      h("button", { class: "btn", type: "button", onclick: () => apply() }, "Review and apply"),
+      h("button", { class: "btn", type: "button", onclick: () => apply({ rollback: true }) }, "Roll back"),
+      view.restart_required ? h("button", { class: "btn", type: "button", onclick: () => confirmRestart(view.pending_revision || view.revision, status, errorBox) },
+        "Restart daemon") : null));
+}
+
+async function confirmRestart(targetRevision, status, errorBox) {
+  if (!window.confirm("Restart the daemon to apply pending settings?")) return;
+  status.textContent = "Restarting… reconnecting to see whether the target revision became active.";
+  try {
+    await api("/config/restart", { method: "POST", body: { revision: targetRevision, confirm: true } });
+  } catch (e) {
+    if (e.code === "restart_not_supervised") {
+      errorBox.append(h("p", { class: "note bad" }, e.message));
+      return;
+    }
+    // 202 may still parse as success; a dropped connection is expected.
+  }
+  const started = Date.now();
+  while (Date.now() - started < 45000) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const next = await api("/config");
+      if (next.revision === targetRevision && next.confirmed) {
+        toast("Restarted with the new configuration");
+        location.reload();
+        return;
+      }
+      if (next.recovery && next.recovery.recovery === "lkg_restore") {
+        errorBox.append(h("p", { class: "note bad" },
+          `Automatic recovery restored revision ${next.revision}. ${next.recovery.reason || ""}`.trim()));
+        return;
+      }
+      if (next.recovery && next.recovery.recovery === "overlay_quarantined") {
+        errorBox.append(h("p", { class: "note bad" },
+          next.warning || next.recovery.warning || next.recovery.reason ||
+          "Managed overlay was quarantined; YAML defaults are in effect."));
+        return;
+      }
+    } catch (_) { /* daemon still down */ }
+  }
+  errorBox.append(h("p", { class: "note bad" }, "Timed out waiting for the daemon to come back."));
+}
+
 function backupLine(b) {
   if (!b || !b.enabled) return null;
   const failed = b.error && (b.error_at || 0) > (b.ok_at || 0);
   return h("p", { class: `small${failed ? " bad" : ""}` },
     b.ok_at ? `Backup ${ago(b.ok_at)} (${Math.max(1, Math.round(b.bytes / 2 ** 20))} MB) in ${b.dir}` : "No backup yet",
     failed ? ` · last attempt failed: ${b.error}` : "");
+}
+
+function imageArchiveBlock(a, reload) {
+  if (!a || !a.enabled) return null;
+  const count = Number(a.archived || 0);
+  const bytes = Number(a.bytes || 0);
+  const warning = a.free_space_warning || (a.errors ? `${a.errors} image archive error${a.errors === 1 ? "" : "s"}` : "");
+  const summary = h("div", {},
+    h("p", { class: `small${warning ? " bad" : ""}` },
+      h("strong", {}, "Image archive"), " ",
+      `${count} image${count === 1 ? "" : "s"} · ${Math.round(bytes / 2 ** 20)} MB · ${a.path}`),
+    a.last_reconciliation ? h("p", { class: "muted small" },
+      `Reconciled ${ago(a.last_reconciliation)} · ${a.missing || 0} missing · ${a.errors || 0} errors`) : null,
+    warning ? h("p", { class: "note bad" }, warning) : null);
+  if (!a.retention_days) return summary;
+  return h("div", {}, summary,
+    h("button", { class: "btn secondary", onclick: async (ev) => {
+      ev.target.disabled = true;
+      try {
+        const p = await api("/maintenance/image-archive/retention/preview", { method: "POST" });
+        if (!p.count) { toast("No archived images are old enough to remove"); return; }
+        const size = Math.round(p.bytes / 2 ** 20);
+        if (!confirm(`Permanently remove ${p.count} archived image${p.count === 1 ? "" : "s"} (${size} MB)? Live gallery images are not deleted.`)) return;
+        const r = await api("/maintenance/image-archive/retention/apply", {
+          method: "POST", body: JSON.stringify({ confirmation: p.confirmation }),
+        });
+        toast(`Removed ${r.removed} archived image${r.removed === 1 ? "" : "s"} (${Math.round(r.bytes / 2 ** 20)} MB)`);
+        reload();
+      } catch (e) { toast(e.message); }
+      finally { ev.target.disabled = false; }
+    } }, `Review ${a.retention_days}-day image retention`));
 }
 
 function gpuText(g) {
@@ -2617,6 +3053,96 @@ function remoteControlCard() {
   const timer = setInterval(() => { if (!busy) load(); }, 3000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "card" }, h("h3", {}, "Claude Remote Control"), body);
+}
+
+async function skillsPage(pid) {
+  const data = await api("/skills");
+  if (!data.enabled) {
+    return h("div", { class: "card" }, h("p", { class: "muted small" }, "Instruction skills are disabled. Ordinary sessions are unchanged."));
+  }
+  if (pid) {
+    const p = await api(`/skills/proposals/${pid}`);
+    const findings = (p.static_findings || []).map((f) => h("li", {}, `${f.code}: ${f.message}`));
+    const review = p.review || {};
+    const examples = (p.examples || []).map((ex) => h("div", { class: "card" },
+      h("p", {}, ex.prompt), h("p", { class: "muted small" }, ex.expected || ex.expected_behavior || "")));
+    const refs = (p.references || []).map((r) => h("details", {}, h("summary", {}, r.path), h("pre", {}, r.content || "")));
+    const act = async (path, body, label) => {
+      if (label && !confirm(label)) return;
+      try {
+        await api(path, { method: "POST", body: body || {} });
+        toast("Done");
+        go("#/profile/skills", true);
+      } catch (e) { toast(e.message); }
+    };
+    return h("div", {},
+      h("div", { class: "card" },
+        h("h3", {}, p.title || p.slug),
+        h("p", { class: "muted small" }, `${p.slug} · ${p.status} · hash ${p.content_hash} · session ${p.source_session_id || "—"}`),
+        h("p", {}, p.purpose || ""),
+        p.activation_suggestion ? h("p", { class: "muted small" }, `Suggested when: ${p.activation_suggestion}`) : null,
+        p.diff ? h("pre", { class: "preview" }, p.diff) : null,
+        h("p", { class: "section-label" }, "SKILL.md"),
+        h("pre", {}, p.skill_md || ""),
+        refs.length ? h("p", { class: "section-label" }, "References") : null, ...refs,
+        h("p", { class: "section-label" }, "Examples"), ...examples,
+        h("p", { class: "section-label" }, "Static findings"),
+        findings.length ? h("ul", {}, findings) : h("p", { class: "muted small" }, "No static findings."),
+        h("p", { class: "section-label" }, "Model review"),
+        h("p", { class: "muted small" }, p.review_status || "not started"),
+        review.summary ? h("p", {}, review.summary) : null,
+        review.recommendation ? h("p", {}, `Recommendation: ${review.recommendation}`) : null,
+        review.error ? h("p", { class: "bad" }, review.error) : null,
+        h("div", { class: "row", style: "margin-top:18px;flex-wrap:wrap;gap:8px" },
+          h("button", { class: "btn primary", onclick: () => act(`/skills/proposals/${p.id}/install`, { content_hash: p.content_hash },
+            `Install hash ${p.content_hash.slice(0, 12)}? It stays disabled until you enable it.`) }, "Install"),
+          h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" }, "Reject this hash?") }, "Reject"),
+          h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/review`) }, "Run hosted review"),
+          h("button", { class: "btn bad", onclick: async () => {
+            if (!confirm("Delete this draft?")) return;
+            try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
+            catch (e) { toast(e.message); }
+          } }, "Delete draft"))));
+  }
+  const proposals = (data.proposals || []).map((p) => h("a", { class: "card", href: `#/profile/skills/${p.id}` },
+    h("h3", {}, p.title || p.slug),
+    h("div", { class: "meta" }, h("span", {}, p.status), h("span", {}, p.review_status || "no review"),
+      h("span", {}, (p.content_hash || "").slice(0, 12)))));
+  const installed = (data.installed || []).map((sk) => {
+    const toggle = sk.enabled ? "disable" : "enable";
+    return h("div", { class: "card" },
+      h("h3", {}, `${sk.enabled ? "" : "⏸ "}${sk.title || sk.slug}`),
+      h("p", { class: "muted small" }, `${sk.slug} v${sk.version} · ${(sk.content_hash || "").slice(0, 12)}`),
+      h("p", {}, sk.purpose || ""),
+      sk.projects?.length ? h("p", { class: "muted small" }, `Projects: ${sk.projects.join(", ")}`) : h("p", { class: "muted small" }, "No project allowlist. Enable it and pick it on New task."),
+      h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
+        h("button", { class: "btn small", onclick: async () => {
+          try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        } }, sk.enabled ? "Disable" : "Enable"),
+        h("button", { class: "btn small", onclick: async () => {
+          const raw = window.prompt("Project allowlist (comma-separated names)", (sk.projects || []).join(", "));
+          if (raw === null) return;
+          try {
+            await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
+            route();
+          } catch (e) { toast(e.message); }
+        } }, "Projects"),
+        h("button", { class: "btn small", onclick: async () => {
+          if (!confirm("Roll back to the previous version?")) return;
+          try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        } }, "Rollback"),
+        h("button", { class: "btn small bad", onclick: async () => {
+          if (!confirm(`Uninstall ${sk.slug}? Later sessions will not receive it.`)) return;
+          try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        } }, "Uninstall")));
+  });
+  return h("div", {},
+    h("p", { class: "muted small" }, "Agents can only stage drafts. You install an exact hash; new skills stay off until you enable them. Advisory model review never installs."),
+    data.hosted_reviewer_configured ? h("p", { class: "muted small" }, "Hosted review is configured and spends that provider's quota only when you tap Run hosted review.") : h("p", { class: "muted small" }, "No hosted reviewer configured. Local Qwen review runs only when the GPU is idle."),
+    h("p", { class: "section-label" }, "Proposals"),
+    proposals.length ? proposals : h("p", { class: "empty" }, "No proposals yet."),
+    h("p", { class: "section-label" }, "Installed"),
+    installed.length ? installed : h("p", { class: "empty" }, "No installed skills."));
 }
 
 function memoryCard() {
@@ -2886,6 +3412,7 @@ function diskCard() {
         fact("Workspaces", `${mb(u.workspaces_mb)} · ${u.workspaces.length} session${u.workspaces.length === 1 ? "" : "s"} · ${u.quota_mb} MB quota each`),
         fact("Sandboxes", `${u.containers.length} container${u.containers.length === 1 ? "" : "s"}`),
         backupLine(u.backup),
+        isGuest() ? null : imageArchiveBlock(u.image_archive, load),
         top.length ? h("p", { class: "muted small", style: "margin-top:10px" }, "Largest workspaces") : null,
         top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null);
       fill(body,
@@ -2932,8 +3459,10 @@ async function warmModel(force = false) {
   if (isGuest()) return;
   if (!force && Date.now() - lastWarm < 60_000) return;
   try {
-    const gpu = await api("/gpu");
-    if (gpu.manual) return;
+    if (!isMember()) {
+      const gpu = await api("/gpu");
+      if (gpu.manual) return;
+    }
     lastWarm = Date.now();
     await api("/models/warm", { method: "POST" });
   } catch (_) { /* offline */ }

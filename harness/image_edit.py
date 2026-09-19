@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import threading
 from pathlib import Path
 
 from .config import ImagesConfig
@@ -83,9 +84,55 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+# A 20 GB checkpoint must never be re-read on status polling. Results are tied
+# to the identity of the bytes on disk, so replacement invalidates the cache.
+_HASH_CACHE: dict[tuple[str, int, int, str], bool] = {}
+_HASH_LOCK = threading.Lock()
+
+
+def clear_hash_cache() -> None:
+    with _HASH_LOCK:
+        _HASH_CACHE.clear()
+
+
+def _hash_key(path: Path, size: int) -> tuple[str, int, int, str]:
+    stat = path.stat()
+    mtime_ns = int(getattr(stat, "st_mtime_ns", stat.st_mtime * 1_000_000_000))
+    return (str(path.resolve()), size, mtime_ns, EDIT_MODEL["unet"]["sha256"].lower())
+
+
 def locate_assets(cfg: ImagesConfig) -> dict[str, Path | None]:
     root = models_dir(cfg)
     return {key: find_asset(root, EDIT_MODEL[key]) for key in ("unet", "clip", "vae")}
+
+
+def asset_modes(key: str) -> frozenset[str]:
+    """Components that pin an edit asset; shared files never become edit-owned."""
+    return frozenset({"image_edit"}) if key == "unet" else frozenset({"quality", "quality-fast", "image_edit"})
+
+
+def remove_assets(cfg: ImagesConfig) -> dict:
+    """Remove only files exclusively owned by image_edit, including only its own partial download."""
+    root = models_dir(cfg)
+    removed, skipped = [], []
+    for key in ("unet", "clip", "vae"):
+        spec = EDIT_MODEL[key]
+        for folder in spec["folders"]:
+            path = root / folder / spec["name"]
+            candidates = (path, path.with_name(path.name + ".part"))
+            for candidate in candidates:
+                if not candidate.exists():
+                    continue
+                if asset_modes(key) != frozenset({"image_edit"}):
+                    skipped.append(str(candidate))
+                    continue
+                try:
+                    candidate.unlink()
+                    removed.append(str(candidate))
+                except OSError as exc:
+                    skipped.append(f"{candidate}: {exc}")
+    clear_hash_cache()
+    return {"removed": removed, "skipped": skipped}
 
 
 def unet_hash_ok(path: Path | None, *, verify_hash: bool = False) -> bool | None:
@@ -95,7 +142,28 @@ def unet_hash_ok(path: Path | None, *, verify_hash: bool = False) -> bool | None
     size = path.stat().st_size
     expected = EDIT_MODEL["unet"]["bytes"]
     if size == expected:
-        return file_sha256(path) == EDIT_MODEL["unet"]["sha256"] if verify_hash else None
+        try:
+            key = _hash_key(path, size)
+        except OSError:
+            return False
+        with _HASH_LOCK:
+            cached = _HASH_CACHE.get(key)
+        if cached is not None:
+            return cached
+        if not verify_hash:
+            return None
+        try:
+            result = file_sha256(path).lower() == EDIT_MODEL["unet"]["sha256"].lower()
+            unchanged = _hash_key(path, size) == key
+        except OSError:
+            return False
+        if unchanged:
+            with _HASH_LOCK:
+                stale = [old for old in _HASH_CACHE if old[0] == key[0] and old != key]
+                for old in stale:
+                    _HASH_CACHE.pop(old, None)
+                _HASH_CACHE[key] = result
+        return result
     if size < 1_000_000:
         return None
     return False
@@ -105,27 +173,34 @@ def assets_status(cfg: ImagesConfig, *, verify_hash: bool = False) -> dict:
     files = locate_assets(cfg)
     missing = [key for key, path in files.items() if path is None]
     hash_ok = unet_hash_ok(files.get("unet"), verify_hash=verify_hash)
-    available = not missing and hash_ok is not False
+    unet = files.get("unet")
+    try:
+        verifying = bool(unet and unet.stat().st_size == EDIT_MODEL["unet"]["bytes"] and hash_ok is None)
+    except OSError:
+        verifying = False
+    available = not missing and hash_ok is not False and not verifying
     return {
         "available": available,
         "enabled": bool(getattr(cfg, "edit_enabled", False)),
         "missing": missing,
         "hash_ok": hash_ok,
+        "verifying": verifying,
         "model": EDIT_MODEL["source_repo"],
         "label": EDIT_MODEL["label"],
         "license": EDIT_MODEL["license"],
         "revision": EDIT_MODEL["revision"],
         "sha256": EDIT_MODEL["unet"]["sha256"],
         "bytes": EDIT_MODEL["unet"]["bytes"],
-        "setup": "" if available else SETUP_GUIDANCE,
+        "setup": "" if available else ("Verifying the pinned Qwen-Image-Edit checkpoint in the background."
+                                         if verifying else SETUP_GUIDANCE),
     }
 
 
 def public_status(cfg: ImagesConfig) -> dict:
     """Owner/UI payload: no filesystem paths."""
     raw = assets_status(cfg)
-    return {key: raw[key] for key in ("available", "enabled", "model", "label", "license", "revision", "sha256",
-                                      "bytes", "setup")}
+    return {key: raw[key] for key in ("available", "enabled", "verifying", "model", "label", "license",
+                                      "revision", "sha256", "bytes", "setup")}
 
 
 def is_private(job: dict | None) -> bool:
