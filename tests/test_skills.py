@@ -26,7 +26,7 @@ from harness.skill_validate import (
     validate_bundle,
     validate_dir,
 )
-from harness.skills import SkillError, SkillStore, in_process_sandbox, session_eligible, skill_instructions
+from harness.skills import SkillError, SkillStore, in_process_sandbox, session_eligible, skill_instructions, _safe_join, _write_contained
 from test_daemon import Script, call, make_cfg, wait_status
 
 SKILL_MD = "# Commit messages\nWrite conventional commits: `type: summary`.\nKeep the first line under 72 characters.\n"
@@ -109,6 +109,124 @@ def test_static_validation_rejects(mut, code):
     result = validate_bundle(b)
     assert not result["ok"], result
     assert code in result["codes"] or any(code in f["code"] for f in result["findings"])
+
+
+TRAVERSAL_PATHS = [
+    "references/../../../harness.sqlite3",
+    "references/../../../../config/harness.yaml",
+    "../outside.txt",
+    "/etc/passwd",
+    r"\Windows\Temp\pwned.md",
+    "C:/Windows/Temp/pwned.md",
+    "C:foo",
+    "//server/share/pwned.md",
+    r"\\server\share\pwned.md",
+    "references/foo\x00.md",
+    "references/NUL.md",
+    "references/CON.md",
+    "references/../secret.md",
+]
+
+
+def _outside_markers(tmp: Path) -> None:
+    yaml = tmp / "config" / "harness.yaml"
+    yaml.parent.mkdir(parents=True, exist_ok=True)
+    yaml.write_text("CANARY-YAML", encoding="utf-8")
+    (tmp / "outside.txt").write_text("CANARY-OUTSIDE", encoding="utf-8")
+
+
+def _assert_nothing_outside_staging(tmp: Path) -> None:
+    assert (tmp / "outside.txt").read_text(encoding="utf-8") == "CANARY-OUTSIDE"
+    assert (tmp / "config" / "harness.yaml").read_text(encoding="utf-8") == "CANARY-YAML"
+    sqlite = tmp / "harness.sqlite3"
+    if sqlite.exists():
+        data = sqlite.read_bytes()
+        assert data != b"pwned"
+        assert not data.decode("utf-8", "replace").startswith("pwned")
+    for found in tmp.rglob("*"):
+        if not found.is_file():
+            continue
+        try:
+            assert found.read_text(encoding="utf-8") != "pwned", f"wrote payload outside staging: {found}"
+        except UnicodeDecodeError:
+            continue
+
+
+@pytest.mark.parametrize("rel", TRAVERSAL_PATHS)
+def test_safe_join_rejects_each_traversal_variant(tmp_path, rel):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _outside_markers(tmp_path)
+    with pytest.raises(ValueError):
+        _safe_join(staging, rel)
+    _assert_nothing_outside_staging(tmp_path)
+    assert list(staging.iterdir()) == []
+
+
+@pytest.mark.parametrize("rel", TRAVERSAL_PATHS)
+def test_write_helpers_never_create_files_outside_staging(tmp_path, rel):
+    store = store_for(tmp_path)
+    _outside_markers(tmp_path)
+    payload = {**bundle()["files"], rel: "pwned"}
+    with pytest.raises(ValueError):
+        _write_contained(store.staging_dir / "one", payload)
+    with pytest.raises(ValueError):
+        store._write_proposal_files("deadbeefcafe", {**bundle(), "files": payload}, {"slug": "commit-style"})
+    result = store._sandbox_validate({**bundle(), "files": payload}, "abcd" * 8)
+    assert result["ok"] is False
+    assert any(f.get("code") == "traversal" for f in result.get("findings") or [])
+    _assert_nothing_outside_staging(tmp_path)
+    assert not (store.proposals_dir / "deadbeefcafe").exists()
+    leftovers = [p for p in store.proposals_dir.rglob("*") if p.is_file()]
+    assert leftovers == []
+    leftovers_staging = [p for p in store.staging_dir.rglob("*") if p.is_file()]
+    assert leftovers_staging == []
+
+
+def test_propose_traversal_does_not_write_after_validation(tmp_path):
+    store = store_for(tmp_path)
+    _outside_markers(tmp_path)
+    b = bundle()
+    b["files"]["references/../../../harness.sqlite3"] = "pwned"
+    out = store._propose_locked(b, "s1")
+    assert "failed" in out.lower()
+    row = store.db.list_skill_proposals()[0]
+    assert row["status"] == "invalid"
+    assert not (store.proposals_dir / row["id"]).exists()
+    _assert_nothing_outside_staging(tmp_path)
+
+
+def test_propose_skill_tool_rejects_traversal_reference_path(tmp_path):
+    store = store_for(tmp_path)
+    _outside_markers(tmp_path)
+    session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
+    with pytest.raises(Exception, match="safe references"):
+        asyncio.run(store.propose_from_tool({
+            "slug": "commit-style", "title": "Commit style",
+            "purpose": "Keep git commit messages conventional and short.",
+            "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
+            "references": json.dumps([{"path": "references/../../../harness.sqlite3", "content": "pwned"}]),
+        }, session))
+    assert store.db.list_skill_proposals() == []
+    _assert_nothing_outside_staging(tmp_path)
+
+
+def test_safe_join_rejects_symlink_escape(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret", encoding="utf-8")
+    link = staging / "references"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks not available")
+    _outside_markers(tmp_path)
+    with pytest.raises(ValueError, match="symlink"):
+        _safe_join(staging, "references/secret.md")
+    assert (outside / "secret.md").read_text(encoding="utf-8") == "secret"
+    _assert_nothing_outside_staging(tmp_path)
 
 
 def test_validate_dir_rejects_symlink(tmp_path):
@@ -756,6 +874,46 @@ def test_owner_api_and_guest_blocked(tmp_path):
         created = client.post("/sessions", json={"prompt": "hello", "skills": ["commit-style"]},
                               headers={"Tailscale-User-Login": "me@example.com"}).json()
     assert created["skills"][0]["content_hash"] == row["content_hash"]
+
+
+def test_member_gets_403_on_every_skills_route(tmp_path):
+    from harness.admin import PREFIX
+    from test_household import ALICE, H, OWNER, create_member
+
+    cfg = enable_skills(make_cfg(tmp_path))
+    cfg.allowed_logins = [OWNER]
+    m = Manager(cfg, chat=Script([Completion(content="done")]))
+    if m.skills is not None:
+        m.skills._run_sandbox = in_process_sandbox
+    client = TestClient(create_app(m))
+    with client:
+        create_member(client, ALICE, "Alice")
+        ah, oh = H(ALICE), H(OWNER)
+        assert client.get("/skills", headers=oh).status_code == 200
+        pid, slug = "no-such-id", "no-such-skill"
+        routes = [
+            ("GET", "/skills", None),
+            ("GET", "/skills/enabled", None),
+            ("GET", f"/skills/proposals/{pid}", None),
+            ("POST", f"/skills/proposals/{pid}/install", {"content_hash": "abc"}),
+            ("POST", f"/skills/proposals/{pid}/reject", {"reason": "no"}),
+            ("POST", f"/skills/proposals/{pid}/reopen", None),
+            ("POST", f"/skills/proposals/{pid}/review", None),
+            ("DELETE", f"/skills/proposals/{pid}", None),
+            ("POST", f"/skills/{slug}/enable", None),
+            ("POST", f"/skills/{slug}/disable", None),
+            ("POST", f"/skills/{slug}/rollback", None),
+            ("POST", f"/skills/{slug}/uninstall", None),
+            ("PUT", f"/skills/{slug}/projects", {"projects": []}),
+            ("GET", f"/skills/{slug}/export", None),
+        ]
+        for method, path, body in routes:
+            for prefix in ("", PREFIX):
+                r = client.request(method, prefix + path, headers=ah, json=body)
+                assert r.status_code == 403, (method, prefix + path, r.status_code, r.text)
+                assert "member" in r.json()["detail"]
+        hidden = client.get("/static/app.js").text.split("MEMBER_HIDDEN_PAGES")[1].split(";")[0]
+        assert "skills" in hidden
 
 
 def test_reviewer_payload_has_no_transcript_or_secrets():

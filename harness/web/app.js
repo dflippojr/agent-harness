@@ -1913,7 +1913,7 @@ async function viewJob(id) {
 // ---------- profile ----------
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
 const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "skills"]);
-const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends"]);
+const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends", "skills"]);
 const PROFILE_PAGES = {
   connection: "Connection",
   appearance: "Appearance",

@@ -18,7 +18,8 @@ import uuid
 from pathlib import Path
 
 from .config import SkillsConfig
-from .fileops import ToolError
+from .fileops import ToolError, resolve_path
+from .storage import contained, is_reparse_point
 from .skill_validate import (
     MAX_EXAMPLE_CHARS,
     MAX_EXAMPLES,
@@ -67,6 +68,99 @@ REJECTABLE_STATUSES = (
 REVIEWABLE_STATUSES = ("draft", "validating", "validated", "review_pending")
 INSTALL_FROM_STATUSES = REJECTABLE_STATUSES + ("installed",)
 INSTALL_LOCK_NAME = "install.lock"
+_WINDOWS_RESERVED = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
+
+def _rel_parts(rel: str) -> list[str]:
+    """Split a skill-relative path, or raise if it is lexically unsafe."""
+    if not isinstance(rel, str) or not rel:
+        raise ValueError("empty path")
+    if "\x00" in rel or any(ord(ch) < 32 for ch in rel):
+        raise ValueError("NUL and control characters are forbidden in skill paths")
+    if rel.startswith(("\\\\", "//", "\\\\?\\")) or rel.startswith("\\"):
+        raise ValueError("absolute, UNC, and device paths are forbidden")
+    normalized = rel.replace("\\", "/")
+    if normalized.startswith("/") or normalized.startswith("\\"):
+        raise ValueError("absolute paths are forbidden")
+    first = normalized.split("/", 1)[0]
+    if ":" in first:
+        raise ValueError("drive letters and UNC shares are forbidden")
+    parts = normalized.split("/")
+    for part in parts:
+        if part in ("", ".", ".."):
+            raise ValueError("'.' / '..' / empty path segments are forbidden")
+        stem = part.split(".", 1)[0].rstrip(" ").upper()
+        if stem in _WINDOWS_RESERVED:
+            raise ValueError("reserved Windows device names are forbidden")
+        if part.endswith(" ") or part.endswith("."):
+            raise ValueError("trailing spaces and dots are forbidden in skill paths")
+    return parts
+
+
+def _safe_join(root: Path, rel: str) -> Path:
+    """Resolve ``rel`` under ``root`` and refuse any path that could land outside it.
+
+    Rejects absolute paths, drive letters, UNC, ``..`` / empty / ``.`` segments, NUL and
+    other control characters, reserved Windows device names, and symlink/junction escapes.
+    The returned path is the lexical join (not a followed link) after the resolved target
+    has been proven to stay inside ``root``.
+    """
+    parts = _rel_parts(rel)
+    root = Path(root)
+    dest = root.joinpath(*parts)
+    cur = dest
+    while True:
+        try:
+            if cur.is_symlink() or (cur.exists() and is_reparse_point(cur)):
+                raise ValueError("symlinks and junctions are forbidden")
+        except ValueError:
+            raise
+        except OSError as e:
+            raise ValueError(f"path is not usable: {e}") from e
+        if cur == root or cur.parent == cur:
+            break
+        try:
+            cur.relative_to(root)
+        except ValueError:
+            break
+        cur = cur.parent
+    try:
+        root_res = resolve_path(root)
+        dest_res = resolve_path(dest)
+    except (OSError, RuntimeError) as e:
+        raise ValueError(f"path is not usable: {e}") from e
+    try:
+        dest_res.relative_to(root_res)
+    except ValueError as e:
+        raise ValueError("path escapes the staging directory") from e
+    if not contained(dest, root, allow_missing=True):
+        raise ValueError("path escapes the staging directory")
+    return dest
+
+
+def _write_contained(root: Path, files: dict[str, str]) -> None:
+    """Write ``files`` into ``root`` only after every path is proven inside ``root``."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink() or is_reparse_point(root):
+        raise ValueError("staging root may not be a symlink or junction")
+    planned: list[tuple[Path, str]] = []
+    for rel, content in files.items():
+        if not isinstance(rel, str) or not isinstance(content, str):
+            raise ValueError("each file path and body must be a string")
+        planned.append((_safe_join(root, rel), content))
+    for dest, content in planned:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.parent != root and not contained(dest.parent, root, allow_missing=False):
+            raise ValueError("path escapes the staging directory")
+        dest.write_text(content, encoding="utf-8")
+        if dest.is_symlink() or is_reparse_point(dest) or not contained(dest, root, allow_missing=False):
+            dest.unlink(missing_ok=True)
+            raise ValueError("write escaped the staging directory")
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
@@ -154,6 +248,10 @@ def _references_from_args(raw) -> dict[str, str]:
             raise ToolError(f"references[{i}] needs path and content")
         if not path.startswith("references/"):
             path = "references/" + path.lstrip("/")
+        try:
+            _rel_parts(path)
+        except ValueError as e:
+            raise ToolError(f"references[{i}] path is not a safe references/*.md file") from e
         files[path] = content
     return files
 
@@ -302,7 +400,9 @@ class SkillStore:
             if current:
                 diff = _unified_diff(current.get("skill_md") or "", bundle["files"].get("SKILL.md") or "",
                                      f"{installed['slug']}/SKILL.md")
-        sandbox = self._sandbox_validate(bundle, content_hash)
+        sandbox = {"ok": True, "findings": []}
+        if static["ok"]:
+            sandbox = self._sandbox_validate(bundle, content_hash)
         ok = bool(static["ok"] and sandbox.get("ok"))
         findings = list(static.get("findings") or []) + list(sandbox.get("findings") or [])
         status = "validated" if ok else "invalid"
@@ -325,7 +425,17 @@ class SkillStore:
             "target_slug": bundle["slug"] if installed else "", "diff": diff,
             "created_at": now, "updated_at": now,
         }
-        self._write_proposal_files(pid, bundle, manifest)
+        if ok:
+            try:
+                self._write_proposal_files(pid, bundle, manifest)
+            except ValueError as e:
+                ok = False
+                status = "invalid"
+                review_status = ""
+                findings.append({"code": "traversal", "path": "", "message": str(e)})
+                row["status"] = status
+                row["review_status"] = review_status
+                row["static_findings"] = findings
         self.db.insert_skill_proposal(row)
         if ok and self.reviewer is not None:
             self.reviewer.enqueue(pid, content_hash)
@@ -346,21 +456,21 @@ class SkillStore:
         if global_n >= self.cfg.proposal_rate_per_hour * 4:
             raise ToolError("proposal rate limit: try again later")
 
+    def _bundle_file_map(self, bundle: dict, extra: dict[str, str]) -> dict[str, str]:
+        files = {k: v for k, v in (bundle.get("files") or {}).items() if isinstance(k, str) and isinstance(v, str)}
+        files.update(extra)
+        return files
+
     def _write_proposal_files(self, pid: str, bundle: dict, manifest: dict) -> None:
         dest = self.proposals_dir / pid
         tmp = self.proposals_dir / f".{pid}.tmp"
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
-        (tmp / "SKILL.md").write_text(bundle["files"]["SKILL.md"], encoding="utf-8")
-        refs = {k: v for k, v in bundle["files"].items() if k.startswith("references/")}
-        if refs:
-            (tmp / "references").mkdir()
-            for path, content in refs.items():
-                (tmp / path).write_text(content, encoding="utf-8")
-        (tmp / "manifest.json").write_text(json.dumps({**manifest, "examples": bundle["examples"]},
-                                                      indent=2), encoding="utf-8")
-        (tmp / "examples.json").write_text(json.dumps({"examples": bundle["examples"]}, indent=2), encoding="utf-8")
+        extra = {
+            "manifest.json": json.dumps({**manifest, "examples": bundle["examples"]}, indent=2),
+            "examples.json": json.dumps({"examples": bundle["examples"]}, indent=2),
+        }
+        _write_contained(tmp, self._bundle_file_map(bundle, extra))
         if dest.exists():
             shutil.rmtree(dest)
         tmp.replace(dest)
@@ -369,27 +479,23 @@ class SkillStore:
         staging = self.staging_dir / f"{content_hash}-{uuid.uuid4().hex[:8]}"
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True)
         try:
-            (staging / "SKILL.md").write_text(bundle["files"]["SKILL.md"], encoding="utf-8")
-            refs = {k: v for k, v in bundle["files"].items() if k.startswith("references/")}
-            if refs:
-                (staging / "references").mkdir()
-                for path, content in refs.items():
-                    (staging / path).write_text(content, encoding="utf-8")
             manifest = {
                 "slug": bundle["slug"], "title": bundle["title"], "purpose": bundle["purpose"],
                 "activation_suggestion": bundle["activation_suggestion"], "content_hash": content_hash,
             }
-            (staging / "manifest.json").write_text(json.dumps({**manifest, "examples": bundle["examples"]},
-                                                              indent=2), encoding="utf-8")
-            (staging / "examples.json").write_text(json.dumps({"examples": bundle["examples"]}, indent=2),
-                                                   encoding="utf-8")
+            extra = {
+                "manifest.json": json.dumps({**manifest, "examples": bundle["examples"]}, indent=2),
+                "examples.json": json.dumps({"examples": bundle["examples"]}, indent=2),
+            }
+            _write_contained(staging, self._bundle_file_map(bundle, extra))
             try:
                 os.chmod(staging, 0o555)
             except OSError:
                 pass
             return self._run_sandbox(staging)
+        except ValueError as e:
+            return {"ok": False, "findings": [{"code": "traversal", "path": "", "message": str(e)}]}
         finally:
             try:
                 os.chmod(staging, 0o755)
@@ -719,18 +825,14 @@ class SkillStore:
         tmp.replace(dest)
 
     def _materialize(self, dest: Path, bundle: dict, row: dict) -> None:
-        dest.mkdir(parents=True)
-        (dest / "SKILL.md").write_text(bundle["files"]["SKILL.md"], encoding="utf-8")
-        refs = {k: v for k, v in bundle["files"].items() if k.startswith("references/")}
-        if refs:
-            (dest / "references").mkdir()
-            for path, content in refs.items():
-                (dest / path).write_text(content, encoding="utf-8")
-        (dest / "manifest.json").write_text(json.dumps({
-            "slug": bundle["slug"], "title": bundle["title"], "purpose": bundle["purpose"],
-            "activation_suggestion": bundle["activation_suggestion"],
-            "content_hash": row["content_hash"], "examples": bundle["examples"],
-        }, indent=2), encoding="utf-8")
+        extra = {
+            "manifest.json": json.dumps({
+                "slug": bundle["slug"], "title": bundle["title"], "purpose": bundle["purpose"],
+                "activation_suggestion": bundle["activation_suggestion"],
+                "content_hash": row["content_hash"], "examples": bundle["examples"],
+            }, indent=2),
+        }
+        _write_contained(dest, self._bundle_file_map(bundle, extra))
 
     def _public_installed(self, row: dict) -> dict:
         if row is None:
