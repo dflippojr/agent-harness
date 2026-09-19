@@ -23,7 +23,9 @@ self.addEventListener("fetch", (event) => {
   if (!isShell) return;
   // Network first so deploys show up right away; the cache is only the offline fallback.
   event.respondWith(
-    fetch(event.request)
+    // Bypass Chromium's HTTP cache here. Otherwise a successful fetch can still
+    // return a stale app bundle, defeating this worker's network-first policy.
+    fetch(event.request, { cache: "no-cache" })
       .then((resp) => {
         const copy = resp.clone();
         caches.open(SHELL).then((c) => c.put(event.request, copy));

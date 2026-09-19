@@ -263,6 +263,8 @@ language model is unloaded for a few minutes. Missing Real-ESRGAN weights do not
 upscale routes return a clear install error. `GET /images` (phone) and job JSON include mode availability and setup
 details. Each finished job stores `provenance` (mode, steps, sampler, hashes, seed, timing); older rows without that
 column still load.
+App tokens can only create and read **generated** images and their upscaled derivatives. Uploaded photos, masks, and
+masked edits are owner-only Agent Harness Web data and return 404 on this surface.
 
 ### `GET /api/v1/remote-control`, `POST /api/v1/remote-control/{project}`, `POST /api/v1/remote-control/{project}/stop`  (scope `remote_control`)
 Starts the unmodified `claude remote-control --spawn worktree` in a tower project's folder, so the user can work there

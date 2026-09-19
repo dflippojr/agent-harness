@@ -256,6 +256,8 @@ endpoint:
 # and start ComfyUI from C:/AI/ComfyUI. Opening the Images tab warms ComfyUI without loading a checkpoint; the GPU
 # is given back as soon as the queue is empty.
 # Models in C:/AI/comfy-models: fast = Z-Image-Turbo, quality = Qwen-Image-2512 (both Apache 2.0).
+# Masked editing is the optional image_edit component (Qwen-Image-Edit fp8); it is off unless explicitly enabled
+# and is never downloaded by an ordinary install or daemon upgrade.
 # Optional quality-fast = the same Qwen base plus the lightx2v Lightning 4-step LoRA in loras/.
 # Optional flux-fast = FLUX.2 klein 4B FP8 (Apache 2.0; ops/images-models.ps1 install flux-fast).
 # Optional model files are never downloaded on daemon start.
@@ -263,11 +265,14 @@ endpoint:
 # unless upscale_dir is set. Generation still works when they are absent.
 images:
   enabled: true
+  edit_enabled: false
   comfy_dir: C:/AI/ComfyUI
+  models_dir: C:/AI/comfy-models
   port: 8188
   work_dir: D:/Agents/harness/images-work
   linger_seconds: 0
-  models_dir: C:/AI/comfy-models
+  max_upload_bytes: 20971520
+  max_pixels: 20000000
   upscale_dir: ""
   upscale_max_pixels: 36000000
   upscale_tile: 512

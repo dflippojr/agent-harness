@@ -374,7 +374,10 @@ MIGRATIONS = [
     ("images", "archive_deleted_at", "REAL"),
     # Issue #87: opt-in Real-ESRGAN derived images keep the original PNG unchanged.
     ("images", "parent_id", TEXT_EMPTY),
+    # Issue #88: masked edits retain their pinned model revision and feathering input.
     ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
+    ("images", "model_revision", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "feather", "INTEGER NOT NULL DEFAULT 0"),
     ("images", "scale", "INTEGER NOT NULL DEFAULT 1"),
     ("images", "upscale_model", TEXT_EMPTY),
     ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
@@ -847,17 +850,20 @@ class Database:
     def insert_image(self, job: dict) -> None:
         cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height",
                 "seed", "base_model", "lora", "lora_revision", "lora_sha256",
-                "parent_id", "operation", "scale", "upscale_model", "requested_upscale"]
+                "parent_id", "operation", "model_revision", "feather", "scale", "upscale_model",
+                "requested_upscale"]
         defaults = {"session_id": "", "resolution": "auto", "base_model": "", "lora": "", "lora_revision": "",
-                    "lora_sha256": "", "parent_id": "", "operation": "generate", "scale": 1,
-                    "upscale_model": "", "requested_upscale": "none"}
+                    "lora_sha256": "", "parent_id": "", "operation": "generate", "model_revision": "",
+                    "feather": 0, "scale": 1, "upscale_model": "", "requested_upscale": "none"}
         values = [job[c] if c in job else defaults[c] for c in cols]
         provenance = job.get("provenance") or {}
+        status = job.get("status") or "queued"
+        created = job.get("created_at") or time.time()
         with self.lock:
             self.conn.execute(
                 f"INSERT INTO images ({','.join(cols)}, provenance, status, created_at) VALUES "
-                f"({','.join('?' * len(cols))}, ?, 'queued', ?)",
-                values + [json.dumps(provenance), time.time()])
+                f"({','.join('?' * len(cols))}, ?, ?, ?)",
+                values + [json.dumps(provenance), status, created])
 
     def update_image(self, iid: str, **fields) -> None:
         if "provenance" in fields and not isinstance(fields["provenance"], str):
@@ -871,11 +877,21 @@ class Database:
             row = self.conn.execute("SELECT * FROM images WHERE id = ?", (iid,)).fetchone()
         return self._image_row(row)
 
-    def list_images(self, limit: int = 60, status: tuple = ()) -> list[dict]:
+    def delete_image(self, iid: str) -> bool:
+        with self.lock:
+            return self.conn.execute("DELETE FROM images WHERE id = ?", (iid,)).rowcount == 1
+
+    def list_images(self, limit: int = 60, status: tuple = (), operations: tuple = ()) -> list[dict]:
         query, params = "SELECT * FROM images", []
+        clauses = []
         if status:
-            query += f" WHERE status IN ({','.join('?' * len(status))})"
-            params = list(status)
+            clauses.append(f"status IN ({','.join('?' * len(status))})")
+            params.extend(status)
+        if operations:
+            clauses.append(f"COALESCE(operation, 'generate') IN ({','.join('?' * len(operations))})")
+            params.extend(operations)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
         return [self._image_row(r) for r in rows]

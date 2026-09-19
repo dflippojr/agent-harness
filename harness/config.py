@@ -13,9 +13,13 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_FILE = "projects.yaml"
 MODULE_NAMES = (
-    "local_model", "homelab", "memory_library", "images", "jobs", "gpu_guard", "runners",
+    "local_model", "homelab", "memory_library", "images", "image_edit", "jobs", "gpu_guard", "runners",
     "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills",
 )
+# Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
+OPT_IN_MODULES = frozenset({"image_edit"})
+# extra_model_paths root shared by installer, doctor, and image components (Z-Image / quality / image_edit).
+DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
 # Optional modules whose on/off switch is ``cfg.<section>.enabled``. The rest
 # (local_model, homelab, runners) are install-selected only.
 MODULE_ENABLE_SECTIONS = {
@@ -44,6 +48,8 @@ def module_effective(cfg: "Config", name: str) -> bool:
     installed = getattr(cfg, "installed", None)
     if installed is None or not bool(getattr(installed, name, False)):
         return False
+    if name == "image_edit":
+        return bool(getattr(getattr(cfg, "images", None), "edit_enabled", False))
     section_name = MODULE_ENABLE_SECTIONS.get(name)
     if section_name is None:
         return True
@@ -240,14 +246,17 @@ class EndpointConfig:
 class ImagesConfig:
     """Local image generation with ComfyUI (images.py). The language model is unloaded while jobs run."""
     enabled: bool = False
+    edit_enabled: bool = False                 # optional Qwen-Image-Edit; never implied by images.enabled
     comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
+    models_dir: str = DEFAULT_IMAGES_MODELS_DIR  # extra_model_paths root (diffusion_models / text_encoders / vae)
     port: int = 8188
     work_dir: str = "D:/Agents/harness/images-work"  # ComfyUI output/temp and the harness's PNGs (images/)
     log_dir: str = "D:/Agents/harness/logs"
     linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
-    models_dir: str = "C:/AI/comfy-models"    # diffusion_models, text_encoders, vae, loras
+    max_upload_bytes: int = 20 * 2**20
+    max_pixels: int = 20_000_000
     upscale_dir: str = ""                      # Real-ESRGAN weights; empty → <comfy_dir>/ComfyUI/models/upscale_models
     upscale_max_pixels: int = 36_000_000       # refuse 2×/4× outputs above this before allocating
     upscale_tile: int = 512                    # ComfyUI ImageUpscaleWithModel starting tile
@@ -270,6 +279,7 @@ class ModulesConfig:
     homelab: bool = True
     memory_library: bool = True
     images: bool = True
+    image_edit: bool = False     # optional Qwen-Image-Edit; off until explicitly enabled
     jobs: bool = True
     gpu_guard: bool = True
     runners: bool = True
@@ -467,6 +477,16 @@ def _load_guests(raw) -> list[GuestAccess]:
     return guests
 
 
+def resolve_images_models_dir(cfg=None) -> Path:
+    """Single models root used by installer, daemon, doctor, and image components."""
+    configured = getattr(cfg, "models_dir", None) if cfg is not None else None
+    return Path(configured or DEFAULT_IMAGES_MODELS_DIR)
+
+
+def images_models_dir_matches(left: str | Path, right: str | Path) -> bool:
+    return Path(left).as_posix().rstrip("/").casefold() == Path(right).as_posix().rstrip("/").casefold()
+
+
 def _read_yaml(path: Path) -> dict:
     return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
 
@@ -525,7 +545,13 @@ def _resolve_profile(raw: dict) -> tuple[str, dict, ModulesConfig]:
     if unknown_modules:
         raise ValueError(f"unknown modules {unknown_modules}; known: {', '.join(MODULE_NAMES)}")
     module_defaults = profile == "full"
-    selected = ModulesConfig(**{name: bool(raw_modules.get(name, module_defaults)) for name in MODULE_NAMES})
+    selected = ModulesConfig(**{
+        name: bool(raw_modules.get(name, False if name in OPT_IN_MODULES else module_defaults))
+        for name in MODULE_NAMES
+    })
+    if selected.image_edit:
+        selected.images = True
+        selected.local_model = True
     return profile, raw_modules, selected
 
 
@@ -610,7 +636,8 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     memory_library.enabled = module_enabled("memory_library", memory_library.enabled)
     web.enabled = module_enabled("web", web.enabled)
     endpoint.enabled = module_enabled("endpoint", endpoint.enabled)
-    images.enabled = module_enabled("images", images.enabled)
+    images.enabled = module_enabled("images", images.enabled) or selected.image_edit
+    images.edit_enabled = bool(selected.image_edit)
     search.enabled = module_enabled("search", search.enabled)
     jobs.enabled = module_enabled("jobs", jobs.enabled)
     skills.enabled = module_enabled("skills", skills.enabled)
@@ -620,6 +647,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         homelab=selected.homelab,
         memory_library=memory_library.enabled,
         images=images.enabled,
+        image_edit=images.edit_enabled,
         jobs=jobs.enabled,
         gpu_guard=gpu_guard.enabled,
         runners=selected.runners,

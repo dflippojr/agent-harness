@@ -74,6 +74,26 @@ def test_registry_specs_are_explicit_and_reject_unknown_keys(tmp_path):
     assert schema_entry(hidden, cfg)["guidance"] == "managed in local configuration"
 
 
+def test_image_edit_settings_are_explicit_and_install_gated(tmp_path):
+    cfg = make_cfg(tmp_path)
+    registry = build_registry(cfg)
+    keys = ("images.edit_enabled", "images.max_upload_bytes", "images.max_pixels")
+    assert all(key in registry.specs for key in keys)
+    assert all(schema_entry(registry.get(key), cfg)["available"] is False for key in keys)
+    cfg.installed.image_edit = True
+    cfg.modules.image_edit = True
+    cfg.images.edit_enabled = True
+    for key in keys:
+        entry = schema_entry(registry.get(key), cfg)
+        assert entry["available"] is True and entry["modules"] == ["image_edit"]
+    registry.get("images.max_upload_bytes").setter(cfg, 8 * 2**20)
+    registry.get("images.max_pixels").setter(cfg, 12_000_000)
+    registry.get("images.edit_enabled").setter(cfg, False)
+    assert cfg.images.max_upload_bytes == 8 * 2**20
+    assert cfg.images.max_pixels == 12_000_000
+    assert cfg.images.edit_enabled is False
+
+
 def test_compaction_and_feature_enable_cross_field_validation(tmp_path):
     client, manager = _client(tmp_path)
     with client:

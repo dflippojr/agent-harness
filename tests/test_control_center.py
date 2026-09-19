@@ -119,8 +119,9 @@ def test_web_shell_includes_transport_module_and_canonical_names():
     worker = (web / "sw.js").read_text(encoding="utf-8")
     assert 'from "./client.mjs"' in app
     assert '"/api/v1"' in client and '"/api/admin/v1"' in client
+    assert "body instanceof FormData" in client
     index = (web / "index.html").read_text(encoding="utf-8")
-    assert 'src="/app.js"' in index and 'href="/style.css"' in index
+    assert 'src="/app.js?v=4"' in index and 'href="/style.css?v=4"' in index
     assert "<title>Agent Harness Web</title>" in index
     assert 'apple-mobile-web-app-title" content="Harness"' in index
     manifest = (web / "manifest.webmanifest").read_text(encoding="utf-8")
@@ -133,6 +134,7 @@ def test_web_shell_includes_transport_module_and_canonical_names():
     # The shell cache name is derived from BUILD_ID so a client build bumps it automatically (#69).
     assert 'const BUILD_ID = "' in worker
     assert "const SHELL = `harness-shell-${BUILD_ID}`" in worker
+    assert 'fetch(event.request, { cache: "no-cache" })' in worker
 
 
 def test_web_assets_work_at_static_root_and_compatibility_alias(tmp_path):

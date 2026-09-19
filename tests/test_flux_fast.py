@@ -859,13 +859,13 @@ def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
         await m.stop()
 
         m, server, _ = image_manager(tmp_path / "d")
-        running = {"id": "restarted1", "session_id": "", "source": "phone", "prompt": "resume",
+        running = {"id": "abcdef012345", "session_id": "", "source": "phone", "prompt": "resume",
                    "model": "fast", "aspect_ratio": "1:1", "resolution": "standard",
                    "width": 1024, "height": 1024, "seed": 1, "provenance": {}}
         m.db.insert_image(running)
-        m.db.update_image("restarted1", status="running")
+        m.db.update_image("abcdef012345", status="running")
         await m.start(maintenance=False)
-        done = await m.images.wait("restarted1")
+        done = await m.images.wait("abcdef012345")
         assert done["status"] == "done"
         for _ in range(100):
             if m.images.phase == "idle":

@@ -59,7 +59,7 @@ same; only the prefix and the owner credential check are new.
 | Configuration | `/config`, `/config/schema`, `/config/validate`, `/config/rollback`, `/config/restart` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
 | Smart approvals | `/smart-approvals` (`GET` status, `PUT` `{mode: off\|shadow\|auto}`; last writer with Settings `smart_approvals.mode`; `off` calls no reviewer) |
-| Images | `/images`, `/images/warmup`, `/images/cooldown`, `/images/{iid}/upscale` |
+| Images | `/images`, `/images/uploads`, `/images/warmup`, `/images/cooldown`, `/images/{iid}`, `/images/{iid}/edit`, `/images/{iid}/upscale`, `/images/{iid}/cancel` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
 | Memory | `/memory`, `/memory/profile` |
 | Skills | `/skills`, `/skills/enabled`, `/skills/proposals/{pid}`, install/reject/reopen/review, `/skills/{slug}/enable`, disable, rollback, uninstall, projects, export |
@@ -174,6 +174,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.12 | 2026-09-19 | Owner masked inpainting: upload, edit, cancel, and delete |
 | 1.11 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |
 | 1.10 | 2026-09-19 | Smart-approval effective mode: last writer among PUT and Settings; `off` is truly off |
 | 1.9 | 2026-09-18 | Owner smart-approvals status and live mode (`off`/`shadow`/`auto`) |

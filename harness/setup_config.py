@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from .config import MODULE_NAMES
+from .config import DEFAULT_IMAGES_MODELS_DIR, MODULE_NAMES, images_models_dir_matches
 
 PRESETS = {
     # tested on an RTX 4070 Ti Super 16 GB with 32 GB RAM (docs/phase0-results.md)
@@ -79,7 +79,7 @@ def build(args) -> dict:
                    "image_archive_keep_days": 0, "image_archive_min_free_gb": 1},
         "endpoint": {"enabled": args.profile == "full" or "endpoint" in enabled},
         "web": {"enabled": "web" in enabled},
-        "images": {"enabled": "images" in enabled},
+        "images": _images_section(args, enabled),
         "memory_library": {"enabled": "memory_library" in enabled},
         "search": {"enabled": "search" in enabled},
         "jobs": {"enabled": "jobs" in enabled},
@@ -91,8 +91,18 @@ def build(args) -> dict:
     return result
 
 
+def _images_section(args, enabled: set[str]) -> dict:
+    section = {"enabled": "images" in enabled or "image_edit" in enabled}
+    models_dir = str(getattr(args, "images_models_dir", "") or "").strip()
+    if models_dir and not images_models_dir_matches(models_dir, DEFAULT_IMAGES_MODELS_DIR):
+        section["models_dir"] = Path(models_dir).as_posix()
+    return section
+
+
 def profile_overlay(args) -> dict:
     enabled = dict.fromkeys(args.enable_module, True) if args.profile == "service" else {}
+    if "image_edit" in args.enable_module:
+        enabled["image_edit"] = True
     overlay = {"profile": args.profile, "modules": enabled,
                **({"backends": SERVICE_BACKENDS} if args.profile == "service" else {})}
     if args.profile == "full" or "local_model" in enabled:
@@ -116,15 +126,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=8100)
     p.add_argument("--llama-url", default="http://127.0.0.1:8090")
     p.add_argument("--pause-flag", required=True)
+    p.add_argument("--images-models-dir", default="")
     p.add_argument("--gpu-guard", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--public-url", default="")
     p.add_argument("--login", default="")
     p.add_argument("--force", action="store_true")
     args = p.parse_args(argv)
     enabled = set(args.enable_module)
-    local_dependents = enabled & {"endpoint", "images", "gpu_guard"}
+    local_dependents = enabled & {"endpoint", "images", "image_edit", "gpu_guard"}
     if local_dependents:
         enabled.add("local_model")
+    if "image_edit" in enabled:
+        enabled.add("images")
     args.enable_module = sorted(enabled)
 
     config_dir = Path(args.config_dir)

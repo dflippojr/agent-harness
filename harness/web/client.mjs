@@ -55,8 +55,12 @@ export class AgentHarnessWebClient {
     const headers = this.headers();
     const opts = { method, headers, cache: "no-store" };
     if (body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      opts.body = JSON.stringify(body);
+      if (typeof FormData !== "undefined" && body instanceof FormData) {
+        opts.body = body;
+      } else {
+        headers["Content-Type"] = "application/json";
+        opts.body = JSON.stringify(body);
+      }
     }
     let resp;
     try { resp = await fetch(this.url(path, surface), opts); }

@@ -66,6 +66,17 @@ def check_images(cfg: Config) -> list[str]:
     return errors
 
 
+def check_image_edit(cfg: Config) -> list[str]:
+    errors = check_images(cfg)
+    if not module_installed(cfg, "image_edit"):
+        errors.append("image_edit is not installed for this profile")
+    from . import image_edit
+    status = image_edit.assets_status(cfg.images)
+    if status["missing"] or status["hash_ok"] is False:
+        errors.append(status["setup"])
+    return errors
+
+
 def check_gpu_guard(cfg: Config) -> list[str]:
     errors = []
     if not module_installed(cfg, "local_model"):
@@ -103,6 +114,7 @@ ENABLE_CHECKS = {
     "jobs.enabled": check_jobs,
     "endpoint.enabled": check_endpoint,
     "images.enabled": check_images,
+    "images.edit_enabled": check_image_edit,
     "gpu_guard.enabled": check_gpu_guard,
     "notifications.enabled": check_notifications,
     "backup.enabled": check_backup,
@@ -127,6 +139,8 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
         cfg.endpoint.enabled = enabled
     elif name == "images":
         cfg.images.enabled = enabled
+    elif name == "image_edit":
+        cfg.images.edit_enabled = enabled
     elif name == "gpu_guard":
         cfg.gpu_guard.enabled = enabled
     elif name == "backup":
@@ -138,6 +152,8 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
 def _get_module_enabled(cfg: Config, name: str) -> bool:
     if name == "notifications":
         return cfg.notify.enabled
+    if name == "image_edit":
+        return cfg.images.edit_enabled
     section = getattr(cfg, name)
     return bool(section.enabled)
 
@@ -182,7 +198,8 @@ def validate_enables(cfg: Config, proposed: dict) -> list[dict]:
         if proposed[key] is not True:
             continue
         spec_name = key.split(".", 1)[0]
-        module = "notifications" if spec_name == "notifications" else spec_name
+        module = "image_edit" if key == "images.edit_enabled" else (
+            "notifications" if spec_name == "notifications" else spec_name)
         if not module_installed(cfg, module):
             errors.append({"key": key, "code": "dependency",
                            "message": f"{module} is not installed for this profile"})
@@ -403,6 +420,22 @@ def _get_img_job(cfg: Config):
 
 def _set_img_job(cfg: Config, value):
     cfg.images.job_timeout_seconds = float(value)
+
+
+def _get_img_upload_bytes(cfg: Config):
+    return cfg.images.max_upload_bytes
+
+
+def _set_img_upload_bytes(cfg: Config, value):
+    cfg.images.max_upload_bytes = int(value)
+
+
+def _get_img_pixels(cfg: Config):
+    return cfg.images.max_pixels
+
+
+def _set_img_pixels(cfg: Config, value):
+    cfg.images.max_pixels = int(value)
 
 
 def _get_gpu_poll(cfg: Config):
@@ -680,6 +713,14 @@ STATIC_ADMIN: list[SettingSpec] = [
            "How long a single image job may run.",
            "Images", 1200, _get_img_job, _set_img_job, 60, 7200, ("images", "job_timeout_seconds"),
            modules=("images",)),
+    _int("images.max_upload_bytes", "Image-edit upload byte limit",
+         "Maximum source or mask upload size for owner-only masked editing.",
+         "Images", 20 * 2**20, _get_img_upload_bytes, _set_img_upload_bytes,
+         2**20, 100 * 2**20, ("images", "max_upload_bytes"), modules=("image_edit",)),
+    _int("images.max_pixels", "Image-edit decoded pixel limit",
+         "Reject gallery edits and decoded uploads/masks above this pixel count (long side is also capped at 1664).",
+         "Images", 20_000_000, _get_img_pixels, _set_img_pixels,
+         1_000_000, 100_000_000, ("images", "max_pixels"), modules=("image_edit",)),
     _float("gpu_guard.poll_seconds", "GPU guard poll (seconds)",
            "How often the GPU guard looks for games or Plex transcodes.",
            "GPU guard", 10, _get_gpu_poll, _set_gpu_poll, 2, 60, ("gpu_guard", "poll_seconds"),
@@ -756,6 +797,11 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for local image generation.",
           "Features", False, _enable_get("images"), _enable_set("images"), ("images", "enabled"),
           apply_mode="daemon_restart", modules=("images",), enable_check=check_images),
+    _bool("images.edit_enabled", "Masked image editing",
+          "Runtime enable for the installed Qwen-Image-Edit component. Does not download model weights.",
+          "Features", False, _enable_get("image_edit"), _enable_set("image_edit"),
+          ("images", "edit_enabled"), apply_mode="daemon_restart", modules=("image_edit",),
+          enable_check=check_image_edit),
     _bool("gpu_guard.enabled", "GPU guard",
           "Runtime enable for pausing the model while a game or Plex transcode needs the GPU.",
           "Features", False, _enable_get("gpu_guard"), _enable_set("gpu_guard"), ("gpu_guard", "enabled"),

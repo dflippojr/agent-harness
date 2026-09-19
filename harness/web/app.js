@@ -11,6 +11,7 @@
 //   #/profile/<section>      a Settings page (appearance, notifications, backends, …)
 //   #/images                 image generation and gallery
 //   #/images/<id>            one result (prompt, metadata, Another one)
+//   #/images/<id>/edit       masked inpainting / photo edit
 //   #/images/<id>/full       in-app fullscreen viewer
 //   #/jobs[/new|/<id>]       scheduled jobs
 
@@ -452,7 +453,8 @@ async function route() {
     else if (parts[0] === "new") await viewNew();
             else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1], parts[2]);
     else if (parts[0] === "images") {
-      if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
+      if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
+      else if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
       else if (parts[1]) await viewImage(parts[1]);
       else await viewImages();
     }
@@ -1579,10 +1581,12 @@ const IMAGE_BUSY = new Set(["waiting", "switching", "starting", "generating", "r
 
 function imageCard(img) {
   const ready = img.status === "done";
+  const kind = img.operation && img.operation !== "generate" ? img.operation : "";
   const scale = Number(img.scale) > 1 ? `${img.scale}×` : "";
   return h("a", { class: "card image-card", href: `#/images/${img.id}` },
     ready ? daemonImage(`/images/${img.id}.png`, { alt: img.prompt, loading: "lazy" })
-      : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" ? "failed" : h("span", { class: "dots" }, img.status)),
+      : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" || img.status === "cancelled" ? img.status : h("span", { class: "dots" }, img.status)),
+    kind ? h("span", { class: "image-kind" }, kind) : null,
     scale ? h("span", { class: "image-scale" }, scale) : null,
     h("div", { class: "preview small" }, img.prompt));
 }
@@ -1597,7 +1601,8 @@ function updateImageStatusView(view, s) {
   const busy = IMAGE_BUSY.has(s.phase);
   const hasSteps = s.phase === "generating" && Number(p.max) > 0;
   const upscaling = s.phase === "generating" && p.stage === "upscaling";
-  label.textContent = (upscaling ? "Upscaling" : text) + queued;
+  const editing = s.phase === "generating" && p.stage === "editing";
+  label.textContent = (upscaling ? "Upscaling" : editing ? "Editing" : text) + queued;
   label.classList.toggle("dots", busy);
   bar.hidden = !busy;
   detail.hidden = !hasSteps;
@@ -1606,7 +1611,7 @@ function updateImageStatusView(view, s) {
     if (hasSteps) {
       const fraction = Math.max(0, Math.min(1, Number(p.value || 0) / Number(p.max)));
       barFill.style.width = `${Math.max(2, fraction * 100).toFixed(1)}%`;
-      detail.textContent = `${upscaling ? "Upscaling" : "Sampling"} ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
+      detail.textContent = `${upscaling ? "Upscaling" : editing ? "Editing" : "Sampling"} ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
     } else {
       barFill.style.width = "";
       detail.textContent = "";
@@ -1721,6 +1726,24 @@ async function viewImages() {
   };
   render(data);
   const go = h("button", { class: "btn primary", type: "submit" }, "Generate");
+  const upload = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/jpg", hidden: true, "aria-label": "Upload a photo to edit" });
+  const uploadBtn = h("button", { class: "btn", type: "button", onclick: () => upload.click() }, "Upload photo");
+  upload.addEventListener("change", async () => {
+    const file = upload.files && upload.files[0];
+    upload.value = "";
+    if (!file) return;
+    if (!(await confirmGpuQueue("This image edit"))) return;
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const job = await api("/images/uploads", { method: "POST", body });
+      location.hash = `#/images/${job.id}/edit`;
+    } catch (err) { toast(err.message); }
+  });
+  const edit = data.status.edit || {};
+  const editHint = (!edit.available || !edit.enabled) && !isGuest()
+    ? h("p", { class: "muted small" }, edit.setup || "Masked editing is an optional component.")
+    : null;
   $app.append(
     isGuest() ? h("p", { class: "muted small" }, "Demo access can view generated images, not start new ones.") : h("form", {
       onsubmit: async (e) => {
@@ -1750,7 +1773,11 @@ async function viewImages() {
     h("p", { class: "muted small" }, upscaleInfo.available
       ? "The language model is unloaded while images generate; running tasks pause for a few minutes. Upscaling is off unless you choose 2× or 4×."
       : "The language model is unloaded while images generate; running tasks pause for a few minutes. Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable."),
-    h("div", { class: "row", style: "margin-top:12px" }, h("span", { class: "spacer" }), go)),
+    editHint,
+    h("div", { class: "row", style: "margin-top:12px" },
+      (edit.available && edit.enabled) ? upload : null,
+      (edit.available && edit.enabled) ? uploadBtn : null,
+      h("span", { class: "spacer" }), go)),
     phase, grid);
   let timer = 0;
   const tick = async () => {
@@ -1768,6 +1795,11 @@ async function viewImage(id) {
   const load = async () => {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
+    const edit = (img.service && img.service.edit) || {};
+    const sizeOk = img.editable !== false;
+    const editReady = !isGuest() && img.status === "done" && edit.enabled && edit.available;
+    const canEdit = editReady && sizeOk;
+    const editBlockedReason = img.editable_reason || "This source is too large to edit. Use the original or a non-upscaled image.";
     const meta = [`${img.model} · ${img.width}×${img.height}`];
     if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
     meta.push(`seed ${img.seed}`, img.source);
@@ -1775,7 +1807,7 @@ async function viewImage(id) {
     if (img.lora) meta.push(`LoRA ${img.lora}`);
     if (img.lora_revision) meta.push(img.lora_revision.slice(0, 8));
     meta.push(when);
-    const canUpscale = img.status === "done" && !isGuest() && Number(img.scale || 1) === 1;
+    const canUpscale = img.status === "done" && !isGuest() && !img.private && Number(img.scale || 1) === 1;
     const startUpscale = (choice) => async () => {
       try {
         if (!(await confirmGpuQueue("This upscale job"))) return;
@@ -1785,7 +1817,8 @@ async function viewImage(id) {
     };
     fill($app,
       img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
-        : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : imageStatusView(img.service)),
+        : h("p", { class: `note${img.status === "failed" || img.status === "cancelled" ? " bad" : ""}` },
+          img.status === "failed" ? `Failed: ${img.error}` : img.status === "cancelled" ? "Cancelled" : imageStatusView(img.service)),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, meta.join(" · ")),
@@ -1794,12 +1827,14 @@ async function viewImage(id) {
            img.provenance.sampler, img.provenance.scheduler, img.provenance.guidance != null && `cfg ${img.provenance.guidance}`,
            img.provenance.checkpoint_revision && `ckpt ${String(img.provenance.checkpoint_revision).slice(0, 12)}`,
            img.provenance.comfy_revision && `ComfyUI ${img.provenance.comfy_revision}`].filter(Boolean).join(" · ")) : null,
-        img.parent && img.parent.id ? h("p", { class: "muted small" }, "Upscaled from ",
+        img.parent && img.parent.id ? h("p", { class: "muted small" }, "Derived from ",
           h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
         (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
-          ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` }, `${c.scale}×`)]))) : null,
+          ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` },
+            c.operation === "upscale" ? `${c.scale}×` : c.operation)]))) : null,
+        !isGuest() && (!edit.enabled || !edit.available) ? h("p", { class: "muted small" }, edit.setup || "") : null,
         h("div", { class: "row" },
-          isGuest() ? null : h("button", {
+          isGuest() ? null : img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
             class: "btn",
             onclick: async () => {
               try {
@@ -1807,19 +1842,175 @@ async function viewImage(id) {
                 location.hash = `#/images/${again.id}`;
               } catch (e) { toast(e.message); }
             },
-          }, "Another one"),
+          }, "Another one") : null,
+          canEdit ? h("a", { class: "btn", href: `#/images/${id}/edit` }, "Edit")
+            : editReady ? h("button", { class: "btn", type: "button", disabled: true, title: editBlockedReason }, "Edit") : null,
           canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
           canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
           img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
+          !isGuest() && (img.status === "queued" || img.status === "running") ? h("button", {
+            class: "btn",
+            onclick: async () => {
+              if (!confirm("Cancel this image job?")) return;
+              try { await api(`/images/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
+            },
+          }, "Cancel") : null,
+          !isGuest() ? h("button", {
+            class: "btn danger",
+            onclick: async () => {
+              if (!confirm("Delete this image from the live gallery? Independent backups are not changed.")) return;
+              try { await api(`/images/${id}`, { method: "DELETE" }); go("#/images", true); } catch (e) { toast(e.message); }
+            },
+          }, "Delete") : null,
           img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null)));
     return img;
   };
   let img = await load();
   const timer = setInterval(async () => {
-    if (img.status === "done" || img.status === "failed") return clearInterval(timer);
+    if (img.status === "done" || img.status === "failed" || img.status === "cancelled") return clearInterval(timer);
     try { img = await load(); } catch (_) { /* offline */ }
   }, 400);
   onLeave(() => clearInterval(timer));
+}
+
+function maskEditor(width, height, previewImg) {
+  const canvas = h("canvas", {
+    class: "mask-canvas", width, height, "aria-label": "Edit mask",
+  });
+  canvas.style.width = "100%";
+  canvas.style.height = "auto";
+  canvas.style.touchAction = "none";
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, width, height);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  let mode = "draw";
+  let size = Math.max(12, Math.round(Math.min(width, height) / 24));
+  let drawing = false;
+  const pos = (ev) => {
+    const r = canvas.getBoundingClientRect();
+    return [(ev.clientX - r.left) * (canvas.width / r.width), (ev.clientY - r.top) * (canvas.height / r.height)];
+  };
+  const paint = (x, y) => {
+    ctx.strokeStyle = mode === "draw" ? "#fff" : "#000";
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = size;
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+  };
+  canvas.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    canvas.setPointerCapture(ev.pointerId);
+    drawing = true;
+    const [x, y] = pos(ev);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    paint(x, y);
+  });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (!drawing) return;
+    ev.preventDefault();
+    const [x, y] = pos(ev);
+    paint(x, y);
+  });
+  const stop = (ev) => {
+    if (!drawing) return;
+    drawing = false;
+    try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* already released */ }
+  };
+  canvas.addEventListener("pointerup", stop);
+  canvas.addEventListener("pointercancel", stop);
+  const tools = {
+    setMode(next) { mode = next; },
+    setSize(next) { size = Math.max(2, Number(next) || size); },
+    clear() { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, width, height); },
+    invert() {
+      const data = ctx.getImageData(0, 0, width, height);
+      for (let i = 0; i < data.data.length; i += 4) {
+        data.data[i] = 255 - data.data[i];
+        data.data[i + 1] = 255 - data.data[i + 1];
+        data.data[i + 2] = 255 - data.data[i + 2];
+      }
+      ctx.putImageData(data, 0, 0);
+    },
+    preview(on) { canvas.classList.toggle("mask-preview", on); previewImg.classList.toggle("mask-preview-source", on); },
+    blob() { return new Promise((resolve) => canvas.toBlob(resolve, "image/png")); },
+    canvas,
+  };
+  return tools;
+}
+
+async function viewImageEdit(id) {
+  if (isGuest()) { go(`#/images/${id}`, true); return; }
+  setHeader("images", "Edit", { page: true });
+  const img = await api(`/images/${id}`);
+  const edit = (img.service && img.service.edit) || {};
+  if (img.status !== "done") { go(`#/images/${id}`, true); return; }
+  if (!edit.enabled || !edit.available) {
+    $app.append(h("p", { class: "note" }, edit.setup || "Masked editing is not installed."),
+      h("a", { class: "btn", href: `#/images/${id}` }, "Back"));
+    return;
+  }
+  if (img.editable === false) {
+    $app.append(h("p", { class: "note" },
+      img.editable_reason || "This source is too large to edit. Use the original or a non-upscaled image."),
+      h("a", { class: "btn", href: `#/images/${id}` }, "Back"));
+    return;
+  }
+  const source = daemonImage(`/images/${id}.png`, { class: "mask-source", alt: img.prompt });
+  const waitForImage = () => new Promise((resolve, reject) => {
+    if (source.complete && source.naturalWidth) return resolve();
+    source.addEventListener("load", () => resolve(), { once: true });
+    source.addEventListener("error", () => reject(new Error("Could not load the source image")), { once: true });
+  });
+  try { await waitForImage(); } catch (e) { $app.append(h("p", { class: "note bad" }, e.message)); return; }
+  const width = source.naturalWidth || img.width;
+  const height = source.naturalHeight || img.height;
+  const editor = maskEditor(width, height, source);
+  const prompt = h("textarea", { placeholder: "Describe the edit…" });
+  const brush = h("input", { type: "range", min: "4", max: "96", value: String(Math.max(12, Math.round(Math.min(width, height) / 24))), "aria-label": "Brush size" });
+  brush.addEventListener("input", () => editor.setSize(brush.value));
+  const feather = h("input", { type: "range", min: "0", max: "32", value: "0", "aria-label": "Feather" });
+  const draw = h("button", { class: "btn selected", type: "button", onclick: () => { editor.setMode("draw"); draw.classList.add("selected"); erase.classList.remove("selected"); } }, "Draw");
+  const erase = h("button", { class: "btn", type: "button", onclick: () => { editor.setMode("erase"); erase.classList.add("selected"); draw.classList.remove("selected"); } }, "Erase");
+  const preview = h("label", { class: "row" }, h("input", { type: "checkbox", onchange: (e) => editor.preview(e.target.checked) }), " Preview mask");
+  const go = h("button", { class: "btn primary", type: "submit" }, "Edit");
+  $app.append(
+    h("p", { class: "muted small" }, `White is edited, black is preserved · ${width}×${height}`),
+    h("div", { class: "mask-stage" }, source, editor.canvas),
+    h("form", {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        if (!prompt.value.trim()) return toast("Describe the edit first");
+        if (!(await confirmGpuQueue("This image edit"))) return;
+        go.disabled = true;
+        try {
+          const mask = await editor.blob();
+          if (!mask) throw new Error("Could not read the mask");
+          const body = new FormData();
+          body.append("prompt", prompt.value);
+          body.append("feather", feather.value || "0");
+          body.append("mask", mask, "mask.png");
+          const job = await api(`/images/${id}/edit`, { method: "POST", body });
+          location.hash = `#/images/${job.id}`;
+        } catch (err) { toast(err.message); }
+        go.disabled = false;
+      },
+    },
+    h("div", { class: "row mask-tools" }, draw, erase,
+      h("button", { class: "btn", type: "button", onclick: () => editor.clear() }, "Clear"),
+      h("button", { class: "btn", type: "button", onclick: () => editor.invert() }, "Invert")),
+    h("label", {}, "Brush size"), brush,
+    h("label", {}, "Feather (defaults to 0)"), feather,
+    preview,
+    h("label", {}, "Edit prompt"), prompt,
+    h("div", { class: "row", style: "margin-top:12px" }, h("span", { class: "spacer" }), go)));
 }
 
 async function viewImageFull(id) {

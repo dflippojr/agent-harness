@@ -978,8 +978,12 @@ def register(app: FastAPI, mgr) -> None:
         key = auth(request, "images")
         if m.images is None:
             raise HarnessError(400, "image generation is disabled on this harness")
+        from . import image_edit
+        parent = m.db.get_image(iid.removesuffix(".png"))
+        if parent is None or image_edit.is_private(parent):
+            raise HarnessError(404, "no such image")
         try:
-            job = m.images.submit_upscale(iid.removesuffix(".png"), body.upscale,
+            job = m.images.submit_upscale(parent["id"], body.upscale,
                                           source=f"app:{key['name']}"[:40])
         except ToolError as e:
             raise HarnessError(400, str(e))
@@ -1024,11 +1028,15 @@ def register(app: FastAPI, mgr) -> None:
         job = m.db.get_image(iid.removesuffix(".png")) if m.images else None
         if job is None:
             raise HarnessError(404, "no such image")
+        from . import image_edit
+        if image_edit.is_private(job):
+            raise HarnessError(404, "no such image")
         if iid.endswith(".png"):
             if job["status"] != "done":
                 raise HarnessError(404, "image not ready")
             return FileResponse(m.images.path(job), media_type="image/png")
-        children = m.db.image_children(job["id"]) if m.images else []
+        children = [child for child in m.db.image_children(job["id"])
+                    if not image_edit.is_private(child)] if m.images else []
         return {**job, "url": f"/api/v1/images/{job['id']}.png" if job["status"] == "done" else None,
                 "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
                               "upscale_model": c.get("upscale_model") or ""} for c in children]}

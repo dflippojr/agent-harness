@@ -428,7 +428,15 @@ def fake_comfy(fail_prompts=(), fail_upscale=False):
                                                        "outputs": {"5": {"images": [{"filename": "up.png",
                                                                                      "subfolder": "harness",
                                                                                      "type": "output"}]}}}})
-            text = next(n["inputs"]["text"] for n in graph.values() if n["class_type"] == "CLIPTextEncode")
+            text = ""
+            for node in graph.values():
+                inputs = node.get("inputs") or {}
+                if node.get("class_type") == "CLIPTextEncode" and inputs.get("text"):
+                    text = inputs["text"]
+                    break
+                if node.get("class_type") == "TextEncodeQwenImageEdit" and (inputs.get("prompt") or "").strip():
+                    text = inputs["prompt"]
+                    break
             if text in fail_prompts:
                 return httpx.Response(200, json={pid: {"status": {"status_str": "error", "completed": False, "messages": [
                     ["execution_error", {"exception_message": "CUDA out of memory"}]]}}})

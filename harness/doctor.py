@@ -207,6 +207,32 @@ def check_images(r: Report, cfg) -> None:
         r.warn("FLUX.2 klein 4B (optional)", flux_warning)
     else:
         r.ok("FLUX.2 klein 4B (optional)", "flux-fast assets and nodes are ready")
+    from . import image_edit
+    edit = image_edit.assets_status(cfg.images, verify_hash=True)
+    if cfg.images.edit_enabled:
+        if edit["available"] and edit["hash_ok"] is not False:
+            extra = "checksum verified" if edit["hash_ok"] else "stub or unpackaged file present"
+            r.ok("Image editing", f"{edit['model']} {edit['revision'][:12]} ({extra})")
+        else:
+            missing = ", ".join(edit["missing"]) or "checksum mismatch"
+            r.fail("Image editing", f"image_edit is enabled but assets are not ready ({missing}). {edit['setup']}")
+        try:
+            import psutil
+            ram_gb = psutil.virtual_memory().total / 2**30
+            (r.ok if ram_gb >= 30 else r.warn)(
+                "Image editing RAM", f"{ram_gb:.0f} GB (Qwen-Image-Edit fp8 was tested with 32 GB)")
+        except (ImportError, OSError):
+            r.warn("Image editing RAM", "could not read installed RAM")
+        models = image_edit.models_dir(cfg.images)
+        try:
+            free = shutil.disk_usage(models if models.exists() else cfg.data_dir).free / 2**30
+            need = 22 if not edit["available"] else 1
+            (r.ok if free >= need else r.fail)(
+                "Image editing disk", f"{free:.0f} GB free at {models} (need about {need} GB)")
+        except OSError as e:
+            r.warn("Image editing disk", str(e))
+    elif not edit["available"]:
+        r.ok("Image editing", "optional component not installed; text-to-image is unchanged")
     from . import upscale as upscale_mod
     if upscale_mod.missing_weights(cfg.images, verify_hash=True):
         r.warn("Image upscaling", upscale_mod.remediation(cfg.images))

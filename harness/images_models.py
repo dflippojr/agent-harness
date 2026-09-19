@@ -20,6 +20,8 @@ from pathlib import Path
 
 import httpx
 
+from .config import resolve_images_models_dir
+
 log = logging.getLogger("harness.images_models")
 
 MANIFEST_PATH = Path(__file__).with_name("images_flux_fast.json")
@@ -40,7 +42,7 @@ def redact_url(url: str) -> str:
 
 
 def models_dir(cfg) -> Path:
-    return Path(getattr(cfg, "models_dir", None) or "C:/AI/comfy-models")
+    return resolve_images_models_dir(cfg)
 
 
 def comfy_dir(cfg) -> Path:

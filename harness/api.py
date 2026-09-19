@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -553,11 +553,48 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             raise HarnessError(400, "image generation is disabled in config/harness.yaml")
         return m.images
 
+    def image_payload(job: dict, svc, request: Request, status: dict) -> dict:
+        from . import image_edit
+        parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
+        children = svc.db.image_children(job["id"])
+        if request.state.access.role == "guest":
+            children = [child for child in children if not image_edit.is_private(child)]
+        eligibility = image_edit.edit_eligibility(
+            job.get("width"), job.get("height"), max_pixels=svc.cfg.max_pixels)
+        return {**job, "service": status, "private": image_edit.is_private(job),
+                "editable": eligibility["editable"], "editable_reason": eligibility["reason"],
+                "parent": ({"id": parent["id"], "width": parent["width"], "height": parent["height"]}
+                           if parent else None),
+                "children": [{"id": child["id"], "operation": child.get("operation") or "generate",
+                              "scale": child.get("scale"), "status": child["status"],
+                              "upscale_model": child.get("upscale_model") or "", "width": child["width"],
+                              "height": child["height"]} for child in children]}
+
+    def visible_job(job, request, svc):
+        from . import image_edit
+        if job is None:
+            raise HarnessError(404, "no such image")
+        if request.state.access.role == "guest" and image_edit.is_private(job):
+            raise HarnessError(404, "no such image")
+        return job
+
+    async def read_upload(file: UploadFile | None, limit: int) -> bytes:
+        if file is None:
+            raise HarnessError(400, "file is required")
+        # Ignore the client filename entirely: uploads are stored as a generated id, never as a path.
+        data = await file.read(limit + 1)
+        if len(data) > limit:
+            raise HarnessError(400, f"image is too large (max {limit} bytes)")
+        return data
+
     @app.get("/images")
     async def list_images(request: Request, limit: int = 60):
+        from . import image_edit
         svc = images_service(request)
+        visible_operations = tuple(image_edit.PUBLIC_OPERATIONS) if request.state.access.role == "guest" else ()
+        images = svc.db.list_images(limit=limit, operations=visible_operations)
         status = await asyncio.to_thread(svc.status)
-        return {"status": status, "images": svc.db.list_images(limit=limit)}
+        return {"status": status, "images": images}
 
     @app.post("/images", status_code=201)
     async def create_image(body: ImageRequest, request: Request):
@@ -566,6 +603,16 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         try:
             return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
                               resolution=body.resolution, seed=body.seed, upscale=body.upscale)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
+    @app.post("/images/uploads", status_code=201)
+    async def upload_image(request: Request, file: UploadFile = File(...)):
+        from .fileops import ToolError
+        require_owner(request)
+        svc = images_service(request)
+        try:
+            return svc.ingest_upload(await read_upload(file, svc.cfg.max_upload_bytes))
         except ToolError as e:
             raise HarnessError(400, str(e))
 
@@ -579,32 +626,79 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         """Drop an unused Images-tab warmup so the language model can come back."""
         return images_service(request).cooldown()
 
+    @app.post("/images/{iid}/edit", status_code=201)
+    async def edit_image(iid: str, request: Request, prompt: str = Form(...), mask: UploadFile = File(...),
+                         feather: int = Form(0), seed: int | None = Form(None)):
+        from .fileops import ToolError
+        require_owner(request)
+        svc = images_service(request)
+        parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+        try:
+            return svc.submit_edit(parent["id"], prompt, await read_upload(mask, svc.cfg.max_upload_bytes),
+                                   feather=feather, seed=seed)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
     @app.post("/images/{iid}/upscale", status_code=201)
     async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
         from .fileops import ToolError
         svc = images_service(request)
+        parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
         try:
-            return svc.submit_upscale(iid.removesuffix(".png"), body.upscale)
+            return svc.submit_upscale(parent["id"], body.upscale)
         except ToolError as e:
             raise HarnessError(400, str(e))
+
+    @app.post("/images/{iid}/cancel")
+    async def cancel_image(iid: str, request: Request):
+        from .fileops import ToolError
+        require_owner(request)
+        svc = images_service(request)
+        job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+        try:
+            return svc.cancel(job["id"])
+        except ToolError as e:
+            raise HarnessError(409, str(e))
+
+    @app.delete("/images/{iid}")
+    async def delete_image(iid: str, request: Request):
+        from .fileops import ToolError
+        require_owner(request)
+        svc = images_service(request)
+        job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+        backup = Path(mgr(request).cfg.backup.dir) if mgr(request).cfg.backup.dir else None
+        try:
+            return await svc.delete(job["id"], backup_dir=backup)
+        except ToolError as e:
+            raise HarnessError(404, str(e))
 
     @app.get("/images/{iid}")
     async def get_image(iid: str, request: Request):
         svc = images_service(request)
-        job = svc.db.get_image(iid.removesuffix(".png"))
-        if job is None:
-            raise HarnessError(404, "no such image")
-        if iid.endswith(".png"):
-            if job["status"] != "done" or not svc.path(job).exists():
-                raise HarnessError(404, "image not ready")
-            return FileResponse(svc.path(job), media_type="image/png", headers={"Cache-Control": "max-age=86400"})
-        parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
-        status = await asyncio.to_thread(svc.status)
-        return {**job, "service": status, "parent": ({"id": parent["id"], "width": parent["width"],
-                "height": parent["height"]} if parent else None),
-                "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
-                              "upscale_model": c.get("upscale_model") or "", "width": c["width"], "height": c["height"]}
-                             for c in svc.db.image_children(job["id"])]}
+        variant = "json"
+        raw = iid
+        if raw.endswith(".source.png"):
+            variant, raw = "source", raw[: -len(".source.png")]
+        elif raw.endswith(".mask.png"):
+            variant, raw = "mask", raw[: -len(".mask.png")]
+        elif raw.endswith(".png"):
+            variant, raw = "png", raw[: -len(".png")]
+        job = visible_job(svc.db.get_image(raw), request, svc)
+        owner = request.state.access.role == "owner"
+        if variant == "json":
+            status = await asyncio.to_thread(svc.status)
+            return image_payload(job, svc, request, status)
+        from . import image_edit
+        if variant in ("source", "mask") and not owner:
+            raise HarnessError(404, "image not ready")
+        path = {"png": svc.path, "source": svc.source_path, "mask": svc.mask_path}[variant](job)
+        if variant == "png" and job["status"] != "done":
+            raise HarnessError(404, "image not ready")
+        if not path.exists():
+            raise HarnessError(404, "image not ready")
+        headers = {"Cache-Control": "private, no-store"} if image_edit.is_private(job) or variant != "png" else {
+            "Cache-Control": "max-age=86400"}
+        return FileResponse(path, media_type="image/png", headers=headers)
 
     # GPU contention guard
     @app.get("/gpu")

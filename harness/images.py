@@ -22,7 +22,9 @@ Lightning 4-step LoRA, and optional `flux-fast` = distilled FLUX.2 [klein] 4B FP
 modes stay disabled until their pinned assets and preflight checks succeed and never fall back to another model.
 Inputs a workflow does not support are rejected. Upscaling is opt-in Real-ESRGAN 2×/4× (never the default). A
 requested upscale runs in the same GPU occupancy; a later gallery action is a queued image job. The original PNG is
-preserved; the result is a linked row. Results are PNGs under data_dir/images, served by GET /images/{id}.png.
+preserved; the result is a linked row. Masked inpainting is a separate optional owner-only `image_edit` component
+using Qwen-Image-Edit and does not change the text-to-image defaults. Results are PNGs under data_dir/images, served
+by GET /images/{id}.png.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import threading
@@ -46,7 +49,10 @@ import yaml
 
 from .config import ImagesConfig
 from .fileops import ToolError
+from . import image_edit
 from . import upscale as upscale_mod
+
+IMAGE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 log = logging.getLogger("harness.images")
 
@@ -411,8 +417,8 @@ class ComfyProcess:
         log_dir.mkdir(parents=True, exist_ok=True)
         out = open(log_dir / "comfyui.log", "ab")
         work = Path(self.cfg.work_dir)
-        for name in ("output", "temp", "input"):
-            (work / name).mkdir(parents=True, exist_ok=True)
+        for sub in ("output", "temp", "input"):
+            (work / sub).mkdir(parents=True, exist_ok=True)
         args = [str(root / "python_embeded" / "python.exe"), "-s", str(root / "ComfyUI" / "main.py"),
                 "--listen", "127.0.0.1", "--port", str(self.cfg.port), "--disable-auto-launch",
                 "--extra-model-paths-config", str(root / "ComfyUI" / "extra_model_paths.yaml"),
@@ -479,6 +485,7 @@ class ImageService:
         self._drain_sessions: set[str] = set()
         self.images_dir = Path(cfg.work_dir) / "images"
         self.input_dir = Path(cfg.work_dir) / "input"
+        self._cancel: set[str] = set()
         self.transport = None          # tests inject a fake ComfyUI
         self.object_info = None        # tests inject ComfyUI /object_info
         self.flux_manifest = None      # tests inject a tiny fixture manifest
@@ -491,6 +498,11 @@ class ImageService:
         self._flux_verify_error: str | None = None
         self._flux_verify_retry_at = 0.0
         self._flux_verify_backoff = 1.0
+        self._edit_verify_lock = threading.Lock()
+        self._edit_verify_in_flight = False
+        self._edit_verify_error: str | None = None
+        self._edit_verify_retry_at = 0.0
+        self._edit_verify_backoff = 1.0
 
     def schemas(self) -> list[dict]:
         return schemas(self.cfg, available=[name for name in MODELS if self.mode_available(name)])
@@ -562,6 +574,7 @@ class ImageService:
             asyncio.get_running_loop().create_task(self._stop_stray())
             for job in self.db.list_images(status=("queued", "running")):  # interrupted by a daemon restart
                 self.db.update_image(job["id"], status="queued")
+                self._done.setdefault(job["id"], asyncio.Event())
                 self.queue.put_nowait(job["id"])
             for job in self.db.list_images(limit=500):
                 if job["status"] != "done":
@@ -577,6 +590,8 @@ class ImageService:
                     except ToolError as e:
                         log.warning("could not recover upscale for %s: %s", job["id"], e)
             self._schedule_flux_verify()
+            if self.cfg.edit_enabled:
+                self.edit_status()
             self._task = asyncio.create_task(self._loop(), name="images")
 
     def _schedule_flux_verify(self) -> None:
@@ -611,6 +626,52 @@ class ImageService:
         finally:
             with self._flux_verify_lock:
                 self._flux_verify_in_flight = False
+
+    def _schedule_edit_verify(self) -> None:
+        """Hash the 20 GB edit checkpoint once on a worker, never on the asyncio loop."""
+        now = time.monotonic()
+        with self._edit_verify_lock:
+            if self._edit_verify_in_flight or now < self._edit_verify_retry_at:
+                return
+            self._edit_verify_in_flight = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            threading.Thread(target=self._warm_edit_status, name="image-edit-verify", daemon=True).start()
+            return
+        loop.run_in_executor(None, self._warm_edit_status)
+
+    def _warm_edit_status(self) -> None:
+        try:
+            image_edit.assets_status(self.cfg, verify_hash=True)
+            self._edit_verify_error = None
+            self._edit_verify_backoff = 1.0
+            self._edit_verify_retry_at = 0.0
+        except Exception as e:  # noqa: BLE001 - report and retry without blocking status requests
+            self._edit_verify_error = str(e).strip() or e.__class__.__name__
+            delay = self._edit_verify_backoff
+            self._edit_verify_backoff = min(self._edit_verify_backoff * 2, 30.0)
+            self._edit_verify_retry_at = time.monotonic() + delay
+            log.debug("image-edit verification failed", exc_info=True)
+        finally:
+            with self._edit_verify_lock:
+                self._edit_verify_in_flight = False
+
+    def edit_status(self) -> dict:
+        report = image_edit.public_status(self.cfg)
+        report["enabled"] = bool(self.cfg.edit_enabled)
+        if report.get("verifying"):
+            self._schedule_edit_verify()
+        with self._edit_verify_lock:
+            in_flight = self._edit_verify_in_flight
+            error = self._edit_verify_error
+        report["verifying"] = bool(report.get("verifying") or in_flight)
+        if error and not in_flight:
+            report.update({"available": False, "verifying": False,
+                           "setup": f"Verification failed: {error}. Verification will retry automatically."})
+        elif not self.cfg.edit_enabled:
+            report["setup"] = image_edit.SETUP_GUIDANCE
+        return report
 
     async def _stop_stray(self) -> None:
         """A ComfyUI left running by a daemon that crashed mid-batch holds the GPU: stop it and restore the model."""
@@ -652,6 +713,12 @@ class ImageService:
                 for key, entry in self.mode_catalog().items()]
 
     def provenance_for(self, job: dict) -> dict:
+        if job["model"] == image_edit.EDIT_MODEL_ID:
+            return {"mode": image_edit.EDIT_MODEL_ID, "prompt": job["prompt"],
+                    "width": job["width"], "height": job["height"], "seed": job["seed"],
+                    "steps": 50, "sampler": "euler", "scheduler": "simple", "guidance": 4.0,
+                    "checkpoint_revision": image_edit.EDIT_MODEL["revision"],
+                    "checkpoint_sha256": image_edit.EDIT_MODEL["unet"]["sha256"]}
         spec = MODELS[job["model"]]
         extra = {}
         if job["model"] == "flux-fast":
@@ -707,7 +774,7 @@ class ImageService:
                "model": model, "aspect_ratio": aspect_ratio, "resolution": resolution, "width": width, "height": height,
                "seed": seed if seed is not None else random.SystemRandom().randrange(2**48), **mode_provenance(model),
                "parent_id": "", "operation": "generate", "scale": 1, "upscale_model": "",
-               "requested_upscale": requested}
+               "requested_upscale": requested, "model_revision": "", "feather": 0}
         job["provenance"] = self.provenance_for(job)
         self.db.insert_image(job)
         self._done[job["id"]] = asyncio.Event()
@@ -724,6 +791,8 @@ class ImageService:
             raise ToolError("upscale needs a completed image")
         if not self.path(parent).is_file():
             raise ToolError("upscale needs the original PNG")
+        if image_edit.is_private(parent):
+            raise ToolError("uploaded and edited images cannot be upscaled")
         scale = upscale_mod.SCALES[requested]
         spec = upscale_mod.require_weights(self.cfg, scale)
         out_w, out_h = upscale_mod.check_dimensions(
@@ -742,46 +811,183 @@ class ImageService:
                "prompt": parent["prompt"], "model": parent["model"], "aspect_ratio": parent["aspect_ratio"],
                "resolution": parent.get("resolution") or "auto", "width": out_w, "height": out_h,
                "seed": parent["seed"], "parent_id": parent["id"], "operation": "upscale", "scale": scale,
-               "upscale_model": spec.key, "requested_upscale": requested}
+               "upscale_model": spec.key, "requested_upscale": requested, "model_revision": "", "feather": 0}
         self.db.insert_image(job)
         self._done[job["id"]] = asyncio.Event()
         self.queue.put_nowait(job["id"])
         return self.db.get_image(job["id"])
 
-    def cancel(self, job_id: str) -> dict:
-        job = self.db.get_image(job_id)
-        if job is None:
-            raise ToolError("no such image")
-        if job["status"] in ("done", "failed"):
-            return job
-        self._cancel.add(job_id)
-        if job["status"] == "queued":
-            self.db.update_image(job_id, status="failed", finished_at=time.time(), error="cancelled")
-            event = self._done.get(job_id)
-            if event:
-                event.set()
-            return self.db.get_image(job_id)
-        return job
-
     async def wait(self, job_id: str) -> dict:
-        event = self._done.setdefault(job_id, asyncio.Event())
         while True:
             job = self.db.get_image(job_id)
-            if job["status"] in ("done", "failed"):
+            if job is None:
+                return {"id": job_id, "status": "deleted", "error": "image was deleted"}
+            if job["status"] in ("done", "failed", "cancelled"):
                 return job
+            event = self._done.setdefault(job_id, asyncio.Event())
             try:
                 await asyncio.wait_for(event.wait(), timeout=10)
             except asyncio.TimeoutError:
                 pass
 
+    def _image_path(self, job: dict, suffix: str) -> Path:
+        image_id = job.get("id") if isinstance(job, dict) else None
+        if not isinstance(image_id, str):
+            raise ToolError("invalid image id")
+        safe_id = os.path.basename(image_id)
+        if safe_id != image_id or IMAGE_ID_RE.fullmatch(safe_id) is None:
+            raise ToolError("invalid image id")
+        safe_id = f"{int(safe_id, 16):012x}"
+        images_dir = self.images_dir.resolve()
+        path = (images_dir / f"{safe_id}{suffix}").resolve()
+        if not path.is_relative_to(images_dir):
+            raise ToolError("image path escapes the images directory")
+        return path
+
     def path(self, job: dict) -> Path:
-        return self.images_dir / f"{job['id']}.png"
+        return self._image_path(job, ".png")
+
+    def source_path(self, job: dict) -> Path:
+        return self._image_path(job, ".source.png")
+
+    def mask_path(self, job: dict) -> Path:
+        return self._image_path(job, ".mask.png")
+
+    def _job_files(self, job: dict) -> list[Path]:
+        return [self.path(job), self.source_path(job), self.mask_path(job)]
+
+    def _require_edit(self) -> dict:
+        status = self.edit_status()
+        if not self.cfg.edit_enabled or not status["available"]:
+            raise ToolError(status["setup"] or image_edit.SETUP_GUIDANCE)
+        return status
+
+    def ingest_upload(self, data: bytes, source: str = "owner") -> dict:
+        """Normalize an owner upload into a gallery row. Never uses the client filename as a path."""
+        self._require_edit()
+        png, width, height = image_edit.normalize_source(
+            data, max_bytes=self.cfg.max_upload_bytes, max_pixels=self.cfg.max_pixels)
+        job_id = uuid.uuid4().hex[:12]
+        now = time.time()
+        job = {"id": job_id, "session_id": "", "source": source, "prompt": "Uploaded photo",
+               "model": image_edit.EDIT_MODEL_ID, "aspect_ratio": "1:1", "resolution": "upload",
+               "width": width, "height": height, "seed": 0, "parent_id": "",
+               "operation": image_edit.OPERATION_UPLOAD, "model_revision": "", "feather": 0,
+               "status": "done", "created_at": now}
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.path(job).write_bytes(png)
+        self.db.insert_image(job)
+        self.db.update_image(job_id, finished_at=now, bytes=len(png))
+        return self.db.get_image(job_id)
+
+    def submit_edit(self, parent_id: str, prompt: str, mask: bytes, feather: int | str = 0,
+                    source: str = "phone", seed: int | None = None) -> dict:
+        """Queue a masked edit. Source and mask are copied onto the new row before GPU work starts."""
+        edit = self._require_edit()
+        prompt = prompt.strip()
+        if not prompt:
+            raise ToolError("prompt is empty")
+        parent = self.db.get_image(parent_id)
+        if parent is None or parent["status"] != "done":
+            raise ToolError("source image is not available")
+        raw_parent_id = parent.get("id")
+        if not isinstance(raw_parent_id, str):
+            raise ToolError("invalid image id")
+        safe_parent_id = os.path.basename(raw_parent_id)
+        if safe_parent_id != raw_parent_id or IMAGE_ID_RE.fullmatch(safe_parent_id) is None:
+            raise ToolError("invalid image id")
+        safe_parent_id = f"{int(safe_parent_id, 16):012x}"
+        parent_path = self.path({"id": safe_parent_id})
+        if not parent_path.exists():
+            raise ToolError("source image is not available")
+        image_edit.require_editable_source(
+            parent["width"], parent["height"], max_pixels=self.cfg.max_pixels)
+        feather_n = image_edit.parse_feather(feather)
+        mask_png = image_edit.normalize_mask(
+            mask, parent["width"], parent["height"],
+            max_bytes=self.cfg.max_upload_bytes, max_pixels=self.cfg.max_pixels)
+        job_id = uuid.uuid4().hex[:12]
+        job = {"id": job_id, "session_id": "", "source": source, "prompt": prompt[:4000],
+               "model": image_edit.EDIT_MODEL_ID, "aspect_ratio": parent["aspect_ratio"],
+               "resolution": parent.get("resolution") or "auto",
+               "width": parent["width"], "height": parent["height"],
+               "seed": seed if seed is not None else random.SystemRandom().randrange(2**48),
+               "parent_id": safe_parent_id, "operation": image_edit.OPERATION_EDIT,
+               "model_revision": edit["revision"], "feather": feather_n}
+        job["provenance"] = self.provenance_for(job)
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(parent_path, self.source_path(job))
+        self.mask_path(job).write_bytes(mask_png)
+        self.db.insert_image(job)
+        self._done[job_id] = asyncio.Event()
+        self.queue.put_nowait(job_id)
+        return self.db.get_image(job_id)
+
+    def cancel(self, job_id: str) -> dict:
+        job = self.db.get_image(job_id)
+        if job is None:
+            raise ToolError("no such image")
+        if job["status"] in ("done", "failed", "cancelled"):
+            return job
+        self._cancel.add(job_id)
+        if job["status"] == "queued":
+            status = "cancelled" if job.get("operation") == image_edit.OPERATION_EDIT else "failed"
+            self.db.update_image(job_id, status=status, finished_at=time.time(), error="cancelled")
+        if self.active_job == job_id:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                loop.create_task(self.comfy.interrupt())
+        event = self._done.get(job_id)
+        if event and job["status"] == "queued":
+            event.set()
+        return self.db.get_image(job_id)
+
+    async def delete(self, job_id: str, *, backup_dir: Path | None = None) -> dict:
+        """Remove this live row and its files. Never walks a backup/archive directory."""
+        job = self.db.get_image(job_id)
+        if job is None:
+            raise ToolError("no such image")
+        event = self._done.get(job_id)
+        if job["status"] in ("queued", "running"):
+            self.cancel(job_id)
+        current = self.db.get_image(job_id)
+        worker_can_touch_files = self.active_job == job_id or bool(
+            current and current["status"] in ("queued", "running"))
+        if worker_can_touch_files:
+            event = event or self._done.setdefault(job_id, asyncio.Event())
+            await event.wait()
+        job = self.db.get_image(job_id) or job
+        backup_root = backup_dir.resolve() if backup_dir is not None else None
+        for path in self._job_files(job):
+            if not path.exists():
+                continue
+            resolved = path.resolve()
+            if backup_root is not None and (resolved == backup_root or backup_root in resolved.parents):
+                continue
+            if resolved.parent.resolve() != self.images_dir.resolve():
+                continue
+            path.unlink()
+        self.db.delete_image(job_id)
+        return {"deleted": job_id, "parent_id": job.get("parent_id") or ""}
+
+    def _stage_edit_inputs(self, job: dict) -> tuple[str, str]:
+        source = self.source_path(job).read_bytes()
+        mask = image_edit.apply_feather(self.mask_path(job).read_bytes(), int(job.get("feather") or 0))
+        source_name = f"{job['id']}-source.png"
+        mask_name = f"{job['id']}-mask.png"
+        self.input_dir.mkdir(parents=True, exist_ok=True)
+        (self.input_dir / source_name).write_bytes(source)
+        (self.input_dir / mask_name).write_bytes(mask)
+        return source_name, mask_name
 
     def _live_job(self, job_id: str | None) -> bool:
         if not job_id:
             return False
         job = self.db.get_image(job_id)
-        return job is not None and job["status"] not in ("done", "failed")
+        return job is not None and job["status"] not in ("done", "failed", "cancelled")
 
     def _skip_dead_jobs(self, first: str | None) -> str | None:
         """Drop cancelled/finished ids left in the queue so they never occupy the GPU."""
@@ -844,7 +1050,7 @@ class ImageService:
         self.progress = {
             **self.progress,
             "job": job_id,
-            "stage": "generating",
+            "stage": self.progress.get("stage") or "generating",
             "value": int(data.get("value") or 0),
             "max": int(maximum),
             "seconds": round(time.time() - started),
@@ -948,7 +1154,7 @@ class ImageService:
         if not job_id:
             return
         job = self.db.get_image(job_id)
-        if job is None or job["status"] in ("done", "failed"):
+        if job is None or job["status"] in ("done", "failed", "cancelled"):
             return
         if job_id in self._cancel:
             self.db.update_image(job_id, status="failed", finished_at=time.time(), error="cancelled")
@@ -961,14 +1167,22 @@ class ImageService:
         started = time.time()
         self.db.update_image(job_id, status="running", started_at=started)
         upscaling = job.get("operation") == "upscale"
-        self.progress = {"job": job_id, "stage": "upscaling" if upscaling else "queued in ComfyUI"}
+        stage = "upscaling" if upscaling else (
+            "editing" if job.get("operation") == image_edit.OPERATION_EDIT else "queued in ComfyUI")
+        self.progress = {"job": job_id, "stage": stage}
         stop_progress = asyncio.Event()
         listener = asyncio.create_task(self._listen_progress(job_id, started, stop_progress))
         try:
             if upscaling:
                 content = await self._run_upscale(job, started)
+            elif (job.get("operation") or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_EDIT:
+                content = await self._run_edit(job, started)
             else:
                 content = await self._run_generate(job, started)
+            if job_id in self._cancel:
+                status = "cancelled" if job.get("operation") == image_edit.OPERATION_EDIT else "failed"
+                self.db.update_image(job_id, status=status, finished_at=time.time(), error="cancelled")
+                return
             self.images_dir.mkdir(parents=True, exist_ok=True)
             canonical = self.path(job)
             partial = canonical.with_name(canonical.name + ".partial")
@@ -1002,12 +1216,16 @@ class ImageService:
                     log.exception("image archive hook failed for %s", job_id)
             log.info("image %s (%s) done in %.0f s", job_id, job.get("upscale_model") or job["model"],
                      time.time() - started)
-            if not upscaling:
+            if (job.get("operation") or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_GENERATE:
                 await self._queue_requested_upscale(job)
         except (ToolError, httpx.HTTPError, KeyError, ValueError, OSError) as e:
-            self.db.update_image(job_id, status="failed", finished_at=time.time(), error=str(e)[:1000])
-            log.warning("image %s failed: %s", job_id, e)
+            cancelled_edit = (job_id in self._cancel
+                              and job.get("operation") == image_edit.OPERATION_EDIT)
+            status = "cancelled" if cancelled_edit else "failed"
+            self.db.update_image(job_id, status=status, finished_at=time.time(), error=str(e)[:1000])
+            log.warning("image %s %s: %s", job_id, status, e)
         finally:
+            self._cancel.discard(job_id)
             stop_progress.set()
             listener.cancel()
             await asyncio.gather(listener, return_exceptions=True)
@@ -1054,6 +1272,12 @@ class ImageService:
                          encoder_name=encoder)
         return await self._comfy_png(job["id"], graph, started, stage="generating")
 
+    async def _run_edit(self, job: dict, started: float) -> bytes:
+        source_name, mask_name = self._stage_edit_inputs(job)
+        prefix = f"harness/{job['id']}"
+        graph = image_edit.edit_workflow(job["prompt"], source_name, mask_name, job["seed"], prefix)
+        return await self._comfy_png(job["id"], graph, started, stage="editing")
+
     async def _run_upscale(self, job: dict, started: float) -> bytes:
         parent = self.db.get_image(job["parent_id"])
         if parent is None or not self.path(parent).is_file():
@@ -1089,7 +1313,8 @@ class ImageService:
                     raise ToolError("cancelled")
                 if time.monotonic() > deadline:
                     await self.comfy.interrupt()
-                    raise ToolError("image generation timed out" if stage != "upscaling" else "upscale timed out")
+                    action = {"upscaling": "upscale", "editing": "image edit"}.get(stage, "image generation")
+                    raise ToolError(f"{action} timed out")
                 hist = (await client.get(f"{self.comfy.url}/history/{prompt_id}")).json().get(prompt_id)
                 if hist:
                     status = hist.get("status") or {}
@@ -1105,6 +1330,8 @@ class ImageService:
                 self.progress = {**self.progress, "job": job_id, "stage": stage,
                                  "seconds": round(time.time() - started)}
                 await asyncio.sleep(0.4)
+            if job_id in self._cancel:
+                raise ToolError("cancelled")
             images = [img for out in hist.get("outputs", {}).values() for img in out.get("images", [])]
             if not images:
                 raise ToolError("ComfyUI finished without an image")
@@ -1112,6 +1339,8 @@ class ImageService:
             data = await client.get(f"{self.comfy.url}/view", params={
                 "filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": img.get("type", "output")})
             data.raise_for_status()
+        if job_id in self._cancel:
+            raise ToolError("cancelled")
         return data.content
 
     async def _listen_progress(self, job_id: str, started: float, stop: asyncio.Event) -> None:
@@ -1153,6 +1382,7 @@ class ImageService:
                     pass
 
     def status(self) -> dict:
+        edit = self.edit_status()
         modes = self.mode_catalog()
         return {"enabled": self.cfg.enabled, "phase": self.phase, "active_job": self.active_job,
                 "queued": self.queue.qsize(), "progress": self.progress,
@@ -1160,7 +1390,7 @@ class ImageService:
                 "aspect_ratios": list(ASPECTS),
                 "resolutions": {name: {"label": label, "sizes": {aspect: list(size) for aspect, size in RESOLUTION_SIZES[name].items()}}
                                 for name, label in RESOLUTIONS.items()},
-                "upscale": upscale_mod.status(self.cfg)}
+                "edit": edit, "upscale": upscale_mod.status(self.cfg)}
 
     # agent tool
     async def call(self, name: str, args: dict, workspace_root: Path | None = None, put_bytes=None) -> str:
@@ -1179,7 +1409,7 @@ class ImageService:
                           session_id=args.get("_session", ""), upscale=requested)
         job = await self.wait(job["id"])
         if job["status"] != "done":
-            raise ToolError(f"image generation failed: {job['error']}")
+            raise ToolError(f"image generation failed: {job.get('error') or job['status']}")
         result = job
         if requested != "none":
             child = self.db.find_image_upscale(job["id"], requested)
