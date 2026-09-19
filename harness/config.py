@@ -235,6 +235,7 @@ class ImagesConfig:
     linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
+    models_dir: str = "C:/AI/comfy-models"    # diffusion_models, text_encoders, vae, loras
     upscale_dir: str = ""                      # Real-ESRGAN weights; empty → <comfy_dir>/ComfyUI/models/upscale_models
     upscale_max_pixels: int = 36_000_000       # refuse 2×/4× outputs above this before allocating
     upscale_tile: int = 512                    # ComfyUI ImageUpscaleWithModel starting tile

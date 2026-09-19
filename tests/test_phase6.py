@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import json
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -455,7 +456,8 @@ def image_manager(tmp_path, steps=None, fail_prompts=(), fail_upscale=False, wei
     upscale_dir = tmp_path / "upscale-weights"
     upscale_dir.mkdir(parents=True, exist_ok=True)
     cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2,
-                              comfy_dir=str(tmp_path / "comfy"), upscale_dir=str(upscale_dir))
+                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"),
+                              upscale_dir=str(upscale_dir))
     if weights:
         from harness.upscale import MODELS
         for spec in MODELS.values():
@@ -549,11 +551,165 @@ def test_images_api_and_generate_image_for_tower_and_mac(tmp_path):
         assert r.status_code == 200 and r.content == PNG and r.headers["content-type"] == "image/png"
         listing = client.get("/images").json()
         assert listing["images"][0]["id"] == job["id"] and "fast" in listing["status"]["models"]
+        assert "quality-fast" in listing["status"]["models"]
+        assert listing["status"]["modes"]["quality"]["available"] is True
+        assert listing["status"]["modes"]["quality-fast"]["available"] is False
+        assert "SHA-256" in listing["status"]["modes"]["quality-fast"]["setup"]
+        assert client.post("/images", json={"prompt": "x", "model": "quality-fast"}).status_code == 400
         assert listing["status"]["resolutions"]["high"]["sizes"]["16:9"] == [1664, 928]
         tower = {"id": "t", "project": "scratch", "target": "tower", "model": "fake", "workspace": str(tmp_path)}
         mac = {**tower, "project": "mac", "target": "macbook"}
         assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(tower)}
         assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(mac)}
+        assert "quality-fast" not in m.images.schemas()[0]["function"]["parameters"]["properties"]["model"]["description"]
+
+
+def test_quality_fast_graph_uses_official_lightning_settings():
+    from harness.images import LIGHTNING_LORA, workflow
+
+    quality = workflow("quality", "a cat", 1328, 1328, 1, "p")
+    lightning = workflow("quality-fast", "a cat", 1328, 1328, 1, "p")
+    turbo = workflow("fast", "a cat", 1024, 1024, 1, "p")
+    q_sampler = next(node["inputs"] for node in quality.values() if node["class_type"] == "KSampler")
+    l_sampler = next(node["inputs"] for node in lightning.values() if node["class_type"] == "KSampler")
+    t_sampler = next(node["inputs"] for node in turbo.values() if node["class_type"] == "KSampler")
+    assert q_sampler["steps"] == 50 and q_sampler["cfg"] == 4 and q_sampler["sampler_name"] == "euler"
+    assert "LoraLoaderModelOnly" not in {node["class_type"] for node in quality.values()}
+    assert quality["222"]["inputs"] == {"model": ["226", 0], "shift": 3.1}
+    assert l_sampler["steps"] == 4 and l_sampler["cfg"] == 1
+    assert l_sampler["sampler_name"] == "euler" and l_sampler["scheduler"] == "simple" and l_sampler["denoise"] == 1
+    lora = next(node["inputs"] for node in lightning.values() if node["class_type"] == "LoraLoaderModelOnly")
+    assert lora == {"model": ["226", 0], "lora_name": LIGHTNING_LORA["filename"], "strength_model": 1}
+    assert lightning["222"]["inputs"] == {"model": ["221", 0], "shift": 3.1}
+    assert t_sampler["steps"] == 8
+    assert LIGHTNING_LORA["bytes"] == 1698951104
+    assert LIGHTNING_LORA["sha256"] == "ad12117461cb41e2ea637fec8df6392ce8e8550c47fbe2b829ed3deb98262066"
+    assert LIGHTNING_LORA["revision"] == "a52649c9d0f6e1a248bff13f0df33bb8a2abdb52"
+
+
+def test_missing_lightning_lora_disables_only_quality_fast(tmp_path):
+    m, _, _ = image_manager(tmp_path)
+    status = m.images.status()
+    assert status["modes"]["fast"]["available"] and status["modes"]["quality"]["available"]
+    assert status["modes"]["quality-fast"]["available"] is False
+    assert status["modes"]["quality-fast"]["optional"] is True
+    assert "will not fall back" in status["modes"]["quality-fast"]["setup"]
+    with pytest.raises(ToolError, match="quality-fast needs the Apache-2.0"):
+        m.images.submit("a poster", model="quality-fast")
+    assert m.db.list_images() == []
+
+
+def test_quality_fast_job_records_lora_and_shares_the_gpu_batch(tmp_path):
+    from harness.images import LIGHTNING_LORA
+
+    async def body():
+        m, server, state = image_manager(tmp_path)
+        m.images._lora_available = True
+        await m.start(maintenance=False)
+        assert "quality-fast" in m.images.schemas()[0]["function"]["parameters"]["properties"]["model"]["description"]
+        a = m.images.submit("poster text", model="quality", seed=7)
+        b = m.images.submit("poster text", model="quality-fast", seed=7)
+        done = [await m.images.wait(job["id"]) for job in (a, b)]
+        assert [job["status"] for job in done] == ["done", "done"]
+        assert done[0]["lora"] == "" and done[0]["base_model"] == "qwen_image_2512_fp8_e4m3fn.safetensors"
+        assert done[1]["model"] == "quality-fast"
+        assert done[1]["lora"] == LIGHTNING_LORA["filename"]
+        assert done[1]["lora_revision"] == LIGHTNING_LORA["revision"]
+        assert done[1]["lora_sha256"] == LIGHTNING_LORA["sha256"]
+        assert done[1]["seed"] == 7 and done[1]["width"] == 1328 and done[1]["bytes"] == len(PNG)
+        steps = [next(node["inputs"]["steps"] for node in graph.values() if node["class_type"] == "KSampler")
+                 for graph in state["graphs"]]
+        assert steps == [50, 4]
+        assert "LoraLoaderModelOnly" not in {node["class_type"] for node in state["graphs"][0].values()}
+        lora = next(node["inputs"]["lora_name"] for node in state["graphs"][1].values()
+                    if node["class_type"] == "LoraLoaderModelOnly")
+        assert lora == LIGHTNING_LORA["filename"]
+        for _ in range(200):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.01)
+        assert server.calls == ["stop", "start"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_lightning_lora_status_uses_extra_paths_and_rejects_wrong_size(tmp_path):
+    from harness.config import ImagesConfig
+    from harness.images import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status, verify_lightning_lora
+
+    alt = tmp_path / "alt" / "loras"
+    alt.mkdir(parents=True)
+    payload = b"not-the-lora"
+    (alt / LIGHTNING_LORA["filename"]).write_bytes(payload)
+    comfy = tmp_path / "comfy" / "ComfyUI"
+    comfy.mkdir(parents=True)
+    (comfy / "extra_model_paths.yaml").write_text(
+        f"harness:\n  base_path: {(tmp_path / 'alt').as_posix()}\n  loras: loras\n", encoding="utf-8")
+    cfg = ImagesConfig(models_dir=str(tmp_path / "models"), comfy_dir=str(tmp_path / "comfy"))
+    found = lightning_lora_path(cfg)
+    assert found == alt / LIGHTNING_LORA["filename"]
+    status = lightning_lora_status(cfg)
+    assert status["available"] is False and status["reason"] == "size"
+    assert str(LIGHTNING_LORA["bytes"]) in status["setup"]
+    assert verify_lightning_lora(found)
+
+
+def test_lightning_lora_install_copy_shadows_pinned_models_dir(tmp_path, monkeypatch):
+    """ComfyUI searches install models/loras before extra_model_paths / models_dir."""
+    import hashlib
+    from harness.config import ImagesConfig
+    from harness.images import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status
+
+    payload = b"pinned-lora-ok"
+    monkeypatch.setitem(LIGHTNING_LORA, "bytes", len(payload))
+    monkeypatch.setitem(LIGHTNING_LORA, "sha256", hashlib.sha256(payload).hexdigest())
+    models = tmp_path / "models" / "loras"
+    models.mkdir(parents=True)
+    (models / LIGHTNING_LORA["filename"]).write_bytes(payload)
+    install = tmp_path / "comfy" / "ComfyUI" / "models" / "loras"
+    install.mkdir(parents=True)
+    (install / LIGHTNING_LORA["filename"]).write_bytes(b"truncated")
+    cfg = ImagesConfig(models_dir=str(tmp_path / "models"), comfy_dir=str(tmp_path / "comfy"))
+    found = lightning_lora_path(cfg)
+    assert found == install / LIGHTNING_LORA["filename"]
+    status = lightning_lora_status(cfg)
+    assert status["available"] is False
+    assert "shadow" in status["setup"].lower()
+    assert str(models / LIGHTNING_LORA["filename"]) in status["setup"].replace("\\", "/") or \
+        str(models / LIGHTNING_LORA["filename"]) in status["setup"]
+
+
+def test_quality_fast_hashes_the_file_comfyui_would_load(tmp_path, monkeypatch):
+    import hashlib
+    from harness.images import LIGHTNING_LORA
+
+    payload = b"pinned-lora-ok"
+    unpinned = b"unpinned-copy!"
+    assert len(payload) == len(unpinned)
+    monkeypatch.setitem(LIGHTNING_LORA, "bytes", len(payload))
+    monkeypatch.setitem(LIGHTNING_LORA, "sha256", hashlib.sha256(payload).hexdigest())
+    m, _, _ = image_manager(tmp_path)
+    models = Path(m.cfg.images.models_dir) / "loras"
+    models.mkdir(parents=True)
+    (models / LIGHTNING_LORA["filename"]).write_bytes(payload)
+    install = Path(m.cfg.images.comfy_dir) / "ComfyUI" / "models" / "loras"
+    install.mkdir(parents=True)
+    (install / LIGHTNING_LORA["filename"]).write_bytes(unpinned)
+    with pytest.raises(ToolError, match="SHA-256"):
+        m.images.submit("poster text", model="quality-fast")
+
+
+def test_app_root_lists_quality_fast_without_enabling_it(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+
+    m, _, _ = image_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        root = client.get("/api/v1").json()
+        assert root["api_version"] == "1.11"
+        assert root["image_modes"]["fast"]["available"] is True
+        assert root["image_modes"]["quality-fast"]["available"] is False
+        assert root["image_modes"]["quality-fast"]["label"] == "Qwen quality (fast, 4-step)"
 
 
 def test_image_warmup_holds_gpu_until_cooldown(tmp_path):
@@ -696,7 +852,8 @@ def test_agent_generate_image_saves_into_mac_workspace(tmp_path):
     steps = [Completion(tool_calls=[call("generate_image", 0, prompt="app icon", filename="assets/icon")]),
              Completion(content="made the icon")]
     cfg = mac_cfg(tmp_path)
-    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2)
+    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2,
+                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"))
     m = Manager(cfg, chat=Script(steps))
     m.images.control = FakeServer()
     handler, _ = fake_comfy()

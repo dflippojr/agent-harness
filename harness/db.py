@@ -269,6 +269,10 @@ MIGRATIONS = [
     ("templates", "backend", TEXT_LOCAL),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
+    ("images", "base_model", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "lora", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "lora_revision", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "lora_sha256", "TEXT NOT NULL DEFAULT ''"),
     # Issue #86: durable image archive state. The canonical digest detects later source corruption.
     ("images", "sha256", "TEXT NOT NULL DEFAULT ''"),
     ("images", "archive_bytes", "INTEGER NOT NULL DEFAULT 0"),
@@ -728,8 +732,10 @@ class Database:
     # images
     def insert_image(self, job: dict) -> None:
         cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height",
-                "seed", "parent_id", "operation", "scale", "upscale_model", "requested_upscale"]
-        defaults = {"session_id": "", "resolution": "auto", "parent_id": "", "operation": "generate", "scale": 1,
+                "seed", "base_model", "lora", "lora_revision", "lora_sha256",
+                "parent_id", "operation", "scale", "upscale_model", "requested_upscale"]
+        defaults = {"session_id": "", "resolution": "auto", "base_model": "", "lora": "", "lora_revision": "",
+                    "lora_sha256": "", "parent_id": "", "operation": "generate", "scale": 1,
                     "upscale_model": "", "requested_upscale": "none"}
         values = [job[c] if c in job else defaults[c] for c in cols]
         with self.lock:
