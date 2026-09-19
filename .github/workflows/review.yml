@@ -48,6 +48,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Ensure GitHub CLI is on PATH
         shell: powershell
@@ -57,12 +58,27 @@ jobs:
         id: pr
         shell: powershell
         env:
+          EVENT_NAME: ${{ github.event_name }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
           INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
         run: |
           $num = $env:EVENT_PR_NUMBER
           if ([string]::IsNullOrEmpty($num)) { $num = $env:INPUT_PR_NUMBER }
+          $workspace = $env:GITHUB_WORKSPACE
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            $workspace = Join-Path $env:GITHUB_WORKSPACE 'pr'
+          }
           "number=$num" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "workspace=$workspace" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Check out PR head for dispatch review context
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Attach running check to the PR
         id: check
@@ -100,17 +116,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REVIEW_WORKSPACE: ${{ steps.pr.outputs.workspace }}
           REQUESTED_BACKEND: ${{ github.event.inputs.backend }}
           REVIEW_BACKENDS: ${{ vars.REVIEW_BACKENDS }}
           REVIEW_PROMPT: |
             Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
+
+            The embedded diff is authoritative for what changed. The workspace is the pull request head and is available only for surrounding code, history, and blame context.
 
             Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts it as the PR comment. Only after you have actually inspected the embedded diff and reported findings or no significant findings, end with a final line exactly `REVIEW_STATUS: COMPLETE`. Do not print that marker if you could not inspect the diff.
         run: |
           & .\ops\review\run-review.ps1 `
             -Backend $env:REQUESTED_BACKEND `
             -ConfiguredBackends $env:REVIEW_BACKENDS `
-            -Workspace $env:GITHUB_WORKSPACE `
+            -Workspace $env:REVIEW_WORKSPACE `
             -Prompt $env:REVIEW_PROMPT `
             -OutputPath (Join-Path $env:GITHUB_WORKSPACE 'review-output.md') `
             -ScratchDirectory $env:RUNNER_TEMP

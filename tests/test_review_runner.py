@@ -560,6 +560,8 @@ def test_workflow_exposes_backend_input_and_delegates_to_runner():
     assert ".\\ops\\review\\run-review.ps1" in workflow
     assert "steps.agent.outputs.backend" in workflow
     assert "diff embedded in this prompt" in workflow
+    assert "The embedded diff is authoritative for what changed." in workflow
+    assert "The workspace is the pull request head" in workflow
     assert "Run 'gh pr diff" not in workflow
     assert "REVIEW_STATUS: COMPLETE" in workflow
     assert '$title = "Automated review $conclusion"' in workflow
@@ -578,6 +580,19 @@ def test_workflow_keeps_review_security_and_scheduling_contracts():
     assert "group: review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}" in workflow
     assert "cancel-in-progress: true" in workflow
     assert "types: [opened]" in workflow
+
+
+def test_dispatch_reviews_use_separate_full_history_pr_head_checkout():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "name: Check out PR head for dispatch review context" in workflow
+    assert "ref: refs/pull/${{ steps.pr.outputs.number }}/head" in workflow
+    assert "path: pr" in workflow
+    assert workflow.count("fetch-depth: 0") == 2
+    assert workflow.count("persist-credentials: false") == 2
+    assert "$workspace = Join-Path $env:GITHUB_WORKSPACE 'pr'" in workflow
+    assert "REVIEW_WORKSPACE: ${{ steps.pr.outputs.workspace }}" in workflow
+    assert "-Workspace $env:REVIEW_WORKSPACE" in workflow
+    assert "-OutputPath (Join-Path $env:GITHUB_WORKSPACE 'review-output.md')" in workflow
 
 
 def test_ci_docs_explain_backend_configuration_and_manual_verification():
