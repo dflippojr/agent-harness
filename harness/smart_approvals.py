@@ -217,6 +217,8 @@ def strip_shell_comments(command: str) -> tuple[str, str]:
     out, i, n = [], 0, len(command)
     quote = ""
     comment = []
+    word_start = True
+    had_comment = False
     while i < n:
         ch = command[i]
         if quote:
@@ -232,9 +234,20 @@ def strip_shell_comments(command: str) -> tuple[str, str]:
         if ch in "'\"":
             quote = ch
             out.append(ch)
+            word_start = False
             i += 1
             continue
-        if ch == "#":
+        if ch == "\\" and i + 1 < n:
+            out.extend((ch, command[i + 1]))
+            if command[i + 1] != "\n":
+                word_start = False
+            i += 2
+            continue
+        # Bash recognizes a comment only when an unquoted # begins a word.
+        # A hash in ``path#suffix`` is ordinary data and everything after it
+        # must remain visible to the safety checks.
+        if ch == "#" and word_start:
+            had_comment = True
             rest = command[i + 1:]
             nl = rest.find("\n")
             text = rest if nl < 0 else rest[:nl]
@@ -244,11 +257,39 @@ def strip_shell_comments(command: str) -> tuple[str, str]:
             i = n if nl < 0 else i + 1 + nl
             continue
         out.append(ch)
+        word_start = ch.isspace() or ch in "|&;()<>"
         i += 1
     if quote:
         return command, "unbalanced quotes"
-    stripped = "".join(out).strip()
+    stripped = "".join(out).strip() if had_comment else "".join(out)
     return stripped, ""
+
+
+def _has_unquoted_hash(command: str) -> bool:
+    """Whether command contains a hash outside quotes, including an escaped literal hash."""
+    quote = ""
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote != "'" and i + 1 < len(command):
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(command):
+            if command[i + 1] == "#":
+                return True
+            i += 2
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch == "#":
+            return True
+        i += 1
+    return False
 
 
 def _secretish(text: str) -> bool:
@@ -589,18 +630,18 @@ def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool 
         return Eligibility(ok=False, reason="unparseable command", tool=name, rule=rule)
     if len(command) > MAX_COMMAND:
         return Eligibility(ok=False, reason="command too long", tool=name, rule=rule)
-    stripped, err = strip_shell_comments(command)
+    _stripped, err = strip_shell_comments(command)
     if err:
         return Eligibility(ok=False, reason=err, tool=name, rule=rule, command=command)
-    if stripped != command.strip() and not stripped:
-        return Eligibility(ok=False, reason="comment-only command", tool=name, rule=rule)
-    if _INJECTION_RE.search(stripped) or _INJECTION_RE.search(str(args.get("description") or "")):
-        return Eligibility(ok=False, reason="prompt-injection text", tool=name, rule=rule)
-    if _secretish(stripped) or any(_secretish(str(v)) for v in args.values() if isinstance(v, str)):
-        return Eligibility(ok=False, reason="possible secret", tool=name, rule=rule)
-    if stripped != command.strip():
-        # Comment removal is allowed only when the remaining tokens are unchanged in meaning.
-        command = stripped
+    # The runner executes args["command"], not a comment-stripped copy. Keep
+    # every hash outside quotes human-only so the reviewed and executed bytes
+    # can never diverge, even for escaped hashes or genuine Bash comments.
+    if _has_unquoted_hash(command):
+        return Eligibility(ok=False, reason="unquoted hash", tool=name, rule=rule, command=command)
+    if _INJECTION_RE.search(command) or _INJECTION_RE.search(str(args.get("description") or "")):
+        return Eligibility(ok=False, reason="prompt-injection text", tool=name, rule=rule, command=command)
+    if _secretish(command) or any(_secretish(str(v)) for v in args.values() if isinstance(v, str)):
+        return Eligibility(ok=False, reason="possible secret", tool=name, rule=rule, command=command)
     if _CHAIN_RE.search(command):
         return Eligibility(ok=False, reason="shell chaining", tool=name, rule=rule, command=command)
     if _SUBST_RE.search(command) or _WIN_ENV_RE.search(command) or _BRACE_RE.search(command):
@@ -629,7 +670,7 @@ def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool 
                            command=command)
     if not _paths_confined(command, tokens):
         return Eligibility(ok=False, reason="path escapes workspace", tool=name, rule=rule, command=command)
-    return Eligibility(ok=True, reason="eligible", tool=name, rule=rule, command=command[:MAX_COMMAND],
+    return Eligibility(ok=True, reason="eligible", tool=name, rule=rule, command=command,
                        repo=repo, network=False, workspace=True)
 
 
