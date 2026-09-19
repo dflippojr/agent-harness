@@ -355,6 +355,24 @@ def test_remote_control_tool_always_asks():
     assert Policy([{"tool": "*", "action": "allow"}]).decide("open_claude_remote_control", {}).action == ASK
 
 
+def test_remote_control_tool_attached_only_to_owner_tower_session(tmp_path):
+    rc, _, _ = _rc_setup(tmp_path)
+    manager = Manager(rc.cfg, chat=Script([Completion(content="unused")]))
+    manager.runner.remote_control = rc
+    owner = {
+        "id": "owner-tower", "project": "repo", "target": "tower", "model": "fake",
+        "workspace": str(tmp_path / "workspace"), "owner_id": "owner", "app_id": "",
+    }
+    app = {**owner, "id": "app-tower", "app_id": "app-key"}
+    runner = {**owner, "id": "owner-runner", "target": "macbook"}
+
+    assert rc in manager.runner.daemon_toolkits(owner)
+    owner_tools = {schema["function"]["name"] for schema in manager.runner.tool_schemas(owner, manager.runner.workspace(owner))}
+    assert "open_claude_remote_control" in owner_tools
+    assert rc not in manager.runner.daemon_toolkits(app)
+    assert rc not in manager.runner.daemon_toolkits(runner)
+
+
 # Claude Code stream-json backend (8a step 2)
 
 FAKE_CLAUDE = r'''import json
