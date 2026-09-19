@@ -485,7 +485,6 @@ class ImageService:
         self._drain_sessions: set[str] = set()
         self.images_dir = Path(cfg.work_dir) / "images"
         self.input_dir = Path(cfg.work_dir) / "input"
-        self._cancel: set[str] = set()
         self.transport = None          # tests inject a fake ComfyUI
         self.object_info = None        # tests inject ComfyUI /object_info
         self.flux_manifest = None      # tests inject a tiny fixture manifest
@@ -923,7 +922,7 @@ class ImageService:
         self.queue.put_nowait(job_id)
         return self.db.get_image(job_id)
 
-    def cancel(self, job_id: str) -> dict:
+    async def cancel(self, job_id: str) -> dict:
         job = self.db.get_image(job_id)
         if job is None:
             raise ToolError("no such image")
@@ -933,16 +932,13 @@ class ImageService:
         if job["status"] == "queued":
             status = "cancelled" if job.get("operation") == image_edit.OPERATION_EDIT else "failed"
             self.db.update_image(job_id, status=status, finished_at=time.time(), error="cancelled")
-        if self.active_job == job_id:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop is not None:
-                loop.create_task(self.comfy.interrupt())
         event = self._done.get(job_id)
         if event and job["status"] == "queued":
             event.set()
+        elif event and self.active_job == job_id:
+            # The worker owns ComfyUI interruption. Waiting for its job boundary
+            # guarantees that an interrupt for this job cannot arrive during the next one.
+            await event.wait()
         return self.db.get_image(job_id)
 
     async def delete(self, job_id: str, *, backup_dir: Path | None = None) -> dict:
@@ -952,7 +948,7 @@ class ImageService:
             raise ToolError("no such image")
         event = self._done.get(job_id)
         if job["status"] in ("queued", "running"):
-            self.cancel(job_id)
+            await self.cancel(job_id)
         current = self.db.get_image(job_id)
         worker_can_touch_files = self.active_job == job_id or bool(
             current and current["status"] in ("queued", "running"))
@@ -1298,6 +1294,48 @@ class ImageService:
             raise ToolError("upscale refused to modify the original PNG")
         return content
 
+    @staticmethod
+    def _queued_prompt_ids(queue: dict, key: str) -> set[str]:
+        """Extract prompt ids from ComfyUI's list-based (or future dict-based) queue rows."""
+        prompt_ids = set()
+        for item in queue.get(key, []):
+            if isinstance(item, (list, tuple)) and len(item) > 1:
+                prompt_ids.add(str(item[1]))
+            elif isinstance(item, dict) and item.get("prompt_id") is not None:
+                prompt_ids.add(str(item["prompt_id"]))
+        return prompt_ids
+
+    async def _comfy_prompt_state(self, client: httpx.AsyncClient, prompt_id: str) -> str:
+        """Return finished, running, pending, or missing for one exact ComfyUI prompt."""
+        history_response = await client.get(f"{self.comfy.url}/history/{prompt_id}")
+        history_response.raise_for_status()
+        if history_response.json().get(prompt_id):
+            return "finished"
+        queue_response = await client.get(f"{self.comfy.url}/queue")
+        queue_response.raise_for_status()
+        queue = queue_response.json()
+        if prompt_id in self._queued_prompt_ids(queue, "queue_running"):
+            return "running"
+        if prompt_id in self._queued_prompt_ids(queue, "queue_pending"):
+            return "pending"
+        return "missing"
+
+    async def _interrupt_comfy_prompt(self, client: httpx.AsyncClient, prompt_id: str) -> None:
+        """Interrupt only this service's still-running prompt and wait for it to leave the runner."""
+        try:
+            if await self._comfy_prompt_state(client, prompt_id) != "running":
+                return
+            response = await client.post(f"{self.comfy.url}/interrupt")
+            response.raise_for_status()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if await self._comfy_prompt_state(client, prompt_id) != "running":
+                    return
+                await asyncio.sleep(0.05)
+        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            # Failing closed is safer than interrupting whichever prompt may now be active.
+            log.warning("could not verify ComfyUI prompt %s for interruption", prompt_id, exc_info=True)
+
     async def _comfy_png(self, job_id: str, graph: dict, started: float, stage: str) -> bytes:
         async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
             resp = await client.post(f"{self.comfy.url}/prompt", json={"prompt": graph,
@@ -1309,10 +1347,10 @@ class ImageService:
             hist = None
             while True:
                 if job_id in self._cancel:
-                    await self.comfy.interrupt()
+                    await self._interrupt_comfy_prompt(client, prompt_id)
                     raise ToolError("cancelled")
                 if time.monotonic() > deadline:
-                    await self.comfy.interrupt()
+                    await self._interrupt_comfy_prompt(client, prompt_id)
                     action = {"upscaling": "upscale", "editing": "image edit"}.get(stage, "image generation")
                     raise ToolError(f"{action} timed out")
                 hist = (await client.get(f"{self.comfy.url}/history/{prompt_id}")).json().get(prompt_id)

@@ -836,7 +836,7 @@ def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
             if m.images.active_job == job["id"]:
                 break
             await asyncio.sleep(0.01)
-        m.images.cancel(job["id"])
+        await m.images.cancel(job["id"])
         done = await m.images.wait(job["id"])
         assert done["status"] == "failed" and "cancelled" in done["error"]
         for _ in range(100):
@@ -880,7 +880,7 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
     async def body():
         m, server, _ = image_manager(tmp_path / "direct")
         job = m.images.submit("never run")
-        m.images.cancel(job["id"])
+        await m.images.cancel(job["id"])
         await m.images._run_batch(job["id"])
         assert server.calls == []
         assert m.images.phase == "idle" and not m.images.gpu_taken
@@ -888,7 +888,7 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
         m, server, _ = image_manager(tmp_path / "q")
         job = m.images.submit("never run")
         assert job["status"] == "queued"
-        cancelled = m.images.cancel(job["id"])
+        cancelled = await m.images.cancel(job["id"])
         assert cancelled["status"] == "failed" and "cancelled" in cancelled["error"]
         await m.start(maintenance=False)
         done = await m.images.wait(job["id"])
@@ -904,7 +904,7 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
         m, server, _ = image_manager(tmp_path / "mix")
         skipped = m.images.submit("skip me")
         kept = m.images.submit("keep me")
-        m.images.cancel(skipped["id"])
+        await m.images.cancel(skipped["id"])
         await m.start(maintenance=False)
         assert (await m.images.wait(skipped["id"]))["status"] == "failed"
         assert (await m.images.wait(kept["id"]))["status"] == "done"
@@ -929,7 +929,7 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
                 break
             await asyncio.sleep(0.02)
         assert m.images.phase == "waiting"
-        m.images.cancel(held["id"])
+        await m.images.cancel(held["id"])
         Hold.active = False
         m.images._guard_wake.set()
         assert (await m.images.wait(held["id"]))["status"] == "failed"
@@ -973,7 +973,7 @@ def test_cancel_during_exclusive_gate_wait_does_not_boot_comfy(tmp_path):
         job = m.images.submit("behind the language model")
         task = asyncio.create_task(m.images._run_batch(job["id"]))
         await asyncio.wait_for(gate.waiting.wait(), timeout=2)
-        m.images.cancel(job["id"])
+        await m.images.cancel(job["id"])
         gate.allow.set()
         await asyncio.wait_for(task, timeout=2)
         assert (await m.images.wait(job["id"]))["status"] == "failed"

@@ -510,8 +510,9 @@ def test_cancel_running_edit_records_cancelled_not_failed(tmp_path):
         await m.start(maintenance=False)
         edit = m.images.submit_edit(parent["id"], "cancel me", png_mask())
         await asyncio.wait_for(started.wait(), timeout=2)
-        m.images.cancel(edit["id"])
+        cancelling = asyncio.create_task(m.images.cancel(edit["id"]))
         release.set()
+        await cancelling
         cancelled = await asyncio.wait_for(m.images.wait(edit["id"]), timeout=2)
         assert cancelled["status"] == "cancelled"
         assert cancelled["error"] == "cancelled"
@@ -551,7 +552,7 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
         await m.start(maintenance=False)
         parent = m.images.ingest_upload(png_rgb())
         queued = m.images.submit_edit(parent["id"], "queued edit", png_mask())
-        m.images.cancel(queued["id"])
+        await m.images.cancel(queued["id"])
         cancelled = await m.images.wait(queued["id"])
         assert cancelled["status"] == "cancelled"
         assert m.images.source_path(cancelled).exists() and m.images.mask_path(cancelled).exists()
