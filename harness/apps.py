@@ -30,10 +30,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .fileops import ToolError
+from . import compat
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.12"
+API_VERSION = "1.13"
 SESSIONS_ALL = "sessions:all"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
@@ -225,6 +226,11 @@ class AppRootResponse(BaseModel):
     backends: list[BackendResponse]
     capabilities: CapabilitiesResponse
     features: dict[str, bool | str]
+    release: str
+    build_id: str
+    protocols: dict
+    minimum_clients: dict
+    update_hint: dict
     image_modes: dict[str, dict] = Field(default_factory=dict)
 
 
@@ -556,8 +562,9 @@ def register(app: FastAPI, mgr) -> None:
         backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, False, None, False)
                                                for name in m.cfg.backends]))
         return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
+                **compat.metadata(m.cfg.capabilities()),
                 "projects": [],
-                "models": list(m.cfg.models), "backends": backends, "capabilities": m.cfg.capabilities(), "features": {
+                "models": list(m.cfg.models), "backends": backends, "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "image_upscale": bool(m.images is not None),
                     "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),

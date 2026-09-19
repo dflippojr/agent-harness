@@ -12,6 +12,13 @@ import time
 
 import httpx
 
+try:
+    from .compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
+    from .updater import apply_update
+except ImportError:  # installed native bundle imports these as sibling modules
+    from harness_compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
+    from harness_update import apply_update
+
 HOME_DIR = ".agent-harness"
 DEFAULT_CONFIG = Path.home() / HOME_DIR / "client" / "config.json"
 DEFAULT_RUNNER_CONFIG = Path.home() / HOME_DIR / "runner" / "config.json"
@@ -40,7 +47,10 @@ def configure(path: Path | str = DEFAULT_CONFIG) -> dict:
 
 
 def _headers(extra: dict | None = None) -> dict:
-    return ({**(extra or {}), "Authorization": f"Bearer {TOKEN}"} if TOKEN else dict(extra or {}))
+    headers = {**(extra or {}), "X-Agent-Harness-Client": f"cli/{CLIENT_PROTOCOLS['cli']}"}
+    if TOKEN:
+        headers["Authorization"] = f"Bearer {TOKEN}"
+    return headers
 
 
 def _write_private_json(path: Path, data: dict) -> None:
@@ -59,7 +69,8 @@ def pair_native(server: str, code: str, client_path: Path, runner_path: Path) ->
     """Redeem once, then persist the owner and runner credentials without printing either secret."""
     server = server.rstrip("/")
     try:
-        response = httpx.post(server + "/api/v1/runner-pair", json={"code": code}, timeout=60)
+        response = httpx.post(server + "/api/v1/runner-pair", json={"code": code}, timeout=60,
+                              headers={"X-Agent-Harness-Client": f"cli/{CLIENT_PROTOCOLS['cli']}"})
     except httpx.TransportError as exc:
         sys.exit(f"daemon not reachable at {server}: {exc}")
     if response.status_code >= 400:
@@ -107,11 +118,24 @@ def api(method: str, path: str, retries: int = 30, **kwargs) -> dict | list | st
             time.sleep(2)
     if resp.status_code >= 400:
         try:
-            detail = resp.json().get("detail")
+            payload = resp.json()
+            detail = payload.get("detail")
+            if resp.status_code == 426 and payload.get("error", {}).get("code") == "client_update_required":
+                detail = f"{detail}; run `harness update`"
         except ValueError:
             detail = resp.text
         sys.exit(f"error {resp.status_code}: {detail}")
     return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+
+
+def server_version() -> dict:
+    try:
+        response = httpx.get(BASE + "/health", headers={
+            "X-Agent-Harness-Client": f"cli/{CLIENT_PROTOCOLS['cli']}"}, timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"daemon not reachable at {BASE}: {exc}") from exc
 
 
 def indent(text: str, max_lines: int | None) -> str:
@@ -307,6 +331,8 @@ def main() -> int:
         sp.add_argument("--note", default="")
     sub.add_parser("list", help="list sessions")
     sub.add_parser("queue", help="GPU queue")
+    sub.add_parser("version", help="show installed client and connected server versions")
+    sub.add_parser("update", help="verify and install the version-matched Mac client package")
     projects = sub.add_parser("projects", help="manage Mac runner project roots").add_subparsers(
         dest="projects_cmd", required=True)
     add = projects.add_parser("add", help="allow a local project directory")
@@ -325,6 +351,28 @@ def main() -> int:
     if args.cmd == "pair":
         paired = pair_native(args.server, args.code, Path(args.config), Path(args.runner_config))
         print(f"paired {paired['runner']['name']} with {paired['server']}")
+        return 0
+    if args.cmd == "version":
+        print(f"Agent Harness CLI {MAC_CLIENT_VERSION} (admin protocol {CLIENT_PROTOCOLS['cli']})")
+        try:
+            remote = server_version()
+        except RuntimeError as exc:
+            print(str(exc))
+            return 1
+        supported = remote.get("protocols", {}).get("admin", {})
+        protocol = CLIENT_PROTOCOLS["cli"]
+        state = ("client update required" if protocol < supported.get("min", protocol) else
+                 "Server update required" if protocol > supported.get("max", protocol) else "compatible")
+        print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
+        print(f"compatibility: {state} (Server supports admin protocol "
+              f"{supported.get('min', '?')}–{supported.get('max', '?')})")
+        return 0
+    if args.cmd == "update":
+        try:
+            result = apply_update(BASE)
+        except RuntimeError as exc:
+            sys.exit(str(exc))
+        print(f"updated Agent Harness for Mac to {result['version']}")
         return 0
     if args.cmd == "projects":
         try:
