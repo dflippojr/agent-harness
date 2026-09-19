@@ -201,6 +201,12 @@ def check_images(r: Report, cfg) -> None:
              f"revision {LIGHTNING_LORA['revision']})")
     else:
         r.warn("Qwen quality-fast LoRA", lora["setup"])
+    from .images_models import doctor_warning, inspect_flux_fast
+    flux_warning = doctor_warning(inspect_flux_fast(cfg.images))
+    if flux_warning:
+        r.warn("FLUX.2 klein 4B (optional)", flux_warning)
+    else:
+        r.ok("FLUX.2 klein 4B (optional)", "flux-fast assets and nodes are ready")
     from . import upscale as upscale_mod
     if upscale_mod.missing_weights(cfg.images, verify_hash=True):
         r.warn("Image upscaling", upscale_mod.remediation(cfg.images))

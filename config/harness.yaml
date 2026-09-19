@@ -257,6 +257,8 @@ endpoint:
 # is given back as soon as the queue is empty.
 # Models in C:/AI/comfy-models: fast = Z-Image-Turbo, quality = Qwen-Image-2512 (both Apache 2.0).
 # Optional quality-fast = the same Qwen base plus the lightx2v Lightning 4-step LoRA in loras/.
+# Optional flux-fast = FLUX.2 klein 4B FP8 (Apache 2.0; ops/images-models.ps1 install flux-fast).
+# Optional model files are never downloaded on daemon start.
 # Optional Real-ESRGAN 2×/4× weights (BSD-3-Clause) live in <comfy_dir>/ComfyUI/models/upscale_models
 # unless upscale_dir is set. Generation still works when they are absent.
 images:

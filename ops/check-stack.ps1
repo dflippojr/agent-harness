@@ -59,6 +59,18 @@ Check 'Image generation' {
     $upNote = if ($up) { '; Real-ESRGAN optional (generation still works)' } else { '; Real-ESRGAN 2x/4x present' }
     "phase $($s.phase); models present; $loraNote; ComfyUI starts on demand$upNote"
 }
+# Optional component: warn (never FAIL) when flux-fast assets or nodes are missing.
+try {
+    $flux = (Get-Json 'http://127.0.0.1:8100/images?limit=1').status.modes.'flux-fast'
+    if (-not $flux) { throw 'flux-fast mode missing from /images status' }
+    if ($flux.available) {
+        Write-Host ("[ OK ] FLUX.2 klein 4B (optional)  {0}" -f $flux.label) -ForegroundColor Green
+    } else {
+        Write-Host ("[WARN] FLUX.2 klein 4B (optional)  {0}. {1}" -f $flux.unavailable_reason, $flux.remediation) -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host ("[WARN] FLUX.2 klein 4B (optional)  {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+}
 Check 'Harness daemon :8100' {
     $null = Get-Json 'http://127.0.0.1:8100/health'
     $m = Get-Json 'http://127.0.0.1:8100/models/status'
