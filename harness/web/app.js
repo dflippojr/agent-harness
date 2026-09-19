@@ -3250,19 +3250,20 @@ function hasUnsavedInput() {
   });
 }
 
-async function reloadAndUpdate(buildId) {
+async function reloadAndUpdate() {
   if (hasUnsavedInput()) {
     toast("Save or discard your form changes before reloading the app.", 6000);
     return false;
   }
   const attempted = sessionStorage.getItem(UPDATE_GUARD);
-  if (attempted === buildId) {
+  if (attempted === WEB_BUILD_ID) {
     fill($app, h("div", { class: "card" },
       h("h2", {}, "Update did not load"),
       h("p", {}, "Close every installed Agent Harness window, reopen it while online, and reload. If it still fails, remove and reinstall the home-screen app.")));
     return false;
   }
-  sessionStorage.setItem(UPDATE_GUARD, buildId);
+  // Use only the bundle's compiled identifier in browser storage. Compatibility metadata is remote input.
+  sessionStorage.setItem(UPDATE_GUARD, WEB_BUILD_ID);
   if (window.caches) {
     const keys = await caches.keys();
     await Promise.all(keys.filter((key) => key.startsWith("harness-shell-")).map((key) => caches.delete(key)));
@@ -3282,7 +3283,7 @@ function blockingUpdate(meta, state) {
     h("p", {}, daemonIsOld
       ? "This browser app uses a newer protocol than the connected server. Update the server, then reload."
       : "This installed app is too old for the connected server."),
-    daemonIsOld ? null : h("button", { class: "btn primary", onclick: () => reloadAndUpdate(meta.update_hint?.web?.build_id || meta.build_id) }, "Reload and update"),
+    daemonIsOld ? null : h("button", { class: "btn primary", onclick: () => reloadAndUpdate() }, "Reload and update"),
     h("p", { class: "muted small" }, `Web protocol ${WEB_PROTOCOL}; server supports ${meta.protocols?.admin?.min}–${meta.protocols?.admin?.max}.`)));
 }
 
@@ -3298,11 +3299,11 @@ async function checkCompatibility({ foreground = false } = {}) {
   const available = meta.update_hint?.web?.build_id;
   if (available && available !== WEB_BUILD_ID) {
     try { await (await navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
-    const promptKey = `harness.webUpdatePrompt.${available}`;
-    if (!sessionStorage.getItem(promptKey) && (!foreground || !hasUnsavedInput())) {
-      sessionStorage.setItem(promptKey, "1");
+    const promptKey = "harness.webUpdatePrompt";
+    if (sessionStorage.getItem(promptKey) !== WEB_BUILD_ID && (!foreground || !hasUnsavedInput())) {
+      sessionStorage.setItem(promptKey, WEB_BUILD_ID);
       if (confirm("A newer Agent Harness Web bundle is available. Reload and update now?")) {
-        await reloadAndUpdate(available);
+        await reloadAndUpdate();
         return false;
       }
     }

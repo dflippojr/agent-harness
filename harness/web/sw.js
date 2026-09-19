@@ -34,7 +34,7 @@ self.addEventListener("fetch", (event) => {
 });
 
 self.addEventListener("message", (event) => {
-  if (event.data !== "PURGE_SHELL") return;
+  if (event.origin !== self.location.origin || event.data !== "PURGE_SHELL") return;
   event.waitUntil(caches.keys().then((keys) => Promise.all(
     keys.filter((key) => key.startsWith("harness-shell-")).map((key) => caches.delete(key)),
   )));

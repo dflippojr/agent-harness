@@ -324,5 +324,8 @@ def test_web_bundle_has_safe_cache_update_and_version_handshake():
     assert "X-Agent-Harness-Client" in client and "compatibility()" in client
     assert "hasUnsavedInput" in app and "Reload and update" in app
     assert "sessionStorage" in app and "PURGE_SHELL" in app
+    assert "sessionStorage.setItem(UPDATE_GUARD, WEB_BUILD_ID)" in app
+    assert "harness.webUpdatePrompt.${available}" not in app
     assert "harness-shell-${BUILD_ID}" in worker and "PURGE_SHELL" in worker
+    assert "event.origin !== self.location.origin" in worker
     assert "api/v1" not in worker and "api/admin" not in worker
