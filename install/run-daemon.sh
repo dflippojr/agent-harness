@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Restarting supervisor used by systemd --user and launchd installs.
+# Advertises supervised restart by setting HARNESS_SUPERVISED=1 on the daemon process.
 set -u
 
 if [[ $# -ne 4 ]]; then
@@ -33,7 +34,7 @@ while :; do
     echo "$(stamp) starting daemon" >>"$supervisor_log"
     (
         cd "$app_dir" || exit 1
-        exec env HARNESS_CONFIG_DIR="$config_dir" "$python" -u -m harness
+        exec env HARNESS_CONFIG_DIR="$config_dir" HARNESS_SUPERVISED=1 "$python" -u -m harness
     ) >>"$daemon_log" 2>&1 &
     child=$!
     wait "$child"

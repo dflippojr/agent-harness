@@ -20,6 +20,8 @@ from . import config as config_mod
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
 
+NO_SUCH_JOB = "no such job"
+
 log = logging.getLogger("harness.api")
 WEB = Path(__file__).parent / "web"
 # Session-list stream: status-level events only, no tool output or token deltas.
@@ -105,6 +107,10 @@ class MemoryProfileUpdate(BaseModel):
     summary: str = "Update agent profile"
 
 
+class ImageArchiveRetentionApply(BaseModel):
+    confirmation: str
+
+
 class Job(BaseModel):
     name: str
     prompt: str
@@ -145,18 +151,33 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     def owner_id(request: Request) -> str:
         ident = request.state.access
+        if ident.kind == "member":
+            return ident.user_id
         return "owner" if ident.role == "owner" else f"guest:{ident.login or 'unknown'}"
 
+    def principal_of(request: Request):
+        return getattr(request.state, "access", None)
+
     def owned_session(request: Request, ref: str) -> tuple[Manager, str, dict]:
-        """Resolve a human-facing session only inside the caller's durable owner scope."""
+        """Resolve a human-facing session only inside the caller's durable user scope."""
         m = mgr(request)
-        if request.state.access.role == "guest":
+        ident = request.state.access
+        if ident.role == "guest":
             raise HarnessError(404, "no session matches that id")
-        sid = m.resolve_id(ref)
+        scope = owner_id(request)
+        sid = m.resolve_id(ref, user_id=scope)
         session = m.db.get_session(sid)
-        if session is None or session.get("owner_id", "owner") != owner_id(request):
+        if session is None or session.get("owner_id", "owner") != scope:
+            m.db.insert_audit(scope, scope, "cross_user", "denied")
             raise HarnessError(404, "no session matches that id")
         return m, sid, session
+
+    def require_owner(request: Request) -> Manager:
+        # Compatibility routes normally rely on Tailscale identity. If a bearer credential is supplied, enforce
+        # its kind too so an app/device token can never reveal owner-only paths or operate maintenance.
+        from .admin import require_admin
+        require_admin(request, mgr)
+        return mgr(request)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -165,16 +186,25 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         from .apps import cors_origin_allowed, daemon_origins, normalize_origin
         # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
         login = request.headers.get("tailscale-user-login")
-        ident = access_mod.resolve_access(cfg, login)
+        ident = access_mod.resolve_access(cfg, login, m.db)
         request.state.access = ident
+        if ident.kind in ("owner", "member") and ident.allowed and ident.user_id != "owner":
+            m.db.touch_account(ident.user_id)
         if not ident.allowed:
             log.warning("refused %s %s from tailnet login %s (%s)",
                         request.method, request.url.path, login, ident.detail)
+            m.db.insert_audit(ident.user_id or "unknown", ident.user_id or "", "auth", "denied",
+                              ident.detail or "not allowed")
             return JSONResponse({"detail": ident.detail or "this tailnet login is not allowed"}, status_code=403)
         guest_block = access_mod.guest_forbidden(ident, request.method, request.url.path)
         if guest_block:
             log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
             return JSONResponse({"detail": guest_block}, status_code=403)
+        member_block = access_mod.member_forbidden(ident, request.method, request.url.path)
+        if member_block:
+            log.warning("refused member %s %s from %s (%s)", request.method, request.url.path, login, member_block)
+            m.db.insert_audit(ident.user_id, ident.user_id, "cross_user", "denied", member_block)
+            return JSONResponse({"detail": member_block}, status_code=403)
         raw_origin = request.headers.get("origin", "")
         try:
             origin = normalize_origin(raw_origin) if raw_origin else ""
@@ -210,9 +240,14 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.exception_handler(HarnessError)
     async def harness_error(request: Request, exc: HarnessError):
-        return JSONResponse({"detail": str(exc), "error": {
+        body = {"detail": str(exc), "error": {
             "code": exc.code, "message": str(exc), "retryable": exc.status == 429 or exc.status >= 500,
-        }}, status_code=exc.status)
+        }}
+        if getattr(exc, "keys", None):
+            body["error"]["keys"] = exc.keys
+        if getattr(exc, "details", None):
+            body["error"]["details"] = exc.details
+        return JSONResponse(body, status_code=exc.status)
 
     # web app
     @app.get("/", include_in_schema=False)
@@ -251,7 +286,17 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/health")
     async def health():
         cfg = app.state.manager.cfg
-        return {"ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities()}
+        settings = getattr(app.state.manager, "settings", None)
+        recovery = settings.store.read_status() if settings else {}
+        return {
+            "ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities(),
+            "config": {
+                "revision": settings.admin_view()["revision"] if settings else 0,
+                "confirmed": settings.admin_view()["confirmed"] if settings else True,
+                "supervised_restart": bool(settings and settings.admin_view()["supervised_restart"]),
+                "recovery": recovery or None,
+            },
+        }
 
     @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
     async def metrics(request: Request):
@@ -261,17 +306,46 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/me")
     async def me(request: Request):
-        cfg = mgr(request).cfg
+        m = mgr(request)
+        cfg = m.cfg
         ident = getattr(request.state, "access", None) or access_mod.resolve_access(
-            cfg, request.headers.get("tailscale-user-login"))
+            cfg, request.headers.get("tailscale-user-login"), m.db)
         guest = ident.role == "guest"
+        member = ident.role == "member"
+        usage = {}
+        if member and ident.allowed:
+            from .storage import account_usage_bytes, quota_message
+            account = m.db.account_by_id(ident.user_id)
+            if account:
+                used = account_usage_bytes(cfg, ident.user_id)
+                usage = {
+                    "disk_used_bytes": used,
+                    "disk_quota_bytes": int(account["disk_quota_bytes"]),
+                    "disk_note": quota_message(used, int(account["disk_quota_bytes"])),
+                    "max_running": int(account["max_running"]),
+                    "max_queued": int(account["max_queued"]),
+                    "running": m.db.count_sessions(ident.user_id, "running"),
+                    "queued": m.db.count_sessions(ident.user_id, "queued"),
+                    "account_hint": ident.user_id[2:10] if ident.user_id.startswith("u-") else ident.user_id[:8],
+                }
         return {
             "login": ident.login,
-            "name": request.headers.get("tailscale-user-name"),
+            "name": (ident.display_name or request.headers.get("tailscale-user-name")),
             "public_url": cfg.public_url,
             "role": ident.role,
+            "user_id": ident.user_id if ident.role != "guest" else None,
             "guest_until": ident.until_iso(),
-            "notify": {"enabled": False, "topic": ""} if guest else {
+            "capabilities": {
+                "admin": ident.role == "owner",
+                "local_sessions": ident.role in ("owner", "member"),
+                "hosted_backends": ident.role == "owner",
+                "images": ident.role == "owner",
+                "jobs": ident.role == "owner",
+                "runners": ident.role == "owner",
+                "accounts": ident.role == "owner",
+            },
+            "usage": usage,
+            "notify": {"enabled": False, "topic": ""} if guest or member else {
                 "enabled": cfg.notify.enabled, "topic": cfg.notify.topic,
             },
         }
@@ -293,14 +367,24 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/projects")
     async def projects(request: Request):
-        cfg = mgr(request).cfg
+        from . import catalog
+        m = mgr(request)
         scope = owner_id(request)
-        return [{"name": p.name, "description": p.description, "repo": bool(p.repo), "homelab": p.homelab,
-                 "target": p.target, "managed": p.managed} for p in cfg.projects.values() if p.owner_id == scope]
+        if request.state.access.role == "guest":
+            return []
+        return [catalog.public_project(p) for p in catalog.list_projects(m.cfg, m.db, scope)]
 
     @app.post("/projects", status_code=201)
     async def create_project(body: CreateProject, request: Request):
-        cfg = mgr(request).cfg
+        ident = request.state.access
+        if ident.role == "guest":
+            raise HarnessError(403, "demo access is read-only")
+        if ident.kind not in ("owner", "member") or not ident.bundled:
+            raise HarnessError(403, "project creation is only for the signed-in Tailscale owner or member")
+        m = mgr(request)
+        if ident.role == "member":
+            return m.create_member_project(ident.user_id, body.name, body.description, body.repo)
+        cfg = m.cfg
         if body.target != "tower" and body.target not in cfg.runners:
             raise HarnessError(400, f"runner {body.target!r} is not configured")
         project = config_mod.Project(name=body.name, description=body.description, target=body.target,
@@ -348,6 +432,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def backends(request: Request):
         m = mgr(request)
         from .backend_state import local_view, view as backend_view
+        if request.state.access.role == "member":
+            return [local_view(m)]
         check_auth = request.query_params.get("auth") != "skip"
         names = list(m.cfg.backends)
         if check_auth:
@@ -572,7 +658,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             return {"query": q, "mode": "all", "results": []}
         if not m.cfg.search.enabled:
             raise HarnessError(400, "session search is disabled in config/harness.yaml")
-        return await asyncio.to_thread(search.search, m.db, q, project, max(1, min(limit, 50)))
+        return await asyncio.to_thread(search.search, m.db, q, project, max(1, min(limit, 50)),
+                                       "", owner_id(request))
 
     @app.post("/sessions", status_code=201)
     async def create_session(body: CreateSession, request: Request):
@@ -615,15 +702,27 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/maintenance")
     async def maintenance(request: Request):
-        return await mgr(request).maintenance.usage()
+        return await require_owner(request).maintenance.usage()
 
     @app.post("/maintenance/cleanup")
     async def maintenance_cleanup(request: Request):
-        return await mgr(request).maintenance.cleanup()
+        return await require_owner(request).maintenance.cleanup()
 
     @app.post("/maintenance/backup")
     async def maintenance_backup(request: Request):
-        return await mgr(request).maintenance.backup()
+        return await require_owner(request).maintenance.backup()
+
+    @app.post("/maintenance/image-archive/retention/preview")
+    async def image_archive_retention_preview(request: Request):
+        return await asyncio.to_thread(require_owner(request).image_archive.retention_preview)
+
+    @app.post("/maintenance/image-archive/retention/apply")
+    async def image_archive_retention_apply(body: ImageArchiveRetentionApply, request: Request):
+        from .image_archive import ImageArchiveError
+        try:
+            return await asyncio.to_thread(require_owner(request).image_archive.apply_retention, body.confirmation)
+        except ImageArchiveError as e:
+            raise HarnessError(409, str(e))
 
     @app.get("/sessions/{ref}/approvals")
     async def approvals(ref: str, request: Request, all: bool = False):
@@ -708,10 +807,10 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def get_job(jid: str, request: Request):
         m = jobs_on(request)
         if request.state.access.role == "guest":
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         job = m.db.get_job(jid)
         if job is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         return job_view(m, job, runs=15)
 
     @app.put("/jobs/{jid}")
@@ -721,7 +820,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = jobs_on(request)
         old = m.db.get_job(jid)
         if old is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         try:
             job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
         except (ValueError, CronError) as e:
@@ -733,7 +832,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.delete("/jobs/{jid}", status_code=204)
     async def delete_job(jid: str, request: Request):
         if not jobs_on(request).db.delete_job(jid):
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
 
     @app.post("/jobs/{jid}/run", status_code=201)
     async def run_job(jid: str, request: Request):
@@ -741,7 +840,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = jobs_on(request)
         job = m.db.get_job(jid)
         if job is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         if job["last_session_id"] and m._is_active(job["last_session_id"]):
             raise HarnessError(409, "the previous run is still going")
         sid = m.jobs.run(job, manual=True)
@@ -803,9 +902,12 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
         async def stream():
             sub = m.bus.subscribe("*")
+            epoch = m.stream_epoch.get(scope, 0)
             try:
                 yield ": connected\n\n"
                 while True:
+                    if m.stream_epoch.get(scope, 0) != epoch:
+                        return
                     try:
                         e = await asyncio.wait_for(sub.queue.get(), timeout=15)
                     except asyncio.TimeoutError:
@@ -817,7 +919,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                     if e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope:
                         if e["type"] == "run_finished":
                             e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}
-                        yield sse(e)
+                        # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
+                        yield sse({**e, "seq": None})
             finally:
                 m.bus.unsubscribe("*", sub)
 
@@ -835,6 +938,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         async def stream():
             sub = m.bus.subscribe(sid)
             last = after
+            epoch = m.stream_epoch.get(owner_id(request), 0)
             try:
                 yield ": connected\n\n"
                 for e in m.db.events(sid, after):
@@ -843,6 +947,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                 if not follow:
                     return
                 while True:
+                    if m.stream_epoch.get(owner_id(request), 0) != epoch:
+                        return
                     if sub.overflowed:
                         sub.overflowed = False
                         while not sub.queue.empty():

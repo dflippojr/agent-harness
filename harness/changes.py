@@ -6,21 +6,17 @@ started from (its upstream), so both commits the agent made and uncommitted edit
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
+
+from .projects import git
 
 MAX_DIFF_CHARS = 400_000
 SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 
 
 def _git(repo: Path, *args: str) -> str:
-    proc = subprocess.run(
-        ["git", "-c", "core.autocrlf=false", "-c", "core.quotepath=off", "-c", f"safe.directory={repo.as_posix()}",
-         "-C", str(repo), *args],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    return proc.stdout
+    # Isolated host Git: workspace config/hooks/filters must not run. See harness.projects.
+    return git(repo, *args, timeout=60, check=False).out
 
 
 def find_repos(root: Path, depth: int = 2) -> list[Path]:
@@ -61,10 +57,11 @@ def workspace_changes(workspace: Path, base_commit: str | None = None) -> dict:
             if base:
                 break
         base = base or _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip()
-        diff = _git(repo, "diff", base, "--no-color", "--no-ext-diff") if base else ""
+        diff = _git(repo, "diff", base, "--no-color", "--no-ext-diff", "--no-textconv") if base else ""
         for path in untracked:
             # Git for Windows maps /dev/null for --no-index too.
-            diff += _git(repo, "diff", "--no-index", "--no-color", "--", "/dev/null", path)
+            diff += _git(repo, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv",
+                         "--", "/dev/null", path)
         truncated = len(diff) > budget
         diff = diff[:max(0, budget)]
         budget -= len(diff)
