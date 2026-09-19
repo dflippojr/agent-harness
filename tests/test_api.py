@@ -85,17 +85,32 @@ def test_web_app_and_guard(tmp_path):
         assert 'showFab("#/jobs/new", "+ New job")' in js
         assert 'api("/backends?auth=skip")' in js
         assert 'if (images && !route.onImages) api("/images/warmup"' not in js
+        assert "function imageModeEntries" in js
+        assert 'disabled: spec.available === false' in js
+        assert "quality-fast" in js
         assert 'if (prompt.value.trim()) startWarmup()' in js
         assert 'await startWarmup().catch(() => {})' in js
         assert "updateImageStatusView(phase, d.status)" in js
+        assert "data.status.modes" in js
+        assert "not installed" in js
+        assert "updateFluxHint" in js
+        assert "That image mode isn't installed" in js
         assert "grid.dataset.keys" in js
-        assert 'upscaling ? "Upscaling" : "Sampling"' in js
+        assert 'upscaling ? "Upscaling"' in js and 'editing ? "Editing"' in js
+        assert "function maskEditor" in js and "viewImageEdit" in js
+        assert "canvas.width / r.width" in js
+        assert "Independent backups are not changed" in js
+        assert ".mask-stage" in css and "touch-action: none" in css
         assert '"Upscale 2×"' in js and '"Upscale 4×"' in js
         assert "upscale: upscale.value" in js
         assert 'href: "#/profile/account"' in js
         assert "gpuActionRow()" in js and "function gpuCard()" not in js
         assert 'h("span", {}, "Duration:")' in js and 'duration.disabled = isGuest() || !g.manual' in js
         assert 'href: "#/profile/remote-control"' in js and 'href: "#/profile/disk"' in js
+        assert '"smart-approvals": "Smart approvals"' in js and "function smartApprovalsCard()" in js
+        assert 'skills: "Skills"' in js
+        assert 'api("/skills/enabled")' in js
+        assert "Install hash" in js
         assert "confirmGpuQueue" in js and "gpu.manual" in js
         assert "picker.hidden = !picker.hidden" not in js
         assert "if (holding)" in js

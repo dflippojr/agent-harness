@@ -6,6 +6,8 @@ errs toward asking.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import fnmatch
 import posixpath
 import re
@@ -34,7 +36,7 @@ DEFAULT_RULES: list[dict] = [
     {"tool": ["Edit", "Write", "MultiEdit", "NotebookEdit"], "action": ASK,
      "reason": "changes a file outside /workspace or uses an unrecognized path"},
     {"tool": ["WebFetch", "WebSearch"], "action": ASK, "reason": "uses Claude Code web access"},
-    {"tool": "Bash", "action": ASK, "reason": "runs a Claude Code shell command"},
+    {"tool": "Bash", "action": ASK, "reason": "runs a Claude Code shell command", "smart_eligible": True},
     {"tool": "apply_patch", "workspace_paths": "file_paths", "action": ALLOW},
     {"tool": "apply_patch", "action": ASK,
      "reason": "changes a file outside /workspace or uses an unrecognized path"},
@@ -65,6 +67,7 @@ ALWAYS_ASK: dict[str, str] = {
 class Decision:
     action: str
     reason: str = ""
+    smart_eligible: bool = False
 
 
 def _matches(rule: dict, name: str, args: dict) -> bool:
@@ -138,17 +141,26 @@ def _delete_outside_scratch(command: str) -> bool:
 
 class Policy:
     def __init__(self, project_rules: list[dict] | None = None, repo: bool = False):
+        cleaned = []
         for rule in project_rules or []:
             if rule.get("action") not in (ALLOW, ASK, DENY):
                 raise ValueError(f"policy rule needs action allow|ask|deny: {rule}")
-        self.rules = list(project_rules or []) + (REPO_RULES if repo else []) + DEFAULT_RULES
+            # Project rules cannot opt into smart review or widen eligibility.
+            cleaned.append({k: v for k, v in rule.items() if k != "smart_eligible"})
+        self.rules = cleaned + (REPO_RULES if repo else []) + DEFAULT_RULES
+
+    def fingerprint(self) -> str:
+        """Stable id of the ordered rule set the deterministic gate used."""
+        payload = json.dumps(self.rules, sort_keys=True, default=str).encode()
+        return hashlib.sha256(payload).hexdigest()[:16]
 
     def decide(self, name: str, args: dict) -> Decision:
         for rule in self.rules:
             if _matches(rule, name, args):
                 if name in ALWAYS_ASK and rule["action"] != DENY:
                     break
-                return Decision(rule["action"], rule.get("reason", ""))
+                return Decision(rule["action"], rule.get("reason", ""),
+                                smart_eligible=bool(rule.get("smart_eligible")))
         if name in ALWAYS_ASK:
             return Decision(ASK, ALWAYS_ASK[name])
         if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):

@@ -9,17 +9,21 @@ both a permissive default and a higher-quality model.
 | --- | --- | --- | --- | --- |
 | `fast` (default, agent assets) | **Z-Image-Turbo** | Apache 2.0, not gated | `z_image_turbo_bf16` (12 GB), `qwen_3_4b` text encoder (7.5 GB), `ae` VAE | 8 steps, fits in VRAM |
 | `quality` (phone) | **Qwen-Image-2512** | Apache 2.0, not gated | `qwen_image_2512_fp8_e4m3fn` (20 GB), `qwen_2.5_vl_7b_fp8_scaled` (8.8 GB), `qwen_image_vae` | 50 steps, cfg 4; best text rendering; ComfyUI streams part of it from RAM |
+| `flux-fast` (optional) | **FLUX.2 [klein] 4B FP8** | Apache 2.0, not gated | See `docs/flux-fast.md`. Disabled until `ops/images-models.ps1 install flux-fast`. | 4 steps; not a replacement for `fast` |
+| `quality-fast` (optional) | **Qwen-Image-2512 + Lightning 4-step LoRA** | Apache 2.0, not gated | same Qwen files plus `Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors` (1.6 GB, lightx2v, revision `a52649c9d0f6e1a248bff13f0df33bb8a2abdb52`) | Official ComfyUI 4-step subgraph: LoRA strength 1, 4 steps, cfg 1, euler/simple, shift 3.1. Missing LoRA disables only this mode. |
 
 The user allowed a personal-use license for the quality slot, but the best model that works here without extra steps
 is Apache-licensed anyway:
 
-- **FLUX.2 [klein] 9B** (non-commercial) is gated (needs a Hugging Face login and license acceptance), so it wasn't
-  installed. It can be added later as a third workflow.
+- **FLUX.2 [klein] 9B** (non-commercial) stays out: it is gated. The 4B Apache-2.0 distilled checkpoint is the
+  optional fourth workflow (`docs/flux-fast.md`, issue #92).
 - The "Qwen-Image 2.0" some 2026 articles mention couldn't be found on Hugging Face.
 
 ComfyUI: portable NVIDIA build **v0.35.0** (torch 2.13 + CUDA 13.0) in `C:\AI\ComfyUI`, models via
 `ComfyUI\extra_model_paths.yaml`. The workflows are transcribed from ComfyUI's bundled templates
-(`image_z_image_turbo.json`, `image_qwen_Image_2512.json`; the optional Lightning LoRA is left out).
+(`image_z_image_turbo.json`, `image_qwen_Image_2512.json`). `quality` is the 50-step graph; `quality-fast` transcribes
+that template's 4-step Lightning LoRA subgraph instead of inventing sampler values. Comparison notes:
+`docs/issue-13-lightning-results.md`.
 
 ## Design
 
@@ -74,3 +78,41 @@ Live on the tower (2026-09-15):
   inside the run. Endpoint clients get 503 during a batch.
 - The fast model misspells text; ask for `quality` when words matter.
 - Generated images live in `D:\Agents\harness\images-work\images` and are not part of the nightly backup.
+
+## Optional masked editing (issue #88)
+
+Owner-only Agent Harness Web work. Fast/quality text-to-image is unchanged. The optional `image_edit` component uses
+the official Apache-2.0 **Qwen-Image-Edit** family through ComfyUI's Qwen edit graph (fp8, same RAM-streaming pattern
+as `quality`):
+
+| | |
+| --- | --- |
+| Source | [Qwen/Qwen-Image-Edit](https://huggingface.co/Qwen/Qwen-Image-Edit) (Apache 2.0) |
+| ComfyUI package | [Comfy-Org/Qwen-Image-Edit_ComfyUI](https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI) revision `7d41107b653d3039be20972fb82398b01b3213eb` |
+| Artifact | `qwen_image_edit_fp8_e4m3fn.safetensors` (20,430,635,136 bytes) |
+| SHA-256 | `393c6743d1de2e9031b5197027b36116f2096958ccc0223526d34e1860266021` |
+
+It is never downloaded during an ordinary install or daemon upgrade. Enable with `-EnableModules image_edit` after
+the installer has checked disk (~22 GB extra), 16 GB GPU, and 32 GB RAM. CLIP (`qwen_2.5_vl_7b_fp8_scaled`) and VAE
+(`qwen_image_vae`) are shared with `quality`. Missing edit weights produce setup guidance; Generate still works.
+
+Edits start from a gallery PNG or an owner PNG/JPEG/WebP upload (metadata stripped, orientation/color normalized).
+The mask editor paints white=editable / black=preserved at the source's exact pixel size. The source is never
+overwritten; the result is a new row with `parent_id`. Uploads/masks/results are owner-private (no guest or app-token
+listing, no hosted-provider upload). Delete confirms and removes only the live files for that row.
+
+Upload and gallery edits share one size envelope: at most **1664 px** on the long side (`MAX_EDIT_SIDE`, the quality
+high-res bound) and `images.max_pixels` decoded pixels (default 20,000,000). Uploads that exceed the long side are
+**downscaled** during ingest (then snapped to a 16 px VAE multiple). Gallery sources that already exceed the envelope
+— including 2×/4× upscales that `upscale_max_pixels` still allows — are **rejected**, not downscaled, before the mask
+is parsed or the GPU starts. The error tells the owner to use the original or a non-upscaled image. `GET /images/{id}`
+exposes `editable` and `editable_reason`; Agent Harness Web disables **Edit** with that reason as the tooltip.
+
+### 16 GB GPU exit test (required before closing the issue)
+
+Run on the tower after the weights are installed. Record peak VRAM, peak RAM, and end-to-end time for:
+
+1. a small source (around 1024×1024)
+2. a larger source (Qwen-Image high-res envelope, e.g. 1664×928)
+
+Keep real paths, logins, tokens, and tailnet names out of public comments.

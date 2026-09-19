@@ -29,6 +29,12 @@ services:
     container_name: harness-egress-cursor
     volumes: ["./filters/cursor.txt:/etc/tinyproxy/filter:ro"]
     networks: [harness-cli-cursor, harness-egress]
+  reviewer:
+    <<: *proxy
+    container_name: harness-egress-reviewer
+    volumes: ["./filters/reviewer.txt:/etc/tinyproxy/filter:ro"]
+    ports: ["127.0.0.1:8890:8888"]
+    networks: [harness-egress]
 
 networks:
   harness-cli-claude:

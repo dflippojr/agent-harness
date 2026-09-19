@@ -41,14 +41,17 @@ sys.path.insert(0, str(APP_DIR))
 
 from harness import projects  # noqa: E402
 from harness.changes import workspace_changes  # noqa: E402
+from harness.compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION  # noqa: E402
 from harness.fileops import FILE_TOOLS, FileOps, ToolError, dir_size, resolve_path  # noqa: E402
+from harness.updater import apply_update, schedule_launchd_handoff  # noqa: E402
 
-VERSION = "4.1"
+VERSION = MAC_CLIENT_VERSION
 POLL_TIMEOUT = 60           # the daemon holds a poll for up to 25 s
 OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trims further for the model)
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
 HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+")
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+WORKSPACE = "/workspace"  # the sandbox path the daemon addresses tool paths by
 OFFLINE_RULES = """;; No network except localhost (tests that start a server); no DNS either, so nothing leaks through lookups.
 (deny network*)
 (allow network-bind network-inbound (local ip "localhost:*"))
@@ -72,7 +75,7 @@ class Project:
 
 class Executor:
     def __init__(self, workspaces: Path, repo_roots: list, profile: Path | None, home: Path,
-                 shell: str = "/bin/bash", min_free_gb: float = 10):
+                 shell: str = "/bin/bash", min_free_gb: float = 10, server: str = ""):
         self.workspaces = resolve_path(workspaces)
         self.repo_roots = [resolve_path(Path(r).expanduser()) for r in repo_roots]
         self.profile_template = profile.read_text(encoding="utf-8") if profile else None
@@ -81,6 +84,7 @@ class Executor:
         self.home = home
         self.shell = shell
         self.min_free_gb = min_free_gb
+        self.server = server.rstrip("/")
         self.lock = threading.Lock()
         self.procs: dict = {}      # request id -> Popen
         self.proc_sessions: dict = {}  # request id -> session id
@@ -116,10 +120,17 @@ class Executor:
 
     def info(self) -> dict:
         free_gb, total_gb = self.disk()
-        return {"version": VERSION, "python": platform.python_version(), "macos": platform.mac_ver()[0],
+        last_update = None
+        try:
+            last_update = json.loads((self.home / ".agent-harness/runner/last-update.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        return {"version": VERSION, "protocol": CLIENT_PROTOCOLS["runner"],
+                "python": platform.python_version(), "macos": platform.mac_ver()[0],
                 "arch": platform.machine(), "free_gb": free_gb, "total_gb": total_gb,
                 "workspaces": str(self.workspaces),
-                "sandbox": self.profile_template is not None, "repo_roots": [str(r) for r in self.repo_roots]}
+                "sandbox": self.profile_template is not None, "repo_roots": [str(r) for r in self.repo_roots],
+                "last_update": last_update}
 
     # dispatch
     def handle(self, rid: str, op: str, params: dict):
@@ -140,12 +151,12 @@ class Executor:
         if p["name"] not in FILE_TOOLS:
             raise OpError(f"not a file tool: {p['name']}")
         ws = self.workspace(p["session"], create=True)
-        files = FileOps(ws, int(p.get("context_tokens") or 65536), prefixes=(str(ws), "/workspace"))
+        files = FileOps(ws, int(p.get("context_tokens") or 65536), prefixes=(str(ws), WORKSPACE))
         return getattr(files, p["name"])(**p["args"])
 
     def op_preview(self, rid: str, p: dict):
         ws = self.workspace(p["session"], create=True)
-        return FileOps(ws, 65536, prefixes=(str(ws), "/workspace")).preview_diff(p["name"], p["args"])
+        return FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE)).preview_diff(p["name"], p["args"])
 
     def op_size(self, rid: str, p: dict):
         ws = self.workspace(p["session"])
@@ -160,7 +171,7 @@ class Executor:
         except (binascii.Error, ValueError):
             raise OpError("content_b64 is not valid base64", "tool")
         ws = self.workspace(p["session"], create=True)
-        files = FileOps(ws, 65536, prefixes=(str(ws), "/workspace"))
+        files = FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE))
         return files.write_bytes(p.get("path") or "", data)
 
     def op_shell(self, rid: str, p: dict):
@@ -173,7 +184,7 @@ class Executor:
         if not HTTPS_URL_RE.fullmatch(url):
             raise OpError("url must be an https://... URL (local: repositories are only on the tower)", "tool")
         ws = self.workspace(p["session"], create=True)
-        files = FileOps(ws, 65536, prefixes=(str(ws), "/workspace"))
+        files = FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE))
         dest = p.get("dest") or url.rstrip("/").rsplit("/", 1)[-1]
         if dest.endswith(".git"):
             dest = dest[:-4]
@@ -185,6 +196,14 @@ class Executor:
         if out["code"] != 0:
             raise OpError(f"git clone failed (exit {out['code']}): {out['output'][-2000:].strip()}", "tool")
         return f"cloned {url} into {files.rel(target)}"
+
+    def op_update_client(self, rid: str, p: dict):
+        if not self.server:
+            raise OpError("runner has no configured server for updates")
+        try:
+            return apply_update(self.server, self.home / ".agent-harness", restart=False, home=self.home)
+        except RuntimeError as exc:
+            raise OpError(str(exc)) from exc
 
     def run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
@@ -345,6 +364,7 @@ class Client:
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(self.base + path, data=data, method="POST", headers={
             "Content-Type": "application/json", "Authorization": f"Bearer {self.token}",
+            "X-Agent-Harness-Client": f"runner/{CLIENT_PROTOCOLS['runner']}",
             "User-Agent": f"agent-harness-runner/{VERSION}"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -411,6 +431,20 @@ class Runner:
         finally:
             with self.lock:
                 self.inflight.pop(rid, None)
+        if op == "update_client" and payload["ok"]:
+            # The result reaches the server before launchd replaces this process.
+            value = payload.get("value") if isinstance(payload.get("value"), dict) else {}
+            base = self.executor.home / ".agent-harness"
+            plist = self.executor.home / "Library" / "LaunchAgents" / "dev.agent-harness.runner.plist"
+            previous = base / "runner" / "previous-plist"
+            schedule_launchd_handoff(
+                plist,
+                definition_changed=bool(value.get("plist_changed", True)),
+                previous_plist=previous if previous.is_file() else None,
+                base=base,
+                python=sys.executable,
+                app_dir=base / "runner" / "app",
+            )
 
     def loop(self) -> None:
         log.info("runner %s (instance %s) polling %s", VERSION, self.instance[:8], self.client.base)
@@ -457,6 +491,7 @@ def main() -> None:
         repo_roots=cfg.get("repo_roots") or [str(home / "Projects")],
         profile=None if cfg.get("sandbox") is False else APP_DIR / "sandbox.sb",
         home=home, min_free_gb=float(cfg.get("min_free_gb", 10)))
+    executor.server = cfg["server"]
     runner = Runner(Client(cfg["server"], cfg.get("name", "macbook"), cfg["token"]), executor)
 
     def stop(signum, frame):

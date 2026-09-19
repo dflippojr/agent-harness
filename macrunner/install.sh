@@ -46,6 +46,8 @@ rm -rf "$BASE/runner/app"
 mv "$BASE/runner/app.new" "$BASE/runner/app"
 install -m 600 "$SRC/client/harness_cli.py" "$BASE/client/harness_cli.py"
 install -m 644 "$SRC/client/harness_client.py" "$BASE/client/harness_client.py"
+install -m 644 "$SRC/client/harness_compat.py" "$BASE/client/harness_compat.py"
+install -m 644 "$SRC/client/harness_update.py" "$BASE/client/harness_update.py"
 SITE_PACKAGES="$("$VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
 printf '%s\n' "$BASE/client" > "$SITE_PACKAGES/agent_harness_client.pth"
 

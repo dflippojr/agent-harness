@@ -12,8 +12,16 @@ import time
 
 import httpx
 
-DEFAULT_CONFIG = Path.home() / ".agent-harness" / "client" / "config.json"
-DEFAULT_RUNNER_CONFIG = Path.home() / ".agent-harness" / "runner" / "config.json"
+try:
+    from .compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
+    from .updater import apply_update
+except ImportError:  # installed native bundle imports these as sibling modules
+    from harness_compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
+    from harness_update import apply_update
+
+HOME_DIR = ".agent-harness"
+DEFAULT_CONFIG = Path.home() / HOME_DIR / "client" / "config.json"
+DEFAULT_RUNNER_CONFIG = Path.home() / HOME_DIR / "runner" / "config.json"
 BASE = "http://127.0.0.1:8100"
 TOKEN = ""
 CONFIG_PATH = DEFAULT_CONFIG
@@ -39,7 +47,10 @@ def configure(path: Path | str = DEFAULT_CONFIG) -> dict:
 
 
 def _headers(extra: dict | None = None) -> dict:
-    return ({**(extra or {}), "Authorization": f"Bearer {TOKEN}"} if TOKEN else dict(extra or {}))
+    headers = {**(extra or {}), "X-Agent-Harness-Client": f"cli/{CLIENT_PROTOCOLS['cli']}"}
+    if TOKEN:
+        headers["Authorization"] = f"Bearer {TOKEN}"
+    return headers
 
 
 def _write_private_json(path: Path, data: dict) -> None:
@@ -58,7 +69,8 @@ def pair_native(server: str, code: str, client_path: Path, runner_path: Path) ->
     """Redeem once, then persist the owner and runner credentials without printing either secret."""
     server = server.rstrip("/")
     try:
-        response = httpx.post(server + "/api/v1/runner-pair", json={"code": code}, timeout=60)
+        response = httpx.post(server + "/api/v1/runner-pair", json={"code": code}, timeout=60,
+                              headers={"X-Agent-Harness-Client": f"cli/{CLIENT_PROTOCOLS['cli']}"})
     except httpx.TransportError as exc:
         sys.exit(f"daemon not reachable at {server}: {exc}")
     if response.status_code >= 400:
@@ -106,11 +118,24 @@ def api(method: str, path: str, retries: int = 30, **kwargs) -> dict | list | st
             time.sleep(2)
     if resp.status_code >= 400:
         try:
-            detail = resp.json().get("detail")
+            payload = resp.json()
+            detail = payload.get("detail")
+            if resp.status_code == 426 and payload.get("error", {}).get("code") == "client_update_required":
+                detail = f"{detail}; run `harness update`"
         except ValueError:
             detail = resp.text
         sys.exit(f"error {resp.status_code}: {detail}")
     return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+
+
+def server_version() -> dict:
+    try:
+        response = httpx.get(BASE + "/health", headers={
+            "X-Agent-Harness-Client": f"cli/{CLIENT_PROTOCOLS['cli']}"}, timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"daemon not reachable at {BASE}: {exc}") from exc
 
 
 def indent(text: str, max_lines: int | None) -> str:
@@ -142,6 +167,83 @@ def _iter_sse(sid: str, after: int):
                 data = []
 
 
+def _print_delta(d: dict, args, streamed: dict) -> None:
+    """One streamed token, opening the `assistant:` line and the dim reasoning block as needed."""
+    if not any(streamed.values()):
+        print(f"{CYAN}assistant:{RESET} ", end="")
+    if d["kind"] == "reasoning" and not streamed["reasoning"]:
+        print(DIM, end="")
+    if d["kind"] == "content" and streamed["reasoning"] and not streamed["content"]:
+        print(RESET + "\n", end="")
+    streamed[d["kind"]] = True
+    print(d["text"], end="", flush=True)
+
+
+def _print_assistant(d: dict, streamed: dict) -> str:
+    """The finished turn, its tool calls and token counts. Returns the content for the answer comparison."""
+    if any(streamed.values()):
+        print(RESET)
+    elif d["content"].strip():
+        print(f"{CYAN}assistant:{RESET} {d['content'].strip()}")
+    streamed.update(content=False, reasoning=False)
+    for call in d["tool_calls"]:
+        print(f"  {CYAN}→ {call['function']['name']}{RESET} {call['function']['arguments'][:300]}")
+    tps = f", {d['gen_tps']} tok/s" if d.get("gen_tps") else ""
+    print(f"  {DIM}[{d['prompt_tokens']} prompt / {d['completion_tokens']} completion tokens{tps}]{RESET}")
+    return d["content"].strip()
+
+
+def _print_event(t: str, d: dict, args) -> None:
+    """Events that only print: no loop state depends on them."""
+    if t == "user_message":
+        print(f"{BOLD}user:{RESET} {d['content']}")
+    elif t == "tool_call" and d["decision"] != "allow":
+        print(f"  {YELLOW}policy {d['decision']}: {d['reason']}{RESET}")
+    elif t == "tool_result":
+        color = GREEN if d["ok"] else RED
+        print(f"  {color}← {d['name']}{RESET} {DIM}({d['seconds']}s){RESET}")
+        print(DIM + indent(d["output"], None if args.full else 12) + RESET)
+    elif t == "compaction":
+        print(f"{DIM}context compacted ({d['tier']}): ~{d['tokens_before']} → ~{d['tokens_after']} tokens{RESET}")
+    elif t in ("error", "llm_retry"):
+        print(f"{RED}{t}: {d.get('message') or d.get('error')}{RESET}")
+    elif t == "model_waking":
+        print(f"{YELLOW}model is asleep; waking it (about {d['expected_seconds']} s)...{RESET}")
+    elif t == "model_ready":
+        print(f"{DIM}model ready after {d['seconds']} s{RESET}")
+    elif t == "resumed":
+        print(f"{YELLOW}daemon restarted; session resumed{RESET}")
+
+
+def _print_approval_request(d: dict) -> None:
+    print(f"\n{YELLOW}{BOLD}approval needed [{d['id']}]{RESET}{YELLOW}: {d['tool']} — {d['reason']}{RESET}")
+    print(indent(json.dumps(d["args"], indent=2), 40))
+    if d.get("detail"):
+        print(indent(d["detail"], 80))
+
+
+def _terminal_exit(d: dict, sid: str, last_content: str) -> int | None:
+    """The exit code once the session has really ended, else None."""
+    print(f"{DIM}status: {d['status']}{(' (' + d['stop_reason'] + ')') if d.get('stop_reason') else ''}{RESET}")
+    # Replayed history can contain earlier runs' endings; only stop if the session is still ended.
+    if d["status"] not in TERMINAL or api("GET", f"/sessions/{sid}")["status"] not in TERMINAL:
+        return None
+    if d.get("answer") and d["answer"].strip() != last_content:
+        print(f"\n{GREEN}{BOLD}answer:{RESET}\n{d['answer'].strip()}")
+    return 0 if d["status"] == "done" else 1
+
+
+def _decide_approval(sid: str, approval_id: str) -> None:
+    answer = input(f"{YELLOW}approve {approval_id}? [y]es / [n]o / [s]kip: {RESET}").strip().lower()
+    if answer.startswith("y"):
+        api("POST", f"/sessions/{sid}/approvals/{approval_id}", json={"decision": "approve"})
+    elif answer.startswith("n"):
+        note = input("note for the agent (optional): ")
+        api("POST", f"/sessions/{sid}/approvals/{approval_id}", json={"decision": "deny", "note": note})
+    else:
+        print(f"{DIM}left pending; approve later with: approve {sid} {approval_id}{RESET}")
+
+
 def watch(sid: str, args, after: int = 0) -> int:
     streamed = {"content": False, "reasoning": False}
     position = None
@@ -153,16 +255,8 @@ def watch(sid: str, args, after: int = 0) -> int:
             if e["seq"] is not None:
                 after = e["seq"]
             if t == "delta":
-                if d["kind"] == "reasoning" and not args.reasoning:
-                    continue
-                if not any(streamed.values()):
-                    print(f"{CYAN}assistant:{RESET} ", end="")
-                if d["kind"] == "reasoning" and not streamed["reasoning"]:
-                    print(DIM, end="")
-                if d["kind"] == "content" and streamed["reasoning"] and not streamed["content"]:
-                    print(RESET + "\n", end="")
-                streamed[d["kind"]] = True
-                print(d["text"], end="", flush=True)
+                if d["kind"] != "reasoning" or args.reasoning:
+                    _print_delta(d, args, streamed)
                 continue
             if t == "queue":
                 if d["position"] != position and d["position"] > 0:
@@ -172,52 +266,21 @@ def watch(sid: str, args, after: int = 0) -> int:
             if t == "compacting":
                 print(f"{DIM}compacting {d['messages']} messages...{RESET}")
                 continue
-            if t == "user_message":
-                print(f"{BOLD}user:{RESET} {d['content']}")
-            elif t == "assistant":
-                last_content = d["content"].strip()
-                if any(streamed.values()):
-                    print(RESET)
-                elif d["content"].strip():
-                    print(f"{CYAN}assistant:{RESET} {d['content'].strip()}")
-                streamed = {"content": False, "reasoning": False}
-                for call in d["tool_calls"]:
-                    print(f"  {CYAN}→ {call['function']['name']}{RESET} {call['function']['arguments'][:300]}")
-                tps = f", {d['gen_tps']} tok/s" if d.get("gen_tps") else ""
-                print(f"  {DIM}[{d['prompt_tokens']} prompt / {d['completion_tokens']} completion tokens{tps}]{RESET}")
-            elif t == "tool_call" and d["decision"] != "allow":
-                print(f"  {YELLOW}policy {d['decision']}: {d['reason']}{RESET}")
-            elif t == "tool_result":
-                color = GREEN if d["ok"] else RED
-                print(f"  {color}← {d['name']}{RESET} {DIM}({d['seconds']}s){RESET}")
-                print(DIM + indent(d["output"], None if args.full else 12) + RESET)
+            if t == "assistant":
+                last_content = _print_assistant(d, streamed)
             elif t == "approval_requested":
-                print(f"\n{YELLOW}{BOLD}approval needed [{d['id']}]{RESET}{YELLOW}: {d['tool']} — {d['reason']}{RESET}")
-                print(indent(json.dumps(d["args"], indent=2), 40))
-                if d.get("detail"):
-                    print(indent(d["detail"], 80))
+                _print_approval_request(d)
                 prompt_for = d["id"]
             elif t == "approval_decided":
                 print(f"{YELLOW}approval {d['id']} {d['status']}{RESET}")
                 if prompt_for == d["id"]:
                     prompt_for = None
-            elif t == "compaction":
-                print(f"{DIM}context compacted ({d['tier']}): ~{d['tokens_before']} → ~{d['tokens_after']} tokens{RESET}")
-            elif t in ("error", "llm_retry"):
-                print(f"{RED}{t}: {d.get('message') or d.get('error')}{RESET}")
-            elif t == "model_waking":
-                print(f"{YELLOW}model is asleep; waking it (about {d['expected_seconds']} s)...{RESET}")
-            elif t == "model_ready":
-                print(f"{DIM}model ready after {d['seconds']} s{RESET}")
-            elif t == "resumed":
-                print(f"{YELLOW}daemon restarted; session resumed{RESET}")
             elif t == "status":
-                print(f"{DIM}status: {d['status']}{(' (' + d['stop_reason'] + ')') if d.get('stop_reason') else ''}{RESET}")
-                # Replayed history can contain earlier runs' endings; only stop if the session is still ended.
-                if d["status"] in TERMINAL and api("GET", f"/sessions/{sid}")["status"] in TERMINAL:
-                    if d.get("answer") and d["answer"].strip() != last_content:
-                        print(f"\n{GREEN}{BOLD}answer:{RESET}\n{d['answer'].strip()}")
-                    return 0 if d["status"] == "done" else 1
+                code = _terminal_exit(d, sid, last_content)
+                if code is not None:
+                    return code
+            else:
+                _print_event(t, d, args)
             if prompt_for and t in ("approval_requested", "status") and sys.stdin.isatty() and not args.no_prompt:
                 pending = {a["id"] for a in api("GET", f"/sessions/{sid}/approvals")}
                 if prompt_for in pending:
@@ -226,14 +289,7 @@ def watch(sid: str, args, after: int = 0) -> int:
         else:
             time.sleep(2)  # stream ended or dropped; reconnect
             continue
-        answer = input(f"{YELLOW}approve {prompt_for}? [y]es / [n]o / [s]kip: {RESET}").strip().lower()
-        if answer.startswith("y"):
-            api("POST", f"/sessions/{sid}/approvals/{prompt_for}", json={"decision": "approve"})
-        elif answer.startswith("n"):
-            note = input("note for the agent (optional): ")
-            api("POST", f"/sessions/{sid}/approvals/{prompt_for}", json={"decision": "deny", "note": note})
-        else:
-            print(f"{DIM}left pending; approve later with: approve {sid} {prompt_for}{RESET}")
+        _decide_approval(sid, prompt_for)
 
 
 def main() -> int:
@@ -275,6 +331,8 @@ def main() -> int:
         sp.add_argument("--note", default="")
     sub.add_parser("list", help="list sessions")
     sub.add_parser("queue", help="GPU queue")
+    sub.add_parser("version", help="show installed client and connected server versions")
+    sub.add_parser("update", help="verify and install the version-matched Mac client package")
     projects = sub.add_parser("projects", help="manage Mac runner project roots").add_subparsers(
         dest="projects_cmd", required=True)
     add = projects.add_parser("add", help="allow a local project directory")
@@ -294,6 +352,28 @@ def main() -> int:
         paired = pair_native(args.server, args.code, Path(args.config), Path(args.runner_config))
         print(f"paired {paired['runner']['name']} with {paired['server']}")
         return 0
+    if args.cmd == "version":
+        print(f"Agent Harness CLI {MAC_CLIENT_VERSION} (admin protocol {CLIENT_PROTOCOLS['cli']})")
+        try:
+            remote = server_version()
+        except RuntimeError as exc:
+            print(str(exc))
+            return 1
+        supported = remote.get("protocols", {}).get("admin", {})
+        protocol = CLIENT_PROTOCOLS["cli"]
+        state = ("client update required" if protocol < supported.get("min", protocol) else
+                 "Server update required" if protocol > supported.get("max", protocol) else "compatible")
+        print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
+        print(f"compatibility: {state} (Server supports admin protocol "
+              f"{supported.get('min', '?')}–{supported.get('max', '?')})")
+        return 0
+    if args.cmd == "update":
+        try:
+            result = apply_update(BASE)
+        except RuntimeError as exc:
+            sys.exit(str(exc))
+        print(f"updated Agent Harness for Mac to {result['version']}")
+        return 0
     if args.cmd == "projects":
         try:
             root = add_project_root(args.path, Path(args.runner_config))
@@ -308,7 +388,7 @@ def main() -> int:
             print("runner restarted")
             return 0
         if args.runner_cmd == "logs":
-            log = Path.home() / ".agent-harness" / "logs" / "runner.log"
+            log = Path.home() / HOME_DIR / "logs" / "runner.log"
             command = ["tail", "-n", str(max(1, args.lines))]
             if args.follow:
                 command.append("-f")

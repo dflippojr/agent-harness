@@ -5,20 +5,24 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import access as access_mod
+from . import compat
 from . import config as config_mod
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
+
+NO_SUCH_JOB = "no such job"
 
 log = logging.getLogger("harness.api")
 WEB = Path(__file__).parent / "web"
@@ -34,6 +38,7 @@ class CreateSession(BaseModel):
     backend: str = "local"
     model: str | None = None
     title: str | None = None
+    skills: list[str] | None = None
 
 
 class CreateProject(BaseModel):
@@ -96,9 +101,29 @@ class BackendUpdate(BaseModel):
     effort: str | None = None
 
 
+class SmartApprovalsUpdate(BaseModel):
+    mode: str
+
+
 class MemoryProfileUpdate(BaseModel):
     content: str
     summary: str = "Update agent profile"
+
+
+class SkillInstall(BaseModel):
+    content_hash: str
+
+
+class SkillAllowlist(BaseModel):
+    projects: list[str] = []
+
+
+class SkillReject(BaseModel):
+    reason: str = ""
+
+
+class ImageArchiveRetentionApply(BaseModel):
+    confirmation: str
 
 
 class Job(BaseModel):
@@ -141,74 +166,120 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     def owner_id(request: Request) -> str:
         ident = request.state.access
+        if ident.kind == "member":
+            return ident.user_id
         return "owner" if ident.role == "owner" else f"guest:{ident.login or 'unknown'}"
 
+    def principal_of(request: Request):
+        return getattr(request.state, "access", None)
+
     def owned_session(request: Request, ref: str) -> tuple[Manager, str, dict]:
-        """Resolve a human-facing session only inside the caller's durable owner scope."""
+        """Resolve a human-facing session only inside the caller's durable user scope."""
         m = mgr(request)
-        if request.state.access.role == "guest":
+        ident = request.state.access
+        if ident.role == "guest":
             raise HarnessError(404, "no session matches that id")
-        sid = m.resolve_id(ref)
+        scope = owner_id(request)
+        sid = m.resolve_id(ref, user_id=scope)
         session = m.db.get_session(sid)
-        if session is None or session.get("owner_id", "owner") != owner_id(request):
+        if session is None or session.get("owner_id", "owner") != scope:
+            m.db.insert_audit(scope, scope, "cross_user", "denied")
             raise HarnessError(404, "no session matches that id")
         return m, sid, session
+
+    def require_owner(request: Request) -> Manager:
+        # Compatibility routes normally rely on Tailscale identity. If a bearer credential is supplied, enforce
+        # its kind too so an app/device token can never reveal owner-only paths or operate maintenance.
+        from .admin import require_admin
+        require_admin(request, mgr)
+        return mgr(request)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
         m: Manager = request.app.state.manager
         cfg = m.cfg
         from .apps import cors_origin_allowed, daemon_origins, normalize_origin
-        # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
-        login = request.headers.get("tailscale-user-login")
-        ident = access_mod.resolve_access(cfg, login)
-        request.state.access = ident
-        if not ident.allowed:
-            log.warning("refused %s %s from tailnet login %s (%s)",
-                        request.method, request.url.path, login, ident.detail)
-            return JSONResponse({"detail": ident.detail or "this tailnet login is not allowed"}, status_code=403)
-        guest_block = access_mod.guest_forbidden(ident, request.method, request.url.path)
-        if guest_block:
-            log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
-            return JSONResponse({"detail": guest_block}, status_code=403)
+        public_path = request.scope.get("harness_original_path", request.url.path)
         raw_origin = request.headers.get("origin", "")
         try:
             origin = normalize_origin(raw_origin) if raw_origin else ""
         except ValueError:
             origin = ""
-        public_path = request.scope.get("harness_original_path", request.url.path)
-        browser_api = public_path.startswith("/api/v1") or public_path.startswith("/api/admin/v1")
+        browser_api = (public_path == "/health" or public_path.startswith("/api/v1")
+                       or public_path.startswith("/api/admin/v1"))
         cross_origin_api = bool(origin and origin not in daemon_origins(cfg)
                                 and browser_api and cors_origin_allowed(m, request, origin))
         cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_api else {}
+        # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
+        login = request.headers.get("tailscale-user-login")
+        ident = access_mod.resolve_access(cfg, login, m.db)
+        request.state.access = ident
+        if ident.kind in ("owner", "member") and ident.allowed and ident.user_id != "owner":
+            m.db.touch_account(ident.user_id)
+        if not ident.allowed:
+            log.warning("refused %s %s from tailnet login %s (%s)",
+                        request.method, request.url.path, login, ident.detail)
+            m.db.insert_audit(ident.user_id or "unknown", ident.user_id or "", "auth", "denied",
+                              ident.detail or "not allowed")
+            return JSONResponse({"detail": ident.detail or "this tailnet login is not allowed"},
+                                status_code=403, headers=cors_headers)
+        guest_block = access_mod.guest_forbidden(ident, request.method, request.url.path)
+        if guest_block:
+            log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
+            return JSONResponse({"detail": guest_block}, status_code=403, headers=cors_headers)
+        member_block = access_mod.member_forbidden(ident, request.method, request.url.path)
+        if member_block:
+            log.warning("refused member %s %s from %s (%s)", request.method, request.url.path, login, member_block)
+            m.db.insert_audit(ident.user_id, ident.user_id, "cross_user", "denied", member_block)
+            return JSONResponse({"detail": member_block}, status_code=403, headers=cors_headers)
+        surface = compat.surface_for_path(public_path)
+        compatibility = compat.check_client(request.headers.get(compat.CLIENT_HEADER, ""), surface) if surface else None
+        discovery = request.method in {"GET", "HEAD"} and public_path in {"/api/v1", "/api/admin/v1"}
+        if compatibility and not discovery and compatibility["state"] == "invalid":
+            return JSONResponse({"detail": "invalid first-party client identity", "error": {
+                "code": "invalid_client_identity", **compatibility,
+            }}, status_code=400, headers=cors_headers)
+        if compatibility and not discovery and compatibility["state"] in {"client_update_required", "daemon_update_required"}:
+            return JSONResponse({"detail": compatibility["state"].replace("_", " "), "error": {
+                "code": compatibility["state"], **compatibility,
+            }}, status_code=426, headers=cors_headers)
 
         if request.method == "OPTIONS" and browser_api and raw_origin:
             requested_method = request.headers.get("access-control-request-method", "").upper()
             requested_headers = {h.strip().lower() for h in
                                  request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
             if (not cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
-                    or not requested_headers <= {"authorization", "content-type", "last-event-id"}):
-                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+                    or not requested_headers <= {"authorization", "content-type", "last-event-id",
+                                                  "x-agent-harness-client"}):
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403, headers=cors_headers)
             return Response(status_code=204, headers={**cors_headers,
                             "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-                            "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID",
+                            "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID, X-Agent-Harness-Client",
                             "Access-Control-Max-Age": "600"})
 
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             # Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent).
             if ((raw_origin and origin not in daemon_origins(cfg) and not cross_origin_api)
                     or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_api)):
-                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403, headers=cors_headers)
         response = await call_next(request)
+        if compatibility and compatibility["state"] == "transition":
+            response.headers["X-Agent-Harness-Deprecation"] = "missing_client_version"
+            response.headers["Warning"] = '299 agent-harness "client version header will be required after this transition release"'
         for key, value in cors_headers.items():
             response.headers[key] = value
         return response
 
     @app.exception_handler(HarnessError)
     async def harness_error(request: Request, exc: HarnessError):
-        return JSONResponse({"detail": str(exc), "error": {
+        body = {"detail": str(exc), "error": {
             "code": exc.code, "message": str(exc), "retryable": exc.status == 429 or exc.status >= 500,
-        }}, status_code=exc.status)
+        }}
+        if getattr(exc, "keys", None):
+            body["error"]["keys"] = exc.keys
+        if getattr(exc, "details", None):
+            body["error"]["details"] = exc.details
+        return JSONResponse(body, status_code=exc.status)
 
     # web app
     @app.get("/", include_in_schema=False)
@@ -237,6 +308,11 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             "Cache-Control": "no-cache",
         })
 
+    @app.get("/mac-client/manifest.json", include_in_schema=False)
+    async def mac_client_manifest():
+        from .mac_client import package_manifest
+        return JSONResponse(package_manifest(), headers={"Cache-Control": "no-cache"})
+
     app.mount("/static", StaticFiles(directory=WEB), name="static")
 
     from . import apps, endpoint
@@ -247,7 +323,18 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/health")
     async def health():
         cfg = app.state.manager.cfg
-        return {"ok": True, "profile": cfg.profile, "capabilities": cfg.capabilities()}
+        settings = getattr(app.state.manager, "settings", None)
+        recovery = settings.store.read_status() if settings else {}
+        config_view = settings.admin_view() if settings else None
+        return {
+            "ok": True, "profile": cfg.profile, **compat.metadata(cfg.capabilities()),
+            "config": {
+                "revision": config_view["revision"] if config_view else 0,
+                "confirmed": config_view["confirmed"] if config_view else True,
+                "supervised_restart": bool(config_view and config_view["supervised_restart"]),
+                "recovery": recovery or None,
+            },
+        }
 
     @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
     async def metrics(request: Request):
@@ -257,17 +344,46 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/me")
     async def me(request: Request):
-        cfg = mgr(request).cfg
+        m = mgr(request)
+        cfg = m.cfg
         ident = getattr(request.state, "access", None) or access_mod.resolve_access(
-            cfg, request.headers.get("tailscale-user-login"))
+            cfg, request.headers.get("tailscale-user-login"), m.db)
         guest = ident.role == "guest"
+        member = ident.role == "member"
+        usage = {}
+        if member and ident.allowed:
+            from .storage import account_usage_bytes, quota_message
+            account = m.db.account_by_id(ident.user_id)
+            if account:
+                used = account_usage_bytes(cfg, ident.user_id)
+                usage = {
+                    "disk_used_bytes": used,
+                    "disk_quota_bytes": int(account["disk_quota_bytes"]),
+                    "disk_note": quota_message(used, int(account["disk_quota_bytes"])),
+                    "max_running": int(account["max_running"]),
+                    "max_queued": int(account["max_queued"]),
+                    "running": m.db.count_sessions(ident.user_id, "running"),
+                    "queued": m.db.count_sessions(ident.user_id, "queued"),
+                    "account_hint": ident.user_id[2:10] if ident.user_id.startswith("u-") else ident.user_id[:8],
+                }
         return {
             "login": ident.login,
-            "name": request.headers.get("tailscale-user-name"),
+            "name": (ident.display_name or request.headers.get("tailscale-user-name")),
             "public_url": cfg.public_url,
             "role": ident.role,
+            "user_id": ident.user_id if ident.role != "guest" else None,
             "guest_until": ident.until_iso(),
-            "notify": {"enabled": False, "topic": ""} if guest else {
+            "capabilities": {
+                "admin": ident.role == "owner",
+                "local_sessions": ident.role in ("owner", "member"),
+                "hosted_backends": ident.role == "owner",
+                "images": ident.role == "owner",
+                "jobs": ident.role == "owner",
+                "runners": ident.role == "owner",
+                "accounts": ident.role == "owner",
+            },
+            "usage": usage,
+            "notify": {"enabled": False, "topic": ""} if guest or member else {
                 "enabled": cfg.notify.enabled, "topic": cfg.notify.topic,
             },
         }
@@ -289,14 +405,24 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/projects")
     async def projects(request: Request):
-        cfg = mgr(request).cfg
+        from . import catalog
+        m = mgr(request)
         scope = owner_id(request)
-        return [{"name": p.name, "description": p.description, "repo": bool(p.repo), "homelab": p.homelab,
-                 "target": p.target, "managed": p.managed} for p in cfg.projects.values() if p.owner_id == scope]
+        if request.state.access.role == "guest":
+            return []
+        return [catalog.public_project(p) for p in catalog.list_projects(m.cfg, m.db, scope)]
 
     @app.post("/projects", status_code=201)
     async def create_project(body: CreateProject, request: Request):
-        cfg = mgr(request).cfg
+        ident = request.state.access
+        if ident.role == "guest":
+            raise HarnessError(403, "demo access is read-only")
+        if ident.kind not in ("owner", "member") or not ident.bundled:
+            raise HarnessError(403, "project creation is only for the signed-in Tailscale owner or member")
+        m = mgr(request)
+        if ident.role == "member":
+            return m.create_member_project(ident.user_id, body.name, body.description, body.repo)
+        cfg = m.cfg
         if body.target != "tower" and body.target not in cfg.runners:
             raise HarnessError(400, f"runner {body.target!r} is not configured")
         project = config_mod.Project(name=body.name, description=body.description, target=body.target,
@@ -334,6 +460,31 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             raise HarnessError(413, "result too large")
         return {"accepted": m.hub.result(name, body.id, body.ok, body.value, body.error, body.kind)}
 
+    @app.post("/runners/{name}/update")
+    async def runner_update(name: str, request: Request):
+        m = mgr(request)
+        from .admin import require_admin
+        require_admin(request, mgr)
+        if name not in m.hub.state:
+            raise HarnessError(404, "unknown runner")
+        state = m.hub.state[name]
+        protocol = state.info.get("protocol")
+        public = m.cfg.public_url or str(request.base_url).rstrip("/")
+        fallback = (f"Run `harness update` on the Mac. If that command is unavailable, run "
+                    f"`curl -fsSL {public}/mac-client/install.sh | bash -s -- --server {public}`.")
+        if not m.hub.online(name):
+            raise HarnessError(409, f"runner is offline. {fallback}")
+        try:
+            remote_update_supported = int(protocol) == compat.PROTOCOLS["runner"]["max"]
+        except (TypeError, ValueError):
+            remote_update_supported = False
+        if not remote_update_supported:
+            raise HarnessError(409, f"runner is too old for remote update. {fallback}")
+        try:
+            return await m.hub.call(name, "update_client", {}, timeout=300, wait_if_offline=False)
+        except Exception as exc:
+            raise HarnessError(409, f"Mac client update failed: {exc}. {fallback}") from exc
+
     @app.get("/models")
     async def models(request: Request):
         cfg = mgr(request).cfg
@@ -344,6 +495,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def backends(request: Request):
         m = mgr(request)
         from .backend_state import local_view, view as backend_view
+        if request.state.access.role == "member":
+            return [local_view(m)]
         check_auth = request.query_params.get("auth") != "skip"
         names = list(m.cfg.backends)
         if check_auth:
@@ -370,6 +523,14 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         from .backend_state import view as backend_view
         return await asyncio.to_thread(backend_view, m, name, False)
 
+    @app.get("/smart-approvals")
+    async def smart_approvals(request: Request):
+        return require_owner(request).smart_approvals_status()
+
+    @app.put("/smart-approvals")
+    async def update_smart_approvals(body: SmartApprovalsUpdate, request: Request):
+        return require_owner(request).set_smart_approvals_mode(body.mode)
+
     @app.get("/models/status")
     async def models_status(request: Request):
         m = mgr(request)
@@ -392,10 +553,48 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             raise HarnessError(400, "image generation is disabled in config/harness.yaml")
         return m.images
 
+    def image_payload(job: dict, svc, request: Request, status: dict) -> dict:
+        from . import image_edit
+        parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
+        children = svc.db.image_children(job["id"])
+        if request.state.access.role == "guest":
+            children = [child for child in children if not image_edit.is_private(child)]
+        eligibility = image_edit.edit_eligibility(
+            job.get("width"), job.get("height"), max_pixels=svc.cfg.max_pixels)
+        return {**job, "service": status, "private": image_edit.is_private(job),
+                "editable": eligibility["editable"], "editable_reason": eligibility["reason"],
+                "parent": ({"id": parent["id"], "width": parent["width"], "height": parent["height"]}
+                           if parent else None),
+                "children": [{"id": child["id"], "operation": child.get("operation") or "generate",
+                              "scale": child.get("scale"), "status": child["status"],
+                              "upscale_model": child.get("upscale_model") or "", "width": child["width"],
+                              "height": child["height"]} for child in children]}
+
+    def visible_job(job, request, svc):
+        from . import image_edit
+        if job is None:
+            raise HarnessError(404, "no such image")
+        if request.state.access.role == "guest" and image_edit.is_private(job):
+            raise HarnessError(404, "no such image")
+        return job
+
+    async def read_upload(file: UploadFile | None, limit: int) -> bytes:
+        if file is None:
+            raise HarnessError(400, "file is required")
+        # Ignore the client filename entirely: uploads are stored as a generated id, never as a path.
+        data = await file.read(limit + 1)
+        if len(data) > limit:
+            raise HarnessError(400, f"image is too large (max {limit} bytes)")
+        return data
+
     @app.get("/images")
     async def list_images(request: Request, limit: int = 60):
+        from . import image_edit
         svc = images_service(request)
-        return {"status": svc.status(), "images": svc.db.list_images(limit=limit)}
+        visible_operations = tuple(image_edit.PUBLIC_OPERATIONS) if request.state.access.role == "guest" else ()
+        images = svc.db.list_images(limit=limit, operations=visible_operations)
+        status = await asyncio.to_thread(svc.status)
+        return {"status": status, "images": images}
 
     @app.post("/images", status_code=201)
     async def create_image(body: ImageRequest, request: Request):
@@ -404,6 +603,16 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         try:
             return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
                               resolution=body.resolution, seed=body.seed, upscale=body.upscale)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
+    @app.post("/images/uploads", status_code=201)
+    async def upload_image(request: Request, file: UploadFile = File(...)):
+        from .fileops import ToolError
+        require_owner(request)
+        svc = images_service(request)
+        try:
+            return svc.ingest_upload(await read_upload(file, svc.cfg.max_upload_bytes))
         except ToolError as e:
             raise HarnessError(400, str(e))
 
@@ -417,31 +626,79 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         """Drop an unused Images-tab warmup so the language model can come back."""
         return images_service(request).cooldown()
 
+    @app.post("/images/{iid}/edit", status_code=201)
+    async def edit_image(iid: str, request: Request, prompt: str = Form(...), mask: UploadFile = File(...),
+                         feather: int = Form(0), seed: int | None = Form(None)):
+        from .fileops import ToolError
+        require_owner(request)
+        svc = images_service(request)
+        parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+        try:
+            return svc.submit_edit(parent["id"], prompt, await read_upload(mask, svc.cfg.max_upload_bytes),
+                                   feather=feather, seed=seed)
+        except ToolError as e:
+            raise HarnessError(400, str(e))
+
     @app.post("/images/{iid}/upscale", status_code=201)
     async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
         from .fileops import ToolError
         svc = images_service(request)
+        parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
         try:
-            return svc.submit_upscale(iid.removesuffix(".png"), body.upscale)
+            return svc.submit_upscale(parent["id"], body.upscale)
         except ToolError as e:
             raise HarnessError(400, str(e))
+
+    @app.post("/images/{iid}/cancel")
+    async def cancel_image(iid: str, request: Request):
+        from .fileops import ToolError
+        require_owner(request)
+        svc = images_service(request)
+        job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+        try:
+            return svc.cancel(job["id"])
+        except ToolError as e:
+            raise HarnessError(409, str(e))
+
+    @app.delete("/images/{iid}")
+    async def delete_image(iid: str, request: Request):
+        from .fileops import ToolError
+        require_owner(request)
+        svc = images_service(request)
+        job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+        backup = Path(mgr(request).cfg.backup.dir) if mgr(request).cfg.backup.dir else None
+        try:
+            return await svc.delete(job["id"], backup_dir=backup)
+        except ToolError as e:
+            raise HarnessError(404, str(e))
 
     @app.get("/images/{iid}")
     async def get_image(iid: str, request: Request):
         svc = images_service(request)
-        job = svc.db.get_image(iid.removesuffix(".png"))
-        if job is None:
-            raise HarnessError(404, "no such image")
-        if iid.endswith(".png"):
-            if job["status"] != "done" or not svc.path(job).exists():
-                raise HarnessError(404, "image not ready")
-            return FileResponse(svc.path(job), media_type="image/png", headers={"Cache-Control": "max-age=86400"})
-        parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
-        return {**job, "service": svc.status(), "parent": ({"id": parent["id"], "width": parent["width"],
-                "height": parent["height"]} if parent else None),
-                "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
-                              "upscale_model": c.get("upscale_model") or "", "width": c["width"], "height": c["height"]}
-                             for c in svc.db.image_children(job["id"])]}
+        variant = "json"
+        raw = iid
+        if raw.endswith(".source.png"):
+            variant, raw = "source", raw[: -len(".source.png")]
+        elif raw.endswith(".mask.png"):
+            variant, raw = "mask", raw[: -len(".mask.png")]
+        elif raw.endswith(".png"):
+            variant, raw = "png", raw[: -len(".png")]
+        job = visible_job(svc.db.get_image(raw), request, svc)
+        owner = request.state.access.role == "owner"
+        if variant == "json":
+            status = await asyncio.to_thread(svc.status)
+            return image_payload(job, svc, request, status)
+        from . import image_edit
+        if variant in ("source", "mask") and not owner:
+            raise HarnessError(404, "image not ready")
+        path = {"png": svc.path, "source": svc.source_path, "mask": svc.mask_path}[variant](job)
+        if variant == "png" and job["status"] != "done":
+            raise HarnessError(404, "image not ready")
+        if not path.exists():
+            raise HarnessError(404, "image not ready")
+        headers = {"Cache-Control": "private, no-store"} if image_edit.is_private(job) or variant != "png" else {
+            "Cache-Control": "max-age=86400"}
+        return FileResponse(path, media_type="image/png", headers=headers)
 
     # GPU contention guard
     @app.get("/gpu")
@@ -551,6 +808,102 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return {"profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
                 "last_commit": saved}
 
+    def skills_or_400(m: Manager):
+        if m.skills is None:
+            raise HarnessError(400, "instruction skills are disabled")
+        return m.skills
+
+    def skill_op(fn):
+        from .skills import SkillError
+        try:
+            return fn()
+        except SkillError as e:
+            raise HarnessError(e.status, str(e)) from e
+        except sqlite3.IntegrityError as e:
+            raise HarnessError(409, "skill store constraint failed") from e
+
+    def skills_owner(request: Request):
+        require_owner(request)
+        return skills_or_400(mgr(request))
+
+    @app.get("/skills")
+    async def skills_overview(request: Request):
+        m = require_owner(request)
+        if m.skills is None:
+            return {"enabled": False, "proposals": [], "installed": []}
+        return m.skills.list_overview()
+
+    @app.get("/skills/enabled")
+    async def skills_enabled(request: Request):
+        m = require_owner(request)
+        if m.skills is None:
+            return []
+        return m.skills.list_enabled()
+
+    @app.get("/skills/proposals/{pid}")
+    async def skill_proposal(pid: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.get_proposal(pid, include_body=True))
+
+    @app.post("/skills/proposals/{pid}/install")
+    async def skill_install(pid: str, body: SkillInstall, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.install(pid, body.content_hash))
+
+    @app.post("/skills/proposals/{pid}/reject")
+    async def skill_reject(pid: str, body: SkillReject, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.reject(pid, body.reason))
+
+    @app.post("/skills/proposals/{pid}/reopen")
+    async def skill_reopen(pid: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.reopen(pid))
+
+    @app.post("/skills/proposals/{pid}/review")
+    async def skill_hosted_review(pid: str, request: Request):
+        store = skills_owner(request)
+        if store.reviewer is None:
+            raise HarnessError(400, "skill review is not available")
+        return skill_op(lambda: store.reviewer.request_hosted(pid))
+
+    @app.delete("/skills/proposals/{pid}", status_code=204)
+    async def skill_delete_draft(pid: str, request: Request):
+        store = skills_owner(request)
+        skill_op(lambda: store.delete_draft(pid))
+
+    @app.post("/skills/{slug}/enable")
+    async def skill_enable(slug: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.set_enabled(slug, True))
+
+    @app.post("/skills/{slug}/disable")
+    async def skill_disable(slug: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.set_enabled(slug, False))
+
+    @app.post("/skills/{slug}/rollback")
+    async def skill_rollback(slug: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.rollback(slug))
+
+    @app.post("/skills/{slug}/uninstall")
+    async def skill_uninstall(slug: str, request: Request):
+        store = skills_owner(request)
+        skill_op(lambda: store.uninstall(slug))
+        return {"ok": True}
+
+    @app.put("/skills/{slug}/projects")
+    async def skill_projects(slug: str, body: SkillAllowlist, request: Request):
+        require_owner(request)
+        m = mgr(request)
+        return skill_op(lambda: skills_or_400(m).set_allowlist(slug, body.projects, list(m.cfg.projects)))
+
+    @app.get("/skills/{slug}/export")
+    async def skill_export(slug: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.export_bundle(slug))
+
     @app.get("/search")
     async def search_sessions(request: Request, q: str = "", project: str = "", limit: int = 20):
         """Full-text search over past sessions. Passages mark matches with \\u0002 ... \\u0003."""
@@ -560,13 +913,14 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             return {"query": q, "mode": "all", "results": []}
         if not m.cfg.search.enabled:
             raise HarnessError(400, "session search is disabled in config/harness.yaml")
-        return await asyncio.to_thread(search.search, m.db, q, project, max(1, min(limit, 50)))
+        return await asyncio.to_thread(search.search, m.db, q, project, max(1, min(limit, 50)),
+                                       "", owner_id(request))
 
     @app.post("/sessions", status_code=201)
     async def create_session(body: CreateSession, request: Request):
         m = mgr(request)
         s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
-                     model=body.model, title=body.title, owner_id=owner_id(request))
+                     model=body.model, title=body.title, owner_id=owner_id(request), skills=body.skills)
         return m.summary(s)
 
     @app.get("/sessions/{ref}")
@@ -603,15 +957,27 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     @app.get("/maintenance")
     async def maintenance(request: Request):
-        return await mgr(request).maintenance.usage()
+        return await require_owner(request).maintenance.usage()
 
     @app.post("/maintenance/cleanup")
     async def maintenance_cleanup(request: Request):
-        return await mgr(request).maintenance.cleanup()
+        return await require_owner(request).maintenance.cleanup()
 
     @app.post("/maintenance/backup")
     async def maintenance_backup(request: Request):
-        return await mgr(request).maintenance.backup()
+        return await require_owner(request).maintenance.backup()
+
+    @app.post("/maintenance/image-archive/retention/preview")
+    async def image_archive_retention_preview(request: Request):
+        return await asyncio.to_thread(require_owner(request).image_archive.retention_preview)
+
+    @app.post("/maintenance/image-archive/retention/apply")
+    async def image_archive_retention_apply(body: ImageArchiveRetentionApply, request: Request):
+        from .image_archive import ImageArchiveError
+        try:
+            return await asyncio.to_thread(require_owner(request).image_archive.apply_retention, body.confirmation)
+        except ImageArchiveError as e:
+            raise HarnessError(409, str(e))
 
     @app.get("/sessions/{ref}/approvals")
     async def approvals(ref: str, request: Request, all: bool = False):
@@ -696,10 +1062,10 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def get_job(jid: str, request: Request):
         m = jobs_on(request)
         if request.state.access.role == "guest":
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         job = m.db.get_job(jid)
         if job is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         return job_view(m, job, runs=15)
 
     @app.put("/jobs/{jid}")
@@ -709,7 +1075,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = jobs_on(request)
         old = m.db.get_job(jid)
         if old is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         try:
             job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
         except (ValueError, CronError) as e:
@@ -721,7 +1087,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.delete("/jobs/{jid}", status_code=204)
     async def delete_job(jid: str, request: Request):
         if not jobs_on(request).db.delete_job(jid):
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
 
     @app.post("/jobs/{jid}/run", status_code=201)
     async def run_job(jid: str, request: Request):
@@ -729,7 +1095,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = jobs_on(request)
         job = m.db.get_job(jid)
         if job is None:
-            raise HarnessError(404, "no such job")
+            raise HarnessError(404, NO_SUCH_JOB)
         if job["last_session_id"] and m._is_active(job["last_session_id"]):
             raise HarnessError(409, "the previous run is still going")
         sid = m.jobs.run(job, manual=True)
@@ -791,9 +1157,12 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
         async def stream():
             sub = m.bus.subscribe("*")
+            epoch = m.stream_epoch.get(scope, 0)
             try:
                 yield ": connected\n\n"
                 while True:
+                    if m.stream_epoch.get(scope, 0) != epoch:
+                        return
                     try:
                         e = await asyncio.wait_for(sub.queue.get(), timeout=15)
                     except asyncio.TimeoutError:
@@ -805,7 +1174,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                     if e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope:
                         if e["type"] == "run_finished":
                             e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}
-                        yield sse(e)
+                        # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
+                        yield sse({**e, "seq": None})
             finally:
                 m.bus.unsubscribe("*", sub)
 
@@ -823,6 +1193,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         async def stream():
             sub = m.bus.subscribe(sid)
             last = after
+            epoch = m.stream_epoch.get(owner_id(request), 0)
             try:
                 yield ": connected\n\n"
                 for e in m.db.events(sid, after):
@@ -831,6 +1202,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                 if not follow:
                     return
                 while True:
+                    if m.stream_epoch.get(owner_id(request), 0) != epoch:
+                        return
                     if sub.overflowed:
                         sub.overflowed = False
                         while not sub.queue.empty():

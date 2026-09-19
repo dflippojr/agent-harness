@@ -13,7 +13,9 @@ concurrency:
 
 jobs:
   test:
-    runs-on: [self-hosted, Windows, X64, agent-harness-tower]
+    # Pytest-only runner. SonarQube and automated review stay on
+    # `agent-harness-tower` so those jobs do not share this queue.
+    runs-on: [self-hosted, Windows, X64, agent-harness-ci]
     steps:
       - uses: actions/checkout@v4
 

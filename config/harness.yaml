@@ -149,6 +149,8 @@ backup:
   dir: D:/My Backups/agent-harness
   at: "03:30"
   keep_days: 14
+  image_archive_keep_days: 0       # 0 = keep forever; deletion is still an explicit owner action
+  image_archive_min_free_gb: 1
 
 # Memory library for agents (harness/memory_library.py). The daemon keeps its own clone and pulls it at most every
 # refresh_minutes. Only these categories are visible; sensitive ones (health, emotions, feelings, finance,
@@ -192,6 +194,18 @@ jobs:
   enabled: true
   poll_seconds: 30
 
+# Instruction-only skills (harness/skills.py): agents may stage a draft SKILL.md for the owner to review. Installation
+# is an explicit owner approval of an exact content hash; new skills stay disabled until the owner enables them for a
+# project allowlist or a New task. Skills never add tools, change approvals, or expand access. Hosted review never
+# runs unless the owner starts it (skills.reviewer_base_url / reviewer_model).
+skills:
+  enabled: true
+  local_review: true
+  proposal_rate_per_hour: 8
+  reviewer_base_url: ""
+  reviewer_model: ""
+  reviewer_api_key_file: ""
+
 # Claude Code Remote Control servers (harness/remote_control.py): Settings -> Claude Remote Control, the app API
 # (/api/v1/remote-control, scope remote_control), and the agent tool open_claude_remote_control (always asks). Each
 # server runs the unmodified `claude remote-control` in a tower project's folder; sessions opened from the Claude app
@@ -225,18 +239,40 @@ endpoint:
   embedding_model: ""        # e.g. nomic-embed-text-v1.5
   embedding_context_tokens: 8192
 
+# Optional hosted reviewer for tagged shell approvals (issue #18). Off by default. After setup, mode is
+# shadow until the owner switches to auto. Secret values stay in the referenced file; only the opaque
+# name is stored. Apps and guests cannot enable this or select its credential.
+# smart_approvals:
+#   enabled: false
+#   provider: openai          # openai | anthropic
+#   model: gpt-4.1-mini
+#   secret_ref: smart-reviewer  # opaque name in provider_secret_files
+#   timeout_seconds: 8
+#   min_confidence: 0.85
+#   mode: shadow              # shadow | auto | off
+#   proxy: http://127.0.0.1:8890  # optional provider egress proxy
+
 # Local image generation with ComfyUI (harness/images.py). Jobs stop llama-server (same pause flag as the GPU guard)
 # and start ComfyUI from C:/AI/ComfyUI. Opening the Images tab warms ComfyUI without loading a checkpoint; the GPU
 # is given back as soon as the queue is empty.
 # Models in C:/AI/comfy-models: fast = Z-Image-Turbo, quality = Qwen-Image-2512 (both Apache 2.0).
+# Masked editing is the optional image_edit component (Qwen-Image-Edit fp8); it is off unless explicitly enabled
+# and is never downloaded by an ordinary install or daemon upgrade.
+# Optional quality-fast = the same Qwen base plus the lightx2v Lightning 4-step LoRA in loras/.
+# Optional flux-fast = FLUX.2 klein 4B FP8 (Apache 2.0; ops/images-models.ps1 install flux-fast).
+# Optional model files are never downloaded on daemon start.
 # Optional Real-ESRGAN 2×/4× weights (BSD-3-Clause) live in <comfy_dir>/ComfyUI/models/upscale_models
 # unless upscale_dir is set. Generation still works when they are absent.
 images:
   enabled: true
+  edit_enabled: false
   comfy_dir: C:/AI/ComfyUI
+  models_dir: C:/AI/comfy-models
   port: 8188
   work_dir: D:/Agents/harness/images-work
   linger_seconds: 0
+  max_upload_bytes: 20971520
+  max_pixels: 20000000
   upscale_dir: ""
   upscale_max_pixels: 36000000
   upscale_tile: 512

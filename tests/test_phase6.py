@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import json
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -286,6 +287,108 @@ def test_inference_gate_endpoint_first_with_fairness():
     asyncio.run(body())
 
 
+async def _wait_until(predicate, timeout=2):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out waiting for gate state")
+
+
+def test_inference_gate_queued_endpoint_refused_when_exclusive():
+    """A request already queued behind a starved agent must not enter once images hold the GPU."""
+    from harness.scheduler import GpuExclusive, InferenceGate
+
+    async def body():
+        gate = InferenceGate(fair_seconds=0)  # fairness is immediate; no GPU or model server
+        initial = await gate.endpoint_request()
+        assert gate.endpoint_active == 1
+
+        agent_task = asyncio.create_task(gate.agent_turn())
+        await _wait_until(lambda: bool(gate._agent_waiting_since))
+        endpoint_task = asyncio.create_task(gate.endpoint_request())
+        await _wait_until(lambda: gate.endpoint_waiting == 1)
+
+        exclusive_task = asyncio.create_task(gate.acquire_exclusive())
+        await _wait_until(lambda: gate.exclusive_waiting == 1)
+        assert not (gate.exclusive_active and gate.endpoint_active)
+
+        await initial.release()
+        exclusive = await asyncio.wait_for(exclusive_task, 2)
+        assert gate.exclusive_active is True
+        assert gate.endpoint_active == 0
+
+        agent_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await agent_task
+        assert not gate._agent_waiting_since
+        assert gate.agent_active == 0
+
+        with pytest.raises(GpuExclusive):
+            await asyncio.wait_for(endpoint_task, 2)
+        assert gate.exclusive_active is True
+        assert gate.endpoint_active == 0
+        assert gate.endpoint_waiting == 0
+        assert gate.agent_active == 0
+
+        await exclusive.release()
+        slot = await gate.endpoint_request()
+        assert gate.endpoint_active == 1 and not gate.exclusive
+        await slot.release()
+    asyncio.run(body())
+
+
+def test_inference_gate_cancellation_and_exclusive_rejection_counters():
+    from harness.scheduler import GpuExclusive, InferenceGate, QueueFull
+
+    async def body():
+        gate = InferenceGate(max_waiting=2, fair_seconds=90)
+
+        busy = await gate.agent_turn()
+        waiting = asyncio.create_task(gate.endpoint_request())
+        await _wait_until(lambda: gate.endpoint_waiting == 1)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+
+        queued = asyncio.create_task(gate.endpoint_request())
+        await _wait_until(lambda: gate.endpoint_waiting == 1)
+        extra = asyncio.create_task(gate.endpoint_request())
+        await _wait_until(lambda: gate.endpoint_waiting == 2)
+        with pytest.raises(QueueFull):
+            await gate.endpoint_request()
+        extra.cancel()
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await extra
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+        await busy.release()
+
+        exclusive = await gate.acquire_exclusive()
+        with pytest.raises(GpuExclusive):
+            await gate.endpoint_request()
+        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+        agent = asyncio.create_task(gate.agent_turn())
+        await _wait_until(lambda: bool(gate._agent_waiting_since))
+        agent.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await agent
+        assert not gate._agent_waiting_since and gate.agent_active == 0
+        await exclusive.release()
+        assert not gate.exclusive
+
+        slot = await gate.endpoint_request()
+        await slot.release()
+        turn = await gate.agent_turn()
+        await turn.release()
+        assert gate.endpoint_active == 0 and gate.agent_active == 0
+    asyncio.run(body())
+
+
 # 6d: image generation
 PNG = b"\x89PNG\r\n\x1a\nfake"
 
@@ -325,7 +428,15 @@ def fake_comfy(fail_prompts=(), fail_upscale=False):
                                                        "outputs": {"5": {"images": [{"filename": "up.png",
                                                                                      "subfolder": "harness",
                                                                                      "type": "output"}]}}}})
-            text = next(n["inputs"]["text"] for n in graph.values() if n["class_type"] == "CLIPTextEncode")
+            text = ""
+            for node in graph.values():
+                inputs = node.get("inputs") or {}
+                if node.get("class_type") == "CLIPTextEncode" and inputs.get("text"):
+                    text = inputs["text"]
+                    break
+                if node.get("class_type") == "TextEncodeQwenImageEdit" and (inputs.get("prompt") or "").strip():
+                    text = inputs["prompt"]
+                    break
             if text in fail_prompts:
                 return httpx.Response(200, json={pid: {"status": {"status_str": "error", "completed": False, "messages": [
                     ["execution_error", {"exception_message": "CUDA out of memory"}]]}}})
@@ -353,7 +464,8 @@ def image_manager(tmp_path, steps=None, fail_prompts=(), fail_upscale=False, wei
     upscale_dir = tmp_path / "upscale-weights"
     upscale_dir.mkdir(parents=True, exist_ok=True)
     cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2,
-                              comfy_dir=str(tmp_path / "comfy"), upscale_dir=str(upscale_dir))
+                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"),
+                              upscale_dir=str(upscale_dir))
     if weights:
         from harness.upscale import MODELS
         for spec in MODELS.values():
@@ -447,11 +559,165 @@ def test_images_api_and_generate_image_for_tower_and_mac(tmp_path):
         assert r.status_code == 200 and r.content == PNG and r.headers["content-type"] == "image/png"
         listing = client.get("/images").json()
         assert listing["images"][0]["id"] == job["id"] and "fast" in listing["status"]["models"]
+        assert "quality-fast" in listing["status"]["models"]
+        assert listing["status"]["modes"]["quality"]["available"] is True
+        assert listing["status"]["modes"]["quality-fast"]["available"] is False
+        assert "SHA-256" in listing["status"]["modes"]["quality-fast"]["setup"]
+        assert client.post("/images", json={"prompt": "x", "model": "quality-fast"}).status_code == 400
         assert listing["status"]["resolutions"]["high"]["sizes"]["16:9"] == [1664, 928]
         tower = {"id": "t", "project": "scratch", "target": "tower", "model": "fake", "workspace": str(tmp_path)}
         mac = {**tower, "project": "mac", "target": "macbook"}
         assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(tower)}
         assert "generate_image" in {k.tool_names[0] for k in m.runner.daemon_toolkits(mac)}
+        assert "quality-fast" not in m.images.schemas()[0]["function"]["parameters"]["properties"]["model"]["description"]
+
+
+def test_quality_fast_graph_uses_official_lightning_settings():
+    from harness.images import LIGHTNING_LORA, workflow
+
+    quality = workflow("quality", "a cat", 1328, 1328, 1, "p")
+    lightning = workflow("quality-fast", "a cat", 1328, 1328, 1, "p")
+    turbo = workflow("fast", "a cat", 1024, 1024, 1, "p")
+    q_sampler = next(node["inputs"] for node in quality.values() if node["class_type"] == "KSampler")
+    l_sampler = next(node["inputs"] for node in lightning.values() if node["class_type"] == "KSampler")
+    t_sampler = next(node["inputs"] for node in turbo.values() if node["class_type"] == "KSampler")
+    assert q_sampler["steps"] == 50 and q_sampler["cfg"] == 4 and q_sampler["sampler_name"] == "euler"
+    assert "LoraLoaderModelOnly" not in {node["class_type"] for node in quality.values()}
+    assert quality["222"]["inputs"] == {"model": ["226", 0], "shift": 3.1}
+    assert l_sampler["steps"] == 4 and l_sampler["cfg"] == 1
+    assert l_sampler["sampler_name"] == "euler" and l_sampler["scheduler"] == "simple" and l_sampler["denoise"] == 1
+    lora = next(node["inputs"] for node in lightning.values() if node["class_type"] == "LoraLoaderModelOnly")
+    assert lora == {"model": ["226", 0], "lora_name": LIGHTNING_LORA["filename"], "strength_model": 1}
+    assert lightning["222"]["inputs"] == {"model": ["221", 0], "shift": 3.1}
+    assert t_sampler["steps"] == 8
+    assert LIGHTNING_LORA["bytes"] == 1698951104
+    assert LIGHTNING_LORA["sha256"] == "ad12117461cb41e2ea637fec8df6392ce8e8550c47fbe2b829ed3deb98262066"
+    assert LIGHTNING_LORA["revision"] == "a52649c9d0f6e1a248bff13f0df33bb8a2abdb52"
+
+
+def test_missing_lightning_lora_disables_only_quality_fast(tmp_path):
+    m, _, _ = image_manager(tmp_path)
+    status = m.images.status()
+    assert status["modes"]["fast"]["available"] and status["modes"]["quality"]["available"]
+    assert status["modes"]["quality-fast"]["available"] is False
+    assert status["modes"]["quality-fast"]["optional"] is True
+    assert "will not fall back" in status["modes"]["quality-fast"]["setup"]
+    with pytest.raises(ToolError, match="quality-fast needs the Apache-2.0"):
+        m.images.submit("a poster", model="quality-fast")
+    assert m.db.list_images() == []
+
+
+def test_quality_fast_job_records_lora_and_shares_the_gpu_batch(tmp_path):
+    from harness.images import LIGHTNING_LORA
+
+    async def body():
+        m, server, state = image_manager(tmp_path)
+        m.images._lora_available = True
+        await m.start(maintenance=False)
+        assert "quality-fast" in m.images.schemas()[0]["function"]["parameters"]["properties"]["model"]["description"]
+        a = m.images.submit("poster text", model="quality", seed=7)
+        b = m.images.submit("poster text", model="quality-fast", seed=7)
+        done = [await m.images.wait(job["id"]) for job in (a, b)]
+        assert [job["status"] for job in done] == ["done", "done"]
+        assert done[0]["lora"] == "" and done[0]["base_model"] == "qwen_image_2512_fp8_e4m3fn.safetensors"
+        assert done[1]["model"] == "quality-fast"
+        assert done[1]["lora"] == LIGHTNING_LORA["filename"]
+        assert done[1]["lora_revision"] == LIGHTNING_LORA["revision"]
+        assert done[1]["lora_sha256"] == LIGHTNING_LORA["sha256"]
+        assert done[1]["seed"] == 7 and done[1]["width"] == 1328 and done[1]["bytes"] == len(PNG)
+        steps = [next(node["inputs"]["steps"] for node in graph.values() if node["class_type"] == "KSampler")
+                 for graph in state["graphs"]]
+        assert steps == [50, 4]
+        assert "LoraLoaderModelOnly" not in {node["class_type"] for node in state["graphs"][0].values()}
+        lora = next(node["inputs"]["lora_name"] for node in state["graphs"][1].values()
+                    if node["class_type"] == "LoraLoaderModelOnly")
+        assert lora == LIGHTNING_LORA["filename"]
+        for _ in range(200):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.01)
+        assert server.calls == ["stop", "start"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_lightning_lora_status_uses_extra_paths_and_rejects_wrong_size(tmp_path):
+    from harness.config import ImagesConfig
+    from harness.images import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status, verify_lightning_lora
+
+    alt = tmp_path / "alt" / "loras"
+    alt.mkdir(parents=True)
+    payload = b"not-the-lora"
+    (alt / LIGHTNING_LORA["filename"]).write_bytes(payload)
+    comfy = tmp_path / "comfy" / "ComfyUI"
+    comfy.mkdir(parents=True)
+    (comfy / "extra_model_paths.yaml").write_text(
+        f"harness:\n  base_path: {(tmp_path / 'alt').as_posix()}\n  loras: loras\n", encoding="utf-8")
+    cfg = ImagesConfig(models_dir=str(tmp_path / "models"), comfy_dir=str(tmp_path / "comfy"))
+    found = lightning_lora_path(cfg)
+    assert found == alt / LIGHTNING_LORA["filename"]
+    status = lightning_lora_status(cfg)
+    assert status["available"] is False and status["reason"] == "size"
+    assert str(LIGHTNING_LORA["bytes"]) in status["setup"]
+    assert verify_lightning_lora(found)
+
+
+def test_lightning_lora_install_copy_shadows_pinned_models_dir(tmp_path, monkeypatch):
+    """ComfyUI searches install models/loras before extra_model_paths / models_dir."""
+    import hashlib
+    from harness.config import ImagesConfig
+    from harness.images import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status
+
+    payload = b"pinned-lora-ok"
+    monkeypatch.setitem(LIGHTNING_LORA, "bytes", len(payload))
+    monkeypatch.setitem(LIGHTNING_LORA, "sha256", hashlib.sha256(payload).hexdigest())
+    models = tmp_path / "models" / "loras"
+    models.mkdir(parents=True)
+    (models / LIGHTNING_LORA["filename"]).write_bytes(payload)
+    install = tmp_path / "comfy" / "ComfyUI" / "models" / "loras"
+    install.mkdir(parents=True)
+    (install / LIGHTNING_LORA["filename"]).write_bytes(b"truncated")
+    cfg = ImagesConfig(models_dir=str(tmp_path / "models"), comfy_dir=str(tmp_path / "comfy"))
+    found = lightning_lora_path(cfg)
+    assert found == install / LIGHTNING_LORA["filename"]
+    status = lightning_lora_status(cfg)
+    assert status["available"] is False
+    assert "shadow" in status["setup"].lower()
+    assert str(models / LIGHTNING_LORA["filename"]) in status["setup"].replace("\\", "/") or \
+        str(models / LIGHTNING_LORA["filename"]) in status["setup"]
+
+
+def test_quality_fast_hashes_the_file_comfyui_would_load(tmp_path, monkeypatch):
+    import hashlib
+    from harness.images import LIGHTNING_LORA
+
+    payload = b"pinned-lora-ok"
+    unpinned = b"unpinned-copy!"
+    assert len(payload) == len(unpinned)
+    monkeypatch.setitem(LIGHTNING_LORA, "bytes", len(payload))
+    monkeypatch.setitem(LIGHTNING_LORA, "sha256", hashlib.sha256(payload).hexdigest())
+    m, _, _ = image_manager(tmp_path)
+    models = Path(m.cfg.images.models_dir) / "loras"
+    models.mkdir(parents=True)
+    (models / LIGHTNING_LORA["filename"]).write_bytes(payload)
+    install = Path(m.cfg.images.comfy_dir) / "ComfyUI" / "models" / "loras"
+    install.mkdir(parents=True)
+    (install / LIGHTNING_LORA["filename"]).write_bytes(unpinned)
+    with pytest.raises(ToolError, match="SHA-256"):
+        m.images.submit("poster text", model="quality-fast")
+
+
+def test_app_root_lists_quality_fast_without_enabling_it(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+
+    m, _, _ = image_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        root = client.get("/api/v1").json()
+        assert root["api_version"] == "1.13"
+        assert root["image_modes"]["fast"]["available"] is True
+        assert root["image_modes"]["quality-fast"]["available"] is False
+        assert root["image_modes"]["quality-fast"]["label"] == "Qwen quality (fast, 4-step)"
 
 
 def test_image_warmup_holds_gpu_until_cooldown(tmp_path):
@@ -594,7 +860,8 @@ def test_agent_generate_image_saves_into_mac_workspace(tmp_path):
     steps = [Completion(tool_calls=[call("generate_image", 0, prompt="app icon", filename="assets/icon")]),
              Completion(content="made the icon")]
     cfg = mac_cfg(tmp_path)
-    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2)
+    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2,
+                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"))
     m = Manager(cfg, chat=Script(steps))
     m.images.control = FakeServer()
     handler, _ = fake_comfy()
@@ -714,6 +981,117 @@ def test_app_scopes_and_isolation(tmp_path):
         # app tokens without the inference scope can't use the model endpoint
         m.cfg.endpoint.enabled = True
         assert client.post("/v1/chat/completions", headers=H(a), json={"messages": []}).status_code == 401
+
+
+def test_sessions_all_read_vs_mutation_matrix(tmp_path):
+    client, m = app_client(tmp_path, [Completion(content="ok")])
+    with client:
+        a = client.post("/keys", json={"name": "app-a", "kind": "app",
+                                       "scopes": ["sessions", "approvals"]}).json()["key"]
+        b = client.post("/keys", json={"name": "app-b", "kind": "app", "scopes": ["sessions"]}).json()["key"]
+        reader = client.post("/keys", json={"name": "reader", "kind": "app",
+                                            "scopes": ["sessions:all"]}).json()["key"]
+        broad = client.post("/keys", json={"name": "broad", "kind": "app",
+                                           "scopes": ["sessions", "sessions:all"]}).json()["key"]
+        wide = client.post("/keys", json={"name": "wide", "kind": "app",
+                                          "scopes": ["sessions", "sessions:all", "approvals"]}).json()["key"]
+        owner = client.post("/keys", json={"name": "control-center", "kind": "owner",
+                                           "scopes": ["admin"]}).json()["key"]
+        H = lambda k: {"Authorization": f"Bearer {k}"}  # noqa: E731
+
+        owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
+        a_sid = client.post("/api/v1/sessions", headers=H(a), json={"prompt": "a task"}).json()["id"]
+        b_sid = client.post("/api/v1/sessions", headers=H(b), json={"prompt": "b task"}).json()["id"]
+        sessions = {"owner": owner_sid, "a": a_sid, "b": b_sid}
+        for sid in sessions.values():
+            wait_for(lambda sid=sid: client.get(f"/sessions/{sid}").json()["status"] == "done")
+
+        def event_count(sid, type_):
+            return sum(1 for e in m.db.events(sid) if e["type"] == type_)
+
+        read_rows = [
+            ("a", a, {"owner": 404, "a": 200, "b": 404}, {a_sid}),
+            ("b", b, {"owner": 404, "a": 404, "b": 200}, {b_sid}),
+            ("reader", reader, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
+            ("broad", broad, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
+            ("owner", owner, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
+        ]
+        read_paths = (
+            "/api/v1/sessions/{sid}",
+            "/api/v1/sessions/{sid}/events?follow=false",
+            "/api/v1/sessions/{sid}/tool_calls",
+            "/api/v1/sessions/{sid}/approvals",
+        )
+        for name, token, expected, listed in read_rows:
+            for label, sid in sessions.items():
+                for path in read_paths:
+                    r = client.get(path.format(sid=sid), headers=H(token))
+                    assert r.status_code == expected[label], (name, path, label, r.status_code, r.text)
+            assert {s["id"] for s in client.get("/api/v1/sessions", headers=H(token)).json()} == listed
+
+        mutate_rows = ((a, {a_sid}), (b, {b_sid}), (broad, set()), (owner, {owner_sid, a_sid, b_sid}))
+        for token, allowed_sids in mutate_rows:
+            for label, sid in sessions.items():
+                payload = f"injected-{token[-8:]}-{label}"
+                msg, ctx = {"content": payload}, {"context": [{"title": "Injected", "content": payload}]}
+                before_msg, before_ctx = event_count(sid, "user_message"), event_count(sid, "app_context")
+                cancel = client.post(f"/api/v1/sessions/{sid}/cancel", headers=H(token))
+                send = client.post(f"/api/v1/sessions/{sid}/messages", headers=H(token), json=msg)
+                added = client.post(f"/api/v1/sessions/{sid}/context", headers=H(token), json=ctx)
+                if sid in allowed_sids:
+                    assert cancel.status_code in (200, 409), (label, cancel.status_code, cancel.text)
+                    assert send.status_code == 200, (label, send.status_code, send.text)
+                    assert added.status_code == 200, (label, added.status_code, added.text)
+                    assert event_count(sid, "user_message") == before_msg + 1
+                    assert event_count(sid, "app_context") == before_ctx + 1
+                else:
+                    assert send.status_code == 404, (label, send.status_code, send.text)
+                    assert added.status_code == 404
+                    assert cancel.status_code == 404
+                    assert event_count(sid, "user_message") == before_msg
+                    assert event_count(sid, "app_context") == before_ctx
+                    assert not any(payload in (e["data"].get("content") or "") for e in m.db.events(sid)
+                                   if e["type"] in ("user_message", "app_context"))
+
+        reader_msg, reader_ctx = {"content": "reader-inject"}, {"context": [{"title": "x", "content": "y"}]}
+        for sid in sessions.values():
+            before = event_count(sid, "user_message")
+            assert client.post(f"/api/v1/sessions/{sid}/messages", headers=H(reader),
+                               json=reader_msg).status_code == 403
+            assert client.post(f"/api/v1/sessions/{sid}/context", headers=H(reader),
+                               json=reader_ctx).status_code == 403
+            assert client.post(f"/api/v1/sessions/{sid}/cancel", headers=H(reader)).status_code == 403
+            assert event_count(sid, "user_message") == before
+
+        m.db.insert_app_tool_call(a_sid, "call-a", "lookup", {"x": 1})
+        assert client.get(f"/api/v1/sessions/{a_sid}/tool_calls", headers=H(broad)).status_code == 200
+        assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(broad),
+                           json={"output": "nope"}).status_code == 404
+        assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(b),
+                           json={"output": "nope"}).status_code == 404
+        owner_tool = client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(owner),
+                                 json={"output": "nope"})
+        assert owner_tool.status_code == 403 and "only the app that registered" in owner_tool.json()["detail"]
+        assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(a),
+                           json={"output": "yes"}).status_code == 200
+
+        m.db.insert_approval({"id": "appr-a", "session_id": a_sid, "tool_call_id": "native-1",
+                              "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
+        m.db.insert_approval({"id": "appr-o", "session_id": owner_sid, "tool_call_id": "native-2",
+                              "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
+        assert client.get(f"/api/v1/sessions/{a_sid}/approvals", headers=H(broad)).status_code == 200
+        assert client.post(f"/api/v1/sessions/{a_sid}/approvals/appr-a", headers=H(wide),
+                           json={"decision": "approve"}).status_code == 404
+        assert client.post(f"/api/v1/sessions/{owner_sid}/approvals/appr-o", headers=H(wide),
+                           json={"decision": "approve"}).status_code == 404
+        assert client.post(f"/api/v1/sessions/{a_sid}/approvals/appr-a", headers=H(a),
+                           json={"decision": "approve", "note": "mine"}).status_code == 200
+        decided = client.post(f"/api/v1/sessions/{owner_sid}/approvals/appr-o", headers=H(owner),
+                              json={"decision": "deny", "note": "owner"})
+        assert decided.status_code == 200 and decided.json()["status"] == "denied"
+
+        bundled = client.post(f"/api/v1/sessions/{owner_sid}/messages", json={"content": "from bundled"})
+        assert bundled.status_code == 200
 
 
 def test_setup_config_writes_a_loadable_config(tmp_path, capsys):

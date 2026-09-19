@@ -1,15 +1,30 @@
-<# Registers a pinned GitHub Actions runner as a hidden per-user logon task. The registration token is used once. #>
+<#
+.SYNOPSIS
+  Registers a pinned GitHub Actions runner as a hidden per-user logon task.
+
+.DESCRIPTION
+  The registration token is used once and is not saved. Default values install
+  the original tower runner (tower-only jobs). Pass -Labels
+  agent-harness-ci and a distinct -InstallDir / -Name / -TaskName for the
+  pytest-only runner so those jobs do not share a queue with other tower jobs.
+
+.EXAMPLE
+  $token = gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
+  .\ops\github\install-runner.ps1 -Token $token
+  .\ops\github\install-runner.ps1 -Token $token -InstallDir D:\Agents\github-runner-ci -Name dflippotower-agent-harness-ci -TaskName AgentHarness-GitHubRunner-CI -Labels agent-harness-ci
+#>
 param(
     [Parameter(Mandatory)][string]$Token,
     [string]$Repo = 'dflippojr/agent-harness',
     [string]$InstallDir = 'D:\Agents\github-runner',
     [string]$WorkDir = '_work',
     [string]$Name = 'dflippotower-agent-harness',
+    [string]$TaskName = 'AgentHarness-GitHubRunner',
+    [string]$Labels = 'agent-harness-tower',
     [string]$Version = '2.337.0',
     [string]$Sha256 = '1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc'
 )
 $ErrorActionPreference = 'Stop'
-$taskName = 'AgentHarness-GitHubRunner'
 $zip = Join-Path $env:TEMP "actions-runner-win-x64-$Version.zip"
 $url = "https://github.com/actions/runner/releases/download/v$Version/actions-runner-win-x64-$Version.zip"
 
@@ -24,8 +39,8 @@ Expand-Archive -LiteralPath $zip -DestinationPath $InstallDir -Force
 
 Push-Location $InstallDir
 try {
-    & .\config.cmd --unattended --replace --url "https://github.com/$Repo" --token $Token --name $Name `
-        --labels agent-harness-tower --work $WorkDir
+    & .\config.cmd --unattended --url "https://github.com/$Repo" --token $Token --name $Name `
+        --labels $Labels --work $WorkDir
     if ($LASTEXITCODE -ne 0) { throw "runner registration failed with exit code $LASTEXITCODE" }
 } finally { Pop-Location }
 
@@ -34,7 +49,7 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $launchArg
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
-    -Description 'GitHub Actions deployment runner for dflippojr/agent-harness main pushes.' -Force | Out-Null
-Start-ScheduledTask -TaskName $taskName
-Get-ScheduledTask -TaskName $taskName | Select-Object TaskName, State
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
+    -Description "GitHub Actions runner $Name ($Labels) for $Repo." -Force | Out-Null
+Start-ScheduledTask -TaskName $TaskName
+Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State

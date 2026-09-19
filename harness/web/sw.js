@@ -1,6 +1,7 @@
 // Service worker: caches the app shell so the app opens instantly (and shows a clear offline state).
 // API responses are never cached: session state must always be live.
-const SHELL = "harness-shell-v4";
+const BUILD_ID = "2026.09.17.1";
+const SHELL = `harness-shell-${BUILD_ID}`;
 const ASSETS = ["/", "/style.css", "/app.js", "/client.mjs", "/icon-192.png", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -22,7 +23,9 @@ self.addEventListener("fetch", (event) => {
   if (!isShell) return;
   // Network first so deploys show up right away; the cache is only the offline fallback.
   event.respondWith(
-    fetch(event.request)
+    // Bypass Chromium's HTTP cache here. Otherwise a successful fetch can still
+    // return a stale app bundle, defeating this worker's network-first policy.
+    fetch(event.request, { cache: "no-cache" })
       .then((resp) => {
         const copy = resp.clone();
         caches.open(SHELL).then((c) => c.put(event.request, copy));
@@ -30,4 +33,11 @@ self.addEventListener("fetch", (event) => {
       })
       .catch(() => caches.match(event.request)),
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.origin !== self.location.origin || event.data !== "PURGE_SHELL") return;
+  event.waitUntil(caches.keys().then((keys) => Promise.all(
+    keys.filter((key) => key.startsWith("harness-shell-")).map((key) => caches.delete(key)),
+  )));
 });

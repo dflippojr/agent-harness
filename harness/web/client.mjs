@@ -3,6 +3,8 @@
 
 const BASE_KEY = "harness.daemonUrl";
 const TOKEN_KEY = "harness.ownerToken";
+export const WEB_BUILD_ID = "2026.09.17.1";
+export const WEB_PROTOCOL = 2;
 
 export function normalizeDaemonUrl(value) {
   const raw = String(value || "").trim();
@@ -44,15 +46,21 @@ export class AgentHarnessWebClient {
   }
 
   headers(extra = {}) {
-    return this.token ? { ...extra, Authorization: `Bearer ${this.token}` } : { ...extra };
+    const headers = { ...extra, "X-Agent-Harness-Client": `web/${WEB_PROTOCOL}` };
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    return headers;
   }
 
   async request(path, { method = "GET", body, surface = "admin" } = {}) {
     const headers = this.headers();
     const opts = { method, headers, cache: "no-store" };
     if (body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      opts.body = JSON.stringify(body);
+      if (typeof FormData !== "undefined" && body instanceof FormData) {
+        opts.body = body;
+      } else {
+        headers["Content-Type"] = "application/json";
+        opts.body = JSON.stringify(body);
+      }
     }
     let resp;
     try { resp = await fetch(this.url(path, surface), opts); }
@@ -60,8 +68,20 @@ export class AgentHarnessWebClient {
     if (resp.status === 204) return null;
     const type = resp.headers.get("content-type") || "";
     const data = type.includes("json") ? await resp.json() : await resp.text();
-    if (!resp.ok) throw new Error((data && data.detail) || `HTTP ${resp.status}`);
+    if (!resp.ok) {
+      const err = new Error((data && data.detail) || `HTTP ${resp.status}`);
+      err.status = resp.status;
+      err.code = data && data.error && data.error.code;
+      err.keys = data && data.error && data.error.keys;
+      err.details = data && data.error && data.error.details;
+      err.data = data;
+      throw err;
+    }
     return data;
+  }
+
+  compatibility() {
+    return this.request("/health", { surface: "" });
   }
 
   async blob(path, surface = "admin") {
