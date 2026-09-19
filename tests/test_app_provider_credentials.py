@@ -90,6 +90,40 @@ def test_owner_assigns_opaque_refs_and_apps_only_see_their_policy(tmp_path, monk
     assert b"app-two-plaintext-secret" not in durable and str(second).encode() not in durable
 
 
+def test_revoked_default_backend_drops_its_model_and_falls_back_to_local(tmp_path):
+    manager, _, _ = configured_manager(tmp_path)
+    manager._spawn = lambda *_args, **_kwargs: None
+    with TestClient(create_app(manager)) as client:
+        app = client.post("/keys", json={
+            "name": "builder", "kind": "app", "scopes": ["sessions"],
+        }).json()
+        credential = manager.set_app_provider_credential(
+            app["id"], "claude", "billing-one", "api_key", ["claude-sonnet-4"],
+        )
+        headers = {"Authorization": f"Bearer {app['key']}"}
+        patched = client.patch("/api/v1/config", headers=headers, json={
+            "revision": 0,
+            "changes": {
+                "app.default_backend": "claude",
+                "app.default_model": "claude-sonnet-4",
+            },
+        })
+        assert patched.status_code == 200, patched.text
+
+        assert manager.revoke_app_provider_credential(credential["id"])
+        effective = {row["key"]: row["effective"] for row in client.get(
+            "/api/v1/config", headers=headers,
+        ).json()["settings"]}
+        assert effective["app.default_backend"] == ""
+        assert effective["app.default_model"] == ""
+
+        created = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello"})
+        assert created.status_code == 201, created.text
+        session = manager.db.get_session(created.json()["id"])
+        assert session["backend"] == "local"
+        assert session["model"] == manager.cfg.default_model
+
+
 def test_app_file_key_is_used_and_usage_is_attributed_without_storing_it(tmp_path):
     async def body():
         manager, made, _ = _claude_manager(tmp_path, "echo")

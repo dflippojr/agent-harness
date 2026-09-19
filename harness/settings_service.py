@@ -129,12 +129,13 @@ class SettingsService:
         return OverlayState(active=self._active(), pending=self._pending(), lkg=lkg)
 
     def _commit_overlay(self, old: OverlayState, new: OverlayState, *, boot_tried=UNSET,
-                        quarantine_reason: str | None = None) -> None:
+                        quarantine_reason: str | None = None, active_first: bool = False) -> None:
         args = overlay_commit_args(old, new, boot_tried=boot_tried)
         if quarantine_reason is not None:
             args["quarantine_envelope"] = old.active
             args["quarantine_reason"] = quarantine_reason
             args["quarantine_raw"] = old.active is None
+        args["active_first"] = active_first
         self.store.commit(**args)
 
     # --- load / recovery -------------------------------------------------
@@ -161,6 +162,20 @@ class SettingsService:
             if active is None:
                 self._migrate_backend_prefs()
                 return status
+            if is_confirmed(active):
+                pending = self._pending()
+                pending_matches = bool(
+                    pending is not None
+                    and pending.revision == active.revision
+                    and pending.values == active.values
+                )
+                if pending_matches or self.store.boot_tried():
+                    # confirm_startup publishes confirmed active first. Finish any
+                    # cleanup left by a crash after that commit point.
+                    self.store.commit(
+                        pending=None if pending_matches else UNSET,
+                        boot_tried=False,
+                    )
             if active.unconfirmed or not active.confirmed:
                 # boot-tried is a cross-process crash flag. load() then Manager.__init__ both
                 # call apply_overlay on the same cfg; the in-process marker keeps the first
@@ -233,7 +248,7 @@ class SettingsService:
             if old.active is None or is_confirmed(old.active):
                 return
             new = next_overlay(old, OverlayRequest(action="confirm_startup", now=time.time()), self._apply_mode)
-            self._commit_overlay(old, new, boot_tried=False)
+            self._commit_overlay(old, new, boot_tried=False, active_first=True)
             self._audit("system", "confirm", list(new.active.values), "ok", revision=new.active.revision)
 
     def _migrate_backend_prefs(self) -> None:
@@ -414,8 +429,15 @@ class SettingsService:
             if not self._backend_allowed(key, configured):
                 return "", "provider_policy"
         if spec.key == "app.default_model" and configured:
-            backend = (self._app_envelope(key["id"]).values.get("app.default_backend")
-                       or ("local" if self.cfg.modules.local_model else ""))
+            configured_backend = self._app_envelope(key["id"]).values.get("app.default_backend")
+            if configured_backend:
+                backend, backend_cap = self._effective_app_value(
+                    self.registry.get("app.default_backend"), configured_backend, key,
+                )
+                if not backend:
+                    return "", backend_cap
+            else:
+                backend = "local" if self.cfg.modules.local_model else ""
             if backend == "local" and configured not in self.cfg.models:
                 return "", "models"
             if backend and backend != "local":
