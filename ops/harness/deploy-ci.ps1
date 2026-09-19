@@ -23,25 +23,42 @@ function Run([string]$File, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$File failed with exit code $LASTEXITCODE" }
 }
 
+function Get-GitOutput {
+    param(
+        [Parameter(Mandatory)][string]$FailureMessage,
+        [Parameter(Mandatory)][string[]]$GitArguments
+    )
+    $output = & git @GitArguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "$FailureMessage (git exit code $exitCode)" }
+    if ($null -eq $output) { return [string]::Empty }
+    return ([string]::Join("`n", [string[]]$output)).Trim()
+}
+
 $release = (Resolve-Path -LiteralPath $ReleaseRoot).Path
 $deploy = (Resolve-Path -LiteralPath $DeployDir).Path
 if (-not (Test-Path -LiteralPath (Join-Path $release '.git'))) { throw "release checkout is not a git repository: $release" }
 if (-not (Test-Path -LiteralPath (Join-Path $deploy '.git'))) { throw "deploy checkout is not a git repository: $deploy" }
 
-$releaseCommit = (& git -C $release rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $releaseCommit -ne $Commit) {
+$releaseCommit = Get-GitOutput -FailureMessage 'could not resolve Actions checkout HEAD' `
+    -GitArguments @('-C', $release, 'rev-parse', 'HEAD')
+if (-not $releaseCommit) { throw 'could not resolve Actions checkout HEAD: git returned no commit' }
+if ($releaseCommit -ne $Commit) {
     throw "Actions checkout is $releaseCommit, expected $Commit"
 }
-$branch = (& git -C $deploy branch --show-current).Trim()
-if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') { throw "live checkout must be on main, not $branch" }
+$branch = Get-GitOutput -FailureMessage 'could not determine live checkout branch' `
+    -GitArguments @('-C', $deploy, 'branch', '--show-current')
+if (-not $branch) { throw 'live checkout must be on main; current branch is detached or unknown' }
+if ($branch -ne 'main') { throw "live checkout must be on main, not $branch" }
 $dirty = & git -C $deploy status --porcelain
-if ($LASTEXITCODE -ne 0) { throw 'could not inspect live checkout' }
+if ($LASTEXITCODE -ne 0) { throw "could not inspect live checkout (git exit code $LASTEXITCODE)" }
 if ($dirty) { throw "live checkout has uncommitted files; refusing deployment:`n$($dirty -join "`n")" }
 
 Run git @('-C', $deploy, 'fetch', '--prune', 'origin', 'main')
 if (-not $DryRun) {
-    $remoteCommit = (& git -C $deploy rev-parse origin/main).Trim()
-    if ($LASTEXITCODE -ne 0) { throw 'could not resolve origin/main' }
+    $remoteCommit = Get-GitOutput -FailureMessage 'could not resolve origin/main' `
+        -GitArguments @('-C', $deploy, 'rev-parse', 'origin/main')
+    if (-not $remoteCommit) { throw 'could not resolve origin/main: git returned no commit' }
     if ($remoteCommit -ne $Commit) {
         Write-Host "origin/main has moved to $remoteCommit; skipping obsolete deployment for $Commit"
         exit 0
