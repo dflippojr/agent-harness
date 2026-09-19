@@ -25,7 +25,8 @@ restart copies it onto active.
 - **confirmed-after-boot** — ``confirm_startup`` after ``/health``: active
   ``confirmed: true``, pending and boot-tried cleared.
 - **quarantined** — unconfirmed/invalid candidate moved aside; LKG restored as
-  confirmed active (or active unlinked if there is no LKG).
+  confirmed active (or active unlinked if there is no LKG). If LKG is also
+  unusable, active and LKG are timestamp-renamed and YAML defaults take effect.
 
 Every generation change goes through ``ManagedStore.commit``. Writes use a temp
 file, flush/fsync, then ``os.replace``. Multi-file order is quarantine → LKG →
@@ -231,6 +232,43 @@ class ManagedStore:
             "quarantined_revision": envelope.revision,
             "at": time.time(),
         })
+
+    def quarantine_managed_files(self, reason: str, warning: str | None = None) -> list[Path]:
+        """Rename active, pending, and LKG aside with a timestamp and boot without them.
+
+        Original bytes are kept for the owner. Canonical overlay paths become empty
+        so the next start uses YAML defaults.
+        """
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        kept: list[Path] = []
+        for path in (self.active_path, self.pending_path, self.lkg_path):
+            if not path.is_file():
+                continue
+            dest = path.with_name(f"{path.name}.quarantine.{stamp}")
+            suffix = 1
+            while dest.exists():
+                dest = path.with_name(f"{path.name}.quarantine.{stamp}.{suffix}")
+                suffix += 1
+            try:
+                os.replace(path, dest)
+                kept.append(dest)
+            except OSError:
+                try:
+                    dest.write_bytes(path.read_bytes())
+                    path.unlink()
+                    kept.append(dest)
+                except OSError:
+                    continue
+            _restrict(dest)
+        self.clear_boot_tried()
+        self.write_status({
+            "recovery": "overlay_quarantined",
+            "reason": reason,
+            "warning": warning or reason,
+            "quarantined": [path.name for path in kept],
+            "at": time.time(),
+        })
+        return kept
 
     def commit(self, *, active=UNSET, pending=UNSET, lkg=UNSET, unlink_active: bool = False,
                boot_tried=UNSET, status=UNSET, quarantine_envelope: Envelope | None = None,

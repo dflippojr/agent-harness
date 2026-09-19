@@ -732,6 +732,7 @@ def test_web_settings_render_plan_and_phone_layout(tmp_path):
     assert "daemonSettingsCard" in text
     assert "dry_run" in text and "revision_conflict" in text
     assert "confirmRestart" in text and "lkg_restore" in text
+    assert "overlay_quarantined" in text
     assert "Enable " in text and "Roll back" in text
     assert "config-row" in style and "max-width: 420px" in style
     client, _ = _client(tmp_path)

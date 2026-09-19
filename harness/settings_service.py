@@ -139,7 +139,12 @@ class SettingsService:
 
     # --- load / recovery -------------------------------------------------
     def apply_overlay(self) -> dict[str, Any]:
-        """Apply the active managed overlay, restoring LKG if a candidate is unconfirmed or invalid."""
+        """Apply the active managed overlay. Must not raise for overlay contents.
+
+        Unconfirmed or invalid active restores LKG when that generation applies.
+        If LKG is also unusable, both files are timestamp-quarantined and the
+        process continues on YAML defaults.
+        """
         status: dict[str, Any] = {"recovery": None}
         with self.store.lock():
             try:
@@ -148,7 +153,9 @@ class SettingsService:
                 restored = self.store.restore_lkg(str(e))
                 self._audit("system", "lkg_recovery", [], "failure", extra={"reason": str(e)})
                 if restored is None:
-                    raise
+                    status["recovery"] = self.store.read_status().get("recovery") or "overlay_quarantined"
+                    self._migrate_backend_prefs()
+                    return status
                 active = restored
                 status["recovery"] = self.store.read_status().get("recovery")
             if active is None:
@@ -176,17 +183,49 @@ class SettingsService:
             try:
                 # Boot applies active only. Pending is never the apply map.
                 self._apply_values(self.cfg, active.values, persist=False)
-            except SettingsError as e:
-                old = OverlayState(active=active, pending=self._pending(), lkg=self._overlay_state().lkg)
-                new = next_overlay(old, OverlayRequest(action="restore_lkg"), self._apply_mode)
-                self._commit_overlay(old, new, boot_tried=False, quarantine_reason=str(e))
-                self._audit("system", "lkg_recovery", list(active.values), "failure", extra={"reason": str(e)})
-                status["recovery"] = "lkg_restore"
-                active = new.active
-                if active is not None:
-                    self._apply_values(self.cfg, active.values, persist=False)
-            self._migrate_backend_prefs()
+            except Exception as e:
+                status.update(self._recover_failed_overlay(active, e))
+            if status.get("recovery") != "overlay_quarantined":
+                self._migrate_backend_prefs()
         return status
+
+    def _recover_failed_overlay(self, failed: Envelope, error: BaseException) -> dict[str, Any]:
+        """If active cannot apply, try LKG. If LKG also fails, boot on YAML defaults.
+
+        Boot must never fail because of the managed overlay. ``_apply_values``
+        mutates a copy first, so a failed apply leaves ``cfg`` on YAML defaults.
+        """
+        lkg = None
+        try:
+            lkg = self.store.read_lkg()
+        except ManagedConfigError:
+            lkg = None
+        if lkg is not None:
+            try:
+                self._apply_values(self.cfg, lkg.values, persist=False)
+            except Exception as lkg_error:
+                return self._quarantine_unusable_overlay(failed, error, lkg_error)
+            old = OverlayState(active=failed, pending=self._pending(), lkg=lkg)
+            new = next_overlay(old, OverlayRequest(action="restore_lkg"), self._apply_mode)
+            self._commit_overlay(old, new, boot_tried=False, quarantine_reason=str(error))
+            self._audit("system", "lkg_recovery", list(failed.values), "failure", extra={"reason": str(error)})
+            return {"recovery": "lkg_restore"}
+        return self._quarantine_unusable_overlay(failed, error, None)
+
+    def _quarantine_unusable_overlay(self, failed: Envelope, active_error: BaseException,
+                                     lkg_error: BaseException | None) -> dict[str, Any]:
+        warning = (
+            "Managed overlay could not be applied and last-known-good was also unusable; "
+            "booting on YAML defaults. Quarantined overlay files were kept for the owner."
+        )
+        reason = str(lkg_error or active_error)
+        kept = self.store.quarantine_managed_files(reason=reason, warning=warning)
+        self._audit(
+            "system", "overlay_quarantined", list(failed.values or {}), "failure",
+            extra={"reason": reason, "quarantined": [path.name for path in kept]},
+        )
+        log.warning("%s (%s)", warning, reason)
+        return {"recovery": "overlay_quarantined", "warning": warning}
 
     def confirm_startup(self) -> None:
         with self.store.lock():
@@ -272,11 +311,31 @@ class SettingsService:
             "pending_revision": pending.revision if pending else None,
             "confirmed": True if active is None else bool(active.confirmed and not active.unconfirmed),
             "supervised_restart": supervised_restart_supported(),
-            "restart_required": pending is not None,
+            "restart_required": self._restart_required(active, pending),
             "recovery": recovery or None,
+            "warning": (recovery or {}).get("warning") or None,
             "etag": str(revision),
             "settings": settings,
         }
+
+    def _restart_required(self, active: Envelope | None, pending: Envelope | None) -> bool:
+        """True when a pending file exists or confirmed restart keys differ from this process."""
+        if pending is not None:
+            return True
+        for spec in self.registry.writable_admin():
+            if spec.apply_mode != "daemon_restart":
+                continue
+            if active is not None and spec.key in active.values:
+                target = active.values[spec.key]
+            else:
+                target = self.inherited.get(spec.key, spec.default)
+            try:
+                applied = spec.getter(self.cfg)
+            except Exception:
+                return True
+            if applied != target:
+                return True
+        return False
 
     def app_view(self, app_id: str, key: dict) -> dict[str, Any]:
         envelope = self._app_envelope(app_id)
@@ -405,7 +464,7 @@ class SettingsService:
             return body
         body.update({k: self.admin_view()[k] for k in
                      ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
-                      "recovery", "etag")})
+                      "recovery", "etag", "warning")})
         body["settings"] = self.admin_view()["settings"]
         return body
 
@@ -450,7 +509,7 @@ class SettingsService:
                 body = plan.as_dict(self.registry)
                 body.update({k: self.admin_view()[k] for k in
                              ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
-                              "recovery", "etag")})
+                              "recovery", "etag", "warning")})
                 body["settings"] = self.admin_view()["settings"]
                 return body
             except OverlayCrash:

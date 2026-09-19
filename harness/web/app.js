@@ -2482,7 +2482,10 @@ async function daemonSettingsCard() {
     `Revision ${view.revision}` +
     (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
     (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
-    (view.recovery && view.recovery.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : ""));
+    (view.warning ? ` · ${view.warning}` :
+      view.recovery && view.recovery.recovery === "overlay_quarantined"
+        ? ` · ${view.recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`
+        : (view.recovery && view.recovery.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
   const planBox = h("div", { class: "config-plan" });
   const errorBox = h("div");
   const groups = {};
@@ -2585,6 +2588,12 @@ async function confirmRestart(targetRevision, status, errorBox) {
       if (next.recovery && next.recovery.recovery === "lkg_restore") {
         errorBox.append(h("p", { class: "note bad" },
           `Automatic recovery restored revision ${next.revision}. ${next.recovery.reason || ""}`.trim()));
+        return;
+      }
+      if (next.recovery && next.recovery.recovery === "overlay_quarantined") {
+        errorBox.append(h("p", { class: "note bad" },
+          next.warning || next.recovery.warning || next.recovery.reason ||
+          "Managed overlay was quarantined; YAML defaults are in effect."));
         return;
       }
     } catch (_) { /* daemon still down */ }

@@ -35,6 +35,9 @@ Managed files are a flat JSON object:
 - `managed-config.pending.json` — restart-required candidate.
 - `managed-config.lkg.json` — last confirmed good managed generation.
 - `managed-config.quarantine.json` — a failed candidate, with a reason.
+- `managed-config.json.quarantine.<UTC>` / `managed-config.lkg.json.quarantine.<UTC>` — timestamped
+  copies of overlay files that could not be applied (active and LKG both invalid). YAML defaults
+  are in effect until the owner inspects and deletes or repairs them.
 
 Writes use a process lock, a temp file, flush/fsync where supported, atomic replace, and `0600`
 permissions where the OS allows. The files contain no secrets and no nested YAML.
@@ -52,6 +55,10 @@ copying a default.
   hooks are undone, the previous file and in-memory values are restored, and the failure is audited.
 - **daemon_restart** keys are saved as pending. They are visible separately from effective values and
   do not change the running process until an owner-confirmed restart.
+- `restart_required` is true when a pending file exists **or** when the confirmed/active overlay's
+  `daemon_restart` values differ from what this process has applied (for example after rolling back
+  `web.enabled`). GET `/api/admin/v1/config` and the rollback response use that flag so the Web UI
+  can offer Restart. It is not derived only from a pending file.
 - Supervisors (Windows scheduled-task wrapper, systemd-user `run-daemon.sh`, launchd `run-daemon.sh`)
   set `HARNESS_SUPERVISED=1`. `POST /api/admin/v1/config/restart` then returns `202` and asks this
   process to exit; the supervisor starts it again. The API never shells out to Task Scheduler,
@@ -64,8 +71,16 @@ copying a default.
 - If that candidate fails validation/startup, or the next supervisor start still sees it unconfirmed,
   it is quarantined and LKG is restored. Invalid base/local/profile YAML is never masked by this
   fallback.
+- **Boot never fails because of the managed overlay.** If applying confirmed active raises, LKG is
+  tried next. If LKG also fails (for example both pin `backends.local.model` to a name later removed
+  from `harness.yaml`), both files are renamed aside with a timestamp
+  (`managed-config.json.quarantine.<UTC>`, `managed-config.lkg.json.quarantine.<UTC>`), the process
+  starts on YAML defaults, and GET `/api/admin/v1/config` surfaces `recovery: overlay_quarantined`
+  plus a `warning`. The quarantined files are kept for the owner. Invalid YAML still fails boot.
 - Owner rollback restores the single previous confirmed managed generation through the same
-  validation path (live or pending according to the keys).
+  validation path (live or pending according to the keys). Rollback of a `daemon_restart` key writes
+  LKG onto confirmed active and does not apply that key in-memory; `restart_required` stays true
+  until an owner-confirmed restart loads the restored overlay.
 
 ### Overlay state machine
 
@@ -81,6 +96,7 @@ copies it onto active. Every generation change is a single `ManagedStore.commit`
 | unconfirmed active, boot-tried clear | owner confirmed restart; first start | try candidate once |
 | unconfirmed active, boot-tried set | previous start died before `/health` confirm | quarantine candidate; restore LKG |
 | quarantine + restored LKG | failed generation | apply confirmed LKG |
+| active and LKG both unusable | YAML dropped a pinned overlay value | timestamp-quarantine both; YAML defaults; `overlay_quarantined` |
 
 A PATCH of a restart key (for example `web.enabled`) must not drop that key from
 confirmed active. The new value lives in pending until restart. If the process dies

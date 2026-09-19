@@ -675,7 +675,8 @@ def _apply_managed_overlay(cfg: Config) -> None:
     """Apply registered admin keys from data_dir/managed-config.json after YAML loading.
 
     An invalid or unconfirmed managed candidate restores the last known good overlay.
-    Invalid base/local/profile YAML is never masked by that fallback.
+    If that overlay is also unusable, both files are quarantined and YAML defaults
+    remain in effect. Invalid base/local/profile YAML is never masked by this fallback.
     """
     from .settings_service import SettingsService
     SettingsService(cfg).apply_overlay()

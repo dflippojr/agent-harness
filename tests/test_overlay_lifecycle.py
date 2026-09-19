@@ -3,8 +3,10 @@
 An in-memory reference model of (active, pending, lkg, boot_tried) is driven
 with the same operations as SettingsService. After every step the store files
 must match the model, boot applies active only, a live PATCH cannot clobber a
-pending restart key, rollback clears pending, and an unconfirmed boot that
-already tried the candidate restores LKG.
+pending restart key, rollback clears pending, restart_required follows
+active-vs-applied daemon_restart values, shrinking the YAML baseline between
+boots never prevents startup, and an unconfirmed boot that already tried the
+candidate restores LKG.
 """
 
 from __future__ import annotations
@@ -17,10 +19,11 @@ from harness.managed_config import OverlayCrash
 from harness.overlay import OverlayRequest, OverlayState, effective_candidate, next_overlay
 from harness.settings import RESET
 from harness.settings_service import SettingsError, SettingsService
+from harness.config import ModelConfig
 
 from test_daemon import make_cfg
 
-LIVE_KEYS = ("sessions.max_turns", "backup.keep_days")
+LIVE_KEYS = ("sessions.max_turns", "backup.keep_days", "backends.local.model")
 RESTART_KEYS = ("web.enabled", "search.enabled")
 ALL_KEYS = LIVE_KEYS + RESTART_KEYS
 MODES = {key: "live" for key in LIVE_KEYS}
@@ -28,19 +31,23 @@ MODES.update({key: "daemon_restart" for key in RESTART_KEYS})
 INHERITED = {
     "sessions.max_turns": 80,
     "backup.keep_days": 14,
+    "backends.local.model": "fake",
     "web.enabled": False,
     "search.enabled": False,
 }
 GETTERS = {
     "sessions.max_turns": lambda cfg: cfg.max_turns,
     "backup.keep_days": lambda cfg: cfg.backup.keep_days,
+    "backends.local.model": lambda cfg: cfg.default_model,
     "web.enabled": lambda cfg: cfg.web.enabled,
     "search.enabled": lambda cfg: cfg.search.enabled,
 }
 LIVE_VALUES = {
     "sessions.max_turns": (10, 20, 40, 50, 60, 70),
     "backup.keep_days": (3, 7, 14, 21, 30),
+    "backends.local.model": ("fake", "qwen-a"),
 }
+BASE_MODELS = ("fake", "qwen-a")
 N_SEQUENCES = 200
 STEPS = 12
 SEED = 66
@@ -81,14 +88,15 @@ def _distinct_pending_restart(model: OverlayModel) -> dict | None:
 class OverlayModel:
     """Independent spec of the overlay lifecycle. Does not call next_overlay."""
 
-    def __init__(self):
+    def __init__(self, models=BASE_MODELS):
         self.active: dict | None = None
         self.pending: dict | None = None
         self.lkg: dict | None = None
         self.boot_tried = False
+        self.models = set(models)
 
     def clone(self) -> "OverlayModel":
-        other = OverlayModel()
+        other = OverlayModel(models=self.models)
         other.active = copy.deepcopy(self.active)
         other.pending = copy.deepcopy(self.pending)
         other.lkg = copy.deepcopy(self.lkg)
@@ -101,6 +109,7 @@ class OverlayModel:
             "pending": copy.deepcopy(self.pending),
             "lkg": copy.deepcopy(self.lkg),
             "boot_tried": self.boot_tried,
+            "models": set(self.models),
         }
 
     def restore(self, snap: dict) -> None:
@@ -108,6 +117,7 @@ class OverlayModel:
         self.pending = copy.deepcopy(snap["pending"])
         self.lkg = copy.deepcopy(snap["lkg"])
         self.boot_tried = snap["boot_tried"]
+        self.models = set(snap["models"])
 
     def _confirmed(self) -> bool:
         return True if self.active is None else bool(self.active["confirmed"])
@@ -202,23 +212,39 @@ class OverlayModel:
         self.boot_tried = False
         return "ok"
 
-    def reboot(self) -> str:
-        if self.active is None:
-            return "empty"
-        if self.active["confirmed"]:
-            return "confirmed"
-        if self.boot_tried:
-            if self.lkg is None:
-                self.active = None
-            else:
-                self.active = {
-                    "revision": self.lkg["revision"],
-                    "confirmed": True,
-                    "values": dict(self.lkg["values"]),
-                }
+    def _applies(self, values: dict | None) -> bool:
+        if not values:
+            return True
+        model = values.get("backends.local.model")
+        if model is not None and model not in self.models:
+            return False
+        return True
+
+    def _adopt_lkg_or_discard(self) -> str:
+        if self.lkg is not None and self._applies(self.lkg["values"]):
+            self.active = {
+                "revision": self.lkg["revision"],
+                "confirmed": True,
+                "values": dict(self.lkg["values"]),
+            }
             self.pending = None
             self.boot_tried = False
             return "lkg_restore"
+        self.active = None
+        self.pending = None
+        self.lkg = None
+        self.boot_tried = False
+        return "overlay_quarantined"
+
+    def reboot(self) -> str:
+        if self.active is None:
+            return "empty"
+        if not self.active["confirmed"] and self.boot_tried:
+            return self._adopt_lkg_or_discard()
+        if not self._applies(self.active["values"]):
+            return self._adopt_lkg_or_discard()
+        if self.active["confirmed"]:
+            return "confirmed"
         self.boot_tried = True
         return "try_candidate"
 
@@ -256,12 +282,20 @@ def _apply_partial(model: OverlayModel, old: dict, steps: list[tuple[str, str, A
             return
 
 
-def _fresh(tmp_path) -> SettingsService:
-    return SettingsService(make_cfg(tmp_path))
+def _make_cfg(tmp_path, models=BASE_MODELS):
+    cfg = make_cfg(tmp_path)
+    tokens = cfg.models["fake"].context_tokens if "fake" in cfg.models else 65536
+    cfg.models = {name: ModelConfig(name=name, base_url="http://unused", context_tokens=tokens) for name in models}
+    cfg.default_model = "fake" if "fake" in cfg.models else next(iter(cfg.models))
+    return cfg
 
 
-def _reboot(tmp_path) -> SettingsService:
-    svc = _fresh(tmp_path)
+def _fresh(tmp_path, models=BASE_MODELS) -> SettingsService:
+    return SettingsService(_make_cfg(tmp_path, models))
+
+
+def _reboot(tmp_path, models=BASE_MODELS) -> SettingsService:
+    svc = _fresh(tmp_path, models)
     svc.apply_overlay()
     return svc
 
@@ -276,12 +310,15 @@ def _assert_files(svc: SettingsService, model: OverlayModel, history: list[str])
 def _assert_boot_applies_active(tmp_path, svc: SettingsService, model: OverlayModel, history: list[str]) -> None:
     active = svc.store.read_active()
     pending = svc.store.read_pending()
-    if pending is None:
-        return
+    # Do not apply onto the live store when the candidate is unconfirmed: that would
+    # mark boot-tried or restore LKG as a side effect of the assertion.
     if active is not None and not (active.confirmed and not active.unconfirmed):
         return
-    probe = make_cfg(tmp_path)
-    SettingsService(probe).apply_overlay()
+    probe_svc = _fresh(tmp_path, tuple(sorted(model.models)))
+    probe_svc.apply_overlay()
+    if pending is None:
+        return
+    probe = probe_svc.cfg
     for key in ALL_KEYS:
         expected = active.values[key] if active is not None and key in active.values else INHERITED[key]
         assert GETTERS[key](probe) == expected, (history, key, GETTERS[key](probe), expected)
@@ -289,12 +326,24 @@ def _assert_boot_applies_active(tmp_path, svc: SettingsService, model: OverlayMo
             assert GETTERS[key](probe) != pending.values[key], (history, key)
 
 
+def _expected_restart_required(svc: SettingsService, model: OverlayModel) -> bool:
+    if model.pending is not None:
+        return True
+    active = model.active
+    for key in RESTART_KEYS:
+        disk = active["values"][key] if active is not None and key in active["values"] else INHERITED[key]
+        if GETTERS[key](svc.cfg) != disk:
+            return True
+    return False
+
+
 def _assert_invariants(tmp_path, svc: SettingsService, model: OverlayModel, last_op: str,
                        last_ok: bool, pending_restart_before: dict | None, history: list[str],
-                       restored: bool) -> None:
+                       restored: bool, boot_result: str | None = None) -> None:
     _assert_files(svc, model, history)
     _assert_boot_applies_active(tmp_path, svc, model, history)
-    if last_op in ("reboot", "crash_reboot"):
+    assert svc.admin_view()["restart_required"] is _expected_restart_required(svc, model), history
+    if last_op in ("reboot", "crash_reboot", "shrink_yaml"):
         active = svc.store.read_active()
         for key in ALL_KEYS:
             expected = active.values[key] if active is not None and key in active.values else INHERITED[key]
@@ -315,10 +364,19 @@ def _assert_invariants(tmp_path, svc: SettingsService, model: OverlayModel, last
             assert active is not None and active.confirmed and not active.unconfirmed, history
             assert active.values == lkg.values, history
         assert svc.store.read_status().get("recovery") == "lkg_restore", history
+    if boot_result == "overlay_quarantined":
+        assert svc.store.read_active() is None, history
+        assert svc.store.read_lkg() is None, history
+        assert svc.store.read_pending() is None, history
+        assert svc.store.read_status().get("recovery") == "overlay_quarantined", history
+        assert svc.admin_view().get("warning"), history
 
 
-def _pick_live_patch(rng: random.Random) -> dict[str, Any]:
+def _pick_live_patch(rng: random.Random, models) -> dict[str, Any]:
     key = rng.choice(LIVE_KEYS)
+    if key == "backends.local.model":
+        choices = tuple(models) or ("fake",)
+        return {key: rng.choice(choices)}
     return {key: rng.choice(LIVE_VALUES[key])}
 
 
@@ -393,9 +451,9 @@ def test_next_overlay_rollback_clears_pending_only_restart_key():
     assert new.active is not None and "web.enabled" not in new.active.values
 
 
-def _payload_for(kind: str, rng: random.Random) -> dict | None:
+def _payload_for(kind: str, rng: random.Random, models=BASE_MODELS) -> dict | None:
     if kind == "patch_live":
-        return _pick_live_patch(rng)
+        return _pick_live_patch(rng, models)
     if kind == "patch_restart":
         return _pick_restart_patch(rng)
     if kind == "patch_reset":
@@ -454,9 +512,10 @@ def _crash_and_reboot(seq_dir, svc, model, kind, payload, rng, history):
     finally:
         svc.store.crash_at = None
     _apply_partial(model, old, plan, crash_at)
-    svc = _reboot(seq_dir)
-    restored = model.reboot() == "lkg_restore"
-    _assert_invariants(seq_dir, svc, model, "crash_reboot", True, None, history, restored)
+    svc = _reboot(seq_dir, tuple(sorted(model.models)))
+    boot_result = model.reboot()
+    _assert_invariants(seq_dir, svc, model, "crash_reboot", True, None, history,
+                       boot_result == "lkg_restore", boot_result)
     return svc, True
 
 
@@ -464,7 +523,7 @@ def test_overlay_lifecycle_property(tmp_path, monkeypatch):
     monkeypatch.setenv("HARNESS_SUPERVISED", "1")
     rng = random.Random(SEED)
     mutating = ("patch_live", "patch_restart", "patch_reset", "rollback", "confirm_restart")
-    kinds = mutating + ("confirm_startup", "reboot", "crash_reboot")
+    kinds = mutating + ("confirm_startup", "reboot", "crash_reboot", "shrink_yaml")
     for seq in range(N_SEQUENCES):
         seq_dir = tmp_path / f"s{seq}"
         seq_dir.mkdir()
@@ -476,22 +535,31 @@ def test_overlay_lifecycle_property(tmp_path, monkeypatch):
             crash = kind == "crash_reboot"
             if crash:
                 kind = rng.choice(mutating)
-            payload = _payload_for(kind, rng)
+            payload = _payload_for(kind, rng, model.models)
             pending_before = _distinct_pending_restart(model)
             if crash:
                 svc, _did = _crash_and_reboot(seq_dir, svc, model, kind, payload, rng, history)
                 continue
+            if kind == "shrink_yaml":
+                history.append("shrink_yaml")
+                model.models.discard("qwen-a")
+                svc = _reboot(seq_dir, tuple(sorted(model.models)))
+                boot_result = model.reboot()
+                _assert_invariants(seq_dir, svc, model, "shrink_yaml", True, None, history,
+                                   boot_result == "lkg_restore", boot_result)
+                continue
             if kind == "reboot":
                 history.append("reboot")
-                svc = _reboot(seq_dir)
-                restored = model.reboot() == "lkg_restore"
-                _assert_invariants(seq_dir, svc, model, "reboot", True, None, history, restored)
+                svc = _reboot(seq_dir, tuple(sorted(model.models)))
+                boot_result = model.reboot()
+                _assert_invariants(seq_dir, svc, model, "reboot", True, None, history,
+                                   boot_result == "lkg_restore", boot_result)
                 continue
             _apply_success(svc, model, kind, payload, history, pending_before, seq_dir)
 
 
 def test_overlay_property_corpus_includes_reported_interleavings(tmp_path, monkeypatch):
-    """The two 22:45Z findings must fail the model invariants if they regress."""
+    """The 22:45Z and 23:49Z findings must fail the model invariants if they regress."""
     monkeypatch.setenv("HARNESS_SUPERVISED", "1")
     svc = _fresh(tmp_path)
     model = OverlayModel()
@@ -525,3 +593,43 @@ def test_overlay_property_corpus_includes_reported_interleavings(tmp_path, monke
     _apply_success(svc2, model2, "patch_restart", {"web.enabled": True}, history2, pending_before, other)
     pending_before = _distinct_pending_restart(model2)
     _apply_success(svc2, model2, "rollback", None, history2, pending_before, other)
+
+    confirmed = tmp_path / "confirmed-restart-rollback"
+    confirmed.mkdir()
+    svc3 = _fresh(confirmed)
+    model3 = OverlayModel()
+    history3: list[str] = []
+    pending_before = _distinct_pending_restart(model3)
+    _apply_success(svc3, model3, "patch_restart", {"web.enabled": True}, history3, pending_before, confirmed)
+    pending_before = _distinct_pending_restart(model3)
+    _apply_success(svc3, model3, "confirm_restart", None, history3, pending_before, confirmed)
+    history3.append("reboot")
+    svc3 = _reboot(confirmed)
+    boot_result = model3.reboot()
+    assert boot_result != "lkg_restore"
+    svc3.confirm_startup()
+    assert model3.confirm_startup() == "ok"
+    _assert_invariants(confirmed, svc3, model3, "confirm_startup", True, None, history3, False)
+    pending_before = _distinct_pending_restart(model3)
+    _apply_success(svc3, model3, "rollback", None, history3, pending_before, confirmed)
+    assert svc3.cfg.web.enabled is True
+    assert svc3.store.read_active().values.get("web.enabled") is not True
+    assert svc3.admin_view()["restart_required"] is True
+
+    shrink = tmp_path / "shrink-yaml"
+    shrink.mkdir()
+    svc4 = _fresh(shrink)
+    model4 = OverlayModel()
+    history4: list[str] = []
+    pending_before = _distinct_pending_restart(model4)
+    _apply_success(svc4, model4, "patch_live", {"backends.local.model": "qwen-a"}, history4, pending_before, shrink)
+    pending_before = _distinct_pending_restart(model4)
+    _apply_success(svc4, model4, "patch_live", {"sessions.max_turns": 40}, history4, pending_before, shrink)
+    history4.append("shrink_yaml")
+    model4.models.discard("qwen-a")
+    svc4 = _reboot(shrink, tuple(sorted(model4.models)))
+    boot_result = model4.reboot()
+    assert boot_result == "overlay_quarantined"
+    _assert_invariants(shrink, svc4, model4, "shrink_yaml", True, None, history4, False, boot_result)
+    assert svc4.cfg.default_model == "fake"
+    assert svc4.cfg.max_turns == 80
