@@ -1,22 +1,38 @@
-# Restart the harness daemon to pick up code or config changes. Sessions that were running resume on start.
-# Stop-ScheduledTask alone isn't enough: it ends the supervisor but leaves the daemon (a cmd.exe child) running,
-# still holding port 8100. Killing the daemon lets the running supervisor start a fresh one within ~10 s.
+# Restart, stop, or start the harness daemon. Sessions that were running resume on start.
+param([ValidateSet('Restart', 'Stop', 'Start')][string]$Mode = 'Restart')
 $ErrorActionPreference = 'Stop'
 
-$daemons = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match '-m harness(\s|$)' }
-$supervisor = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'powershell.exe' -and $_.CommandLine -match 'run-daemon\.ps1' }
-if (-not $supervisor) {
-    Write-Host 'No supervisor running; starting the AgentHarness-Daemon task.'
+function Stop-HarnessDaemon {
+    # Stopping the task ends the supervisor, but its cmd/python descendants can survive and retain port 8100.
+    Stop-ScheduledTask -TaskName AgentHarness-Daemon
+    $processes = Get-CimInstance Win32_Process
+    $daemons = $processes | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match '-m harness(\s|$)' }
+    $supervisors = $processes | Where-Object { $_.Name -eq 'powershell.exe' -and $_.CommandLine -match 'run-daemon\.ps1' }
     $daemons | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Start-ScheduledTask AgentHarness-Daemon
-} else {
-    $daemons | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $supervisors | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 1
+    $remaining = Get-CimInstance Win32_Process | Where-Object {
+        ($_.Name -eq 'python.exe' -and $_.CommandLine -match '-m harness(\s|$)') -or
+        ($_.Name -eq 'powershell.exe' -and $_.CommandLine -match 'run-daemon\.ps1')
+    }
+    if ($remaining) { throw 'could not stop all harness daemon processes' }
+    Write-Host 'AgentHarness-Daemon stopped.'
 }
 
-foreach ($i in 1..30) {
-    Start-Sleep -Seconds 2
-    try {
-        if ((Invoke-RestMethod http://127.0.0.1:8100/health -TimeoutSec 3).ok) { Write-Host "daemon up after $($i * 2) s"; exit 0 }
-    } catch { }
+function Start-HarnessDaemon {
+    $task = Get-ScheduledTask -TaskName AgentHarness-Daemon
+    if ($task.State -ne 'Running') { Start-ScheduledTask -TaskName AgentHarness-Daemon }
+    foreach ($i in 1..30) {
+        Start-Sleep -Seconds 2
+        try {
+            if ((Invoke-RestMethod http://127.0.0.1:8100/health -TimeoutSec 3).ok) {
+                Write-Host "daemon up after $($i * 2) s"
+                return
+            }
+        } catch { }
+    }
+    throw 'daemon did not come back within 60 s; see D:\Agents\harness\logs'
 }
-Write-Error 'daemon did not come back within 60 s; see D:\Agents\harness\logs'
+
+if ($Mode -in @('Restart', 'Stop')) { Stop-HarnessDaemon }
+if ($Mode -in @('Restart', 'Start')) { Start-HarnessDaemon }

@@ -4,7 +4,16 @@
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$python = Join-Path $root '.venv\Scripts\python.exe'
+$venv = Join-Path $root '.venv'
+$venvPointer = Join-Path $root '.venv-path'
+if (Test-Path -LiteralPath $venvPointer) {
+    $pointerValue = Get-Content -Raw -LiteralPath $venvPointer
+    if ($null -eq $pointerValue) { throw "empty deployment virtual environment pointer: $venvPointer" }
+    $venv = ([string]$pointerValue).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($venv)) { throw "invalid deployment virtual environment pointer: $venvPointer" }
+}
+$python = Join-Path $venv 'Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $python)) { throw "harness Python is missing: $python" }
 $logDir = 'D:\Agents\harness\logs'
 $daemonLog = Join-Path $logDir 'daemon.log'
 $supervisorLog = Join-Path $logDir 'supervisor.log'

@@ -130,6 +130,26 @@ def test_deploy_plan_rolls_back_after_post_stop_failure(tmp_path):
     assert "deployment failed after daemon stop; previous deployment restored" in plan
 
 
+def test_deploy_plan_stops_partially_started_daemon_before_rollback(tmp_path):
+    result = run_deploy(tmp_path, dry_run_failure="AfterStart")
+    assert result.returncode != 0
+
+    plan = output(result)
+    failure = plan.index("simulated dry-run failure after start")
+    stop = plan.index("-Mode Stop", failure)
+    reset = plan.index("reset --hard", failure)
+    images = plan.index("[rollback] restored previous image tags", failure)
+    restart = plan.index("[rollback] previous daemon started and healthy", failure)
+    assert failure < stop < reset < images < restart
+
+
+def test_daemon_supervisor_honors_deployment_venv_pointer():
+    supervisor = (ROOT / "ops/harness/run-daemon.ps1").read_text(encoding="utf-8")
+    assert ".venv-path" in supervisor
+    assert "IsPathRooted" in supervisor
+    assert "Join-Path $venv 'Scripts\\python.exe'" in supervisor
+
+
 def test_deploy_rejects_detached_head_with_clear_error(tmp_path):
     result = run_deploy(tmp_path, branch="")
     assert result.returncode != 0

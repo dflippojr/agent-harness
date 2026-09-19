@@ -11,11 +11,15 @@ after that workflow succeeds for the exact commit pushed to `main`:
    - `ghcr.io/dflippojr/agent-harness-sandbox:sha-<commit>` and `:py312`
    - `ghcr.io/dflippojr/agent-harness-cli:sha-<commit>` and `:1`
 3. **deploy-tower** runs only after image publication for that same tested SHA. The repository-scoped runner pulls the
-   immutable images, verifies that the live checkout is clean `main` and can fast-forward, installs requirements,
-   retags the images to the daemon's local names, restarts the daemon, and waits for `/health`.
+   immutable images, verifies that the live checkout is clean `main` and can fast-forward, builds a fresh side-by-side
+   virtual environment, stops the daemon, swaps environments, fast-forwards, retags the images, starts the daemon, and
+   waits for `/health`.
 
 The SHA tags are immutable deployment inputs; the stable tags match the local names already expected by the daemon.
 The CLI Dockerfile accepts `SANDBOX_IMAGE` so its hosted build is based on the exact sandbox image from the same commit.
+The supervisor reads the ignored `.venv-path` file when present. Deployment switches that pointer rather than moving
+the newly built environment, so Windows entry points keep their original absolute paths; the original `.venv` remains
+untouched for first-deployment rollback. Later successful deployments remove the superseded managed environment.
 
 Both builds read any available GitHub Actions cache, but cache export uses `ignore-error=true`. A `workflow_run` token
 may be unable to write the default branch's Actions cache; that optional optimization must never block GHCR publication
@@ -74,7 +78,11 @@ pass.
 
 - CI failure, cancellation, pull-request run, or non-`main` run: no images and no deployment.
 - Image build/push failure: no deployment. Actions cache export failure is ignored because the cache is optional.
-- Docker unavailable, live checkout dirty, wrong branch, non-fast-forward history, dependency install failure, or failed
-  daemon health check: deployment fails visibly in Actions rather than forcing or discarding host state.
+- Docker unavailable, live checkout dirty, wrong branch, non-fast-forward history, or dependency resolution failure:
+  deployment fails visibly before the daemon is stopped or the live checkout and virtual environment are changed.
+- After the daemon is stopped, a swap, fast-forward, image retag, restart, or health-check failure triggers rollback:
+  the partially deployed daemon is stopped, the previous checkout and untouched virtual environment are restored, and
+  the previous daemon is started and health-checked. The Actions job still exits non-zero and reports whether rollback
+  itself had any errors.
 - A newer `main` commit superseding an older queued deployment makes the older deployment exit without changing the
   tower; the serialized newer workflow run handles it.
