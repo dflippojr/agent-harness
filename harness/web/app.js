@@ -51,6 +51,7 @@ const progressBar = (fraction) => h("div", { class: `progress${fraction === null
 
 let cleanup = [];
 const onLeave = (fn) => cleanup.push(fn);
+let protocolBlocked = false;
 
 function layoutBar() {
   const bar = document.getElementById("bar");
@@ -86,6 +87,7 @@ window.addEventListener("pageshow", repaintBar);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintBar(); });
 
 async function loadProfileIcon() {
+  if (protocolBlocked) return;
   try { $profileIcon.textContent = (await api("/profile")).emoji; } catch (_) { /* offline */ }
 }
 
@@ -181,6 +183,11 @@ function apiSurface(path, method) {
 }
 
 async function api(path, { method = "GET", body, surface } = {}) {
+  if (protocolBlocked) {
+    const err = new Error("Update required");
+    err.code = "client_update_required";
+    throw err;
+  }
   return agentHarnessWeb.request(path, { method, body, surface: surface || apiSurface(path, method) });
 }
 
@@ -192,6 +199,7 @@ function ownerSurface() {
 
 function daemonImage(path, attrs = {}) {
   const img = h("img", { ...attrs, alt: attrs.alt || "" });
+  if (protocolBlocked) return img;
   if (!agentHarnessWeb.token) {
     img.src = agentHarnessWeb.url(path, ownerSurface());
   } else {
@@ -205,6 +213,7 @@ function daemonImage(path, attrs = {}) {
 }
 
 async function downloadDaemonFile(path, filename) {
+  if (protocolBlocked) return;
   try {
     const blob = await agentHarnessWeb.blob(path, ownerSurface());
     const url = URL.createObjectURL(blob);
@@ -351,7 +360,7 @@ function openStream(urlFor, handlers, { authorized = false } = {}) {
     }
   };
   const connect = async () => {
-    if (closed) return;
+    if (closed || protocolBlocked) return;
     const run = ++generation;
     es?.close();
     controller?.abort();
@@ -382,7 +391,7 @@ function openStream(urlFor, handlers, { authorized = false } = {}) {
       source.addEventListener(type, (msg) => fn(JSON.parse(msg.data)));
     }
   };
-  const onVisible = () => { if (document.visibilityState === "visible") connect(); };
+  const onVisible = () => { if (!protocolBlocked && document.visibilityState === "visible") connect(); };
   document.addEventListener("visibilitychange", onVisible);
   connect();
   return () => {
@@ -400,6 +409,7 @@ const hashParts = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boo
 const isTopLevel = (parts) => parts.length === 0 || (parts.length === 1 && (parts[0] === "jobs" || parts[0] === "images"));
 
 function go(hash, replace = false) {
+  if (protocolBlocked) return;
   const url = !hash || hash === "#" || hash === "#/" ? "#/" : (hash.startsWith("#") ? hash : `#/${hash}`);
   const cur = location.hash || "#/";
   const same = url === cur || (url === "#/" && (cur === "" || cur === "#" || cur === "#/"));
@@ -409,6 +419,7 @@ function go(hash, replace = false) {
 }
 
 async function route() {
+  if (protocolBlocked) return;
   cleanup.forEach((fn) => { try { fn(); } catch (_) { /* ignore */ } });
   cleanup = [];
   $app.replaceChildren();
@@ -454,6 +465,7 @@ async function route() {
   }
 }
 $back.addEventListener("click", () => {
+  if (protocolBlocked) return;
   const parts = hashParts();
   // Session Transcript/Changes/Info are tabs (replaceState), so Back always leaves the session.
   // An approval deep-link is a real subpage of the transcript.
@@ -461,6 +473,7 @@ $back.addEventListener("click", () => {
   else history.back();
 });
 $feature.addEventListener("change", () => {
+  if (protocolBlocked) return;
   go($feature.value === "jobs" ? "#/jobs" : $feature.value === "images" ? "#/images" : "#/", true);
 });
 window.addEventListener("hashchange", route);
@@ -3276,7 +3289,7 @@ function diskCard() {
 // Loading the model takes about a minute after it has slept, so start as soon as the app is opened.
 let lastWarm = 0;
 async function warmModel(force = false) {
-  if (isGuest()) return;
+  if (protocolBlocked || isGuest()) return;
   if (!force && Date.now() - lastWarm < 60_000) return;
   try {
     if (!isMember()) {
@@ -3327,6 +3340,7 @@ async function reloadAndUpdate() {
 }
 
 function blockingUpdate(meta, state) {
+  protocolBlocked = true;
   setHeader("agents", "Update required", { page: true });
   const daemonIsOld = state === "daemon_update_required";
   fill($app, h("div", { class: "card" },
@@ -3341,12 +3355,14 @@ function blockingUpdate(meta, state) {
 async function checkCompatibility({ foreground = false } = {}) {
   let meta;
   try { meta = await agentHarnessWeb.compatibility(); }
-  catch (_) { return true; } // normal offline UI handles connection failures
+  catch (_) { return !protocolBlocked; } // stay on the update card if health fails after a skew
   const range = meta.protocols?.admin;
   if (range && (WEB_PROTOCOL < range.min || WEB_PROTOCOL > range.max)) {
     blockingUpdate(meta, WEB_PROTOCOL < range.min ? "client_update_required" : "daemon_update_required");
     return false;
   }
+  const wasBlocked = protocolBlocked;
+  protocolBlocked = false;
   const available = meta.update_hint?.web?.build_id;
   if (available && available !== WEB_BUILD_ID) {
     try { await (await navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
@@ -3361,6 +3377,7 @@ async function checkCompatibility({ foreground = false } = {}) {
   } else {
     sessionStorage.removeItem(UPDATE_GUARD);
   }
+  if (wasBlocked) await route();
   return true;
 }
 

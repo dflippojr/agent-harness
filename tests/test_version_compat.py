@@ -459,3 +459,17 @@ def test_web_bundle_has_safe_cache_update_and_version_handshake():
     assert "harness-shell-${BUILD_ID}" in worker and "PURGE_SHELL" in worker
     assert "event.origin !== self.location.origin" in worker
     assert "api/v1" not in worker and "api/admin" not in worker
+
+
+def test_blocked_web_ui_ignores_hashchange_and_nav_without_api_calls():
+    import shutil
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node isn't installed")
+    script = Path(__file__).resolve().parent / "web_blocked_state.mjs"
+    result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ok" in result.stdout
+    app = (Path(__file__).parents[1] / "harness/web/app.js").read_text(encoding="utf-8")
+    assert "let protocolBlocked = false;" in app
+    assert "if (protocolBlocked) return;" in app
