@@ -821,7 +821,7 @@ class ImageService:
         while True:
             job = self.db.get_image(job_id)
             if job is None:
-                return {"id": job_id, "status": "deleted"}
+                return {"id": job_id, "status": "deleted", "error": "image was deleted"}
             if job["status"] in ("done", "failed", "cancelled"):
                 return job
             event = self._done.setdefault(job_id, asyncio.Event())
@@ -1217,7 +1217,9 @@ class ImageService:
             if (job.get("operation") or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_GENERATE:
                 await self._queue_requested_upscale(job)
         except (ToolError, httpx.HTTPError, KeyError, ValueError, OSError) as e:
-            status = "failed"
+            cancelled_edit = (job_id in self._cancel
+                              and job.get("operation") == image_edit.OPERATION_EDIT)
+            status = "cancelled" if cancelled_edit else "failed"
             self.db.update_image(job_id, status=status, finished_at=time.time(), error=str(e)[:1000])
             log.warning("image %s %s: %s", job_id, status, e)
         finally:
@@ -1405,7 +1407,7 @@ class ImageService:
                           session_id=args.get("_session", ""), upscale=requested)
         job = await self.wait(job["id"])
         if job["status"] != "done":
-            raise ToolError(f"image generation failed: {job['error']}")
+            raise ToolError(f"image generation failed: {job.get('error') or job['status']}")
         result = job
         if requested != "none":
             child = self.db.find_image_upscale(job["id"], requested)

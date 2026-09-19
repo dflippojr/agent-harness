@@ -343,7 +343,8 @@ def test_delete_queued_image_makes_wait_return_deleted(tmp_path):
         result = await m.images.delete(job["id"])
         assert result == {"deleted": job["id"], "parent_id": ""}
         assert m.db.get_image(job["id"]) is None
-        assert await m.images.wait(job["id"]) == {"id": job["id"], "status": "deleted"}
+        assert await m.images.wait(job["id"]) == {
+            "id": job["id"], "status": "deleted", "error": "image was deleted"}
 
     asyncio.run(body())
 
@@ -375,7 +376,50 @@ def test_delete_running_image_waits_for_worker_before_removing_files(tmp_path):
         assert result == {"deleted": job["id"], "parent_id": ""}
         assert m.db.get_image(job["id"]) is None
         assert not m.images.path(job).exists()
-        assert await m.images.wait(job["id"]) == {"id": job["id"], "status": "deleted"}
+        assert await m.images.wait(job["id"]) == {
+            "id": job["id"], "status": "deleted", "error": "image was deleted"}
+        await m.stop()
+
+    asyncio.run(body())
+
+
+def test_agent_image_tool_reports_deleted_job_without_key_error(tmp_path):
+    async def body():
+        m, _, _ = image_manager(tmp_path)
+        missing_id = "abcdef012345"
+        m.images.submit = lambda *args, **kwargs: {"id": missing_id}
+        with pytest.raises(ToolError, match="deleted"):
+            await m.images.call("generate_image", {"prompt": "gone", "filename": "gone"},
+                                workspace_root=tmp_path)
+
+    asyncio.run(body())
+
+
+def test_cancel_running_edit_records_cancelled_not_failed(tmp_path):
+    async def body():
+        m, _, _ = edit_manager(tmp_path)
+        parent = m.images.ingest_upload(png_rgb())
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def interrupted_edit(job, started_at):
+            started.set()
+            await release.wait()
+            raise ToolError("cancelled")
+
+        async def no_interrupt():
+            return None
+
+        m.images._run_edit = interrupted_edit
+        m.images.comfy.interrupt = no_interrupt
+        await m.start(maintenance=False)
+        edit = m.images.submit_edit(parent["id"], "cancel me", png_mask())
+        await asyncio.wait_for(started.wait(), timeout=2)
+        m.images.cancel(edit["id"])
+        release.set()
+        cancelled = await asyncio.wait_for(m.images.wait(edit["id"]), timeout=2)
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["error"] == "cancelled"
         await m.stop()
 
     asyncio.run(body())
