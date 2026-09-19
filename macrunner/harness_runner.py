@@ -43,7 +43,7 @@ from harness import projects  # noqa: E402
 from harness.changes import workspace_changes  # noqa: E402
 from harness.compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION  # noqa: E402
 from harness.fileops import FILE_TOOLS, FileOps, ToolError, dir_size, resolve_path  # noqa: E402
-from harness.updater import apply_update  # noqa: E402
+from harness.updater import apply_update, schedule_launchd_handoff  # noqa: E402
 
 VERSION = MAC_CLIENT_VERSION
 POLL_TIMEOUT = 60           # the daemon holds a poll for up to 25 s
@@ -433,9 +433,18 @@ class Runner:
                 self.inflight.pop(rid, None)
         if op == "update_client" and payload["ok"]:
             # The result reaches the server before launchd replaces this process.
-            domain = f"gui/{os.getuid()}/dev.agent-harness.runner"
-            subprocess.Popen(["/bin/sh", "-c", f"sleep 1; launchctl kickstart -k {shlex.quote(domain)}"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            value = payload.get("value") if isinstance(payload.get("value"), dict) else {}
+            base = self.executor.home / ".agent-harness"
+            plist = self.executor.home / "Library" / "LaunchAgents" / "dev.agent-harness.runner.plist"
+            previous = base / "runner" / "previous-plist"
+            schedule_launchd_handoff(
+                plist,
+                definition_changed=bool(value.get("plist_changed", True)),
+                previous_plist=previous if previous.is_file() else None,
+                base=base,
+                python=sys.executable,
+                app_dir=base / "runner" / "app",
+            )
 
     def loop(self) -> None:
         log.info("runner %s (instance %s) polling %s", VERSION, self.instance[:8], self.client.base)

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -47,8 +48,13 @@ def _safe_extract(package: Path, destination: Path) -> None:
 
 
 LAUNCH_AGENT_LABEL = "dev.agent-harness.runner"
+PREVIOUS_PLIST_NAME = "previous-plist"
 _BOOTOUT_ATTEMPTS = 5
 _BOOTOUT_POLL_SECONDS = 1.0
+_HANDOFF_DELAY_SECONDS = 1.0
+_PROGRAM_ARGUMENTS_RE = re.compile(
+    r"<key>ProgramArguments</key>\s*<array>(.*?)</array>", re.DOTALL)
+_PLIST_STRING_RE = re.compile(r"<string>([^<]*)</string>")
 
 
 def _write_result(base: Path, result: dict) -> None:
@@ -70,6 +76,10 @@ def _launchd_target(uid: int | None = None) -> tuple[str, str]:
     return domain, f"{domain}/{LAUNCH_AGENT_LABEL}"
 
 
+def previous_plist_path(base: Path) -> Path:
+    return base / "runner" / PREVIOUS_PLIST_NAME
+
+
 def unload_launch_agent(*, uid: int | None = None) -> None:
     _, target = _launchd_target(uid)
     _launchctl("bootout", target, check=False)
@@ -87,6 +97,35 @@ def load_launch_agent(plist: Path, *, uid: int | None = None) -> None:
     _launchctl("enable", target)
 
 
+def kickstart_launch_agent(*, uid: int | None = None) -> None:
+    _, target = _launchd_target(uid)
+    _launchctl("kickstart", "-k", target)
+
+
+def _program_arguments(plist: Path) -> list[str]:
+    try:
+        text = plist.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    match = _PROGRAM_ARGUMENTS_RE.search(text)
+    if not match:
+        return []
+    return _PLIST_STRING_RE.findall(match.group(1))
+
+
+def verify_launch_agent_loaded(plist: Path, *, uid: int | None = None) -> None:
+    _, target = _launchd_target(uid)
+    probe = _launchctl("print", target, check=False)
+    stdout = probe.stdout or ""
+    if probe.returncode != 0:
+        raise RuntimeError(f"launchd job {target} is not loaded after reload")
+    missing = [arg for arg in _program_arguments(plist) if arg and arg not in stdout]
+    if missing:
+        raise RuntimeError(
+            f"launchd job {target} is not running the installed plist "
+            f"(missing {missing[0]})")
+
+
 def reload_launch_agent(plist: Path, *, uid: int | None = None) -> None:
     """Unload the current launchd job and load the installed plist.
 
@@ -96,6 +135,102 @@ def reload_launch_agent(plist: Path, *, uid: int | None = None) -> None:
     """
     unload_launch_agent(uid=uid)
     load_launch_agent(plist, uid=uid)
+
+
+def activate_launch_agent(plist: Path, *, definition_changed: bool,
+                         uid: int | None = None) -> None:
+    """Make launchd run `plist`: reload the definition when it changed, else kickstart."""
+    if definition_changed:
+        reload_launch_agent(plist, uid=uid)
+    else:
+        kickstart_launch_agent(uid=uid)
+    verify_launch_agent_loaded(plist, uid=uid)
+
+
+def perform_launchd_handoff(plist: Path, *, definition_changed: bool,
+                            previous_plist: Path | None, base: Path,
+                            uid: int | None = None) -> dict:
+    """Activate the installed plist and record the outcome in last-update.json.
+
+    Used by the CLI updater synchronously and by the Mac runner's detached helper
+    after the update result has been posted. Bootstrap failure restores the
+    previous plist and reloads it.
+    """
+    prior = {}
+    try:
+        prior = json.loads((base / "runner" / "last-update.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    try:
+        activate_launch_agent(plist, definition_changed=definition_changed, uid=uid)
+        result = {
+            "ok": True,
+            "version": str(prior.get("version") or ""),
+            "build_id": prior.get("build_id", ""),
+            "at": time.time(),
+            "message": str(prior.get("message") or "Mac client updated"),
+            "plist_changed": definition_changed,
+        }
+        _write_result(base, result)
+        if previous_plist is not None and previous_plist.exists():
+            previous_plist.unlink()
+        return result
+    except Exception as exc:
+        message = f"update failed; prior launchd job restored: {exc}"
+        if previous_plist is not None and previous_plist.is_file():
+            shutil.copy2(previous_plist, plist)
+        try:
+            if plist.is_file():
+                reload_launch_agent(plist, uid=uid)
+                verify_launch_agent_loaded(plist, uid=uid)
+        except Exception as reload_exc:
+            message = f"{message}; restored launchd job failed to reload: {reload_exc}"
+        result = {
+            "ok": False,
+            "version": str(prior.get("version") or ""),
+            "build_id": prior.get("build_id", ""),
+            "at": time.time(),
+            "message": message,
+            "plist_changed": definition_changed,
+        }
+        _write_result(base, result)
+        return result
+
+
+def schedule_launchd_handoff(plist: Path, *, definition_changed: bool,
+                             previous_plist: Path | None, base: Path,
+                             python: str, app_dir: Path) -> subprocess.Popen:
+    """Run the shared launchd activate helper after this process can return.
+
+    The Mac runner is the launchd job being replaced, so bootout must happen in a
+    detached helper after the HTTP result is posted.
+    """
+    env = os.environ.copy()
+    env["HARNESS_LAUNCHD_HANDOFF"] = json.dumps({
+        "plist": str(plist),
+        "definition_changed": bool(definition_changed),
+        "previous_plist": str(previous_plist) if previous_plist else "",
+        "base": str(base),
+        "delay": _HANDOFF_DELAY_SECONDS,
+    })
+    env["HARNESS_LAUNCHD_APP"] = str(app_dir)
+    code = (
+        "import json,os,sys,time;"
+        "from pathlib import Path;"
+        "cfg=json.loads(os.environ['HARNESS_LAUNCHD_HANDOFF']);"
+        "time.sleep(float(cfg.get('delay') or 0));"
+        "sys.path.insert(0, os.environ['HARNESS_LAUNCHD_APP']);"
+        "from harness.updater import perform_launchd_handoff;"
+        "prev=cfg.get('previous_plist');"
+        "perform_launchd_handoff(Path(cfg['plist']),"
+        " definition_changed=bool(cfg.get('definition_changed')),"
+        " previous_plist=Path(prev) if prev else None,"
+        " base=Path(cfg['base']))"
+    )
+    kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "env": env}
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    return subprocess.Popen([python, "-c", code], **kwargs)
 
 
 def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
@@ -154,6 +289,7 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
             "__PYTHON__", str(base / "venv" / "bin" / "python"))
         plist_new.write_text(plist_text, encoding="utf-8")
         targets.append((plist_new, plist_target))
+        prior_plist_text = plist_target.read_text(encoding="utf-8") if plist_target.is_file() else None
         backup = work / "backup"
         backup.mkdir()
         for index, (source, target) in enumerate(targets):
@@ -165,12 +301,16 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
             os.replace(source, target)
             installed.append(target)
 
+        plist_changed = prior_plist_text != plist_target.read_text(encoding="utf-8")
+        if not restart and prior_plist_text is not None:
+            previous = previous_plist_path(base)
+            previous.parent.mkdir(parents=True, exist_ok=True)
+            previous.write_text(prior_plist_text, encoding="utf-8")
         if restart:
-            unload_launch_agent()
             launchd_unloaded = True
-            load_launch_agent(plist_target)
+            activate_launch_agent(plist_target, definition_changed=plist_changed)
         result = {"ok": True, "version": str(manifest["version"]), "build_id": manifest.get("build_id", ""),
-                  "at": time.time(), "message": "Mac client updated"}
+                  "at": time.time(), "message": "Mac client updated", "plist_changed": plist_changed}
         _write_result(base, result)
         return result
     except Exception as exc:
@@ -187,6 +327,7 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
         if launchd_unloaded and plist_target.is_file():
             try:
                 reload_launch_agent(plist_target)
+                verify_launch_agent_loaded(plist_target)
             except Exception as reload_exc:
                 message = f"{message}; restored launchd job failed to reload: {reload_exc}"
         result.update({"at": time.time(), "message": message})

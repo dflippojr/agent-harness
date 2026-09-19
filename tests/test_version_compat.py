@@ -187,22 +187,40 @@ def fake_download(monkeypatch, *, bad_hash: bool = False):
     monkeypatch.setattr(updater, "_download", download)
 
 
+def packaged_plist_text(home: Path, base: Path) -> str:
+    raw = (Path(mac_client.ROOT) / "macrunner/dev.agent-harness.runner.plist").read_text(encoding="utf-8")
+    return raw.replace("__HOME__", str(home)).replace("__PYTHON__", str(base / "venv" / "bin" / "python"))
+
+
 def fake_launchctl(monkeypatch, *, fail_on: str | None = None, print_loaded: bool = False,
-                   fail_times: int | None = None):
+                   fail_times: int | None = None, plist: Path | None = None):
     calls = []
     remaining = fail_times
+    loaded = True
+    active_plist = plist
 
     def run(args, **kwargs):
-        nonlocal remaining
+        nonlocal remaining, loaded, active_plist
         calls.append(list(args))
         command = args[1] if len(args) > 1 else ""
         if fail_on and command == fail_on and (remaining is None or remaining > 0):
             if remaining is not None:
                 remaining -= 1
             raise subprocess.CalledProcessError(1, args)
-        if command == "print" and not print_loaded:
-            return subprocess.CompletedProcess(args, 1)
-        return subprocess.CompletedProcess(args, 0)
+        if command == "bootout" and not print_loaded:
+            loaded = False
+        elif command == "bootstrap":
+            loaded = True
+            if len(args) > 3:
+                active_plist = Path(args[3])
+        if command == "print":
+            if loaded or print_loaded:
+                stdout = "dev.agent-harness.runner"
+                if active_plist and Path(active_plist).is_file():
+                    stdout = Path(active_plist).read_text(encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(updater.os, "getuid", lambda: 501, raising=False)
     monkeypatch.setattr(updater.subprocess, "run", run)
@@ -220,11 +238,13 @@ def test_mac_update_is_atomic_preserves_credentials_and_restarts(tmp_path, monke
     assert json.loads((base / "runner/config.json").read_text())["token"] == "runner-secret"
     assert json.loads((base / "client/config.json").read_text())["token"] == "owner-secret"
     plist = home / "Library/LaunchAgents/dev.agent-harness.runner.plist"
+    assert result["plist_changed"] is True
     assert calls == [
         ["launchctl", "bootout", "gui/501/dev.agent-harness.runner"],
         ["launchctl", "print", "gui/501/dev.agent-harness.runner"],
         ["launchctl", "bootstrap", "gui/501", str(plist)],
         ["launchctl", "enable", "gui/501/dev.agent-harness.runner"],
+        ["launchctl", "print", "gui/501/dev.agent-harness.runner"],
     ]
     assert json.loads((base / "runner/last-update.json").read_text())["ok"] is True
     assert not list(base.glob(".update-*"))
@@ -259,10 +279,10 @@ def test_mac_update_reload_failure_restores_prior_plist_into_launchd(tmp_path, m
     probe = ["launchctl", "print", "gui/501/dev.agent-harness.runner"]
     bootstrap = ["launchctl", "bootstrap", "gui/501", str(plist)]
     enable = ["launchctl", "enable", "gui/501/dev.agent-harness.runner"]
-    reload = [bootout, probe, bootstrap, enable]
+    reload = [bootout, probe, bootstrap, enable, probe]
     expected = {
         "bootstrap": [bootout, probe, bootstrap] + reload,
-        "enable": reload + reload,
+        "enable": [bootout, probe, bootstrap, enable] + reload,
     }
     for command, want in expected.items():
         calls = fake_launchctl(monkeypatch, fail_on=command, fail_times=1)
@@ -284,7 +304,8 @@ def test_mac_update_stuck_launchd_job_is_not_reported_ok(tmp_path, monkeypatch):
         updater.apply_update("https://tower.example", base, home=home)
     assert (base / "runner/app/old.txt").read_text() == "old runner"
     assert json.loads((base / "runner/last-update.json").read_text())["ok"] is False
-    assert [call[1] for call in calls] == ["bootout"] + ["print"] * 5
+    unload = ["bootout"] + ["print"] * 5
+    assert [call[1] for call in calls] == unload + unload
 
 
 def test_interrupted_mac_update_staging_leaves_runtime_and_credentials_untouched(tmp_path, monkeypatch):
@@ -298,6 +319,114 @@ def test_interrupted_mac_update_staging_leaves_runtime_and_credentials_untouched
     assert (base / "client/old.txt").read_text() == "old client"
     assert json.loads((base / "runner/config.json").read_text())["token"] == "runner-secret"
     assert json.loads((base / "client/config.json").read_text())["token"] == "owner-secret"
+
+
+def test_web_update_reloads_changed_plist_via_shared_handoff(tmp_path, monkeypatch):
+    home, base = installed_runtime(tmp_path)
+    fake_download(monkeypatch)
+    plist = home / "Library/LaunchAgents/dev.agent-harness.runner.plist"
+    assert updater.apply_update("https://tower.example", base, restart=False, home=home)["plist_changed"] is True
+    assert "ProgramArguments" in plist.read_text(encoding="utf-8")
+    previous = updater.previous_plist_path(base)
+    assert previous.read_text(encoding="utf-8") == "old plist"
+    calls = fake_launchctl(monkeypatch, plist=plist)
+    recorded = updater.perform_launchd_handoff(
+        plist, definition_changed=True, previous_plist=previous, base=base)
+    assert recorded["ok"] is True
+    assert calls == [
+        ["launchctl", "bootout", "gui/501/dev.agent-harness.runner"],
+        ["launchctl", "print", "gui/501/dev.agent-harness.runner"],
+        ["launchctl", "bootstrap", "gui/501", str(plist)],
+        ["launchctl", "enable", "gui/501/dev.agent-harness.runner"],
+        ["launchctl", "print", "gui/501/dev.agent-harness.runner"],
+    ]
+    assert not previous.exists()
+    assert json.loads((base / "runner/last-update.json").read_text())["ok"] is True
+
+
+def test_unchanged_plist_update_kickstarts(tmp_path, monkeypatch):
+    home, base = installed_runtime(tmp_path)
+    plist = home / "Library/LaunchAgents/dev.agent-harness.runner.plist"
+    plist.write_text(packaged_plist_text(home, base), encoding="utf-8")
+    fake_download(monkeypatch)
+    result = updater.apply_update("https://tower.example", base, restart=False, home=home)
+    assert result["ok"] and result["plist_changed"] is False
+    calls = fake_launchctl(monkeypatch, plist=plist)
+    recorded = updater.perform_launchd_handoff(
+        plist, definition_changed=False, previous_plist=updater.previous_plist_path(base), base=base)
+    assert recorded["ok"] is True
+    assert calls == [
+        ["launchctl", "kickstart", "-k", "gui/501/dev.agent-harness.runner"],
+        ["launchctl", "print", "gui/501/dev.agent-harness.runner"],
+    ]
+    cli_calls = fake_launchctl(monkeypatch, plist=plist)
+    cli = updater.apply_update("https://tower.example", base, home=home)
+    assert cli["plist_changed"] is False
+    assert cli_calls == [
+        ["launchctl", "kickstart", "-k", "gui/501/dev.agent-harness.runner"],
+        ["launchctl", "print", "gui/501/dev.agent-harness.runner"],
+    ]
+
+
+def test_handoff_bootstrap_failure_restores_previous_plist(tmp_path, monkeypatch):
+    home, base = installed_runtime(tmp_path)
+    fake_download(monkeypatch)
+    plist = home / "Library/LaunchAgents/dev.agent-harness.runner.plist"
+    updater.apply_update("https://tower.example", base, restart=False, home=home)
+    previous = updater.previous_plist_path(base)
+    prior_text = previous.read_text(encoding="utf-8")
+    assert prior_text == "old plist"
+    assert prior_text != plist.read_text(encoding="utf-8")
+    calls = fake_launchctl(monkeypatch, fail_on="bootstrap", fail_times=1, plist=plist)
+    recorded = updater.perform_launchd_handoff(
+        plist, definition_changed=True, previous_plist=previous, base=base)
+    assert recorded["ok"] is False
+    assert "prior launchd job restored" in recorded["message"]
+    assert plist.read_text(encoding="utf-8") == prior_text
+    assert json.loads((base / "runner/last-update.json").read_text())["ok"] is False
+    bootout = ["launchctl", "bootout", "gui/501/dev.agent-harness.runner"]
+    probe = ["launchctl", "print", "gui/501/dev.agent-harness.runner"]
+    bootstrap = ["launchctl", "bootstrap", "gui/501", str(plist)]
+    enable = ["launchctl", "enable", "gui/501/dev.agent-harness.runner"]
+    assert calls == [bootout, probe, bootstrap] + [bootout, probe, bootstrap, enable, probe]
+
+
+def test_runner_schedules_shared_handoff_after_posting_update_result(tmp_path, monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "macrunner"))
+    import harness_runner
+    home, base = installed_runtime(tmp_path)
+    updater.previous_plist_path(base).write_text("old plist", encoding="utf-8")
+    scheduled = []
+    posted = []
+    monkeypatch.setattr(harness_runner, "schedule_launchd_handoff",
+                        lambda *args, **kwargs: scheduled.append((args, kwargs)))
+    executor = harness_runner.Executor(
+        workspaces=tmp_path / "ws", repo_roots=[tmp_path], profile=None, home=home, min_free_gb=0,
+        server="https://tower.example")
+    monkeypatch.setattr(executor, "handle", lambda rid, op, params: {
+        "ok": True, "version": "4.2", "plist_changed": True})
+
+    class FakeClient:
+        def post(self, path, body, timeout):
+            posted.append(body)
+            return {}
+
+    harness_runner.Runner(FakeClient(), executor).work(
+        {"id": "req-1", "op": "update_client", "params": {}})
+    assert posted and posted[0]["ok"] is True and posted[0]["id"] == "req-1"
+    assert scheduled and scheduled[0][1]["definition_changed"] is True
+    assert scheduled[0][1]["previous_plist"] == updater.previous_plist_path(base)
+    assert scheduled[0][1]["base"] == base
+    argv = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kwargs: argv.append((args, kwargs)) or type(
+        "P", (), {})())
+    updater.schedule_launchd_handoff(
+        home / "Library/LaunchAgents/dev.agent-harness.runner.plist",
+        definition_changed=True, previous_plist=updater.previous_plist_path(base), base=base,
+        python=sys.executable, app_dir=base / "runner" / "app")
+    assert argv and "kickstart" not in " ".join(argv[0][0])
+    assert "perform_launchd_handoff" in argv[0][0][2]
+    assert "HARNESS_LAUNCHD_HANDOFF" in argv[0][1]["env"]
 
 
 def test_old_runner_gets_exact_manual_update_fallback(tmp_path):
