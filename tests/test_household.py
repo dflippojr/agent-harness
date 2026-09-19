@@ -235,7 +235,7 @@ def test_two_member_adversarial_matrix(tmp_path):
         assert "accounts" not in admin.json().get("detail", "")
         for path in (f"{PREFIX}/accounts", f"{PREFIX}/sessions", f"{PREFIX}/keys", f"{PREFIX}/gpu",
                      f"{PREFIX}/jobs", f"{PREFIX}/maintenance", "/keys", "/jobs", "/images", "/gpu",
-                     "/memory", "/templates", "/metrics", "/runners", "/smart-approvals"):
+                     "/memory", "/templates", "/metrics", "/runners", "/smart-approvals", "/skills"):
             r = client.get(path, headers=ah)
             assert r.status_code == 403, path
         assert "runners" in client.get("/runners", headers=ah).json()["detail"]

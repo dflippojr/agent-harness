@@ -33,7 +33,7 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.10"
+API_VERSION = "1.11"
 SESSIONS_ALL = "sessions:all"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
@@ -225,6 +225,7 @@ class AppRootResponse(BaseModel):
     backends: list[BackendResponse]
     capabilities: CapabilitiesResponse
     features: dict[str, bool | str]
+    image_modes: dict[str, dict] = Field(default_factory=dict)
 
 
 class ProviderFailureResponse(BaseModel):
@@ -562,7 +563,8 @@ def register(app: FastAPI, mgr) -> None:
                     "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                     "runner_pairing": bool(m.cfg.runners),
                     "remote_control": m.remote_control is not None, "browser_pairing": True,
-                    "stream_tickets": True, "scoped_projects": True, "household_accounts": True}}
+                    "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
+                "image_modes": m.images.mode_catalog() if m.images is not None else {}}
 
     @app.get("/api/v1/backends", response_model=list[BackendResponse])
     async def backends(request: Request):

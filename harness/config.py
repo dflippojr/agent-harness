@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_FILE = "projects.yaml"
 MODULE_NAMES = (
     "local_model", "homelab", "memory_library", "images", "jobs", "gpu_guard", "runners",
-    "remote_control", "web", "search", "endpoint", "notifications", "backup",
+    "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills",
 )
 # Optional modules whose on/off switch is ``cfg.<section>.enabled``. The rest
 # (local_model, homelab, runners) are install-selected only.
@@ -29,6 +29,7 @@ MODULE_ENABLE_SECTIONS = {
     "backup": "backup",
     "memory_library": "memory_library",
     "remote_control": "remote_control",
+    "skills": "skills",
 }
 
 
@@ -203,6 +204,17 @@ class JobsConfig:
 
 
 @dataclass
+class SkillsConfig:
+    """Instruction-only owner-approved skills (skills.py). Agents may only stage drafts."""
+    enabled: bool = False
+    local_review: bool = True          # full local profile: advisory Qwen review at true GPU idle
+    proposal_rate_per_hour: int = 8
+    reviewer_base_url: str = ""        # hosted-only review; never used unless the owner explicitly starts it
+    reviewer_model: str = ""
+    reviewer_api_key_file: str = ""    # owner-managed file; never returned by an API
+
+
+@dataclass
 class SearchConfig:
     """Full-text search over past sessions (search.py): the app's search box and the session_search tools."""
     enabled: bool = False
@@ -235,6 +247,7 @@ class ImagesConfig:
     linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
+    models_dir: str = "C:/AI/comfy-models"    # diffusion_models, text_encoders, vae, loras
     upscale_dir: str = ""                      # Real-ESRGAN weights; empty → <comfy_dir>/ComfyUI/models/upscale_models
     upscale_max_pixels: int = 36_000_000       # refuse 2×/4× outputs above this before allocating
     upscale_tile: int = 512                    # ComfyUI ImageUpscaleWithModel starting tile
@@ -266,6 +279,7 @@ class ModulesConfig:
     endpoint: bool = True
     notifications: bool = True
     backup: bool = True
+    skills: bool = True
 
 
 @dataclass
@@ -332,6 +346,7 @@ class Config:
     images: ImagesConfig = field(default_factory=ImagesConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     jobs: JobsConfig = field(default_factory=JobsConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     remote_control: RemoteControlConfig = field(default_factory=RemoteControlConfig)
     smart_approvals: object = field(default_factory=_smart_approvals_default)
     max_turns: int = 80
@@ -582,6 +597,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     images = ImagesConfig(**(raw.get("images") or {}))
     search = SearchConfig(**(raw.get("search") or {}))
     jobs = JobsConfig(**(raw.get("jobs") or {}))
+    skills = SkillsConfig(**(raw.get("skills") or {}))
     remote_control = RemoteControlConfig(**(raw.get("remote_control") or {}))
     def module_enabled(name: str, configured: bool) -> bool:
         # In the service profile, an explicit module opt-in is the enable switch. Full-profile settings keep their
@@ -597,6 +613,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     images.enabled = module_enabled("images", images.enabled)
     search.enabled = module_enabled("search", search.enabled)
     jobs.enabled = module_enabled("jobs", jobs.enabled)
+    skills.enabled = module_enabled("skills", skills.enabled)
     remote_control.enabled = module_enabled("remote_control", remote_control.enabled)
     modules = ModulesConfig(
         local_model=selected.local_model,
@@ -612,6 +629,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         endpoint=endpoint.enabled,
         notifications=notify.enabled,
         backup=backup.enabled,
+        skills=skills.enabled,
     )
     if not selected.local_model:
         models = {}
@@ -645,6 +663,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         images=images,
         search=search,
         jobs=jobs,
+        skills=skills,
         remote_control=remote_control,
         smart_approvals=load_smart_config(raw.get("smart_approvals")),
         max_turns=int(budgets.get("max_turns", 80)),

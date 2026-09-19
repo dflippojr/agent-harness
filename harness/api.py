@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -36,6 +37,7 @@ class CreateSession(BaseModel):
     backend: str = "local"
     model: str | None = None
     title: str | None = None
+    skills: list[str] | None = None
 
 
 class CreateProject(BaseModel):
@@ -105,6 +107,18 @@ class SmartApprovalsUpdate(BaseModel):
 class MemoryProfileUpdate(BaseModel):
     content: str
     summary: str = "Update agent profile"
+
+
+class SkillInstall(BaseModel):
+    content_hash: str
+
+
+class SkillAllowlist(BaseModel):
+    projects: list[str] = []
+
+
+class SkillReject(BaseModel):
+    reason: str = ""
 
 
 class ImageArchiveRetentionApply(BaseModel):
@@ -649,6 +663,102 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return {"profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
                 "last_commit": saved}
 
+    def skills_or_400(m: Manager):
+        if m.skills is None:
+            raise HarnessError(400, "instruction skills are disabled")
+        return m.skills
+
+    def skill_op(fn):
+        from .skills import SkillError
+        try:
+            return fn()
+        except SkillError as e:
+            raise HarnessError(e.status, str(e)) from e
+        except sqlite3.IntegrityError as e:
+            raise HarnessError(409, "skill store constraint failed") from e
+
+    def skills_owner(request: Request):
+        require_owner(request)
+        return skills_or_400(mgr(request))
+
+    @app.get("/skills")
+    async def skills_overview(request: Request):
+        m = require_owner(request)
+        if m.skills is None:
+            return {"enabled": False, "proposals": [], "installed": []}
+        return m.skills.list_overview()
+
+    @app.get("/skills/enabled")
+    async def skills_enabled(request: Request):
+        m = require_owner(request)
+        if m.skills is None:
+            return []
+        return m.skills.list_enabled()
+
+    @app.get("/skills/proposals/{pid}")
+    async def skill_proposal(pid: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.get_proposal(pid, include_body=True))
+
+    @app.post("/skills/proposals/{pid}/install")
+    async def skill_install(pid: str, body: SkillInstall, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.install(pid, body.content_hash))
+
+    @app.post("/skills/proposals/{pid}/reject")
+    async def skill_reject(pid: str, body: SkillReject, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.reject(pid, body.reason))
+
+    @app.post("/skills/proposals/{pid}/reopen")
+    async def skill_reopen(pid: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.reopen(pid))
+
+    @app.post("/skills/proposals/{pid}/review")
+    async def skill_hosted_review(pid: str, request: Request):
+        store = skills_owner(request)
+        if store.reviewer is None:
+            raise HarnessError(400, "skill review is not available")
+        return skill_op(lambda: store.reviewer.request_hosted(pid))
+
+    @app.delete("/skills/proposals/{pid}", status_code=204)
+    async def skill_delete_draft(pid: str, request: Request):
+        store = skills_owner(request)
+        skill_op(lambda: store.delete_draft(pid))
+
+    @app.post("/skills/{slug}/enable")
+    async def skill_enable(slug: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.set_enabled(slug, True))
+
+    @app.post("/skills/{slug}/disable")
+    async def skill_disable(slug: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.set_enabled(slug, False))
+
+    @app.post("/skills/{slug}/rollback")
+    async def skill_rollback(slug: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.rollback(slug))
+
+    @app.post("/skills/{slug}/uninstall")
+    async def skill_uninstall(slug: str, request: Request):
+        store = skills_owner(request)
+        skill_op(lambda: store.uninstall(slug))
+        return {"ok": True}
+
+    @app.put("/skills/{slug}/projects")
+    async def skill_projects(slug: str, body: SkillAllowlist, request: Request):
+        require_owner(request)
+        m = mgr(request)
+        return skill_op(lambda: skills_or_400(m).set_allowlist(slug, body.projects, list(m.cfg.projects)))
+
+    @app.get("/skills/{slug}/export")
+    async def skill_export(slug: str, request: Request):
+        store = skills_owner(request)
+        return skill_op(lambda: store.export_bundle(slug))
+
     @app.get("/search")
     async def search_sessions(request: Request, q: str = "", project: str = "", limit: int = 20):
         """Full-text search over past sessions. Passages mark matches with \\u0002 ... \\u0003."""
@@ -665,7 +775,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def create_session(body: CreateSession, request: Request):
         m = mgr(request)
         s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
-                     model=body.model, title=body.title, owner_id=owner_id(request))
+                     model=body.model, title=body.title, owner_id=owner_id(request), skills=body.skills)
         return m.summary(s)
 
     @app.get("/sessions/{ref}")

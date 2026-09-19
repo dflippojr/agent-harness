@@ -439,7 +439,7 @@ async function route() {
   try {
     if (parts.length === 0) await viewList();
     else if (parts[0] === "new") await viewNew();
-    else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1]);
+            else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1], parts[2]);
     else if (parts[0] === "images") {
       if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
       else if (parts[1]) await viewImage(parts[1]);
@@ -713,6 +713,7 @@ async function viewNew() {
         if (targetSwitch) for (const b of targetSwitch.children) b.classList.toggle("primary", b.dataset.target === target);
         showTarget();
         showProjectHint();
+        syncSkillChecks();
         projectCreator.open = false;
         toast(`Project ${created.name} created`);
       } catch (err) {
@@ -790,9 +791,28 @@ async function viewNew() {
     showTarget();
     showProjectHint();
     prompt.value = t.prompt;
+    syncSkillChecks();
   });
 
   const start = h("button", { class: "btn primary", type: "submit" }, "Start");
+  let enabledSkills = [];
+  try { enabledSkills = await api("/skills/enabled"); } catch (_) { enabledSkills = []; }
+  const skillInputs = [];
+  const skillBoxes = enabledSkills.map((sk) => {
+    const box = h("input", { type: "checkbox", class: "skill-opt", value: sk.slug });
+    skillInputs.push(box);
+    return h("label", { class: "row", style: "gap:8px;align-items:flex-start;margin:6px 0" }, box,
+      h("span", {}, h("strong", {}, sk.title || sk.slug),
+        h("div", { class: "muted small" }, sk.purpose || `v${sk.version} · ${sk.content_hash.slice(0, 12)}`)));
+  });
+  const syncSkillChecks = () => {
+    for (const box of skillInputs) {
+      const sk = enabledSkills.find((s) => s.slug === box.value);
+      box.checked = (sk?.projects || []).includes(project.value);
+    }
+  };
+  syncSkillChecks();
+  project.addEventListener("change", syncSkillChecks);
   const form = h("form", {
     onsubmit: async (e) => {
       e.preventDefault();
@@ -800,8 +820,10 @@ async function viewNew() {
       if (backend.value === "local" && !(await confirmGpuQueue("This task"))) return;
       start.disabled = true;
       try {
+        const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
         const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
-          backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null } });
+          backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null,
+          skills: selectedSkills } });
         try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
         location.hash = `#/s/${s.id}`;
       } catch (err) {
@@ -817,6 +839,7 @@ async function viewNew() {
   isMember() ? null : h("label", {}, "Backend"), isMember() ? null : backend, isMember() ? null : backendState,
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
+  skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },
     isMember() ? null : h("button", {
       class: "btn", type: "button",
@@ -1523,6 +1546,10 @@ function viewInfo(s) {
     ["Workspace", s.workspace_removed ? `${s.workspace} (removed)` : s.workspace],
   ];
   if (s.branch) rows.push(["Branch", `${s.branch}${s.base_branch ? ` from ${s.base_branch}` : ""}`], ["Review", s.review || "pending"]);
+  const frozen = s.skills || [];
+  if (frozen.length) {
+    rows.push(["Skills", frozen.map((sk) => `${sk.slug} v${sk.version} (${(sk.content_hash || "").slice(0, 12)})`).join(", ")]);
+  }
   $app.append(h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
     h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v))))),
   h("button", { class: "btn", onclick: () => downloadDaemonFile(`/sessions/${s.id}/transcript`, `${s.id}.md`) },
@@ -1584,6 +1611,15 @@ function imageStatusView(s) {
   return updateImageStatusView(view, s);
 }
 
+function imageModeEntries(status) {
+  if (status.modes) {
+    return Object.entries(status.modes);
+  }
+  return Object.entries(status.models || {}).map(([id, label]) => [id, {
+    label, available: true, resolution: id === "quality" || id === "quality-fast" ? "high" : "standard",
+  }]);
+}
+
 async function viewImages() {
   setHeader("images");
   let data;
@@ -1608,7 +1644,13 @@ async function viewImages() {
     try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ }
     if (prompt.value.trim()) startWarmup().catch(() => {});
   });
-  const model = h("select", {}, Object.entries(data.status.models).map(([k, label]) => h("option", { value: k }, label)));
+  const modes = Object.fromEntries(imageModeEntries(data.status));
+  const model = h("select", {}, imageModeEntries(data.status).map(([k, spec]) => h("option", {
+    value: k, disabled: spec.available === false,
+  }, spec.label || spec)));
+  const qualityFast = modes["quality-fast"];
+  const loraNote = h("p", { class: "muted small image-lora-setup", hidden: !qualityFast || qualityFast.available !== false },
+    (qualityFast && qualityFast.setup) || "");
   const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
   let resolutionTouched = false;
   const resolutionInputs = Object.entries(data.status.resolutions).map(([name, spec]) => {
@@ -1627,7 +1669,8 @@ async function viewImages() {
   aspect.addEventListener("change", renderResolutions);
   model.addEventListener("change", () => {
     if (!resolutionTouched) {
-      const recommended = model.value === "quality" ? "high" : "standard";
+      const recommended = (modes[model.value] && modes[model.value].resolution)
+        || (model.value === "quality" || model.value === "quality-fast" ? "high" : "standard");
       resolutionInputs.find((choice) => choice.name === recommended).input.checked = true;
     }
     renderResolutions();
@@ -1673,6 +1716,7 @@ async function viewImages() {
     h("label", {}, "Prompt"), prompt,
     h("div", { class: "row" }, h("div", { style: "flex:2" }, h("label", {}, "Model"), model),
       h("div", { style: "flex:1" }, h("label", {}, "Aspect ratio"), aspect)),
+    loraNote,
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
     h("div", { class: "row" }, h("div", { style: "flex:1" }, h("label", {}, "Upscale"), upscale)),
@@ -1715,7 +1759,12 @@ async function viewImage(id) {
         : h("p", { class: `note${img.status === "failed" ? " bad" : ""}` }, img.status === "failed" ? `Failed: ${img.error}` : imageStatusView(img.service)),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
-        h("p", { class: "muted small" }, meta.join(" · ")),
+        h("p", { class: "muted small" }, [
+            `${img.model} · ${img.width}×${img.height}`,
+            Number(img.scale) > 1 ? `${img.scale}× ${img.upscale_model || "Real-ESRGAN"}` : "",
+            `seed ${img.seed}`, img.source, img.seconds ? `${Math.round(img.seconds)} s` : "",
+            img.lora ? `LoRA ${img.lora}` : "", img.lora_revision ? img.lora_revision.slice(0, 8) : "", when,
+          ].filter(Boolean).join(" · ")),
         img.parent && img.parent.id ? h("p", { class: "muted small" }, "Upscaled from ",
           h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
         (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
@@ -1911,8 +1960,8 @@ async function viewJob(id) {
 
 // ---------- profile ----------
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
-const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "smart-approvals"]);
-const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends", "smart-approvals"]);
+const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "smart-approvals", "skills"]);
+const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends", "smart-approvals", "skills"]);
 const PROFILE_PAGES = {
   connection: "Connection",
   appearance: "Appearance",
@@ -1922,6 +1971,7 @@ const PROFILE_PAGES = {
   "smart-approvals": "Smart approvals",
   daemon: "Server",
   memory: "Memory",
+  skills: "Skills",
   apps: "Apps",
   endpoint: "Inference endpoint",
 };
@@ -2113,7 +2163,7 @@ async function accountsCard() {
   return wrap;
 }
 
-async function viewProfile(page) {
+async function viewProfile(page, extra) {
   const titles = { account: "Account", accounts: "Accounts", "remote-control": "Claude Remote Control", disk: "Disk", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
@@ -2129,6 +2179,7 @@ async function viewProfile(page) {
   if (page === "smart-approvals") return $app.append(await smartApprovalsCard());
   if (page === "daemon") return $app.append(await daemonSettingsCard());
   if (page === "memory") return $app.append(memoryCard());
+  if (page === "skills") return $app.append(await skillsPage(extra));
   if (page === "apps") return $app.append(appsCard(me));
   if (page === "endpoint") return $app.append(endpointCard(me));
   if (page === "disk") return $app.append(diskCard());
@@ -2805,6 +2856,96 @@ function remoteControlCard() {
   const timer = setInterval(() => { if (!busy) load(); }, 3000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "card" }, h("h3", {}, "Claude Remote Control"), body);
+}
+
+async function skillsPage(pid) {
+  const data = await api("/skills");
+  if (!data.enabled) {
+    return h("div", { class: "card" }, h("p", { class: "muted small" }, "Instruction skills are disabled. Ordinary sessions are unchanged."));
+  }
+  if (pid) {
+    const p = await api(`/skills/proposals/${pid}`);
+    const findings = (p.static_findings || []).map((f) => h("li", {}, `${f.code}: ${f.message}`));
+    const review = p.review || {};
+    const examples = (p.examples || []).map((ex) => h("div", { class: "card" },
+      h("p", {}, ex.prompt), h("p", { class: "muted small" }, ex.expected || ex.expected_behavior || "")));
+    const refs = (p.references || []).map((r) => h("details", {}, h("summary", {}, r.path), h("pre", {}, r.content || "")));
+    const act = async (path, body, label) => {
+      if (label && !confirm(label)) return;
+      try {
+        await api(path, { method: "POST", body: body || {} });
+        toast("Done");
+        go("#/profile/skills", true);
+      } catch (e) { toast(e.message); }
+    };
+    return h("div", {},
+      h("div", { class: "card" },
+        h("h3", {}, p.title || p.slug),
+        h("p", { class: "muted small" }, `${p.slug} · ${p.status} · hash ${p.content_hash} · session ${p.source_session_id || "—"}`),
+        h("p", {}, p.purpose || ""),
+        p.activation_suggestion ? h("p", { class: "muted small" }, `Suggested when: ${p.activation_suggestion}`) : null,
+        p.diff ? h("pre", { class: "preview" }, p.diff) : null,
+        h("p", { class: "section-label" }, "SKILL.md"),
+        h("pre", {}, p.skill_md || ""),
+        refs.length ? h("p", { class: "section-label" }, "References") : null, ...refs,
+        h("p", { class: "section-label" }, "Examples"), ...examples,
+        h("p", { class: "section-label" }, "Static findings"),
+        findings.length ? h("ul", {}, findings) : h("p", { class: "muted small" }, "No static findings."),
+        h("p", { class: "section-label" }, "Model review"),
+        h("p", { class: "muted small" }, p.review_status || "not started"),
+        review.summary ? h("p", {}, review.summary) : null,
+        review.recommendation ? h("p", {}, `Recommendation: ${review.recommendation}`) : null,
+        review.error ? h("p", { class: "bad" }, review.error) : null,
+        h("div", { class: "row", style: "margin-top:18px;flex-wrap:wrap;gap:8px" },
+          h("button", { class: "btn primary", onclick: () => act(`/skills/proposals/${p.id}/install`, { content_hash: p.content_hash },
+            `Install hash ${p.content_hash.slice(0, 12)}? It stays disabled until you enable it.`) }, "Install"),
+          h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" }, "Reject this hash?") }, "Reject"),
+          h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/review`) }, "Run hosted review"),
+          h("button", { class: "btn bad", onclick: async () => {
+            if (!confirm("Delete this draft?")) return;
+            try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
+            catch (e) { toast(e.message); }
+          } }, "Delete draft"))));
+  }
+  const proposals = (data.proposals || []).map((p) => h("a", { class: "card", href: `#/profile/skills/${p.id}` },
+    h("h3", {}, p.title || p.slug),
+    h("div", { class: "meta" }, h("span", {}, p.status), h("span", {}, p.review_status || "no review"),
+      h("span", {}, (p.content_hash || "").slice(0, 12)))));
+  const installed = (data.installed || []).map((sk) => {
+    const toggle = sk.enabled ? "disable" : "enable";
+    return h("div", { class: "card" },
+      h("h3", {}, `${sk.enabled ? "" : "⏸ "}${sk.title || sk.slug}`),
+      h("p", { class: "muted small" }, `${sk.slug} v${sk.version} · ${(sk.content_hash || "").slice(0, 12)}`),
+      h("p", {}, sk.purpose || ""),
+      sk.projects?.length ? h("p", { class: "muted small" }, `Projects: ${sk.projects.join(", ")}`) : h("p", { class: "muted small" }, "No project allowlist. Enable it and pick it on New task."),
+      h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
+        h("button", { class: "btn small", onclick: async () => {
+          try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        } }, sk.enabled ? "Disable" : "Enable"),
+        h("button", { class: "btn small", onclick: async () => {
+          const raw = window.prompt("Project allowlist (comma-separated names)", (sk.projects || []).join(", "));
+          if (raw === null) return;
+          try {
+            await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
+            route();
+          } catch (e) { toast(e.message); }
+        } }, "Projects"),
+        h("button", { class: "btn small", onclick: async () => {
+          if (!confirm("Roll back to the previous version?")) return;
+          try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        } }, "Rollback"),
+        h("button", { class: "btn small bad", onclick: async () => {
+          if (!confirm(`Uninstall ${sk.slug}? Later sessions will not receive it.`)) return;
+          try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        } }, "Uninstall")));
+  });
+  return h("div", {},
+    h("p", { class: "muted small" }, "Agents can only stage drafts. You install an exact hash; new skills stay off until you enable them. Advisory model review never installs."),
+    data.hosted_reviewer_configured ? h("p", { class: "muted small" }, "Hosted review is configured and spends that provider's quota only when you tap Run hosted review.") : h("p", { class: "muted small" }, "No hosted reviewer configured. Local Qwen review runs only when the GPU is idle."),
+    h("p", { class: "section-label" }, "Proposals"),
+    proposals.length ? proposals : h("p", { class: "empty" }, "No proposals yet."),
+    h("p", { class: "section-label" }, "Installed"),
+    installed.length ? installed : h("p", { class: "empty" }, "No installed skills."));
 }
 
 function memoryCard() {

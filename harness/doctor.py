@@ -193,6 +193,14 @@ def check_images(r: Report, cfg) -> None:
     py = Path(cfg.images.comfy_dir) / "python_embeded" / "python.exe"
     (r.ok if py.exists() else r.fail)("Image generation", f"ComfyUI at {cfg.images.comfy_dir}"
                                       + ("" if py.exists() else " not found"))
+    from .images import LIGHTNING_LORA, lightning_lora_status
+    lora = lightning_lora_status(cfg.images)
+    if lora["available"]:
+        r.ok("Qwen quality-fast LoRA",
+             f"{lora['path']} ({LIGHTNING_LORA['filename']}, {LIGHTNING_LORA['bytes']} bytes, "
+             f"revision {LIGHTNING_LORA['revision']})")
+    else:
+        r.warn("Qwen quality-fast LoRA", lora["setup"])
     from . import upscale as upscale_mod
     if upscale_mod.missing_weights(cfg.images, verify_hash=True):
         r.warn("Image upscaling", upscale_mod.remediation(cfg.images))

@@ -33,8 +33,13 @@ def render(db: Database, sid: str) -> str:
         f"- Created {created} · status **{s['status']}** ({s['stop_reason'] or '-'})",
         f"- Totals: {totals.get('turns', 0)} model turns, {totals.get('prompt_tokens', 0)} prompt tokens, "
         f"{totals.get('completion_tokens', 0)} completion tokens",
-        "",
     ]
+    frozen = s.get("skills") or []
+    if frozen:
+        names = ", ".join(f"`{item.get('slug')}` v{item.get('version')} ({(item.get('content_hash') or '')[:12]})"
+                          for item in frozen)
+        lines += [f"- Frozen skills: {names}"]
+    lines += ["",]
     last_content = ""
     for e in db.events(sid):
         d, t, at = e["data"], e["type"], _clock(e["ts"])

@@ -153,10 +153,10 @@ requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and
 ## Endpoints
 
 ### `GET /api/v1`
-Server info: API version, scopes, projects, models, hosted backends, enabled features, and `capabilities`. The
-capability object identifies the `full` or `service` profile, always-on Server facilities, and effective optional
-modules. It contains no credentials and doesn't need a token. `GET /health` exposes the same capability object for
-lightweight discovery.
+Server info: API version, scopes, projects, models, hosted backends, enabled features, `capabilities`, and
+`image_modes` (labels, availability, and setup text for optional Lightning `quality-fast`). The capability object
+identifies the `full` or `service` profile, always-on Server facilities, and effective optional modules. It contains
+no credentials and doesn't need a token. `GET /health` exposes the same capability object for lightweight discovery.
 
 ### `POST /api/v1/sessions`  (scope `sessions`)
 
@@ -248,13 +248,15 @@ Requires owning the session (or an owner token); `sessions:all` does not authori
 `{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name.
 
 ### `POST /api/v1/images`, `GET /api/v1/images/{id}`, `GET /api/v1/images/{id}.png`, `POST /api/v1/images/{id}/upscale`  (scope `images`)
-`{"prompt": "...", "model": "fast" | "quality", "aspect_ratio": "1:1", "upscale": "none" | "2x" | "4x"}` queues a
-job; `upscale` defaults to `none` and must stay that way unless the caller asks. Poll until `status` is `done`, then
-download the PNG. When `upscale` is `2x` or `4x`, the original is kept and a linked derived image is generated in the
-same GPU occupancy (Real-ESRGAN general-image weights, optional). `POST /api/v1/images/{id}/upscale` with
+`{"prompt": "...", "model": "fast" | "quality" | "quality-fast", "aspect_ratio": "1:1", "upscale": "none" | "2x" | "4x"}`
+queues a job; `upscale` defaults to `none`. Poll until `status` is `done`, then download the PNG. `quality-fast` is
+the Qwen-Image-2512 Lightning 4-step LoRA; it is opt-in and listed on `GET /api/v1` as `image_modes["quality-fast"]`.
+If that LoRA is missing, `available` is false and `setup` has the pinned filename, size, SHA-256, and destination;
+requesting the mode fails instead of falling back to 50-step `quality`. When `upscale` is `2x` or `4x`, the original
+is kept and a linked derived image is generated in the same GPU occupancy. `POST /api/v1/images/{id}/upscale` with
 `{"upscale": "2x" | "4x"}` does the same from a completed gallery image and is idempotent per parent and scale.
 While images generate or upscale, the language model is unloaded for a few minutes. Missing Real-ESRGAN weights do
-not break ordinary generation; the upscale routes return a clear install error.
+not break ordinary generation.
 
 ### `GET /api/v1/remote-control`, `POST /api/v1/remote-control/{project}`, `POST /api/v1/remote-control/{project}/stop`  (scope `remote_control`)
 Starts the unmodified `claude remote-control --spawn worktree` in a tower project's folder, so the user can work there
@@ -360,5 +362,6 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
 | 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
 | 1.8 | 2026-09-17 | Opt-in Real-ESRGAN 2×/4× upscaling (`upscale` on create; `POST /api/v1/images/{id}/upscale`) |
-| 1.10 | 2026-09-18 | Per-app configuration registry (`/api/v1/config`); values may only narrow owner/token authority |
 | 1.9 | 2026-09-17 | Household members: scoped `/me`, `/projects`, search, events, local-only backends; discovery hides project names. `sessions:all` expands owner-scope reads only; messages, context, and cancel require owning the session |
+| 1.10 | 2026-09-18 | Per-app configuration registry (`/api/v1/config`); values may only narrow owner/token authority |
+| 1.11 | 2026-09-18 | Image mode discovery (`image_modes`) including optional `quality-fast` Lightning LoRA |

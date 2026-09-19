@@ -382,6 +382,7 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .resolution-option:has(input:checked) { border-color: var(--text); background: var(--panel-2); }
 .resolution-option input { width: auto; margin: 0 7px 0 0; }
 .resolution-option .size { display: block; margin-left: 24px; font-size: 0.75rem; font-weight: 400; color: var(--muted); }
+.image-lora-setup { margin: 8px 0 0; }
 
 .session-chrome {
   position: sticky; top: var(--bar-h, 52px); z-index: 9;
