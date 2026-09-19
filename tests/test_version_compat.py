@@ -116,13 +116,15 @@ def test_hosted_web_compatibility_errors_keep_cors_headers(tmp_path):
 
 
 def test_new_main_routes_reject_version_skew_with_cors(tmp_path):
-    """Household, config-registry, and skills routes all stay behind the compatibility guard."""
+    """Household, config-registry, skills, and smart-approvals routes stay behind the compatibility guard."""
     manager, origin, headers = hosted_web_client(tmp_path)
     with TestClient(create_app(manager)) as client:
         for path in (
             "/api/admin/v1/accounts",  # #102 household accounts
             "/api/admin/v1/config",    # #103 typed config registry
             "/api/admin/v1/skills",    # #100 agent-written skills
+            "/api/admin/v1/smart-approvals",  # #99 smart approvals
+            "/smart-approvals",
         ):
             response = client.get(path, headers={**headers, compat.CLIENT_HEADER: "web/99"})
             assert response.status_code == 426, (path, response.text)
