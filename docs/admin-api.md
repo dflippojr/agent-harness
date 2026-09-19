@@ -57,6 +57,7 @@ same; only the prefix and the owner credential check are new.
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup`, image-archive retention preview/apply |
 | Configuration | `/config`, `/config/schema`, `/config/validate`, `/config/rollback`, `/config/restart` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
+| Smart approvals | `/smart-approvals` (`GET` status, `PUT` `{mode: off\|shadow\|auto}`; last writer with Settings `smart_approvals.mode`; `off` calls no reviewer) |
 | Images | `/images`, `/images/warmup`, `/images/cooldown`, `/images/{iid}/upscale` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
 | Memory | `/memory`, `/memory/profile` |
@@ -172,6 +173,8 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.10 | 2026-09-19 | Smart-approval effective mode: last writer among PUT and Settings; `off` is truly off |
+| 1.9 | 2026-09-18 | Owner smart-approvals status and live mode (`off`/`shadow`/`auto`) |
 | 1.8 | 2026-09-18 | Owner-approved instruction skills: proposals, hash-bound install, enable/allowlist/rollback. `POST /sessions` `skills`: omit the field to inject the project's allowlisted enabled skills; send an explicit list (including `[]`) as the include set so an unchecked box is excluded |
 | 1.7 | 2026-09-18 | Typed configuration registry, managed overlay, supervised restart/rollback |
 | 1.6 | 2026-09-17 | Image archive health and explicit retention preview/apply operations |

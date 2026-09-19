@@ -85,6 +85,27 @@ def render(m: Manager) -> str:
                [({"status": st}, secs) for st, _, secs in approvals if st != "pending"])
     out.metric("harness_approvals_pending", "gauge", "Approvals waiting now.",
                [({}, sum(n for st, n, _ in approvals if st == "pending"))])
+    with db.lock:
+        smart_rows = db.conn.execute(
+            "SELECT outcome, COALESCE(NULLIF(escalate_reason, ''), ''), COUNT(*), "
+            "COALESCE(SUM(latency_ms), 0), COALESCE(SUM(cost_usd), 0) FROM smart_reviews GROUP BY 1, 2"
+        ).fetchall()
+    attempts = sum(n for _, _, n, _, _ in smart_rows)
+    out.metric("harness_smart_review_attempts_total", "counter",
+               "Smart-review provider calls (eligible ASK only).", [({}, attempts)])
+    out.metric("harness_smart_review_auto_approvals_total", "counter", "Calls auto-approved in auto mode.",
+               [({}, sum(n for outcome, _, n, _, _ in smart_rows if outcome == "auto_approved"))])
+    out.metric("harness_smart_review_escalations_total", "counter", "Smart-review escalations by reason.",
+               [({"reason": reason or outcome}, n) for outcome, reason, n, _, _ in smart_rows
+                if outcome in ("escalated", "failed")])
+    out.metric("harness_smart_review_failures_total", "counter", "Smart-review provider or schema failures.",
+               [({"reason": reason or "provider error"}, n) for outcome, reason, n, _, _ in smart_rows
+                if outcome == "failed"])
+    out.metric("harness_smart_review_latency_ms_total", "counter", "Smart-review provider latency.",
+               [({}, sum(ms for _, _, _, ms, _ in smart_rows))])
+    out.metric("harness_smart_review_cost_usd_total", "counter",
+               "Estimated or API-reported smart-review cost.",
+               [({}, sum(cost for _, _, _, _, cost in smart_rows))])
     backend_limits, backend_costs = [], []
     for name in m.cfg.backends:
         state = db.get_backend_usage(name)["data"]

@@ -707,6 +707,26 @@ class Manager:
             item["chat_summary"] = asks
         return item
 
+    def smart_approvals_status(self) -> dict:
+        from .smart_approvals import public_status
+        view = public_status(self)
+        view["recent"] = self.db.smart_reviews(20)
+        return view
+
+    def set_smart_approvals_mode(self, mode: str) -> dict:
+        from .smart_approvals import MODES, save_runtime_mode
+        mode = (mode or "").strip().lower()
+        if mode not in MODES:
+            raise HarnessError(400, f"mode must be {'|'.join(MODES)}")
+        settings = self.runner.smart.settings(self.db)
+        if mode != "off" and not settings.enabled:
+            raise HarnessError(400, "configure smart_approvals in harness.yaml first")
+        if mode in ("shadow", "auto") and not settings.secret_ref:
+            raise HarnessError(400, "smart_approvals.secret_ref is not configured")
+        save_runtime_mode(self.db, mode)
+        self.cfg.smart_approvals.mode = mode
+        return self.smart_approvals_status()
+
     # owner-managed app provider credentials (issue #29)
     def app_provider_status(self, app_id: str, backend: str) -> dict:
         managed = self.db.app_provider_managed(app_id)

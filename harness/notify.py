@@ -32,7 +32,7 @@ def _short(text: str, limit: int) -> str:
 
 
 def describe_call(tool: str, args: dict) -> str:
-    if tool == "run_shell":
+    if tool == "run_shell" or tool == "Bash" or tool == "exec_command":
         return ("🌐 " if args.get("network") else "") + args.get("command", "")
     if tool in ("write_file", "edit_file"):
         return f"{tool} {args.get('path', '')}"

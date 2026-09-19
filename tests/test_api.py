@@ -99,6 +99,7 @@ def test_web_app_and_guard(tmp_path):
         assert "gpuActionRow()" in js and "function gpuCard()" not in js
         assert 'h("span", {}, "Duration:")' in js and 'duration.disabled = isGuest() || !g.manual' in js
         assert 'href: "#/profile/remote-control"' in js and 'href: "#/profile/disk"' in js
+        assert '"smart-approvals": "Smart approvals"' in js and "function smartApprovalsCard()" in js
         assert 'skills: "Skills"' in js
         assert 'api("/skills/enabled")' in js
         assert "Install hash" in js

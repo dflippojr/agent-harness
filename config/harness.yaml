@@ -239,6 +239,19 @@ endpoint:
   embedding_model: ""        # e.g. nomic-embed-text-v1.5
   embedding_context_tokens: 8192
 
+# Optional hosted reviewer for tagged shell approvals (issue #18). Off by default. After setup, mode is
+# shadow until the owner switches to auto. Secret values stay in the referenced file; only the opaque
+# name is stored. Apps and guests cannot enable this or select its credential.
+# smart_approvals:
+#   enabled: false
+#   provider: openai          # openai | anthropic
+#   model: gpt-4.1-mini
+#   secret_ref: smart-reviewer  # opaque name in provider_secret_files
+#   timeout_seconds: 8
+#   min_confidence: 0.85
+#   mode: shadow              # shadow | auto | off
+#   proxy: http://127.0.0.1:8890  # optional provider egress proxy
+
 # Local image generation with ComfyUI (harness/images.py). Jobs stop llama-server (same pause flag as the GPU guard)
 # and start ComfyUI from C:/AI/ComfyUI. Opening the Images tab warms ComfyUI without loading a checkpoint; the GPU
 # is given back as soon as the queue is empty.
