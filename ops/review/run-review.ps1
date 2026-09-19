@@ -137,12 +137,12 @@ function Get-ReviewBackendCommand {
             if (-not $WindowsPlatform) {
                 $arguments += @('--sandbox', 'enabled')
             }
-            $arguments += @('--workspace', $Workspace, $Prompt)
+            $arguments += @('--workspace', $Workspace)
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = $entrypoint.Node
                 Arguments = $arguments
-                InputText = $null
+                InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $null
                 Model = $null
@@ -153,7 +153,7 @@ function Get-ReviewBackendCommand {
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'codex'
-                Arguments = @('exec', '--sandbox', 'read-only', '--cd', $Workspace, '--ephemeral', '--ignore-user-config', '--color', 'never', '--output-last-message', $resultPath, '-')
+                Arguments = @('exec', '--sandbox', 'read-only', '--cd', $Workspace, '--ephemeral', '--color', 'never', '--output-last-message', $resultPath, '-')
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $resultPath
@@ -164,8 +164,8 @@ function Get-ReviewBackendCommand {
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'claude'
-                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob,Bash', '--allowedTools', 'Read,Grep,Glob,Bash(gh pr diff:*)', '--strict-mcp-config', '--disable-slash-commands', $Prompt)
-                InputText = $null
+                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--strict-mcp-config', '--disable-slash-commands')
+                InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $null
                 Model = $null

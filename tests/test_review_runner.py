@@ -121,8 +121,8 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
         "ask",
         "--workspace",
         str(workspace),
-        "prompt",
     ]
+    assert commands["cursor"]["InputText"] == "prompt"
 
     codex_args = commands["codex"]["Arguments"]
     result_path = str(scratch / "codex-review-output.md")
@@ -133,20 +133,22 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
         "--cd",
         str(workspace),
         "--ephemeral",
-        "--ignore-user-config",
         "--color",
         "never",
         "--output-last-message",
         result_path,
         "-",
     ]
+    assert "--ignore-user-config" not in codex_args
     assert commands["codex"]["ResultPath"] == result_path
+    assert commands["codex"]["InputText"] == "prompt"
 
     claude_args = commands["claude"]["Arguments"]
-    assert "Read,Grep,Glob,Bash" in claude_args
-    assert "Read,Grep,Glob,Bash(gh pr diff:*)" in claude_args
+    assert "Read,Grep,Glob" in claude_args
+    assert all("Bash" not in arg for arg in claude_args)
     assert not {"Edit", "Write", "NotebookEdit"}.intersection(claude_args)
     assert "--strict-mcp-config" in claude_args
+    assert commands["claude"]["InputText"] == "prompt"
 
 
 def test_cursor_enables_sandbox_off_windows(tmp_path):
@@ -179,7 +181,6 @@ $command.Arguments | ConvertTo-Json -Compress
         "enabled",
         "--workspace",
         str(workspace),
-        "prompt",
     ]
 
 
