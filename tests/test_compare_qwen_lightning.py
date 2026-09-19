@@ -1,4 +1,4 @@
-"""Path and URL confinement for scripts/compare_qwen_lightning.py."""
+"""Path and URL confinement for bakeoff/compare_qwen_lightning.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "compare_qwen_lightning.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "bakeoff" / "compare_qwen_lightning.py"
 
 
 def load_compare():

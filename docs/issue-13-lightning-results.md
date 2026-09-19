@@ -34,7 +34,7 @@ without the file returns an error instead of running 50-step `quality`.
 Run against a daemon that already has images enabled and the LoRA installed:
 
 ```
-python scripts/compare_qwen_lightning.py --out issue-13-lightning-outputs
+python -m bakeoff.compare_qwen_lightning --out issue-13-lightning-outputs
 ```
 
 Ten prompts cover people, landscape, illustration, small text, dense text, 9:16, 2:3, interior, and fur detail.
@@ -48,7 +48,7 @@ Not run yet. On this checkout the pinned LoRA was not present under `models_dir/
 `python -m harness.doctor`, restart the daemon, then:
 
 ```
-python scripts/compare_qwen_lightning.py --out issue-13-lightning-outputs
+python -m bakeoff.compare_qwen_lightning --out issue-13-lightning-outputs
 ```
 
 Paste the summary table and a visual note before closing:

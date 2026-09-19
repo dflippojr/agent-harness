@@ -4,7 +4,7 @@ Talks to a running local daemon (default http://127.0.0.1:8100). Submit a batch 
 cold (ComfyUI start + model load) and the rest are warm. Poll nvidia-smi for peak RAM/VRAM. Writes a JSON
 summary and copies PNGs into --out.
 
-    python scripts/compare_qwen_lightning.py --out docs/issue-13-outputs
+    python -m bakeoff.compare_qwen_lightning --out docs/issue-13-outputs
 """
 
 from __future__ import annotations
