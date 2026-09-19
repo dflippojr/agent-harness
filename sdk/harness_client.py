@@ -29,6 +29,7 @@ import httpx
 
 TERMINAL = ("done", "failed", "cancelled")
 SDK_API_MAJOR = "1"
+JSON_MEDIA_TYPE = "application/json"
 
 # Used by validate_openapi() and CI. Paths use the server's OpenAPI templates, not formatted runtime ids.
 SDK_OPERATIONS = {
@@ -46,15 +47,17 @@ SDK_OPERATIONS = {
     "generate_image": ("post", "/api/v1/images"),
     "upscale_image": ("post", "/api/v1/images/{iid}/upscale"),
 }
+# Keyed off SDK_OPERATIONS so a path only ever spells itself once, in the table above.
 SDK_REQUEST_FIELDS = {
-    ("post", "/api/v1/pair"): {"code"},
-    ("post", "/api/v1/sessions"): {"prompt", "project", "backend", "model", "title", "context", "tools", "metadata"},
-    ("post", "/api/v1/sessions/{ref}/messages"): {"content"},
-    ("post", "/api/v1/sessions/{ref}/context"): {"context"},
-    ("post", "/api/v1/sessions/{ref}/tool_calls/{call_id}"): {"output", "ok"},
-    ("post", "/api/v1/sessions/{ref}/approvals/{approval_id}"): {"decision", "note"},
-    ("post", "/api/v1/images"): {"prompt", "model", "aspect_ratio", "upscale"},
-    ("post", "/api/v1/images/{iid}/upscale"): {"upscale"},
+    SDK_OPERATIONS["pair"]: {"code"},
+    SDK_OPERATIONS["create_session"]: {"prompt", "project", "backend", "model", "title", "context", "tools",
+                                       "metadata"},
+    SDK_OPERATIONS["send"]: {"content"},
+    SDK_OPERATIONS["add_context"]: {"context"},
+    SDK_OPERATIONS["submit_tool_result"]: {"output", "ok"},
+    SDK_OPERATIONS["decide_approval"]: {"decision", "note"},
+    SDK_OPERATIONS["generate_image"]: {"prompt", "model", "aspect_ratio", "upscale"},
+    SDK_OPERATIONS["upscale_image"]: {"upscale"},
 }
 
 
@@ -127,15 +130,15 @@ class Approval(TypedDict, total=False):
 
 
 SDK_RESPONSE_TYPES = {
-    ("get", "/api/v1/backends"): ("200", BackendStatus, True),
-    ("post", "/api/v1/sessions"): ("201", Session, False),
-    ("get", "/api/v1/sessions"): ("200", Session, True),
-    ("get", "/api/v1/sessions/{ref}"): ("200", Session, False),
-    ("post", "/api/v1/sessions/{ref}/messages"): ("200", Session, False),
-    ("post", "/api/v1/sessions/{ref}/context"): ("200", Session, False),
-    ("post", "/api/v1/sessions/{ref}/cancel"): ("200", Session, False),
-    ("get", "/api/v1/sessions/{ref}/approvals"): ("200", Approval, True),
-    ("post", "/api/v1/sessions/{ref}/approvals/{approval_id}"): ("200", Approval, False),
+    SDK_OPERATIONS["backends"]: ("200", BackendStatus, True),
+    SDK_OPERATIONS["create_session"]: ("201", Session, False),
+    SDK_OPERATIONS["sessions"]: ("200", Session, True),
+    SDK_OPERATIONS["session"]: ("200", Session, False),
+    SDK_OPERATIONS["send"]: ("200", Session, False),
+    SDK_OPERATIONS["add_context"]: ("200", Session, False),
+    SDK_OPERATIONS["cancel"]: ("200", Session, False),
+    SDK_OPERATIONS["pending_approvals"]: ("200", Approval, True),
+    SDK_OPERATIONS["decide_approval"]: ("200", Approval, False),
 }
 
 
@@ -257,7 +260,7 @@ class Harness:
         resp = self.client.request(method, f"/api/v1{path}", **kwargs)
         if resp.status_code >= 400:
             self._raise_response(resp)
-        return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.content
+        return resp.json() if resp.headers.get("content-type", "").startswith(JSON_MEDIA_TYPE) else resp.content
 
     def info(self) -> dict:
         return self._call("GET", "")
@@ -287,7 +290,7 @@ class Harness:
             expected = SDK_REQUEST_FIELDS.get((method, path))
             if expected is None:
                 continue
-            body = (((operation.get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get(
+            body = (((operation.get("requestBody") or {}).get("content") or {}).get(JSON_MEDIA_TYPE) or {}).get(
                 "schema")
             if not body:
                 errors.append(f"{name}: OpenAPI has no JSON request schema")
@@ -299,7 +302,7 @@ class Harness:
         for (method, path), (status, response_type, is_list) in SDK_RESPONSE_TYPES.items():
             operation = (schema.get("paths", {}).get(path) or {}).get(method) or {}
             response = (((operation.get("responses") or {}).get(status) or {}).get("content") or {}).get(
-                "application/json", {}).get("schema")
+                JSON_MEDIA_TYPE, {}).get("schema")
             if not response:
                 errors.append(f"{method.upper()} {path}: OpenAPI has no JSON response schema")
                 continue

@@ -196,25 +196,63 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_provider_credentials_active
 ON app_provider_credentials(app_id, backend) WHERE revoked_at IS NULL;
 -- Session search (search.py): one row per indexed event.
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-    text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED,
+    text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED, user_id UNINDEXED,
     tokenize = 'porter unicode61 remove_diacritics 2'
 );
+CREATE TABLE IF NOT EXISTS accounts (
+    user_id TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    login TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    disk_quota_bytes INTEGER NOT NULL,
+    max_running INTEGER NOT NULL DEFAULT 1,
+    max_queued INTEGER NOT NULL DEFAULT 2,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    last_activity_at REAL
+);
+CREATE TABLE IF NOT EXISTS account_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    actor_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS account_audit_ts ON account_audit(ts);
+CREATE TABLE IF NOT EXISTS member_projects (
+    user_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    repo TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (user_id, slug)
+);
+CREATE INDEX IF NOT EXISTS member_projects_user ON member_projects(user_id);
 """
+
+# Column definitions reused across the migration table below.
+TEXT_EMPTY = "TEXT NOT NULL DEFAULT ''"
+TEXT_LOCAL = "TEXT NOT NULL DEFAULT 'local'"
 
 # Columns added after a table first shipped: (table, column, definition).
 MIGRATIONS = [
     # Secret for deciding one approval from a notification button, without a session cookie or JSON body.
-    ("approvals", "token", "TEXT NOT NULL DEFAULT ''"),
+    ("approvals", "token", TEXT_EMPTY),
     # Phase 3: git-backed projects. `review` is '' | merged | pushed | discarded.
-    ("sessions", "branch", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "base_branch", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "base_commit", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "review", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "review_detail", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "branch", TEXT_EMPTY),
+    ("sessions", "base_branch", TEXT_EMPTY),
+    ("sessions", "base_commit", TEXT_EMPTY),
+    ("sessions", "review", TEXT_EMPTY),
+    ("sessions", "review_detail", TEXT_EMPTY),
     # Set when cleanup deleted the workspace (or the user discarded it).
     ("sessions", "workspace_removed", "INTEGER NOT NULL DEFAULT 0"),
     # Phase 6e: sessions created through the app API, their registered tools and metadata; key scopes.
-    ("sessions", "app_id", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "app_id", TEXT_EMPTY),
     ("sessions", "app_tools", "TEXT NOT NULL DEFAULT '[]'"),
     ("sessions", "app_metadata", "TEXT NOT NULL DEFAULT '{}'"),
     # Issue #57: human-owned Agent Harness Web data. v1 has one stable owner; guests own nothing.
@@ -223,30 +261,50 @@ MIGRATIONS = [
     ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
     ("api_keys", "origins", "TEXT NOT NULL DEFAULT '[]'"),
     # Phase 7d: sessions started by a scheduled job, and the STATUS the job's answer ended with (ok | attention).
-    ("sessions", "job_id", "TEXT NOT NULL DEFAULT ''"),
-    ("sessions", "job_status", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "job_id", TEXT_EMPTY),
+    ("sessions", "job_status", TEXT_EMPTY),
     # Phase 8a: local inference or a hosted CLI session backend.
-    ("sessions", "backend", "TEXT NOT NULL DEFAULT 'local'"),
-    ("jobs", "backend", "TEXT NOT NULL DEFAULT 'local'"),
-    ("templates", "backend", "TEXT NOT NULL DEFAULT 'local'"),
+    ("sessions", "backend", TEXT_LOCAL),
+    ("jobs", "backend", TEXT_LOCAL),
+    ("templates", "backend", TEXT_LOCAL),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
     ("images", "base_model", "TEXT NOT NULL DEFAULT ''"),
     ("images", "lora", "TEXT NOT NULL DEFAULT ''"),
     ("images", "lora_revision", "TEXT NOT NULL DEFAULT ''"),
     ("images", "lora_sha256", "TEXT NOT NULL DEFAULT ''"),
+    # Issue #86: durable image archive state. The canonical digest detects later source corruption.
+    ("images", "sha256", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("images", "archived_at", "REAL"),
+    ("images", "archive_error", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_deleted_at", "REAL"),
     # Issue #87: opt-in Real-ESRGAN derived images keep the original PNG unchanged.
-    ("images", "parent_id", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "parent_id", TEXT_EMPTY),
     ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
     ("images", "scale", "INTEGER NOT NULL DEFAULT 1"),
-    ("images", "upscale_model", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "upscale_model", TEXT_EMPTY),
     ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
+    # Issue #66: freeze hosted effort at session start; app-scoped settings live beside the token.
+    ("sessions", "effort", "TEXT NOT NULL DEFAULT ''"),
+    # Issue #66: in-flight app sessions keep the defaults they started with if the app is revoked.
+    ("sessions", "app_defaults", "TEXT NOT NULL DEFAULT '{}'"),
 ]
 
-JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data", "origins",
-                "models"}
+
+APP_SETTINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS app_settings (
+    app_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+"""
+
+JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "app_defaults", "data",
+                "origins", "models"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -268,10 +326,12 @@ class Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        self.conn.executescript(APP_SETTINGS_SCHEMA)
         for table, column, definition in MIGRATIONS:
             existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        self._ensure_search_index_columns()
         self.lock = threading.RLock()
         self._build_search_index()
 
@@ -309,9 +369,22 @@ class Database:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone())
 
-    def find_session_ids(self, prefix: str) -> list[str]:
+    def get_session_for_user(self, sid: str, user_id: str) -> dict | None:
         with self.lock:
-            rows = self.conn.execute("SELECT id FROM sessions WHERE id LIKE ?", (prefix + "%",)).fetchall()
+            return _row(self.conn.execute(
+                "SELECT * FROM sessions WHERE id = ? AND owner_id = ?", (sid, user_id)).fetchone())
+
+    def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None) -> list[str]:
+        sql = "SELECT id FROM sessions WHERE id LIKE ?"
+        params: list = [prefix + "%"]
+        if user_id is not None:
+            sql += " AND owner_id = ?"
+            params.append(user_id)
+        if app_id is not None:
+            sql += " AND app_id = ?"
+            params.append(app_id)
+        with self.lock:
+            rows = self.conn.execute(sql, params).fetchall()
         return [r["id"] for r in rows]
 
     def list_sessions(self, limit: int = 50, owner_id: str | None = None) -> list[dict]:
@@ -325,13 +398,25 @@ class Database:
             ).fetchall()
         return [_row(r) for r in rows]
 
-    def sessions_with_status(self, *statuses: str) -> list[dict]:
+    def sessions_with_status(self, *statuses: str, user_id: str | None = None) -> list[dict]:
+        marks = ",".join("?" * len(statuses))
+        query = f"SELECT * FROM sessions WHERE status IN ({marks})"
+        params: list = list(statuses)
+        if user_id is not None:
+            query += " AND owner_id = ?"
+            params.append(user_id)
+        with self.lock:
+            rows = self.conn.execute(query + " ORDER BY updated_at", params).fetchall()
+        return [_row(r) for r in rows]
+
+    def count_sessions(self, user_id: str, *statuses: str) -> int:
         marks = ",".join("?" * len(statuses))
         with self.lock:
-            rows = self.conn.execute(
-                f"SELECT * FROM sessions WHERE status IN ({marks}) ORDER BY updated_at", statuses
-            ).fetchall()
-        return [_row(r) for r in rows]
+            row = self.conn.execute(
+                f"SELECT COUNT(*) AS n FROM sessions WHERE owner_id = ? AND status IN ({marks})",
+                (user_id, *statuses),
+            ).fetchone()
+        return int(row["n"] if row else 0)
 
     # events
     def insert_event(self, sid: str, type_: str, data: dict) -> dict:
@@ -344,13 +429,36 @@ class Database:
             self._index_event(sid, cur.lastrowid, ts, type_, data)
         return {"seq": cur.lastrowid, "session_id": sid, "ts": ts, "type": type_, "data": data}
 
+    def _session_user_id(self, sid: str) -> str:
+        row = self.conn.execute("SELECT owner_id FROM sessions WHERE id = ?", (sid,)).fetchone()
+        return (row["owner_id"] if row and row["owner_id"] else "owner")
+
+    def _ensure_search_index_columns(self) -> None:
+        """FTS5 tables cannot ALTER; rebuild when the household user_id column is missing."""
+        try:
+            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(search_index)")}
+        except sqlite3.DatabaseError:
+            cols = set()
+        if "user_id" in cols:
+            return
+        self.conn.execute("DROP TABLE IF EXISTS search_index")
+        self.conn.execute(
+            "CREATE VIRTUAL TABLE search_index USING fts5("
+            "text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED, ts UNINDEXED, user_id UNINDEXED, "
+            "tokenize = 'porter unicode61 remove_diacritics 2')"
+        )
+        self.conn.execute("DELETE FROM meta WHERE key = 'search_index'")
+
     # session search (search.py)
-    def _index_event(self, sid: str, seq: int, ts: float, type_: str, data: dict) -> None:
+    def _index_event(self, sid: str, seq: int, ts: float, type_: str, data: dict, user_id: str | None = None) -> None:
         from .search import event_text
         item = event_text(type_, data)
         if item and item[1].strip():
-            self.conn.execute("INSERT INTO search_index (text, session_id, seq, kind, ts) VALUES (?, ?, ?, ?, ?)",
-                              (item[1], sid, seq, item[0], ts))
+            uid = user_id if user_id is not None else self._session_user_id(sid)
+            self.conn.execute(
+                "INSERT INTO search_index (text, session_id, seq, kind, ts, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (item[1], sid, seq, item[0], ts, uid),
+            )
 
     def _build_search_index(self) -> None:
         """Index events written before search existed (or by an older index version). Runs once."""
@@ -362,22 +470,32 @@ class Database:
             self.conn.execute("BEGIN IMMEDIATE")
             try:
                 self.conn.execute("DELETE FROM search_index")
+                owners = {r["id"]: (r["owner_id"] or "owner")
+                          for r in self.conn.execute("SELECT id, owner_id FROM sessions")}
                 for r in self.conn.execute("SELECT seq, session_id, ts, type, data FROM events ORDER BY seq").fetchall():
-                    self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]))
+                    self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]),
+                                      user_id=owners.get(r["session_id"], "owner"))
                 self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('search_index', ?)", (INDEX_VERSION,))
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
             self.conn.execute("COMMIT")
 
-    def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600) -> list[dict]:
+    def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600,
+                      user_id: str | None = None, app_id: str | None = None) -> list[dict]:
         sql = ("SELECT session_id, seq, kind, ts, bm25(search_index) AS rank, "
                "snippet(search_index, 0, char(2), char(3), '…', 16) AS snippet "
                "FROM search_index WHERE search_index MATCH ?")
         params: list = [fts_query]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
         if exclude:
             sql += " AND session_id != ?"
             params.append(exclude)
+        if app_id is not None:
+            sql += " AND session_id IN (SELECT id FROM sessions WHERE app_id = ?)"
+            params.append(app_id)
         with self.lock:
             try:
                 rows = self.conn.execute(sql + " ORDER BY rank LIMIT ?", [*params, max_rows]).fetchall()
@@ -385,11 +503,15 @@ class Database:
                 return []
         return [dict(r) for r in rows]
 
-    def session_brief(self, sid: str) -> dict | None:
+    def session_brief(self, sid: str, user_id: str | None = None) -> dict | None:
+        query = ("SELECT id, project, target, title, status, created_at, updated_at, branch, "
+                 "review, owner_id, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?")
+        params: tuple = (sid,)
+        if user_id is not None:
+            query += " AND owner_id = ?"
+            params = (sid, user_id)
         with self.lock:
-            row = self.conn.execute("SELECT id, project, target, title, status, created_at, updated_at, branch, "
-                                    "review, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?",
-                                    (sid,)).fetchone()
+            row = self.conn.execute(query, params).fetchone()
         return dict(row) if row else None
 
     def events(self, sid: str, after: int = 0) -> list[dict]:
@@ -431,14 +553,20 @@ class Database:
                 (sid, call_id),
             ).fetchone())
 
-    def pending_approvals(self, sid: str | None = None) -> list[dict]:
-        query = "SELECT * FROM approvals WHERE status = 'pending'"
-        params: tuple = ()
+    def pending_approvals(self, sid: str | None = None, user_id: str | None = None) -> list[dict]:
+        query = "SELECT a.* FROM approvals a"
+        params: list = []
+        where = ["a.status = 'pending'"]
         if sid:
-            query += " AND session_id = ?"
-            params = (sid,)
+            where.append("a.session_id = ?")
+            params.append(sid)
+        if user_id is not None:
+            query += " JOIN sessions s ON s.id = a.session_id"
+            where.append("s.owner_id = ?")
+            params.append(user_id)
+        query += " WHERE " + " AND ".join(where)
         with self.lock:
-            return [_row(r) for r in self.conn.execute(query + " ORDER BY created_at", params).fetchall()]
+            return [_row(r) for r in self.conn.execute(query + " ORDER BY a.created_at", params).fetchall()]
 
     def approvals(self, sid: str) -> list[dict]:
         with self.lock:
@@ -631,6 +759,11 @@ class Database:
             params = list(status)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
+        return [dict(r) for r in rows]
+
+    def images_for_archive(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM images WHERE status = 'done' ORDER BY created_at, id").fetchall()
         return [dict(r) for r in rows]
 
     def find_image_upscale(self, parent_id: str, upscale: str) -> dict | None:
@@ -870,8 +1003,38 @@ class Database:
 
     def revoke_api_key(self, kid: str) -> bool:
         with self.lock:
-            return self.conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-                                     (time.time(), kid)).rowcount == 1
+            ok = self.conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                                   (time.time(), kid)).rowcount == 1
+            if ok:
+                self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
+            return ok
+
+    def get_app_settings(self, app_id: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM app_settings WHERE app_id = ?", (app_id,)).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        try:
+            out["values"] = json.loads(out["payload"])
+        except (ValueError, KeyError):
+            out["values"] = {}
+        return out
+
+    def set_app_settings(self, app_id: str, revision: int, values: dict) -> None:
+        payload = json.dumps(values)
+        now = time.time()
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO app_settings (app_id, revision, payload, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(app_id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload, "
+                "updated_at = excluded.updated_at",
+                (app_id, revision, payload, now),
+            )
+
+    def delete_app_settings(self, app_id: str) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (app_id,))
 
     def log_endpoint_request(self, r: dict) -> None:
         with self.lock:
@@ -889,3 +1052,100 @@ class Database:
                 (status, note, time.time(), aid),
             )
         return cur.rowcount == 1
+
+    # household accounts (non-secret metadata only: never tokens, credentials, or session material)
+    def member_count(self) -> int:
+        with self.lock:
+            row = self.conn.execute("SELECT COUNT(*) AS n FROM accounts WHERE role = 'member'").fetchone()
+        return int(row["n"] if row else 0)
+
+    def account_by_login(self, login: str) -> dict | None:
+        if not login:
+            return None
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM accounts WHERE login = ?", (login,)).fetchone()
+        return dict(row) if row else None
+
+    def account_by_id(self, user_id: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM accounts WHERE user_id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_accounts(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM accounts WHERE role = 'member' ORDER BY created_at").fetchall()
+        return [dict(r) for r in rows]
+
+    def insert_account(self, row: dict) -> None:
+        cols = ("user_id", "role", "login", "display_name", "enabled", "disk_quota_bytes",
+                "max_running", "max_queued", "created_at", "updated_at", "last_activity_at")
+        with self.lock:
+            self.conn.execute(
+                f"INSERT INTO accounts ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                [row.get(c) for c in cols],
+            )
+
+    def update_account(self, user_id: str, **fields) -> bool:
+        if not fields:
+            return False
+        fields["updated_at"] = time.time()
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self.lock:
+            return self.conn.execute(
+                f"UPDATE accounts SET {sets} WHERE user_id = ?", [*fields.values(), user_id]
+            ).rowcount == 1
+
+    def touch_account(self, user_id: str) -> None:
+        if not user_id or user_id == "owner":
+            return
+        with self.lock:
+            self.conn.execute("UPDATE accounts SET last_activity_at = ? WHERE user_id = ?",
+                              (time.time(), user_id))
+
+    def insert_audit(self, actor_id: str, target_id: str, action: str, outcome: str, detail: str = "") -> None:
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO account_audit (ts, actor_id, target_id, action, outcome, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (time.time(), actor_id, target_id, action, outcome, detail),
+            )
+            cutoff = time.time() - 365 * 86400
+            self.conn.execute("DELETE FROM account_audit WHERE ts < ?", (cutoff,))
+
+    def list_audit(self, limit: int = 200) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id, ts, actor_id, target_id, action, outcome, detail FROM account_audit "
+                "ORDER BY ts DESC LIMIT ?", (max(1, min(limit, 500)),)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_member_project(self, user_id: str, slug: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM member_projects WHERE user_id = ? AND slug = ?", (user_id, slug)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_member_projects(self, user_id: str) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM member_projects WHERE user_id = ? ORDER BY slug", (user_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def insert_member_project(self, row: dict) -> None:
+        now = time.time()
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO member_projects (user_id, slug, description, repo, source_url, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (row["user_id"], row["slug"], row.get("description") or "", row.get("repo") or "",
+                 row.get("source_url") or "", now, now),
+            )
+
+    def delete_member_project(self, user_id: str, slug: str) -> bool:
+        with self.lock:
+            return self.conn.execute(
+                "DELETE FROM member_projects WHERE user_id = ? AND slug = ?", (user_id, slug)
+            ).rowcount == 1

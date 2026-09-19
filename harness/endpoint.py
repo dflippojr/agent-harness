@@ -35,13 +35,18 @@ from .scheduler import GpuExclusive, QueueFull
 
 log = logging.getLogger("harness.endpoint")
 
+EMBEDDINGS_PATH = "/v1/embeddings"
+JSON_MEDIA_TYPE = "application/json"
+SSE_MEDIA_TYPE = "text/event-stream"
+BAD_KEY = "missing or invalid API key"
+
 ROUTES = {
     "/v1/chat/completions": "openai",
     "/v1/completions": "openai",
     "/v1/responses": "openai",
     "/v1/messages": "anthropic",
     "/v1/messages/count_tokens": "anthropic",
-    "/v1/embeddings": "openai",
+    EMBEDDINGS_PATH: "openai",
 }
 NO_GPU = {"/v1/messages/count_tokens"}  # tokenizer only
 MAX_BODY = 32 * 2**20
@@ -71,48 +76,180 @@ def usage_from(head: bytes, tail: bytes) -> tuple[int, int]:
     return prompt, last("completion")
 
 
+def embeddings_enabled(m) -> bool:
+    return bool(m.cfg.endpoint.embedding_base_url.strip() and m.cfg.endpoint.embedding_model.strip())
+
+
+def embedding_model(m) -> ModelConfig:
+    return ModelConfig(name=m.cfg.endpoint.embedding_model, base_url=m.cfg.endpoint.embedding_base_url,
+                       context_tokens=m.cfg.endpoint.embedding_context_tokens, max_tokens=0)
+
+
+def available_models(m) -> list[ModelConfig]:
+    models = list(m.cfg.models.values())
+    if embeddings_enabled(m) and m.cfg.endpoint.embedding_model not in {mc.name for mc in models}:
+        models.append(embedding_model(m))
+    return models
+
+
+def resolve_model(m, requested: str, path: str) -> ModelConfig | None:
+    cfg = m.cfg
+    if path == EMBEDDINGS_PATH:
+        return embedding_model(m) if embeddings_enabled(m) else None
+    if requested in cfg.models:
+        return cfg.models[requested]
+    for pattern, target in cfg.endpoint.model_aliases.items():
+        if fnmatch.fnmatch(requested or "", pattern) and target in cfg.models:
+            return cfg.models[target]
+    return cfg.models[cfg.endpoint.default_model or cfg.default_model]
+
+
+def authenticate(m, request: Request) -> dict | None:
+    auth = request.headers.get("authorization", "")
+    key = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
+    row = m.db.api_key_by_secret(key)
+    return row if row and "inference" in (row.get("scopes") or "").split() else None
+
+
+def flavor_of(request: Request) -> str:
+    return "anthropic" if request.headers.get("anthropic-version") or request.headers.get("x-api-key") else "openai"
+
+
+async def _close(upstream, client, slot) -> None:
+    await upstream.aclose()
+    await client.aclose()
+    if slot:
+        await slot.release()
+
+
+async def _parse_body(request: Request, flavor: str) -> tuple[dict | None, JSONResponse | None]:
+    """The decoded JSON object, or the error response to send instead."""
+    raw = await request.body()
+    if len(raw) > MAX_BODY:
+        return None, error(flavor, 413, "request_too_large", "request body is too large")
+    try:
+        body = json.loads(raw or b"{}")
+        if not isinstance(body, dict):
+            raise ValueError
+    except ValueError:
+        return None, error(flavor, 400, "invalid_request_error", "body must be a JSON object")
+    return body, None
+
+
+async def _acquire_slot(m, flavor: str, path: str, finish) -> tuple[object | None, JSONResponse | None]:
+    """An InferenceGate slot for GPU-bound routes, or the 429/503 to send instead."""
+    if path in NO_GPU:
+        return None, None
+    if m.guard is not None and m.guard.active:
+        finish(503)
+        return None, error(flavor, 503, "overloaded_error", "the GPU is in use by a game or a Plex transcode; the "
+                           "model is unloaded until it's free", headers={"Retry-After": "180"})
+    try:
+        return await m.runner.gate.endpoint_request(), None
+    except GpuExclusive:
+        finish(503)
+        return None, error(flavor, 503, "overloaded_error", "the GPU is generating images; the language model is "
+                           "unloaded for a minute or two", headers={"Retry-After": "60"})
+    except QueueFull:
+        finish(429)
+        return None, error(flavor, 429, "rate_limit_error", "too many requests are waiting for the GPU",
+                           headers={"Retry-After": "10"})
+
+
+def _request_log(m, record: dict, started: float):
+    """A `finish(status, ...)` that writes one accounting row for this request."""
+    def finish(status: int, prompt: int = 0, completion: int = 0, wait_ms: int = 0) -> None:
+        record.update(status=status, prompt_tokens=prompt, completion_tokens=completion, wait_ms=wait_ms,
+                      total_ms=int((time.monotonic() - started) * 1000))
+        try:
+            m.db.log_endpoint_request(record)
+        except Exception:  # noqa: BLE001 - accounting must not break a response
+            log.exception("could not log endpoint request")
+    return finish
+
+
+async def _relay_upstream(upstream, client, slot, stream: bool, finish, wait_ms: int) -> Response:
+    """Buffer the upstream response, or stream it through while scraping usage from head and tail."""
+    ctype = upstream.headers.get("content-type", JSON_MEDIA_TYPE)
+    if not stream or SSE_MEDIA_TYPE not in ctype:
+        try:
+            data = await upstream.aread()
+        finally:
+            await _close(upstream, client, slot)
+        prompt, completion = usage_from(data[:16384], data[-16384:])
+        finish(upstream.status_code, prompt, completion, wait_ms)
+        return Response(content=data, status_code=upstream.status_code, media_type=ctype.split(";")[0])
+
+    async def relay():
+        head, tail = bytearray(), bytearray()
+        try:
+            async for chunk in upstream.aiter_bytes():  # decoded: content-encoding isn't forwarded
+                if len(head) < 16384:
+                    head.extend(chunk[: 16384 - len(head)])
+                tail.extend(chunk)
+                del tail[:-16384]
+                yield chunk
+        finally:
+            await asyncio.shield(_close(upstream, client, slot))
+            prompt, completion = usage_from(bytes(head), bytes(tail))
+            finish(upstream.status_code, prompt, completion, wait_ms)
+
+    return StreamingResponse(relay(), status_code=upstream.status_code, media_type=SSE_MEDIA_TYPE,
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+async def proxy(m, request: Request, path: str) -> Response:
+    flavor = ROUTES[path]
+    ecfg = m.cfg.endpoint
+    if not ecfg.enabled:
+        return error(flavor, 404, "not_found_error", "the inference endpoint is disabled")
+    key = authenticate(m, request)
+    if key is None:
+        return error(flavor, 401, "authentication_error", BAD_KEY)
+    body, err = await _parse_body(request, flavor)
+    if err is not None:
+        return err
+    model = resolve_model(m, str(body.get("model") or ""), path)
+    if model is None:
+        return error(flavor, 404, "not_found_error", "the embeddings endpoint is not configured; set "
+                     "endpoint.embedding_base_url and endpoint.embedding_model for a dedicated embedding server")
+    body["model"] = model.name
+    if path == EMBEDDINGS_PATH:
+        body.pop("stream", None)
+    stream = bool(body.get("stream"))
+    started = time.monotonic()
+    finish = _request_log(m, {"key_id": key["id"], "route": path, "model": model.name,
+                              "stream": stream, "status": 0}, started)
+
+    slot, err = await _acquire_slot(m, flavor, path, finish)
+    if err is not None:
+        return err
+    wait_ms = int((time.monotonic() - started) * 1000)
+    client = httpx.AsyncClient(timeout=httpx.Timeout(ecfg.request_timeout_seconds, connect=10), trust_env=False,
+                               transport=getattr(m, "endpoint_transport", None))  # tests inject a fake server
+    try:
+        upstream = await client.send(client.build_request(
+            "POST", f"{model.base_url.rstrip('/')}{path}", content=json.dumps(body).encode(),
+            headers={"content-type": JSON_MEDIA_TYPE,
+                     "accept": SSE_MEDIA_TYPE if stream else JSON_MEDIA_TYPE}), stream=True)
+    except httpx.HTTPError as e:
+        await client.aclose()
+        if slot:
+            await slot.release()
+        finish(502, wait_ms=wait_ms)
+        return error(flavor, 502, "api_error", f"model server unreachable: {type(e).__name__}")
+
+    return await _relay_upstream(upstream, client, slot, stream, finish, wait_ms)
+
+
 def register(app: FastAPI, mgr) -> None:
-    def embeddings_enabled(m) -> bool:
-        return bool(m.cfg.endpoint.embedding_base_url.strip() and m.cfg.endpoint.embedding_model.strip())
-
-    def available_models(m) -> list[ModelConfig]:
-        models = list(m.cfg.models.values())
-        if embeddings_enabled(m) and m.cfg.endpoint.embedding_model not in {mc.name for mc in models}:
-            models.append(ModelConfig(name=m.cfg.endpoint.embedding_model,
-                                      base_url=m.cfg.endpoint.embedding_base_url,
-                                      context_tokens=m.cfg.endpoint.embedding_context_tokens, max_tokens=0))
-        return models
-
-    def resolve_model(m, requested: str, path: str):
-        cfg = m.cfg
-        if path == "/v1/embeddings":
-            if not embeddings_enabled(m):
-                return None
-            return ModelConfig(name=cfg.endpoint.embedding_model, base_url=cfg.endpoint.embedding_base_url,
-                               context_tokens=cfg.endpoint.embedding_context_tokens, max_tokens=0)
-        if requested in cfg.models:
-            return cfg.models[requested]
-        for pattern, target in cfg.endpoint.model_aliases.items():
-            if fnmatch.fnmatch(requested or "", pattern) and target in cfg.models:
-                return cfg.models[target]
-        return cfg.models[cfg.endpoint.default_model or cfg.default_model]
-
-    def authenticate(m, request: Request) -> dict | None:
-        auth = request.headers.get("authorization", "")
-        key = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
-        row = m.db.api_key_by_secret(key)
-        return row if row and "inference" in (row.get("scopes") or "").split() else None
-
-    def flavor_of(request: Request) -> str:
-        return "anthropic" if request.headers.get("anthropic-version") or request.headers.get("x-api-key") else "openai"
-
     @app.get("/v1/models")
     async def v1_models(request: Request):
         m = mgr(request)
         if not m.cfg.endpoint.enabled:
             return error(flavor_of(request), 404, "not_found_error", "the inference endpoint is disabled")
         if authenticate(m, request) is None:
-            return error(flavor_of(request), 401, "authentication_error", "missing or invalid API key")
+            return error(flavor_of(request), 401, "authentication_error", BAD_KEY)
         data = [{"id": mc.name, "object": "model", "type": "model", "display_name": mc.name, "owned_by": "tower",
                  "created": 0, "created_at": "2026-01-01T00:00:00Z", "context_length": mc.context_tokens}
                 for mc in available_models(m)]
@@ -123,11 +260,11 @@ def register(app: FastAPI, mgr) -> None:
     async def v1_capabilities(request: Request):
         m = mgr(request)
         if not m.cfg.endpoint.enabled or authenticate(m, request) is None:
-            return error("openai", 401, "authentication_error", "missing or invalid API key")
+            return error("openai", 401, "authentication_error", BAD_KEY)
         return {
             "server": "agent-harness", "api_version": 1,
             "routes": {path: {"method": "POST", "api": api} for path, api in ROUTES.items()
-                       if path != "/v1/embeddings" or embeddings_enabled(m)}
+                       if path != EMBEDDINGS_PATH or embeddings_enabled(m)}
             | {"/v1/models": {"method": "GET", "api": "both"}},
             "models": [{"id": mc.name, "context_tokens": mc.context_tokens, "max_tokens": mc.max_tokens,
                         "default": mc.name == (m.cfg.endpoint.default_model or m.cfg.default_model)}
@@ -139,118 +276,14 @@ def register(app: FastAPI, mgr) -> None:
             "gpu": {"shared_with_agents": True, "guard_state": m.guard.state if m.guard else "clear"},
         }
 
-    async def proxy(request: Request, path: str):
-        m = mgr(request)
-        flavor = ROUTES[path]
-        ecfg = m.cfg.endpoint
-        if not ecfg.enabled:
-            return error(flavor, 404, "not_found_error", "the inference endpoint is disabled")
-        key = authenticate(m, request)
-        if key is None:
-            return error(flavor, 401, "authentication_error", "missing or invalid API key")
-        raw = await request.body()
-        if len(raw) > MAX_BODY:
-            return error(flavor, 413, "request_too_large", "request body is too large")
-        try:
-            body = json.loads(raw or b"{}")
-            if not isinstance(body, dict):
-                raise ValueError
-        except ValueError:
-            return error(flavor, 400, "invalid_request_error", "body must be a JSON object")
-        model = resolve_model(m, str(body.get("model") or ""), path)
-        if model is None:
-            return error(flavor, 404, "not_found_error", "the embeddings endpoint is not configured; set "
-                         "endpoint.embedding_base_url and endpoint.embedding_model for a dedicated embedding server")
-        body["model"] = model.name
-        if path == "/v1/embeddings":
-            body.pop("stream", None)
-        stream = bool(body.get("stream"))
-        record = {"key_id": key["id"], "route": path, "model": model.name, "stream": stream, "status": 0}
-        started = time.monotonic()
-
-        def finish(status: int, prompt: int = 0, completion: int = 0, wait_ms: int = 0) -> None:
-            record.update(status=status, prompt_tokens=prompt, completion_tokens=completion, wait_ms=wait_ms,
-                          total_ms=int((time.monotonic() - started) * 1000))
-            try:
-                m.db.log_endpoint_request(record)
-            except Exception:  # noqa: BLE001 - accounting must not break a response
-                log.exception("could not log endpoint request")
-
-        gpu = path not in NO_GPU
-        if gpu and m.guard is not None and m.guard.active:
-            finish(503)
-            return error(flavor, 503, "overloaded_error", "the GPU is in use by a game or a Plex transcode; the "
-                         "model is unloaded until it's free", headers={"Retry-After": "180"})
-        slot = None
-        if gpu:
-            try:
-                slot = await m.runner.gate.endpoint_request()
-            except GpuExclusive:
-                finish(503)
-                return error(flavor, 503, "overloaded_error", "the GPU is generating images; the language model is "
-                             "unloaded for a minute or two", headers={"Retry-After": "60"})
-            except QueueFull:
-                finish(429)
-                return error(flavor, 429, "rate_limit_error", "too many requests are waiting for the GPU",
-                             headers={"Retry-After": "10"})
-        wait_ms = int((time.monotonic() - started) * 1000)
-        client = httpx.AsyncClient(timeout=httpx.Timeout(ecfg.request_timeout_seconds, connect=10), trust_env=False,
-                                   transport=getattr(m, "endpoint_transport", None))  # tests inject a fake server
-        try:
-            upstream = await client.send(client.build_request(
-                "POST", f"{model.base_url.rstrip('/')}{path}", content=json.dumps(body).encode(),
-                headers={"content-type": "application/json",
-                         "accept": "text/event-stream" if stream else "application/json"}), stream=True)
-        except httpx.HTTPError as e:
-            await client.aclose()
-            if slot:
-                await slot.release()
-            finish(502, wait_ms=wait_ms)
-            return error(flavor, 502, "api_error", f"model server unreachable: {type(e).__name__}")
-
-        ctype = upstream.headers.get("content-type", "application/json")
-        if not stream or "text/event-stream" not in ctype:
-            try:
-                data = await upstream.aread()
-            finally:
-                await upstream.aclose()
-                await client.aclose()
-                if slot:
-                    await slot.release()
-            prompt, completion = usage_from(data[:16384], data[-16384:])
-            finish(upstream.status_code, prompt, completion, wait_ms)
-            return Response(content=data, status_code=upstream.status_code, media_type=ctype.split(";")[0])
-
-        async def relay():
-            head, tail = bytearray(), bytearray()
-            try:
-                async for chunk in upstream.aiter_bytes():  # decoded: content-encoding isn't forwarded
-                    if len(head) < 16384:
-                        head.extend(chunk[: 16384 - len(head)])
-                    tail.extend(chunk)
-                    del tail[:-16384]
-                    yield chunk
-            finally:
-                await asyncio.shield(_close(upstream, client, slot))
-                prompt, completion = usage_from(bytes(head), bytes(tail))
-                finish(upstream.status_code, prompt, completion, wait_ms)
-
-        return StreamingResponse(relay(), status_code=upstream.status_code, media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-    async def _close(upstream, client, slot) -> None:
-        await upstream.aclose()
-        await client.aclose()
-        if slot:
-            await slot.release()
-
     def route_handler(path: str):
         async def handler(request: Request):
-            return await proxy(request, path)
+            return await proxy(mgr(request), request, path)
         return handler
 
     for path in ROUTES:
         app.add_api_route(path, route_handler(path), methods=["POST"], include_in_schema=False)
+
 
     # key management (web app / local CLI; protected like the rest of the daemon, not by API keys)
     @app.get("/keys")
@@ -280,5 +313,5 @@ def register(app: FastAPI, mgr) -> None:
     @app.delete("/keys/{kid}", status_code=204)
     async def revoke_key(kid: str, request: Request):
         if not mgr(request).db.revoke_api_key(kid):
-            return JSONResponse({"detail": "no such active key"}, status_code=404)
+            raise HarnessError(404, "no such active key")
         return Response(status_code=204)

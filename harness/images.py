@@ -360,13 +360,14 @@ class ComfyProcess:
 class ImageService:
     tool_names = TOOLS
 
-    def __init__(self, cfg: ImagesConfig, db, runner, control, notify=None):
+    def __init__(self, cfg: ImagesConfig, db, runner, control, notify=None, archive=None):
         self.cfg = cfg
         self.control = control         # gpu_guard.ServerControl for the language model server
         self.db = db
         self.runner = runner
         self.comfy = ComfyProcess(cfg)
         self.notify = notify           # callable(job) for finished phone jobs
+        self.archive = archive         # image_archive.ImageArchive when image + backup modules are enabled
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.active_job: str = ""
         self.phase = "idle"            # idle | waiting | switching | starting | warm | generating | restoring
@@ -704,10 +705,30 @@ class ImageService:
             else:
                 content = await self._run_generate(job, started)
             self.images_dir.mkdir(parents=True, exist_ok=True)
-            self.path(job).write_bytes(content)
+            canonical = self.path(job)
+            partial = canonical.with_name(canonical.name + ".partial")
+            try:
+                with partial.open("wb") as f:
+                    f.write(content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(partial, canonical)
+            finally:
+                try:
+                    partial.unlink()
+                except FileNotFoundError:
+                    pass
             self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=round(time.time() - started, 1),
-                                 bytes=len(content), width=job["width"], height=job["height"])
-            if self.on_stored:
+                                 bytes=len(content), width=job["width"], height=job["height"],
+                                 sha256=hashlib.sha256(content).hexdigest())
+            if self.archive and self.archive.enabled:
+                archive_job = self.db.get_image(job_id)
+                try:
+                    await asyncio.to_thread(self.archive.archive, archive_job, canonical)
+                except Exception as archive_error:  # image success is independent of backup health
+                    self.archive.record_error(archive_job, archive_error)
+                    log.warning("image %s archive failed: %s", job_id, archive_error)
+            elif self.on_stored:
                 try:
                     self.on_stored(self.db.get_image(job_id))
                 except Exception:  # noqa: BLE001 - archive must not fail the image job
