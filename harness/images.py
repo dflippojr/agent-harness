@@ -900,7 +900,6 @@ class ImageService:
         parent_path = self.path({"id": safe_parent_id})
         if not parent_path.exists():
             raise ToolError("source image is not available")
-        parent_png = parent_path.read_bytes()
         feather_n = image_edit.parse_feather(feather)
         mask_png = image_edit.normalize_mask(
             mask, parent["width"], parent["height"],
@@ -915,7 +914,7 @@ class ImageService:
                "model_revision": edit["revision"], "feather": feather_n}
         job["provenance"] = self.provenance_for(job)
         self.images_dir.mkdir(parents=True, exist_ok=True)
-        self.source_path(job).write_bytes(parent_png)
+        shutil.copyfile(parent_path, self.source_path(job))
         self.mask_path(job).write_bytes(mask_png)
         self.db.insert_image(job)
         self._done[job_id] = asyncio.Event()
