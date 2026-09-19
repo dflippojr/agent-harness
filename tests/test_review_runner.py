@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "ops" / "review" / "run-review.ps1"
+WORKFLOW = ROOT / ".github" / "workflows" / "review.yml"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
 
 
@@ -180,3 +181,27 @@ $result | ConvertTo-Json -Compress
     assert value["Output"] == "clean review"
     assert "empty output" in result.stdout
     assert "rate limit or quota response" in result.stdout
+
+
+def test_workflow_exposes_backend_input_and_delegates_to_runner():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    dispatch = workflow.split("  workflow_dispatch:", 1)[1].split("\npermissions:", 1)[0]
+    assert "      backend:" in dispatch
+    assert "        default: auto" in dispatch
+    assert all(f"          - {name}" in dispatch for name in ("auto", "cursor", "codex", "claude"))
+    assert "${{ vars.REVIEW_BACKENDS }}" in workflow
+    assert ".\\ops\\review\\run-review.ps1" in workflow
+    assert "steps.agent.outputs.backend" in workflow
+    assert "Cursor Agent is reviewing" not in workflow
+    assert "--force" not in workflow
+
+
+def test_workflow_keeps_review_security_and_scheduling_contracts():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "pull-requests: write" in workflow
+    assert "contents: read" in workflow
+    assert "checks: write" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, agent-harness-review]" in workflow
+    assert "group: review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "types: [opened]" in workflow
