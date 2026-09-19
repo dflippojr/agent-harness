@@ -185,6 +185,19 @@ Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{tmp_path}' | C
     assert "diagnostic" in value["Stderr"]
 
 
+def test_shared_prompt_points_read_only_backends_at_prefetched_diff(tmp_path):
+    diff_path = tmp_path / ".automated-review-diff-42.patch"
+    result = run_powershell(
+        tmp_path,
+        f"Add-ReviewDiffContext -Prompt 'original shared prompt' -DiffPath '{diff_path}'",
+    )
+    assert result.returncode == 0, output(result)
+    assert result.stdout.startswith("original shared prompt")
+    assert "exact gh pr diff output" in result.stdout
+    assert diff_path.name in result.stdout
+    assert str(tmp_path) not in result.stdout
+
+
 def test_empty_and_rate_limited_successes_fall_through(tmp_path):
     version = tmp_path / "versions" / "2026.09.18"
     version.mkdir(parents=True)

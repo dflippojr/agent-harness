@@ -3,6 +3,7 @@ param(
     [string]$Backend = $env:REVIEW_BACKEND,
     [string]$ConfiguredBackends = $env:REVIEW_BACKENDS,
     [string]$Workspace = $env:GITHUB_WORKSPACE,
+    [string]$PrNumber = $env:PR_NUMBER,
     [string]$Prompt = $env:REVIEW_PROMPT,
     [string]$OutputPath = '',
     [string]$ScratchDirectory = $env:RUNNER_TEMP
@@ -238,6 +239,47 @@ function Invoke-ReviewFallback {
     throw "all review backends failed: $($failures -join '; ')"
 }
 
+function New-ReviewDiffFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory
+    )
+
+    if ($PrNumber -notmatch '^\d+$') { throw "invalid PR number '$PrNumber'" }
+    $command = [pscustomobject]@{
+        Backend = 'github-diff'
+        FilePath = 'gh'
+        Arguments = @('pr', 'diff', $PrNumber)
+        InputText = $null
+        WorkingDirectory = $Workspace
+        ResultPath = $null
+        Model = $null
+    }
+    $attempt = Invoke-ReviewBackendProcess -Command $command -ScratchDirectory $ScratchDirectory
+    if ($attempt.ExitCode -ne 0) {
+        throw "gh pr diff $PrNumber exited $($attempt.ExitCode): $($attempt.Stderr.Trim())"
+    }
+    if ([string]::IsNullOrWhiteSpace($attempt.Stdout)) {
+        throw "gh pr diff $PrNumber produced no diff"
+    }
+    $diffPath = Join-Path $Workspace ('.automated-review-diff-{0}.patch' -f $PID)
+    $attempt.Stdout | Out-File -LiteralPath $diffPath -Encoding utf8
+    return $diffPath
+}
+
+function Add-ReviewDiffContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [Parameter(Mandatory = $true)][string]$DiffPath
+    )
+
+    $leaf = Split-Path -Leaf $DiffPath
+    return "$Prompt`r`n`r`nThe workflow has also saved the exact gh pr diff output to '$leaf'. Read that file if gh is unavailable in the read-only environment; do not treat the scratch file itself as a proposed change."
+}
+
 function Write-ReviewResult {
     [CmdletBinding()]
     param(
@@ -259,21 +301,30 @@ function Invoke-ReviewMain {
         [string]$Backend,
         [string]$ConfiguredBackends,
         [string]$Workspace,
+        [string]$PrNumber,
         [string]$Prompt,
         [string]$OutputPath,
         [string]$ScratchDirectory
     )
 
     if ([string]::IsNullOrWhiteSpace($Workspace)) { $Workspace = (Get-Location).Path }
+    if ([string]::IsNullOrWhiteSpace($PrNumber)) { throw 'PR_NUMBER is required' }
     if ([string]::IsNullOrWhiteSpace($Prompt)) { throw 'REVIEW_PROMPT is required' }
     if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { $ScratchDirectory = $env:TEMP }
     if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'RUNNER_TEMP or TEMP is required' }
     if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $Workspace 'review-output.md' }
 
-    $backends = @(Resolve-ReviewBackends -RequestedBackend $Backend -ConfiguredBackends $ConfiguredBackends)
-    $runner = { param($command) Invoke-ReviewBackendProcess -Command $command -ScratchDirectory $ScratchDirectory }
-    $result = Invoke-ReviewFallback -Backends $backends -Workspace $Workspace -Prompt $Prompt -ScratchDirectory $ScratchDirectory -Runner $runner
-    Write-ReviewResult -Result $result -OutputPath $OutputPath
+    $diffPath = $null
+    try {
+        $diffPath = New-ReviewDiffFile -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+        $effectivePrompt = Add-ReviewDiffContext -Prompt $Prompt -DiffPath $diffPath
+        $backends = @(Resolve-ReviewBackends -RequestedBackend $Backend -ConfiguredBackends $ConfiguredBackends)
+        $runner = { param($command) Invoke-ReviewBackendProcess -Command $command -ScratchDirectory $ScratchDirectory }
+        $result = Invoke-ReviewFallback -Backends $backends -Workspace $Workspace -Prompt $effectivePrompt -ScratchDirectory $ScratchDirectory -Runner $runner
+        Write-ReviewResult -Result $result -OutputPath $OutputPath
+    } finally {
+        if ($diffPath) { Remove-Item -LiteralPath $diffPath -Force -ErrorAction SilentlyContinue }
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -285,5 +336,5 @@ function Invoke-ReviewMain {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-ReviewMain -Backend $Backend -ConfiguredBackends $ConfiguredBackends -Workspace $Workspace -Prompt $Prompt -OutputPath $OutputPath -ScratchDirectory $ScratchDirectory
+    Invoke-ReviewMain -Backend $Backend -ConfiguredBackends $ConfiguredBackends -Workspace $Workspace -PrNumber $PrNumber -Prompt $Prompt -OutputPath $OutputPath -ScratchDirectory $ScratchDirectory
 }

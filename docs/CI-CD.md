@@ -58,7 +58,9 @@ workflow edit.
 All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
 with its sandbox enabled, Codex uses a read-only sandbox with approvals disabled, and Claude exposes only
 Read/Grep/Glob plus Bash commands matching `gh pr diff`. The wrapper, rather than a model, writes the final comment
-file. After installing or changing a CLI, verify each backend explicitly against a disposable pull request:
+file. It also saves `gh pr diff` to a temporary workspace file for read-only backends that cannot run network commands,
+then removes that file after the review. After installing or changing a CLI, verify each backend explicitly against a
+disposable pull request:
 
 ```powershell
 gh workflow run review.yml -f pr_number=N -f backend=cursor
