@@ -62,7 +62,7 @@ _PY_SCRIPT_RE = re.compile(r".+\.py$")
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _NUMERIC_SHORT_RE = re.compile(r"^-[0-9]+$")
 _CLUSTER_RE = re.compile(r"^-[A-Za-z]+$")
-_GIT_FORCE_RE = re.compile(r"(?i)\s(-d|-D|--delete|--force|-f)\b")
+_GIT_FORCE_RE = re.compile(r"(?i)\s(-d|--delete|--force|-f)\b")
 
 _SECRET_RE = re.compile(
     r"(?i)(sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-"
@@ -181,19 +181,28 @@ def load_smart_config(raw: dict | None) -> SmartConfig:
     )
 
 
+def _cfg_mode(cfg: SmartConfig) -> str:
+    return cfg.mode if cfg.mode in MODES else "shadow"
+
+
 def runtime_mode(db, cfg: SmartConfig) -> str:
-    """Live mode overlay so the owner can switch shadow/auto/off without restarting sessions."""
+    """Effective mode. Last writer among PUT /smart-approvals and Settings.
+
+    Disabled is always off. Otherwise a valid SQLite overlay wins; yaml/settings
+    ``cfg.mode`` is used only when no overlay has been written. ``off`` stays off
+    and never becomes shadow — no reviewer calls and no outbound shadow logging.
+    """
     if not cfg.enabled:
         return "off"
     raw = db.get_meta(META_KEY) if db is not None else ""
     if not raw:
-        return cfg.mode if cfg.mode != "off" else "shadow"
+        return _cfg_mode(cfg)
     try:
         data = json.loads(raw)
     except ValueError:
-        return cfg.mode
-    mode = str((data or {}).get("mode") or cfg.mode).strip().lower()
-    return mode if mode in MODES else cfg.mode
+        return _cfg_mode(cfg)
+    mode = str((data or {}).get("mode") or "").strip().lower()
+    return mode if mode in MODES else _cfg_mode(cfg)
 
 
 def save_runtime_mode(db, mode: str) -> str:
@@ -250,7 +259,7 @@ _OPTION_SEPS = re.compile(r"[=:,]")
 
 
 def _path_piece_ok(piece: str) -> bool:
-    """True when one path fragment cannot name a location outside /workspace or /tmp."""
+    """True when one path fragment cannot name a location outside /workspace."""
     if not piece:
         return True
     if piece.startswith("-") and _OPTION_SEPS.search(piece) is None:
@@ -267,19 +276,19 @@ def _path_piece_ok(piece: str) -> bool:
     if any(part == ".." for part in path.split("/")):
         return False
     if path.startswith("/"):
-        return path == "/workspace" or path.startswith("/workspace/") or path == "/tmp" or path.startswith("/tmp/")
+        return path == "/workspace" or path.startswith("/workspace/")
     return True
 
 
 def _relative_ok(token: str) -> bool:
-    """True when a token cannot name a path outside /workspace or /tmp.
+    """True when a token cannot name a path outside /workspace.
 
-    Fail closed on home/drive/UNC/env expansion and any `..` segment. Prefix
-    allowlists for /workspace and /tmp are applied only after those checks, so
-    `/workspace/../etc` is not treated as workspace-confined. `VAR=value` and
-    `--flag=value` tokens are judged by every `=`, `:`, and `,` piece, so
-    `DESTDIR=/etc` and `--cov-report=html:../out` cannot skip the absolute-path
-    and `..` checks.
+    Fail closed on home/drive/UNC/env expansion and any `..` segment. The
+    /workspace prefix allowlist is applied only after those checks, so
+    `/workspace/../etc` is not treated as workspace-confined. World-writable
+    directories are not confined. `VAR=value` and `--flag=value` tokens are
+    judged by every `=`, `:`, and `,` piece, so `DESTDIR=/etc` and
+    `--cov-report=html:../out` cannot skip the absolute-path and `..` checks.
     """
     if token.startswith("-") and _OPTION_SEPS.search(token) is None:
         return True
@@ -659,7 +668,7 @@ def parse_reviewer_output(text: str) -> Review:
         confidence = float(data.get("confidence"))
     except (TypeError, ValueError):
         return Review("escalate", escalate_reason="schema violation")
-    if confidence != confidence or confidence < 0 or confidence > 1:  # NaN or range
+    if not 0 <= confidence <= 1:  # NaN, below 0, or above 1
         return Review("escalate", escalate_reason="schema violation")
     reason = data.get("reason")
     if not isinstance(reason, str):

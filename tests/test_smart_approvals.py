@@ -10,7 +10,7 @@ import pytest
 from harness.policy import ALLOW, ASK, DENY, Policy
 from harness.smart_approvals import (
     BLOCKING_FLAGS, RISK_FLAGS, SmartConfig, SmartReviewer, _relative_ok, assess_eligibility,
-    parse_reviewer_output, reviewer_payload, strip_shell_comments,
+    parse_reviewer_output, reviewer_payload, runtime_mode, save_runtime_mode, strip_shell_comments,
 )
 
 BASH = "Bash"
@@ -84,7 +84,15 @@ def test_strict_schema_rejects_extra_text_and_unknown_keys():
     assert parse_reviewer_output(
         '{"recommendation":"approve","confidence":0.9,"reason":"x","risk_flags":[],"extra":1}'
     ).escalate_reason == "schema violation"
-    assert parse_reviewer_output('{"recommendation":"allow","confidence":1,"reason":"x","risk_flags":[]}').escalate_reason
+    assert parse_reviewer_output(
+        '{"recommendation":"approve","confidence":NaN,"reason":"x","risk_flags":[]}'
+    ).escalate_reason == "schema violation"
+    assert parse_reviewer_output(
+        '{"recommendation":"approve","confidence":-0.1,"reason":"x","risk_flags":[]}'
+    ).escalate_reason == "schema violation"
+    assert parse_reviewer_output(
+        '{"recommendation":"approve","confidence":1.1,"reason":"x","risk_flags":[]}'
+    ).escalate_reason == "schema violation"
     assert parse_reviewer_output("not json").escalate_reason == "malformed JSON"
     deny = parse_reviewer_output(
         '{"recommendation":"deny","confidence":0.99,"reason":"nope","risk_flags":["destructive"]}')
@@ -150,6 +158,73 @@ def test_auto_approve_requires_empty_risk_flags_and_fails_closed():
             assert review.escalate_reason == "risk flags", name
         else:
             assert parsed.escalate_reason or parsed.recommendation != "approve" or parsed.auto_ok is False, name
+
+
+class _ModeDb:
+    def __init__(self, raw=""):
+        self.raw = raw
+
+    def get_meta(self, _key):
+        return self.raw
+
+    def set_meta(self, _key, value):
+        self.raw = value
+
+
+def _effective_mode_rows():
+    """(enabled, yaml_mode, live_mode, overlay_mode, expected).
+
+    Last writer wins: live setting and PUT both write the SQLite overlay. The
+    table applies overlay first, then a live setting when one is given, matching
+    'PUT auto then Settings off' and the yaml-only default.
+    """
+    rows = []
+    for enabled in (True, False):
+        for yaml_mode in ("off", "shadow", "auto"):
+            for overlay in (None, "off", "shadow", "auto"):
+                for live in (None, "off", "shadow", "auto"):
+                    if live is not None:
+                        expected = "off" if not enabled else live
+                    elif overlay is not None:
+                        expected = "off" if not enabled else overlay
+                    else:
+                        expected = "off" if not enabled else yaml_mode
+                    rows.append((enabled, yaml_mode, live, overlay, expected))
+    return rows
+
+
+@pytest.mark.parametrize("enabled,yaml_mode,live_mode,overlay_mode,expected", _effective_mode_rows())
+def test_effective_mode_yaml_live_overlay_matrix(enabled, yaml_mode, live_mode, overlay_mode, expected):
+    """yaml/settings `off` is off; overlay is last writer among PUT and live settings."""
+    from harness.settings_keys import apply_smart_mode
+
+    cfg = SmartConfig(enabled=enabled, mode=yaml_mode)
+    db = _ModeDb()
+    if overlay_mode is not None:
+        save_runtime_mode(db, overlay_mode)
+    if live_mode is not None:
+        cfg.mode = live_mode
+        apply_smart_mode(type("Mgr", (), {"db": db})(), overlay_mode or yaml_mode, live_mode)
+    assert runtime_mode(db, cfg) == expected
+
+
+def test_yaml_mode_off_does_not_call_reviewer():
+    """enabled + mode off (yaml, no overlay) must not ship the command to the hosted API."""
+    cfg = type("Cfg", (), {"smart_approvals": SmartConfig(enabled=True, mode="off", min_confidence=0.85)})()
+    called = []
+
+    def complete(payload):
+        called.append(payload)
+        return {"recommendation": "approve", "confidence": 0.95, "reason": "ok", "risk_flags": []}
+
+    reviewer = SmartReviewer(cfg, complete=complete)
+    decision = Policy().decide(BASH, {"command": "pytest -q"})
+    el, review = asyncio.run(reviewer.consider(
+        _ModeDb(), Policy(), BASH, {"command": "pytest -q"}, decision,
+    ))
+    assert el.ok and review is None and called == []
+    assert reviewer.should_auto_approve(review) is False
+    assert runtime_mode(_ModeDb(), cfg.smart_approvals) == "off"
 
 
 # 100+ synthetic shadow cases. Unsafe classes must never be eligibility.ok.
@@ -411,6 +486,8 @@ def test_workspace_confinement_rejects_home_drive_unc_and_dotdot():
         "cat foo/bar/..",
         "ls /workspace/../etc",
         "cat /tmp/../etc/passwd",
+        "cat /tmp/out.txt",
+        "ls /tmp",
         "cat /workspace/foo/../../etc/passwd",
         r"cat C:\Users\me\secrets.txt",
         "cat C:/Users/me/secrets.txt",
@@ -462,7 +539,7 @@ def test_workspace_confinement_rejects_home_drive_unc_and_dotdot():
 
     assert _relative_ok("README.md")
     assert _relative_ok("/workspace/README.md")
-    assert _relative_ok("/tmp/out.txt")
+    assert not _relative_ok("/tmp/out.txt")
     assert _relative_ok("-n")
     assert not _relative_ok("~/.aws/credentials")
     assert not _relative_ok("$HOME/.aws")
@@ -537,6 +614,7 @@ def test_assignment_tokens_cannot_escape_workspace():
     """VAR=value must take the same confinement path as --flag=value."""
     path_escape = [
         "make build DESTDIR=/etc",
+        "make build DESTDIR=/tmp/out",
         "make build DESTDIR=../outside",
         "make build PREFIX=/usr",
         "make build DESTDIR=~/out",
@@ -554,7 +632,7 @@ def test_assignment_tokens_cannot_escape_workspace():
         assert el.ok is False, command
         assert el.reason == "path escapes workspace", (command, el.reason)
     assert _eligible("make build DESTDIR=/workspace/out")
-    assert _eligible("make build DESTDIR=/tmp/out")
+    assert not _eligible("make build DESTDIR=/tmp/out")
     assert _eligible("make build")
     assert _eligible("cargo test")
     assert _eligible("go test ./...")
@@ -564,7 +642,7 @@ def test_assignment_tokens_cannot_escape_workspace():
     assert not _relative_ok("GOPATH=/etc")
     assert not _relative_ok("OUT=C:/Windows")
     assert _relative_ok("DESTDIR=/workspace/out")
-    assert _relative_ok("DESTDIR=/tmp/out")
+    assert not _relative_ok("DESTDIR=/tmp/out")
     assert _relative_ok("FOO=bar")
     assert _relative_ok("DEBUG=1")
     assert _relative_ok("-n")
@@ -576,7 +654,8 @@ def test_assignment_tokens_cannot_escape_workspace():
     ("FOO=bar", True),
     ("DEBUG=1", True),
     ("DESTDIR=/workspace/out", True),
-    ("DESTDIR=/tmp/out", True),
+    ("DESTDIR=/tmp/out", False),
+    ("/tmp/out.txt", False),
     ("--cov=src", True),
     ("--cov-report=xml", True),
     ("--cov-report=html", True),
@@ -645,7 +724,6 @@ def test_closed_argv_grammar_allows_only_exact_shapes():
         "make test",
         "make build",
         "make build DESTDIR=/workspace/out",
-        "make build DESTDIR=/tmp/out",
         "git status",
         "git log -1",
         "git show HEAD",
@@ -662,6 +740,7 @@ def test_closed_argv_grammar_allows_only_exact_shapes():
         ("make all extra", "command is not routine workspace work"),
         ("make test extra", "command is not routine workspace work"),
         ("make install", "command is not routine workspace work"),
+        ("make build DESTDIR=/tmp/out", "path escapes workspace"),
         ("make test -C /tmp", "command is not routine workspace work"),
         ("make test --directory=/tmp", "command is not routine workspace work"),
         ("make test --directory=/workspace", "command is not routine workspace work"),
@@ -981,6 +1060,40 @@ def test_owner_settings_and_live_disable(tmp_path):
         assert m2.runner.smart.calls == []
         await m2.stop()
     asyncio.run(disabled_claude())
+
+
+def test_put_auto_then_live_settings_off_does_not_call_reviewer(tmp_path):
+    """Last writer wins: PUT auto, then Settings mode off, must not auto-approve pytest -q."""
+    cfg = _enable_smart(make_cfg(tmp_path), tmp_path, "shadow")
+    m = Manager(cfg, chat=Script([Completion(content="hi")]))
+    m._spawn = lambda *_a, **_k: None
+    with TestClient(create_app(m)) as client:
+        auto = client.put("/smart-approvals", json={"mode": "auto"}).json()
+        assert auto["mode"] == "auto"
+        rev = client.get("/api/admin/v1/config").json()["revision"]
+        patched = client.patch("/api/admin/v1/config", json={
+            "revision": rev, "changes": {"smart_approvals.mode": "off"},
+        })
+        assert patched.status_code == 200, patched.text
+        assert client.get("/smart-approvals").json()["mode"] == "off"
+        assert m.cfg.smart_approvals.mode == "off"
+        assert runtime_mode(m.db, m.cfg.smart_approvals) == "off"
+
+    async def body():
+        m2, _, _ = _claude_manager(tmp_path / "live-off", "ask", bash_command="pytest -q")
+        _enable_smart(m2.cfg, tmp_path / "live-off", "shadow")
+        m2.runner.smart.complete = _approve
+        save_runtime_mode(m2.db, "auto")
+        from harness.settings_keys import _set_smart_mode, apply_smart_mode
+        _set_smart_mode(m2.cfg, "off")
+        apply_smart_mode(m2, "auto", "off")
+        await m2.start()
+        sid = m2.create("run it", backend="claude")["id"]
+        await wait_status(m2, sid, "waiting_approval")
+        assert m2.runner.smart.calls == []
+        assert m2.db.pending_approvals(sid)
+        await m2.stop()
+    asyncio.run(body())
 
 
 def test_member_gets_403_on_every_smart_approvals_route(tmp_path):

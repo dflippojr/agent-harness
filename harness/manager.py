@@ -656,6 +656,7 @@ class Manager:
         if mode in ("shadow", "auto") and not settings.secret_ref:
             raise HarnessError(400, "smart_approvals.secret_ref is not configured")
         save_runtime_mode(self.db, mode)
+        self.cfg.smart_approvals.mode = mode
         return self.smart_approvals_status()
 
     # owner-managed app provider credentials (issue #29)

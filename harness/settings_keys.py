@@ -215,11 +215,12 @@ def _bool(key, label, help, category, default, getter, setter, yaml_path, apply_
 
 
 def _enum(key, label, help, category, default, getter, setter, values, yaml_path, modules=(),
-          apply_mode="live", max_length=80):
+          apply_mode="live", max_length=80, live_apply=None, live_undo=None):
     return SettingSpec(
         key=key, label=label, help=help, category=category, value_type="enum", default=default,
         scope="admin", apply_mode=apply_mode, getter=getter, setter=setter,
         bounds=Bounds(enum=values, max_length=max_length), yaml_path=yaml_path, modules=modules,
+        live_apply=live_apply, live_undo=live_undo,
     )
 
 
@@ -468,6 +469,15 @@ def _set_smart_mode(cfg: Config, value):
     cfg.smart_approvals.mode = mode
 
 
+def apply_smart_mode(manager, old, new) -> None:
+    """Last writer: Settings `smart_approvals.mode` writes the same overlay as PUT."""
+    from .smart_approvals import save_runtime_mode
+    db = getattr(manager, "db", None)
+    if db is None:
+        return
+    save_runtime_mode(db, str(new).strip().lower())
+
+
 def _get_smart_provider(cfg: Config):
     return cfg.smart_approvals.provider
 
@@ -695,9 +705,11 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Smart approvals", False, _get_smart_enabled, _set_smart_enabled,
           ("smart_approvals", "enabled")),
     _enum("smart_approvals.mode", "Smart-approval mode",
-          "off, shadow, or auto. Live PUT /smart-approvals can overlay this without a restart.",
+          "off, shadow, or auto. Last writer among this setting and PUT /smart-approvals "
+          "wins; off means no reviewer calls.",
           "Smart approvals", "shadow", _get_smart_mode, _set_smart_mode,
-          ("off", "shadow", "auto"), ("smart_approvals", "mode")),
+          ("off", "shadow", "auto"), ("smart_approvals", "mode"),
+          live_apply=apply_smart_mode, live_undo=apply_smart_mode),
     _enum("smart_approvals.provider", "Smart-approval provider",
           "Hosted reviewer provider. openai or anthropic.",
           "Smart approvals", "openai", _get_smart_provider, _set_smart_provider,

@@ -27,8 +27,24 @@ smart_approvals:
 After setup the live mode is `shadow`: recommendations are recorded and shown on the ordinary
 approval card, but the owner still decides. Switch to `auto` from Settings → Smart approvals, or
 `PUT /smart-approvals` / `PUT /api/admin/v1/smart-approvals` with `{ "mode": "auto" }`. Apps, guests,
-and app tokens cannot enable it, pick its credential, or widen eligibility. Turning it `off` or
-back to `shadow` applies to the next tool call without restarting sessions.
+and app tokens cannot enable it, pick its credential, or widen eligibility.
+
+### Effective mode
+
+One last-writer rule. When `smart_approvals.enabled` is false, the effective mode is `off`.
+Otherwise:
+
+1. A valid mode stored by the live overlay (SQLite `smart_approvals` meta) wins.
+2. If no overlay has been written, `smart_approvals.mode` from YAML or the settings registry is used.
+
+`PUT /smart-approvals` and Settings → `smart_approvals.mode` both write that overlay and
+`cfg.smart_approvals.mode`. The later of those two writes is the effective mode for the next tool
+call, without restarting sessions. YAML is only the default until one of those writes happens.
+
+`off` is truly off: no hosted reviewer calls and no shadow logging that sends command text out.
+It is never rewritten to `shadow`.
+
+Turning it `off` or back to `shadow` applies to the next tool call without restarting sessions.
 
 The optional proxy is the `reviewer` service in `ops/egress/compose.yaml` (host `127.0.0.1:8890`),
 allowlisting official OpenAI and Anthropic API hosts only.
