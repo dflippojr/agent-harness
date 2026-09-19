@@ -867,7 +867,7 @@ def test_web_installed_enabled_overlay_matrix(tmp_path, monkeypatch,
     _assert_web_surfaces(manager, on=expect_on, installed=installed, yaml_enabled=yaml_enabled)
 
 
-def _image_edit_loadable(tmp_path, *, installed=True, enabled=True):
+def _image_edit_loadable(tmp_path, *, installed=True, enabled=True, include_edit_key=True):
     from harness import image_edit
     comfy_dir = tmp_path / "comfy"
     models_dir = tmp_path / "models"
@@ -876,8 +876,9 @@ def _image_edit_loadable(tmp_path, *, installed=True, enabled=True):
         target = models_dir / subdir
         target.mkdir(parents=True)
         (target / image_edit.EDIT_MODEL[key]["name"]).write_bytes(b"stub")
+    edit_setting = f"edit_enabled: {str(bool(enabled)).lower()}, " if include_edit_key else ""
     extra = (
-        f"images: {{enabled: true, edit_enabled: {str(bool(enabled)).lower()}, "
+        f"images: {{enabled: true, {edit_setting}"
         f"work_dir: {(tmp_path / 'images').as_posix()}, comfy_dir: {comfy_dir.as_posix()}, "
         f"models_dir: {models_dir.as_posix()}}}\n"
     )
@@ -887,6 +888,16 @@ def _image_edit_loadable(tmp_path, *, installed=True, enabled=True):
         encoding="utf-8",
     )
     return cfg_dir, data_dir
+
+
+def test_legacy_image_edit_install_opt_in_supplies_missing_enable_switch(tmp_path):
+    cfg_dir, _ = _image_edit_loadable(tmp_path, installed=True, include_edit_key=False)
+
+    cfg = load(cfg_dir)
+
+    assert cfg.installed.image_edit is True
+    assert cfg.images.edit_enabled is True
+    assert module_effective(cfg, "image_edit") is True
 
 
 def _assert_image_edit_surfaces(manager, *, on: bool, installed: bool, yaml_enabled: bool):

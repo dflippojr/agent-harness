@@ -620,7 +620,12 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     memory_library = MemoryLibraryConfig(**(raw.get("memory_library") or {}))
     web = WebConfig(**(raw.get("web") or {}))
     endpoint = EndpointConfig(**(raw.get("endpoint") or {}))
-    images = ImagesConfig(**(raw.get("images") or {}))
+    raw_images = raw.get("images") or {}
+    images = ImagesConfig(**raw_images)
+    # Before edit_enabled was persisted, the installer opt-in in profile.yaml was the only enable switch.
+    # Preserve that state for legacy configs, while keeping an explicit YAML false authoritative.
+    if "edit_enabled" not in raw_images:
+        images.edit_enabled = selected.image_edit
     search = SearchConfig(**(raw.get("search") or {}))
     jobs = JobsConfig(**(raw.get("jobs") or {}))
     skills = SkillsConfig(**(raw.get("skills") or {}))
