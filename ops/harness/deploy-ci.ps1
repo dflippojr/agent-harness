@@ -19,9 +19,6 @@ param(
     [string]$DryRunFailure = 'None'
 )
 $ErrorActionPreference = 'Stop'
-if ($DryRunFailure -ne 'None' -and -not $DryRun) {
-    throw 'DryRunFailure can only be used with DryRun'
-}
 
 function Run([string]$File, [string[]]$Arguments) {
     if ($DryRun) { Write-Host "[dry run] $File $($Arguments -join ' ')"; return }
@@ -58,7 +55,10 @@ function Remove-DeploymentDirectory([string]$Path) {
 function Set-DeploymentVenvPointer([string]$Pointer, [string]$TemporaryPointer, [string]$Target) {
     if ($DryRun) { Write-Host "[dry run] Set-Content $Pointer -> $Target"; return }
     [System.IO.File]::WriteAllText($TemporaryPointer, $Target)
-    Move-Item -LiteralPath $TemporaryPointer -Destination $Pointer -Force
+    if (Test-Path -LiteralPath $Pointer) {
+        Remove-Item -LiteralPath $Pointer -Force
+    }
+    Move-Item -LiteralPath $TemporaryPointer -Destination $Pointer
 }
 
 function Restore-DeploymentVenvPointer(
@@ -77,7 +77,7 @@ function Restore-DeploymentVenvPointer(
 }
 
 function Invoke-DryRunFailure([string]$Stage) {
-    if ($DryRun -and $DryRunFailure -eq $Stage) {
+    if ($DryRunFailure -eq $Stage) {
         $message = "simulated dry-run failure after $($Stage.Substring(5).ToLowerInvariant())"
         Write-Host "[dry run] $message"
         throw $message
@@ -170,13 +170,34 @@ try {
 Write-Host '[deploy] dependencies staged'
 
 $restart = Join-Path $release 'ops\harness\restart-daemon.ps1'
+if (-not $DryRun) {
+    try { . $restart }
+    catch {
+        Remove-DeploymentDirectory $stagedVenv
+        throw
+    }
+}
+function Stop-DeploymentDaemon {
+    if ($DryRun) {
+        Write-Host "[dry run] powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $restart -Mode Stop"
+        return
+    }
+    Stop-HarnessDaemon
+}
+function Start-DeploymentDaemon {
+    if ($DryRun) {
+        Write-Host "[dry run] powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $restart -Mode Start"
+        return
+    }
+    Start-HarnessDaemon
+}
 $stopInitiated = $false
 $venvSwitchInitiated = $false
 $mergeInitiated = $false
 $imageRetagInitiated = $false
 try {
     $stopInitiated = $true
-    Run powershell.exe @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $restart, '-Mode', 'Stop')
+    Stop-DeploymentDaemon
     Write-Host '[deploy] daemon stopped'
     Invoke-DryRunFailure 'AfterStop'
 
@@ -193,7 +214,7 @@ try {
     $imageRetagInitiated = $true
     Run docker @('tag', $sandbox, $sandboxStable)
     Run docker @('tag', $cli, $cliStable)
-    Run powershell.exe @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $restart, '-Mode', 'Start')
+    Start-DeploymentDaemon
     Write-Host '[deploy] daemon started and healthy'
     Invoke-DryRunFailure 'AfterStart'
 } catch {
@@ -204,61 +225,65 @@ try {
     }
 
     $rollbackErrors = [System.Collections.Generic.List[string]]::new()
-    $safeToRestore = $true
-    $safeToStartPrevious = $true
     try {
-        Run powershell.exe @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $restart, '-Mode', 'Stop')
+        Stop-DeploymentDaemon
         Write-Host '[rollback] stopped partially deployed daemon'
     } catch {
-        $safeToRestore = $false
-        $safeToStartPrevious = $false
         $rollbackErrors.Add("daemon stop: $($_.Exception.Message)")
     }
 
-    if ($safeToRestore) {
-        if ($mergeInitiated) {
-            try {
-                Run git @('-C', $deploy, 'reset', '--hard', $previousCommit)
-                Write-Host "[rollback] restored checkout $previousCommit"
-            } catch {
-                $safeToStartPrevious = $false
-                $rollbackErrors.Add("checkout: $($_.Exception.Message)")
-            }
-        }
-
+    if ($mergeInitiated) {
         try {
-            if ($venvSwitchInitiated) {
-                Restore-DeploymentVenvPointer $venvPointer $venvPointerTemp $hadVenvPointer $previousVenv
-            }
-            Write-Host '[rollback] restored previous virtual environment'
+            Run git @('-C', $deploy, 'reset', '--hard', $previousCommit)
+            Write-Host "[rollback] restored checkout $previousCommit"
         } catch {
-            $safeToStartPrevious = $false
-            $rollbackErrors.Add("virtual environment: $($_.Exception.Message)")
-        }
-
-        if ($imageRetagInitiated) {
-            try {
-                Run docker @('tag', $previousSandboxImage, $sandboxStable)
-                Run docker @('tag', $previousCliImage, $cliStable)
-                Write-Host '[rollback] restored previous image tags'
-            } catch {
-                $safeToStartPrevious = $false
-                $rollbackErrors.Add("image tags: $($_.Exception.Message)")
-            }
+            $rollbackErrors.Add("checkout: $($_.Exception.Message)")
         }
     }
 
-    if ($safeToStartPrevious) {
+    try {
+        if ($venvSwitchInitiated) {
+            Restore-DeploymentVenvPointer $venvPointer $venvPointerTemp $hadVenvPointer $previousVenv
+        }
+        Write-Host '[rollback] restored previous virtual environment'
+    } catch {
+        $rollbackErrors.Add("virtual environment: $($_.Exception.Message)")
+    }
+
+    if ($imageRetagInitiated) {
+        $imageRestoreFailed = $false
         try {
-            Run powershell.exe @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $restart, '-Mode', 'Start')
-            Write-Host '[rollback] previous daemon started and healthy'
-        } catch { $rollbackErrors.Add("daemon restart: $($_.Exception.Message)") }
-    } else {
-        $rollbackErrors.Add('daemon restart: skipped because the previous state could not be fully restored')
+            Run docker @('tag', $previousSandboxImage, $sandboxStable)
+            Write-Host '[rollback] restored previous sandbox image tag'
+        } catch {
+            $imageRestoreFailed = $true
+            $rollbackErrors.Add("sandbox image tag: $($_.Exception.Message)")
+        }
+        try {
+            Run docker @('tag', $previousCliImage, $cliStable)
+            Write-Host '[rollback] restored previous CLI image tag'
+        } catch {
+            $imageRestoreFailed = $true
+            $rollbackErrors.Add("CLI image tag: $($_.Exception.Message)")
+        }
+        if (-not $imageRestoreFailed) { Write-Host '[rollback] restored previous image tags' }
     }
 
-    try { Remove-DeploymentDirectory $stagedVenv }
-    catch { $rollbackErrors.Add("staged environment cleanup: $($_.Exception.Message)") }
+    try {
+        Start-DeploymentDaemon
+        Write-Host '[rollback] previous daemon started and healthy'
+    } catch { $rollbackErrors.Add("daemon restart: $($_.Exception.Message)") }
+
+    try {
+        $activeVenv = if (Test-Path -LiteralPath $venvPointer) {
+            ([string](Get-Content -Raw -LiteralPath $venvPointer)).Trim()
+        } else { $liveVenv }
+        if ($activeVenv -eq $stagedVenv) {
+            $rollbackErrors.Add('staged environment cleanup: skipped because it is still the active virtual environment')
+        } else {
+            Remove-DeploymentDirectory $stagedVenv
+        }
+    } catch { $rollbackErrors.Add("staged environment cleanup: $($_.Exception.Message)") }
 
     if ($rollbackErrors.Count -gt 0) {
         throw "deployment failed after daemon stop ($deploymentError); rollback also failed: $($rollbackErrors -join '; ')"
