@@ -21,4 +21,7 @@ def test_jobs_keep_only_required_package_permissions():
     publish = workflow.split("  publish-images:", 1)[1].split("  deploy-tower:", 1)[0]
     deploy = workflow.split("  deploy-tower:", 1)[1]
     assert "packages: write" in publish
-    assert "packages: read" in deploy
+    # The published images are public (this repository is public), so the tower pulls them anonymously.
+    # A GITHUB_TOKEN login on the tower was rejected ("denied") and is not needed.
+    assert "packages:" not in deploy
+    assert "docker login" not in deploy

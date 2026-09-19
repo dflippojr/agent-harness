@@ -78,16 +78,10 @@ jobs:
     environment: tower-production
     permissions:
       contents: read
-      packages: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-      - name: Sign in to GHCR for this job
-        shell: powershell
-        run: $env:GITHUB_TOKEN | docker login ghcr.io -u $env:GITHUB_ACTOR --password-stdin
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull images, fast-forward the live checkout, and restart
         shell: powershell
         run: >-
