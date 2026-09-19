@@ -1796,7 +1796,10 @@ async function viewImage(id) {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
     const edit = (img.service && img.service.edit) || {};
-    const canEdit = !isGuest() && img.status === "done" && edit.enabled && edit.available;
+    const sizeOk = img.editable !== false;
+    const editReady = !isGuest() && img.status === "done" && edit.enabled && edit.available;
+    const canEdit = editReady && sizeOk;
+    const editBlockedReason = img.editable_reason || "This source is too large to edit. Use the original or a non-upscaled image.";
     const meta = [`${img.model} · ${img.width}×${img.height}`];
     if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
     meta.push(`seed ${img.seed}`, img.source);
@@ -1840,7 +1843,8 @@ async function viewImage(id) {
               } catch (e) { toast(e.message); }
             },
           }, "Another one") : null,
-          canEdit ? h("a", { class: "btn", href: `#/images/${id}/edit` }, "Edit") : null,
+          canEdit ? h("a", { class: "btn", href: `#/images/${id}/edit` }, "Edit")
+            : editReady ? h("button", { class: "btn", type: "button", disabled: true, title: editBlockedReason }, "Edit") : null,
           canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
           canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
           img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
@@ -1950,6 +1954,12 @@ async function viewImageEdit(id) {
   if (img.status !== "done") { go(`#/images/${id}`, true); return; }
   if (!edit.enabled || !edit.available) {
     $app.append(h("p", { class: "note" }, edit.setup || "Masked editing is not installed."),
+      h("a", { class: "btn", href: `#/images/${id}` }, "Back"));
+    return;
+  }
+  if (img.editable === false) {
+    $app.append(h("p", { class: "note" },
+      img.editable_reason || "This source is too large to edit. Use the original or a non-upscaled image."),
       h("a", { class: "btn", href: `#/images/${id}` }, "Back"));
     return;
   }

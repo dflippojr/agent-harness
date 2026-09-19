@@ -123,7 +123,7 @@ budget are not increased):
 | `web.page_chars` / `web.max_bytes` / `web.max_document_bytes` / `web.timeout_seconds` / `web.quote_check` | web module installed |
 | `endpoint.max_waiting` / `endpoint.agent_fair_seconds` / `endpoint.request_timeout_seconds` | endpoint module |
 | `images.start_timeout_seconds` / `images.job_timeout_seconds` | images module |
-| `images.edit_enabled` / `images.max_upload_bytes` / `images.max_pixels` | opt-in image_edit module |
+| `images.edit_enabled` / `images.max_upload_bytes` / `images.max_pixels` | opt-in image_edit module. `max_pixels` is the decoded-pixel cap for uploads and gallery edits; gallery sources over 1664 px on the long side or over `max_pixels` are rejected (uploads downscale to 1664) |
 | `gpu_guard.poll_seconds` / `gpu_guard.resume_after_seconds` / `gpu_guard.drain_timeout_seconds` | gpu_guard module |
 | `jobs.poll_seconds` | jobs module |
 | `backup.at` (`HH:MM`) / `backup.keep_days` | backup module |

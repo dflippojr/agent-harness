@@ -59,6 +59,35 @@ MIN_SIDE = 64
 MAX_FEATHER = 32
 ALLOWED_FORMATS = {"PNG", "JPEG", "WEBP"}
 
+
+def edit_eligibility(width: int, height: int, *, max_side: int = MAX_EDIT_SIDE,
+                     max_pixels: int = MAX_DECODE_PIXELS) -> dict:
+    """One envelope for gallery and upload edits. Over-cap gallery sources are rejected, not downscaled."""
+    try:
+        width_n, height_n = int(width), int(height)
+    except (TypeError, ValueError):
+        width_n, height_n = 0, 0
+    pixels = width_n * height_n if width_n > 0 and height_n > 0 else 0
+    ok = (width_n >= MIN_SIDE and height_n >= MIN_SIDE
+          and max(width_n, height_n) <= max_side and pixels <= max_pixels)
+    if ok:
+        reason = ""
+    elif width_n < MIN_SIDE or height_n < MIN_SIDE:
+        reason = (f"this source is too small to edit ({width_n}×{height_n}). "
+                  f"Masked editing needs at least {MIN_SIDE} px on each side.")
+    else:
+        reason = (f"this source is too large to edit ({width_n}×{height_n}). "
+                  f"Masked editing accepts images up to {max_side} px on the long side "
+                  f"and {max_pixels} pixels. Use the original or a non-upscaled image.")
+    return {"editable": ok, "reason": reason, "max_side": max_side, "max_pixels": max_pixels}
+
+
+def require_editable_source(width: int, height: int, *, max_side: int = MAX_EDIT_SIDE,
+                            max_pixels: int = MAX_DECODE_PIXELS) -> None:
+    info = edit_eligibility(width, height, max_side=max_side, max_pixels=max_pixels)
+    if not info["editable"]:
+        raise ToolError(info["reason"])
+
 QWEN_EDIT_NEGATIVE = " "
 
 

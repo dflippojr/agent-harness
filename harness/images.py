@@ -900,6 +900,8 @@ class ImageService:
         parent_path = self.path({"id": safe_parent_id})
         if not parent_path.exists():
             raise ToolError("source image is not available")
+        image_edit.require_editable_source(
+            parent["width"], parent["height"], max_pixels=self.cfg.max_pixels)
         feather_n = image_edit.parse_feather(feather)
         mask_png = image_edit.normalize_mask(
             mask, parent["width"], parent["height"],

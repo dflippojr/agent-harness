@@ -154,6 +154,8 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
   language model, generates, and restores it. Phone: Images screen; agents: `generate_image` (tower and MacBook sessions).
   Opt-in Real-ESRGAN 2×/4× upscaling preserves the original PNG. Optional `image_edit` adds owner-only masked
   inpainting with Qwen-Image-Edit and is not downloaded unless that component is enabled (`docs/INSTALL.md`).
+  Edits use a 1664 px / `images.max_pixels` envelope: uploads downscale to it, over-size gallery sources (including
+  upscales) are rejected.
 - Distributable (`docs/phase6e-results.md`): app API `/api/v1` with scoped tokens, context, app-registered tools and
   events (`harness/apps.py`, `sdk/harness_client.py`); installer, uninstaller and `python -m harness.doctor`.
 

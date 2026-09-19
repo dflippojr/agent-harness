@@ -559,7 +559,10 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         children = svc.db.image_children(job["id"])
         if request.state.access.role == "guest":
             children = [child for child in children if not image_edit.is_private(child)]
+        eligibility = image_edit.edit_eligibility(
+            job.get("width"), job.get("height"), max_pixels=svc.cfg.max_pixels)
         return {**job, "service": status, "private": image_edit.is_private(job),
+                "editable": eligibility["editable"], "editable_reason": eligibility["reason"],
                 "parent": ({"id": parent["id"], "width": parent["width"], "height": parent["height"]}
                            if parent else None),
                 "children": [{"id": child["id"], "operation": child.get("operation") or "generate",

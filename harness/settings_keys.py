@@ -718,7 +718,7 @@ STATIC_ADMIN: list[SettingSpec] = [
          "Images", 20 * 2**20, _get_img_upload_bytes, _set_img_upload_bytes,
          2**20, 100 * 2**20, ("images", "max_upload_bytes"), modules=("image_edit",)),
     _int("images.max_pixels", "Image-edit decoded pixel limit",
-         "Reject source or mask images above this decoded pixel count.",
+         "Reject gallery edits and decoded uploads/masks above this pixel count (long side is also capped at 1664).",
          "Images", 20_000_000, _get_img_pixels, _set_img_pixels,
          1_000_000, 100_000_000, ("images", "max_pixels"), modules=("image_edit",)),
     _float("gpu_guard.poll_seconds", "GPU guard poll (seconds)",

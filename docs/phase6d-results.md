@@ -101,6 +101,13 @@ The mask editor paints white=editable / black=preserved at the source's exact pi
 overwritten; the result is a new row with `parent_id`. Uploads/masks/results are owner-private (no guest or app-token
 listing, no hosted-provider upload). Delete confirms and removes only the live files for that row.
 
+Upload and gallery edits share one size envelope: at most **1664 px** on the long side (`MAX_EDIT_SIDE`, the quality
+high-res bound) and `images.max_pixels` decoded pixels (default 20,000,000). Uploads that exceed the long side are
+**downscaled** during ingest (then snapped to a 16 px VAE multiple). Gallery sources that already exceed the envelope
+— including 2×/4× upscales that `upscale_max_pixels` still allows — are **rejected**, not downscaled, before the mask
+is parsed or the GPU starts. The error tells the owner to use the original or a non-upscaled image. `GET /images/{id}`
+exposes `editable` and `editable_reason`; Agent Harness Web disables **Edit** with that reason as the tooltip.
+
 ### 16 GB GPU exit test (required before closing the issue)
 
 Run on the tower after the weights are installed. Record peak VRAM, peak RAM, and end-to-end time for:

@@ -70,6 +70,17 @@ def edit_manager(tmp_path):
     return m, server, state
 
 
+def seed_done_image(m, *, iid="aaaaaaaaaaaa", width=64, height=64, operation="generate"):
+    job = {"id": iid, "session_id": "", "source": "phone", "prompt": "seed",
+           "model": "fast", "aspect_ratio": "1:1", "resolution": "standard",
+           "width": width, "height": height, "seed": 1, "parent_id": "",
+           "operation": operation, "status": "done", "created_at": 1, "scale": 4 if operation == "upscale" else 1}
+    m.db.insert_image(job)
+    m.images.images_dir.mkdir(parents=True, exist_ok=True)
+    m.images.path(job).write_bytes(png_rgb())
+    return m.db.get_image(iid)
+
+
 def test_normalize_rejects_unsupported_and_empty_mask():
     with pytest.raises(ToolError, match="malformed"):
         image_edit.normalize_source(b"not-an-image")
@@ -235,6 +246,44 @@ def test_gallery_and_upload_edits_preserve_source(tmp_path):
     asyncio.run(body())
 
 
+def test_edit_envelope_matches_upload_and_rejects_gallery_upscale(tmp_path):
+    m, server, _ = edit_manager(tmp_path)
+    bound = image_edit.edit_eligibility(1664, 928, max_pixels=m.images.cfg.max_pixels)
+    over_side = image_edit.edit_eligibility(1665, 928, max_pixels=m.images.cfg.max_pixels)
+    under_pixels = image_edit.edit_eligibility(4096, 4096, max_pixels=m.images.cfg.max_pixels)
+    over_pixels = image_edit.edit_eligibility(6656, 3712, max_pixels=m.images.cfg.max_pixels)
+    assert bound["editable"] is True and bound["max_side"] == image_edit.MAX_EDIT_SIDE
+    assert over_side["editable"] is False and "too large to edit" in over_side["reason"]
+    assert under_pixels["editable"] is False and under_pixels["reason"]
+    assert 4096 * 4096 < m.images.cfg.max_pixels
+    assert over_pixels["editable"] is False and 6656 * 3712 > m.images.cfg.max_pixels
+
+    uploaded = m.images.ingest_upload(png_rgb(2000, 1000))
+    assert max(uploaded["width"], uploaded["height"]) <= image_edit.MAX_EDIT_SIDE
+    assert uploaded["width"] * uploaded["height"] <= m.images.cfg.max_pixels
+    assert image_edit.edit_eligibility(
+        uploaded["width"], uploaded["height"], max_pixels=m.images.cfg.max_pixels)["editable"]
+
+    ok = seed_done_image(m, iid="bbbbbbbbbbbb", width=1664, height=928)
+    queued = m.images.submit_edit(ok["id"], "keep the sky", png_mask(1664, 928))
+    assert queued["status"] == "queued" and queued["width"] == 1664
+
+    rejected = seed_done_image(m, iid="cccccccccccc", width=1665, height=928)
+    with pytest.raises(ToolError, match="too large to edit"):
+        m.images.submit_edit(rejected["id"], "keep the sky", png_mask(1665, 928))
+
+    upscale = seed_done_image(m, iid="dddddddddddd", width=4096, height=4096, operation="upscale")
+    with pytest.raises(ToolError, match="non-upscaled"):
+        m.images.submit_edit(upscale["id"], "replace the cube", b"not-a-mask-at-all")
+    assert server.calls == []
+
+    m.images.cfg.max_pixels = 10
+    with pytest.raises(ToolError, match="too large to edit"):
+        m.images.submit_edit(ok["id"], "still too many pixels", png_mask(1664, 928))
+    with pytest.raises(ToolError, match="pixel cap"):
+        m.images.ingest_upload(png_rgb(64, 64))
+
+
 def test_edit_validation_and_path_tricks_before_gpu(tmp_path):
     m, server, _ = edit_manager(tmp_path)
     parent = m.images.ingest_upload(png_rgb())
@@ -281,6 +330,25 @@ def test_edit_missing_assets_do_not_break_text_to_image(tmp_path):
         assert job["status"] == "done" and job["operation"] == "generate"
         await m.stop()
     asyncio.run(body())
+
+
+def test_image_payload_exposes_editable_flag(tmp_path):
+    m, _, _ = edit_manager(tmp_path)
+    m.cfg.allowed_logins = [LOGIN]
+    ok = seed_done_image(m, iid="eeeeeeeeeeee", width=1664, height=928)
+    huge = seed_done_image(m, iid="ffffffffffff", width=4096, height=4096, operation="upscale")
+    with TestClient(create_app(m)) as client:
+        ready = client.get(f"/images/{ok['id']}")
+        blocked = client.get(f"/images/{huge['id']}")
+        assert ready.status_code == 200 and ready.json()["editable"] is True
+        assert ready.json()["editable_reason"] == ""
+        assert blocked.status_code == 200 and blocked.json()["editable"] is False
+        assert "too large to edit" in blocked.json()["editable_reason"]
+        refused = client.post(f"/images/{huge['id']}/edit", data={"prompt": "make it dusk"},
+                              files={"mask": ("mask.png", b"not-a-mask", "image/png")})
+        assert refused.status_code == 400
+        assert "too large to edit" in refused.json()["detail"]
+        assert "malformed" not in refused.json()["detail"]
 
 
 def test_owner_guest_app_authorization(tmp_path):
@@ -555,6 +623,9 @@ def test_web_mask_editor_round_trips_source_pixels():
     assert 'accept: "image/png,image/jpeg,image/webp,image/jpg"' in js
     assert "Independent backups are not changed" in js
     assert "White is edited, black is preserved" in js
+    assert "img.editable !== false" in js
+    assert "disabled: true, title: editBlockedReason" in js
+    assert "img.editable === false" in js
     assert "body instanceof FormData" in client
     assert "touch-action: none" in css
     assert "@media (max-width: 640px)" in css and ".mask-tools" in css
