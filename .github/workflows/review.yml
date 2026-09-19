@@ -105,7 +105,7 @@ jobs:
           REVIEW_PROMPT: |
             Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
 
-            Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts it as the PR comment.
+            Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts it as the PR comment. Only after you have actually inspected the embedded diff and reported findings or no significant findings, end with a final line exactly `REVIEW_STATUS: COMPLETE`. Do not print that marker if you could not inspect the diff.
         run: |
           & .\ops\review\run-review.ps1 `
             -Backend $env:REQUESTED_BACKEND `
@@ -142,12 +142,17 @@ jobs:
           }
           $backend = $env:REVIEW_BACKEND
           if ([string]::IsNullOrWhiteSpace($backend)) { $backend = 'configured backends' }
-          $summary = "$backend review $conclusion."
+          $title = "Automated review $conclusion"
+          $summary = "Automated review $conclusion; no review was posted."
+          if ($conclusion -eq 'success') {
+            $title = "Review by $backend"
+            $summary = "$backend review posted."
+          }
           $completed = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
           gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/check-runs/$env:CHECK_ID" `
             -f status="completed" `
             -f conclusion="$conclusion" `
             -f completed_at="$completed" `
-            -f "output[title]=Review by $backend`: $conclusion" `
+            -f "output[title]=$title" `
             -f "output[summary]=$summary"
           if ($LASTEXITCODE -ne 0) { throw "failed to complete check run $($env:CHECK_ID)" }

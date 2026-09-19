@@ -196,7 +196,7 @@ $runner = {{
     if ($command.Backend -eq 'codex') {{
         return [pscustomobject]@{{ ExitCode = 17; Stdout = ''; Stderr = 'RESOURCE_EXHAUSTED'; Model = $null }}
     }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = '- src/app.py:12: real bug'; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "- src/app.py:12: real bug`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $backends = @(Resolve-ReviewBackends -RequestedBackend auto -ConfiguredBackends 'codex,claude,cursor')
 $result = Invoke-ReviewFallback -Backends $backends -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
@@ -209,6 +209,76 @@ Write-ReviewResult -Result $result -OutputPath '{output_path}'
     assert value["backend"] == "claude"
     assert value["calls"] == ["codex", "claude"]
     assert "Automated review backend: **claude**." in value["body"]
+    assert "REVIEW_STATUS: COMPLETE" not in value["body"]
+
+
+def test_missing_completion_marker_triggers_fallback(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        f"""
+$script:calls = New-Object System.Collections.Generic.List[string]
+$runner = {{
+    param($command)
+    $script:calls.Add($command.Backend)
+    if ($command.Backend -eq 'codex') {{
+        return [pscustomobject]@{{ ExitCode = 0; Stdout = 'plausible but unverified review'; Stderr = ''; Model = $null }}
+    }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+}}
+$result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
+[ordered]@{{ backend = $result.Backend; calls = @($script:calls); body = $result.Output }} | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip().splitlines()[-1])
+    assert value == {
+        "backend": "claude",
+        "calls": ["codex", "claude"],
+        "body": "No significant findings.",
+    }
+    assert "missing completion marker" in result.stdout
+
+
+def test_unable_to_review_response_without_marker_triggers_fallback(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        f"""
+$script:calls = New-Object System.Collections.Generic.List[string]
+$runner = {{
+    param($command)
+    $script:calls.Add($command.Backend)
+    if ($command.Backend -eq 'codex') {{
+        return [pscustomobject]@{{ ExitCode = 0; Stdout = 'Unable to review: environment policy blocked the diff.'; Stderr = ''; Model = $null }}
+    }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+}}
+$result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
+[ordered]@{{ backend = $result.Backend; calls = @($script:calls); body = $result.Output }} | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip().splitlines()[-1])
+    assert value["backend"] == "claude"
+    assert value["calls"] == ["codex", "claude"]
+    assert "Unable to review" not in value["body"]
+    assert "unable to review" in result.stdout.lower()
+
+
+def test_all_backends_without_completion_marker_fail(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        f"""
+$runner = {{
+    param($command)
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = 'review without proof of completion'; Stderr = ''; Model = $null }}
+}}
+Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
+""",
+    )
+    assert result.returncode != 0
+    assert "all review backends failed" in output(result)
+    assert "codex: missing completion marker" in output(result)
+    assert "claude: missing completion marker" in output(result)
 
 
 def test_process_launcher_captures_stdout_stderr_and_exit_code(tmp_path):
@@ -306,7 +376,7 @@ $runner = {{
     $script:index++
     if ($script:index -eq 1) {{ return [pscustomobject]@{{ ExitCode = 0; Stdout = '   '; Stderr = ''; Model = $null }} }}
     if ($script:index -eq 2) {{ return [pscustomobject]@{{ ExitCode = 0; Stdout = 'quota exceeded'; Stderr = ''; Model = $null }} }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = 'clean review'; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude','cursor') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner -CursorBase '{tmp_path}'
 $result | ConvertTo-Json -Compress
@@ -333,7 +403,8 @@ $script:calls = New-Object System.Collections.Generic.List[string]
 $runner = {{
     param($command)
     $script:calls.Add($command.Backend)
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = '{escaped_review}'; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = '{escaped_review}
+REVIEW_STATUS: COMPLETE'; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
 [ordered]@{{ backend = $result.Backend; calls = @($script:calls); length = $result.Output.Length }} | ConvertTo-Json -Compress
@@ -364,7 +435,7 @@ $runner = {{
     if ($script:index -eq 1) {{
         return [pscustomobject]@{{ ExitCode = 0; Stdout = '{first_stdout}'; Stderr = '{first_stderr}'; Model = $null }}
     }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = 'clean review'; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
 $result | ConvertTo-Json -Compress
@@ -408,7 +479,7 @@ $runner = {{
     if ($script:index -eq 1) {{
         return [pscustomobject]@{{ ExitCode = 9; Stdout = ''; Stderr = 'backend diagnostic detail'; Model = $null }}
     }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = 'clean review'; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
 $result | ConvertTo-Json -Compress
@@ -430,6 +501,10 @@ def test_workflow_exposes_backend_input_and_delegates_to_runner():
     assert "steps.agent.outputs.backend" in workflow
     assert "diff embedded in this prompt" in workflow
     assert "Run 'gh pr diff" not in workflow
+    assert "REVIEW_STATUS: COMPLETE" in workflow
+    assert '$title = "Automated review $conclusion"' in workflow
+    assert '$title = "Review by $backend"' in workflow
+    assert '-f "output[title]=$title"' in workflow
     assert "Cursor Agent is reviewing" not in workflow
     assert "--force" not in workflow
 

@@ -47,9 +47,10 @@ provider runs only that provider, which is useful for verification and deliberat
 or selecting `auto` tries the comma-separated `REVIEW_BACKENDS` repository variable in order. If the variable is empty,
 the order defaults to `codex,claude,cursor`.
 
-The runner falls through that ordered list when a CLI exits non-zero, returns no review, or reports a recognizable
-rate-limit or quota error. The successful backend is included in the PR comment footer and the manually created Check
-Run. Invalid backend names fail closed instead of silently changing provider.
+The runner falls through that ordered list when a CLI exits non-zero, returns no review, reports a recognizable
+rate-limit or quota error, or omits the required completion marker after inspecting the diff. The marker is removed
+before posting. The successful backend is included in the PR comment footer and the manually created Check Run. Invalid
+backend names fail closed instead of silently changing provider.
 
 Set `REVIEW_BACKENDS` under repository **Settings > Secrets and variables > Actions > Variables**. For example,
 `claude,codex,cursor` spends Claude quota first while retaining two fallbacks; changing the variable does not require a

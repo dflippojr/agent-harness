@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:KnownReviewBackends = @('cursor', 'codex', 'claude')
 $script:DefaultReviewBackends = @('codex', 'claude', 'cursor')
+$script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
 
 function Resolve-ReviewBackends {
     [CmdletBinding()]
@@ -95,6 +96,27 @@ function Get-ReviewDiagnosticTail {
         $redacted = $redacted.Substring($redacted.Length - $MaxCharacters)
     }
     return $redacted
+}
+
+function Get-CompletedReviewText {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $marker = [regex]::Escape($script:ReviewCompletionMarker)
+    $match = [regex]::Match($Text, "(?:^|\r?\n)$marker(?:\r?\n)?\z")
+    if (-not $match.Success) { return $null }
+    $review = $Text.Substring(0, $match.Index).Trim()
+    if ([string]::IsNullOrWhiteSpace($review)) { return $null }
+    return $review
+}
+
+function Test-ReviewUnableResponse {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text)
+
+    return -not [string]::IsNullOrWhiteSpace($Text) -and
+        $Text -match '(?i)\b(?:unable to|cannot|could not)\s+(?:review|inspect|access|read)\b'
 }
 
 function Get-CursorAgentEntrypoint {
@@ -257,12 +279,20 @@ function Invoke-ReviewFallback {
             $attempt = & $Runner $command
             $rateLimited = Test-ReviewAttemptRateLimit -ExitCode $attempt.ExitCode -Stdout ([string]$attempt.Stdout) -Stderr ([string]$attempt.Stderr)
             $reason = $null
+            $completedReview = $null
             if ($rateLimited) {
                 $reason = 'rate limit or quota response'
             } elseif ([int]$attempt.ExitCode -ne 0) {
                 $reason = "exit code $($attempt.ExitCode)"
             } elseif ([string]::IsNullOrWhiteSpace([string]$attempt.Stdout)) {
                 $reason = 'empty output'
+            } elseif (Test-ReviewUnableResponse -Text ([string]$attempt.Stdout)) {
+                $reason = 'backend reported that it was unable to review'
+            } else {
+                $completedReview = Get-CompletedReviewText -Text ([string]$attempt.Stdout)
+                if ([string]::IsNullOrWhiteSpace([string]$completedReview)) {
+                    $reason = 'missing completion marker'
+                }
             }
             if ($reason) {
                 $failures.Add("$backend`: $reason")
@@ -277,7 +307,7 @@ function Invoke-ReviewFallback {
             return [pscustomobject]@{
                 Backend = $backend
                 Model = $attempt.Model
-                Output = ([string]$attempt.Stdout).Trim()
+                Output = $completedReview
             }
         } catch {
             $failures.Add("$backend`: $($_.Exception.Message)")
