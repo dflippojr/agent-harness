@@ -93,6 +93,10 @@ def check_backup(cfg: Config) -> list[str]:
     return []
 
 
+def check_skills(cfg: Config) -> list[str]:
+    return []
+
+
 ENABLE_CHECKS = {
     "web.enabled": check_web,
     "search.enabled": check_search,
@@ -102,6 +106,7 @@ ENABLE_CHECKS = {
     "gpu_guard.enabled": check_gpu_guard,
     "notifications.enabled": check_notifications,
     "backup.enabled": check_backup,
+    "skills.enabled": check_skills,
 }
 
 
@@ -126,6 +131,8 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
         cfg.gpu_guard.enabled = enabled
     elif name == "backup":
         cfg.backup.enabled = enabled
+    elif name == "skills":
+        cfg.skills.enabled = enabled
 
 
 def _get_module_enabled(cfg: Config, name: str) -> bool:
@@ -658,6 +665,10 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for the nightly backup. Does not change the backup directory.",
           "Features", False, _enable_get("backup"), _enable_set("backup"), ("backup", "enabled"),
           apply_mode="daemon_restart", modules=("backup",), enable_check=check_backup),
+    _bool("skills.enabled", "Instruction skills",
+          "Runtime enable for owner-approved instruction skills. Does not install the skills module.",
+          "Features", False, _enable_get("skills"), _enable_set("skills"), ("skills", "enabled"),
+          apply_mode="daemon_restart", modules=("skills",), enable_check=check_skills),
     _hidden("listen.host", "Listen address", "Bind address for the daemon HTTP server.", "Network",
             ("listen", "host")),
     _hidden("listen.port", "Listen port", "TCP port for the daemon HTTP server.", "Network",

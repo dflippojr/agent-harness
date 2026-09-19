@@ -27,7 +27,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.7"
+API_VERSION = "1.8"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
@@ -71,6 +71,19 @@ ADMIN_PATHS = frozenset({
     "/search",
     "/memory",
     "/memory/profile",
+    "/skills",
+    "/skills/enabled",
+    "/skills/proposals/{pid}",
+    "/skills/proposals/{pid}/install",
+    "/skills/proposals/{pid}/reject",
+    "/skills/proposals/{pid}/reopen",
+    "/skills/proposals/{pid}/review",
+    "/skills/{slug}/enable",
+    "/skills/{slug}/disable",
+    "/skills/{slug}/rollback",
+    "/skills/{slug}/uninstall",
+    "/skills/{slug}/projects",
+    "/skills/{slug}/export",
     "/maintenance",
     "/maintenance/cleanup",
     "/maintenance/backup",

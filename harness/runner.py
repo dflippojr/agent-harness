@@ -113,6 +113,7 @@ class Runner:
         self.images = None                      # images.ImageService, set by the manager when enabled
         self.sessions = None                    # search.SessionSearch, set by the manager when enabled
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
+        self.skills = None                      # skills.SkillStore, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
         self.settings = None                    # settings_service.SettingsService, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
@@ -171,6 +172,8 @@ class Runner:
         if (not member and self.remote_control is not None and s["target"] == "tower"
                 and not s.get("app_id") and app_allows(defaults, "remote_control")):
             kits.append(self.remote_control)  # not for app sessions: apps launch through /api/v1/remote-control
+        if self.skills is not None and self.skills.can_propose(s):
+            kits.append(self.skills)
         return kits
 
     def _app_defaults_for_session(self, s: dict) -> dict:

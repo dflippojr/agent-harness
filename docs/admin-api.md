@@ -60,6 +60,7 @@ same; only the prefix and the owner credential check are new.
 | Images | `/images`, `/images/warmup`, `/images/cooldown`, `/images/{iid}/upscale` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
 | Memory | `/memory`, `/memory/profile` |
+| Skills | `/skills`, `/skills/enabled`, `/skills/proposals/{pid}`, install/reject/reopen/review, `/skills/{slug}/enable`, disable, rollback, uninstall, projects, export |
 | Notifications | `/notify/test` |
 | Remote Control | `/remote-control`, launch/stop, `/remote-control/{project}/trust` |
 
@@ -171,6 +172,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.8 | 2026-09-18 | Owner-approved instruction skills: proposals, hash-bound install, enable/allowlist/rollback. `POST /sessions` `skills`: omit the field to inject the project's allowlisted enabled skills; send an explicit list (including `[]`) as the include set so an unchecked box is excluded |
 | 1.7 | 2026-09-18 | Typed configuration registry, managed overlay, supervised restart/rollback |
 | 1.6 | 2026-09-17 | Image archive health and explicit retention preview/apply operations |
 | 1.5 | 2026-09-17 | Owner-provisioned household members: accounts, audit, aggregate metadata, no member content |

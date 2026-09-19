@@ -23,12 +23,13 @@ from .principal import (  # re-exported for existing imports
 
 Access = Principal
 
-OWNER_GET_PREFIXES = ("/keys", "/metrics", "/maintenance")
+OWNER_GET_PREFIXES = ("/keys", "/metrics", "/maintenance", "/skills")
 RUNNER_PREFIX = "/runners/"
 MEMBER_FORBIDDEN_PREFIXES = (
     "/keys", "/metrics", "/maintenance", "/jobs", "/images", "/gpu",
     "/remote-control", "/memory", "/templates", "/notify", "/pairing-codes",
     "/runner-pairing-codes", "/api/admin", "/api/v1/images", "/api/v1/remote-control",
+    "/skills",
 )
 MEMBER_FORBIDDEN_EXACT = frozenset({"/keys", "/metrics", "/maintenance", "/jobs", "/images", "/gpu",
                                     "/memory", "/templates", "/notify/test"})
@@ -90,6 +91,8 @@ def member_forbidden(access: Access, method: str, path: str) -> str | None:
             return "members cannot use notifications"
         if path.startswith("/metrics"):
             return "members cannot view owner metrics"
+        if path.startswith("/skills"):
+            return "members cannot manage instruction skills"
         return "members cannot use owner-only operations"
     if path.startswith("/backends/") and method not in ("GET", "HEAD", "OPTIONS"):
         return "members cannot change machine settings"

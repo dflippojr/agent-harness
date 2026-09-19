@@ -343,7 +343,8 @@
                   "search",
                   "endpoint",
                   "notifications",
-                  "backup"
+                  "backup",
+                  "skills"
                 ]
               }
             }
