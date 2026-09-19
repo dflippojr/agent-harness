@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import json
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -651,6 +652,51 @@ def test_lightning_lora_status_uses_extra_paths_and_rejects_wrong_size(tmp_path)
     assert status["available"] is False and status["reason"] == "size"
     assert str(LIGHTNING_LORA["bytes"]) in status["setup"]
     assert verify_lightning_lora(found)
+
+
+def test_lightning_lora_install_copy_shadows_pinned_models_dir(tmp_path, monkeypatch):
+    """ComfyUI searches install models/loras before extra_model_paths / models_dir."""
+    import hashlib
+    from harness.config import ImagesConfig
+    from harness.images import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status
+
+    payload = b"pinned-lora-ok"
+    monkeypatch.setitem(LIGHTNING_LORA, "bytes", len(payload))
+    monkeypatch.setitem(LIGHTNING_LORA, "sha256", hashlib.sha256(payload).hexdigest())
+    models = tmp_path / "models" / "loras"
+    models.mkdir(parents=True)
+    (models / LIGHTNING_LORA["filename"]).write_bytes(payload)
+    install = tmp_path / "comfy" / "ComfyUI" / "models" / "loras"
+    install.mkdir(parents=True)
+    (install / LIGHTNING_LORA["filename"]).write_bytes(b"truncated")
+    cfg = ImagesConfig(models_dir=str(tmp_path / "models"), comfy_dir=str(tmp_path / "comfy"))
+    found = lightning_lora_path(cfg)
+    assert found == install / LIGHTNING_LORA["filename"]
+    status = lightning_lora_status(cfg)
+    assert status["available"] is False
+    assert "shadow" in status["setup"].lower()
+    assert str(models / LIGHTNING_LORA["filename"]) in status["setup"].replace("\\", "/") or \
+        str(models / LIGHTNING_LORA["filename"]) in status["setup"]
+
+
+def test_quality_fast_hashes_the_file_comfyui_would_load(tmp_path, monkeypatch):
+    import hashlib
+    from harness.images import LIGHTNING_LORA
+
+    payload = b"pinned-lora-ok"
+    unpinned = b"unpinned-copy!"
+    assert len(payload) == len(unpinned)
+    monkeypatch.setitem(LIGHTNING_LORA, "bytes", len(payload))
+    monkeypatch.setitem(LIGHTNING_LORA, "sha256", hashlib.sha256(payload).hexdigest())
+    m, _, _ = image_manager(tmp_path)
+    models = Path(m.cfg.images.models_dir) / "loras"
+    models.mkdir(parents=True)
+    (models / LIGHTNING_LORA["filename"]).write_bytes(payload)
+    install = Path(m.cfg.images.comfy_dir) / "ComfyUI" / "models" / "loras"
+    install.mkdir(parents=True)
+    (install / LIGHTNING_LORA["filename"]).write_bytes(unpinned)
+    with pytest.raises(ToolError, match="SHA-256"):
+        m.images.submit("poster text", model="quality-fast")
 
 
 def test_app_root_lists_quality_fast_without_enabling_it(tmp_path):

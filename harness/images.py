@@ -84,11 +84,16 @@ LIGHTNING_LORA["url"] = (f"https://huggingface.co/{LIGHTNING_LORA['repo']}/resol
 
 
 def lightning_lora_dirs(cfg: ImagesConfig) -> list[Path]:
-    """Folders ComfyUI may load LoRAs from: configured models_dir, portable install, extra_model_paths.yaml."""
+    """Folders in ComfyUI LoRA search order.
+
+    LoraLoaderModelOnly gets a bare filename. ComfyUI resolves it against its own folder list:
+    install ``models/loras`` first, then folders from extra_model_paths.yaml (models_dir last).
+    """
     root = Path(cfg.comfy_dir)
-    dirs = [Path(cfg.models_dir) / "loras", root / "ComfyUI" / "models" / "loras", root / "models" / "loras"]
+    dirs = [root / "ComfyUI" / "models" / "loras", root / "models" / "loras"]
     for extra in (root / "ComfyUI" / "extra_model_paths.yaml", root / "extra_model_paths.yaml"):
         dirs.extend(_loras_from_extra_paths(extra))
+    dirs.append(Path(cfg.models_dir) / "loras")
     seen: set[str] = set()
     unique: list[Path] = []
     for folder in dirs:
@@ -132,27 +137,54 @@ def lightning_lora_setup(cfg: ImagesConfig) -> str:
             f"quality-fast will not fall back to 50-step quality.")
 
 
-def lightning_lora_path(cfg: ImagesConfig) -> Path | None:
+def lightning_lora_files(cfg: ImagesConfig) -> list[Path]:
+    """Existing copies of the Lightning LoRA, first entry is the file ComfyUI would load."""
     name = LIGHTNING_LORA["filename"]
+    files: list[Path] = []
+    seen: set[str] = set()
     for folder in lightning_lora_dirs(cfg):
         candidate = folder / name
+        try:
+            key = str(candidate.resolve()).replace("\\", "/").lower()
+        except OSError:
+            key = str(candidate).replace("\\", "/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
         if candidate.is_file():
-            return candidate
-    return None
+            files.append(candidate)
+    return files
+
+
+def lightning_lora_path(cfg: ImagesConfig) -> Path | None:
+    files = lightning_lora_files(cfg)
+    return files[0] if files else None
+
+
+def _shadow_note(files: list[Path]) -> str:
+    if len(files) < 2:
+        return ""
+    later = ", ".join(str(path) for path in files[1:])
+    return (f" That file shadows later copies ComfyUI will not load ({later}). "
+            f"lora_name is the bare filename, so ComfyUI searches install models/loras before extra_model_paths.")
 
 
 def lightning_lora_status(cfg: ImagesConfig) -> dict:
-    """Whether the optional Lightning LoRA is present and the expected size. Hash is checked when a job runs."""
+    """Whether every on-disk copy ComfyUI could resolve matches the expected size. Hash is checked when a job runs."""
     setup = lightning_lora_setup(cfg)
-    path = lightning_lora_path(cfg)
-    if path is None:
+    files = lightning_lora_files(cfg)
+    if not files:
         return {"available": False, "path": None, "reason": "missing", "setup": setup}
-    size = path.stat().st_size
-    if size != LIGHTNING_LORA["bytes"]:
-        return {"available": False, "path": str(path), "reason": "size",
+    bad = [path for path in files if path.stat().st_size != LIGHTNING_LORA["bytes"]]
+    if bad:
+        path = files[0] if files[0] in bad else bad[0]
+        size = path.stat().st_size
+        reason = "shadow" if files[0] in bad and len(files) > 1 else "size"
+        extra = _shadow_note(files) if reason == "shadow" else ""
+        return {"available": False, "path": str(path), "reason": reason,
                 "setup": (f"quality-fast LoRA at {path} is {size} bytes, expected {LIGHTNING_LORA['bytes']} "
-                          f"(SHA-256 {LIGHTNING_LORA['sha256']}). {setup}")}
-    return {"available": True, "path": str(path), "reason": "ok", "setup": "",
+                          f"(SHA-256 {LIGHTNING_LORA['sha256']}).{extra} {setup}")}
+    return {"available": True, "path": str(files[0]), "reason": "ok", "setup": "",
             "filename": LIGHTNING_LORA["filename"], "revision": LIGHTNING_LORA["revision"],
             "sha256": LIGHTNING_LORA["sha256"], "bytes": LIGHTNING_LORA["bytes"]}
 
@@ -167,6 +199,26 @@ def verify_lightning_lora(path: Path) -> str:
     if got != LIGHTNING_LORA["sha256"]:
         return (f"quality-fast LoRA at {path} SHA-256 is {got}, expected {LIGHTNING_LORA['sha256']} "
                 f"(revision {LIGHTNING_LORA['revision']})")
+    return ""
+
+
+def verify_lightning_candidates(cfg: ImagesConfig) -> str:
+    """Hash every same-named copy ComfyUI could resolve; fail closed if any is unpinned."""
+    files = lightning_lora_files(cfg)
+    if not files:
+        return lightning_lora_setup(cfg)
+    for index, path in enumerate(files):
+        size = path.stat().st_size
+        if size != LIGHTNING_LORA["bytes"]:
+            error = (f"quality-fast LoRA at {path} is {size} bytes, expected {LIGHTNING_LORA['bytes']} "
+                     f"(SHA-256 {LIGHTNING_LORA['sha256']})")
+        else:
+            error = verify_lightning_lora(path)
+        if error:
+            if index == 0 and len(files) > 1:
+                error += (f" ComfyUI would load this file for lora_name={LIGHTNING_LORA['filename']}, "
+                          f"shadowing {files[1]}.")
+            return error
     return ""
 
 
@@ -420,12 +472,9 @@ class ImageService:
             raise ToolError(self.mode_catalog()["quality-fast"].get("setup") or lightning_lora_setup(self.cfg))
         if self._lora_available is True:
             return
-        path = lightning_lora_path(self.cfg)
-        if path is None:
-            raise ToolError(lightning_lora_setup(self.cfg))
         if self._lora_hash_ok:
             return
-        error = verify_lightning_lora(path)
+        error = verify_lightning_candidates(self.cfg)
         if error:
             self._lora_hash_ok = False
             raise ToolError(error)
