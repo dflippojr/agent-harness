@@ -552,7 +552,7 @@ class ImageService:
         width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
         job = {"id": uuid.uuid4().hex[:12], "session_id": session_id, "source": source, "prompt": prompt[:4000],
                "model": model, "aspect_ratio": aspect_ratio, "resolution": resolution, "width": width, "height": height,
-               "seed": seed if seed is not None else random.randrange(2**48), **mode_provenance(model),
+               "seed": seed if seed is not None else random.SystemRandom().randrange(2**48), **mode_provenance(model),
                "parent_id": "", "operation": "generate", "scale": 1, "upscale_model": "",
                "requested_upscale": requested}
         self.db.insert_image(job)
