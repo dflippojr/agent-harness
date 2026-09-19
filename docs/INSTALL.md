@@ -188,7 +188,7 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Pause for games / Plex transcodes | `gpu_guard` (on by default) | nothing |
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |
-| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`). Optional `quality-fast` needs the pinned Lightning LoRA in `models_dir/loras/` (`python -m harness.doctor` prints the filename, size, SHA-256, and path). Optional Real-ESRGAN 2×/4× weights; generation still works without them. |
+| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`). Optional `quality-fast` needs the pinned Lightning LoRA in `models_dir/loras/` (`python -m harness.doctor` prints the filename, size, SHA-256, and path); optional `flux-fast` is installed with `ops/images-models.ps1` (`docs/flux-fast.md`). Optional Real-ESRGAN 2×/4× weights; generation still works without them. |
 | Claude / Codex / Cursor as session backends | `backends` | `ops/backends/login.sh <backend>` on Unix or `login.ps1` on Windows (`docs/phase8a-design.md`) |
 | Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
 | Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |

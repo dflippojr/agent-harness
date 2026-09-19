@@ -388,8 +388,10 @@ MIGRATIONS = [
     ("sessions", "effort", "TEXT NOT NULL DEFAULT ''"),
     # Issue #66: in-flight app sessions keep the defaults they started with if the app is revoked.
     ("sessions", "app_defaults", "TEXT NOT NULL DEFAULT '{}'"),
+    # Issue #92: enough to reproduce a generation; old rows stay readable with {}.
+    # Keep this PR's migration after every migration already present on main.
+    ("images", "provenance", "TEXT NOT NULL DEFAULT '{}'"),
 ]
-
 
 APP_SETTINGS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -402,7 +404,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "app_defaults", "data",
                 "origins", "models", "smart", "risk_flags", "skills", "references", "examples", "manifest",
-                "static_findings", "findings"}
+                "static_findings", "findings", "provenance"}
 # skill_proposals.review is JSON; sessions.review is a plain merge/push/discard string.
 SKILL_JSON_COLUMNS = JSON_COLUMNS | {"review"}
 
@@ -850,11 +852,16 @@ class Database:
                     "lora_sha256": "", "parent_id": "", "operation": "generate", "scale": 1,
                     "upscale_model": "", "requested_upscale": "none"}
         values = [job[c] if c in job else defaults[c] for c in cols]
+        provenance = job.get("provenance") or {}
         with self.lock:
-            self.conn.execute(f"INSERT INTO images ({','.join(cols)}, status, created_at) VALUES "
-                              f"({','.join('?' * len(cols))}, 'queued', ?)", values + [time.time()])
+            self.conn.execute(
+                f"INSERT INTO images ({','.join(cols)}, provenance, status, created_at) VALUES "
+                f"({','.join('?' * len(cols))}, ?, 'queued', ?)",
+                values + [json.dumps(provenance), time.time()])
 
     def update_image(self, iid: str, **fields) -> None:
+        if "provenance" in fields and not isinstance(fields["provenance"], str):
+            fields = {**fields, "provenance": json.dumps(fields["provenance"])}
         sets = ", ".join(f"{k} = ?" for k in fields)
         with self.lock:
             self.conn.execute(f"UPDATE images SET {sets} WHERE id = ?", [*fields.values(), iid])
@@ -862,7 +869,7 @@ class Database:
     def get_image(self, iid: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM images WHERE id = ?", (iid,)).fetchone()
-        return dict(row) if row else None
+        return self._image_row(row)
 
     def list_images(self, limit: int = 60, status: tuple = ()) -> list[dict]:
         query, params = "SELECT * FROM images", []
@@ -871,7 +878,21 @@ class Database:
             params = list(status)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
-        return [dict(r) for r in rows]
+        return [self._image_row(r) for r in rows]
+
+    def _image_row(self, row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        out = dict(row)
+        raw = out.get("provenance")
+        if isinstance(raw, str):
+            try:
+                out["provenance"] = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                out["provenance"] = {}
+        elif raw is None:
+            out["provenance"] = {}
+        return out
 
     def images_for_archive(self) -> list[dict]:
         with self.lock:

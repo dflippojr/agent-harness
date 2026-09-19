@@ -91,6 +91,10 @@ def test_web_app_and_guard(tmp_path):
         assert 'if (prompt.value.trim()) startWarmup()' in js
         assert 'await startWarmup().catch(() => {})' in js
         assert "updateImageStatusView(phase, d.status)" in js
+        assert "data.status.modes" in js
+        assert "not installed" in js
+        assert "updateFluxHint" in js
+        assert "That image mode isn't installed" in js
         assert "grid.dataset.keys" in js
         assert 'upscaling ? "Upscaling" : "Sampling"' in js
         assert '"Upscale 2×"' in js and '"Upscale 4×"' in js

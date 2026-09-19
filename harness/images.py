@@ -16,12 +16,13 @@ After the last job the GPU is given back immediately; there is no linger. Leavin
 warmup.
 
 Jobs come from the phone (POST /images) and from agents (the `generate_image` tool). Workflows, from ComfyUI's own
-templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; assets agents may ship), `quality` = Qwen-Image-2512
-(Apache 2.0, 20B fp8, 50 steps, best text rendering; slower, part of it runs from RAM), and optional `quality-fast` =
-the same Qwen base with the Apache-2.0 lightx2v Lightning 4-step LoRA. Inputs the workflow doesn't support
-are ignored. Upscaling is opt-in Real-ESRGAN 2×/4× (never the default). A requested upscale runs in the same GPU
-occupancy; a later gallery action is a queued image job. The original PNG is preserved; the result is a linked row.
-Results are PNGs under data_dir/images, served by GET /images/{id}.png.
+templates: `fast` = Z-Image-Turbo (Apache 2.0, 8 steps; the default), `quality` = Qwen-Image-2512 (Apache 2.0, 20B
+fp8, 50 steps, best text rendering), optional `quality-fast` = the same Qwen base with the Apache-2.0 lightx2v
+Lightning 4-step LoRA, and optional `flux-fast` = distilled FLUX.2 [klein] 4B FP8 (Apache 2.0, 4 steps). Optional
+modes stay disabled until their pinned assets and preflight checks succeed and never fall back to another model.
+Inputs a workflow does not support are rejected. Upscaling is opt-in Real-ESRGAN 2×/4× (never the default). A
+requested upscale runs in the same GPU occupancy; a later gallery action is a queued image job. The original PNG is
+preserved; the result is a linked row. Results are PNGs under data_dir/images, served by GET /images/{id}.png.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ import os
 import random
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -58,14 +60,20 @@ RESOLUTION_SIZES = {
     "standard": {"1:1": (1024, 1024), "16:9": (1344, 768), "9:16": (768, 1344), "4:3": (1152, 864),
              "3:4": (864, 1152), "3:2": (1216, 832), "2:3": (832, 1216)},
 }
-MODEL_RESOLUTION = {"fast": "standard", "quality": "high", "quality-fast": "high"}
+MODEL_RESOLUTION = {"fast": "standard", "quality": "high", "quality-fast": "high", "flux-fast": "standard"}
 MODELS = {
     "fast": {"label": "Z-Image-Turbo (fast, Apache 2.0)", "negative": False, "optional": False,
-             "base_model": "z_image_turbo_bf16.safetensors"},
+             "steps": 8, "sampler": "res_multistep", "scheduler": "simple", "guidance": 1.0,
+             "license": "Apache-2.0", "base_model": "z_image_turbo_bf16.safetensors"},
     "quality": {"label": "Qwen-Image-2512 (quality, Apache 2.0)", "negative": True, "optional": False,
-                "base_model": "qwen_image_2512_fp8_e4m3fn.safetensors"},
+                "steps": 50, "sampler": "euler", "scheduler": "simple", "guidance": 4.0,
+                "license": "Apache-2.0", "base_model": "qwen_image_2512_fp8_e4m3fn.safetensors"},
     "quality-fast": {"label": "Qwen quality (fast, 4-step)", "negative": True, "optional": True,
-                     "base_model": "qwen_image_2512_fp8_e4m3fn.safetensors"},
+                     "steps": 4, "sampler": "euler", "scheduler": "simple", "guidance": 1.0,
+                     "license": "Apache-2.0", "base_model": "qwen_image_2512_fp8_e4m3fn.safetensors"},
+    "flux-fast": {"label": "FLUX.2 klein 4B (fast, Apache 2.0)", "negative": False, "optional": True,
+                  "steps": 4, "sampler": "euler", "scheduler": "Flux2Scheduler", "guidance": 1.0,
+                  "license": "Apache-2.0", "base_model": "flux-2-klein-4b-fp8.safetensors"},
 }
 QWEN_NEGATIVE = ("low resolution, low quality, deformed limbs, deformed fingers, oversaturated, waxy, no facial "
                  "detail, over-smoothed, AI look, cluttered composition, blurry text, distorted text")
@@ -243,12 +251,13 @@ def workspace_png_name(filename: str) -> str:
 
 def schemas(cfg: ImagesConfig, available: list[str] | None = None) -> list[dict]:
     names = [name for name in MODELS if available is None or name in available]
-    quality_fast = "quality-fast" in names
-    model_help = "fast or quality. Default fast."
-    extra = ""
-    if quality_fast:
-        model_help = "fast, quality, or quality-fast. Default fast."
-        extra = " 'quality-fast' is the same Qwen model with a 4-step Lightning LoRA: quicker, a bit less detailed."
+    model_help = f"{', '.join(names[:-1])}, or {names[-1]}. Default fast."
+    extras = []
+    if "quality-fast" in names:
+        extras.append("'quality-fast' is the same Qwen model with a 4-step Lightning LoRA")
+    if "flux-fast" in names:
+        extras.append("'flux-fast' is the optional 4-step FLUX.2 klein model")
+    extra = (" " + "; ".join(extras) + ".") if extras else ""
     return [{"type": "function", "function": {
         "name": "generate_image",
         "description": "Generate an image from a text prompt with a local model and save it as a PNG in the workspace. "
@@ -259,7 +268,8 @@ def schemas(cfg: ImagesConfig, available: list[str] | None = None) -> list[dict]
             "prompt": {"type": "string", "description": "Detailed description of the image."},
             "filename": {"type": "string", "description": "Where to save it in the workspace, e.g. assets/logo.png"},
             "aspect_ratio": {"type": "string", "description": f"One of {', '.join(ASPECTS)}. Default 1:1."},
-            "resolution": {"type": "string", "description": "standard or high. Defaults to the model's native size."},
+            "resolution": {"type": "string", "description": "standard or high. Defaults to the model's native size. "
+                           "flux-fast only supports standard."},
             "model": {"type": "string", "description": model_help},
             "upscale": {"type": "string", "description": "none (default), 2x, or 4x. Opt-in Real-ESRGAN; omitted or "
                         "none leaves the generated PNG unchanged. Requires optional Real-ESRGAN weights."},
@@ -267,9 +277,18 @@ def schemas(cfg: ImagesConfig, available: list[str] | None = None) -> list[dict]
     }}]
 
 
-def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix: str) -> dict:
-    """ComfyUI API-format graph, transcribed from the bundled templates image_z_image_turbo.json and
-    image_qwen_Image_2512.json. quality-fast enables that template's official 4-step Lightning LoRA subgraph."""
+def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix: str,
+             encoder_name: str | None = None) -> dict:
+    """ComfyUI API-format graph.
+
+    `fast`, `quality`, and `quality-fast` are transcribed from the bundled templates image_z_image_turbo.json and
+    image_qwen_Image_2512.json; quality-fast enables the official Lightning LoRA subgraph. `flux-fast` is transcribed
+    from the distilled
+    subgraph of Comfy-Org/workflow_templates templates/image_flux2_klein_text_to_image.json at revision
+    8f6709b8f6ef808b0eccc47eff28ada4a58adbbe. Deliberate deviation: UNET file is BFL's public FP8 checkpoint
+    flux-2-klein-4b-fp8.safetensors rather than the template's bf16 flux-2-klein-4b.safetensors. Sampler (euler),
+    Flux2Scheduler steps=4, and CFGGuider cfg=1.0 match upstream.
+    """
     if model == "fast":
         return {
             "28": {"class_type": "UNETLoader", "inputs": {"unet_name": "z_image_turbo_bf16.safetensors",
@@ -288,6 +307,29 @@ def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["29", 0]}},
             "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": prefix}},
         }
+    if model == "flux-fast":
+        clip = encoder_name or "qwen_3_4b.safetensors"
+        return {
+            "70": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux-2-klein-4b-fp8.safetensors",
+                                                          "weight_dtype": "default"}},
+            "71": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip, "type": "flux2", "device": "default"}},
+            "72": {"class_type": "VAELoader", "inputs": {"vae_name": "flux2-vae.safetensors"}},
+            "74": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["71", 0], "text": prompt}},
+            "76": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["74", 0]}},
+            "66": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+            "69": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+            "61": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+            "62": {"class_type": "Flux2Scheduler", "inputs": {"steps": 4, "width": width, "height": height}},
+            "63": {"class_type": "CFGGuider", "inputs": {"model": ["70", 0], "positive": ["74", 0],
+                                                         "negative": ["76", 0], "cfg": 1.0}},
+            "64": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["69", 0], "guider": ["63", 0],
+                                                                     "sampler": ["61", 0], "sigmas": ["62", 0],
+                                                                     "latent_image": ["66", 0]}},
+            "65": {"class_type": "VAEDecode", "inputs": {"samples": ["64", 0], "vae": ["72", 0]}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["65", 0], "filename_prefix": prefix}},
+        }
+    if model not in ("quality", "quality-fast"):
+        raise ToolError(f"model must be one of {', '.join(MODELS)}")
     sampled = ["226", 0]
     steps, cfg_scale = 50, 4
     extra = {}
@@ -319,6 +361,11 @@ def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix
 async def _run(args: list[str]) -> tuple[int, str, str]:
     from .sandbox import run_cmd
     return await run_cmd(args, timeout=30)
+
+
+def _comfy_revision(cfg: ImagesConfig) -> str:
+    from .images_models import comfy_version_label
+    return comfy_version_label(Path(cfg.comfy_dir))
 
 
 async def _ws_read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -433,9 +480,17 @@ class ImageService:
         self.images_dir = Path(cfg.work_dir) / "images"
         self.input_dir = Path(cfg.work_dir) / "input"
         self.transport = None          # tests inject a fake ComfyUI
+        self.object_info = None        # tests inject ComfyUI /object_info
+        self.flux_manifest = None      # tests inject a tiny fixture manifest
+        self._cancel: set[str] = set()
         self._lora_available: bool | None = None  # tests force Lightning LoRA presence; None = inspect disk
         self._lora_hash_ok: bool | None = None
         self.on_stored = None          # optional archive hook: callable(job) after a PNG is written
+        self._flux_verify_lock = threading.Lock()
+        self._flux_verify_in_flight = False
+        self._flux_verify_error: str | None = None
+        self._flux_verify_retry_at = 0.0
+        self._flux_verify_backoff = 1.0
 
     def schemas(self) -> list[dict]:
         return schemas(self.cfg, available=[name for name in MODELS if self.mode_available(name)])
@@ -443,19 +498,24 @@ class ImageService:
     def mode_available(self, model: str) -> bool:
         if model not in MODELS:
             return False
-        if model != "quality-fast" or MODELS[model]["optional"] is False:
+        if MODELS[model]["optional"] is False:
             return True
+        if model == "flux-fast":
+            return bool(self.flux_status()["available"])
         if self._lora_available is not None:
             return self._lora_available
         return bool(lightning_lora_status(self.cfg)["available"])
 
     def mode_catalog(self) -> dict:
-        """Discovery metadata for every mode. quality-fast is listed even when the optional LoRA is missing."""
+        """Discovery metadata for all modes, including unavailable optional modes."""
         catalog = {}
         for name, spec in MODELS.items():
             available = self.mode_available(name)
             entry = {"label": spec["label"], "available": available, "optional": spec["optional"],
-                     "resolution": MODEL_RESOLUTION[name], "base_model": spec["base_model"]}
+                     "resolution": MODEL_RESOLUTION[name], "base_model": spec["base_model"],
+                     "license": spec["license"], "steps": spec["steps"], "sampler": spec["sampler"],
+                     "scheduler": spec["scheduler"], "guidance": spec["guidance"],
+                     "negative_prompt": spec["negative"], "supported_aspects": list(ASPECTS)}
             if name == "quality-fast":
                 entry["lora"] = LIGHTNING_LORA["filename"]
                 entry["lora_revision"] = LIGHTNING_LORA["revision"]
@@ -464,6 +524,19 @@ class ImageService:
                 if not available:
                     entry["setup"] = lightning_lora_status(self.cfg)["setup"] if self._lora_available is None \
                         else lightning_lora_setup(self.cfg)
+            elif name == "flux-fast":
+                flux = self.flux_status()
+                entry.update({"checkpoint_revision": flux["checkpoint_revision"],
+                              "checkpoint_hash": flux["checkpoint_sha256"],
+                              "supported_resolutions": list(flux["supported_resolutions"]),
+                              "unavailable_reason": flux["unavailable_reason"],
+                              "remediation": flux["remediation"],
+                              "verifying": bool(flux.get("verifying"))})
+                if not available:
+                    entry["setup"] = ". ".join(
+                        value for value in (flux["unavailable_reason"], flux["remediation"]) if value)
+            else:
+                entry["supported_resolutions"] = list(RESOLUTIONS)
             catalog[name] = entry
         return catalog
 
@@ -503,7 +576,41 @@ class ImageService:
                         log.info("re-queued upscale %s for image %s after restart", child["id"], job["id"])
                     except ToolError as e:
                         log.warning("could not recover upscale for %s: %s", job["id"], e)
+            self._schedule_flux_verify()
             self._task = asyncio.create_task(self._loop(), name="images")
+
+    def _schedule_flux_verify(self) -> None:
+        """Hash matching-but-uncached flux-fast files once, off the event loop, with retry backoff."""
+        now = time.monotonic()
+        with self._flux_verify_lock:
+            if self._flux_verify_in_flight or now < self._flux_verify_retry_at:
+                return
+            self._flux_verify_in_flight = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            threading.Thread(target=self._warm_flux_status, name="flux-verify", daemon=True).start()
+            return
+        loop.run_in_executor(None, self._warm_flux_status)
+
+    def _warm_flux_status(self) -> None:
+        """Hash flux-fast assets off the event loop so the first status poll is O(stat)."""
+        try:
+            from .images_models import inspect_flux_fast
+            inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
+                              hash_if_needed=True)
+            self._flux_verify_error = None
+            self._flux_verify_backoff = 1.0
+            self._flux_verify_retry_at = 0.0
+        except Exception as e:  # noqa: BLE001 - surface then retry; never leave 'verifying' stuck
+            self._flux_verify_error = str(e).strip() or e.__class__.__name__
+            delay = self._flux_verify_backoff
+            self._flux_verify_backoff = min(self._flux_verify_backoff * 2, 30.0)
+            self._flux_verify_retry_at = time.monotonic() + delay
+            log.debug("flux-fast inspect warmup failed", exc_info=True)
+        finally:
+            with self._flux_verify_lock:
+                self._flux_verify_in_flight = False
 
     async def _stop_stray(self) -> None:
         """A ComfyUI left running by a daemon that crashed mid-batch holds the GPU: stop it and restore the model."""
@@ -524,6 +631,42 @@ class ImageService:
         if self.comfy.proc:
             await self.comfy.stop()
 
+    def flux_status(self) -> dict:
+        from .images_models import inspect_flux_fast
+        report = inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
+                                   hash_if_needed=False)
+        if report.get("verifying"):
+            self._schedule_flux_verify()
+        with self._flux_verify_lock:
+            in_flight = self._flux_verify_in_flight
+            error = self._flux_verify_error
+        if error and not in_flight:
+            reason = f"verification failed: {error}"
+            return {**report, "available": False, "verifying": False, "unavailable_reason": reason,
+                    "remediation": "verification will retry automatically"}
+        return report
+
+    def mode_reports(self) -> list[dict]:
+        """List-shaped compatibility view of the canonical mode catalog."""
+        return [{"key": key, "display_name": entry["label"], **entry}
+                for key, entry in self.mode_catalog().items()]
+
+    def provenance_for(self, job: dict) -> dict:
+        spec = MODELS[job["model"]]
+        extra = {}
+        if job["model"] == "flux-fast":
+            flux = self.flux_status()
+            extra = {"checkpoint_revision": flux["checkpoint_revision"], "checkpoint_sha256": flux["checkpoint_sha256"],
+                     "encoder_sha256": flux["encoder_sha256"], "vae_sha256": flux["vae_sha256"],
+                     "encoder_name": flux["encoder_name"],
+                     "comfy_revision": _comfy_revision(self.cfg)}
+        elif job["model"] == "quality-fast":
+            extra = {"lora": LIGHTNING_LORA["filename"], "lora_revision": LIGHTNING_LORA["revision"],
+                     "lora_sha256": LIGHTNING_LORA["sha256"]}
+        return {"mode": job["model"], "prompt": job["prompt"], "width": job["width"], "height": job["height"],
+                "seed": job["seed"], "steps": spec["steps"], "sampler": spec["sampler"],
+                "scheduler": spec["scheduler"], "guidance": spec["guidance"], **extra}
+
     # jobs
     def submit(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", resolution: str = "auto",
                source: str = "phone", session_id: str = "", seed: int | None = None,
@@ -534,7 +677,9 @@ class ImageService:
         if model not in MODELS:
             raise ToolError(f"model must be one of {', '.join(MODELS)}")
         if not self.mode_available(model):
-            raise ToolError(self.mode_catalog()[model].get("setup") or lightning_lora_setup(self.cfg))
+            unavailable = self.mode_catalog()[model]
+            raise ToolError(unavailable.get("setup") or unavailable.get("unavailable_reason") or
+                            f"{model} is not available")
         if model == "quality-fast":
             self._require_quality_fast()
         if aspect_ratio not in ASPECTS:
@@ -543,6 +688,14 @@ class ImageService:
             resolution = MODEL_RESOLUTION[model]
         if resolution not in RESOLUTIONS:
             raise ToolError(f"resolution must be one of {', '.join(RESOLUTIONS)}")
+        allowed = list(RESOLUTIONS) if model != "flux-fast" else ["standard"]
+        if resolution not in allowed:
+            raise ToolError(f"{model} does not support resolution {resolution}; use {', '.join(allowed)}")
+        if model == "flux-fast":
+            flux = self.flux_status()
+            if not flux["available"]:
+                raise ToolError(flux["unavailable_reason"] +
+                                (f". {flux['remediation']}" if flux.get("remediation") else ""))
         requested = upscale_mod.parse_choice(upscale)
         if requested != "none":
             scale = upscale_mod.SCALES[requested]
@@ -555,6 +708,7 @@ class ImageService:
                "seed": seed if seed is not None else random.SystemRandom().randrange(2**48), **mode_provenance(model),
                "parent_id": "", "operation": "generate", "scale": 1, "upscale_model": "",
                "requested_upscale": requested}
+        job["provenance"] = self.provenance_for(job)
         self.db.insert_image(job)
         self._done[job["id"]] = asyncio.Event()
         self.queue.put_nowait(job["id"])
@@ -594,6 +748,21 @@ class ImageService:
         self.queue.put_nowait(job["id"])
         return self.db.get_image(job["id"])
 
+    def cancel(self, job_id: str) -> dict:
+        job = self.db.get_image(job_id)
+        if job is None:
+            raise ToolError("no such image")
+        if job["status"] in ("done", "failed"):
+            return job
+        self._cancel.add(job_id)
+        if job["status"] == "queued":
+            self.db.update_image(job_id, status="failed", finished_at=time.time(), error="cancelled")
+            event = self._done.get(job_id)
+            if event:
+                event.set()
+            return self.db.get_image(job_id)
+        return job
+
     async def wait(self, job_id: str) -> dict:
         event = self._done.setdefault(job_id, asyncio.Event())
         while True:
@@ -608,10 +777,30 @@ class ImageService:
     def path(self, job: dict) -> Path:
         return self.images_dir / f"{job['id']}.png"
 
+    def _live_job(self, job_id: str | None) -> bool:
+        if not job_id:
+            return False
+        job = self.db.get_image(job_id)
+        return job is not None and job["status"] not in ("done", "failed")
+
+    def _skip_dead_jobs(self, first: str | None) -> str | None:
+        """Drop cancelled/finished ids left in the queue so they never occupy the GPU."""
+        candidate = first
+        while candidate is not None and not self._live_job(candidate):
+            candidate = None if self.queue.empty() else self.queue.get_nowait()
+        return candidate
+
+    def _batch_is_empty(self, first: str | None) -> tuple[str | None, bool]:
+        """Return the next live id and whether the batch should exit without GPU side effects."""
+        first = self._skip_dead_jobs(first)
+        return first, first is None and not self._keep_warm
+
     async def _loop(self) -> None:
         while True:
             job_id = await self.queue.get()
             try:
+                if job_id is not None and not self._live_job(job_id):
+                    continue
                 await self._run_batch(job_id)
             except asyncio.CancelledError:
                 raise
@@ -676,25 +865,44 @@ class ImageService:
             drain = self._drain_sessions
             self._drain_sessions = set()
             await self.runner.scheduler.wait_for_drain(drain)
+        first, empty = self._batch_is_empty(first)
+        if empty:
+            self.phase = "idle"
+            return
         slot = await self.runner.gate.acquire_exclusive()
         flagged = False
         ran_job = False
+        took_over = False
         try:
+            first, empty = self._batch_is_empty(first)
+            if empty:
+                return
             self.phase = "switching"
             await self.control.stop()  # stop llama-server; its supervisor waits while the flag exists
             flagged = True
+            first, empty = self._batch_is_empty(first)
+            if empty:
+                return
             self.phase = "starting"
             await self.comfy.start()
+            took_over = True
+            first, empty = self._batch_is_empty(first)
+            if empty:
+                return
             job_id: str | None = first
             while True:
                 if paused():
-                    if job_id:
+                    if self._live_job(job_id):
                         self.db.update_image(job_id, status="queued")
                         self.queue.put_nowait(job_id)
                     break
                 if job_id:
-                    await self._run_job(job_id)
-                    ran_job = True
+                    job_id, empty = self._batch_is_empty(job_id)
+                    if empty:
+                        return
+                    if job_id:
+                        await self._run_job(job_id)
+                        ran_job = True
                     job_id = None
                 if not self.queue.empty():
                     job_id = self.queue.get_nowait()
@@ -722,9 +930,11 @@ class ImageService:
         finally:
             self._keep_warm = False
             self._wake = None
-            self.phase = "restoring"
-            await self.comfy.stop()
+            if took_over:
+                self.phase = "restoring"
+                await self.comfy.stop()
             if flagged and not paused():  # when the guard is paused it restores the model itself later
+                self.phase = "restoring"
                 await self.control.start()  # llama-server restarts and reloads the model
                 for _ in range(150):
                     if await self.control.healthy():
@@ -739,6 +949,12 @@ class ImageService:
             return
         job = self.db.get_image(job_id)
         if job is None or job["status"] in ("done", "failed"):
+            return
+        if job_id in self._cancel:
+            self.db.update_image(job_id, status="failed", finished_at=time.time(), error="cancelled")
+            event = self._done.pop(job_id, None)
+            if event:
+                event.set()
             return
         self.active_job = job_id
         self.phase = "generating"
@@ -767,9 +983,11 @@ class ImageService:
                     partial.unlink()
                 except FileNotFoundError:
                     pass
-            self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=round(time.time() - started, 1),
+            seconds = round(time.time() - started, 1)
+            provenance = {**(job.get("provenance") or {}), **self.provenance_for(job), "seconds": seconds}
+            self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=seconds,
                                  bytes=len(content), width=job["width"], height=job["height"],
-                                 sha256=hashlib.sha256(content).hexdigest())
+                                 sha256=hashlib.sha256(content).hexdigest(), provenance=provenance)
             if self.archive and self.archive.enabled:
                 archive_job = self.db.get_image(job_id)
                 try:
@@ -831,7 +1049,9 @@ class ImageService:
         if job["model"] == "quality-fast":
             self._require_quality_fast()
         prefix = f"harness/{job['id']}"
-        graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix)
+        encoder = self.flux_status()["encoder_name"] if job["model"] == "flux-fast" else None
+        graph = workflow(job["model"], job["prompt"], job["width"], job["height"], job["seed"], prefix,
+                         encoder_name=encoder)
         return await self._comfy_png(job["id"], graph, started, stage="generating")
 
     async def _run_upscale(self, job: dict, started: float) -> bytes:
@@ -864,6 +1084,9 @@ class ImageService:
             deadline = time.monotonic() + self.cfg.job_timeout_seconds
             hist = None
             while True:
+                if job_id in self._cancel:
+                    await self.comfy.interrupt()
+                    raise ToolError("cancelled")
                 if time.monotonic() > deadline:
                     await self.comfy.interrupt()
                     raise ToolError("image generation timed out" if stage != "upscaling" else "upscale timed out")
@@ -930,9 +1153,10 @@ class ImageService:
                     pass
 
     def status(self) -> dict:
+        modes = self.mode_catalog()
         return {"enabled": self.cfg.enabled, "phase": self.phase, "active_job": self.active_job,
                 "queued": self.queue.qsize(), "progress": self.progress,
-                "models": {k: v["label"] for k, v in MODELS.items()}, "modes": self.mode_catalog(),
+                "models": {k: v["label"] for k, v in MODELS.items()}, "modes": modes,
                 "aspect_ratios": list(ASPECTS),
                 "resolutions": {name: {"label": label, "sizes": {aspect: list(size) for aspect, size in RESOLUTION_SIZES[name].items()}}
                                 for name, label in RESOLUTIONS.items()},

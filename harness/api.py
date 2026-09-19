@@ -556,7 +556,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.get("/images")
     async def list_images(request: Request, limit: int = 60):
         svc = images_service(request)
-        return {"status": svc.status(), "images": svc.db.list_images(limit=limit)}
+        status = await asyncio.to_thread(svc.status)
+        return {"status": status, "images": svc.db.list_images(limit=limit)}
 
     @app.post("/images", status_code=201)
     async def create_image(body: ImageRequest, request: Request):
@@ -598,7 +599,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                 raise HarnessError(404, "image not ready")
             return FileResponse(svc.path(job), media_type="image/png", headers={"Cache-Control": "max-age=86400"})
         parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
-        return {**job, "service": svc.status(), "parent": ({"id": parent["id"], "width": parent["width"],
+        status = await asyncio.to_thread(svc.status)
+        return {**job, "service": status, "parent": ({"id": parent["id"], "width": parent["width"],
                 "height": parent["height"]} if parent else None),
                 "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
                               "upscale_model": c.get("upscale_model") or "", "width": c["width"], "height": c["height"]}
