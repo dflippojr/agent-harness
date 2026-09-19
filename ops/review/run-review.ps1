@@ -109,7 +109,7 @@ function Get-ReviewBackendCommand {
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'codex'
-                Arguments = @('exec', '--sandbox', 'read-only', '--ask-for-approval', 'never', '--cd', $Workspace, '--ephemeral', '--color', 'never', '--output-last-message', $resultPath, '-')
+                Arguments = @('exec', '--sandbox', 'read-only', '--ask-for-approval', 'never', '--cd', $Workspace, '--ephemeral', '--ignore-user-config', '--color', 'never', '--output-last-message', $resultPath, '-')
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $resultPath
@@ -151,10 +151,18 @@ function Invoke-ReviewBackendProcess {
         Push-Location -LiteralPath $Command.WorkingDirectory
         try {
             $arguments = @($Command.Arguments)
-            if ($null -ne $Command.InputText) {
-                $Command.InputText | & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
-            } else {
-                & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
+            $previousErrorActionPreference = $ErrorActionPreference
+            try {
+                # Windows PowerShell promotes native stderr to error records. Keep
+                # those records redirected without aborting before LASTEXITCODE is read.
+                $ErrorActionPreference = 'Continue'
+                if ($null -ne $Command.InputText) {
+                    $Command.InputText | & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
+                } else {
+                    & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
+                }
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
             }
             $exitCode = $LASTEXITCODE
             if ($null -eq $exitCode) { $exitCode = 0 }
@@ -167,10 +175,10 @@ function Invoke-ReviewBackendProcess {
 
     $stdout = ''
     $stderr = ''
-    if (Test-Path -LiteralPath $stdoutPath) { $stdout = Get-Content -Raw -LiteralPath $stdoutPath }
-    if (Test-Path -LiteralPath $stderrPath) { $stderr = Get-Content -Raw -LiteralPath $stderrPath }
+    if (Test-Path -LiteralPath $stdoutPath) { $stdout = [string](Get-Content -Raw -LiteralPath $stdoutPath) }
+    if (Test-Path -LiteralPath $stderrPath) { $stderr = [string](Get-Content -Raw -LiteralPath $stderrPath) }
     if ($Command.ResultPath -and (Test-Path -LiteralPath $Command.ResultPath)) {
-        $stdout = Get-Content -Raw -LiteralPath $Command.ResultPath
+        $stdout = [string](Get-Content -Raw -LiteralPath $Command.ResultPath)
     }
     return [pscustomobject]@{
         ExitCode = [int]$exitCode

@@ -120,6 +120,7 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
     assert ["--sandbox", "read-only"] == codex_args[codex_args.index("--sandbox") : codex_args.index("--sandbox") + 2]
     assert ["--ask-for-approval", "never"] == codex_args[codex_args.index("--ask-for-approval") : codex_args.index("--ask-for-approval") + 2]
     assert "--ephemeral" in codex_args
+    assert "--ignore-user-config" in codex_args
     assert Path(commands["codex"]["ResultPath"]).parent == scratch
 
     claude_args = commands["claude"]["Arguments"]
@@ -154,6 +155,34 @@ Write-ReviewResult -Result $result -OutputPath '{output_path}'
     assert value["backend"] == "claude"
     assert value["calls"] == ["codex", "claude"]
     assert "Automated review backend: **claude**." in value["body"]
+
+
+def test_process_launcher_captures_stdout_stderr_and_exit_code(tmp_path):
+    fake_backend = tmp_path / "fake-backend.ps1"
+    fake_backend.write_text(
+        '[Console]::Out.Write("review")\n[Console]::Error.Write("diagnostic")\nexit 7\n',
+        encoding="utf-8",
+    )
+    result = run_powershell(
+        tmp_path,
+        f"""
+$command = [pscustomobject]@{{
+    Backend = 'fake'
+    FilePath = (Get-Command powershell.exe).Source
+    Arguments = @('-NoLogo', '-NoProfile', '-File', '{fake_backend}')
+    InputText = $null
+    WorkingDirectory = '{tmp_path}'
+    ResultPath = $null
+    Model = $null
+}}
+Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{tmp_path}' | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip())
+    assert value["ExitCode"] == 7
+    assert value["Stdout"].strip() == "review"
+    assert "diagnostic" in value["Stderr"]
 
 
 def test_empty_and_rate_limited_successes_fall_through(tmp_path):
