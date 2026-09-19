@@ -57,11 +57,12 @@ Set `REVIEW_BACKENDS` under repository **Settings > Secrets and variables > Acti
 workflow edit.
 
 All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
-with its sandbox enabled, Codex uses a read-only sandbox with approvals disabled, and Claude exposes only
-Read/Grep/Glob. The wrapper, rather than a model, writes the final comment file. It fetches the pull request diff before
-starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review sandboxes do not
-need GitHub network access. Larger diffs identify every omitted file in the prompt. After installing or changing a CLI,
-verify each backend explicitly against a disposable pull request:
+with its sandbox enabled. Codex ignores the service user's configuration, restores only the required unelevated Windows
+sandbox setting, disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.
+Claude exposes only Read/Grep/Glob. The wrapper, rather than a model, writes the final comment file. It fetches the pull
+request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review
+sandboxes do not need GitHub network access. Larger diffs identify every omitted file in the prompt. After installing or
+changing a CLI, verify each backend explicitly against a disposable pull request:
 
 ```powershell
 gh workflow run review.yml -f pr_number=N -f backend=cursor

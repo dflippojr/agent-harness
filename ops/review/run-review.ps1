@@ -166,7 +166,20 @@ function Get-ReviewBackendCommand {
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'codex'
-                Arguments = @('exec', '--sandbox', 'read-only', '--cd', $Workspace, '--ephemeral', '--color', 'never', '--output-last-message', $resultPath, '-')
+                Arguments = @(
+                    'exec',
+                    '--ignore-user-config',
+                    '-c', 'windows.sandbox="unelevated"',
+                    '-c', 'mcp_servers={}',
+                    '--disable', 'apps',
+                    '--disable', 'plugins',
+                    '--sandbox', 'read-only',
+                    '--cd', $Workspace,
+                    '--ephemeral',
+                    '--color', 'never',
+                    '--output-last-message', $resultPath,
+                    '-'
+                )
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $resultPath

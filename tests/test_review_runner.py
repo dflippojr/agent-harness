@@ -128,6 +128,15 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
     result_path = str(scratch / "codex-review-output.md")
     assert codex_args == [
         "exec",
+        "--ignore-user-config",
+        "-c",
+        'windows.sandbox="unelevated"',
+        "-c",
+        "mcp_servers={}",
+        "--disable",
+        "apps",
+        "--disable",
+        "plugins",
         "--sandbox",
         "read-only",
         "--cd",
@@ -139,7 +148,6 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
         result_path,
         "-",
     ]
-    assert "--ignore-user-config" not in codex_args
     assert commands["codex"]["ResultPath"] == result_path
     assert commands["codex"]["InputText"] == "prompt"
 
