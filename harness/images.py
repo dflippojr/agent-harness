@@ -832,10 +832,14 @@ class ImageService:
 
     def _image_path(self, job: dict, suffix: str) -> Path:
         image_id = job.get("id") if isinstance(job, dict) else None
-        if not isinstance(image_id, str) or IMAGE_ID_RE.fullmatch(image_id) is None:
+        if not isinstance(image_id, str):
             raise ToolError("invalid image id")
+        safe_id = os.path.basename(image_id)
+        if safe_id != image_id or IMAGE_ID_RE.fullmatch(safe_id) is None:
+            raise ToolError("invalid image id")
+        safe_id = f"{int(safe_id, 16):012x}"
         images_dir = self.images_dir.resolve()
-        path = (images_dir / f"{image_id}{suffix}").resolve()
+        path = (images_dir / f"{safe_id}{suffix}").resolve()
         if not path.is_relative_to(images_dir):
             raise ToolError("image path escapes the images directory")
         return path
@@ -886,9 +890,17 @@ class ImageService:
         parent = self.db.get_image(parent_id)
         if parent is None or parent["status"] != "done":
             raise ToolError("source image is not available")
-        parent_path = self.path(parent)
+        raw_parent_id = parent.get("id")
+        if not isinstance(raw_parent_id, str):
+            raise ToolError("invalid image id")
+        safe_parent_id = os.path.basename(raw_parent_id)
+        if safe_parent_id != raw_parent_id or IMAGE_ID_RE.fullmatch(safe_parent_id) is None:
+            raise ToolError("invalid image id")
+        safe_parent_id = f"{int(safe_parent_id, 16):012x}"
+        parent_path = self.path({"id": safe_parent_id})
         if not parent_path.exists():
             raise ToolError("source image is not available")
+        parent_png = parent_path.read_bytes()
         feather_n = image_edit.parse_feather(feather)
         mask_png = image_edit.normalize_mask(
             mask, parent["width"], parent["height"],
@@ -899,11 +911,11 @@ class ImageService:
                "resolution": parent.get("resolution") or "auto",
                "width": parent["width"], "height": parent["height"],
                "seed": seed if seed is not None else random.SystemRandom().randrange(2**48),
-               "parent_id": parent["id"], "operation": image_edit.OPERATION_EDIT,
+               "parent_id": safe_parent_id, "operation": image_edit.OPERATION_EDIT,
                "model_revision": edit["revision"], "feather": feather_n}
         job["provenance"] = self.provenance_for(job)
         self.images_dir.mkdir(parents=True, exist_ok=True)
-        self.source_path(job).write_bytes(parent_path.read_bytes())
+        self.source_path(job).write_bytes(parent_png)
         self.mask_path(job).write_bytes(mask_png)
         self.db.insert_image(job)
         self._done[job_id] = asyncio.Event()
