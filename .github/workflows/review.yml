@@ -103,7 +103,7 @@ jobs:
           REQUESTED_BACKEND: ${{ github.event.inputs.backend }}
           REVIEW_BACKENDS: ${{ vars.REVIEW_BACKENDS }}
           REVIEW_PROMPT: |
-            Run 'gh pr diff ${{ steps.pr.outputs.number }}' to see this pull request's diff, then review it for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
+            Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
 
             Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts it as the PR comment.
         run: |

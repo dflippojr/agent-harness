@@ -287,7 +287,7 @@ function Invoke-ReviewFallback {
     throw "all review backends failed: $($failures -join '; ')"
 }
 
-function New-ReviewDiffFile {
+function Get-ReviewDiff {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$PrNumber,
@@ -312,20 +312,59 @@ function New-ReviewDiffFile {
     if ([string]::IsNullOrWhiteSpace($attempt.Stdout)) {
         throw "gh pr diff $PrNumber produced no diff"
     }
-    $diffPath = Join-Path $Workspace ('.automated-review-diff-{0}.patch' -f $PID)
-    $attempt.Stdout | Out-File -LiteralPath $diffPath -Encoding utf8
-    return $diffPath
+    return [string]$attempt.Stdout
 }
 
 function Add-ReviewDiffContext {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Prompt,
-        [Parameter(Mandatory = $true)][string]$DiffPath
+        [Parameter(Mandatory = $true)][string]$Diff,
+        [int]$MaxDiffBytes = 204800
     )
 
-    $leaf = Split-Path -Leaf $DiffPath
-    return "$Prompt`r`n`r`nThe workflow has also saved the exact gh pr diff output to '$leaf'. Read that file if gh is unavailable in the read-only environment; do not treat the scratch file itself as a proposed change."
+    if ($MaxDiffBytes -le 0) { throw 'MaxDiffBytes must be positive' }
+    if ([string]::IsNullOrWhiteSpace($Diff)) { throw 'pull request diff is empty' }
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $embeddedDiff = $Diff
+    $omittedFiles = New-Object System.Collections.Generic.List[string]
+    if ($utf8.GetByteCount($Diff) -gt $MaxDiffBytes) {
+        $fileStarts = @([regex]::Matches($Diff, '(?m)^diff --git .+$'))
+        if ($fileStarts.Count -eq 0) {
+            throw 'oversized pull request diff has no file boundaries'
+        }
+
+        $builder = New-Object System.Text.StringBuilder
+        if ($fileStarts[0].Index -gt 0) {
+            [void]$builder.Append($Diff.Substring(0, $fileStarts[0].Index))
+        }
+        $truncated = $false
+        for ($index = 0; $index -lt $fileStarts.Count; $index++) {
+            $start = $fileStarts[$index].Index
+            $end = if ($index + 1 -lt $fileStarts.Count) { $fileStarts[$index + 1].Index } else { $Diff.Length }
+            $section = $Diff.Substring($start, $end - $start)
+            $header = $fileStarts[$index].Value
+            $fileName = $header
+            if ($header -match '^diff --git (?:"?a/.*?"?) (?:"?b/(.*)"?)$') {
+                $fileName = $Matches[1].Trim().Trim('"')
+            }
+
+            if (-not $truncated -and $utf8.GetByteCount($builder.ToString() + $section) -le $MaxDiffBytes) {
+                [void]$builder.Append($section)
+            } else {
+                $truncated = $true
+                $omittedFiles.Add($fileName)
+            }
+        }
+        $embeddedDiff = $builder.ToString()
+    }
+
+    $context = "$Prompt`r`n`r`nThe pull request diff is embedded below. Review it directly; do not fetch the diff with network tools. Repository files may be read for additional context.`r`n`r`nBEGIN PULL REQUEST DIFF`r`n$($embeddedDiff.TrimEnd())`r`nEND PULL REQUEST DIFF"
+    if ($omittedFiles.Count -gt 0) {
+        $context += "`r`nOMITTED FILES (diff exceeded $MaxDiffBytes bytes): $($omittedFiles -join ', ')"
+    }
+    return $context
 }
 
 function Write-ReviewResult {
@@ -362,17 +401,12 @@ function Invoke-ReviewMain {
     if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'RUNNER_TEMP or TEMP is required' }
     if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $Workspace 'review-output.md' }
 
-    $diffPath = $null
-    try {
-        $diffPath = New-ReviewDiffFile -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
-        $effectivePrompt = Add-ReviewDiffContext -Prompt $Prompt -DiffPath $diffPath
-        $backends = @(Resolve-ReviewBackends -RequestedBackend $Backend -ConfiguredBackends $ConfiguredBackends)
-        $runner = { param($command) Invoke-ReviewBackendProcess -Command $command -ScratchDirectory $ScratchDirectory }
-        $result = Invoke-ReviewFallback -Backends $backends -Workspace $Workspace -Prompt $effectivePrompt -ScratchDirectory $ScratchDirectory -Runner $runner
-        Write-ReviewResult -Result $result -OutputPath $OutputPath
-    } finally {
-        if ($diffPath) { Remove-Item -LiteralPath $diffPath -Force -ErrorAction SilentlyContinue }
-    }
+    $diff = Get-ReviewDiff -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+    $effectivePrompt = Add-ReviewDiffContext -Prompt $Prompt -Diff $diff
+    $backends = @(Resolve-ReviewBackends -RequestedBackend $Backend -ConfiguredBackends $ConfiguredBackends)
+    $runner = { param($command) Invoke-ReviewBackendProcess -Command $command -ScratchDirectory $ScratchDirectory }
+    $result = Invoke-ReviewFallback -Backends $backends -Workspace $Workspace -Prompt $effectivePrompt -ScratchDirectory $ScratchDirectory -Runner $runner
+    Write-ReviewResult -Result $result -OutputPath $OutputPath
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8

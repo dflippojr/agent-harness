@@ -239,17 +239,57 @@ Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{tmp_path}' | C
     assert "diagnostic" in value["Stderr"]
 
 
-def test_shared_prompt_points_read_only_backends_at_prefetched_diff(tmp_path):
-    diff_path = tmp_path / ".automated-review-diff-42.patch"
+def test_shared_prompt_contains_prefetched_diff(tmp_path):
     result = run_powershell(
         tmp_path,
-        f"Add-ReviewDiffContext -Prompt 'original shared prompt' -DiffPath '{diff_path}'",
+        r"""
+$diff = @'
+diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-old value
++new value
+'@
+Add-ReviewDiffContext -Prompt 'original shared prompt' -Diff $diff
+""",
     )
     assert result.returncode == 0, output(result)
     assert result.stdout.startswith("original shared prompt")
-    assert "exact gh pr diff output" in result.stdout
-    assert diff_path.name in result.stdout
-    assert str(tmp_path) not in result.stdout
+    assert "+new value" in result.stdout
+    assert "BEGIN PULL REQUEST DIFF" in result.stdout
+    assert "gh pr diff" not in result.stdout
+
+
+def test_oversize_diff_truncates_at_file_boundary_and_lists_omitted_files(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        r"""
+$diff = @'
+diff --git a/src/one.py b/src/one.py
+--- a/src/one.py
++++ b/src/one.py
+@@ -0,0 +1 @@
++AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+diff --git a/src/two.py b/src/two.py
+--- a/src/two.py
++++ b/src/two.py
+@@ -0,0 +1 @@
++BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+diff --git a/src/three.py b/src/three.py
+--- a/src/three.py
++++ b/src/three.py
+@@ -0,0 +1 @@
++CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+'@
+Add-ReviewDiffContext -Prompt 'review prompt' -Diff $diff -MaxDiffBytes 160
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "+AAAAAAAA" in result.stdout
+    assert "+BBBBBBBB" not in result.stdout
+    assert "+CCCCCCCC" not in result.stdout
+    assert "OMITTED FILES (diff exceeded 160 bytes): src/two.py, src/three.py" in result.stdout
 
 
 def test_empty_and_rate_limited_successes_fall_through(tmp_path):
@@ -388,6 +428,8 @@ def test_workflow_exposes_backend_input_and_delegates_to_runner():
     assert "${{ vars.REVIEW_BACKENDS }}" in workflow
     assert ".\\ops\\review\\run-review.ps1" in workflow
     assert "steps.agent.outputs.backend" in workflow
+    assert "diff embedded in this prompt" in workflow
+    assert "Run 'gh pr diff" not in workflow
     assert "Cursor Agent is reviewing" not in workflow
     assert "--force" not in workflow
 
