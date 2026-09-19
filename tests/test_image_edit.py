@@ -225,6 +225,25 @@ def test_edit_validation_and_path_tricks_before_gpu(tmp_path):
     assert server.calls == []
 
 
+def test_image_paths_reject_database_id_traversal(tmp_path):
+    m, _, _ = edit_manager(tmp_path)
+    escaped = m.images.images_dir.parent / "outside.png"
+    escaped.parent.mkdir(parents=True, exist_ok=True)
+    escaped.write_bytes(png_rgb())
+    parent = {"id": "../outside", "session_id": "", "source": "owner", "prompt": "malicious row",
+              "model": image_edit.EDIT_MODEL_ID, "aspect_ratio": "1:1", "resolution": "upload",
+              "width": 64, "height": 64, "seed": 0, "parent_id": "",
+              "operation": image_edit.OPERATION_UPLOAD, "status": "done", "created_at": 1}
+    m.db.insert_image(parent)
+
+    with pytest.raises(ToolError, match="invalid image id"):
+        m.images.submit_edit(parent["id"], "must not escape", png_mask())
+    for builder in (m.images.path, m.images.source_path, m.images.mask_path):
+        with pytest.raises(ToolError, match="invalid image id"):
+            builder(parent)
+    assert escaped.read_bytes() == png_rgb()
+
+
 def test_edit_missing_assets_do_not_break_text_to_image(tmp_path):
     async def body():
         m, _, _ = image_manager(tmp_path)
@@ -416,7 +435,7 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
 
         m2, _, _ = edit_manager(tmp_path / "restart")
         parent2 = m2.images.ingest_upload(png_rgb())
-        restart_id = "restartjob01"
+        restart_id = "abcdef012345"
         restart_job = {"id": restart_id, "session_id": "", "source": "phone", "prompt": "restart me",
                        "model": image_edit.EDIT_MODEL_ID, "aspect_ratio": "1:1", "resolution": "upload",
                        "width": parent2["width"], "height": parent2["height"], "seed": 1,

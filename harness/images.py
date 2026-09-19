@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import threading
@@ -50,6 +51,8 @@ from .config import ImagesConfig
 from .fileops import ToolError
 from . import image_edit
 from . import upscale as upscale_mod
+
+IMAGE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 log = logging.getLogger("harness.images")
 
@@ -827,14 +830,24 @@ class ImageService:
             except asyncio.TimeoutError:
                 pass
 
+    def _image_path(self, job: dict, suffix: str) -> Path:
+        image_id = job.get("id") if isinstance(job, dict) else None
+        if not isinstance(image_id, str) or IMAGE_ID_RE.fullmatch(image_id) is None:
+            raise ToolError("invalid image id")
+        images_dir = self.images_dir.resolve()
+        path = (images_dir / f"{image_id}{suffix}").resolve()
+        if not path.is_relative_to(images_dir):
+            raise ToolError("image path escapes the images directory")
+        return path
+
     def path(self, job: dict) -> Path:
-        return self.images_dir / f"{job['id']}.png"
+        return self._image_path(job, ".png")
 
     def source_path(self, job: dict) -> Path:
-        return self.images_dir / f"{job['id']}.source.png"
+        return self._image_path(job, ".source.png")
 
     def mask_path(self, job: dict) -> Path:
-        return self.images_dir / f"{job['id']}.mask.png"
+        return self._image_path(job, ".mask.png")
 
     def _job_files(self, job: dict) -> list[Path]:
         return [self.path(job), self.source_path(job), self.mask_path(job)]
@@ -871,7 +884,10 @@ class ImageService:
         if not prompt:
             raise ToolError("prompt is empty")
         parent = self.db.get_image(parent_id)
-        if parent is None or parent["status"] != "done" or not self.path(parent).exists():
+        if parent is None or parent["status"] != "done":
+            raise ToolError("source image is not available")
+        parent_path = self.path(parent)
+        if not parent_path.exists():
             raise ToolError("source image is not available")
         feather_n = image_edit.parse_feather(feather)
         mask_png = image_edit.normalize_mask(
@@ -887,7 +903,7 @@ class ImageService:
                "model_revision": edit["revision"], "feather": feather_n}
         job["provenance"] = self.provenance_for(job)
         self.images_dir.mkdir(parents=True, exist_ok=True)
-        self.source_path(job).write_bytes(self.path(parent).read_bytes())
+        self.source_path(job).write_bytes(parent_path.read_bytes())
         self.mask_path(job).write_bytes(mask_png)
         self.db.insert_image(job)
         self._done[job_id] = asyncio.Event()
