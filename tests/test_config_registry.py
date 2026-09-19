@@ -961,3 +961,89 @@ def test_rollback_clears_pending_only_restart_key(tmp_path, monkeypatch):
     assert reloaded.cfg.web.enabled is False
     assert reloaded.settings.store.read_pending() is None
     assert reloaded.settings.store.read_status().get("recovery") != "lkg_restore"
+
+
+def test_rollback_of_confirmed_restart_key_requires_restart(tmp_path, monkeypatch):
+    """After a confirmed web.enabled true generation, rollback restores false on disk
+    but leaves the running process on true. restart_required must come from
+    active-vs-applied, not only from a pending file, so GET/rollback offer Restart."""
+    monkeypatch.setenv("HARNESS_SUPERVISED", "1")
+    cfg_dir, data_dir = _web_loadable(tmp_path, installed=True, enabled=False)
+    store = ManagedStore(data_dir)
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"web.enabled": False}))
+    store.write_active(Envelope(revision=2, confirmed=True, values={"web.enabled": True}))
+    manager = _boot(cfg_dir)
+    assert manager.cfg.web.enabled is True
+    assert manager.runner.web is not None
+    assert manager.settings.store.read_pending() is None
+    assert manager.settings.admin_view()["restart_required"] is False
+
+    client = TestClient(create_app(manager))
+    with client:
+        body = client.post(f"{PREFIX}/config/rollback", json={"revision": 2, "confirm": True})
+        assert body.status_code == 200, body.text
+        payload = body.json()
+        assert payload["restart_required"] is True
+        got = client.get(f"{PREFIX}/config").json()
+        assert got["restart_required"] is True
+        assert got["pending_revision"] is None
+
+    assert manager.settings.store.read_pending() is None
+    assert manager.settings.store.read_active().values.get("web.enabled") is False
+    assert manager.cfg.web.enabled is True
+    assert manager.runner.web is not None
+
+    manager.settings.request_restart(payload["revision"])
+    reloaded = _boot(cfg_dir)
+    reloaded.settings.confirm_startup()
+    assert reloaded.cfg.web.enabled is False
+    assert reloaded.runner.web is None
+    assert reloaded.settings.admin_view()["restart_required"] is False
+
+
+def _write_models_yaml(tmp_path, models: tuple[str, ...]):
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    block = ", ".join(f"{name}: {{base_url: http://unused, context_tokens: 1024}}" for name in models)
+    (cfg_dir / "harness.yaml").write_text(
+        "listen: {host: 127.0.0.1, port: 8100}\n"
+        f"data_dir: {data_dir.as_posix()}\n"
+        f"default_model: {models[0]}\n"
+        f"models: {{{block}}}\n"
+        "sandbox: {image: agent-harness-sandbox:py312}\n",
+        encoding="utf-8",
+    )
+    return cfg_dir, data_dir
+
+
+def test_boot_never_fails_when_active_and_lkg_share_removed_yaml_value(tmp_path):
+    """YAML drops a model that both confirmed active and LKG pin. Boot must
+    quarantine both overlays, start on YAML defaults, and never raise."""
+    cfg_dir, data_dir = _write_models_yaml(tmp_path, ("fake", "qwen-a"))
+    store = ManagedStore(data_dir)
+    store.write_lkg(Envelope(revision=1, confirmed=True, values={"backends.local.model": "qwen-a"}))
+    store.write_active(Envelope(
+        revision=2, confirmed=True,
+        values={"backends.local.model": "qwen-a", "sessions.max_turns": 40},
+    ))
+    _write_models_yaml(tmp_path, ("fake",))
+
+    cfg = load(cfg_dir)
+    assert cfg.default_model == "fake"
+    assert cfg.max_turns == 80
+    manager = Manager(cfg, chat=Script([Completion(content="hi")]))
+    assert manager.cfg.default_model == "fake"
+    assert manager.cfg.max_turns == 80
+    assert not store.active_path.is_file()
+    assert not store.lkg_path.is_file()
+    kept = sorted(p.name for p in data_dir.glob("managed-config*.quarantine.*")
+                  if p.is_file() and p.name != "managed-config.quarantine.json")
+    assert any(name.startswith("managed-config.json.quarantine.") for name in kept)
+    assert any(name.startswith("managed-config.lkg.json.quarantine.") for name in kept)
+    view = manager.settings.admin_view()
+    recovery = view["recovery"] or {}
+    assert recovery.get("recovery") == "overlay_quarantined"
+    assert view.get("warning")
+    assert "YAML" in (view.get("warning") or recovery.get("reason") or "")
