@@ -65,6 +65,28 @@ def encoder_paths(manifest: dict, root: Path) -> tuple[Path, Path]:
     return sub / enc["filename"], sub / enc["alt_filename"]
 
 
+def pin_registry(manifest: dict) -> tuple[tuple[str, str, str], ...]:
+    """(mode, subdir, filename) pins. Ownership follows the registry, not whatever file is on disk."""
+    pins = {("fast", "text_encoders", ZIMAGE_ENCODER)}
+    for asset in manifest.get("assets", {}).values():
+        sub = asset["subdir"]
+        pins.add(("flux-fast", sub, asset["filename"]))
+        if asset.get("alt_filename"):
+            pins.add(("flux-fast", sub, asset["alt_filename"]))
+        shared = asset.get("shared_with")
+        if shared:
+            pins.add((str(shared), sub, asset["filename"]))
+    return tuple(sorted(pins))
+
+
+def modes_pinning(manifest: dict, subdir: str, filename: str) -> set[str]:
+    return {mode for mode, sub, name in pin_registry(manifest) if sub == subdir and name == filename}
+
+
+def exclusively_owned_by_flux_fast(manifest: dict, subdir: str, filename: str) -> bool:
+    return modes_pinning(manifest, subdir, filename) == {"flux-fast"}
+
+
 def asset_dest(asset: dict, root: Path, filename: str | None = None) -> Path:
     return root / asset["subdir"] / (filename or asset["filename"])
 
@@ -106,8 +128,8 @@ def _cache_path_key(path: Path) -> str:
         return str(path)
 
 
-def file_state(path: Path, sha256: str, size: int) -> str:
-    """ok | missing | corrupt. Unchanged files are not re-hashed."""
+def file_state(path: Path, sha256: str, size: int, *, hash_if_needed: bool = True) -> str:
+    """ok | missing | corrupt | verifying. Unchanged files are not re-hashed."""
     if not path.is_file():
         return "missing"
     try:
@@ -122,6 +144,8 @@ def file_state(path: Path, sha256: str, size: int) -> str:
         cached = _FILE_STATE_CACHE.get(key)
         if cached is not None:
             return cached
+    if not hash_if_needed:
+        return "verifying"
     try:
         state = "ok" if sha256_file(path, size).lower() == pin else "corrupt"
     except (OSError, ValueError):
@@ -145,20 +169,26 @@ def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
 
-def encoder_plan(manifest: dict, root: Path) -> dict:
+def encoder_plan(manifest: dict, root: Path, *, hash_if_needed: bool = True) -> dict:
     """Decide whether the existing Z-Image encoder is bit-identical to the FLUX pin."""
     enc = manifest["assets"]["encoder"]
     shared, alt = encoder_paths(manifest, root)
     pin = enc["sha256"]
     size = enc["bytes"]
-    shared_state = file_state(shared, pin, size) if shared.exists() else "missing"
+    shared_state = file_state(shared, pin, size, hash_if_needed=hash_if_needed) if shared.exists() else "missing"
     if shared_state == "ok":
         return {"filename": enc["filename"], "path": shared, "shared": True, "state": "ok",
                 "action": "reuse", "reason": "existing qwen_3_4b.safetensors matches the FLUX pin"}
-    alt_state = file_state(alt, pin, size) if alt.exists() else "missing"
+    if shared_state == "verifying":
+        return {"filename": enc["filename"], "path": shared, "shared": True, "state": "verifying",
+                "action": "verify", "reason": "shared encoder present; SHA-256 not yet verified"}
+    alt_state = file_state(alt, pin, size, hash_if_needed=hash_if_needed) if alt.exists() else "missing"
     if alt_state == "ok":
         return {"filename": enc["alt_filename"], "path": alt, "shared": False, "state": "ok",
                 "action": "keep", "reason": "FLUX-only encoder already installed under a distinct name"}
+    if alt_state == "verifying":
+        return {"filename": enc["alt_filename"], "path": alt, "shared": False, "state": "verifying",
+                "action": "verify", "reason": "FLUX-only encoder present; SHA-256 not yet verified"}
     if shared.exists() and shared_state == "corrupt":
         return {"filename": enc["alt_filename"], "path": alt, "shared": False, "state": "missing",
                 "action": "install-alt",
@@ -230,31 +260,36 @@ def nodes_from_object_info(object_info: dict | None) -> set[str]:
 
 
 def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | None = None,
-                      comfy_root: Path | None = None) -> dict:
+                      comfy_root: Path | None = None, hash_if_needed: bool = True) -> dict:
     """Availability of flux-fast: assets, encoder sharing, and required ComfyUI nodes. Never starts ComfyUI."""
     manifest = manifest or load_manifest()
     root = models_dir(cfg)
     comfy_root = Path(comfy_root) if comfy_root is not None else comfy_dir(cfg)
-    enc_plan = encoder_plan(manifest, root)
+    enc_plan = encoder_plan(manifest, root, hash_if_needed=hash_if_needed)
     assets = {}
-    missing, corrupt = [], []
+    missing, corrupt, verifying = [], [], []
     for key, asset in manifest["assets"].items():
         if key == "encoder":
             dest = enc_plan["path"]
             filename = enc_plan["filename"]
-            state = file_state(dest, asset["sha256"], asset["bytes"]) if dest.exists() else "missing"
+            state = file_state(dest, asset["sha256"], asset["bytes"],
+                              hash_if_needed=hash_if_needed) if dest.exists() else "missing"
             if enc_plan["action"] == "reuse":
                 state = "ok"
+            elif enc_plan["state"] == "verifying":
+                state = "verifying"
         else:
             dest = asset_dest(asset, root)
             filename = asset["filename"]
-            state = file_state(dest, asset["sha256"], asset["bytes"])
+            state = file_state(dest, asset["sha256"], asset["bytes"], hash_if_needed=hash_if_needed)
         assets[key] = {"filename": filename, "path": str(dest), "state": state, "sha256": asset["sha256"],
                        "bytes": asset["bytes"], "revision": asset["revision"]}
         if state == "missing":
             missing.append(filename)
         elif state == "corrupt":
             corrupt.append(filename)
+        elif state == "verifying":
+            verifying.append(filename)
 
     required = list(manifest["required_nodes"])
     if object_info is not None:
@@ -266,9 +301,12 @@ def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | 
             combo = ((info.get("required") or {}).get("type") or [None])[0]
             if isinstance(combo, list):
                 clip_ok = REQUIRED_CLIP_TYPE in combo
-    else:
+    elif hash_if_needed or not (missing or verifying or corrupt):
         present = scan_node_classes(comfy_root)
         clip_ok = clip_type_present(comfy_root) if present else False
+    else:
+        present = set(required)
+        clip_ok = True
     missing_nodes = [name for name in required if name not in present]
     py = comfy_root / "python_embeded" / "python.exe"
     comfy_present = py.is_file() or (comfy_root / "ComfyUI" / "main.py").is_file()
@@ -278,6 +316,9 @@ def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | 
     if missing:
         reasons.append("missing " + ", ".join(missing))
         remediation = "run ops/images-models.ps1 install flux-fast"
+    if verifying:
+        reasons.append("verifying " + ", ".join(verifying))
+        remediation = remediation or "flux-fast assets are being verified"
     if corrupt:
         reasons.append("corrupt " + ", ".join(corrupt))
         remediation = remediation or "re-run ops/images-models.ps1 install flux-fast (corrupt files are not reused)"
@@ -305,6 +346,7 @@ def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | 
         "model_card": manifest["model_card"],
         "available": available,
         "unavailable_reason": reason,
+        "verifying": bool(verifying),
         "remediation": remediation,
         "checkpoint_revision": manifest["assets"]["checkpoint"]["revision"],
         "checkpoint_sha256": manifest["assets"]["checkpoint"]["sha256"],
@@ -468,45 +510,35 @@ def _dir_bytes(path: Path) -> int:
 
 
 def remove_flux_fast(cfg, *, manifest: dict | None = None) -> dict:
-    """Remove files owned solely by flux-fast. Never delete a shared Z-Image encoder."""
+    """Remove files owned solely by flux-fast. Never delete a shared Z-Image encoder or its .part."""
     manifest = manifest or load_manifest()
     root = models_dir(cfg)
-    plan = encoder_plan(manifest, root)
     removed, skipped, recovered = [], [], 0
-    for key, asset in manifest["assets"].items():
-        dest = plan["path"] if key == "encoder" else asset_dest(asset, root)
-        part = dest.with_name(dest.name + ".part")
-        owned = asset.get("owned", True) or (key == "encoder" and not plan["shared"])
-        if key == "encoder" and (plan["shared"] or dest.name == ZIMAGE_ENCODER and dest.exists()
-                                 and file_state(dest, asset["sha256"], asset["bytes"]) == "ok"
-                                 and plan["filename"] == ZIMAGE_ENCODER):
-            skipped.append({"path": str(dest), "reason": "shared with Z-Image fast; left in place"})
-            if part.exists():
-                recovered += part.stat().st_size
-                part.unlink()
-                removed.append(str(part))
-            continue
-        if not owned and dest.name == ZIMAGE_ENCODER:
-            skipped.append({"path": str(dest), "reason": "shared encoder filename; not removing"})
-            continue
-        for path in (dest, part):
+    considered: set[str] = set()
+
+    def consider(subdir: str, name: str, path: Path) -> None:
+        nonlocal recovered
+        key = str(path)
+        if key in considered:
+            return
+        considered.add(key)
+        if not exclusively_owned_by_flux_fast(manifest, subdir, name):
             if path.exists():
-                recovered += path.stat().st_size if path.is_file() else _dir_bytes(path)
-                path.unlink()
-                removed.append(str(path))
-    # leftover parts named after flux-fast assets even if dest was already gone
+                skipped.append({"path": key, "reason": "shared with Z-Image fast; left in place"})
+            return
+        if path.exists():
+            recovered += path.stat().st_size if path.is_file() else _dir_bytes(path)
+            path.unlink()
+            removed.append(key)
+
     for asset in manifest["assets"].values():
-        for name in filter(None, [asset.get("filename"), asset.get("alt_filename")]):
-            part = root / asset["subdir"] / f"{name}.part"
-            if part.exists() and str(part) not in removed:
-                if name == ZIMAGE_ENCODER:
-                    recovered += part.stat().st_size
-                    part.unlink()
-                    removed.append(str(part))
-                    continue
-                recovered += part.stat().st_size
-                part.unlink()
-                removed.append(str(part))
+        names = [asset["filename"]]
+        if asset.get("alt_filename"):
+            names.append(asset["alt_filename"])
+        for name in names:
+            dest = root / asset["subdir"] / name
+            consider(asset["subdir"], name, dest)
+            consider(asset["subdir"], name, dest.with_name(name + ".part"))
     return {"removed": removed, "skipped": skipped, "recovered_bytes": recovered,
             "status": inspect_flux_fast(cfg, manifest=manifest)}
 

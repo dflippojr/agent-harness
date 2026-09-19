@@ -18,9 +18,9 @@ from harness.fileops import ToolError
 from harness.images import workflow
 from harness import images_models as images_models_mod
 from harness.images_models import (
-    RESERVE_BYTES, doctor_warning, download_file, file_state, install_flux_fast, inspect_flux_fast,
-    load_manifest, preflight_graphs, promote_comfyui, redact_url, remove_flux_fast, rollback_comfyui,
-    stage_comfyui, validate_comfyui,
+    RESERVE_BYTES, doctor_warning, download_file, exclusively_owned_by_flux_fast, file_state,
+    install_flux_fast, inspect_flux_fast, load_manifest, pin_registry, preflight_graphs,
+    promote_comfyui, redact_url, remove_flux_fast, rollback_comfyui, stage_comfyui, validate_comfyui,
 )
 
 from test_phase6 import PNG, image_manager
@@ -220,6 +220,10 @@ def test_file_state_caches_hash_and_invalidates_on_change(tmp_path, monkeypatch)
     path.unlink()
     assert file_state(path, digest, len(body)) == "missing"
     assert calls["n"] == 2
+    path.write_bytes(body)
+    os.utime(path, ns=(time.time_ns(), time.time_ns()))
+    assert file_state(path, digest, len(body), hash_if_needed=False) == "verifying"
+    assert calls["n"] == 2
 
 
 def test_repeated_inspect_and_status_do_not_rehash_unchanged_files(tmp_path, monkeypatch):
@@ -314,6 +318,78 @@ def test_install_hash_failure_space_shared_and_idempotent_remove(tmp_path):
         assert any("shared" in s["reason"] for s in first["skipped"])
     finally:
         stop_fixture(server)
+
+
+def test_pin_registry_owns_shared_encoder_for_zimage_and_flux():
+    manifest = load_manifest()
+    pins = pin_registry(manifest)
+    assert ("fast", "text_encoders", "qwen_3_4b.safetensors") in pins
+    assert ("flux-fast", "text_encoders", "qwen_3_4b.safetensors") in pins
+    assert ("flux-fast", "text_encoders", "qwen_3_4b_flux2.safetensors") in pins
+    assert not exclusively_owned_by_flux_fast(manifest, "text_encoders", "qwen_3_4b.safetensors")
+    assert exclusively_owned_by_flux_fast(manifest, "text_encoders", "qwen_3_4b_flux2.safetensors")
+    assert exclusively_owned_by_flux_fast(manifest, "diffusion_models", "flux-2-klein-4b-fp8.safetensors")
+
+
+@pytest.mark.parametrize("dest_present,part_present", [
+    (False, True),
+    (True, False),
+    (False, False),
+    (True, True),
+])
+def test_remove_flux_fast_never_deletes_shared_encoder_or_part(tmp_path, dest_present, part_present):
+    """Z-Image may be mid-download as qwen_3_4b.safetensors.part; remove flux-fast must leave it."""
+    payloads = {"checkpoint": b"CKPT-DATA", "vae": b"VAE-DATA", "encoder": b"ENC-DATA"}
+    cfg = cfg_for(tmp_path)
+    plant_comfy(Path(cfg.comfy_dir))
+    manifest = tiny_manifest("http://unused", payloads)
+    root = Path(cfg.models_dir)
+    plant_asset(root / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors", payloads["checkpoint"])
+    plant_asset(root / "vae" / "flux2-vae.safetensors", payloads["vae"])
+    dest = root / "text_encoders" / "qwen_3_4b.safetensors"
+    part = dest.with_name(dest.name + ".part")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest_present:
+        dest.write_bytes(payloads["encoder"])
+    if part_present:
+        part.write_bytes(b"partial-encoder-bytes")
+    out = remove_flux_fast(cfg, manifest=manifest)
+    assert dest.exists() is dest_present
+    if dest_present:
+        assert dest.read_bytes() == payloads["encoder"]
+    assert part.exists() is part_present
+    if part_present:
+        assert part.read_bytes() == b"partial-encoder-bytes"
+    assert not (root / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors").exists()
+    assert not (root / "vae" / "flux2-vae.safetensors").exists()
+    if dest_present or part_present:
+        assert any("qwen_3_4b.safetensors" in s["path"] for s in out["skipped"])
+    assert not any(Path(p).name.startswith("qwen_3_4b.safetensors") for p in out["removed"])
+
+
+def test_remove_flux_fast_deletes_alt_encoder_part_but_not_shared_part(tmp_path):
+    payloads = {"checkpoint": b"C", "vae": b"V", "encoder": b"E-PIN"}
+    cfg = cfg_for(tmp_path)
+    plant_comfy(Path(cfg.comfy_dir))
+    manifest = tiny_manifest("http://unused", payloads)
+    root = Path(cfg.models_dir)
+    plant_asset(root / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors", payloads["checkpoint"])
+    plant_asset(root / "vae" / "flux2-vae.safetensors", payloads["vae"])
+    plant_asset(root / "text_encoders" / "qwen_3_4b.safetensors", b"z-image-original")
+    shared_part = root / "text_encoders" / "qwen_3_4b.safetensors.part"
+    alt = root / "text_encoders" / "qwen_3_4b_flux2.safetensors"
+    alt_part = alt.with_name(alt.name + ".part")
+    shared_part.parent.mkdir(parents=True, exist_ok=True)
+    shared_part.write_bytes(b"z-image-resume")
+    alt.write_bytes(payloads["encoder"])
+    alt_part.write_bytes(b"flux-only-partial")
+    out = remove_flux_fast(cfg, manifest=manifest)
+    shared = root / "text_encoders" / "qwen_3_4b.safetensors"
+    assert shared.read_bytes() == b"z-image-original"
+    assert shared_part.read_bytes() == b"z-image-resume"
+    assert not alt.exists() and not alt_part.exists()
+    assert any(str(shared_part) == s["path"] or s["path"].endswith("qwen_3_4b.safetensors.part")
+               for s in out["skipped"])
 
 
 def test_install_alt_encoder_when_shared_hash_differs(tmp_path):
@@ -447,6 +523,7 @@ def enable_flux(m, tmp_path, payloads, manifest):
     plant_asset(root / "text_encoders" / "qwen_3_4b.safetensors", payloads["encoder"])
     m.images.flux_manifest = manifest
     m.images.object_info = object_info_for()
+    inspect_flux_fast(m.images.cfg, manifest=manifest, object_info=object_info_for(), hash_if_needed=True)
 
 
 def test_http_and_tool_select_flux_fast_without_fallback(tmp_path):
@@ -502,6 +579,56 @@ def test_http_and_tool_select_flux_fast_without_fallback(tmp_path):
         assert state2["graphs"][-1]["62"]["inputs"]["steps"] == 4
         await m2.stop()
     asyncio.run(body())
+
+
+def test_api_root_and_health_stay_responsive_during_cold_flux_hash(tmp_path, monkeypatch):
+    """A cold SHA-256 of flux-fast assets must not run on GET /api/v1 or /health."""
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+
+    images_models_mod.clear_file_state_cache()
+    payloads = {"checkpoint": b"CKPT-DATA", "vae": b"VAE-DATA", "encoder": b"ENC-DATA"}
+    m, _, _ = image_manager(tmp_path)
+    m.cfg.images.models_dir = str(tmp_path / "models")
+    m.cfg.images.comfy_dir = str(tmp_path / "comfy")
+    m.images.cfg.models_dir = m.cfg.images.models_dir
+    m.images.cfg.comfy_dir = m.cfg.images.comfy_dir
+    manifest = tiny_manifest("http://unused", payloads)
+    plant_comfy(Path(m.cfg.images.comfy_dir))
+    root = Path(m.cfg.images.models_dir)
+    plant_asset(root / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors", payloads["checkpoint"])
+    plant_asset(root / "vae" / "flux2-vae.safetensors", payloads["vae"])
+    plant_asset(root / "text_encoders" / "qwen_3_4b.safetensors", payloads["encoder"])
+    m.images.flux_manifest = manifest
+    m.images.object_info = object_info_for()
+
+    real = images_models_mod.sha256_file
+    hashing = threading.Event()
+
+    def slow_hash(path, expected=None):
+        hashing.set()
+        time.sleep(1.2)
+        return real(path, expected)
+
+    monkeypatch.setattr(images_models_mod, "sha256_file", slow_hash)
+
+    def hash_in_background():
+        inspect_flux_fast(m.images.cfg, manifest=manifest, object_info=object_info_for(), hash_if_needed=True)
+
+    thread = threading.Thread(target=hash_in_background, daemon=True)
+    thread.start()
+    assert hashing.wait(2)
+    with TestClient(create_app(m)) as client:
+        started = time.monotonic()
+        health = client.get("/health")
+        root_json = client.get("/api/v1").json()
+        elapsed = time.monotonic() - started
+        assert health.status_code == 200 and health.json()["ok"] is True
+        assert elapsed < 0.75
+        flux = root_json["image_modes"]["flux-fast"]
+        assert flux["available"] is False
+        assert flux["verifying"] is True or "verifying" in (flux.get("unavailable_reason") or "")
+    thread.join(timeout=8)
 
 
 def test_quality_fast_and_flux_fast_share_one_gpu_batch(tmp_path):

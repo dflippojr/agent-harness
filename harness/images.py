@@ -524,7 +524,8 @@ class ImageService:
                               "checkpoint_hash": flux["checkpoint_sha256"],
                               "supported_resolutions": list(flux["supported_resolutions"]),
                               "unavailable_reason": flux["unavailable_reason"],
-                              "remediation": flux["remediation"]})
+                              "remediation": flux["remediation"],
+                              "verifying": bool(flux.get("verifying"))})
                 if not available:
                     entry["setup"] = ". ".join(
                         value for value in (flux["unavailable_reason"], flux["remediation"]) if value)
@@ -576,7 +577,9 @@ class ImageService:
     def _warm_flux_status(self) -> None:
         """Hash flux-fast assets off the event loop so the first status poll is O(stat)."""
         try:
-            self.flux_status()
+            from .images_models import inspect_flux_fast
+            inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
+                              hash_if_needed=True)
         except (OSError, ValueError, RuntimeError):
             log.debug("flux-fast inspect warmup failed", exc_info=True)
 
@@ -601,7 +604,8 @@ class ImageService:
 
     def flux_status(self) -> dict:
         from .images_models import inspect_flux_fast
-        return inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest)
+        return inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
+                                 hash_if_needed=False)
 
     def mode_reports(self) -> list[dict]:
         """List-shaped compatibility view of the canonical mode catalog."""
