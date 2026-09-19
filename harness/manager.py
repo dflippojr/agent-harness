@@ -443,7 +443,7 @@ class Manager:
         if self.skills is not None:
             from .skills import SKILLS_TOOL_PROMPT, SkillError, skill_instructions
             try:
-                frozen = self.skills.resolve_for_session(project, skills or [], session_meta, missing=skill_missing)
+                frozen = self.skills.resolve_for_session(project, skills, session_meta, missing=skill_missing)
             except SkillError as e:
                 raise HarnessError(e.status, str(e)) from e
             if frozen:

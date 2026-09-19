@@ -653,14 +653,14 @@ def test_enable_allowlist_rollback_uninstall(tmp_path):
     assert inst["current_version"] == 2 and not inst["enabled"]
     store.set_enabled("commit-style", True)
     store.set_allowlist("commit-style", ["scratch"], ["scratch", "guarded"])
-    frozen = store.resolve_for_session("scratch", [], {"owner_id": "owner", "app_id": "", "job_id": ""})
+    frozen = store.resolve_for_session("scratch", None, {"owner_id": "owner", "app_id": "", "job_id": ""})
     assert frozen[0]["version"] == 2
     store.rollback("commit-style")
-    frozen = store.resolve_for_session("scratch", [], {"owner_id": "owner", "app_id": "", "job_id": ""})
+    frozen = store.resolve_for_session("scratch", None, {"owner_id": "owner", "app_id": "", "job_id": ""})
     assert frozen[0]["version"] == 1
     store.uninstall("commit-style")
-    assert store.resolve_for_session("scratch", [], {"owner_id": "owner", "app_id": "", "job_id": ""}) == []
-    assert store.resolve_for_session("scratch", [], {"owner_id": "owner", "app_id": "app", "job_id": ""}) == []
+    assert store.resolve_for_session("scratch", None, {"owner_id": "owner", "app_id": "", "job_id": ""}) == []
+    assert store.resolve_for_session("scratch", None, {"owner_id": "owner", "app_id": "app", "job_id": ""}) == []
 
 
 def test_reinstall_after_uninstall_reuses_version_history(tmp_path):
@@ -719,7 +719,7 @@ def test_reinstall_new_bytes_after_uninstall_keeps_rollback(tmp_path):
     assert restored["version"] == 2
     store.set_enabled("commit-style", True)
     store.set_allowlist("commit-style", ["scratch"], ["scratch"])
-    frozen = store.resolve_for_session("scratch", [], {"owner_id": "owner", "app_id": "", "job_id": ""})
+    frozen = store.resolve_for_session("scratch", None, {"owner_id": "owner", "app_id": "", "job_id": ""})
     assert frozen[0]["version"] == 2
     rolled = store.rollback("commit-style")
     assert rolled["version"] == 1
@@ -905,6 +905,41 @@ def test_owner_api_and_guest_blocked(tmp_path):
         created = client.post("/sessions", json={"prompt": "hello", "skills": ["commit-style"]},
                               headers={"Tailscale-User-Login": "me@example.com"}).json()
     assert created["skills"][0]["content_hash"] == row["content_hash"]
+
+
+def test_explicit_empty_skills_excludes_allowlisted(tmp_path):
+    """POST skills=[] is an include list; omitting skills keeps project allowlist defaults."""
+    cfg = enable_skills(make_cfg(tmp_path))
+    cfg.allowed_logins = ["me@example.com"]
+    m = Manager(cfg, chat=Script([Completion(content="hi")]))
+    m.skills._run_sandbox = in_process_sandbox
+    store = m.skills
+    session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
+    asyncio.run(store.propose_from_tool({
+        "slug": "commit-style", "title": "Commit style",
+        "purpose": "Keep git commit messages conventional and short.",
+        "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
+    }, session))
+    row = store.db.list_skill_proposals()[0]
+    store.install(row["id"], row["content_hash"])
+    store.set_enabled("commit-style", True)
+    store.set_allowlist("commit-style", ["scratch"], list(cfg.projects))
+    headers = {"Tailscale-User-Login": "me@example.com"}
+    client = TestClient(create_app(m))
+    with client:
+        omitted = client.post("/sessions", json={"prompt": "hello", "project": "scratch"}, headers=headers)
+        assert omitted.status_code == 201
+        assert omitted.json()["skills"][0]["slug"] == "commit-style"
+        empty = client.post("/sessions", json={"prompt": "hello", "project": "scratch", "skills": []},
+                            headers=headers)
+        assert empty.status_code == 201
+        assert empty.json()["skills"] == []
+        enabled = client.get("/skills/enabled", headers=headers).json()
+        assert enabled[0]["slug"] == "commit-style"
+        assert "scratch" in enabled[0]["projects"]
+        js = client.get("/static/app.js").text
+        assert "skill-opt" in js
+        assert "Checked skills are injected" in js
 
 
 def test_member_gets_403_on_every_skills_route(tmp_path):

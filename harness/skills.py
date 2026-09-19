@@ -2,6 +2,8 @@
 
 V1 is instruction-only. Agents may stage a draft with `propose_skill`; only the owner can install an
 exact validated hash. Skills never add tools, change approval policy, expand access, or run code.
+New sessions: omit ``skills`` to inject the project's allowlist; an explicit list (including empty)
+is the include set and does not union the allowlist.
 """
 
 from __future__ import annotations
@@ -738,7 +740,11 @@ class SkillStore:
 
     def resolve_for_session(self, project: str, selected: list[str] | None, session_meta: dict,
                             *, missing: str = "error") -> list[dict]:
-        """Deterministic freeze: enabled owner-approved versions only. Apps/jobs/guests/Chat get none."""
+        """Deterministic freeze: enabled owner-approved versions only. Apps/jobs/guests/Chat get none.
+
+        ``selected is None`` (field omitted) injects the project's allowlisted enabled skills.
+        An explicit list — including ``[]`` — is the include set and does not union the allowlist.
+        """
         if not self.cfg.enabled or not session_eligible(session_meta):
             return []
         enabled = {r["slug"]: r for r in self.db.list_skill_installed() if r.get("enabled")}
@@ -753,9 +759,10 @@ class SkillStore:
                 continue
             if slug not in chosen:
                 chosen.append(slug)
-        for slug in self.db.skill_allowlisted_slugs(project):
-            if slug in enabled and slug not in chosen:
-                chosen.append(slug)
+        if selected is None:
+            for slug in self.db.skill_allowlisted_slugs(project):
+                if slug in enabled and slug not in chosen:
+                    chosen.append(slug)
         frozen = []
         for slug in chosen:
             inst = enabled[slug]

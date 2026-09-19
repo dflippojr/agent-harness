@@ -713,6 +713,7 @@ async function viewNew() {
         if (targetSwitch) for (const b of targetSwitch.children) b.classList.toggle("primary", b.dataset.target === target);
         showTarget();
         showProjectHint();
+        syncSkillChecks();
         projectCreator.open = false;
         toast(`Project ${created.name} created`);
       } catch (err) {
@@ -790,17 +791,28 @@ async function viewNew() {
     showTarget();
     showProjectHint();
     prompt.value = t.prompt;
+    syncSkillChecks();
   });
 
   const start = h("button", { class: "btn primary", type: "submit" }, "Start");
   let enabledSkills = [];
   try { enabledSkills = await api("/skills/enabled"); } catch (_) { enabledSkills = []; }
+  const skillInputs = [];
   const skillBoxes = enabledSkills.map((sk) => {
-    const box = h("input", { type: "checkbox", value: sk.slug });
+    const box = h("input", { type: "checkbox", class: "skill-opt", value: sk.slug });
+    skillInputs.push(box);
     return h("label", { class: "row", style: "gap:8px;align-items:flex-start;margin:6px 0" }, box,
       h("span", {}, h("strong", {}, sk.title || sk.slug),
         h("div", { class: "muted small" }, sk.purpose || `v${sk.version} · ${sk.content_hash.slice(0, 12)}`)));
   });
+  const syncSkillChecks = () => {
+    for (const box of skillInputs) {
+      const sk = enabledSkills.find((s) => s.slug === box.value);
+      box.checked = (sk?.projects || []).includes(project.value);
+    }
+  };
+  syncSkillChecks();
+  project.addEventListener("change", syncSkillChecks);
   const form = h("form", {
     onsubmit: async (e) => {
       e.preventDefault();
@@ -808,7 +820,7 @@ async function viewNew() {
       if (backend.value === "local" && !(await confirmGpuQueue("This task"))) return;
       start.disabled = true;
       try {
-        const selectedSkills = [...form.querySelectorAll("input[type=checkbox]:checked")].map((el) => el.value);
+        const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
         const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
           backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null,
           skills: selectedSkills } });
@@ -827,7 +839,7 @@ async function viewNew() {
   isMember() ? null : h("label", {}, "Backend"), isMember() ? null : backend, isMember() ? null : backendState,
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
-  skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Optional owner-approved instruction skills for this session. They stay frozen even if you disable them later."), ...skillBoxes] : null,
+  skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },
     isMember() ? null : h("button", {
       class: "btn", type: "button",

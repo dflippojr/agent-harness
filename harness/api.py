@@ -37,7 +37,7 @@ class CreateSession(BaseModel):
     backend: str = "local"
     model: str | None = None
     title: str | None = None
-    skills: list[str] = []
+    skills: list[str] | None = None
 
 
 class CreateProject(BaseModel):
