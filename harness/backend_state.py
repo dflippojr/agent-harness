@@ -176,6 +176,32 @@ def apply_prefs(manager) -> None:
 
 def save_prefs(manager, name: str, model: str | None = None, effort: str | None = None) -> dict:
     """Persist a default model/effort for `name` (`local` or a hosted backend) and apply it now."""
+    settings = getattr(manager, "settings", None)
+    if settings is not None:
+        changes = {}
+        if name == "local":
+            if model is not None:
+                changes["backends.local.model"] = model
+        elif f"backends.{name}.model" in settings.registry.specs or name in manager.cfg.backends:
+            if model is not None:
+                changes[f"backends.{name}.model"] = model
+            if effort is not None:
+                changes[f"backends.{name}.effort"] = effort
+        else:
+            raise KeyError(name)
+        if not changes:
+            raise ValueError("set model or effort")
+        try:
+            settings.patch_admin(changes, settings.admin_view()["revision"])
+        except Exception as e:
+            from .settings_service import SettingsError
+            if isinstance(e, SettingsError):
+                raise ValueError(str(e)) from e
+            raise
+        if name == "local":
+            return {"model": manager.cfg.default_model}
+        backend = manager.cfg.backends[name]
+        return {"model": backend.model, "effort": backend.effort}
     prefs = _prefs(manager)
     spec = dict(prefs.get(name) or {})
     if name == "local":

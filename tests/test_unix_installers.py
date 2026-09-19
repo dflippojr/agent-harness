@@ -109,3 +109,4 @@ def test_macos_launchd_has_docker_path_and_installer_waits_for_daemon():
     assert "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" in installer
     assert 'curl -fsS "http://127.0.0.1:$port/health"' in installer
     assert "daemon did not become ready within 60 seconds" in installer
+    assert "HARNESS_SUPERVISED=1" in (ROOT / "install/run-daemon.sh").read_text(encoding="utf-8")

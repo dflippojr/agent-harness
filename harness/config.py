@@ -5,16 +5,50 @@ from __future__ import annotations
 import os
 import re
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+PROJECTS_FILE = "projects.yaml"
 MODULE_NAMES = (
     "local_model", "homelab", "memory_library", "images", "jobs", "gpu_guard", "runners",
     "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills",
 )
+# Optional modules whose on/off switch is ``cfg.<section>.enabled``. The rest
+# (local_model, homelab, runners) are install-selected only.
+MODULE_ENABLE_SECTIONS = {
+    "web": "web",
+    "search": "search",
+    "jobs": "jobs",
+    "endpoint": "endpoint",
+    "images": "images",
+    "gpu_guard": "gpu_guard",
+    "notifications": "notify",
+    "backup": "backup",
+    "memory_library": "memory_library",
+    "remote_control": "remote_control",
+    "skills": "skills",
+}
+
+
+def module_effective(cfg: "Config", name: str) -> bool:
+    """True when the module is installed and switched on.
+
+    ``cfg.installed.<name>`` is installer/profile selection. ``cfg.<section>.enabled``
+    is the operational switch (YAML, then managed overlay). ``cfg.modules`` stays the
+    YAML-time snapshot and is not written by overlay setters. Capabilities, /health,
+    /api/v1 features, and Manager tool construction all use this function.
+    """
+    installed = getattr(cfg, "installed", None)
+    if installed is None or not bool(getattr(installed, name, False)):
+        return False
+    section_name = MODULE_ENABLE_SECTIONS.get(name)
+    if section_name is None:
+        return True
+    section = getattr(cfg, section_name, None)
+    return bool(getattr(section, "enabled", False))
 
 
 @dataclass
@@ -118,6 +152,8 @@ class BackupConfig:
     dir: str = "D:/My Backups/agent-harness"
     at: str = "03:30"        # local time
     keep_days: int = 14
+    image_archive_keep_days: int = 0       # owner-triggered retention only; 0 keeps images indefinitely
+    image_archive_min_free_gb: float = 1   # warn without invalidating a database snapshot
 
 
 @dataclass
@@ -284,6 +320,8 @@ class Config:
     projects: dict[str, Project]
     profile: str = "full"
     modules: ModulesConfig = field(default_factory=ModulesConfig)
+    installed: ModulesConfig = field(default_factory=ModulesConfig)
+    config_dir: Path = field(default_factory=lambda: ROOT / "config")
     # Opaque names to owner-managed files. Only the names may be stored in SQLite; paths stay in local config.
     provider_secret_files: dict[str, str] = field(default_factory=dict)
     backends: dict[str, BackendConfig] = field(default_factory=dict)
@@ -324,7 +362,11 @@ class Config:
 
     @property
     def projects_overlay_path(self) -> Path:
-        return self.data_dir / "projects.yaml"
+        return self.data_dir / PROJECTS_FILE
+
+    def module_effective(self, name: str) -> bool:
+        """Installed AND switched on. The single source for capabilities/features/Manager."""
+        return module_effective(self, name)
 
     def capabilities(self) -> dict:
         """Machine-readable service profile and module catalog for first- and third-party clients."""
@@ -334,8 +376,10 @@ class Config:
                 "sessions": True, "provider_adapters": True, "approvals": True, "events": True,
                 "scoped_tokens": True, "storage": True, "capability_discovery": True,
             },
-            "modules": asdict(self.modules),
+            "modules": {name: module_effective(self, name) for name in MODULE_NAMES},
             "hosted_backends": [name for name, cfg in self.backends.items() if cfg.enabled],
+            "config_registry": True,
+            "supervised_restart": os.environ.get("HARNESS_SUPERVISED", "").strip() in ("1", "true", "yes"),
         }
 
 
@@ -416,43 +460,54 @@ def _load_guests(raw) -> list[GuestAccess]:
     return guests
 
 
-def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
-    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+def _read_yaml(path: Path) -> dict:
+    return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
+
+
+def _apply_profile_overlay(raw: dict, profile_raw: dict) -> None:
+    """Fold install.ps1's profile.yaml into `raw` in place; existing machine settings always win."""
+    if not isinstance(profile_raw, dict):
+        raise ValueError("profile.yaml must contain a mapping")
+    for key in ("profile", "modules"):
+        if key in profile_raw:
+            raw[key] = profile_raw[key]
+    # A profile can supply a local-model starter when a hosted-only install is later promoted to full. Existing
+    # full-install model choices remain authoritative.
+    if not (raw.get("models") or {}) and profile_raw.get("models"):
+        raw["models"] = profile_raw["models"]
+        raw["default_model"] = profile_raw.get("default_model") or ""
+    # A service overlay supplies safe hosted-provider defaults only when an existing full install did not
+    # already configure that backend. Machine-specific choices in harness.yaml/local.yaml always win.
+    profile_backends = profile_raw.get("backends") or {}
+    if not isinstance(profile_backends, dict):
+        raise ValueError("profile backends must be a mapping")
+    existing_backends = raw.get("backends") or {}
+    if not isinstance(existing_backends, dict):
+        raise ValueError("backends must be a mapping")
+    raw["backends"] = {name: {**(spec or {}), **(existing_backends.get(name) or {})}
+                       for name, spec in profile_backends.items()} | existing_backends
+
+
+def _read_raw_config(config_dir: Path) -> dict:
+    """harness.yaml, then the untracked harness.local.yaml, then install.ps1's profile.yaml."""
     raw = yaml.safe_load((config_dir / "harness.yaml").read_text(encoding="utf-8")) or {}
     # Machine-specific values (tailnet URL, logins) live in an untracked harness.local.yaml; its top-level
     # sections are merged over harness.yaml's (one level deep).
-    local_file = config_dir / "harness.local.yaml"
-    if local_file.exists():
-        for key, value in (yaml.safe_load(local_file.read_text(encoding="utf-8")) or {}).items():
-            if isinstance(value, dict) and isinstance(raw.get(key), dict):
-                raw[key] = {**raw[key], **value}
-            else:
-                raw[key] = value
+    for key, value in _read_yaml(config_dir / "harness.local.yaml").items():
+        if isinstance(value, dict) and isinstance(raw.get(key), dict):
+            raw[key] = {**raw[key], **value}
+        else:
+            raw[key] = value
     # install.ps1 writes this small overlay independently of harness.yaml so switching between the full and service
     # profiles never destroys an existing machine's paths, secrets, or integration settings.
     profile_file = config_dir / "profile.yaml"
     if profile_file.exists():
-        profile_raw = yaml.safe_load(profile_file.read_text(encoding="utf-8")) or {}
-        if not isinstance(profile_raw, dict):
-            raise ValueError("profile.yaml must contain a mapping")
-        for key in ("profile", "modules"):
-            if key in profile_raw:
-                raw[key] = profile_raw[key]
-        # A profile can supply a local-model starter when a hosted-only install is later promoted to full. Existing
-        # full-install model choices remain authoritative.
-        if not (raw.get("models") or {}) and profile_raw.get("models"):
-            raw["models"] = profile_raw["models"]
-            raw["default_model"] = profile_raw.get("default_model") or ""
-        # A service overlay supplies safe hosted-provider defaults only when an existing full install did not
-        # already configure that backend. Machine-specific choices in harness.yaml/local.yaml always win.
-        profile_backends = profile_raw.get("backends") or {}
-        if not isinstance(profile_backends, dict):
-            raise ValueError("profile backends must be a mapping")
-        existing_backends = raw.get("backends") or {}
-        if not isinstance(existing_backends, dict):
-            raise ValueError("backends must be a mapping")
-        raw["backends"] = {name: {**(spec or {}), **(existing_backends.get(name) or {})}
-                           for name, spec in profile_backends.items()} | existing_backends
+        _apply_profile_overlay(raw, yaml.safe_load(profile_file.read_text(encoding="utf-8")) or {})
+    return raw
+
+
+def _resolve_profile(raw: dict) -> tuple[str, dict, ModulesConfig]:
+    """The validated profile name, its raw module mapping, and the modules it selects."""
     profile = str(raw.get("profile") or "full").strip().lower()
     if profile not in ("full", "service"):
         raise ValueError("profile must be 'full' or 'service'")
@@ -464,45 +519,54 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         raise ValueError(f"unknown modules {unknown_modules}; known: {', '.join(MODULE_NAMES)}")
     module_defaults = profile == "full"
     selected = ModulesConfig(**{name: bool(raw_modules.get(name, module_defaults)) for name in MODULE_NAMES})
-    provider_secret_files = raw.get("provider_secret_files") or {}
-    if not isinstance(provider_secret_files, dict) or any(not isinstance(k, str) or not isinstance(v, str)
-                                                          for k, v in provider_secret_files.items()):
-        raise ValueError("provider_secret_files must map opaque names to file paths")
-    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
-    projects_file = config_dir / "projects.yaml"
-    raw_projects = (yaml.safe_load(projects_file.read_text(encoding="utf-8")) or {}) if projects_file.exists() else {}
-    overlay_file = resolved_data_dir / "projects.yaml"
-    raw_overlay = (yaml.safe_load(overlay_file.read_text(encoding="utf-8")) or {}) if overlay_file.exists() else {}
+    return profile, raw_modules, selected
 
-    models = {
-        name: ModelConfig(name=name, **spec) for name, spec in (raw.get("models") or {}).items()
-    }
+
+def _gate_project(project: Project, selected: ModulesConfig) -> Project | None:
+    """Mask a project's optional features by the selected modules; None if its runner target is unavailable."""
+    if project.target != "tower" and not selected.runners:
+        return None
+    project.homelab = project.homelab and selected.homelab
+    project.memory_library = project.memory_library and selected.memory_library
+    project.web = project.web and selected.web
+    project.images = project.images and selected.images
+    return project
+
+
+def _load_projects(raw_projects: dict, raw_overlay: dict, selected: ModulesConfig) -> dict[str, Project]:
     projects: dict[str, Project] = {}
     for name, spec in (raw_projects.get("projects") or {}).items():
-        spec = spec or {}
-        target = str(spec.get("target") or "tower")
-        if target != "tower" and not selected.runners:
-            continue
-        project = _project_from_spec(name, spec)
-        project.homelab = project.homelab and selected.homelab
-        project.memory_library = project.memory_library and selected.memory_library
-        project.web = project.web and selected.web
-        project.images = project.images and selected.images
-        projects[name] = project
+        project = _gate_project(_project_from_spec(name, spec or {}), selected)
+        if project is not None:
+            projects[name] = project
     if not projects:
         projects["scratch"] = Project(name="scratch", description="Empty workspace for each session.")
     # The checked-in catalog wins if an owner later defines the same name there. The generated overlay is private
     # daemon state and is deliberately never written back to config/projects.yaml.
     for name, spec in (raw_overlay.get("projects") or {}).items():
-        if name not in projects:
-            project = _project_from_spec(name, spec, managed=True)
-            if project.target != "tower" and not selected.runners:
-                continue
-            project.homelab = project.homelab and selected.homelab
-            project.memory_library = project.memory_library and selected.memory_library
-            project.web = project.web and selected.web
-            project.images = project.images and selected.images
+        if name in projects:
+            continue
+        project = _gate_project(_project_from_spec(name, spec, managed=True), selected)
+        if project is not None:
             projects[name] = project
+    return projects
+
+
+def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
+    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+    raw = _read_raw_config(config_dir)
+    profile, raw_modules, selected = _resolve_profile(raw)
+    provider_secret_files = raw.get("provider_secret_files") or {}
+    if not isinstance(provider_secret_files, dict) or any(not isinstance(k, str) or not isinstance(v, str)
+                                                          for k, v in provider_secret_files.items()):
+        raise ValueError("provider_secret_files must map opaque names to file paths")
+    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
+
+    models = {
+        name: ModelConfig(name=name, **spec) for name, spec in (raw.get("models") or {}).items()
+    }
+    projects = _load_projects(_read_yaml(config_dir / PROJECTS_FILE),
+                              _read_yaml(resolved_data_dir / PROJECTS_FILE), selected)
 
     raw_homelab = dict(raw.get("homelab") or {})
     services = {
@@ -572,6 +636,8 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         projects=projects,
         profile=profile,
         modules=modules,
+        installed=selected,
+        config_dir=config_dir,
         provider_secret_files=provider_secret_files,
         backends=backends,
         public_url=(raw.get("public_url") or "").rstrip("/"),
@@ -597,6 +663,15 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),
     )
+    _validate_loaded(cfg)
+    from .settings_keys import build_registry
+    registry = build_registry(cfg)
+    cfg._inherited = {spec.key: spec.getter(cfg) for spec in registry.writable_admin()}
+    _apply_managed_overlay(cfg)
+    return cfg
+
+
+def _validate_loaded(cfg: Config) -> None:
     if cfg.modules.local_model and not cfg.models:
         raise ValueError("the local_model module requires at least one configured model")
     if cfg.default_model and cfg.default_model not in cfg.models:
@@ -612,4 +687,14 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                 raise ValueError(f"project {project.name}: target {project.target!r} is not in runners")
             if project.homelab:
                 raise ValueError(f"project {project.name}: homelab tools only run on the tower")
-    return cfg
+
+
+def _apply_managed_overlay(cfg: Config) -> None:
+    """Apply registered admin keys from data_dir/managed-config.json after YAML loading.
+
+    An invalid or unconfirmed managed candidate restores the last known good overlay.
+    If that overlay is also unusable, both files are quarantined and YAML defaults
+    remain in effect. Invalid base/local/profile YAML is never masked by this fallback.
+    """
+    from .settings_service import SettingsService
+    SettingsService(cfg).apply_overlay()

@@ -122,15 +122,30 @@ function showFab(href, label) {
 let currentMe = { role: "owner" };
 async function currentUser() {
   const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
-  try { currentMe = await api("/me", { surface: bootstrap }); } catch (_) { currentMe = { role: "owner" }; }
+  try {
+    currentMe = await api("/me", { surface: bootstrap });
+  } catch (_) {
+    try { currentMe = await api("/me", { surface: "app" }); }
+    catch (_) { currentMe = { role: "guest" }; }
+  }
   return currentMe;
 }
 function isGuest() { return currentMe.role === "guest"; }
+function isMember() { return currentMe.role === "member"; }
+function isOwner() { return currentMe.role === "owner"; }
 
 function paintGuestChrome() {
   const banner = document.getElementById("guest-banner");
   const guest = isGuest();
+  const member = isMember();
   document.documentElement.classList.toggle("guest", guest);
+  document.documentElement.classList.toggle("member", member);
+  if ($feature) {
+    for (const opt of $feature.options) {
+      if (opt.value === "jobs" || opt.value === "images") opt.hidden = member || guest;
+    }
+    if (member && ($feature.value === "jobs" || $feature.value === "images")) $feature.value = "agents";
+  }
   if (!banner) return;
   if (!guest) {
     banner.hidden = true;
@@ -156,6 +171,7 @@ function toast(text, ms = 2600) {
 
 function apiSurface(path, method) {
   if (isGuest() && !agentHarnessWeb.token) return "legacy";
+  if (isMember()) return "app";
   const route = path.split("?")[0];
   if (route === "/sessions" && (method === "GET" || method === "POST")) return "app";
   if (/^\/sessions\/[^/]+$/.test(route) && method === "GET") return "app";
@@ -168,7 +184,11 @@ async function api(path, { method = "GET", body, surface } = {}) {
   return agentHarnessWeb.request(path, { method, body, surface: surface || apiSurface(path, method) });
 }
 
-const ownerSurface = () => (isGuest() && !agentHarnessWeb.token ? "legacy" : "admin");
+function ownerSurface() {
+  if (isMember()) return "app";
+  if (isGuest() && !agentHarnessWeb.token) return "legacy";
+  return "admin";
+}
 
 function daemonImage(path, attrs = {}) {
   const img = h("img", { ...attrs, alt: attrs.alt || "" });
@@ -410,7 +430,12 @@ async function route() {
     parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
     || ((parts[0] === "profile" || parts[0] === "settings")
       && ["notifications", "apps", "endpoint"].includes(parts[1])));
+  const memberBlocked = isMember() && (
+    parts[0] === "jobs" || parts[0] === "images"
+    || ((parts[0] === "profile" || parts[0] === "settings")
+      && ["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"].includes(parts[1])));
   if (guestBlocked) { go(parts[0] === "jobs" ? "#/jobs" : "#/profile", true); return; }
+  if (memberBlocked) { go(parts[0] === "profile" || parts[0] === "settings" ? "#/profile" : "#/", true); return; }
   try {
     if (parts.length === 0) await viewList();
     else if (parts[0] === "new") await viewNew();
@@ -537,7 +562,7 @@ async function viewList() {
 
   const render = async () => {
     const [freshSessions, queue, gpu, projects] = await Promise.all([
-      api("/sessions"), api("/queue"), api("/gpu").catch(() => null), api("/projects")]);
+      api("/sessions"), api("/queue"), isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
     sessions = freshSessions;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
       .sort((a, b) => (a === "tower" ? -1 : b === "tower" ? 1 : a.localeCompare(b)));
@@ -579,7 +604,7 @@ async function viewList() {
   for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
     handlers[type] = refresh;
   }
-  onLeave(openStream(() => agentHarnessWeb.url("/events", isGuest() && !agentHarnessWeb.token ? "legacy" : "admin"), handlers,
+  onLeave(openStream(() => agentHarnessWeb.url("/events", ownerSurface()), handlers,
     { authorized: !(isGuest() && !agentHarnessWeb.token) }));
   const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
   document.addEventListener("visibilitychange", onVisible);
@@ -588,6 +613,7 @@ async function viewList() {
 
 // ---------- new task ----------
 async function confirmGpuQueue(label) {
+  if (isMember()) return true;
   try {
     const gpu = await api("/gpu");
     if (!gpu.manual) return true;
@@ -600,7 +626,9 @@ async function confirmGpuQueue(label) {
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
   let [projects, models, allTemplates, backends] = await Promise.all([
-    api("/projects"), api("/models"), api("/templates"), api("/backends?auth=skip")]);
+    api("/projects"), api("/models"),
+    isMember() ? Promise.resolve([]) : api("/templates").catch(() => []),
+    isMember() ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip")]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
   const targetKey = "harness.target";
@@ -655,13 +683,14 @@ async function viewNew() {
   const newProjectName = h("input", { type: "text", placeholder: "my-project", maxlength: "64", required: true,
     pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
   const newProjectDescription = h("input", { type: "text", placeholder: "Optional description", maxlength: "240" });
-  const newProjectTarget = h("select", {}, targets.map((name) => h("option", { value: name },
+  const newProjectTarget = isMember() ? h("input", { type: "hidden", value: "tower" }) : h("select", {}, targets.map((name) => h("option", { value: name },
     name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
-  newProjectTarget.value = target;
+  if (!isMember()) newProjectTarget.value = target;
   const newProjectSource = h("select", {},
     h("option", { value: "empty" }, "Empty workspace"),
-    h("option", { value: "repo" }, "Local folder or git URL"));
-  const newProjectRepo = h("input", { type: "text", placeholder: "D:\\Projects\\example or https://…", hidden: true });
+    h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"));
+  const newProjectRepo = h("input", { type: "text",
+    placeholder: isMember() ? "https://github.com/org/repo" : "D:\\Projects\\example or https://…", hidden: true });
   newProjectSource.addEventListener("change", () => {
     newProjectRepo.hidden = newProjectSource.value !== "repo";
     newProjectRepo.required = newProjectSource.value === "repo";
@@ -692,10 +721,12 @@ async function viewNew() {
         createProjectButton.disabled = false;
       }
     } },
-    h("p", { class: "muted small" }, "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task."),
+    h("p", { class: "muted small" }, isMember()
+      ? "Saved in your household account. Use a lowercase project id; a public HTTPS git source is cloned into your own area."
+      : "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task."),
     h("label", {}, "Name"), newProjectName,
     h("label", {}, "Description"), newProjectDescription,
-    h("label", {}, "Runs on"), newProjectTarget,
+    isMember() ? null : h("label", {}, "Runs on"), isMember() ? null : newProjectTarget,
     h("label", {}, "Workspace"), newProjectSource, newProjectRepo,
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
@@ -793,12 +824,12 @@ async function viewNew() {
   allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState, projectHint,
-  h("label", {}, "Backend"), backend, backendState,
+  isMember() ? null : h("label", {}, "Backend"), isMember() ? null : backend, isMember() ? null : backendState,
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
   skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Optional owner-approved instruction skills for this session. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },
-    h("button", {
+    isMember() ? null : h("button", {
       class: "btn", type: "button",
       onclick: async () => {
         if (!prompt.value.trim()) return toast("Write a prompt first");
@@ -1882,12 +1913,14 @@ async function viewJob(id) {
 // ---------- profile ----------
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
 const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "skills"]);
+const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends"]);
 const PROFILE_PAGES = {
   connection: "Connection",
   appearance: "Appearance",
   notifications: "Notifications",
   install: "Install",
   backends: "Backends",
+  daemon: "Server",
   memory: "Memory",
   skills: "Skills",
   apps: "Apps",
@@ -1981,10 +2014,11 @@ function emojiPicker(profile, onPick) {
 
 function accountCard(me, profile) {
   const live = $conn.classList.contains("live");
+  const usage = me.usage || {};
   return h("div", {},
-    isGuest() ? h("div", { class: "card" },
-      h("p", { class: "muted small" }, "Profile icon is owner-only during demo access."),
-      h("p", { style: "font-size:2rem;margin:0" }, profile.emoji))
+    isGuest() || isMember() ? h("div", { class: "card" },
+      h("p", { class: "muted small" }, isMember() ? "Household member identity." : "Profile icon is owner-only during demo access."),
+      h("p", { style: "font-size:2rem;margin:0" }, profile.emoji || "🙂"))
       : h("div", { class: "card" },
       h("p", { class: "muted small" }, "Shown at the top left of the app."),
       emojiPicker(profile)),
@@ -1992,7 +2026,10 @@ function accountCard(me, profile) {
       h("h3", {}, "Account"),
       h("p", {}, me.name || "You"),
       h("p", { class: "muted small" }, me.login || "Not identified by Tailscale on this request."),
-      isGuest() ? h("p", { class: "muted small" }, "Demo access — look around only.") : null),
+      me.user_id && isMember() ? h("p", { class: "muted small" }, `Account ${usage.account_hint || me.user_id}`) : null,
+      isGuest() ? h("p", { class: "muted small" }, "Demo access — look around only.") : null,
+      isMember() && usage.disk_note ? h("p", { class: "muted small" }, usage.disk_note) : null,
+      isMember() ? h("p", { class: "muted small" }, `${usage.running || 0} running · ${usage.queued || 0} queued`) : null),
     h("div", { class: "card" },
       h("h3", {}, "Connection"),
       me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
@@ -2001,41 +2038,127 @@ function accountCard(me, profile) {
         : `Agent Harness Web is not receiving the live stream from Agent Harness Server at ${me.public_url || location.origin}.`)));
 }
 
+function fmtBytes(n) {
+  if (!n && n !== 0) return "—";
+  if (n >= 2 ** 30) return `${(n / 2 ** 30).toFixed(1)} GiB`;
+  if (n >= 2 ** 20) return `${(n / 2 ** 20).toFixed(1)} MiB`;
+  return `${n} B`;
+}
+
+async function accountsCard() {
+  const wrap = h("div");
+  const render = async () => {
+    let rows = [];
+    try { rows = await api("/accounts", { surface: "admin" }); }
+    catch (e) { fill(wrap, h("p", { class: "note bad" }, e.message)); return; }
+    const login = h("input", { type: "email", placeholder: "member@example.com", required: true });
+    const name = h("input", { type: "text", placeholder: "Display name", required: true, maxlength: "80" });
+    const create = h("button", { class: "btn primary", type: "submit" }, "Create member");
+    fill(wrap,
+      h("p", { class: "muted small" }, "Household members authenticate with the exact Tailscale login you enter. The machine owner can still read local storage; this page prevents accidental API and UI cross-account access."),
+      h("form", { class: "card", onsubmit: async (e) => {
+        e.preventDefault();
+        create.disabled = true;
+        try {
+          await api("/accounts", { method: "POST", surface: "admin", body: {
+            login: login.value, display_name: name.value,
+          } });
+          toast("Member created");
+          await render();
+        } catch (err) { toast(err.message, 5000); create.disabled = false; }
+      } }, h("h3", {}, "New member"), login, name, h("div", { class: "row", style: "margin-top:12px" }, create)),
+      rows.length ? rows.map((a) => {
+        const patch = async (body, confirmText) => {
+          if (confirmText && !confirm(confirmText)) return;
+          try {
+            await api(`/accounts/${a.user_id}`, { method: "PATCH", surface: "admin", body });
+            await render();
+          } catch (err) { toast(err.message, 5000); }
+        };
+        return h("div", { class: "card" },
+          h("h3", {}, a.display_name),
+          h("p", { class: "muted small" }, a.login),
+          h("p", { class: "muted small" }, `id ${a.account_hint} · ${a.enabled ? "enabled" : "disabled"}`),
+          h("p", { class: "muted small" }, `${fmtBytes(a.disk_used_bytes)} / ${fmtBytes(a.disk_quota_bytes)} · ${a.running} running · ${a.queued} queued`),
+          a.last_activity_at ? h("p", { class: "muted small" }, `Last activity ${ago(a.last_activity_at)}`) : null,
+          h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
+            h("button", { class: "btn small", type: "button", onclick: () => {
+              const next = window.prompt("Display name", a.display_name);
+              if (next) patch({ display_name: next });
+            } }, "Rename"),
+            h("button", { class: "btn small", type: "button", onclick: () => {
+              const next = window.prompt("New Tailscale login", a.login);
+              if (next && next !== a.login && confirm(`Rebind this account to ${next}? The old login stops working immediately.`)) {
+                patch({ login: next });
+              }
+            } }, "Rebind login"),
+            h("button", { class: "btn small", type: "button", onclick: () => {
+              const next = window.prompt("Disk quota in GiB", String(Math.round(a.disk_quota_bytes / 2 ** 30)));
+              if (next) patch({ disk_quota_bytes: Math.round(Number(next) * 2 ** 30) });
+            } }, "Quota"),
+            h("button", { class: "btn small", type: "button", onclick: () => {
+              const running = window.prompt("Max running sessions", String(a.max_running));
+              const queued = window.prompt("Max queued sessions", String(a.max_queued));
+              if (running || queued) patch({
+                max_running: running ? Number(running) : a.max_running,
+                max_queued: queued ? Number(queued) : a.max_queued,
+              });
+            } }, "Concurrency"),
+            h("button", { class: "btn small", type: "button", onclick: () => patch(
+              { enabled: !a.enabled },
+              a.enabled ? `Disable ${a.display_name}? Running work will be cancelled.` : `Re-enable ${a.display_name}?`,
+            ) }, a.enabled ? "Disable" : "Re-enable")));
+      }) : h("p", { class: "muted small" }, "No household members yet."));
+  };
+  await render();
+  return wrap;
+}
+
 async function viewProfile(page, extra) {
-  const titles = { account: "Account", "remote-control": "Claude Remote Control", disk: "Disk", ...PROFILE_PAGES };
+  const titles = { account: "Account", accounts: "Accounts", "remote-control": "Claude Remote Control", disk: "Disk", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
   setHeader("agents", titles[page] || "Profile", { page: true });
   if (page === "connection") return $app.append(connectionCard());
-  const [me, profile] = await Promise.all([api("/me"), api("/profile")]);
+  const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
   if (page === "account") return $app.append(accountCard(me, profile));
+  if (page === "accounts" && isOwner()) return $app.append(await accountsCard());
   if (page === "appearance") return $app.append(appearanceCard());
   if (page === "notifications") return $app.append(notificationsCard(me));
   if (page === "install") return $app.append(installCard());
   if (page === "backends") return $app.append(await backendsCard());
+  if (page === "daemon") return $app.append(await daemonSettingsCard());
   if (page === "memory") return $app.append(memoryCard());
   if (page === "skills") return $app.append(await skillsPage(extra));
   if (page === "apps") return $app.append(appsCard(me));
   if (page === "endpoint") return $app.append(endpointCard(me));
   if (page === "disk") return $app.append(diskCard());
   if (page === "remote-control") return $app.append(remoteControlCard());
+  let hidden = new Set();
+  if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
+  else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
   $app.append(
     h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
-        h("span", { class: "identity-emoji" }, profile.emoji),
+        h("span", { class: "identity-emoji" }, profile.emoji || "🙂"),
         h("div", { class: "spacer" },
           h("h3", {}, me.name || "You"),
-          h("div", { class: "muted small" }, "Account and connection")),
+          h("div", { class: "muted small" }, isMember() ? "Household member" : "Account and connection")),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    h("p", { class: "section-label" }, "Actions"),
-    h("div", { class: "card settings-list" },
+    isOwner() ? h("p", { class: "section-label" }, "Actions") : null,
+    isOwner() ? h("div", { class: "card settings-list" },
       gpuActionRow(),
       h("a", { href: "#/profile/remote-control" }, "Claude Remote Control"),
-      h("a", { href: "#/profile/disk" }, "Disk")),
+      h("a", { href: "#/profile/disk" }, "Disk"),
+      h("a", { href: "#/profile/accounts" }, "Accounts")) : null,
+    isMember() && me.usage ? h("div", { class: "card" },
+      h("h3", {}, "Usage"),
+      h("p", { class: "muted small" }, me.usage.disk_note || ""),
+      h("p", { class: "muted small" }, `${me.usage.running || 0} running · ${me.usage.queued || 0} queued`)) : null,
     h("p", { class: "section-label" }, "Settings"),
     h("div", { class: "card settings-list" },
       Object.entries(PROFILE_PAGES)
-        .filter(([id]) => (id !== "install" || !isStandalone()) && !(isGuest() && GUEST_HIDDEN_PAGES.has(id)))
+        .filter(([id]) => (id !== "install" || !isStandalone()) && !hidden.has(id))
         .map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
   );
 }
@@ -2331,12 +2454,207 @@ async function backendsCard() {
     body);
 }
 
+function settingInput(spec, draft) {
+  const current = draft[spec.key] !== undefined ? draft[spec.key] : (spec.pending ?? spec.effective);
+  if (spec.type === "bool") {
+    const box = h("input", { type: "checkbox", class: "switch", checked: !!current, disabled: !spec.writable });
+    box.addEventListener("change", () => { draft[spec.key] = box.checked; });
+    return box;
+  }
+  if (spec.enum && spec.enum.length) {
+    const sel = h("select", { disabled: !spec.writable }, spec.enum.map((item) =>
+      h("option", { value: item, selected: item === current }, item)));
+    sel.addEventListener("change", () => { draft[spec.key] = sel.value; });
+    return sel;
+  }
+  const input = h("input", {
+    type: spec.type === "string" ? "text" : "number",
+    value: current == null ? "" : String(current),
+    disabled: !spec.writable,
+    min: spec.minimum, max: spec.maximum, step: spec.type === "int" ? "1" : "any",
+  });
+  input.addEventListener("change", () => {
+    if (input.value === "") { draft[spec.key] = null; return; }
+    draft[spec.key] = spec.type === "string" ? input.value : Number(input.value);
+  });
+  return input;
+}
+
+function settingMeta(spec) {
+  const bits = [];
+  bits.push(spec.apply === "live" ? "applies live" : spec.apply === "daemon_restart" ? "needs restart" : "file only");
+  if (spec.source) bits.push(`source: ${spec.source}`);
+  if (spec.pending != null && spec.apply === "daemon_restart") bits.push(`pending: ${spec.pending}`);
+  if (spec.capped_by) bits.push(`capped by ${spec.capped_by}`);
+  if (spec.file_only) bits.push(spec.guidance || "managed in local configuration");
+  return bits.join(" · ");
+}
+
+async function daemonSettingsCard() {
+  let view;
+  try { view = await api("/config"); }
+  catch (e) { return h("div", { class: "card" }, h("p", { class: "note bad" }, e.message)); }
+  const draft = {};
+  const status = h("p", { class: "muted small" },
+    `Revision ${view.revision}` +
+    (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
+    (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
+    (view.warning ? ` · ${view.warning}` :
+      view.recovery && view.recovery.recovery === "overlay_quarantined"
+        ? ` · ${view.recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`
+        : (view.recovery && view.recovery.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
+  const planBox = h("div", { class: "config-plan" });
+  const errorBox = h("div");
+  const groups = {};
+  for (const spec of view.settings || []) {
+    (groups[spec.category] ||= []).push(spec);
+  }
+  const rows = Object.entries(groups).map(([category, specs]) => h("div", { class: "card config-category" },
+    h("h3", {}, category),
+    specs.map((spec) => h("div", { class: "config-row" },
+      h("div", { class: "config-copy" },
+        h("label", { class: "field-label" }, spec.label),
+        h("p", { class: "muted small" }, spec.help),
+        h("p", { class: "muted small config-meta" }, settingMeta(spec)),
+        spec.file_only ? null : h("p", { class: "muted small" },
+          `effective ${spec.effective == null ? "—" : spec.effective}` +
+          (spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "") +
+          (spec.inherited != null ? ` · inherited ${spec.inherited}` : ""))),
+      spec.file_only ? h("span", { class: "muted small" }, "local config") : settingInput(spec, draft)))));
+
+  const apply = async ({ restart = false, rollback = false } = {}) => {
+    errorBox.replaceChildren();
+    planBox.replaceChildren();
+    const changes = {};
+    for (const [key, value] of Object.entries(draft)) changes[key] = value;
+    try {
+      if (rollback) {
+        if (!window.confirm("Restore the previous confirmed server configuration?")) return;
+        const result = await api("/config/rollback", { method: "POST", body: { revision: view.revision, confirm: true } });
+        toast("Rolled back");
+        if (result.restart_required) {
+          await confirmRestart(result.pending_revision || result.revision, status, errorBox);
+        } else { location.hash = "#/profile/daemon"; location.reload(); }
+        return;
+      }
+      const plan = await api("/config", { method: "PATCH", body: { revision: view.revision, dry_run: true, changes } });
+      planBox.append(
+        h("p", { class: "field-label" }, "Change plan"),
+        (plan.changes || []).length
+          ? h("ul", { class: "config-plan-list" }, plan.changes.map((c) =>
+            h("li", {}, `${c.key}: ${c.from} → ${c.action === "reset" ? "inherited" : c.to} (${c.apply})`)))
+          : h("p", { class: "muted small" }, "No changes."),
+      );
+      const enables = (plan.changes || []).filter((c) => c.to === true && String(c.key).endsWith(".enabled"));
+      if (enables.length && !window.confirm(`Enable ${enables.map((c) => c.key).join(", ")}?`)) return;
+      if (!(plan.changes || []).length) return;
+      if (!window.confirm("Apply these server settings?")) return;
+      const result = await api("/config", { method: "PATCH", body: { revision: view.revision, changes } });
+      toast("Saved");
+      if (result.restart_required || restart) {
+        await confirmRestart(result.pending_revision || result.target_revision || result.revision, status, errorBox);
+      } else { location.reload(); }
+    } catch (e) {
+      if (e.code === "revision_conflict") {
+        errorBox.append(h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
+      } else if (e.keys) {
+        errorBox.append(h("p", { class: "note bad" }, e.message),
+          h("ul", {}, Object.entries(e.keys).map(([key, info]) =>
+            h("li", {}, `${key}: ${info.message || info.code}`))));
+      } else {
+        errorBox.append(h("p", { class: "note bad" }, e.message));
+      }
+    }
+  };
+
+  return h("div", {},
+    h("div", { class: "card" },
+      h("p", { class: "muted small" }, "Operational settings for this daemon. Paths, secrets, modules, and network policy stay in local configuration."),
+      status),
+    ...rows,
+    planBox, errorBox,
+    isGuest() ? null : h("div", { class: "card config-actions" },
+      h("button", { class: "btn", type: "button", onclick: () => apply() }, "Review and apply"),
+      h("button", { class: "btn", type: "button", onclick: () => apply({ rollback: true }) }, "Roll back"),
+      view.restart_required ? h("button", { class: "btn", type: "button", onclick: () => confirmRestart(view.pending_revision || view.revision, status, errorBox) },
+        "Restart daemon") : null));
+}
+
+async function confirmRestart(targetRevision, status, errorBox) {
+  if (!window.confirm("Restart the daemon to apply pending settings?")) return;
+  status.textContent = "Restarting… reconnecting to see whether the target revision became active.";
+  try {
+    await api("/config/restart", { method: "POST", body: { revision: targetRevision, confirm: true } });
+  } catch (e) {
+    if (e.code === "restart_not_supervised") {
+      errorBox.append(h("p", { class: "note bad" }, e.message));
+      return;
+    }
+    // 202 may still parse as success; a dropped connection is expected.
+  }
+  const started = Date.now();
+  while (Date.now() - started < 45000) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const next = await api("/config");
+      if (next.revision === targetRevision && next.confirmed) {
+        toast("Restarted with the new configuration");
+        location.reload();
+        return;
+      }
+      if (next.recovery && next.recovery.recovery === "lkg_restore") {
+        errorBox.append(h("p", { class: "note bad" },
+          `Automatic recovery restored revision ${next.revision}. ${next.recovery.reason || ""}`.trim()));
+        return;
+      }
+      if (next.recovery && next.recovery.recovery === "overlay_quarantined") {
+        errorBox.append(h("p", { class: "note bad" },
+          next.warning || next.recovery.warning || next.recovery.reason ||
+          "Managed overlay was quarantined; YAML defaults are in effect."));
+        return;
+      }
+    } catch (_) { /* daemon still down */ }
+  }
+  errorBox.append(h("p", { class: "note bad" }, "Timed out waiting for the daemon to come back."));
+}
+
 function backupLine(b) {
   if (!b || !b.enabled) return null;
   const failed = b.error && (b.error_at || 0) > (b.ok_at || 0);
   return h("p", { class: `small${failed ? " bad" : ""}` },
     b.ok_at ? `Backup ${ago(b.ok_at)} (${Math.max(1, Math.round(b.bytes / 2 ** 20))} MB) in ${b.dir}` : "No backup yet",
     failed ? ` · last attempt failed: ${b.error}` : "");
+}
+
+function imageArchiveBlock(a, reload) {
+  if (!a || !a.enabled) return null;
+  const count = Number(a.archived || 0);
+  const bytes = Number(a.bytes || 0);
+  const warning = a.free_space_warning || (a.errors ? `${a.errors} image archive error${a.errors === 1 ? "" : "s"}` : "");
+  const summary = h("div", {},
+    h("p", { class: `small${warning ? " bad" : ""}` },
+      h("strong", {}, "Image archive"), " ",
+      `${count} image${count === 1 ? "" : "s"} · ${Math.round(bytes / 2 ** 20)} MB · ${a.path}`),
+    a.last_reconciliation ? h("p", { class: "muted small" },
+      `Reconciled ${ago(a.last_reconciliation)} · ${a.missing || 0} missing · ${a.errors || 0} errors`) : null,
+    warning ? h("p", { class: "note bad" }, warning) : null);
+  if (!a.retention_days) return summary;
+  return h("div", {}, summary,
+    h("button", { class: "btn secondary", onclick: async (ev) => {
+      ev.target.disabled = true;
+      try {
+        const p = await api("/maintenance/image-archive/retention/preview", { method: "POST" });
+        if (!p.count) { toast("No archived images are old enough to remove"); return; }
+        const size = Math.round(p.bytes / 2 ** 20);
+        if (!confirm(`Permanently remove ${p.count} archived image${p.count === 1 ? "" : "s"} (${size} MB)? Live gallery images are not deleted.`)) return;
+        const r = await api("/maintenance/image-archive/retention/apply", {
+          method: "POST", body: JSON.stringify({ confirmation: p.confirmation }),
+        });
+        toast(`Removed ${r.removed} archived image${r.removed === 1 ? "" : "s"} (${Math.round(r.bytes / 2 ** 20)} MB)`);
+        reload();
+      } catch (e) { toast(e.message); }
+      finally { ev.target.disabled = false; }
+    } }, `Review ${a.retention_days}-day image retention`));
 }
 
 function gpuText(g) {
@@ -2812,6 +3130,7 @@ function diskCard() {
         fact("Workspaces", `${mb(u.workspaces_mb)} · ${u.workspaces.length} session${u.workspaces.length === 1 ? "" : "s"} · ${u.quota_mb} MB quota each`),
         fact("Sandboxes", `${u.containers.length} container${u.containers.length === 1 ? "" : "s"}`),
         backupLine(u.backup),
+        isGuest() ? null : imageArchiveBlock(u.image_archive, load),
         top.length ? h("p", { class: "muted small", style: "margin-top:10px" }, "Largest workspaces") : null,
         top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null);
       fill(body,
@@ -2858,8 +3177,10 @@ async function warmModel(force = false) {
   if (isGuest()) return;
   if (!force && Date.now() - lastWarm < 60_000) return;
   try {
-    const gpu = await api("/gpu");
-    if (gpu.manual) return;
+    if (!isMember()) {
+      const gpu = await api("/gpu");
+      if (gpu.manual) return;
+    }
     lastWarm = Date.now();
     await api("/models/warm", { method: "POST" });
   } catch (_) { /* offline */ }
