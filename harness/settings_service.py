@@ -414,8 +414,15 @@ class SettingsService:
             if not self._backend_allowed(key, configured):
                 return "", "provider_policy"
         if spec.key == "app.default_model" and configured:
-            backend = (self._app_envelope(key["id"]).values.get("app.default_backend")
-                       or ("local" if self.cfg.modules.local_model else ""))
+            configured_backend = self._app_envelope(key["id"]).values.get("app.default_backend")
+            if configured_backend:
+                backend, backend_cap = self._effective_app_value(
+                    self.registry.get("app.default_backend"), configured_backend, key,
+                )
+                if not backend:
+                    return "", backend_cap
+            else:
+                backend = "local" if self.cfg.modules.local_model else ""
             if backend == "local" and configured not in self.cfg.models:
                 return "", "models"
             if backend and backend != "local":
