@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 import uuid
 from typing import Callable
@@ -37,11 +36,20 @@ JSON shape:
 """
 
 
+def _strip_markdown_fence(text: str) -> str:
+    if not text.startswith("```"):
+        return text
+    body = text[3:]
+    if body.lower().startswith("json"):
+        body = body[4:]
+    body = body.lstrip()
+    if body.endswith("```"):
+        body = body[:-3].rstrip()
+    return body
+
+
 def _extract_json(text: str) -> dict:
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+    text = _strip_markdown_fence((text or "").strip())
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("reviewer did not return JSON")

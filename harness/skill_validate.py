@@ -382,22 +382,37 @@ def validate_dir(root: Path) -> dict:
     return result
 
 
+SANDBOX_WORK = "/sandbox-work"
+
+
+def _container_user() -> str:
+    """Match the host uid so owner-only staging modes remain readable inside the container."""
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if callable(getuid) and callable(getgid):
+        return f"{getuid()}:{getgid()}"
+    return "65534:65534"
+
+
 def sandbox_command(image: str, proposal_dir: Path, validator_path: Path) -> list[str]:
     """Fresh no-network, read-only container. Proposal and validator only; nothing executable from the proposal."""
     proposal = proposal_dir.resolve()
     validator = validator_path.resolve()
+    work = SANDBOX_WORK
     return [
         "docker", "run", "--rm", "--network", "none", "--read-only",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+        "--tmpfs", f"{work}:rw,noexec,nosuid,size=16m",
         "--security-opt", "no-new-privileges",
         "--cap-drop", "ALL",
         "--pids-limit", "64",
         "--memory", "256m",
         "--cpus", "1",
-        "--user", "65534:65534",
+        "--user", _container_user(),
         "--mount", f"type=bind,source={proposal},target=/proposal,readonly",
         "--mount", f"type=bind,source={validator},target=/run/validate.py,readonly",
-        "--workdir", "/tmp",
+        "--workdir", work,
+        "-e", f"TMPDIR={work}",
+        "-e", f"PYTHONPYCACHEPREFIX={work}",
         image,
         "python", "/run/validate.py", "/proposal",
     ]

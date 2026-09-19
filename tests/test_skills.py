@@ -18,8 +18,9 @@ from harness.config import SkillsConfig
 from harness.db import Database
 from harness.llm import Completion
 from harness.manager import Manager
-from harness.skill_review import SkillReviewer, normalize_findings, review_payload
+from harness.skill_review import SkillReviewer, _extract_json, normalize_findings, review_payload
 from harness.skill_validate import (
+    SANDBOX_WORK,
     canonical_hash,
     sandbox_command,
     sandbox_command_is_isolated,
@@ -257,11 +258,41 @@ def test_sandbox_argv_is_isolated(tmp_path):
     assert sandbox_command_is_isolated(argv) == []
     assert "--network" in argv and "none" in argv
     assert "--read-only" in argv
+    assert argv[argv.index("--workdir") + 1] == SANDBOX_WORK
+    assert argv[argv.index("--workdir") + 1] not in ("/tmp", "/var/tmp")
+    assert f"{SANDBOX_WORK}:rw,noexec,nosuid,size=16m" in argv
+    assert f"TMPDIR={SANDBOX_WORK}" in argv
     joined = " ".join(argv)
     for needle in ("docker.sock", "/workspace", "harness-auth", "/secrets", "memory-library"):
         assert needle not in joined
     bad = argv + ["--mount", "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock"]
     assert sandbox_command_is_isolated(bad)
+
+
+def test_extract_json_strips_markdown_fences_without_regex():
+    payload = {
+        "scope": {"ok": True, "notes": ""}, "recommendation": "approve", "summary": "ok",
+    }
+    raw = json.dumps(payload)
+    assert _extract_json(raw)["recommendation"] == "approve"
+    assert _extract_json("```json\n" + raw + "\n```")["summary"] == "ok"
+    assert _extract_json("```JSON\n" + raw + "\n```")["summary"] == "ok"
+    assert _extract_json("```\n" + raw + "\n```")["recommendation"] == "approve"
+
+
+def test_sandbox_staging_uses_owner_only_permissions(tmp_path, monkeypatch):
+    seen = []
+    orig = os.chmod
+
+    def spy(path, mode, *args, **kwargs):
+        seen.append(mode & 0o777)
+        return orig(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", spy)
+    store_for(tmp_path)._sandbox_validate(bundle(), "deadbeef")
+    assert 0o500 in seen
+    assert 0o700 in seen
+    assert all((mode & 0o077) == 0 for mode in seen)
 
 
 def test_validator_never_executes_proposal_text(tmp_path):

@@ -490,7 +490,7 @@ class SkillStore:
             }
             _write_contained(staging, self._bundle_file_map(bundle, extra))
             try:
-                os.chmod(staging, 0o555)
+                os.chmod(staging, 0o500)
             except OSError:
                 pass
             return self._run_sandbox(staging)
@@ -498,7 +498,7 @@ class SkillStore:
             return {"ok": False, "findings": [{"code": "traversal", "path": "", "message": str(e)}]}
         finally:
             try:
-                os.chmod(staging, 0o755)
+                os.chmod(staging, 0o700)
             except OSError:
                 pass
             shutil.rmtree(staging, ignore_errors=True)
