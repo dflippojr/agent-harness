@@ -309,6 +309,11 @@ class GuestAccess:
     until: str = ""  # ISO-8601 datetime; empty means until the entry is removed from config
 
 
+def _smart_approvals_default():
+    from .smart_approvals import SmartConfig
+    return SmartConfig()
+
+
 @dataclass
 class Config:
     host: str
@@ -343,6 +348,7 @@ class Config:
     jobs: JobsConfig = field(default_factory=JobsConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     remote_control: RemoteControlConfig = field(default_factory=RemoteControlConfig)
+    smart_approvals: object = field(default_factory=_smart_approvals_default)
     max_turns: int = 80
     max_completion_tokens: int = 200000
     elide_at: float = 0.55
@@ -554,6 +560,7 @@ def _load_projects(raw_projects: dict, raw_overlay: dict, selected: ModulesConfi
 
 
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
+    from .smart_approvals import load_smart_config
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
     raw = _read_raw_config(config_dir)
     profile, raw_modules, selected = _resolve_profile(raw)
@@ -658,6 +665,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         jobs=jobs,
         skills=skills,
         remote_control=remote_control,
+        smart_approvals=load_smart_config(raw.get("smart_approvals")),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
         elide_at=float(compaction.get("elide_at", 0.55)),

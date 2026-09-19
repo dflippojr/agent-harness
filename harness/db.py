@@ -194,6 +194,28 @@ CREATE TABLE IF NOT EXISTS runner_pairing_codes ( -- owner-approved Agent Harnes
 );
 CREATE UNIQUE INDEX IF NOT EXISTS app_provider_credentials_active
 ON app_provider_credentials(app_id, backend) WHERE revoked_at IS NULL;
+CREATE TABLE IF NOT EXISTS smart_reviews (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    approval_id TEXT NOT NULL DEFAULT '',
+    tool TEXT NOT NULL DEFAULT '',
+    policy_fingerprint TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT '',
+    recommendation TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    risk_flags TEXT NOT NULL DEFAULT '[]',
+    reason TEXT NOT NULL DEFAULT '',
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL DEFAULT '',
+    escalate_reason TEXT NOT NULL DEFAULT '',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS smart_reviews_created ON smart_reviews(created_at);
 CREATE TABLE IF NOT EXISTS skill_proposals (
     id TEXT PRIMARY KEY,
     slug TEXT NOT NULL,
@@ -360,6 +382,8 @@ MIGRATIONS = [
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
     # Issue #17: frozen owner-approved instruction skills for a session.
     ("sessions", "skills", "TEXT NOT NULL DEFAULT '[]'"),
+    # Issue #18: sanitized smart-review recommendation on the ordinary approval row.
+    ("approvals", "smart", "TEXT NOT NULL DEFAULT '{}'"),
     # Issue #66: freeze hosted effort at session start; app-scoped settings live beside the token.
     ("sessions", "effort", "TEXT NOT NULL DEFAULT ''"),
     # Issue #66: in-flight app sessions keep the defaults they started with if the app is revoked.
@@ -377,7 +401,8 @@ CREATE TABLE IF NOT EXISTS app_settings (
 """
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "app_defaults", "data",
-                "origins", "models", "skills", "references", "examples", "manifest", "static_findings", "findings"}
+                "origins", "models", "smart", "risk_flags", "skills", "references", "examples", "manifest",
+                "static_findings", "findings"}
 # skill_proposals.review is JSON; sessions.review is a plain merge/push/discard string.
 SKILL_JSON_COLUMNS = JSON_COLUMNS | {"review"}
 
@@ -611,12 +636,16 @@ class Database:
 
     # approvals
     def insert_approval(self, a: dict) -> None:
+        status = a.get("status") or "pending"
+        decided_at = time.time() if status != "pending" else None
+        smart = a.get("smart") if isinstance(a.get("smart"), dict) else {}
         with self.lock:
             self.conn.execute(
-                "INSERT INTO approvals (id, session_id, tool_call_id, tool, args, reason, detail, status, created_at, "
-                "token) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                "INSERT INTO approvals (id, session_id, tool_call_id, tool, args, reason, detail, status, note, "
+                "created_at, token, smart, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (a["id"], a["session_id"], a["tool_call_id"], a["tool"], json.dumps(a["args"]),
-                 a["reason"], a.get("detail", ""), time.time(), secrets.token_urlsafe(24)),
+                 a["reason"], a.get("detail", ""), status, a.get("note") or "", time.time(),
+                 secrets.token_urlsafe(24), json.dumps(smart), decided_at),
             )
 
     def approval_by_token(self, token: str) -> dict | None:
@@ -1135,6 +1164,59 @@ class Database:
                 (status, note, time.time(), aid),
             )
         return cur.rowcount == 1
+
+    def insert_smart_review(self, rid: str, sid: str, approval_id: str, record: dict) -> None:
+        flags = record.get("risk_flags") or []
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO smart_reviews (id, session_id, approval_id, tool, policy_fingerprint, provider, model, "
+                "mode, recommendation, confidence, risk_flags, reason, latency_ms, outcome, escalate_reason, "
+                "prompt_tokens, completion_tokens, cost_usd, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (rid, sid, approval_id or "", record.get("tool") or "", record.get("policy_fingerprint") or "",
+                 record.get("provider") or "", record.get("model") or "", record.get("mode") or "",
+                 record.get("recommendation") or "", record.get("confidence"), json.dumps(flags),
+                 str(record.get("reason") or "")[:140], int(record.get("latency_ms") or 0),
+                 record.get("outcome") or "", record.get("escalate_reason") or "",
+                 int(record.get("prompt_tokens") or 0), int(record.get("completion_tokens") or 0),
+                 float(record.get("cost_usd") or 0), time.time()),
+            )
+
+    def smart_review_stats(self, since: float | None = None) -> dict:
+        since = time.time() - 7 * 86400 if since is None else since
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT outcome, COUNT(*), COALESCE(AVG(latency_ms), 0), COALESCE(SUM(cost_usd), 0), "
+                "COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0) "
+                "FROM smart_reviews WHERE created_at >= ? GROUP BY outcome", (since,)).fetchall()
+            reasons = self.conn.execute(
+                "SELECT COALESCE(NULLIF(escalate_reason, ''), recommendation), COUNT(*) FROM smart_reviews "
+                "WHERE created_at >= ? AND outcome IN ('escalated', 'failed') GROUP BY 1",
+                (since,)).fetchall()
+        by_outcome = {row[0]: {"count": row[1], "latency_ms": row[2], "cost_usd": row[3],
+                               "prompt_tokens": row[4], "completion_tokens": row[5]} for row in rows}
+        attempts = sum(v["count"] for v in by_outcome.values())
+        latency = 0.0
+        if attempts:
+            latency = sum(v["latency_ms"] * v["count"] for v in by_outcome.values()) / attempts
+        return {
+            "attempts": attempts,
+            "auto_approvals": by_outcome.get("auto_approved", {}).get("count", 0),
+            "escalations": by_outcome.get("escalated", {}).get("count", 0) + by_outcome.get("failed", {}).get("count", 0),
+            "human_asked": by_outcome.get("human_asked", {}).get("count", 0),
+            "failures": by_outcome.get("failed", {}).get("count", 0),
+            "latency_ms": round(latency, 1),
+            "cost_usd": round(sum(v["cost_usd"] for v in by_outcome.values()), 6),
+            "prompt_tokens": int(sum(v["prompt_tokens"] for v in by_outcome.values())),
+            "completion_tokens": int(sum(v["completion_tokens"] for v in by_outcome.values())),
+            "escalations_by_reason": {str(reason or "unknown"): n for reason, n in reasons},
+        }
+
+    def smart_reviews(self, limit: int = 50) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM smart_reviews ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [_row(r) for r in rows]
 
     # instruction skills (issue #17)
     def insert_skill_proposal(self, row: dict) -> None:

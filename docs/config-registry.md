@@ -126,6 +126,7 @@ budget are not increased):
 | `gpu_guard.poll_seconds` / `gpu_guard.resume_after_seconds` / `gpu_guard.drain_timeout_seconds` | gpu_guard module |
 | `jobs.poll_seconds` | jobs module |
 | `backup.at` (`HH:MM`) / `backup.keep_days` | backup module |
+| `smart_approvals.enabled` / `smart_approvals.mode` / `smart_approvals.provider` / `smart_approvals.model` / `smart_approvals.timeout_seconds` / `smart_approvals.min_confidence` | hosted reviewer; `secret_ref` stays file-only. `mode` last-writer: this setting and `PUT /smart-approvals` share one SQLite overlay; `off` means no reviewer calls |
 | `backends.local.model` | installed local models |
 | `backends.<name>.model` / `backends.<name>.effort` | each configured hosted backend |
 
@@ -139,7 +140,8 @@ the Manager's tool construction are derived from `installed AND <section>.enable
 `gpu_guard.enabled`, `notifications.enabled`, `backup.enabled`.
 
 Installer/file-only metadata (value omitted): `listen.host`, `listen.port`, `paths.data_dir`, `paths.repos_dir`,
-`backup.dir`, `notify.server`, `notify.topic`, `notify.token_file`, `install.profile`, `modules.*`.
+`backup.dir`, `notify.server`, `notify.topic`, `notify.token_file`, `smart_approvals.secret_ref`,
+`smart_approvals.proxy`, `install.profile`, `modules.*`.
 
 ## App keys (v1)
 

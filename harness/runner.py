@@ -24,6 +24,7 @@ from .db import Database
 from .homelab import Homelab
 from .principal import OWNER_USER_ID, session_user_id
 from .policy import ALLOW, ASK, Policy
+from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
@@ -115,6 +116,7 @@ class Runner:
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
         self.skills = None                      # skills.SkillStore, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
+        self.smart = SmartReviewer(cfg)
         self.settings = None                    # settings_service.SettingsService, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
@@ -198,6 +200,46 @@ class Runner:
         default = (self.cfg.runners[s["target"]].workspace_quota_mb if s["target"] in self.cfg.runners
                    else self.cfg.cleanup.workspace_quota_mb)
         return (project.quota_mb if project and project.quota_mb else 0) or default
+
+    async def _review_ask(self, s: dict, name: str, args: dict, decision) -> dict:
+        """Consult the smart reviewer for a tagged ASK. Never auto-denies; failures stay pending."""
+        extra = {"status": "pending", "smart": {}}
+        if decision.action != ASK:
+            return extra
+        project = self.cfg.projects.get(s["project"])
+        repo = bool(project and project.repo)
+        _eligibility, review = await self.smart.consider(self.db, self.policy(s), name, args, decision, repo=repo)
+        if review is None:
+            return extra
+        auto = self.smart.should_auto_approve(review)
+        record = sanitized_record(review, policy_fingerprint=self.policy(s).fingerprint(),
+                                  mode=review.mode, outcome=self.smart.classify(review, auto), tool=name)
+        extra["smart"] = {k: record[k] for k in ("recommendation", "confidence", "reason", "risk_flags",
+                                                 "mode", "provider", "model", "outcome", "escalate_reason")}
+        extra["_record"] = record
+        extra["status"] = "approved" if auto else "pending"
+        extra["note"] = "smart reviewer: deterministic gate and hosted model both allowed this call" if auto else ""
+        return extra
+
+    def _persist_ask(self, sid: str, existing: dict, extra: dict) -> dict:
+        record = extra.pop("_record", None)
+        existing["status"] = extra.get("status", "pending")
+        existing["smart"] = extra.get("smart") or {}
+        if extra.get("note"):
+            existing["note"] = extra["note"]
+        public = {k: existing[k] for k in ("id", "tool_call_id", "tool", "args", "reason", "detail") if k in existing}
+        if existing.get("smart"):
+            public["smart"] = existing["smart"]
+        with self.db.tx():
+            self.db.insert_approval(existing)
+            if record is not None:
+                persist_review(self.db, sid, existing["id"], record)
+                self.bus.emit(sid, "smart_review", record)
+            if existing["status"] == "approved":
+                self.bus.emit(sid, "approval_auto_approved", {"id": existing["id"], **(record or {})})
+            else:
+                self.bus.emit(sid, "approval_requested", public)
+        return existing
 
     def _member_clone_budget(self, user_id: str) -> int | None:
         """Bytes a member clone may still write. None means uncapped (owner)."""
@@ -961,11 +1003,8 @@ class Runner:
             existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call_id,
                         "tool": name, "args": args, "reason": decision.reason,
                         "detail": str(request.get("description") or "")}
-            with self.db.tx():
-                self.db.insert_approval(existing)
-                self.bus.emit(sid, "approval_requested", {k: existing[k] for k in
-                                                          ("id", "tool_call_id", "tool", "args", "reason", "detail")})
-            existing["status"] = "pending"
+            extra = await self._review_ask(s, name, args, decision)
+            existing = self._persist_ask(sid, existing, extra)
         if existing["status"] == "pending":
             self.set_status(sid, "waiting_approval")
             existing = await self._wait_approval(existing["id"])
@@ -1324,11 +1363,8 @@ class Runner:
                     reason = f"{reason} {warning}".strip()
             existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call["id"],
                         "tool": name, "args": args, "reason": reason, "detail": detail}
-            with self.db.tx():
-                self.db.insert_approval(existing)
-                self.bus.emit(sid, "approval_requested", {k: existing[k] for k in
-                                                          ("id", "tool_call_id", "tool", "args", "reason", "detail")})
-            existing["status"] = "pending"
+            extra = await self._review_ask(s, name, args, decision)
+            existing = self._persist_ask(sid, existing, extra)
 
         if existing["status"] == "pending":
             self.scheduler.release(sid)

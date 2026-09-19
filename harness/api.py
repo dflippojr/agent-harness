@@ -101,6 +101,10 @@ class BackendUpdate(BaseModel):
     effort: str | None = None
 
 
+class SmartApprovalsUpdate(BaseModel):
+    mode: str
+
+
 class MemoryProfileUpdate(BaseModel):
     content: str
     summary: str = "Update agent profile"
@@ -518,6 +522,14 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             return {"name": "local", "model": m.cfg.default_model, "effort": ""}
         from .backend_state import view as backend_view
         return await asyncio.to_thread(backend_view, m, name, False)
+
+    @app.get("/smart-approvals")
+    async def smart_approvals(request: Request):
+        return require_owner(request).smart_approvals_status()
+
+    @app.put("/smart-approvals")
+    async def update_smart_approvals(body: SmartApprovalsUpdate, request: Request):
+        return require_owner(request).set_smart_approvals_mode(body.mode)
 
     @app.get("/models/status")
     async def models_status(request: Request):

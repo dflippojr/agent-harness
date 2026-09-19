@@ -32,7 +32,7 @@ const STATUS_LABEL = {
 const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
-  "approval_requested", "approval_decided", "compaction", "compacting", "error", "llm_retry", "resumed",
+  "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
   "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "app_context", "app_tool_call", "app_tool_result",
   "quote_check", "ungrounded_quotes",
@@ -1172,9 +1172,14 @@ async function viewSession(sid, tab, focusApproval) {
         h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
         h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
     }
-    const what = a.tool === "run_shell" ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
+    const what = a.tool === "run_shell" || a.tool === "Bash" || a.tool === "exec_command"
+      ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
       : a.tool === "git_clone" ? `git clone ${a.args.url}`
         : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
+    const rec = a.smart && a.smart.recommendation
+      ? h("p", { class: "smart-rec" },
+          `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${a.smart.reason ? `: ${a.smart.reason}` : ""}`)
+      : null;
     // Memory library changes carry "summary\n\n<unified diff>"; file writes carry just the diff.
     const memory = a.tool === "memory_edit" || a.tool === "memory_write";
     const [summary, diff] = memory && a.detail.includes("\n\n") ? [a.detail.slice(0, a.detail.indexOf("\n\n")), a.detail.slice(a.detail.indexOf("\n\n") + 2)] : ["", a.detail || ""];
@@ -1183,6 +1188,7 @@ async function viewSession(sid, tab, focusApproval) {
       .map((line) => h("div", { class: line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "" }, line))) : null;
     const card = h("div", { class: "approval", id: `approval-${a.id}` },
       h("h4", {}, `Approval needed: ${a.reason || a.tool}`),
+      rec,
       summary ? h("p", { style: "margin:4px 0 8px" }, summary) : null,
       diffView || h("pre", {}, a.detail || what),
       a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args.path || ""}`) : null,
@@ -1262,6 +1268,14 @@ async function viewSession(sid, tab, focusApproval) {
       if (c) c.slot.append(card); else feed.append(h("div", { class: "ev" }, card));
       if (focusApproval !== e.data.id) grew();
     },
+    approval_auto_approved: (e) => {
+      const badge = h("p", { class: "note smart-auto" },
+        `Auto-approved: the deterministic gate and smart reviewer both allowed this ${e.data.tool || "call"} (${e.data.reason || "routine workspace work"}).`);
+      add(badge);
+      const c = calls.get(e.data.tool_call_id);
+      if (c) c.state.textContent = "auto-approved";
+    },
+    smart_review: () => {},
     approval_decided: (e) => {
       const a = approvals.get(e.data.id);
       if (!a) return;
@@ -1946,14 +1960,15 @@ async function viewJob(id) {
 
 // ---------- profile ----------
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
-const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "skills"]);
-const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends", "skills"]);
+const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "smart-approvals", "skills"]);
+const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends", "smart-approvals", "skills"]);
 const PROFILE_PAGES = {
   connection: "Connection",
   appearance: "Appearance",
   notifications: "Notifications",
   install: "Install",
   backends: "Backends",
+  "smart-approvals": "Smart approvals",
   daemon: "Server",
   memory: "Memory",
   skills: "Skills",
@@ -2161,6 +2176,7 @@ async function viewProfile(page, extra) {
   if (page === "notifications") return $app.append(notificationsCard(me));
   if (page === "install") return $app.append(installCard());
   if (page === "backends") return $app.append(await backendsCard());
+  if (page === "smart-approvals") return $app.append(await smartApprovalsCard());
   if (page === "daemon") return $app.append(await daemonSettingsCard());
   if (page === "memory") return $app.append(memoryCard());
   if (page === "skills") return $app.append(await skillsPage(extra));
@@ -2403,6 +2419,41 @@ function backendUsage(b) {
   const cost = Number(b.today.cost_usd || 0) + Number(b.week.cost_usd || 0);
   const dollars = cost > 0 ? ` · $${Number(b.today.cost_usd || 0).toFixed(2)} today` : "";
   return `${b.logged_in ? "signed in" : "sign-in/key needed"} · ${sub} · ${req}${dollars}`;
+}
+
+async function smartApprovalsCard() {
+  let data;
+  try { data = await api("/smart-approvals"); }
+  catch (e) { return h("div", { class: "card" }, h("p", { class: "note bad" }, e.message)); }
+  const status = h("p", { class: "muted small" });
+  const setMode = async (mode) => {
+    try {
+      data = await api("/smart-approvals", { method: "PUT", body: { mode } });
+      toast(mode === "off" ? "Smart approvals off" : `Smart approvals ${mode}`);
+      go("#/profile/smart-approvals");
+    } catch (e) { toast(e.message); }
+  };
+  const configured = data.configured || data.enabled;
+  status.textContent = configured
+    ? `${data.provider || "provider"} · ${data.model || "model"} · mode ${data.mode}`
+    : "Off. The owner enables this in harness.yaml with a hosted API secret reference.";
+  const buttons = isGuest() ? h("p", { class: "muted small" }, "Demo access cannot change smart approvals.")
+    : h("div", { class: "row", style: "margin-top:10px; gap:8px; flex-wrap:wrap" },
+        configured ? h("button", { class: "btn", onclick: () => setMode("shadow") }, "Shadow") : null,
+        configured ? h("button", { class: "btn", onclick: () => setMode("auto") }, "Auto") : null,
+        h("button", { class: "btn", onclick: () => setMode("off") }, "Off"));
+  const stats = h("p", { class: "muted small" },
+    `${data.attempts || 0} reviews · ${data.auto_approvals || 0} auto-approved · ${data.escalations || 0} escalated · `
+    + `${data.latency_ms || 0} ms avg · $${Number(data.cost_usd || 0).toFixed(4)}`);
+  const recent = (data.recent || []).slice(0, 12).map((row) => h("div", { class: "muted small" },
+    `${row.outcome} · ${row.recommendation}${row.escalate_reason ? ` (${row.escalate_reason})` : ""} · `
+    + `${row.provider}/${row.model}`));
+  return h("div", {},
+    h("div", { class: "card" },
+      h("h3", {}, "Smart approvals"),
+      h("p", { class: "muted small" }, "A small hosted model can rate tagged, local, reversible shell asks after the deterministic policy. It never auto-denies. Shadow records a recommendation and still asks; auto only approves a high-confidence approve."),
+      status, stats, buttons),
+    recent.length ? h("div", { class: "card" }, h("h3", {}, "Recent reviews"), ...recent) : null);
 }
 
 async function backendsCard() {

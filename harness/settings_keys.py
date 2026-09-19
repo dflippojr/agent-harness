@@ -222,11 +222,12 @@ def _bool(key, label, help, category, default, getter, setter, yaml_path, apply_
 
 
 def _enum(key, label, help, category, default, getter, setter, values, yaml_path, modules=(),
-          apply_mode="live", max_length=80):
+          apply_mode="live", max_length=80, live_apply=None, live_undo=None):
     return SettingSpec(
         key=key, label=label, help=help, category=category, value_type="enum", default=default,
         scope="admin", apply_mode=apply_mode, getter=getter, setter=setter,
         bounds=Bounds(enum=values, max_length=max_length), yaml_path=yaml_path, modules=modules,
+        live_apply=live_apply, live_undo=live_undo,
     )
 
 
@@ -455,6 +456,80 @@ def _set_backup_keep(cfg: Config, value):
     cfg.backup.keep_days = int(value)
 
 
+def _get_smart_enabled(cfg: Config):
+    return bool(cfg.smart_approvals.enabled)
+
+
+def _set_smart_enabled(cfg: Config, value):
+    cfg.smart_approvals.enabled = bool(value)
+
+
+def _get_smart_mode(cfg: Config):
+    return cfg.smart_approvals.mode
+
+
+def _set_smart_mode(cfg: Config, value):
+    from .smart_approvals import MODES
+    mode = str(value).strip().lower()
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {', '.join(MODES)}")
+    cfg.smart_approvals.mode = mode
+
+
+def apply_smart_mode(manager, old, new) -> None:
+    """Last writer: Settings `smart_approvals.mode` writes the same overlay as PUT."""
+    from .smart_approvals import save_runtime_mode
+    db = getattr(manager, "db", None)
+    if db is None:
+        return
+    save_runtime_mode(db, str(new).strip().lower())
+
+
+def _get_smart_provider(cfg: Config):
+    return cfg.smart_approvals.provider
+
+
+def _set_smart_provider(cfg: Config, value):
+    from .smart_approvals import PROVIDERS
+    provider = str(value).strip().lower()
+    if provider not in PROVIDERS:
+        raise ValueError(f"provider must be one of {', '.join(PROVIDERS)}")
+    cfg.smart_approvals.provider = provider
+
+
+def _get_smart_model(cfg: Config):
+    return cfg.smart_approvals.model
+
+
+def _set_smart_model(cfg: Config, value):
+    model = str(value).strip()[:80]
+    if not model:
+        raise ValueError("model is empty")
+    cfg.smart_approvals.model = model
+
+
+def _get_smart_timeout(cfg: Config):
+    return cfg.smart_approvals.timeout_seconds
+
+
+def _set_smart_timeout(cfg: Config, value):
+    timeout = float(value)
+    if timeout <= 0 or timeout > 60:
+        raise ValueError("smart_approvals.timeout_seconds must be between 0 and 60")
+    cfg.smart_approvals.timeout_seconds = timeout
+
+
+def _get_smart_confidence(cfg: Config):
+    return cfg.smart_approvals.min_confidence
+
+
+def _set_smart_confidence(cfg: Config, value):
+    confidence = float(value)
+    if not 0 <= confidence <= 1:
+        raise ValueError("smart_approvals.min_confidence must be between 0 and 1")
+    cfg.smart_approvals.min_confidence = confidence
+
+
 def _get_local_model(cfg: Config):
     return cfg.default_model
 
@@ -632,6 +707,35 @@ STATIC_ADMIN: list[SettingSpec] = [
          "Delete dated backup folders older than this.",
          "Backup", 14, _get_backup_keep, _set_backup_keep, 1, 365, ("backup", "keep_days"),
          modules=("backup",)),
+    _bool("smart_approvals.enabled", "Smart approvals",
+          "Runtime enable for the hosted smart-approval reviewer. Does not configure a secret_ref.",
+          "Smart approvals", False, _get_smart_enabled, _set_smart_enabled,
+          ("smart_approvals", "enabled")),
+    _enum("smart_approvals.mode", "Smart-approval mode",
+          "off, shadow, or auto. Last writer among this setting and PUT /smart-approvals "
+          "wins; off means no reviewer calls.",
+          "Smart approvals", "shadow", _get_smart_mode, _set_smart_mode,
+          ("off", "shadow", "auto"), ("smart_approvals", "mode"),
+          live_apply=apply_smart_mode, live_undo=apply_smart_mode),
+    _enum("smart_approvals.provider", "Smart-approval provider",
+          "Hosted reviewer provider. openai or anthropic.",
+          "Smart approvals", "openai", _get_smart_provider, _set_smart_provider,
+          ("openai", "anthropic"), ("smart_approvals", "provider")),
+    SettingSpec(
+        key="smart_approvals.model", label="Smart-approval model",
+        help="Hosted reviewer model id. Existing in-flight reviews keep the model they started with.",
+        category="Smart approvals", value_type="string", default="gpt-4.1-mini", scope="admin",
+        apply_mode="live", getter=_get_smart_model, setter=_set_smart_model,
+        bounds=Bounds(min_length=1, max_length=80), yaml_path=("smart_approvals", "model"),
+    ),
+    _float("smart_approvals.timeout_seconds", "Smart-approval timeout (seconds)",
+           "Give up on a hung reviewer request after this long.",
+           "Smart approvals", 8, _get_smart_timeout, _set_smart_timeout, 0.1, 60,
+           ("smart_approvals", "timeout_seconds")),
+    _float("smart_approvals.min_confidence", "Smart-approval min confidence",
+           "Hosted reviewer must meet this confidence before auto mode may approve.",
+           "Smart approvals", 0.85, _get_smart_confidence, _set_smart_confidence, 0, 1,
+           ("smart_approvals", "min_confidence")),
     _bool("web.enabled", "Web tools",
           "Runtime enable for web_search / web_fetch. Does not install the web module.",
           "Features", False, _enable_get("web"), _enable_set("web"), ("web", "enabled"),
@@ -685,6 +789,12 @@ STATIC_ADMIN: list[SettingSpec] = [
             ("notify", "topic"), modules=("notifications",)),
     _hidden("notify.token_file", "Notification token file", "File holding the ntfy write token.",
             "Notifications", ("notify", "token_file"), modules=("notifications",)),
+    _hidden("smart_approvals.secret_ref", "Smart-approval secret",
+            "Opaque name of the hosted reviewer key file. Managed in local configuration.",
+            "Smart approvals", ("smart_approvals", "secret_ref")),
+    _hidden("smart_approvals.proxy", "Smart-approval proxy",
+            "Optional explicit proxy for the hosted reviewer. Managed in local configuration.",
+            "Smart approvals", ("smart_approvals", "proxy")),
     _hidden("install.profile", "Install profile", "full or service. Chosen by the installer.", "Install",
             ("profile",)),
 ]
