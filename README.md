@@ -46,7 +46,8 @@ ops/backends/login.sh codex                # service profile: or claude / cursor
 
 No admin rights needed. The guide is [`docs/INSTALL.md`](docs/INSTALL.md); the API for Agent Harness Apps is
 [`docs/app-api.md`](docs/app-api.md) (Agent Harness SDK in `sdk/`); the owner API is
-[`docs/admin-api.md`](docs/admin-api.md); profile details are in [`docs/service-profile.md`](docs/service-profile.md);
+[`docs/admin-api.md`](docs/admin-api.md); the typed settings registry is [`docs/config-registry.md`](docs/config-registry.md);
+profile details are in [`docs/service-profile.md`](docs/service-profile.md);
 and bundled/separate Agent Harness Web deployment is in [`docs/web.md`](docs/web.md).
 
 Machine owners can optionally isolate a hosted-provider API key and model allowlist per app. Key values remain in
@@ -100,10 +101,17 @@ Profile/Settings). After Phase 8 it grew into the first-party operator UI rather
 - Time-boxed guest/demo access (`guests:` in untracked `config/harness.local.yaml`): a named tailnet
   login can browse read-only until an ISO `until`. Requires `allowed_logins`. Guests cannot start or
   cancel work, approve, mint keys, pause the GPU, use Remote Control, edit memory, or Review.
+- Household members (Settings → Accounts): the owner provisions a Tailscale login with a disk quota and
+  session caps. Members authenticate only with that exact `Tailscale-User-Login`, see only their own
+  projects/sessions, and run local-model tower tasks. Owner Home/search/review never show member prompts
+  or diffs. Open-owner mode (empty `allowed_logins`) remains only while no members exist. The machine
+  owner can still read local storage; this isolation is API/UI, not a hostile-administrator boundary.
+  See `docs/admin-api.md` and `docs/app-api.md`.
 - Agent Harness Web is a first-party Server browser client ([`docs/web.md`](docs/web.md)). Bundled static serving
   remains the default, while the same no-build PWA can be hosted separately with a configurable Server URL and an origin-bound
   `ho-` owner token. Session work dogfoods `/api/v1`; owner operations dogfood `/api/admin/v1`. Authenticated SSE,
   images, and downloads work without putting bearer tokens in URLs. App tokens cannot call the owner surface.
+  Members never construct `/api/admin/v1` requests.
 
 Still open from that pass: **#48** (add agent-harness and the memory library to Remote Control) and
 **#56** (Images: warm ComfyUI when the tab opens, real step progress, unload immediately, in-app
@@ -140,10 +148,10 @@ then 6c inference endpoint, 6d image generation, 6e distributable daemon.
   model at `https://<tower>/v1` with per-device keys (Settings → Inference endpoint). Requests go ahead of the next
   agent turn; 503 while the GPU guard has the model unloaded. `/v1/embeddings` is advertised when a separate
   llama.cpp embedding server/model is configured.
-- Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`)
-  and Qwen-Image-2512 (`quality`), both Apache 2.0. A batch unloads the language model, generates, and restores it.
-  Phone: Images screen; agents: `generate_image` (tower and MacBook sessions). Opt-in Real-ESRGAN 2×/4× upscaling
-  preserves the original PNG (`docs/INSTALL.md`).
+- Images (`images:`; `docs/phase6d-results.md`): ComfyUI (`C:\AI\ComfyUI`, started on demand) with Z-Image-Turbo (`fast`),
+  Qwen-Image-2512 (`quality`), and optional Lightning 4-step `quality-fast`, all Apache 2.0. A batch unloads the language
+  model, generates, and restores it. Phone: Images screen; agents: `generate_image` (tower and MacBook sessions). Opt-in
+  Real-ESRGAN 2×/4× upscaling preserves the original PNG (`docs/INSTALL.md`).
 - Distributable (`docs/phase6e-results.md`): app API `/api/v1` with scoped tokens, context, app-registered tools and
   events (`harness/apps.py`, `sdk/harness_client.py`); installer, uninstaller and `python -m harness.doctor`.
 
@@ -157,7 +165,9 @@ Details and verification: `docs/phase5-results.md`.
   llama-server is stopped (pause flag `C:\AI\llama-server.paused`, honored by `ops/llama-server/run-qwen.ps1`). It
   reloads after 3 min clear. Settings → GPU pauses or resumes by hand. API: `GET /gpu`, `POST /gpu/{pause|resume}`.
 - Metrics: `GET /metrics`, scraped as Prometheus job `agent_harness`; Grafana dashboard "Agent Harness".
-- Backups (`backup:`): nightly to `D:/My Backups/agent-harness/<date>`, 14 days; `POST /maintenance/backup`.
+- Backups (`backup:`): nightly dated database/transcript snapshots, 14 days; `POST /maintenance/backup`. Generated
+  PNGs are verified into the separate `images/YYYY/MM` archive once, with JSON metadata. Image retention defaults to
+  indefinite (`image_archive_keep_days: 0`) and deletion requires an owner preview and apply action.
 - Memory library (`memory_library:`; repo URL in `harness.local.yaml`): tools `memory_index`, `memory_search`,
   `memory_read` over allowlisted categories of a daemon-owned clone. Projects opt out with `memory_library: false`.
 - Homelab: `rebuild_service` (`docker compose up -d --build`, always asks).

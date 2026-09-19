@@ -75,13 +75,15 @@ def build(args) -> dict:
         "gpu_guard": {"enabled": args.gpu_guard and (args.profile == "full" or "gpu_guard" in enabled),
                       "pause_flag": args.pause_flag},
         "backup": {"enabled": args.profile == "full" or "backup" in enabled,
-                   "dir": f"{data}/backups", "at": "03:30", "keep_days": 14},
+                   "dir": f"{data}/backups", "at": "03:30", "keep_days": 14,
+                   "image_archive_keep_days": 0, "image_archive_min_free_gb": 1},
         "endpoint": {"enabled": args.profile == "full" or "endpoint" in enabled},
         "web": {"enabled": "web" in enabled},
         "images": {"enabled": "images" in enabled},
         "memory_library": {"enabled": "memory_library" in enabled},
         "search": {"enabled": "search" in enabled},
         "jobs": {"enabled": "jobs" in enabled},
+        "skills": {"enabled": args.profile == "full" or "skills" in enabled},
         "remote_control": {"enabled": "remote_control" in enabled},
     }
     if args.profile == "service":

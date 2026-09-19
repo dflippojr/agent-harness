@@ -115,6 +115,22 @@ def test_hosted_web_compatibility_errors_keep_cors_headers(tmp_path):
             assert response.json()["error"]["code"] == code
 
 
+def test_new_main_routes_reject_version_skew_with_cors(tmp_path):
+    """Household, config-registry, and skills routes all stay behind the compatibility guard."""
+    manager, origin, headers = hosted_web_client(tmp_path)
+    with TestClient(create_app(manager)) as client:
+        for path in (
+            "/api/admin/v1/accounts",  # #102 household accounts
+            "/api/admin/v1/config",    # #103 typed config registry
+            "/api/admin/v1/skills",    # #100 agent-written skills
+        ):
+            response = client.get(path, headers={**headers, compat.CLIENT_HEADER: "web/99"})
+            assert response.status_code == 426, (path, response.text)
+            assert response.headers["access-control-allow-origin"] == origin
+            assert response.headers["vary"] == "Origin"
+            assert response.json()["error"]["code"] == "daemon_update_required"
+
+
 def test_mac_package_manifest_is_version_matched_and_hash_verified(tmp_path):
     manager = manager_with_runner(tmp_path)
     with TestClient(create_app(manager)) as client:

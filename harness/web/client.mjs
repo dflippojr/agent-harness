@@ -65,11 +65,13 @@ export class AgentHarnessWebClient {
     const type = resp.headers.get("content-type") || "";
     const data = type.includes("json") ? await resp.json() : await resp.text();
     if (!resp.ok) {
-      const error = new Error((data && data.detail) || `HTTP ${resp.status}`);
-      error.status = resp.status;
-      error.code = data && data.error && data.error.code;
-      error.data = data;
-      throw error;
+      const err = new Error((data && data.detail) || `HTTP ${resp.status}`);
+      err.status = resp.status;
+      err.code = data && data.error && data.error.code;
+      err.keys = data && data.error && data.error.keys;
+      err.details = data && data.error && data.error.details;
+      err.data = data;
+      throw err;
     }
     return data;
   }

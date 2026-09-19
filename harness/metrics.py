@@ -160,6 +160,19 @@ def render(m: Manager) -> str:
         out.metric("harness_backup_last_success_timestamp_seconds", "gauge", "Last successful backup.",
                    [({}, backup["ok_at"])])
         out.metric("harness_backup_size_bytes", "gauge", "Size of the last backup.", [({}, backup.get("bytes", 0))])
+    archive = m.image_archive.health()
+    if archive.get("enabled"):
+        out.metric("harness_image_archive_last_reconciliation_timestamp_seconds", "gauge",
+                   "Last image archive reconciliation.", [({}, archive.get("last_reconciliation", 0))])
+        out.metric("harness_image_archive_images", "gauge", "Image archive jobs by state.",
+                   [({"state": state}, archive.get(state, 0)) for state in ("archived", "missing", "errors", "retained")])
+        out.metric("harness_image_archive_bytes", "gauge", "Verified bytes in the image archive.",
+                   [({}, archive.get("bytes", 0))])
+        out.metric("harness_image_archive_free_bytes", "gauge", "Free space on the image archive volume.",
+                   [({}, archive.get("free_bytes", 0))])
+        out.metric("harness_image_archive_free_space_warning", "gauge",
+                   "1 when image archive free space is below its configured threshold.",
+                   [({}, 1 if archive.get("free_space_warning") else 0)])
     if m.maintenance.last_report.get("at"):
         out.metric("harness_cleanup_last_run_timestamp_seconds", "gauge", "Last cleanup run.",
                    [({}, m.maintenance.last_report["at"])])
@@ -170,4 +183,14 @@ def render(m: Manager) -> str:
         pass
     active = sum(by_status.get(s, 0) for s in ACTIVE)
     out.metric("harness_sessions_active", "gauge", "Sessions not yet finished.", [({}, active)])
+    with db.lock:
+        skill_proposals = dict(db.conn.execute("SELECT status, COUNT(*) FROM skill_proposals GROUP BY status").fetchall())
+        skill_installed = db.conn.execute("SELECT COUNT(*), COALESCE(SUM(enabled), 0) FROM skill_installed").fetchone()
+        skill_reviews = dict(db.conn.execute("SELECT status, COUNT(*) FROM skill_review_jobs GROUP BY status").fetchall())
+    out.metric("harness_skill_proposals", "gauge", "Skill proposals by status.",
+               [({"status": st}, n) for st, n in skill_proposals.items()])
+    out.metric("harness_skills_installed", "gauge", "Installed instruction skills.",
+               [({"enabled": "true"}, skill_installed[1] or 0), ({"enabled": "false"}, (skill_installed[0] or 0) - (skill_installed[1] or 0))])
+    out.metric("harness_skill_reviews", "gauge", "Advisory skill reviews by status.",
+               [({"status": st}, n) for st, n in skill_reviews.items()])
     return "\n".join(out.lines) + "\n"

@@ -18,6 +18,13 @@ from typing import Callable
 from .config import BackendConfig, SandboxConfig
 from .sandbox import run_cmd
 
+# The bind-mount target every provider CLI runs in, and the proxy env every container needs.
+WORKSPACE = "/workspace"
+NO_PROXY = "NO_PROXY=localhost,127.0.0.1"
+# Keep this at runtime as well as in cli.Dockerfile so sessions still
+# work if the daemon is briefly paired with an older cached image.
+NODE_USE_ENV_PROXY = "NODE_USE_ENV_PROXY=1"
+
 
 class CliBackendError(Exception):
     """The provider CLI exited or stopped speaking valid JSONL."""
@@ -55,14 +62,12 @@ class ClaudeSession:
             "--network", self.backend.network,
             "-e", f"HTTPS_PROXY={self.backend.proxy}",
             "-e", f"HTTP_PROXY={self.backend.proxy}",
-            "-e", "NO_PROXY=localhost,127.0.0.1",
-            # Keep this at runtime as well as in cli.Dockerfile so sessions still
-            # work if the daemon is briefly paired with an older cached image.
-            "-e", "NODE_USE_ENV_PROXY=1",
+            "-e", NO_PROXY,
+            "-e", NODE_USE_ENV_PROXY,
             "-e", "CLAUDE_CONFIG_DIR=/home/agent/.claude",
             "-v", f"{self.backend.volume}:/home/agent/.claude",
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
-            "-w", "/workspace",
+            "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
             "--cpus", str(self.sandbox.cpus),
             "--pids-limit", str(self.sandbox.pids),
@@ -224,12 +229,12 @@ class CodexSession:
             "--network", self.backend.network,
             "-e", f"HTTPS_PROXY={self.backend.proxy}",
             "-e", f"HTTP_PROXY={self.backend.proxy}",
-            "-e", "NO_PROXY=localhost,127.0.0.1",
-            "-e", "NODE_USE_ENV_PROXY=1",
+            "-e", NO_PROXY,
+            "-e", NODE_USE_ENV_PROXY,
             "-e", "CODEX_HOME=/home/agent/.codex",
             "-v", f"{self.backend.volume}:/home/agent/.codex",
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
-            "-w", "/workspace",
+            "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
             "--cpus", str(self.sandbox.cpus),
             "--pids-limit", str(self.sandbox.pids),
@@ -334,7 +339,7 @@ class CodexSession:
         approval_policy = (self.backend.permission_mode if self.backend.permission_mode in
                            ("on-request", "never") else "on-request")
         common = {
-            "cwd": "/workspace", "model": self.model, "approvalPolicy": approval_policy,
+            "cwd": WORKSPACE, "model": self.model, "approvalPolicy": approval_policy,
             "approvalsReviewer": "user", "sandbox": "workspace-write",
         }
         if self.backend_session_id:
@@ -356,7 +361,7 @@ class CodexSession:
         approval_policy = (self.backend.permission_mode if self.backend.permission_mode in
                            ("on-request", "never") else "on-request")
         return {"threadId": self.backend_session_id, "input": [{"type": "text", "text": content}],
-                "cwd": "/workspace", "model": self.model, "effort": self.backend.effort,
+                "cwd": WORKSPACE, "model": self.model, "effort": self.backend.effort,
                 "approvalPolicy": approval_policy, "approvalsReviewer": "user"}
 
     def user_message(self, content: str) -> dict:
@@ -453,8 +458,8 @@ class CursorSession:
             "--network", self.backend.network,
             "-e", f"HTTPS_PROXY={self.backend.proxy}",
             "-e", f"HTTP_PROXY={self.backend.proxy}",
-            "-e", "NO_PROXY=localhost,127.0.0.1",
-            "-e", "NODE_USE_ENV_PROXY=1",
+            "-e", NO_PROXY,
+            "-e", NODE_USE_ENV_PROXY,
             # Keep every home-relative Cursor auth path inside the provider
             # volume; recent releases do not keep browser auth solely in the
             # documented config directory.
@@ -462,7 +467,7 @@ class CursorSession:
             "-e", "CURSOR_CONFIG_DIR=/home/agent/.cursor/config",
             "-v", f"{self.backend.volume}:/home/agent/.cursor",
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
-            "-w", "/workspace",
+            "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
             "--cpus", str(self.sandbox.cpus),
             "--pids-limit", str(self.sandbox.pids),
@@ -480,7 +485,7 @@ class CursorSession:
             # Cursor exposes no host approval protocol in print mode. This is
             # the user's explicit Phase 8a choice, confined by the outer
             # workspace-only container, provider-only network and branch review.
-            "--force", "--sandbox", "enabled", "--trust", "--workspace", "/workspace",
+            "--force", "--sandbox", "enabled", "--trust", "--workspace", WORKSPACE,
             "--model", self.model,
         ]
         if self.backend_session_id:
