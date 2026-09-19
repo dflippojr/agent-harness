@@ -1905,6 +1905,7 @@ const PROFILE_PAGES = {
   notifications: "Notifications",
   install: "Install",
   backends: "Backends",
+  daemon: "Server",
   memory: "Memory",
   apps: "Apps",
   endpoint: "Inference endpoint",
@@ -2110,6 +2111,7 @@ async function viewProfile(page) {
   if (page === "notifications") return $app.append(notificationsCard(me));
   if (page === "install") return $app.append(installCard());
   if (page === "backends") return $app.append(await backendsCard());
+  if (page === "daemon") return $app.append(await daemonSettingsCard());
   if (page === "memory") return $app.append(memoryCard());
   if (page === "apps") return $app.append(appsCard(me));
   if (page === "endpoint") return $app.append(endpointCard(me));
@@ -2433,6 +2435,170 @@ async function backendsCard() {
   return h("div", { class: "card" },
     h("p", { class: "muted small" }, "New tasks use these defaults. You can still pick a backend when you start one."),
     body);
+}
+
+function settingInput(spec, draft) {
+  const current = draft[spec.key] !== undefined ? draft[spec.key] : (spec.pending ?? spec.effective);
+  if (spec.type === "bool") {
+    const box = h("input", { type: "checkbox", class: "switch", checked: !!current, disabled: !spec.writable });
+    box.addEventListener("change", () => { draft[spec.key] = box.checked; });
+    return box;
+  }
+  if (spec.enum && spec.enum.length) {
+    const sel = h("select", { disabled: !spec.writable }, spec.enum.map((item) =>
+      h("option", { value: item, selected: item === current }, item)));
+    sel.addEventListener("change", () => { draft[spec.key] = sel.value; });
+    return sel;
+  }
+  const input = h("input", {
+    type: spec.type === "string" ? "text" : "number",
+    value: current == null ? "" : String(current),
+    disabled: !spec.writable,
+    min: spec.minimum, max: spec.maximum, step: spec.type === "int" ? "1" : "any",
+  });
+  input.addEventListener("change", () => {
+    if (input.value === "") { draft[spec.key] = null; return; }
+    draft[spec.key] = spec.type === "string" ? input.value : Number(input.value);
+  });
+  return input;
+}
+
+function settingMeta(spec) {
+  const bits = [];
+  bits.push(spec.apply === "live" ? "applies live" : spec.apply === "daemon_restart" ? "needs restart" : "file only");
+  if (spec.source) bits.push(`source: ${spec.source}`);
+  if (spec.pending != null && spec.apply === "daemon_restart") bits.push(`pending: ${spec.pending}`);
+  if (spec.capped_by) bits.push(`capped by ${spec.capped_by}`);
+  if (spec.file_only) bits.push(spec.guidance || "managed in local configuration");
+  return bits.join(" · ");
+}
+
+async function daemonSettingsCard() {
+  let view;
+  try { view = await api("/config"); }
+  catch (e) { return h("div", { class: "card" }, h("p", { class: "note bad" }, e.message)); }
+  const draft = {};
+  const status = h("p", { class: "muted small" },
+    `Revision ${view.revision}` +
+    (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
+    (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
+    (view.warning ? ` · ${view.warning}` :
+      view.recovery && view.recovery.recovery === "overlay_quarantined"
+        ? ` · ${view.recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`
+        : (view.recovery && view.recovery.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
+  const planBox = h("div", { class: "config-plan" });
+  const errorBox = h("div");
+  const groups = {};
+  for (const spec of view.settings || []) {
+    (groups[spec.category] ||= []).push(spec);
+  }
+  const rows = Object.entries(groups).map(([category, specs]) => h("div", { class: "card config-category" },
+    h("h3", {}, category),
+    specs.map((spec) => h("div", { class: "config-row" },
+      h("div", { class: "config-copy" },
+        h("label", { class: "field-label" }, spec.label),
+        h("p", { class: "muted small" }, spec.help),
+        h("p", { class: "muted small config-meta" }, settingMeta(spec)),
+        spec.file_only ? null : h("p", { class: "muted small" },
+          `effective ${spec.effective == null ? "—" : spec.effective}` +
+          (spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "") +
+          (spec.inherited != null ? ` · inherited ${spec.inherited}` : ""))),
+      spec.file_only ? h("span", { class: "muted small" }, "local config") : settingInput(spec, draft)))));
+
+  const apply = async ({ restart = false, rollback = false } = {}) => {
+    errorBox.replaceChildren();
+    planBox.replaceChildren();
+    const changes = {};
+    for (const [key, value] of Object.entries(draft)) changes[key] = value;
+    try {
+      if (rollback) {
+        if (!window.confirm("Restore the previous confirmed server configuration?")) return;
+        const result = await api("/config/rollback", { method: "POST", body: { revision: view.revision, confirm: true } });
+        toast("Rolled back");
+        if (result.restart_required) {
+          await confirmRestart(result.pending_revision || result.revision, status, errorBox);
+        } else { location.hash = "#/profile/daemon"; location.reload(); }
+        return;
+      }
+      const plan = await api("/config", { method: "PATCH", body: { revision: view.revision, dry_run: true, changes } });
+      planBox.append(
+        h("p", { class: "field-label" }, "Change plan"),
+        (plan.changes || []).length
+          ? h("ul", { class: "config-plan-list" }, plan.changes.map((c) =>
+            h("li", {}, `${c.key}: ${c.from} → ${c.action === "reset" ? "inherited" : c.to} (${c.apply})`)))
+          : h("p", { class: "muted small" }, "No changes."),
+      );
+      const enables = (plan.changes || []).filter((c) => c.to === true && String(c.key).endsWith(".enabled"));
+      if (enables.length && !window.confirm(`Enable ${enables.map((c) => c.key).join(", ")}?`)) return;
+      if (!(plan.changes || []).length) return;
+      if (!window.confirm("Apply these server settings?")) return;
+      const result = await api("/config", { method: "PATCH", body: { revision: view.revision, changes } });
+      toast("Saved");
+      if (result.restart_required || restart) {
+        await confirmRestart(result.pending_revision || result.target_revision || result.revision, status, errorBox);
+      } else { location.reload(); }
+    } catch (e) {
+      if (e.code === "revision_conflict") {
+        errorBox.append(h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
+      } else if (e.keys) {
+        errorBox.append(h("p", { class: "note bad" }, e.message),
+          h("ul", {}, Object.entries(e.keys).map(([key, info]) =>
+            h("li", {}, `${key}: ${info.message || info.code}`))));
+      } else {
+        errorBox.append(h("p", { class: "note bad" }, e.message));
+      }
+    }
+  };
+
+  return h("div", {},
+    h("div", { class: "card" },
+      h("p", { class: "muted small" }, "Operational settings for this daemon. Paths, secrets, modules, and network policy stay in local configuration."),
+      status),
+    ...rows,
+    planBox, errorBox,
+    isGuest() ? null : h("div", { class: "card config-actions" },
+      h("button", { class: "btn", type: "button", onclick: () => apply() }, "Review and apply"),
+      h("button", { class: "btn", type: "button", onclick: () => apply({ rollback: true }) }, "Roll back"),
+      view.restart_required ? h("button", { class: "btn", type: "button", onclick: () => confirmRestart(view.pending_revision || view.revision, status, errorBox) },
+        "Restart daemon") : null));
+}
+
+async function confirmRestart(targetRevision, status, errorBox) {
+  if (!window.confirm("Restart the daemon to apply pending settings?")) return;
+  status.textContent = "Restarting… reconnecting to see whether the target revision became active.";
+  try {
+    await api("/config/restart", { method: "POST", body: { revision: targetRevision, confirm: true } });
+  } catch (e) {
+    if (e.code === "restart_not_supervised") {
+      errorBox.append(h("p", { class: "note bad" }, e.message));
+      return;
+    }
+    // 202 may still parse as success; a dropped connection is expected.
+  }
+  const started = Date.now();
+  while (Date.now() - started < 45000) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const next = await api("/config");
+      if (next.revision === targetRevision && next.confirmed) {
+        toast("Restarted with the new configuration");
+        location.reload();
+        return;
+      }
+      if (next.recovery && next.recovery.recovery === "lkg_restore") {
+        errorBox.append(h("p", { class: "note bad" },
+          `Automatic recovery restored revision ${next.revision}. ${next.recovery.reason || ""}`.trim()));
+        return;
+      }
+      if (next.recovery && next.recovery.recovery === "overlay_quarantined") {
+        errorBox.append(h("p", { class: "note bad" },
+          next.warning || next.recovery.warning || next.recovery.reason ||
+          "Managed overlay was quarantined; YAML defaults are in effect."));
+        return;
+      }
+    } catch (_) { /* daemon still down */ }
+  }
+  errorBox.append(h("p", { class: "note bad" }, "Timed out waiting for the daemon to come back."));
 }
 
 function backupLine(b) {

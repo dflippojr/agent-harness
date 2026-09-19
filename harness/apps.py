@@ -33,7 +33,7 @@ from .fileops import ToolError
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.9"
+API_VERSION = "1.10"
 SESSIONS_ALL = "sessions:all"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
@@ -122,7 +122,7 @@ class AppTool(BaseModel):
 class CreateAppSession(BaseModel):
     prompt: str
     project: str = "scratch"
-    backend: str = "local"
+    backend: str | None = None
     model: str | None = None
     title: str | None = None
     context: list[ContextBlock] = []
@@ -185,6 +185,7 @@ class AppImageUpscaleRequest(BaseModel):
 
 
 class CapabilitiesResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     profile: str
     required: dict[str, bool]
     modules: dict[str, bool]
@@ -550,6 +551,7 @@ def register(app: FastAPI, mgr) -> None:
     async def api_root(request: Request):
         m = mgr(request)
         from .backend_state import view as backend_view
+        from .config import module_effective
         backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, False, None, False)
                                                for name in m.cfg.backends]))
         return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
@@ -557,7 +559,7 @@ def register(app: FastAPI, mgr) -> None:
                 "models": list(m.cfg.models), "backends": backends, "capabilities": m.cfg.capabilities(), "features": {
                     "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
                     "image_upscale": bool(m.images is not None),
-                    "inference": m.cfg.endpoint.enabled, "web": m.cfg.web.enabled,
+                    "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                     "runner_pairing": bool(m.cfg.runners),
                     "remote_control": m.remote_control is not None, "browser_pairing": True,
                     "stream_tickets": True, "scoped_projects": True, "household_accounts": True}}
@@ -762,17 +764,19 @@ def register(app: FastAPI, mgr) -> None:
         key = auth(request, "sessions")
         user_id = "owner"
         app = None if owner_key(key) else key
+        backend = body.backend
         if key.get("kind") == "member":
             user_id = key["user_id"]
             app = None
-            if body.backend != "local":
+            if backend not in (None, "", "local"):
                 raise HarnessError(403, "household members can only use the local model")
+            backend = "local"
         elif app is not None:
             user_id = "owner"
         blocks = [b.model_dump() for b in body.context]
         if sum(len(b["content"]) for b in blocks) > MAX_CONTEXT_CHARS:
             raise HarnessError(413, f"context is larger than {MAX_CONTEXT_CHARS} characters")
-        s = m.create(body.prompt, project=body.project, backend=body.backend, model=body.model, title=body.title,
+        s = m.create(body.prompt, project=body.project, backend=backend, model=body.model, title=body.title,
                      app=app, app_context=context_text(key["name"], blocks) if blocks else "", app_tools=body.tools,
                      app_metadata=body.metadata, owner_id=user_id)
         return view(m, s)
@@ -1019,3 +1023,6 @@ def register(app: FastAPI, mgr) -> None:
         return {**job, "url": f"/api/v1/images/{job['id']}.png" if job["status"] == "done" else None,
                 "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
                               "upscale_model": c.get("upscale_model") or ""} for c in children]}
+
+    from . import config_api
+    config_api.register_app(app, mgr, auth, owner_key)

@@ -27,6 +27,7 @@ from .policy import ALLOW, ASK, Policy
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
+from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
 from .tools import ToolError, Workspace, truncate_middle, validate_args
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
@@ -113,6 +114,7 @@ class Runner:
         self.sessions = None                    # search.SessionSearch, set by the manager when enabled
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
+        self.settings = None                    # settings_service.SettingsService, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
 
@@ -137,33 +139,44 @@ class Runner:
         if s["target"] != "tower":
             return RemoteWorkspace(self.hub, s["target"], s["id"], model.context_tokens)
         project = self.project_for(s)
-        homelab = Homelab(self.cfg.homelab) if project and project.homelab and session_user_id(s) == OWNER_USER_ID else None
+        defaults = self._app_defaults_for_session(s)
         from . import storage
         user_id = session_user_id(s)
-        repos = storage.repos_dir(self.cfg, user_id)
         member = user_id != OWNER_USER_ID
+        homelab = (Homelab(self.cfg.homelab)
+                   if project and project.homelab and not member and app_allows(defaults, "homelab") else None)
+        repos = storage.repos_dir(self.cfg, user_id)
         budget = self._member_clone_budget(user_id) if member else None
         return Workspace(Path(s["workspace"]), self.sandbox(s), repos, model.context_tokens, homelab,
                          public_clone_only=member, clone_max_bytes=budget)
 
     def daemon_toolkits(self, s: dict) -> list:
         """Tools that run in the daemon for every target (memory library, web, session search), as enabled for the
-        project."""
+        project and narrowed by app.capabilities."""
         project = self.project_for(s)
+        defaults = self._app_defaults_for_session(s)
         member = session_user_id(s) != OWNER_USER_ID
         kits = []
-        if not member and self.memory is not None and (project is None or project.memory_library):
+        if (not member and self.memory is not None and (project is None or project.memory_library)
+                and app_allows(defaults, "memory_library")):
             kits.append(self.memory)
-        if self.web is not None and (project is None or project.web):
+        if self.web is not None and (project is None or project.web) and app_allows(defaults, "web"):
             kits.append(self.web)
-        if not member and self.images is not None and (project is None or project.images):
+        if (not member and self.images is not None and (project is None or project.images)
+                and app_allows(defaults, "images")):
             kits.append(self.images)
-        if self.sessions is not None and (project is None or project.session_search):
+        if (self.sessions is not None and (project is None or project.session_search)
+                and app_allows(defaults, "search")):
             kits.append(self.sessions)
         if (not member and self.remote_control is not None and s["target"] == "tower"
-                and not s.get("app_id")):
+                and not s.get("app_id") and app_allows(defaults, "remote_control")):
             kits.append(self.remote_control)  # not for app sessions: apps launch through /api/v1/remote-control
         return kits
+
+    def _app_defaults_for_session(self, s: dict) -> dict:
+        if self.settings is None:
+            return {}
+        return self.settings.app_defaults_for_session(s)
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:
         schemas = ws.schemas()
@@ -404,8 +417,10 @@ class Runner:
                 continue
 
             run = s["run"]
-            if run["turns"] >= self.cfg.max_turns or run["completion_tokens"] >= self.cfg.max_completion_tokens:
-                reason = "budget_turns" if run["turns"] >= self.cfg.max_turns else "budget_tokens"
+            max_turns = int(run.get("max_turns") or self.cfg.max_turns)
+            max_tokens = int(run.get("max_completion_tokens") or self.cfg.max_completion_tokens)
+            if run["turns"] >= max_turns or run["completion_tokens"] >= max_tokens:
+                reason = "budget_turns" if run["turns"] >= max_turns else "budget_tokens"
                 self.set_status(sid, "done", stop_reason=reason)
                 await self._end_run(sid)
                 return
@@ -459,7 +474,9 @@ class Runner:
                         self.bus.emit(sid, "billing_warning", {"backend": backend_name, "message": warning})
                     factory = {"claude": self.cli_factory, "codex": self.codex_factory,
                                "cursor": self.cursor_factory}[backend_name]
-                    cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
+                    from dataclasses import replace
+                    frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
+                    cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=frozen,
                                   sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
                                   model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
                     self._cli_sessions[sid] = cli

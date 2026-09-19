@@ -283,10 +283,24 @@ MIGRATIONS = [
     ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
+    # Issue #66: freeze hosted effort at session start; app-scoped settings live beside the token.
+    ("sessions", "effort", "TEXT NOT NULL DEFAULT ''"),
+    # Issue #66: in-flight app sessions keep the defaults they started with if the app is revoked.
+    ("sessions", "app_defaults", "TEXT NOT NULL DEFAULT '{}'"),
 ]
 
-JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "data", "origins",
-                "models"}
+
+APP_SETTINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS app_settings (
+    app_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+"""
+
+JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "app_defaults", "data",
+                "origins", "models"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -308,6 +322,7 @@ class Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        self.conn.executescript(APP_SETTINGS_SCHEMA)
         for table, column, definition in MIGRATIONS:
             existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
@@ -982,8 +997,38 @@ class Database:
 
     def revoke_api_key(self, kid: str) -> bool:
         with self.lock:
-            return self.conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-                                     (time.time(), kid)).rowcount == 1
+            ok = self.conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                                   (time.time(), kid)).rowcount == 1
+            if ok:
+                self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
+            return ok
+
+    def get_app_settings(self, app_id: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM app_settings WHERE app_id = ?", (app_id,)).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        try:
+            out["values"] = json.loads(out["payload"])
+        except (ValueError, KeyError):
+            out["values"] = {}
+        return out
+
+    def set_app_settings(self, app_id: str, revision: int, values: dict) -> None:
+        payload = json.dumps(values)
+        now = time.time()
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO app_settings (app_id, revision, payload, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(app_id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload, "
+                "updated_at = excluded.updated_at",
+                (app_id, revision, payload, now),
+            )
+
+    def delete_app_settings(self, app_id: str) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (app_id,))
 
     def log_endpoint_request(self, r: dict) -> None:
         with self.lock:

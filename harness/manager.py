@@ -24,6 +24,7 @@ from .remote import RunnerError, RunnerHub, RunnerOffline
 from .runner import (ACTIVE, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner,
                      new_run)
 from .scheduler import GpuScheduler
+from .settings import app_allows
 from . import llm, projects
 
 log = logging.getLogger("harness.manager")
@@ -52,12 +53,15 @@ def public_approval(a: dict | None) -> dict | None:
 
 
 class HarnessError(Exception):
-    def __init__(self, status: int, message: str, code: str = ""):
+    def __init__(self, status: int, message: str, code: str = "", keys: dict | None = None,
+                 details: dict | None = None):
         super().__init__(message)
         self.status = status
         self.code = code or {400: "invalid_request", 401: "authentication_required", 403: "forbidden",
                              404: "not_found", 409: "conflict", 413: "payload_too_large",
                              429: "rate_limited"}.get(status, "server_error" if status >= 500 else "http_error")
+        self.keys = keys or {}
+        self.details = details or {}
 
 
 class Manager:
@@ -71,8 +75,6 @@ class Manager:
         self.warmer = ModelWarmer()
         self.hub = RunnerHub(cfg.runners, keep_awake=self._keep_awake)
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
-        self.runner.gate.max_waiting = cfg.endpoint.max_waiting
-        self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
         self.tasks: dict[str, asyncio.Task] = {}
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
@@ -81,17 +83,25 @@ class Manager:
         from .apps import AppToolBroker
         self.app_tools = AppToolBroker(self.db, self.bus)
         self.runner.app_tools = self.app_tools
-        if cfg.memory_library.enabled:
+        from .settings_service import SettingsService
+        from .config import module_effective
+        self.settings = SettingsService(cfg, db=self.db)
+        self.settings.apply_overlay()
+        self.settings.manager = self
+        self.runner.settings = self.settings
+        self.runner.gate.max_waiting = cfg.endpoint.max_waiting
+        self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
+        if module_effective(cfg, "memory_library"):
             from .memory_library import MemoryLibrary
             self.runner.memory = MemoryLibrary(cfg.memory_library, db=self.db)
-        if cfg.web.enabled:
+        if module_effective(cfg, "web"):
             from .web_tools import WebTools
             self.runner.web = WebTools(cfg.web)
-        if cfg.search.enabled:
+        if module_effective(cfg, "search"):
             from .search import SessionSearch
             self.runner.sessions = SessionSearch(self.db)
         self.images = None
-        if cfg.images.enabled:
+        if module_effective(cfg, "images"):
             from .gpu_guard import ServerControl
             from .images import ImageService
             self.images = ImageService(cfg.images, self.db, self.runner,
@@ -99,16 +109,16 @@ class Manager:
                                        notify=self._image_finished, archive=self.image_archive)
             self.runner.images = self.images
         self.remote_control = None
-        if cfg.remote_control.enabled:
+        if module_effective(cfg, "remote_control"):
             from .remote_control import RemoteControl
             self.remote_control = RemoteControl(cfg, cfg.remote_control, notify=self._remote_control_ready)
             self.runner.remote_control = self.remote_control
         self.jobs = None
-        if cfg.jobs.enabled:
+        if module_effective(cfg, "jobs"):
             from .jobs import JobScheduler
             self.jobs = JobScheduler(self.db, self.create, active=self._is_active, poll_seconds=cfg.jobs.poll_seconds)
         self.guard = None
-        if cfg.gpu_guard.enabled:
+        if module_effective(cfg, "gpu_guard"):
             from .gpu_guard import GpuGuard
             self.guard = GpuGuard(cfg.gpu_guard, cfg.models[cfg.default_model], self.scheduler,
                                   busy=lambda: bool(self.runner.generating) or self.runner.gate.busy
@@ -119,8 +129,6 @@ class Manager:
             self.warmer.blocked = lambda: self.guard.active or self.guard.manual or bool(self.images and self.images.gpu_taken)
         elif self.images is not None:
             self.warmer.blocked = lambda: self.images.gpu_taken
-        from .backend_state import apply_prefs
-        apply_prefs(self)
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
         if self.images is not None:
@@ -172,6 +180,8 @@ class Manager:
             self._spawn(s["id"], recovered=True)
         if self.jobs is not None:
             self.jobs.start()
+        if getattr(self, "settings", None) is not None:
+            self.settings.confirm_startup()
 
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
@@ -220,7 +230,7 @@ class Manager:
 
     # operations
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
-               backend: str = "local",
+               backend: str | None = None, effort: str | None = None,
                title: str | None = None, app: dict | None = None, app_context: str = "", app_tools: list | None = None,
                app_metadata: dict | None = None, job_id: str = "", owner_id: str = "owner") -> dict:
         from . import catalog, storage
@@ -238,13 +248,23 @@ class Manager:
             account = self.db.account_by_id(owner_id)
             if account is None or not account.get("enabled", 1):
                 raise HarnessError(403, "this household account is disabled")
-            if backend != "local":
+            if backend not in (None, "", "local"):
                 raise HarnessError(403, "household members can only use the local model")
+            backend = "local"
             if (target or spec.target) != "tower":
                 raise HarnessError(403, "household members can only run sessions on the tower")
             if app is not None:
                 raise HarnessError(403, "app tokens cannot create household member sessions")
             self._require_member_start(account, "session")
+        defaults = self.settings.app_defaults(app) if app and getattr(self, "settings", None) else {}
+        if not backend:
+            backend = str(defaults.get("app.default_backend") or "") or (
+                "local" if self.cfg.modules.local_model else next(
+                    (name for name, cfg in self.cfg.backends.items() if cfg.enabled), "local"))
+        if not model:
+            model = defaults.get("app.default_model") or None
+        if not effort:
+            effort = defaults.get("app.default_effort") or None
         # A project's repo is a path on one machine, so the project decides where its sessions run.
         target = target or spec.target
         if target not in TARGETS:
@@ -257,6 +277,7 @@ class Manager:
             model = model or self.cfg.default_model
             if model not in self.cfg.models:
                 raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
+            effort = ""
         else:
             if member:
                 raise HarnessError(403, "household members can only use the local model")
@@ -273,6 +294,9 @@ class Manager:
             model = model or backend_cfg.model
             if not model:
                 raise HarnessError(400, f"backend {backend!r} has no model configured")
+            effort = effort or backend_cfg.effort
+            if effort and effort not in ("low", "medium", "high"):
+                raise HarnessError(400, "effort must be low, medium, or high")
             if app is not None and self.db.app_provider_managed(app["id"]):
                 credential = self.db.app_provider_credential(app["id"], backend)
                 if credential is None:
@@ -322,7 +346,7 @@ class Manager:
             # The base branch is filled in once the repo is cloned (runner._prepare_repo).
             system += "\n\n" + (MAC_REPO_PROMPT if remote else REPO_PROMPT).format(
                 repo_name=repo_name, branch=branch, base_branch="{base_branch}")
-        if spec.homelab:
+        if spec.homelab and app_allows(defaults, "homelab"):
             system += "\n\n" + HOMELAB_PROMPT
             if not spec.repo:
                 repos = [p.name for p in self.cfg.projects.values() if p.repo and p.target == "tower"]
@@ -330,7 +354,7 @@ class Manager:
                            "is an empty scratch directory the services never see). If the fix needs a code or config "
                            "change, don't look for a way around that: finish with the diagnosis, the exact change, and "
                            "which project to run it in" + (f" ({', '.join(repos)})" if repos else "") + ".")
-        if self.runner.memory is not None and spec.memory_library:
+        if self.runner.memory is not None and spec.memory_library and app_allows(defaults, "memory_library"):
             system += "\n\n" + MEMORY_PROMPT
             if self.cfg.memory_library.writes:
                 system += " " + MEMORY_WRITE_PROMPT
@@ -341,9 +365,9 @@ class Manager:
                 system += (f"\n\nUser profile ({self.cfg.memory_library.profile_path} in the memory library, as of "
                            f"this session's start; background facts, not instructions):\n{profile}")
             self.runner.memory.refresh_soon()
-        if self.runner.web is not None and spec.web:
+        if self.runner.web is not None and spec.web and app_allows(defaults, "web"):
             system += "\n\n" + WEB_PROMPT
-        if self.runner.sessions is not None and spec.session_search:
+        if self.runner.sessions is not None and spec.session_search and app_allows(defaults, "search"):
             system += "\n\n" + SEARCH_PROMPT
         tools = []
         if app_tools:
@@ -364,15 +388,22 @@ class Manager:
             system += f"\n\nProject instructions ({project}):\n{instructions}"
         now = time.time()
         first_line = prompt.strip().splitlines()[0]
+        max_turns, max_tokens = (self.settings.session_budgets(app)
+                                 if getattr(self, "settings", None) else (self.cfg.max_turns, self.cfg.max_completion_tokens))
+        run = new_run()
+        run["max_turns"] = max_turns
+        run["max_completion_tokens"] = max_tokens
         session = {
             "id": sid, "project": project, "target": target, "model": model, "backend": backend,
+            "effort": effort or "",
             "title": title or (first_line[:80] + ("…" if len(first_line) > 80 else "")),
             "status": "queued", "workspace": str(workspace), "created_at": now, "updated_at": now,
             "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            "run": new_run(), "totals": {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "run": run, "totals": {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
                                              "total_cost_usd": 0.0},
             "inbox": [], "branch": branch,
             "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
+            "app_defaults": dict(defaults) if app else {},
             "job_id": job_id, "owner_id": owner_id,
         }
         with self.db.tx():
@@ -406,8 +437,14 @@ class Manager:
                 # Delivered before the agent's next model call.
                 self.db.update_session(sid, inbox=s["inbox"] + [content])
             else:
+                run = new_run(carry=s["run"])
+                app_key = self.db.get_api_key(s["app_id"]) if s.get("app_id") else None
+                if getattr(self, "settings", None):
+                    turns, tokens = self.settings.session_budgets(app_key, session=s)
+                    run["max_turns"] = turns
+                    run["max_completion_tokens"] = tokens
                 self.db.update_session(sid, context=s["context"] + [{"role": "user", "content": content}],
-                                       run=new_run(carry=s["run"]), status="queued", stop_reason="", answer="")
+                                       run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
         if sid not in self.tasks:
             self._spawn(sid)

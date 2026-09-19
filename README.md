@@ -46,7 +46,8 @@ ops/backends/login.sh codex                # service profile: or claude / cursor
 
 No admin rights needed. The guide is [`docs/INSTALL.md`](docs/INSTALL.md); the API for Agent Harness Apps is
 [`docs/app-api.md`](docs/app-api.md) (Agent Harness SDK in `sdk/`); the owner API is
-[`docs/admin-api.md`](docs/admin-api.md); profile details are in [`docs/service-profile.md`](docs/service-profile.md);
+[`docs/admin-api.md`](docs/admin-api.md); the typed settings registry is [`docs/config-registry.md`](docs/config-registry.md);
+profile details are in [`docs/service-profile.md`](docs/service-profile.md);
 and bundled/separate Agent Harness Web deployment is in [`docs/web.md`](docs/web.md).
 
 Machine owners can optionally isolate a hosted-provider API key and model allowlist per app. Key values remain in

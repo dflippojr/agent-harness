@@ -53,6 +53,12 @@ accounts. Cross-user object ids return an indistinguishable 404. Errors are `{"d
 include `error: {code, message, retryable}`; `detail` remains for compatibility. The SDK exposes these as
 `HarnessError.code`, `.detail`, and `.retryable`.
 
+## App configuration
+
+`GET /api/v1/config/schema`, `GET /api/v1/config`, and `PATCH /api/v1/config` require a live app token. They return
+only that app's registered settings and effective caps. Owner, device, runner, guest, and anonymous credentials
+cannot impersonate this surface. The allowlist and cap rules are in [`config-registry.md`](config-registry.md).
+
 ## Household members on `/api/v1`
 
 An enabled Tailscale member is a human principal on the same-origin `/api/v1` surface. `GET /api/v1/me` returns
@@ -354,4 +360,5 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.5 | 2026-09-16 | Typed OpenAPI responses, supported SDK lifecycle, replay guarantees, and normalized failures |
 | 1.6 | 2026-09-16 | Per-app provider allowlists, billing policy, isolated usage attribution, and sanitized status |
 | 1.8 | 2026-09-17 | Opt-in Real-ESRGAN 2×/4× upscaling (`upscale` on create; `POST /api/v1/images/{id}/upscale`) |
+| 1.10 | 2026-09-18 | Per-app configuration registry (`/api/v1/config`); values may only narrow owner/token authority |
 | 1.9 | 2026-09-17 | Household members: scoped `/me`, `/projects`, search, events, local-only backends; discovery hides project names. `sessions:all` expands owner-scope reads only; messages, context, and cancel require owning the session |

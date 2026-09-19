@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -16,6 +16,38 @@ MODULE_NAMES = (
     "local_model", "homelab", "memory_library", "images", "jobs", "gpu_guard", "runners",
     "remote_control", "web", "search", "endpoint", "notifications", "backup",
 )
+# Optional modules whose on/off switch is ``cfg.<section>.enabled``. The rest
+# (local_model, homelab, runners) are install-selected only.
+MODULE_ENABLE_SECTIONS = {
+    "web": "web",
+    "search": "search",
+    "jobs": "jobs",
+    "endpoint": "endpoint",
+    "images": "images",
+    "gpu_guard": "gpu_guard",
+    "notifications": "notify",
+    "backup": "backup",
+    "memory_library": "memory_library",
+    "remote_control": "remote_control",
+}
+
+
+def module_effective(cfg: "Config", name: str) -> bool:
+    """True when the module is installed and switched on.
+
+    ``cfg.installed.<name>`` is installer/profile selection. ``cfg.<section>.enabled``
+    is the operational switch (YAML, then managed overlay). ``cfg.modules`` stays the
+    YAML-time snapshot and is not written by overlay setters. Capabilities, /health,
+    /api/v1 features, and Manager tool construction all use this function.
+    """
+    installed = getattr(cfg, "installed", None)
+    if installed is None or not bool(getattr(installed, name, False)):
+        return False
+    section_name = MODULE_ENABLE_SECTIONS.get(name)
+    if section_name is None:
+        return True
+    section = getattr(cfg, section_name, None)
+    return bool(getattr(section, "enabled", False))
 
 
 @dataclass
@@ -275,6 +307,8 @@ class Config:
     projects: dict[str, Project]
     profile: str = "full"
     modules: ModulesConfig = field(default_factory=ModulesConfig)
+    installed: ModulesConfig = field(default_factory=ModulesConfig)
+    config_dir: Path = field(default_factory=lambda: ROOT / "config")
     # Opaque names to owner-managed files. Only the names may be stored in SQLite; paths stay in local config.
     provider_secret_files: dict[str, str] = field(default_factory=dict)
     backends: dict[str, BackendConfig] = field(default_factory=dict)
@@ -316,6 +350,10 @@ class Config:
     def projects_overlay_path(self) -> Path:
         return self.data_dir / PROJECTS_FILE
 
+    def module_effective(self, name: str) -> bool:
+        """Installed AND switched on. The single source for capabilities/features/Manager."""
+        return module_effective(self, name)
+
     def capabilities(self) -> dict:
         """Machine-readable service profile and module catalog for first- and third-party clients."""
         return {
@@ -324,8 +362,10 @@ class Config:
                 "sessions": True, "provider_adapters": True, "approvals": True, "events": True,
                 "scoped_tokens": True, "storage": True, "capability_discovery": True,
             },
-            "modules": asdict(self.modules),
+            "modules": {name: module_effective(self, name) for name in MODULE_NAMES},
             "hosted_backends": [name for name, cfg in self.backends.items() if cfg.enabled],
+            "config_registry": True,
+            "supervised_restart": os.environ.get("HARNESS_SUPERVISED", "").strip() in ("1", "true", "yes"),
         }
 
 
@@ -579,6 +619,8 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         projects=projects,
         profile=profile,
         modules=modules,
+        installed=selected,
+        config_dir=config_dir,
         provider_secret_files=provider_secret_files,
         backends=backends,
         public_url=(raw.get("public_url") or "").rstrip("/"),
@@ -603,6 +645,15 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),
     )
+    _validate_loaded(cfg)
+    from .settings_keys import build_registry
+    registry = build_registry(cfg)
+    cfg._inherited = {spec.key: spec.getter(cfg) for spec in registry.writable_admin()}
+    _apply_managed_overlay(cfg)
+    return cfg
+
+
+def _validate_loaded(cfg: Config) -> None:
     if cfg.modules.local_model and not cfg.models:
         raise ValueError("the local_model module requires at least one configured model")
     if cfg.default_model and cfg.default_model not in cfg.models:
@@ -618,4 +669,14 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                 raise ValueError(f"project {project.name}: target {project.target!r} is not in runners")
             if project.homelab:
                 raise ValueError(f"project {project.name}: homelab tools only run on the tower")
-    return cfg
+
+
+def _apply_managed_overlay(cfg: Config) -> None:
+    """Apply registered admin keys from data_dir/managed-config.json after YAML loading.
+
+    An invalid or unconfirmed managed candidate restores the last known good overlay.
+    If that overlay is also unusable, both files are quarantined and YAML defaults
+    remain in effect. Invalid base/local/profile YAML is never masked by this fallback.
+    """
+    from .settings_service import SettingsService
+    SettingsService(cfg).apply_overlay()

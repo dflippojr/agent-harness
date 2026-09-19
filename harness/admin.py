@@ -27,7 +27,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.5"
+API_VERSION = "1.7"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
@@ -217,6 +217,8 @@ def register(app: FastAPI, mgr) -> None:
         {"method": "GET", "path": PREFIX + "/accounts/{user_id}"},
         {"method": "PATCH", "path": PREFIX + "/accounts/{user_id}"},
     ])
+    from . import config_api
+    operations.extend(config_api.register_admin(app, mgr, require_admin))
     operations.sort(key=lambda row: (row["path"], row["method"]))
 
     @app.get(PREFIX)
