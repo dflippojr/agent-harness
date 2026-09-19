@@ -1644,12 +1644,12 @@ async function viewImages() {
     try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ }
     if (prompt.value.trim()) startWarmup().catch(() => {});
   });
-  const modeEntries = imageModeEntries(data.status);
+  const modeEntries = data.status.modes ? Object.entries(data.status.modes) : imageModeEntries(data.status);
   const modes = Object.fromEntries(modeEntries);
   const modelChoices = modeEntries.map(([key, spec]) => ({ key, ...spec, display_name: spec.label || spec }));
-  const model = h("select", {}, modelChoices.map((m) => h("option", {
-    value: m.key, disabled: m.available === false,
-  }, m.available === false ? `${m.display_name} — not installed` : m.display_name)));
+  const model = h("select", {}, modeEntries.map(([key, spec]) => h("option", {
+    value: key, disabled: spec.available === false,
+  }, spec.available === false ? `${spec.label || spec} — not installed` : (spec.label || spec))));
   const fluxHint = h("p", { class: "muted small" });
   const updateFluxHint = () => {
     const selected = modelChoices.find((m) => m.key === model.value);
