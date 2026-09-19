@@ -76,6 +76,27 @@ function Test-ReviewAttemptRateLimit {
     return $false
 }
 
+function Get-ReviewDiagnosticTail {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$Stderr,
+        [int]$MaxLines = 20,
+        [int]$MaxCharacters = 2048
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Stderr)) { return '' }
+    $lines = @($Stderr -split "`r?`n")
+    $redacted = (($lines | Select-Object -Last $MaxLines) -join [Environment]::NewLine)
+    $redacted = $redacted -replace '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer [REDACTED]'
+    $redacted = $redacted -replace '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)', '$1$2[REDACTED]'
+    $redacted = $redacted -replace '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b', '[REDACTED]'
+    $redacted = $redacted -replace '\b[A-Za-z0-9+/=_-]{40,}\b', '[REDACTED]'
+    if ($redacted.Length -gt $MaxCharacters) {
+        $redacted = $redacted.Substring($redacted.Length - $MaxCharacters)
+    }
+    return $redacted
+}
+
 function Get-CursorAgentEntrypoint {
     [CmdletBinding()]
     param([string]$CursorBase = (Join-Path $env:LOCALAPPDATA 'cursor-agent'))
@@ -245,7 +266,12 @@ function Invoke-ReviewFallback {
             }
             if ($reason) {
                 $failures.Add("$backend`: $reason")
-                Write-Warning "Review backend $backend failed ($reason); trying the next backend."
+                $warning = "Review backend $backend failed ($reason); trying the next backend."
+                $diagnostic = Get-ReviewDiagnosticTail -Stderr ([string]$attempt.Stderr)
+                if (-not [string]::IsNullOrWhiteSpace($diagnostic)) {
+                    $warning = "$warning`nStderr tail (redacted, last 20 lines / 2 KB):`n$diagnostic"
+                }
+                Write-Warning $warning
                 continue
             }
             return [pscustomobject]@{

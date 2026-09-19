@@ -336,6 +336,48 @@ $result | ConvertTo-Json -Compress
     assert "rate limit or quota response" in result.stdout
 
 
+def test_diagnostic_tail_is_bounded_and_redacts_tokens(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        r"""
+$lines = @(1..25 | ForEach-Object { ('diagnostic line {0:D2} ' -f $_) + ('detail ' * 80) })
+$lines += 'Authorization: Bearer bearer-secret-value-1234567890'
+$lines += 'api_key=sk-supersecretvalue1234567890'
+$tail = Get-ReviewDiagnosticTail -Stderr ($lines -join "`n")
+[ordered]@{ tail = $tail; length = $tail.Length } | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip())
+    assert value["length"] <= 2048
+    assert "diagnostic line 01" not in value["tail"]
+    assert "bearer-secret-value" not in value["tail"]
+    assert "supersecretvalue" not in value["tail"]
+    assert value["tail"].count("[REDACTED]") == 2
+
+
+def test_failed_backend_warning_includes_stderr_tail(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        f"""
+$script:index = 0
+$runner = {{
+    param($command)
+    $script:index++
+    if ($script:index -eq 1) {{
+        return [pscustomobject]@{{ ExitCode = 9; Stdout = ''; Stderr = 'backend diagnostic detail'; Model = $null }}
+    }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = 'clean review'; Stderr = ''; Model = $null }}
+}}
+$result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
+$result | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "Stderr tail (redacted, last 20 lines / 2 KB)" in result.stdout
+    assert "backend diagnostic detail" in result.stdout
+
+
 def test_workflow_exposes_backend_input_and_delegates_to_runner():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     dispatch = workflow.split("  workflow_dispatch:", 1)[1].split("\npermissions:", 1)[0]
