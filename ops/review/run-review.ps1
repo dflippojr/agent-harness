@@ -60,6 +60,22 @@ function Test-ReviewRateLimit {
     return $Text -match '(?i)(resource[_ -]?exhausted|rate[_ -]?limit(?:ed)?|quota(?:\s+(?:has\s+been\s+)?exceeded)?|too\s+many\s+requests|usage\s+limit|credit\s+balance)'
 }
 
+function Test-ReviewAttemptRateLimit {
+    [CmdletBinding()]
+    param(
+        [int]$ExitCode,
+        [AllowEmptyString()][string]$Stdout,
+        [AllowEmptyString()][string]$Stderr,
+        [int]$ShortStdoutThreshold = 600
+    )
+
+    if (Test-ReviewRateLimit -Text $Stderr) { return $true }
+    if ($ExitCode -ne 0 -or $Stdout.Length -lt $ShortStdoutThreshold) {
+        return Test-ReviewRateLimit -Text $Stdout
+    }
+    return $false
+}
+
 function Get-CursorAgentEntrypoint {
     [CmdletBinding()]
     param([string]$CursorBase = (Join-Path $env:LOCALAPPDATA 'cursor-agent'))
@@ -218,14 +234,14 @@ function Invoke-ReviewFallback {
             if (-not [string]::IsNullOrWhiteSpace($CursorBase)) { $commandArgs.CursorBase = $CursorBase }
             $command = Get-ReviewBackendCommand @commandArgs
             $attempt = & $Runner $command
-            $combined = "{0}`n{1}" -f $attempt.Stdout, $attempt.Stderr
+            $rateLimited = Test-ReviewAttemptRateLimit -ExitCode $attempt.ExitCode -Stdout ([string]$attempt.Stdout) -Stderr ([string]$attempt.Stderr)
             $reason = $null
-            if ([int]$attempt.ExitCode -ne 0) {
+            if ($rateLimited) {
+                $reason = 'rate limit or quota response'
+            } elseif ([int]$attempt.ExitCode -ne 0) {
                 $reason = "exit code $($attempt.ExitCode)"
             } elseif ([string]::IsNullOrWhiteSpace([string]$attempt.Stdout)) {
                 $reason = 'empty output'
-            } elseif (Test-ReviewRateLimit -Text $combined) {
-                $reason = 'rate limit or quota response'
             }
             if ($reason) {
                 $failures.Add("$backend`: $reason")

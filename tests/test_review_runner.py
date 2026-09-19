@@ -279,6 +279,63 @@ $result | ConvertTo-Json -Compress
     assert "rate limit or quota response" in result.stdout
 
 
+def test_long_successful_review_can_discuss_rate_limits_and_quotas(tmp_path):
+    review = (
+        "This review explains why matching rate limit text such as quota exceeded "
+        "inside a pull request is not evidence of a provider failure. "
+    ) * 8
+    escaped_review = review.replace("'", "''")
+    result = run_powershell(
+        tmp_path,
+        f"""
+$script:calls = New-Object System.Collections.Generic.List[string]
+$runner = {{
+    param($command)
+    $script:calls.Add($command.Backend)
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = '{escaped_review}'; Stderr = ''; Model = $null }}
+}}
+$result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
+[ordered]@{{ backend = $result.Backend; calls = @($script:calls); length = $result.Output.Length }} | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip().splitlines()[-1])
+    assert value["backend"] == "codex"
+    assert value["calls"] == ["codex"]
+    assert value["length"] >= 600
+
+
+@pytest.mark.parametrize(
+    ("first_stdout", "first_stderr"),
+    [
+        ("rate limit exceeded", ""),
+        ("brief provider response", "RESOURCE_EXHAUSTED"),
+    ],
+)
+def test_short_rate_limit_response_triggers_fallback(tmp_path, first_stdout, first_stderr):
+    result = run_powershell(
+        tmp_path,
+        f"""
+$script:index = 0
+$runner = {{
+    param($command)
+    $script:index++
+    if ($script:index -eq 1) {{
+        return [pscustomobject]@{{ ExitCode = 0; Stdout = '{first_stdout}'; Stderr = '{first_stderr}'; Model = $null }}
+    }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = 'clean review'; Stderr = ''; Model = $null }}
+}}
+$result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
+$result | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip().splitlines()[-1])
+    assert value["Backend"] == "claude"
+    assert value["Output"] == "clean review"
+    assert "rate limit or quota response" in result.stdout
+
+
 def test_workflow_exposes_backend_input_and_delegates_to_runner():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     dispatch = workflow.split("  workflow_dispatch:", 1)[1].split("\npermissions:", 1)[0]
