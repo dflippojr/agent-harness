@@ -18,6 +18,7 @@ import httpx
 
 from .config import Config
 from .db import Database
+from .settings import frozen_app_defaults, use_live_app_settings
 
 log = logging.getLogger("harness.notify")
 
@@ -31,7 +32,7 @@ def _short(text: str, limit: int) -> str:
 
 
 def describe_call(tool: str, args: dict) -> str:
-    if tool == "run_shell":
+    if tool == "run_shell" or tool == "Bash" or tool == "exec_command":
         return ("🌐 " if args.get("network") else "") + args.get("command", "")
     if tool in ("write_file", "edit_file"):
         return f"{tool} {args.get('path', '')}"
@@ -67,11 +68,17 @@ class Notifier:
             return ""
 
     def listener(self, event: dict) -> None:
-        if self.enabled and event["type"] in WATCHED:
-            try:
-                self.queue.put_nowait(event)
-            except asyncio.QueueFull:
-                log.warning("notification queue full; dropping %s", event["type"])
+        if not self.enabled or event["type"] not in WATCHED:
+            return
+        sid = event.get("session_id")
+        if sid:
+            session = self.db.get_session(sid)
+            if session and (session.get("owner_id") or "owner") != "owner":
+                return  # household members do not receive owner ntfy notifications
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            log.warning("notification queue full; dropping %s", event["type"])
 
     def send(self, payload: dict) -> None:
         """Queue a ready-made notification that isn't about a session event (e.g. a finished image)."""
@@ -127,6 +134,8 @@ class Notifier:
         sid, d = event["session_id"], event["data"]
         session = self.db.get_session(sid)
         if session is None:
+            return None
+        if (session.get("owner_id") or "owner") != "owner":
             return None
         title = _short(session["title"], 60)
         base = {"topic": self.cfg.notify.topic}
@@ -199,6 +208,8 @@ class Notifier:
             return self._job_finished(sid, title, d, base)
 
         if event["type"] == "run_finished":
+            if self._app_silences_completion(session):
+                return None
             status = d["status"]
             if status == "done":
                 head, tags, prio = "Done", ["white_check_mark"], 3
@@ -215,6 +226,19 @@ class Notifier:
             return {**base, "title": f"{head}: {title}", "message": _short(body, 400), "priority": prio,
                     "tags": tags, "click": self.link(f"/#/s/{sid}")}
         return None
+
+    def _app_silences_completion(self, session: dict) -> bool:
+        app_id = session.get("app_id") or ""
+        if not app_id:
+            return False
+        key = self.db.get_api_key(app_id)
+        snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
+        if use_live_app_settings(key):
+            row = self.db.get_app_settings(app_id)
+            values = (row or {}).get("values") or {}
+        else:
+            values = frozen_app_defaults(snapshot)
+        return values.get("app.notify.completion") == "never"
 
     def _job_finished(self, sid: str, title: str, d: dict, base: dict) -> dict | None:
         """Scheduled jobs are quiet unless something needs attention (user decision, Phase 7d)."""

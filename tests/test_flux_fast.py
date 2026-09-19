@@ -253,7 +253,7 @@ def test_repeated_inspect_and_status_do_not_rehash_unchanged_files(tmp_path, mon
     before_status = calls["n"]
     for _ in range(8):
         listing = m.images.status()
-        flux = next(x for x in listing["modes"] if x["key"] == "flux-fast")
+        flux = listing["modes"]["flux-fast"]
         assert flux["available"] is True
     assert calls["n"] == before_status
 
@@ -264,7 +264,7 @@ def test_repeated_inspect_and_status_do_not_rehash_unchanged_files(tmp_path, mon
     assert broken["available"] is False and "corrupt" in broken["unavailable_reason"]
     assert calls["n"] > hashed
     listing = m.images.status()
-    flux = next(x for x in listing["modes"] if x["key"] == "flux-fast")
+    flux = listing["modes"]["flux-fast"]
     assert flux["available"] is False
 
 
@@ -463,8 +463,8 @@ def test_http_and_tool_select_flux_fast_without_fallback(tmp_path):
 
     with TestClient(create_app(m)) as client:
         listing = client.get("/images").json()["status"]
-        flux = next(x for x in listing["modes"] if x["key"] == "flux-fast")
-        assert flux["available"] is False and flux["display_name"].startswith("FLUX.2 klein 4B")
+        flux = listing["modes"]["flux-fast"]
+        assert flux["available"] is False and flux["label"].startswith("FLUX.2 klein 4B")
         assert client.post("/images", json={"prompt": "a cat", "model": "flux-fast"}).status_code == 400
         enable_flux(m, tmp_path, payloads, manifest)
         r = client.post("/images", json={"prompt": "a cat", "model": "flux-fast", "resolution": "high"})
@@ -501,6 +501,40 @@ def test_http_and_tool_select_flux_fast_without_fallback(tmp_path):
         assert "flux-fast" in out
         assert state2["graphs"][-1]["62"]["inputs"]["steps"] == 4
         await m2.stop()
+    asyncio.run(body())
+
+
+def test_quality_fast_and_flux_fast_share_one_gpu_batch(tmp_path):
+    """The two optional fast modes keep separate graphs while sharing one GPU occupancy."""
+    async def body():
+        payloads = {"checkpoint": b"C", "vae": b"V", "encoder": b"E"}
+        manifest = tiny_manifest("http://unused", payloads)
+        m, server, state = image_manager(tmp_path)
+        m.cfg.images.models_dir = str(tmp_path / "models")
+        m.cfg.images.comfy_dir = str(tmp_path / "comfy")
+        m.images.cfg.models_dir = m.cfg.images.models_dir
+        m.images.cfg.comfy_dir = m.cfg.images.comfy_dir
+        enable_flux(m, tmp_path, payloads, manifest)
+        m.images._lora_available = True
+        assert list(m.images.status()["modes"]) == ["fast", "quality", "quality-fast", "flux-fast"]
+        model_help = m.images.schemas()[0]["function"]["parameters"]["properties"]["model"]["description"]
+        assert "quality-fast" in model_help and "flux-fast" in model_help
+
+        quality = m.images.submit("fast poster", model="quality-fast", seed=11)
+        flux = m.images.submit("fast illustration", model="flux-fast", seed=12)
+        await m.start(maintenance=False)
+        done = [await m.images.wait(job["id"]) for job in (quality, flux)]
+        assert [job["model"] for job in done] == ["quality-fast", "flux-fast"]
+        assert all(job["status"] == "done" for job in done)
+        assert any(node["class_type"] == "LoraLoaderModelOnly" for node in state["graphs"][0].values())
+        assert any(node["class_type"] == "Flux2Scheduler" for node in state["graphs"][1].values())
+        for _ in range(100):
+            if m.images.phase == "idle":
+                break
+            await asyncio.sleep(0.02)
+        assert server.calls == ["stop", "start"]
+        await m.stop()
+
     asyncio.run(body())
 
 

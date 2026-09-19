@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .scannerwork/
+.worktrees/
 runs/
 config/*.local.yaml
 scripts/*.log

@@ -49,6 +49,7 @@ OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trim
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
 HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+")
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+WORKSPACE = "/workspace"  # the sandbox path the daemon addresses tool paths by
 OFFLINE_RULES = """;; No network except localhost (tests that start a server); no DNS either, so nothing leaks through lookups.
 (deny network*)
 (allow network-bind network-inbound (local ip "localhost:*"))
@@ -140,12 +141,12 @@ class Executor:
         if p["name"] not in FILE_TOOLS:
             raise OpError(f"not a file tool: {p['name']}")
         ws = self.workspace(p["session"], create=True)
-        files = FileOps(ws, int(p.get("context_tokens") or 65536), prefixes=(str(ws), "/workspace"))
+        files = FileOps(ws, int(p.get("context_tokens") or 65536), prefixes=(str(ws), WORKSPACE))
         return getattr(files, p["name"])(**p["args"])
 
     def op_preview(self, rid: str, p: dict):
         ws = self.workspace(p["session"], create=True)
-        return FileOps(ws, 65536, prefixes=(str(ws), "/workspace")).preview_diff(p["name"], p["args"])
+        return FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE)).preview_diff(p["name"], p["args"])
 
     def op_size(self, rid: str, p: dict):
         ws = self.workspace(p["session"])
@@ -160,7 +161,7 @@ class Executor:
         except (binascii.Error, ValueError):
             raise OpError("content_b64 is not valid base64", "tool")
         ws = self.workspace(p["session"], create=True)
-        files = FileOps(ws, 65536, prefixes=(str(ws), "/workspace"))
+        files = FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE))
         return files.write_bytes(p.get("path") or "", data)
 
     def op_shell(self, rid: str, p: dict):
@@ -173,7 +174,7 @@ class Executor:
         if not HTTPS_URL_RE.fullmatch(url):
             raise OpError("url must be an https://... URL (local: repositories are only on the tower)", "tool")
         ws = self.workspace(p["session"], create=True)
-        files = FileOps(ws, 65536, prefixes=(str(ws), "/workspace"))
+        files = FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE))
         dest = p.get("dest") or url.rstrip("/").rsplit("/", 1)[-1]
         if dest.endswith(".git"):
             dest = dest[:-4]

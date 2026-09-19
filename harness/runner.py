@@ -22,10 +22,13 @@ from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSe
 from .config import Config
 from .db import Database
 from .homelab import Homelab
+from .principal import OWNER_USER_ID, session_user_id
 from .policy import ALLOW, ASK, Policy
+from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
+from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
 from .tools import ToolError, Workspace, truncate_middle, validate_args
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
@@ -111,7 +114,10 @@ class Runner:
         self.images = None                      # images.ImageService, set by the manager when enabled
         self.sessions = None                    # search.SessionSearch, set by the manager when enabled
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
+        self.skills = None                      # skills.SkillStore, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
+        self.smart = SmartReviewer(cfg)
+        self.settings = None                    # settings_service.SettingsService, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
 
@@ -120,61 +126,138 @@ class Runner:
         if s["target"] != "tower":
             return RemoteSandbox(self.hub, s["target"], s["id"])
         if s["id"] not in self._sandboxes:
-            project = self.cfg.projects.get(s["project"])
+            project = self.project_for(s)
             sb_cfg = self.cfg.sandbox
             if project and project.sandbox:
                 sb_cfg = type(sb_cfg)(**{**sb_cfg.__dict__, **project.sandbox})
             self._sandboxes[s["id"]] = Sandbox(s["id"], Path(s["workspace"]), sb_cfg)
         return self._sandboxes[s["id"]]
 
+    def project_for(self, s: dict):
+        from . import catalog
+        return catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
+
     def workspace(self, s: dict) -> Workspace | RemoteWorkspace:
         model = self.cfg.models[s["model"]]
         if s["target"] != "tower":
             return RemoteWorkspace(self.hub, s["target"], s["id"], model.context_tokens)
-        project = self.cfg.projects.get(s["project"])
-        homelab = Homelab(self.cfg.homelab) if project and project.homelab else None
-        return Workspace(Path(s["workspace"]), self.sandbox(s), self.cfg.repos_dir, model.context_tokens, homelab)
+        project = self.project_for(s)
+        defaults = self._app_defaults_for_session(s)
+        from . import storage
+        user_id = session_user_id(s)
+        member = user_id != OWNER_USER_ID
+        homelab = (Homelab(self.cfg.homelab)
+                   if project and project.homelab and not member and app_allows(defaults, "homelab") else None)
+        repos = storage.repos_dir(self.cfg, user_id)
+        budget = self._member_clone_budget(user_id) if member else None
+        return Workspace(Path(s["workspace"]), self.sandbox(s), repos, model.context_tokens, homelab,
+                         public_clone_only=member, clone_max_bytes=budget)
 
     def daemon_toolkits(self, s: dict) -> list:
         """Tools that run in the daemon for every target (memory library, web, session search), as enabled for the
-        project."""
-        project = self.cfg.projects.get(s["project"])
+        project and narrowed by app.capabilities."""
+        project = self.project_for(s)
+        defaults = self._app_defaults_for_session(s)
+        member = session_user_id(s) != OWNER_USER_ID
         kits = []
-        if self.memory is not None and (project is None or project.memory_library):
+        if (not member and self.memory is not None and (project is None or project.memory_library)
+                and app_allows(defaults, "memory_library")):
             kits.append(self.memory)
-        if self.web is not None and (project is None or project.web):
+        if self.web is not None and (project is None or project.web) and app_allows(defaults, "web"):
             kits.append(self.web)
-        if self.images is not None and (project is None or project.images):
+        if (not member and self.images is not None and (project is None or project.images)
+                and app_allows(defaults, "images")):
             kits.append(self.images)
-        if self.sessions is not None and (project is None or project.session_search):
+        if (self.sessions is not None and (project is None or project.session_search)
+                and app_allows(defaults, "search")):
             kits.append(self.sessions)
-        if self.remote_control is not None and s["target"] == "tower" and s.get("app_id") is None:
+        if (not member and self.remote_control is not None and s["target"] == "tower"
+                and not s.get("app_id") and app_allows(defaults, "remote_control")):
             kits.append(self.remote_control)  # not for app sessions: apps launch through /api/v1/remote-control
+        if self.skills is not None and self.skills.can_propose(s):
+            kits.append(self.skills)
         return kits
+
+    def _app_defaults_for_session(self, s: dict) -> dict:
+        if self.settings is None:
+            return {}
+        return self.settings.app_defaults_for_session(s)
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:
         schemas = ws.schemas()
         for kit in self.daemon_toolkits(s):
             schemas = schemas + kit.schemas()
-        if self.app_tools is not None and s.get("app_tools"):
+        if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
             schemas = schemas + self.app_tools.schemas(s)
         return schemas
 
     def policy(self, s: dict) -> Policy:
-        project = self.cfg.projects.get(s["project"])
+        project = self.project_for(s)
         return Policy(project.rules if project else [], repo=bool(project and project.repo))
 
     def quota_mb(self, s: dict) -> int:
-        project = self.cfg.projects.get(s["project"])
+        project = self.project_for(s)
         default = (self.cfg.runners[s["target"]].workspace_quota_mb if s["target"] in self.cfg.runners
                    else self.cfg.cleanup.workspace_quota_mb)
         return (project.quota_mb if project and project.quota_mb else 0) or default
+
+    async def _review_ask(self, s: dict, name: str, args: dict, decision) -> dict:
+        """Consult the smart reviewer for a tagged ASK. Never auto-denies; failures stay pending."""
+        extra = {"status": "pending", "smart": {}}
+        if decision.action != ASK:
+            return extra
+        project = self.cfg.projects.get(s["project"])
+        repo = bool(project and project.repo)
+        _eligibility, review = await self.smart.consider(self.db, self.policy(s), name, args, decision, repo=repo)
+        if review is None:
+            return extra
+        auto = self.smart.should_auto_approve(review)
+        record = sanitized_record(review, policy_fingerprint=self.policy(s).fingerprint(),
+                                  mode=review.mode, outcome=self.smart.classify(review, auto), tool=name)
+        extra["smart"] = {k: record[k] for k in ("recommendation", "confidence", "reason", "risk_flags",
+                                                 "mode", "provider", "model", "outcome", "escalate_reason")}
+        extra["_record"] = record
+        extra["status"] = "approved" if auto else "pending"
+        extra["note"] = "smart reviewer: deterministic gate and hosted model both allowed this call" if auto else ""
+        return extra
+
+    def _persist_ask(self, sid: str, existing: dict, extra: dict) -> dict:
+        record = extra.pop("_record", None)
+        existing["status"] = extra.get("status", "pending")
+        existing["smart"] = extra.get("smart") or {}
+        if extra.get("note"):
+            existing["note"] = extra["note"]
+        public = {k: existing[k] for k in ("id", "tool_call_id", "tool", "args", "reason", "detail") if k in existing}
+        if existing.get("smart"):
+            public["smart"] = existing["smart"]
+        with self.db.tx():
+            self.db.insert_approval(existing)
+            if record is not None:
+                persist_review(self.db, sid, existing["id"], record)
+                self.bus.emit(sid, "smart_review", record)
+            if existing["status"] == "approved":
+                self.bus.emit(sid, "approval_auto_approved", {"id": existing["id"], **(record or {})})
+            else:
+                self.bus.emit(sid, "approval_requested", public)
+        return existing
+
+    def _member_clone_budget(self, user_id: str) -> int | None:
+        """Bytes a member clone may still write. None means uncapped (owner)."""
+        if user_id == OWNER_USER_ID:
+            return None
+        account = self.db.account_by_id(user_id)
+        if account is None:
+            return 0
+        from .storage import account_usage_bytes
+        return max(0, int(account["disk_quota_bytes"]) - account_usage_bytes(self.cfg, user_id))
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         with self.db.tx():
             self.db.update_session(sid, status=status, **fields)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
+        # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
+        self.scheduler.recheck()
 
     async def _acquire(self, sid: str, front: bool = False) -> None:
         if self.scheduler.holder == sid:
@@ -379,8 +462,10 @@ class Runner:
                 continue
 
             run = s["run"]
-            if run["turns"] >= self.cfg.max_turns or run["completion_tokens"] >= self.cfg.max_completion_tokens:
-                reason = "budget_turns" if run["turns"] >= self.cfg.max_turns else "budget_tokens"
+            max_turns = int(run.get("max_turns") or self.cfg.max_turns)
+            max_tokens = int(run.get("max_completion_tokens") or self.cfg.max_completion_tokens)
+            if run["turns"] >= max_turns or run["completion_tokens"] >= max_tokens:
+                reason = "budget_turns" if run["turns"] >= max_turns else "budget_tokens"
                 self.set_status(sid, "done", stop_reason=reason)
                 await self._end_run(sid)
                 return
@@ -434,7 +519,9 @@ class Runner:
                         self.bus.emit(sid, "billing_warning", {"backend": backend_name, "message": warning})
                     factory = {"claude": self.cli_factory, "codex": self.codex_factory,
                                "cursor": self.cursor_factory}[backend_name]
-                    cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=backend,
+                    from dataclasses import replace
+                    frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
+                    cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=frozen,
                                   sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
                                   model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
                     self._cli_sessions[sid] = cli
@@ -916,11 +1003,8 @@ class Runner:
             existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call_id,
                         "tool": name, "args": args, "reason": decision.reason,
                         "detail": str(request.get("description") or "")}
-            with self.db.tx():
-                self.db.insert_approval(existing)
-                self.bus.emit(sid, "approval_requested", {k: existing[k] for k in
-                                                          ("id", "tool_call_id", "tool", "args", "reason", "detail")})
-            existing["status"] = "pending"
+            extra = await self._review_ask(s, name, args, decision)
+            existing = self._persist_ask(sid, existing, extra)
         if existing["status"] == "pending":
             self.set_status(sid, "waiting_approval")
             existing = await self._wait_approval(existing["id"])
@@ -1179,6 +1263,19 @@ class Runner:
             return False
         run["workspace_mb"] = mb
         self.db.update_session(sid, run=run)
+        user_id = session_user_id(s)
+        if user_id != OWNER_USER_ID:
+            from .storage import account_usage_bytes, quota_message
+            account = self.db.account_by_id(user_id)
+            if account is not None:
+                used = account_usage_bytes(self.cfg, user_id)
+                limit = int(account["disk_quota_bytes"])
+                if used >= limit:
+                    message = (f"{quota_message(used, limit)}, so the run was stopped. Delete unused files "
+                               "or ask the owner to raise the account quota.")
+                    self.bus.emit(sid, "error", {"message": message})
+                    self.set_status(sid, "failed", stop_reason=f"account_quota_exceeded: {used} > {limit}")
+                    return True
         if mb <= quota or mb <= last:
             return False
         message = (f"The workspace is {mb} MB, over its {quota} MB quota, so the run was stopped. Send a message "
@@ -1189,15 +1286,28 @@ class Runner:
 
     async def _prepare_repo(self, s: dict) -> None:
         """Clone the project repo on the session's first run; refresh origin on later runs."""
-        project = self.cfg.projects.get(s["project"])
+        project = self.project_for(s)
         if not project or not project.repo or s["workspace_removed"]:
             return
         ws = Path(s["workspace"])
         remote = s["target"] != "tower"
+        member = session_user_id(s) != OWNER_USER_ID
+        if member and remote:
+            return
         if not s["base_commit"]:
             if remote:
                 info = await self.hub.call(s["target"], "prepare", {"session": s["id"], "repo": project.repo,
                                                                     "base_branch": project.base_branch}, timeout=900)
+            elif member:
+                from . import clone, storage
+                uid = session_user_id(s)
+                root = storage.workspaces_dir(self.cfg, uid)
+                try:
+                    info = await asyncio.to_thread(
+                        clone.isolated_prepare, ws, project.repo, s["id"], root,
+                        self._member_clone_budget(uid))
+                except clone.QuotaExceeded as e:
+                    raise projects.GitError(str(e)) from e
             else:
                 info = await asyncio.to_thread(projects.prepare, project, ws, s["id"])
             s = self.db.get_session(s["id"])
@@ -1207,8 +1317,18 @@ class Runner:
                 self.db.update_session(s["id"], context=context, **info)
                 self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
         elif not s["run"].get("origin_refreshed"):
-            error = (await self.hub.call(s["target"], "refresh_origin", {"session": s["id"]}, timeout=400) if remote
-                     else await asyncio.to_thread(projects.refresh_origin, ws))
+            if remote:
+                error = await self.hub.call(s["target"], "refresh_origin", {"session": s["id"]}, timeout=400)
+            elif member:
+                from . import clone, storage
+                from .fileops import dir_size
+                uid = session_user_id(s)
+                remaining = self._member_clone_budget(uid)
+                cap = None if remaining is None else remaining + dir_size(ws)
+                error = await asyncio.to_thread(
+                    clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, uid), cap)
+            else:
+                error = await asyncio.to_thread(projects.refresh_origin, ws)
             if error:
                 self.bus.emit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
             run = self.db.get_session(s["id"])["run"]
@@ -1243,11 +1363,8 @@ class Runner:
                     reason = f"{reason} {warning}".strip()
             existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call["id"],
                         "tool": name, "args": args, "reason": reason, "detail": detail}
-            with self.db.tx():
-                self.db.insert_approval(existing)
-                self.bus.emit(sid, "approval_requested", {k: existing[k] for k in
-                                                          ("id", "tool_call_id", "tool", "args", "reason", "detail")})
-            existing["status"] = "pending"
+            extra = await self._review_ask(s, name, args, decision)
+            existing = self._persist_ask(sid, existing, extra)
 
         if existing["status"] == "pending":
             self.scheduler.release(sid)
@@ -1255,6 +1372,12 @@ class Runner:
             existing = await self._wait_approval(existing["id"])
             await self._acquire(sid)
         if existing["status"] == "approved":
+            if session_user_id(s) != OWNER_USER_ID:
+                allowed = {t["function"]["name"] for t in self.tool_schemas(s, ws)}
+                if name not in allowed:
+                    output = "Error: this account cannot use that tool."
+                    self._record_result(sid, call, name, output, ok=False)
+                    return output
             return None
         note = f" Their note: {existing['note']}" if existing.get("note") else ""
         output = f"Error: the user denied this {name} call.{note} Don't retry it; choose another approach or explain."
@@ -1464,14 +1587,18 @@ class Runner:
     def write_transcript(self, sid: str) -> None:
         try:
             from .transcript import write_transcript
-            write_transcript(self.db, self.cfg.transcripts_dir, sid)
+            from . import storage
+            s = self.db.get_session(sid)
+            dest = storage.transcripts_dir(self.cfg, session_user_id(s) if s else OWNER_USER_ID)
+            dest.mkdir(parents=True, exist_ok=True)
+            write_transcript(self.db, dest, sid)
         except OSError:
             log.exception("could not write transcript for %s", sid)
 
     async def save_branch(self, sid: str) -> None:
         """Commit leftovers on the session branch and copy it to a local source repo."""
         s = self.db.get_session(sid)
-        project = self.cfg.projects.get(s["project"])
+        project = self.project_for(s)
         if not project or not project.repo or not s["base_commit"] or s["workspace_removed"]:
             return
         ws = Path(s["workspace"])

@@ -1,0 +1,4 @@
+^api\.openai\.com$
+^([a-z0-9-]+\.)?openai\.com$
+^api\.anthropic\.com$
+^([a-z0-9-]+\.)?anthropic\.com$

@@ -160,6 +160,9 @@ Agent Harness Server listens only on localhost. To reach Agent Harness Web from 
    in the untracked local file (`login` plus an ISO `until`), restart, and remove the entry when done.
    Guests can browse sessions, jobs and images; they cannot start tasks, approve, mint keys, or use GPU /
    Remote Control / Review. Default stays "this login is the owner."
+   To add a household member, keep an explicit `allowed_logins` owner allowlist, then use **Settings → Accounts**
+   (or `POST /api/admin/v1/accounts`) with their exact Tailscale login. Members see only their own work through
+   `/api/v1`. Creating the first member while `allowed_logins` is empty fails closed.
 5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Agent Harness Web icon is
    labeled **Harness**. iOS may retain an older label until you remove that icon and add it again; no server or
    browser data migration is required. See [`web.md`](web.md).
@@ -185,7 +188,7 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Pause for games / Plex transcodes | `gpu_guard` (on by default) | nothing |
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |
-| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`). Optional `flux-fast`: `ops/images-models.ps1` (`docs/flux-fast.md`). Optional Real-ESRGAN 2×/4× weights; generation still works without them. |
+| Image generation | `images` | ComfyUI portable + models (`docs/phase6d-results.md`). Optional `quality-fast` needs the pinned Lightning LoRA in `models_dir/loras/` (`python -m harness.doctor` prints the filename, size, SHA-256, and path); optional `flux-fast` is installed with `ops/images-models.ps1` (`docs/flux-fast.md`). Optional Real-ESRGAN 2×/4× weights; generation still works without them. |
 | Claude / Codex / Cursor as session backends | `backends` | `ops/backends/login.sh <backend>` on Unix or `login.ps1` on Windows (`docs/phase8a-design.md`) |
 | Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
 | Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |
@@ -232,9 +235,13 @@ install/uninstall.sh --remove-files  # also remove the install directory
 
 ## Security model, briefly
 
-- One owner per install. Agent Harness Web and the APIs trust localhost; other devices need a tailnet login plus,
-  for the inference endpoint and App API, a key or token. Optional `guests:` entries grant time-boxed read-only
-  Agent Harness Web access to a named tailnet login without owner powers.
+- One owner per install, plus optional owner-provisioned household members and time-boxed guests. Agent Harness Web
+  and the APIs trust localhost as the owner; other devices need a tailnet login plus, for the inference endpoint and
+  App API, a key or token. Members authenticate only with the exact `Tailscale-User-Login` the owner stored.
+  Optional `guests:` entries grant time-boxed read-only Agent Harness Web access to a named tailnet login without
+  owner or member powers. Member data lives under `data_dir/users/<opaque-id>/`. The machine owner remains
+  inside the host/OS trust boundary and can read local storage; household isolation prevents accidental or
+  API/UI cross-account access, not a hostile administrator.
 - Agents are untrusted: shell commands run in a Docker container with only the workspace mounted and no network
   unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first.
 - Web fetches refuse private, tailnet and metadata addresses. Agent Harness App-provided context and web pages are marked as

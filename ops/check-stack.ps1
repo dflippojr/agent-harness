@@ -51,18 +51,20 @@ Check 'Image generation' {
         Where-Object { -not (Test-Path (Join-Path 'C:\AI\comfy-models' $_)) }
     if ($files) { throw "missing models: $($files -join ', ')" }
     if (-not (Test-Path 'C:\AI\ComfyUI\python_embeded\python.exe')) { throw 'ComfyUI portable missing at C:\AI\ComfyUI' }
+    $lora = 'loras\Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors'
+    $loraNote = if (Test-Path (Join-Path 'C:\AI\comfy-models' $lora)) { 'quality-fast LoRA present' } else { 'quality-fast LoRA not installed (optional)' }
     $upDir = Join-Path 'C:\AI\ComfyUI\ComfyUI\models' 'upscale_models'
     $up = @('RealESRGAN_x2plus.pth', 'RealESRGAN_x4plus.pth') |
         Where-Object { -not (Test-Path (Join-Path $upDir $_)) }
     $upNote = if ($up) { '; Real-ESRGAN optional (generation still works)' } else { '; Real-ESRGAN 2x/4x present' }
-    "phase $($s.phase); models present; ComfyUI starts on demand$upNote"
+    "phase $($s.phase); models present; $loraNote; ComfyUI starts on demand$upNote"
 }
 # Optional component: warn (never FAIL) when flux-fast assets or nodes are missing.
 try {
-    $flux = @((Get-Json 'http://127.0.0.1:8100/images?limit=1').status.modes | Where-Object { $_.key -eq 'flux-fast' })[0]
+    $flux = (Get-Json 'http://127.0.0.1:8100/images?limit=1').status.modes.'flux-fast'
     if (-not $flux) { throw 'flux-fast mode missing from /images status' }
     if ($flux.available) {
-        Write-Host ("[ OK ] FLUX.2 klein 4B (optional)  {0}" -f $flux.display_name) -ForegroundColor Green
+        Write-Host ("[ OK ] FLUX.2 klein 4B (optional)  {0}" -f $flux.label) -ForegroundColor Green
     } else {
         Write-Host ("[WARN] FLUX.2 klein 4B (optional)  {0}. {1}" -f $flux.unavailable_reason, $flux.remediation) -ForegroundColor Yellow
     }
