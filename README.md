@@ -238,7 +238,7 @@ Design notes and test results: `docs/phase1-results.md`.
 .\.venv\Scripts\python -m harness                      # daemon on 127.0.0.1:8100 (config/harness.yaml)
 .\.venv\Scripts\python -m harness.cli new "Clone local:invoice-tools, fix the failing test, and report back"
 .\.venv\Scripts\python -m harness.cli list             # also: watch, send, approve, deny, cancel, transcript, queue
-.\.venv\Scripts\python -m pytest tests -q -n 4 --dist loadfile   # CI-shaped parallel run (install pytest-xdist extra)
+.\.venv\Scripts\python -m pytest tests -q -n 8 --dist loadfile   # CI-shaped parallel run (install pytest-xdist extra)
 .\.venv\Scripts\python -m pytest tests -q -p no:xdist            # serial escape hatch (also `-n 0`)
 ```
 

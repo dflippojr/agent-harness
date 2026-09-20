@@ -5,7 +5,7 @@ after that workflow succeeds for the exact commit pushed to `main`:
 
 1. **CI / test** runs the complete test suite on the repository-scoped `agent-harness-ci` runner **pool** (three
    members on the tower) for pull requests and pushes to `main`. The job installs `pytest-xdist` as a CI extra (not
-   in `requirements.txt`) and runs `python -m pytest tests -q -n 4 --dist loadfile`. There is no duplicate
+   in `requirements.txt`) and runs `python -m pytest tests -q -n 8 --dist loadfile`. There is no duplicate
    `windows-latest` test job in the image/deployment workflow.
 2. **publish-images** is triggered by `workflow_run` only after `CI` completes successfully for a push to `main`.
    It checks out `github.event.workflow_run.head_sha`, never a branch name, and GitHub-hosted Linux builders publish
@@ -159,10 +159,11 @@ Replace `-2` with the member you are removing.
 
 The tower has 28 logical cores and 31.8 GB RAM. `llama-server` (`ops/llama-server/run-qwen.ps1`, port 8090) uses
 about 9 GB RSS when the model is loaded. Three concurrent CI jobs (separate `_work` checkouts) each run
-`python -m pytest tests -q -n 4 --dist loadfile` (fixed workers, never `-n auto`) plus the live daemon still left
-about 8.6 GB free while all three were in the test step. Intra-job xdist targets about 1–2 minutes wall-clock per
-job; historically a serial `python -m pytest tests -q` was about 5 minutes (302 s on GitHub-hosted Windows). The
-pool stays at **three** members. Local serial escape hatch: `python -m pytest tests -q -p no:xdist`.
+`python -m pytest tests -q -n 8 --dist loadfile` (fixed workers, never `-n auto`; raised from `-n 4` after a
+20-run soak median of 192 s stayed above two minutes) plus the live daemon still left about 8.6 GB free while all
+three were in the test step. Historically a serial `python -m pytest tests -q` was about 5 minutes (302 s on
+GitHub-hosted Windows; 426 s in the #132 soak on this Windows machine). The pool stays at **three** members.
+Local serial escape hatch: `python -m pytest tests -q -p no:xdist`.
 
 ### Cross-job isolation
 

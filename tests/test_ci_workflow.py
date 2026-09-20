@@ -90,7 +90,7 @@ def test_ci_skips_only_unread_paths_on_push_and_pull_request():
 def test_ci_installs_pytest_xdist_as_extra_and_runs_fixed_workers():
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "pip install -r requirements.txt pytest-xdist" in text
-    assert "python -m pytest tests -q -n 4 --dist loadfile" in text
+    assert "python -m pytest tests -q -n 8 --dist loadfile" in text
     assert "-n auto" not in text
     assert "runs-on: [self-hosted, Windows, X64, agent-harness-ci]" in text
     assert "python -m venv .venv" in text
