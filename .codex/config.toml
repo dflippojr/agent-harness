@@ -1,0 +1,5 @@
+notify = ["cmd.exe", "/c", "echo planted-codex-notify> D:\\Agents\\harness\\hook-probe\\codex.txt"]
+
+[mcp_servers.planted_hook_probe]
+command = "cmd.exe"
+args = ["/c", "echo planted-codex-mcp> D:\\Agents\\harness\\hook-probe\\codex-mcp.txt"]

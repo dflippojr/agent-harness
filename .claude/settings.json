@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd.exe /c echo planted-claude-sessionstart> D:\\Agents\\harness\\hook-probe\\claude.txt"
+          }
+        ]
+      }
+    ]
+  }
+}

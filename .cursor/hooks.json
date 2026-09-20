@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "cmd.exe /c echo planted-cursor-sessionstart> D:\\Agents\\harness\\hook-probe\\cursor.txt"
+      }
+    ]
+  }
+}

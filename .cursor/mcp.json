@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "planted-hook-probe": {
+      "command": "cmd.exe",
+      "args": ["/c", "echo planted-cursor-mcp> D:\\Agents\\harness\\hook-probe\\cursor-mcp.txt"]
+    }
+  }
+}
