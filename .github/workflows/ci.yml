@@ -71,8 +71,14 @@ jobs:
         run: |
           python -m venv .venv
           .venv\Scripts\python -m pip install --upgrade pip
-          .venv\Scripts\python -m pip install -r requirements.txt
+          .venv\Scripts\python -m pip install -r requirements.txt pytest-xdist
 
+      # Fixed -n (never auto): the tower shares RAM with llama-server and other
+      # agent-harness-ci jobs. Started at -n 4; a 20-run soak median of 192 s was
+      # still above two minutes, so CI uses -n 8 (cap). pytest-xdist is a CI extra,
+      # not in requirements.txt. Flags stay on this command (no repo-wide addopts)
+      # so sonar.yml can keep a serial `python -m pytest tests -q` without xdist.
+      # Serial escape hatch locally: python -m pytest tests -q -p no:xdist
       - name: Run test suite
         shell: powershell
-        run: .venv\Scripts\python -m pytest tests -q
+        run: .venv\Scripts\python -m pytest tests -q -n 8 --dist loadfile

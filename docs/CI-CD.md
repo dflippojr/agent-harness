@@ -4,8 +4,9 @@
 after that workflow succeeds for the exact commit pushed to `main`:
 
 1. **CI / test** runs the complete test suite on the repository-scoped `agent-harness-ci` runner **pool** (three
-   members on the tower) for pull requests and pushes to `main`. There is no duplicate `windows-latest` test job in
-   the image/deployment workflow.
+   members on the tower) for pull requests and pushes to `main`. The job installs `pytest-xdist` as a CI extra (not
+   in `requirements.txt`) and runs `python -m pytest tests -q -n 8 --dist loadfile`. There is no duplicate
+   `windows-latest` test job in the image/deployment workflow.
 2. **publish-images** is triggered by `workflow_run` only after `CI` completes successfully for a push to `main`.
    It checks out `github.event.workflow_run.head_sha`, never a branch name, and GitHub-hosted Linux builders publish
    both runtime images to GHCR:
@@ -173,9 +174,16 @@ Replace `-2` with the member you are removing.
 ### Capacity (2026-09-20)
 
 The tower has 28 logical cores and 31.8 GB RAM. `llama-server` (`ops/llama-server/run-qwen.ps1`, port 8090) uses
-about 9 GB RSS when the model is loaded. Three concurrent full `python -m pytest tests -q` jobs (separate `_work`
-checkouts) plus the live daemon still left about 8.6 GB free while all three were in the test step; a suite that is
-about 5 minutes of pytest took about 10–12 minutes wall-clock under that load. The pool stays at **three** members.
+about 9 GB RSS when the model is loaded. Three concurrent CI jobs (separate `_work` checkouts) each run
+`python -m pytest tests -q -n 8 --dist loadfile` (fixed workers, never `-n auto`; raised from `-n 4` after a
+20-run soak median of 192 s stayed above two minutes) plus the live daemon still left about 8.6 GB free while all
+three were in the test step. Historically a serial `python -m pytest tests -q` was about 5 minutes (302 s on
+GitHub-hosted Windows; 426 s in the #132 soak on this Windows machine). Issue #132 soak on this Windows host
+(782 passed, 4 skipped each run, no flakes): serial `-p no:xdist` 426 s; `-n 4 --dist loadfile` 20/20 green,
+median 192 s, p90 194 s; `-n 8 --dist loadfile` 20/20 green, median 152 s, p90 156 s. The 1–2 minute band was
+not reached at the worker cap of 8. The pool stays at **three** members. Local serial escape hatch:
+`python -m pytest tests -q -p no:xdist`. Parallel-safety: Docker test networks are already unique per process;
+listen ports use `port=0`; data dirs stay under `tmp_path`. No serial-only xdist marks were required.
 
 ### Cross-job isolation
 
