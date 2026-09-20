@@ -208,8 +208,9 @@ def check_images(r: Report, cfg) -> None:
     else:
         r.ok("FLUX.2 klein 4B (optional)", "flux-fast assets and nodes are ready")
     from . import image_edit
+    from .config import module_effective
     edit = image_edit.assets_status(cfg.images, verify_hash=True)
-    if cfg.images.edit_enabled:
+    if module_effective(cfg, "image_edit"):
         if edit["available"] and edit["hash_ok"] is not False:
             extra = "checksum verified" if edit["hash_ok"] else "stub or unpackaged file present"
             r.ok("Image editing", f"{edit['model']} {edit['revision'][:12]} ({extra})")
@@ -231,7 +232,9 @@ def check_images(r: Report, cfg) -> None:
                 "Image editing disk", f"{free:.0f} GB free at {models} (need about {need} GB)")
         except OSError as e:
             r.warn("Image editing disk", str(e))
-    elif not edit["available"]:
+    elif bool(getattr(cfg.installed, "image_edit", False)):
+        r.ok("Image editing", "installed but disabled; text-to-image is unchanged")
+    else:
         r.ok("Image editing", "optional component not installed; text-to-image is unchanged")
     from . import upscale as upscale_mod
     if upscale_mod.missing_weights(cfg.images, verify_hash=True):
