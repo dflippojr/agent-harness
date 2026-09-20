@@ -703,10 +703,11 @@ def test_workflow_keeps_review_security_and_scheduling_contracts():
     assert "types: [opened]" in workflow
 
 
-def test_dispatch_reviews_use_separate_full_history_pr_head_checkout():
+def test_reviews_use_separate_full_history_pr_head_checkout():
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "name: Check out PR head for dispatch review context" in workflow
-    assert "ref: refs/pull/${{ steps.pr.outputs.number }}/head" in workflow
+    assert "name: Check out PR head for review context" in workflow
+    assert "github.event.pull_request.head.sha" in workflow
+    assert "format('refs/pull/{0}/head', steps.pr.outputs.number)" in workflow
     assert "path: pr" in workflow
     assert workflow.count("fetch-depth: 0") == 2
     assert workflow.count("persist-credentials: false") == 2

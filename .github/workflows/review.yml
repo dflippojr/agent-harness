@@ -58,24 +58,19 @@ jobs:
         id: pr
         shell: powershell
         env:
-          EVENT_NAME: ${{ github.event_name }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
           INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
         run: |
           $num = $env:EVENT_PR_NUMBER
           if ([string]::IsNullOrEmpty($num)) { $num = $env:INPUT_PR_NUMBER }
-          $workspace = $env:GITHUB_WORKSPACE
-          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
-            $workspace = Join-Path $env:GITHUB_WORKSPACE 'pr'
-          }
+          $workspace = Join-Path $env:GITHUB_WORKSPACE 'pr'
           "number=$num" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "workspace=$workspace" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Check out PR head for dispatch review context
-        if: github.event_name == 'workflow_dispatch'
+      - name: Check out PR head for review context
         uses: actions/checkout@v4
         with:
-          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+          ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', steps.pr.outputs.number) }}
           path: pr
           fetch-depth: 0
           persist-credentials: false
