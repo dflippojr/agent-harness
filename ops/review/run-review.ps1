@@ -279,6 +279,7 @@ function Get-ReviewBackendCommand {
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'claude'
+                # manual is intentional: in -p mode it prevents prompts and denies unapproved tools.
                 Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--setting-sources', 'user', '--strict-mcp-config', '--disable-slash-commands')
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
