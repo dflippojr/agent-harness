@@ -81,11 +81,13 @@ def _resolve_mode_body(
     head_sha: str,
     has_merge: bool,
     status: str,
+    last_base: str = "main",
+    current_base: str = "main",
 ) -> str:
     succeeded = "$true" if compare_succeeded else "$false"
     merge = "$true" if has_merge else "$false"
     return f"""
-$r = Resolve-ReviewMode -RequestedMode '{requested}' -LastSha '{last_sha}' -CompareSucceeded {succeeded} -MergeBaseSha '{merge_base}' -HeadSha '{head_sha}' -HasMergeCommit {merge} -CompareStatus '{status}'
+$r = Resolve-ReviewMode -RequestedMode '{requested}' -LastSha '{last_sha}' -CompareSucceeded {succeeded} -MergeBaseSha '{merge_base}' -HeadSha '{head_sha}' -HasMergeCommit {merge} -CompareStatus '{status}' -LastBaseRef '{last_base}' -CurrentBaseRef '{current_base}'
 [ordered]@{{ Mode = $r.Mode; Reason = $r.Reason }} | ConvertTo-Json -Compress
 """
 
@@ -213,6 +215,48 @@ $r = Resolve-ReviewMode -RequestedMode '{requested}' -LastSha '{last_sha}' -Comp
             ),
             "incremental",
         ),
+        (
+            dict(
+                requested="auto",
+                last_sha=LAST_SHA,
+                compare_succeeded=True,
+                merge_base=LAST_SHA,
+                head_sha=HEAD_SHA,
+                has_merge=False,
+                status="ahead",
+                last_base="release/1.0",
+                current_base="main",
+            ),
+            "full",
+        ),
+        (
+            dict(
+                requested="auto",
+                last_sha=LAST_SHA,
+                compare_succeeded=True,
+                merge_base=LAST_SHA,
+                head_sha=HEAD_SHA,
+                has_merge=False,
+                status="ahead",
+                last_base="",
+                current_base="main",
+            ),
+            "full",
+        ),
+        (
+            dict(
+                requested="auto",
+                last_sha=LAST_SHA,
+                compare_succeeded=True,
+                merge_base=LAST_SHA,
+                head_sha=HEAD_SHA,
+                has_merge=False,
+                status="ahead",
+                last_base="main",
+                current_base="",
+            ),
+            "full",
+        ),
     ],
 )
 def test_resolve_review_mode_table(tmp_path, kwargs, expected):
@@ -245,6 +289,9 @@ def test_review_marker_and_coverage_line_helpers(tmp_path):
         rf"""
 $value = [ordered]@{{
     sha = Get-ReviewMarkerShaFromBody -Body "text`n<!-- agent-review: sha={LAST_SHA} mode=full -->"
+    shaWithBase = Get-ReviewMarkerShaFromBody -Body "<!-- agent-review: sha={LAST_SHA} mode=full base=release/1.0 -->"
+    base = Get-ReviewMarkerBaseRefFromBody -Body "<!-- agent-review: sha={LAST_SHA} mode=incremental base=release/1.0 -->"
+    missingBase = Get-ReviewMarkerBaseRefFromBody -Body "<!-- agent-review: sha={LAST_SHA} mode=full -->"
     malformed = Get-ReviewMarkerShaFromBody -Body '<!-- agent-review: sha=abc mode=full -->'
     coverageFull = Get-ReviewCoverageLine -Mode full -LastSha '{LAST_SHA}' -HeadSha '{HEAD_SHA}' -CommitCount 3 -LineCount 118
     coverageInc = Get-ReviewCoverageLine -Mode incremental -LastSha '{LAST_SHA}' -HeadSha '{HEAD_SHA}' -CommitCount 3 -LineCount 118
@@ -256,6 +303,9 @@ $value | ConvertTo-Json -Compress
     assert result.returncode == 0, output(result)
     value = json.loads(result.stdout.strip().splitlines()[-1])
     assert value["sha"] == LAST_SHA
+    assert value["shaWithBase"] == LAST_SHA
+    assert value["base"] == "release/1.0"
+    assert value["missingBase"] == ""
     assert value["malformed"] == ""
     assert value["coverageFull"] == "Reviewed the full diff"
     assert value["coverageInc"] == "Reviewed aaaaaaa..bbbbbbb (incremental; 3 commits, 118 lines)"
@@ -762,6 +812,125 @@ Add-ReviewDiffContext -Prompt 'review prompt' -Diff $diff -MaxDiffBytes 160
     assert "OMITTED FILES (diff exceeded 160 bytes): src/two.py, src/three.py" in result.stdout
 
 
+def test_truncated_review_does_not_publish_reusable_marker(tmp_path):
+    output_path = tmp_path / "posted-review.md"
+    result = run_powershell(
+        tmp_path,
+        f"""
+$first = 'A' * 100000
+$second = 'B' * 120000
+$script:diff = @"
+diff --git a/src/one.py b/src/one.py
+--- a/src/one.py
++++ b/src/one.py
+@@ -0,0 +1 @@
++$first
+diff --git a/src/two.py b/src/two.py
+--- a/src/two.py
++++ b/src/two.py
+@@ -0,0 +1 @@
++$second
+"@
+$embedding = Get-ReviewDiffEmbedding -Diff $script:diff
+function Get-ReviewCoverage {{
+    param(
+        [AllowEmptyString()][string]$RequestedMode,
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [AllowEmptyString()][string]$Repository
+    )
+    return [pscustomobject]@{{
+        Mode = 'full'
+        Reason = 'test'
+        Diff = $script:diff
+        LastSha = ''
+        HeadSha = '{HEAD_SHA}'
+        CommitCount = 0
+        LineCount = 0
+        CoverageLine = 'Reviewed the full diff'
+        BaseRef = 'main'
+    }}
+}}
+function Invoke-ReviewFallback {{
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Backends,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [Parameter(Mandatory = $true)][scriptblock]$Runner,
+        [string]$CursorBase = ''
+    )
+    return [pscustomobject]@{{ Backend = 'codex'; Output = 'partial findings'; Model = $null }}
+}}
+$env:REVIEW_BACKEND = 'codex'
+Invoke-ReviewMain -Backend codex -ConfiguredBackends '' -Mode full -Workspace '{tmp_path}' -PrNumber '143' -Prompt 'review prompt' -OutputPath '{output_path}' -ScratchDirectory '{tmp_path}'
+[ordered]@{{ omitted = @($embedding.OmittedFiles) }} | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip().splitlines()[-1])
+    assert value["omitted"] == ["src/two.py"]
+    posted = output_path.read_text(encoding="utf-8-sig")
+    assert "partial findings" in posted
+    assert "<!-- agent-review:" not in posted
+
+
+def test_complete_review_publishes_marker_with_target_branch(tmp_path):
+    output_path = tmp_path / "posted-review.md"
+    result = run_powershell(
+        tmp_path,
+        f"""
+$script:diff = @'
+diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-old value
++new value
+'@
+function Get-ReviewCoverage {{
+    param(
+        [AllowEmptyString()][string]$RequestedMode,
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [AllowEmptyString()][string]$Repository
+    )
+    return [pscustomobject]@{{
+        Mode = 'full'
+        Reason = 'test'
+        Diff = $script:diff
+        LastSha = ''
+        HeadSha = '{HEAD_SHA}'
+        CommitCount = 0
+        LineCount = 0
+        CoverageLine = 'Reviewed the full diff'
+        BaseRef = 'main'
+    }}
+}}
+function Invoke-ReviewFallback {{
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Backends,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [Parameter(Mandatory = $true)][scriptblock]$Runner,
+        [string]$CursorBase = ''
+    )
+    return [pscustomobject]@{{ Backend = 'codex'; Output = 'complete findings'; Model = $null }}
+}}
+Invoke-ReviewMain -Backend codex -ConfiguredBackends '' -Mode full -Workspace '{tmp_path}' -PrNumber '143' -Prompt 'review prompt' -OutputPath '{output_path}' -ScratchDirectory '{tmp_path}'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    posted = output_path.read_text(encoding="utf-8-sig")
+    assert "complete findings" in posted
+    assert posted.rstrip().endswith(
+        f"<!-- agent-review: sha={HEAD_SHA} mode=full base=main -->"
+    )
+
+
 def test_empty_and_rate_limited_successes_fall_through(tmp_path):
     version = tmp_path / "versions" / "2026.09.18"
     version.mkdir(parents=True)
@@ -992,6 +1161,9 @@ def test_ci_docs_explain_backend_configuration_and_manual_verification():
     assert "gh workflow run review.yml -f pr_number=N -f mode=full" in docs
     assert "`mode` dispatch input" in docs
     assert "<!-- agent-review:" in docs
+    assert "base=<target branch>" in docs
+    assert "retargeted PR" in docs
+    assert "omitted files from the prompt" in docs
     assert "reviews only the commits" in docs
     assert "pre-merge review with `mode=full`" in docs
     assert "runner service user" in docs
