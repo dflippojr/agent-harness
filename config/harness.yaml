@@ -265,7 +265,7 @@ endpoint:
 # unless upscale_dir is set. Generation still works when they are absent.
 images:
   enabled: true
-  edit_enabled: false
+  # edit_enabled: false       # optional override; absent follows the image_edit module selection
   comfy_dir: C:/AI/ComfyUI
   models_dir: C:/AI/comfy-models
   port: 8188

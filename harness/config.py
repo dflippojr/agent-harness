@@ -246,7 +246,7 @@ class EndpointConfig:
 class ImagesConfig:
     """Local image generation with ComfyUI (images.py). The language model is unloaded while jobs run."""
     enabled: bool = False
-    edit_enabled: bool = False                 # optional Qwen-Image-Edit; never implied by images.enabled
+    edit_enabled: bool = False                 # resolved opt-in; absent YAML follows modules.image_edit
     comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
     models_dir: str = DEFAULT_IMAGES_MODELS_DIR  # extra_model_paths root (diffusion_models / text_encoders / vae)
     port: int = 8188
@@ -622,8 +622,9 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     endpoint = EndpointConfig(**(raw.get("endpoint") or {}))
     raw_images = raw.get("images") or {}
     images = ImagesConfig(**raw_images)
-    # Before edit_enabled was persisted, the installer opt-in in profile.yaml was the only enable switch.
-    # Preserve that state for legacy configs, while keeping an explicit YAML false authoritative.
+    # The switch is tri-state in configuration: absent follows the install/profile
+    # choice, while explicit YAML true/false remains authoritative. Managed Settings
+    # is applied below and provides the same explicit override without rewriting YAML.
     if "edit_enabled" not in raw_images:
         images.edit_enabled = selected.image_edit
     search = SearchConfig(**(raw.get("search") or {}))

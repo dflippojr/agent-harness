@@ -92,10 +92,10 @@ def build(args) -> dict:
 
 
 def _images_section(args, enabled: set[str]) -> dict:
-    section = {
-        "enabled": "images" in enabled or "image_edit" in enabled,
-        "edit_enabled": "image_edit" in enabled,
-    }
+    # image_edit installation is recorded in profile.yaml. Keep the runtime
+    # switch absent here so it follows that install choice until an owner
+    # explicitly overrides it in YAML or Settings.
+    section = {"enabled": "images" in enabled or "image_edit" in enabled}
     models_dir = str(getattr(args, "images_models_dir", "") or "").strip()
     if models_dir and not images_models_dir_matches(models_dir, DEFAULT_IMAGES_MODELS_DIR):
         section["models_dir"] = Path(models_dir).as_posix()
