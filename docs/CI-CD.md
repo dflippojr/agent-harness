@@ -119,6 +119,59 @@ git merge --ff-only origin/main
 Do this as an explicit maintenance action, not from the Actions runner. Never discard local changes to make a deploy
 pass.
 
+## Review runner pool
+
+Automated review (`.github/workflows/review.yml`) uses three repository-scoped self-hosted runners that share the
+`agent-harness-review` label. Each member takes one job, so reviews of different PRs can run in parallel. They are
+named, installed, and started as:
+
+| GitHub name | Install dir | Hidden logon task |
+| --- | --- | --- |
+| `dflippotower-agent-harness-review-1` | `D:\Agents\github-runner-review-1` | `AgentHarness-GitHubRunner-Review-1` |
+| `dflippotower-agent-harness-review-2` | `D:\Agents\github-runner-review-2` | `AgentHarness-GitHubRunner-Review-2` |
+| `dflippotower-agent-harness-review-3` | `D:\Agents\github-runner-review-3` | `AgentHarness-GitHubRunner-Review-3` |
+
+Use the existing parameterized installer (`ops/github/install-runner.ps1`). Do not add a pool wrapper. Obtain a fresh
+short-lived registration token, then install one member at a time with distinct `-InstallDir` / `-Name` / `-TaskName`
+and `-Labels agent-harness-review`:
+
+```powershell
+$gh = 'C:\Program Files\GitHub CLI\gh.exe'
+$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
+.\ops\github\install-runner.ps1 -Token $token `
+  -InstallDir D:\Agents\github-runner-review-1 `
+  -Name dflippotower-agent-harness-review-1 `
+  -TaskName AgentHarness-GitHubRunner-Review-1 `
+  -Labels agent-harness-review
+$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
+.\ops\github\install-runner.ps1 -Token $token `
+  -InstallDir D:\Agents\github-runner-review-2 `
+  -Name dflippotower-agent-harness-review-2 `
+  -TaskName AgentHarness-GitHubRunner-Review-2 `
+  -Labels agent-harness-review
+$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
+.\ops\github\install-runner.ps1 -Token $token `
+  -InstallDir D:\Agents\github-runner-review-3 `
+  -Name dflippotower-agent-harness-review-3 `
+  -TaskName AgentHarness-GitHubRunner-Review-3 `
+  -Labels agent-harness-review
+```
+
+Each call consumes the token; request a new one for every member. The token is never saved by the installer.
+
+To add a fourth member, repeat the same pattern with unused `-InstallDir` / `-Name` / `-TaskName` values and the same
+label. To repair or remove a member, delete the runner in GitHub (**Settings > Actions > Runners**), uninstall the
+matching scheduled task, and delete that member's install directory, then reinstall with the snippet above if you are
+repairing it:
+
+```powershell
+Unregister-ScheduledTask -TaskName AgentHarness-GitHubRunner-Review-1 -Confirm:$false
+Remove-Item -LiteralPath D:\Agents\github-runner-review-1 -Recurse -Force
+```
+
+Replace `-1` with the member you are removing. The same GitHub-delete + uninstall-task + delete-install-dir sequence
+is the repair path used for the tower runner.
+
 ## Failure behavior
 
 - CI failure, cancellation, pull-request run, or non-`main` run: no images and no deployment.
