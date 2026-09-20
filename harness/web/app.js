@@ -324,13 +324,19 @@ function md(src, pages) {
   return linkQuotes(out.join("\n").replace(/\u0000(\d+)\u0000/g, (_, n) => blocks[Number(n)]), src, pages);
 }
 
+function setConnLive(on) {
+  $conn.classList.toggle("live", !!on);
+}
+
 // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
-function openStream(urlFor, handlers, { authorized = false } = {}) {
+// Connection-dot updates are opt-in (`indicate`) so page streams can close without a false offline state.
+function openStream(urlFor, handlers, { authorized = false, indicate = false } = {}) {
   let es = null;
   let controller = null;
   let closed = false;
   let retry = null;
   let generation = 0;
+  const mark = (on) => { if (indicate) setConnLive(on); };
   const dispatch = (block) => {
     let type = "message";
     const data = [];
@@ -344,7 +350,7 @@ function openStream(urlFor, handlers, { authorized = false } = {}) {
     controller = new AbortController();
     const resp = await fetch(url, { headers: agentHarnessWeb.headers(), cache: "no-store", signal: controller.signal });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
-    $conn.classList.add("live");
+    mark(true);
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -368,21 +374,21 @@ function openStream(urlFor, handlers, { authorized = false } = {}) {
     let url;
     try { url = await urlFor(); }
     catch (_) {
-      $conn.classList.remove("live");
+      mark(false);
       if (!closed && run === generation) retry = setTimeout(connect, 3000);
       return;
     }
     if (authorized && agentHarnessWeb.token) {
       try { await fetchStream(url); } catch (_) { /* retry below */ }
-      $conn.classList.remove("live");
+      mark(false);
       if (!closed && run === generation) retry = setTimeout(connect, 3000);
       return;
     }
     const source = new EventSource(url);
     es = source;
-    source.onopen = () => $conn.classList.add("live");
+    source.onopen = () => mark(true);
     source.onerror = () => {
-      $conn.classList.remove("live");
+      mark(false);
       if (source.readyState === EventSource.CLOSED && run === generation) {
         clearTimeout(retry);
         retry = setTimeout(connect, 3000);
@@ -400,9 +406,18 @@ function openStream(urlFor, handlers, { authorized = false } = {}) {
     clearTimeout(retry);
     es?.close();
     controller?.abort();
-    $conn.classList.remove("live");
+    mark(false);
     document.removeEventListener("visibilitychange", onVisible);
   };
+}
+
+function watchDaemonConnection() {
+  if (watchDaemonConnection.started) return;
+  watchDaemonConnection.started = true;
+  openStream(() => agentHarnessWeb.url("/events", ownerSurface()), {}, {
+    authorized: !(isGuest() && !agentHarnessWeb.token),
+    indicate: true,
+  });
 }
 
 // ---------- router ----------
@@ -421,6 +436,7 @@ function go(hash, replace = false) {
 
 async function route() {
   if (protocolBlocked) return;
+  watchDaemonConnection();
   cleanup.forEach((fn) => { try { fn(); } catch (_) { /* ignore */ } });
   cleanup = [];
   $app.replaceChildren();
