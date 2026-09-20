@@ -39,17 +39,32 @@ trusted `main` workflow code the tower user's filesystem, Docker, credentials, a
 reserved for deployment; tests use `agent-harness-ci`, SonarCloud uses GitHub-hosted Windows, and automated review uses
 the `agent-harness-review` pool.
 
-`.github/workflows/sonar.yml` installs the test extras, runs `pytest` with `pytest-cov` Cobertura output
-(`coverage.xml`) on `windows-latest`, then scans with `sonar.qualitygate.wait=true`. The suite is Windows-native;
-Ubuntu hosted runners fail coverage collection on `msvcrt`, console-creation flags, and Windows paths. Docker-image
-and GPU tests still skip on the hosted runner and do not contribute coverage. Non-Python trees (`harness/web`, `ops`,
-scripts that are not `.py`) are excluded from the coverage metric. Confirm the SonarCloud project still uses a gate
-that includes coverage on new code; the workflow cannot set that condition itself.
+`.github/workflows/sonar.yml` is the analysis. It runs on GitHub-hosted `windows-latest` against SonarCloud
+organization `dflippojr`, project key `dflippojr_agent-harness` (`sonar-project.properties`), host
+`https://sonarcloud.io`, using the repository Actions secret `SONARCLOUD_TOKEN`. It installs the test extras, runs
+`pytest` with `pytest-cov` Cobertura output (`coverage.xml`), then scans with `sonar.qualitygate.wait=true`. The
+suite is Windows-native; Ubuntu hosted runners fail coverage collection on `msvcrt`, console-creation flags, and
+Windows paths. Docker-image and GPU tests still skip on the hosted runner and do not contribute coverage. Non-Python
+trees (`harness/web`, `ops`, scripts that are not `.py`) are excluded from the coverage metric. Confirm the SonarCloud
+project still uses a gate that includes coverage on new code; the workflow cannot set that condition itself.
+
+SonarCloud **Automatic Analysis must stay OFF**. This workflow is the analysis; turning Automatic Analysis on would
+duplicate and fight it. To rotate the token, create a new SonarCloud user token, replace the repo Actions secret
+`SONARCLOUD_TOKEN`, then confirm a `sonar` check on a pull request or a `main` push. The old `SONAR_TOKEN` and
+`SONAR_HOST_URL` secrets are already deleted and must not be reintroduced.
+
+Local SonarQube on `localhost:9000`, published by `ops/tailscale/serve.ps1` as `https://<tower>.ts.net:9000`, is
+local-only. CI does not depend on it.
 
 ## Automated review backends
 
 `.github/workflows/review.yml` reviews a pull request once when it is opened and supports explicit re-reviews through
-`workflow_dispatch`. The optional `backend` dispatch input accepts `auto`, `cursor`, `codex`, or `claude`. An explicit
+`workflow_dispatch`. Re-review a PR with `gh workflow run review.yml -f pr_number=N` (optional `-f backend=…`).
+`workflow_dispatch` always uses the workflow file on `main`, so unmerged `review.yml` changes are not exercised by
+dispatch. Dispatch publishes a Check Run on the PR head SHA (#120/#124); `pull_request` opened already has the native
+workflow check.
+
+The optional `backend` dispatch input accepts `auto`, `cursor`, `codex`, or `claude`. An explicit
 provider runs only that provider, which is useful for verification and deliberate quota steering. Omitting the input
 or selecting `auto` tries the comma-separated `REVIEW_BACKENDS` repository variable in order. If the variable is empty,
 the order defaults to `codex,claude,cursor`.
