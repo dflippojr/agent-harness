@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -328,6 +329,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         config_view = settings.admin_view() if settings else None
         return {
             "ok": True, "profile": cfg.profile, **compat.metadata(cfg.capabilities()),
+            # Which commit this process is running, when a deployer told it (staging sets HARNESS_BUILD_COMMIT).
+            "build": {"commit": os.environ.get("HARNESS_BUILD_COMMIT", "").strip()},
             "config": {
                 "revision": config_view["revision"] if config_view else 0,
                 "confirmed": config_view["confirmed"] if config_view else True,

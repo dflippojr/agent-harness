@@ -278,6 +278,167 @@ Remove-Item -LiteralPath D:\Agents\github-runner-review-1 -Recurse -Force
 Replace `-1` with the member you are removing. The same GitHub-delete + uninstall-task + delete-install-dir sequence
 is the repair path used for the tower runner.
 
+## Staging smoke slot
+
+`.github/workflows/staging.yml` keeps one disposable Agent Harness Server slot on the same tower, so a candidate
+branch or pull-request head can be opened in a browser before it is merged. It is deliberately not a second
+production: no GPU, no provider spend, no household services, and no production data or credentials.
+
+### Trust model
+
+Trusted code only. Isolation exists to prevent **accidents** — the wrong checkout, the wrong port, killing the
+production task, retagging production images — not to sandbox hostile code. Candidate Python is **not** treated as
+hostile, which is the only reason staging may share the owner's Windows account and host with production.
+
+| Allowed | Not allowed |
+| --- | --- |
+| Branches in `dflippojr/agent-harness` | Fork pull requests and other repositories |
+| Pull requests whose **head repository is `dflippojr/agent-harness`** | Untrusted-PR or dedicated-VM isolation |
+
+`scripts/resolve_staging_ref.py` enforces that on a GitHub-hosted runner in the `resolve` job, before the staging
+runner checks out or runs anything: a fork head, a missing branch, a non-numeric `pr_number`, a ref that is not a
+commit, or both inputs at once fails the run there. The control plane is always the workflow file on `main`; a
+dispatch from any other ref is refused, and the candidate's own `deploy-ci.ps1` is never the deployer.
+
+### Locations
+
+Nothing below is derived by appending `-staging` at runtime. `ops/harness/staging-common.ps1` spells every staging
+location out and `Assert-StagingTarget` refuses any path that is, or is inside, a production location.
+
+| Role | Production (never a staging target) | Staging |
+| --- | --- | --- |
+| Checkout | `D:\Projects\agent-harness` | `D:\Projects\agent-harness-staging` |
+| Data (SQLite, workspaces, transcripts, managed config) | `D:\Agents\harness` | `D:\Agents\harness-staging` |
+| Config | repo `config/` + untracked local | candidate `config/` + `D:\Agents\harness-staging\harness.local.yaml` |
+| Virtual environment | `.venv` / `.venv-path` | `D:\Agents\harness-staging\venv` |
+| Logs | `D:\Agents\harness\logs` | `D:\Agents\harness-staging\logs` |
+| Bind | `127.0.0.1:8100` | `127.0.0.1:8101` |
+| Tailscale Serve | `:443` (`ops/tailscale/serve.ps1`) | `:8444` (`ops/tailscale/serve-staging.ps1`) |
+| Scheduled task | `AgentHarness-Daemon` | `AgentHarness-Daemon-Staging` |
+| GitHub environment | `tower-production` | `tower-staging` (no production secrets) |
+| Runner | `agent-harness-tower` | `agent-harness-staging` |
+
+`tower-staging` holds no secrets at all today; the staging job needs only `contents: read`. Restrict the environment
+to this repository's default branch so a candidate copy of the workflow cannot claim it.
+
+The production stop matcher in `ops/harness/restart-daemon.ps1` and the staging one in
+`ops/harness/restart-daemon-staging.ps1` exclude each other: a staging command line always names the
+`harness-staging` data root and a production one never does. Staging stops its own scheduled task and its own port
+only, never "any Python on 8100". Staging runs no `docker` command in v1, so `agent-harness-sandbox:py312` and
+`agent-harness-cli:1` cannot move; if a local sandbox tag is ever needed it is `agent-harness-sandbox:staging`.
+
+### Capabilities
+
+`ops/harness/staging-profile.yaml` is copied over the candidate's `config/profile.yaml` on every deploy. The loader
+applies `profile.yaml` after both `harness.yaml` and `harness.local.yaml`, so the candidate's own yaml cannot switch
+a forced-off module back on. It selects the `full` profile with **every** module off — narrower than the `service`
+profile, which would require an enabled hosted backend. Off: local model / llama-server / inference endpoint,
+images and image edit, the GPU guard, hosted CLI backends, `homelab`, `remote_control`, Mac `runners`, `jobs`,
+notifications / ntfy, `backup`, `web` search and fetch, memory-library writes, `search`, `skills`, and repository
+cloning. On: the Server process, Agent Harness Web, `/health`, the owner/admin API against staging data, the config
+registry over the staging overlay, and creating or listing sessions, which fail closed with a "no backend" error.
+
+After the slot reports healthy, the deployer reads `/health` and refuses to leave staging up if any module or hosted
+backend is enabled. `/health` also carries `build.commit` (from `HARNESS_BUILD_COMMIT`, set by the staging
+supervisor), which is how you confirm the resolved SHA is the one running.
+
+### Dispatch
+
+Manual `workflow_dispatch` only; there is no pull-request label auto-deploy. Set exactly one of `branch` or
+`pr_number`, or dispatch `reset` on its own. The SHA is resolved at job start and printed: if the pull-request head
+moves afterwards the run still deploys the SHA it resolved, and says so. There is one slot, so a successful dispatch
+replaces whatever was running. Closing or merging the pull request does not stop or reset the slot.
+
+```powershell
+gh workflow run staging.yml -f pr_number=N
+gh workflow run staging.yml -f branch=feat/84-chat-home
+gh workflow run staging.yml -f reset=true
+```
+
+Production never waits on staging: `staging.yml` uses its own `agent-harness-staging` concurrency group, so
+`deploy-tower` (`agent-harness-main-deployment`) is never queued behind it, and staging never runs on
+`agent-harness-tower` or `agent-harness-ci`. If host contention ever forces a choice, cancel the staging run;
+production is never cancelled or delayed for staging. The staging job is capped at **30 minutes**, after which it
+fails closed with production unchanged. A healthy staging daemon then stays up until it is replaced or reset.
+
+### Authentication
+
+`:8444` is Tailscale Serve, tailnet-only, never Funnel. `D:\Agents\harness-staging\harness.local.yaml` admits
+exactly one caller: the machine owner's Tailscale login. Guests and household members are not admitted in v1. The
+deployer creates that file from `ops/harness/staging-harness.local.yaml` when it is missing and then **fails closed**
+until `allowed_logins` names the owner — an empty list would make every tailnet login an owner. It also refuses an
+overlay that references a production path or port. Production's `harness.local.yaml`, secret files, and SQLite
+database are never copied.
+
+Each deploy and each reset mints a fresh staging-only owner token (`scripts/staging_owner_token.py`) and revokes the
+previous one. The secret is never printed into the Actions log; read it on the tower with:
+
+```powershell
+Get-Content D:\Agents\harness-staging\owner-token.txt
+```
+
+Pair by opening `https://<tower>.<tailnet>.ts.net:8444/` in a browser that is already on the tailnet. Do not point
+Agent Harness for Mac or the production PWA at staging; v1 is browser smoke against the staging origin.
+
+### Reset
+
+`gh workflow run staging.yml -f reset=true` (or `ops\harness\reset-staging.ps1` on the tower) stops
+`AgentHarness-Daemon-Staging` and deletes the variable state the candidate created, leaving the slot stopped. A
+deploy performs the same clean first, so every deploy starts from empty session and project state.
+
+- **Deleted:** everything directly under `D:\Agents\harness-staging` except the entries below — SQLite and its WAL
+  files, workspaces, transcripts, the managed-config overlay, artifacts, images, the recorded SHA, and the staging
+  owner token. Deleting the database is what rotates staging tokens: previous staging cookies and tokens stop working.
+- **Preserved:** `harness.local.yaml`, `logs`, and `venv`, plus the staging checkout. Reset is not uninstall, and no
+  Docker image is removed.
+- **Not seeded.** v1 copies no fixture from production.
+
+### Tower setup
+
+Once per tower, as the owner (not from an Actions job):
+
+```powershell
+$gh = 'C:\Program Files\GitHub CLI\gh.exe'
+$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
+.\ops\github\install-runner.ps1 -Token $token -Labels agent-harness-staging `
+  -InstallDir D:\Agents\github-runner-staging -Name dflippotower-agent-harness-staging `
+  -TaskName AgentHarness-GitHubRunner-Staging
+D:\Projects\agent-harness\ops\harness\install-task-staging.ps1   # registers AgentHarness-Daemon-Staging
+D:\Projects\agent-harness\ops\tailscale\serve-staging.ps1        # publishes :8444 -> 8101, leaving :443 alone
+```
+
+Install the task from the **production** checkout, not the staging one: the scheduled task remembers the supervisor
+path it was registered with, and that supervisor must stay trusted `main` code even though everything it starts and
+writes is staging. Python must be on the runner account's `PATH`; the first deploy creates
+`D:\Agents\harness-staging\venv` with it and later deploys reuse it.
+
+Then dispatch once, edit `D:\Agents\harness-staging\harness.local.yaml` when the first run tells you to set
+`allowed_logins` (and set `public_url` to `https://<tower>.<tailnet>.ts.net:8444` so the run summary links straight
+to the slot), and dispatch again.
+
+### Real-tower checklist
+
+1. `gh workflow run staging.yml -f pr_number=N`, then read the run summary for the resolved SHA and the URL.
+2. Open `https://<tower>.<tailnet>.ts.net:8444/` and confirm `(Invoke-RestMethod .../health).build.commit` is that SHA.
+3. Confirm production is untouched: `https://<tower>.<tailnet>.ts.net/health` still answers, `Get-ScheduledTask
+   AgentHarness-Daemon` is still running, `git -C D:\Projects\agent-harness rev-parse HEAD` is still the deployed
+   `main` commit, and `docker image inspect agent-harness-sandbox:py312` has the same image id as before.
+4. Replace the slot with another ref and confirm the SHA in `/health` changes while production's does not.
+5. `gh workflow run staging.yml -f reset=true`, then confirm `:8101` is down, `D:\Agents\harness-staging` holds only
+   `harness.local.yaml`, `logs`, and `venv`, and the previous staging token no longer authenticates.
+6. Deploy again and confirm `Get-Content D:\Agents\harness-staging\owner-token.txt` is a different token.
+
+### Staging failure behavior
+
+- Rejected ref (fork head, missing branch, both inputs, dispatch off `main`): the run fails in `resolve` and the
+  tower does nothing.
+- Clone, fetch, dependency, overlay, health, or capability-check failure: the staging daemon is stopped and the run
+  fails. Production's checkout, SHA, process, `/health` on 8100, data, credentials, stable Docker tags, GPU, and
+  `:443` route are unchanged either way — no staging step writes to any of them.
+- Missing `AgentHarness-Daemon-Staging` task: the deploy fails with the `install-task-staging.ps1` instruction rather
+  than starting anything by hand.
+- To recover the slot from any state, dispatch `reset=true` and then deploy again.
+
 ## Failure behavior
 
 - CI failure, cancellation, pull-request run, or non-`main` run: no images and no deployment.

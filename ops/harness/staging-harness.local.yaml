@@ -1,0 +1,39 @@
+# Template for the owner's staging overlay (issue #129). deploy-staging.ps1 creates
+# D:\Agents\harness-staging\harness.local.yaml from this file when it is missing, then fails closed until
+# allowed_logins names the owner's own Tailscale login. It is never copied from production: production's
+# harness.local.yaml, its secret files, and its SQLite database stay where they are.
+#
+# Reset preserves this file. Edit it on the tower, then dispatch a deploy (or reset) to pick the change up.
+listen:
+  host: 127.0.0.1        # published on the tailnet at :8444 by ops/tailscale/serve-staging.ps1; never bind wider
+  port: 8101
+
+# Fill in for the staging origin, e.g. https://tower.your-tailnet.ts.net:8444
+public_url: ""
+# Staging admits exactly one caller: the machine owner's Tailscale login. Guests and household members are not
+# admitted in v1. Leaving the placeholder (or an empty list) fails the deploy closed.
+allowed_logins: [REPLACE_WITH_OWNER_TAILSCALE_LOGIN]
+guests: []
+
+data_dir: D:/Agents/harness-staging
+repos_dir: D:/Agents/harness-staging/repos   # never D:/Agents/repos; cloning is off in v1 anyway
+
+# Staging-only sandbox tag. Production reads agent-harness-sandbox:py312; staging must never create or retag it.
+sandbox:
+  image: agent-harness-sandbox:staging
+
+# No hosted CLI backends in v1: no production login volumes, no staging API keys. Each entry replaces the
+# candidate's whole backend definition, so no image, proxy, volume, or api_key_file survives.
+backends:
+  claude:
+    enabled: false
+    volume: ""
+    api_key_file: ""
+  codex:
+    enabled: false
+    volume: ""
+    api_key_file: ""
+  cursor:
+    enabled: false
+    volume: ""
+    api_key_file: ""

@@ -1,0 +1,27 @@
+# Trusted staging capability overlay (issue #129). deploy-staging.ps1 copies this over
+# <staging checkout>\config\profile.yaml on every deploy, and the loader applies profile.yaml after both
+# harness.yaml and harness.local.yaml, so the candidate's own yaml cannot switch any of these modules back on.
+#
+# v1 staging is a smoke slot: Agent Harness Server, Agent Harness Web, health/version, the owner/admin API against
+# staging data, and the config registry. Sessions fail closed with a "no backend" error. Everything that would
+# share the GPU, provider spend, household services, or owner credentials stays off.
+#
+# The profile is `full` with every module switched off, which is narrower than the `service` profile: `service`
+# requires at least one enabled hosted backend, and v1 staging has no provider login volumes or API keys at all.
+profile: full
+modules:
+  local_model: false
+  homelab: false
+  memory_library: false
+  images: false
+  image_edit: false
+  jobs: false
+  gpu_guard: false
+  runners: false
+  remote_control: false
+  web: false
+  search: false
+  endpoint: false
+  notifications: false
+  backup: false
+  skills: false
