@@ -31,6 +31,9 @@ permissions:
 jobs:
   resolve:
     name: resolve
+    permissions:
+      contents: read
+      pull-requests: read
     # GitHub-hosted, so an invalid or fork ref fails closed before the staging runner sees candidate code.
     runs-on: ubuntu-latest
     timeout-minutes: 10

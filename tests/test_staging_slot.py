@@ -189,6 +189,16 @@ def test_staging_never_runs_on_the_production_or_ci_runners():
     assert WORKFLOW["permissions"] == {"contents": "read"}
 
 
+def test_resolve_job_can_read_pull_requests_without_write_scopes():
+    assert WORKFLOW["permissions"] == {"contents": "read"}
+    resolve_perms = WORKFLOW["jobs"]["resolve"]["permissions"]
+    assert resolve_perms["pull-requests"] == "read"
+    assert resolve_perms["contents"] == "read"
+    for job in WORKFLOW["jobs"].values():
+        for access in (job.get("permissions") or {}).values():
+            assert "write" not in str(access)
+
+
 def test_production_never_queues_behind_staging():
     production = yaml.safe_load((ROOT / ".github" / "workflows" / "ci-cd.yml").read_text(encoding="utf-8"))
     assert WORKFLOW["concurrency"]["group"] != production["concurrency"]["group"]
