@@ -199,8 +199,10 @@ const sessionDetail = {
   backend: "local", model: "local", totals: {}, created_at: 1, updated_at: 2, workspace: "/tmp",
 };
 
+const fetched = [];
 const fakeFetch = async (url) => {
   const href = String(url);
+  fetched.push(href);
   const path = href.replace(/^https?:\/\/[^/]+/, "").replace(/^\/api\/(?:admin\/)?v1/, "");
   if (path === "/health" || href.endsWith("/health")) {
     return jsonResp({ protocols: { admin: { min: 1, max: 4 } }, update_hint: {} });
@@ -388,6 +390,23 @@ assertLive("session transcript painted");
 await go("#/s/sess1/info", "session info");
 await waitFor(() => /Workspace|Session/.test(byId.app.textContent), "session info");
 assertLive("session info painted");
+
+// Hostile route ids must never reach fetch/EventSource; valid ids still do.
+const reached = (needle) => fetched.some((u) => u.includes(needle)) || sources.some((s) => s.url.includes(needle));
+const hostile = ["../x", "%2e%2e", "a%2Fb", "x?y=1", "a".repeat(200)];
+for (const kind of ["s", "chat", "images"]) {
+  for (const bad of hostile) {
+    await go(`#/${kind}/${bad}`, `hostile ${kind}`);
+    if (reached(`/${bad}`) || reached("evil") || reached("..")) throw new Error(`hostile id reached a request: ${kind}/${bad}`);
+  }
+}
+await go("#/s/a%5Cb", "backslash session id");
+if (fetched.concat(sources.map((s) => s.url)).some((u) => /%5C|%2e|%2F|\\|\.\./i.test(u))) {
+  throw new Error("hostile id reached a request");
+}
+await go("#/s/sess1", "valid session after hostile ids");
+await waitFor(() => /Demo session|Transcript/.test(byId.app.textContent), "valid session still loads");
+if (!reached("/sessions/sess1/events")) throw new Error("valid session id no longer opens its stream");
 
 const openSources = () => sources.filter((s) => s.readyState === 1);
 if (!openSources().length) throw new Error("expected an app-level EventSource to stay open off Agents");

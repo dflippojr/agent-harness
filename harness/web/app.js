@@ -330,6 +330,29 @@ function setConnLive(on) {
   $conn.classList.toggle("live", !!on);
 }
 
+// Ids come from the URL hash, so only the characters the daemon issues (hex, "-", "_") may reach a request path.
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const validId = (id) => typeof id === "string" && SAFE_ID.test(id);
+const STREAM_PATH = /^(?:\/api\/v1|\/api\/admin\/v1)?\/(?:(?:sessions|chats)\/[A-Za-z0-9_-]{1,64}\/events|events|queue)$/;
+const STREAM_QUERY = /^(?:\?[A-Za-z0-9_=&.-]*)?$/;
+
+// Returns a rebuilt same-origin stream URL, or null when it is not a known API stream path (fail closed).
+function safeStreamUrl(url) {
+  if (typeof url !== "string" || url.length > 2048) return null;
+  const base = agentHarnessWeb.baseUrl || "";
+  let rest = url;
+  if (base) {
+    if (!url.startsWith(`${base}/`)) return null;
+    rest = url.slice(base.length);
+  }
+  if (!rest.startsWith("/") || rest.startsWith("//") || rest.includes("\\")) return null;
+  const cut = rest.search(/\?/);
+  const path = cut < 0 ? rest : rest.slice(0, cut);
+  const query = cut < 0 ? "" : rest.slice(cut);
+  if (!STREAM_PATH.test(path) || !STREAM_QUERY.test(query)) return null;
+  return `${base}${path}${query}`;
+}
+
 // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
 // Connection-dot updates are opt-in (`indicate`) so page streams can close without a false offline state.
 function openStream(urlFor, handlers, { authorized = false, indicate = false } = {}) {
@@ -380,6 +403,8 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false } =
       if (!closed && run === generation) retry = setTimeout(connect, 3000);
       return;
     }
+    url = safeStreamUrl(url);
+    if (!url) { mark(false); return; }
     if (authorized && agentHarnessWeb.token) {
       try { await fetchStream(url); } catch (_) { /* retry below */ }
       mark(false);
@@ -475,7 +500,8 @@ async function route() {
     else if (parts[0] === "new") await viewNew();
             else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1], parts[2]);
     else if (parts[0] === "images") {
-      if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
+      if (parts[1] && !validId(parts[1])) go("#/images", true);
+      else if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
       else if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
       else if (parts[1]) await viewImage(parts[1]);
       else await viewImages();
@@ -661,6 +687,7 @@ function chatComposer(options, session) {
 
 async function viewChat(id) {
   if (!canChat()) { go("#/agents", true); return; }
+  if (id && !validId(id)) { go("#/chat", true); return; }
   let session = null;
   let options = { backends: [] };
   if (id) session = await api(`/chats/${id}`);
@@ -788,7 +815,7 @@ async function viewChat(id) {
   }
   setBusy(!TERMINAL.has(session.status));
   onLeave(openStream(
-    () => agentHarnessWeb.url(`/chats/${id}/events?after=${lastSeq}`, ownerSurface()),
+    () => agentHarnessWeb.url(`/chats/${encodeURIComponent(id)}/events?after=${lastSeq}`, ownerSurface()),
     tracked,
     { authorized: !!agentHarnessWeb.token },
   ));
@@ -1275,6 +1302,7 @@ function bindSessionJumps() {
 
 // ---------- session ----------
 async function viewSession(sid, tab, focusApproval) {
+  if (!validId(sid)) { go("#/agents", true); return; }
   let session = await api(`/sessions/${sid}`);
   sid = session.id;
   setHeader("agents");
@@ -1744,7 +1772,7 @@ async function viewSession(sid, tab, focusApproval) {
     };
   }
   onLeave(openStream(() => (isGuest() && !agentHarnessWeb.token
-    ? agentHarnessWeb.url(`/sessions/${sid}/events?after=${lastSeq}`, "legacy")
+    ? agentHarnessWeb.url(`/sessions/${encodeURIComponent(sid)}/events?after=${lastSeq}`, "legacy")
     : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked));
   if (composer) onLeave(() => composer.remove());
 }

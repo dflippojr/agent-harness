@@ -97,8 +97,8 @@ export class AgentHarnessWebClient {
   }
 
   async sessionStreamUrl(sessionId, after = 0) {
-    if (!this.token) return this.url(`/sessions/${sessionId}/events?after=${after}`, "app");
-    const data = await this.request(`/sessions/${sessionId}/events/ticket`, { method: "POST", surface: "app" });
+    if (!this.token) return this.url(`/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`, "app");
+    const data = await this.request(`/sessions/${encodeURIComponent(sessionId)}/events/ticket`, { method: "POST", surface: "app" });
     const separator = data.events_url.includes("?") ? "&" : "?";
     return `${this.baseUrl}${data.events_url}${separator}after=${after}`;
   }
