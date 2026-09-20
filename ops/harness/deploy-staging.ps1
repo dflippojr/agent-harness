@@ -28,6 +28,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# Dot-sourcing a script runs its param block in this scope, so capture the switch before that can reset it.
+$planOnly = [bool]$DryRun
 . (Join-Path $PSScriptRoot 'staging-common.ps1')
 . (Join-Path $PSScriptRoot 'reset-staging.ps1')
 
@@ -39,7 +41,7 @@ $StagingLogDir = Join-Path $StagingDataRoot 'logs'
 $StagingLocalConfig = Join-Path $StagingDataRoot 'harness.local.yaml'
 
 function Run([string]$File, [string[]]$Arguments) {
-    if ($DryRun) { Write-Host "[dry run] $File $($Arguments -join ' ')"; return }
+    if ($planOnly) { Write-Host "[dry run] $File $($Arguments -join ' ')"; return }
     & $File @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$File failed with exit code $LASTEXITCODE" }
 }
@@ -73,10 +75,10 @@ Assert-StagingTask $StagingTaskName
 Assert-StagingPort $StagingPort
 Write-Host '[staging] guards passed'
 
-if ($DryRun) { Write-Host '[dry run] Stop-StagingDaemon' } else { Stop-StagingDaemon }
+if ($planOnly) { Write-Host '[dry run] Stop-StagingDaemon' } else { Stop-StagingDaemon }
 Write-Host '[staging] slot stopped'
 
-Reset-StagingData -DryRun:$DryRun
+Reset-StagingData -DryRun:$planOnly
 Write-Host '[staging] slot clean'
 
 if ($Reset) {
@@ -95,7 +97,7 @@ try {
     # Same-repo branches and same-repo pull-request heads only; the ref was already validated off-tower.
     Run git @('-C', $StagingCheckout, 'fetch', '--prune', '--force', 'origin',
         '+refs/heads/*:refs/remotes/origin/*', '+refs/pull/*/head:refs/remotes/origin/pr/*')
-    if (-not $DryRun) {
+    if (-not $planOnly) {
         & git -C $StagingCheckout cat-file -e "$Commit^{commit}"
         if ($LASTEXITCODE -ne 0) { throw "$Commit is not a commit in this repository's fetched refs" }
     }
@@ -108,11 +110,11 @@ try {
     if (-not (Test-Path -LiteralPath $stagingPython)) {
         Run $BootstrapPython @('-m', 'venv', $StagingVenv)
     }
-    if (-not $DryRun -and -not (Test-Path -LiteralPath $stagingPython)) {
+    if (-not $planOnly -and -not (Test-Path -LiteralPath $stagingPython)) {
         throw "staging Python is missing: $stagingPython"
     }
     $requirements = Join-Path $StagingCheckout 'requirements.txt'
-    if (-not $DryRun -and -not (Test-Path -LiteralPath $requirements)) {
+    if (-not $planOnly -and -not (Test-Path -LiteralPath $requirements)) {
         throw "candidate requirements are missing: $requirements"
     }
     Run $stagingPython @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $requirements)
@@ -121,17 +123,17 @@ try {
     # Capability overlay: the trusted profile file wins over the candidate's harness.yaml and the owner's local
     # overlay for `profile` and `modules`, so the candidate cannot switch a forced-off module back on.
     $candidateConfig = Join-Path $StagingCheckout 'config'
-    if (-not $DryRun -and -not (Test-Path -LiteralPath $candidateConfig)) {
+    if (-not $planOnly -and -not (Test-Path -LiteralPath $candidateConfig)) {
         throw "candidate config directory is missing: $candidateConfig"
     }
     if (-not (Test-Path -LiteralPath $StagingLocalConfig)) {
         $template = Join-Path $ReleaseRoot 'ops\harness\staging-harness.local.yaml'
-        if ($DryRun) { Write-Host "[dry run] Copy-Item $template -> $StagingLocalConfig" }
+        if ($planOnly) { Write-Host "[dry run] Copy-Item $template -> $StagingLocalConfig" }
         else { Copy-Item -LiteralPath $template -Destination $StagingLocalConfig }
         Write-Host "[staging] created the owner overlay $StagingLocalConfig from the template"
     }
-    if (-not $DryRun) {
-        Assert-NoProductionReference $StagingLocalConfig
+    if (Test-Path -LiteralPath $StagingLocalConfig) { Assert-NoProductionReference $StagingLocalConfig }
+    if (-not $planOnly) {
         Copy-Item -LiteralPath (Join-Path $ReleaseRoot 'ops\harness\staging-profile.yaml') `
             -Destination (Join-Path $candidateConfig 'profile.yaml') -Force
         Copy-Item -LiteralPath $StagingLocalConfig -Destination (Join-Path $candidateConfig 'harness.local.yaml') -Force
@@ -143,14 +145,14 @@ try {
     }
     Write-Host '[staging] overlay applied with every optional module forced off'
 
-    if (-not $DryRun) {
+    if (-not $planOnly) {
         try { Get-ScheduledTask -TaskName $StagingTaskName -ErrorAction Stop | Out-Null }
         catch { throw "$StagingTaskName is not installed; run ops\harness\install-task-staging.ps1 on the tower once" }
     }
-    if ($DryRun) { Write-Host '[dry run] Start-StagingDaemon' } else { Start-StagingDaemon }
+    if ($planOnly) { Write-Host '[dry run] Start-StagingDaemon' } else { Start-StagingDaemon }
     Write-Host '[staging] daemon started and healthy'
 
-    if ($DryRun) {
+    if ($planOnly) {
         Write-Host "[dry run] verify http://127.0.0.1:$StagingPort/health capabilities"
         Write-Host '[dry run] mint staging owner token'
     } else {
@@ -158,7 +160,7 @@ try {
         $enabled = @($health.capabilities.modules.PSObject.Properties |
             Where-Object { $_.Value } | ForEach-Object { $_.Name })
         $hosted = @($health.capabilities.hosted_backends)
-        if ($health.profile -ne 'service' -or $enabled.Count -gt 0 -or $hosted.Count -gt 0) {
+        if ($enabled.Count -gt 0 -or $hosted.Count -gt 0) {
             throw ("staging came up with more than the smoke profile (profile $($health.profile), " +
                 "modules [$($enabled -join ', ')], hosted backends [$($hosted -join ', ')]); refusing to leave it up")
         }
@@ -172,7 +174,7 @@ try {
 } catch {
     $deployError = $_.Exception.Message
     try {
-        if ($DryRun) { Write-Host '[dry run] Stop-StagingDaemon' } else { Stop-StagingDaemon }
+        if ($planOnly) { Write-Host '[dry run] Stop-StagingDaemon' } else { Stop-StagingDaemon }
         Write-Host '[staging] stopped the failed slot'
     } catch {
         Write-Warning "staging deploy failed and the slot could not be stopped: $($_.Exception.Message)"

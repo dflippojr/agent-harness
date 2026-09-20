@@ -40,10 +40,11 @@ def resolve(
     branch: str = "",
     pr_number: str = "",
     reset: bool = False,
-    api: Callable[[str], dict] = gh_api,
+    api: Callable[[str], dict] | None = None,
     repository: str = REPOSITORY,
 ) -> dict:
     """The resolved dispatch: {"sha", "ref_label", "reset_only"}. Raises RefRejected for anything else."""
+    api = api or gh_api
     branch, pr_number = branch.strip(), pr_number.strip()
     if reset:
         if branch or pr_number:

@@ -5,7 +5,10 @@
 # v1 staging is a smoke slot: Agent Harness Server, Agent Harness Web, health/version, the owner/admin API against
 # staging data, and the config registry. Sessions fail closed with a "no backend" error. Everything that would
 # share the GPU, provider spend, household services, or owner credentials stays off.
-profile: service
+#
+# The profile is `full` with every module switched off, which is narrower than the `service` profile: `service`
+# requires at least one enabled hosted backend, and v1 staging has no provider login volumes or API keys at all.
+profile: full
 modules:
   local_model: false
   homelab: false
