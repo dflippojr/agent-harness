@@ -6,14 +6,17 @@
   The registration token is used once and is not saved. Default values install
   the deploy tower runner (`agent-harness-tower`; `deploy-tower` in ci-cd.yml),
   not SonarCloud or review. Pass -Labels agent-harness-ci and a distinct
-  -InstallDir / -Name / -TaskName for the pytest-only runner so those jobs do
-  not share a queue with deploy. Pass -Labels agent-harness-review and distinct
-  -InstallDir / -Name / -TaskName for each review pool member.
+  -InstallDir / -Name / -TaskName for each pytest pool member (three members:
+  github-runner-ci, -ci-2, -ci-3) so those jobs do not share a queue with
+  deploy. Pass -Labels agent-harness-review and distinct -InstallDir / -Name /
+  -TaskName for each review pool member.
 
 .EXAMPLE
   $token = gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
   .\ops\github\install-runner.ps1 -Token $token
   .\ops\github\install-runner.ps1 -Token $token -InstallDir D:\Agents\github-runner-ci -Name dflippotower-agent-harness-ci -TaskName AgentHarness-GitHubRunner-CI -Labels agent-harness-ci
+  .\ops\github\install-runner.ps1 -Token $token -InstallDir D:\Agents\github-runner-ci-2 -Name dflippotower-agent-harness-ci-2 -TaskName AgentHarness-GitHubRunner-CI-2 -Labels agent-harness-ci
+  .\ops\github\install-runner.ps1 -Token $token -InstallDir D:\Agents\github-runner-ci-3 -Name dflippotower-agent-harness-ci-3 -TaskName AgentHarness-GitHubRunner-CI-3 -Labels agent-harness-ci
 #>
 param(
     [Parameter(Mandatory)][string]$Token,

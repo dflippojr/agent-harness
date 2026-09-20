@@ -20,11 +20,11 @@ Phases 0–8 are built. Open work is GitHub issues, mirrored from `docs/backlog.
 | **Agent Harness App** | A third-party integration that consumes the App API |
 | **Agent Harness for Mac** | The Mac distribution that installs the CLI and Mac Runner together |
 
-The dedicated `agent-harness-ci` runner runs the full suite on pull requests and pushes to `main`. Only after the `CI`
-workflow passes for that exact pushed commit does the `workflow_run` pipeline publish sandbox images to GHCR and let
-the repository-scoped tower runner perform the fail-closed deployment. The `agent-harness-review` pool (three
-self-hosted members) runs automated PR review; rebuild and add/remove steps are in [`docs/CI-CD.md`](docs/CI-CD.md).
-See that page for the trust boundary and recovery details.
+The `agent-harness-ci` pool (three self-hosted members on the tower) runs the full suite on pull requests and pushes
+to `main`. Only after the `CI` workflow passes for that exact pushed commit does the `workflow_run` pipeline publish
+sandbox images to GHCR and let the repository-scoped tower runner perform the fail-closed deployment. The
+`agent-harness-review` pool (three self-hosted members) runs automated PR review; rebuild and add/remove steps for
+both pools are in [`docs/CI-CD.md`](docs/CI-CD.md). See that page for the trust boundary and recovery details.
 
 ## Install
 
