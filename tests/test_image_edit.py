@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -110,17 +111,21 @@ def test_normalize_strips_exif_and_ignores_client_path_bytes():
     assert b"Exif" not in data
 
 
-def test_full_profile_does_not_enable_image_edit_by_default(tmp_path):
+def test_full_profile_image_edit_upgrade_without_force(tmp_path):
     args = ["--config-dir", str(tmp_path / "cfg"), "--data-dir", str(tmp_path / "data"), "--model", "gpt-oss",
             "--pause-flag", str(tmp_path / "paused")]
     assert setup_config.main(args) == 0
     cfg = config.load(tmp_path / "cfg")
     assert not cfg.modules.image_edit and not cfg.images.edit_enabled
-    enabled_args = ["--config-dir", str(tmp_path / "enabled-cfg"), "--data-dir", str(tmp_path / "enabled-data"),
-                    "--model", "gpt-oss", "--pause-flag", str(tmp_path / "enabled-paused"),
-                    "--enable-module", "image_edit"]
-    setup_config.main(enabled_args)
-    enabled = config.load(tmp_path / "enabled-cfg")
+    harness_path = tmp_path / "cfg" / "harness.yaml"
+    original_harness = harness_path.read_text(encoding="utf-8")
+    assert "edit_enabled" not in (yaml.safe_load(original_harness)["images"])
+
+    # This is the install.ps1 -EnableModules image_edit upgrade path: setup_config
+    # keeps harness.yaml without --force but refreshes the profile overlay.
+    assert setup_config.main(args + ["--enable-module", "image_edit"]) == 0
+    assert harness_path.read_text(encoding="utf-8") == original_harness
+    enabled = config.load(tmp_path / "cfg")
     assert enabled.modules.image_edit and enabled.images.edit_enabled and enabled.modules.images
 
 
