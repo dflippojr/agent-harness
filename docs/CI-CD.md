@@ -39,6 +39,14 @@ trusted `main` workflow code the tower user's filesystem, Docker, credentials, a
 reserved for deployment; tests use `agent-harness-ci`, SonarCloud uses GitHub-hosted Ubuntu, and automated review uses
 the `agent-harness-review` pool.
 
+`.github/workflows/sonar.yml` installs the test extras, runs `pytest` with `pytest-cov` Cobertura output
+(`coverage.xml`), then scans with `sonar.qualitygate.wait=true`. SonarCloud's quality gate (Sonar way by default)
+fails the GitHub check when coverage on new code is below 80%. Windows-only, Docker-image, and GPU tests skip on the
+hosted runner and do not contribute coverage; change those areas with tests that still run on Ubuntu, or expect the
+gate to treat the new Python as uncovered. Non-Python trees (`harness/web`, `ops`, scripts that are not `.py`) are
+excluded from the coverage metric. Confirm the SonarCloud project still uses a gate that includes coverage on new
+code; the workflow cannot set that condition itself.
+
 `workflow_run` executes the workflow file from the default branch and can access secrets, so its jobs reject every
 event except a successful `CI` run caused by a push whose head branch is `main`. They check out and deploy only the
 reported `head_sha`; they never check out or execute pull-request code. Third-party actions are pinned to exact
