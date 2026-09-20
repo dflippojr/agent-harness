@@ -2,10 +2,56 @@ name: CI
 
 # Feature-branch pushes without a PR do not run. `pull_request` covers open and
 # later commits on a PR (`synchronize`); `push` to main still runs after merge.
+#
+# paths-ignore is an allow-list of files no pytest currently reads. GitHub
+# skips this workflow only when every changed file matches the list. Do not
+# use `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
+# INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
+# are asserted by tests/test_product_naming.py; marketplace design, threat
+# model, schema, and example manifests by tests/test_marketplace_manifest.py;
+# docs/CI-CD.md by
+# tests/test_review_runner.py::test_ci_docs_explain_backend_configuration_and_manual_verification.
+# Adding a test that reads a skipped file requires removing that path from
+# paths-ignore in the same change.
+#
+# main currently has no branch protection or rulesets, so a skipped `test`
+# check is acceptable. If `test` ever becomes required, add a tiny
+# always-running success job (do not add that job here).
+# .github/workflows/ci-cd.yml already deploys only when
+# workflow_run.conclusion == 'success' for a push to main, so a skipped or
+# absent CI run does not publish or deploy (desired).
 on:
   push:
     branches: [main]
+    paths-ignore: &ci-skip-unread-paths
+      - LICENSE
+      - third_party/Real-ESRGAN.LICENSE
+      - docs/backlog.yaml
+      - docs/compatibility.md
+      - docs/config-registry.md
+      - docs/flux-fast.md
+      - docs/issue-13-lightning-results.md
+      - docs/smart-approvals.md
+      - docs/phase0-results.md
+      - docs/phase1-results.md
+      - docs/phase2-results.md
+      - docs/phase3-results.md
+      - docs/phase4-results.md
+      - docs/phase5-results.md
+      - docs/phase6a-hermes-study.md
+      - docs/phase6b-results.md
+      - docs/phase6c-results.md
+      - docs/phase6d-results.md
+      - docs/phase6e-results.md
+      - docs/phase7a-results.md
+      - docs/phase7b-results.md
+      - docs/phase7d-results.md
+      - docs/phase7e-results.md
+      - docs/phase8a-design.md
+      - docs/phase8b-results.md
+      - docs/phase8c-results.md
   pull_request:
+    paths-ignore: *ci-skip-unread-paths
 
 concurrency:
   group: ci-${{ github.ref }}
