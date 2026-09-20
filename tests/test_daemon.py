@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -21,11 +23,14 @@ from harness.scheduler import GpuScheduler
 
 
 def make_cfg(tmp: Path, context_tokens: int = 65536, rules: list | None = None) -> Config:
+    # Per-process unique names so concurrent CI jobs on one Docker engine do not
+    # share or `docker network rm` each other's test networks.
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
     return Config(
         host="127.0.0.1", port=0, data_dir=tmp / "data", repos_dir=tmp / "repos", default_model="fake",
         models={"fake": ModelConfig(name="fake", base_url="http://unused", context_tokens=context_tokens)},
-        sandbox=SandboxConfig(image="agent-harness-sandbox:py312", network="harness-test-sbx",
-                              egress_network="harness-test-egress"),
+        sandbox=SandboxConfig(image="agent-harness-sandbox:py312", network=f"harness-test-sbx-{token}",
+                              egress_network=f"harness-test-egress-{token}"),
         projects={"scratch": Project(name="scratch"), "guarded": Project(name="guarded", rules=rules or [])},
     )
 
@@ -388,8 +393,10 @@ def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
         Completion(content="done"),
     ])
 
+    cfg = make_cfg(tmp_path)
+
     async def body():
-        m = Manager(make_cfg(tmp_path), chat=script)
+        m = Manager(cfg, chat=script)
         await m.start()
         s = m.create("clone and run")
         s = await wait_status(m, s["id"], "waiting_approval", "done", "failed", timeout=120)
@@ -410,4 +417,7 @@ def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
     try:
         asyncio.run(body())
     finally:
-        subprocess.run(["docker", "network", "rm", "harness-test-sbx", "harness-test-egress"], capture_output=True)
+        subprocess.run(
+            ["docker", "network", "rm", cfg.sandbox.network, cfg.sandbox.egress_network],
+            capture_output=True,
+        )
