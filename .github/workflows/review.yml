@@ -6,6 +6,8 @@ name: Automated Code Review
 # runner service user's already-authenticated Codex, Claude, and Cursor CLIs.
 # The dispatch input can select one backend; auto uses the ordered
 # REVIEW_BACKENDS repository variable, then codex,claude,cursor by default.
+# The optional mode input is auto (incremental when a prior review marker
+# makes that safe) or full. Pre-merge reviews should dispatch mode=full.
 #
 # pull_request runs already appear in the PR Checks tab. workflow_dispatch
 # does not, so those re-reviews publish a Check Run on the PR head SHA.
@@ -27,6 +29,14 @@ on:
           - cursor
           - codex
           - claude
+      mode:
+        description: "Review coverage (auto = incremental when safe)"
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - full
 
 permissions:
   pull-requests: write
@@ -113,6 +123,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           REVIEW_WORKSPACE: ${{ steps.pr.outputs.workspace }}
           REQUESTED_BACKEND: ${{ github.event.inputs.backend }}
+          REVIEW_MODE: ${{ github.event.inputs.mode }}
           REVIEW_BACKENDS: ${{ vars.REVIEW_BACKENDS }}
           REVIEW_PROMPT: |
             Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
@@ -124,6 +135,7 @@ jobs:
           & .\ops\review\run-review.ps1 `
             -Backend $env:REQUESTED_BACKEND `
             -ConfiguredBackends $env:REVIEW_BACKENDS `
+            -Mode $env:REVIEW_MODE `
             -Workspace $env:REVIEW_WORKSPACE `
             -Prompt $env:REVIEW_PROMPT `
             -OutputPath (Join-Path $env:GITHUB_WORKSPACE 'review-output.md') `
