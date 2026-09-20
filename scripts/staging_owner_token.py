@@ -19,6 +19,7 @@ from pathlib import Path
 
 PRODUCTION_DATA_ROOT = Path("D:/Agents/harness")
 PRODUCTION_CHECKOUT = Path("D:/Projects/agent-harness")
+TOKEN_BASENAME = "owner-token.txt"
 
 
 def _collapsed(path: Path) -> Path:
@@ -45,12 +46,9 @@ def _refuse_production(path: Path) -> None:
             raise SystemExit(f"refusing to mint a token from the production checkout: {candidate}")
 
 
-def _require_token_inside_data_dir(token_file: Path, data_dir: Path) -> None:
-    try:
-        relative = _collapsed(token_file).relative_to(_collapsed(data_dir))
-    except ValueError:
-        raise SystemExit(f"refusing to write a token outside the staging data dir: {token_file}") from None
-    if relative == Path("."):
+def _require_token_file(token_file: Path, data_dir: Path) -> None:
+    expected = _collapsed(data_dir) / TOKEN_BASENAME
+    if _collapsed(token_file) != expected:
         raise SystemExit(f"refusing to write a token outside the staging data dir: {token_file}")
 
 
@@ -65,8 +63,9 @@ def mint(data_dir: Path, token_file: Path, harness_root: Path | None = None) -> 
         _refuse_production(harness_root)
     _refuse_production(data_dir)
     _refuse_production(token_file)
-    _require_token_inside_data_dir(token_file, data_dir)
-    data_dir, token_file = _collapsed(data_dir), _collapsed(token_file)
+    _require_token_file(token_file, data_dir)
+    data_dir = _collapsed(data_dir)
+    destination = data_dir / TOKEN_BASENAME
     if harness_root is not None:
         sys.path.insert(0, str(_collapsed(harness_root)))
     from harness.db import Database
@@ -80,10 +79,10 @@ def mint(data_dir: Path, token_file: Path, harness_root: Path | None = None) -> 
     finally:
         db.close()
 
-    token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(secret + "\n", encoding="utf-8")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    destination.write_text(secret + "\n", encoding="utf-8")
     try:
-        os.chmod(token_file, 0o600)
+        os.chmod(destination, 0o600)
     except OSError:
         pass
     return row["prefix"]

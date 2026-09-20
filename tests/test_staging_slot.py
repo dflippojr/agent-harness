@@ -422,8 +422,13 @@ def test_token_minting_rejects_escaped_paths_before_any_write(tmp_path):
         mint(data_dir, Path("D:/Agents/harness/owner-token.txt"))
     with pytest.raises(SystemExit, match="starts with '-'"):
         mint(data_dir, data_dir / "owner-token.txt", Path("-rf"))
+    with pytest.raises(SystemExit, match="outside the staging data dir"):
+        mint(data_dir, data_dir / "other.txt")
+    with pytest.raises(SystemExit, match="outside the staging data dir"):
+        mint(data_dir, data_dir / "subdir" / "owner-token.txt")
     assert not escaped.exists()
     assert not (data_dir / "harness.sqlite3").exists()
+    assert not (data_dir / "other.txt").exists()
     assert not Path("-owner-token.txt").exists()
 
 
