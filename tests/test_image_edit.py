@@ -360,6 +360,24 @@ def test_image_payload_exposes_editable_flag(tmp_path):
         assert "malformed" not in refused.json()["detail"]
 
 
+def test_image_payload_editable_false_when_edit_assets_unavailable(tmp_path):
+    m, _, _ = image_manager(tmp_path)
+    m.cfg.allowed_logins = [LOGIN]
+    m.images.edit_enabled = True
+    m.images.cfg.models_dir = str(tmp_path / "missing-models")
+    ok = seed_done_image(m, iid="eeeeeeeeeeee", width=1664, height=928)
+    with TestClient(create_app(m)) as client:
+        payload = client.get(f"/images/{ok['id']}")
+        assert payload.status_code == 200
+        body = payload.json()
+        assert body["service"]["edit"]["available"] is False
+        assert body["editable"] is False
+        assert body["editable_reason"]
+        refused = client.post("/images/uploads", files={"file": ("photo.png", png_rgb(), "image/png")})
+        assert refused.status_code == 400
+        assert refused.json()["detail"] == body["editable_reason"]
+
+
 def test_owner_guest_app_authorization(tmp_path):
     m, _, _ = edit_manager(tmp_path)
     m.cfg.allowed_logins = [LOGIN]
