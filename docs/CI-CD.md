@@ -403,12 +403,18 @@ $token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registr
 .\ops\github\install-runner.ps1 -Token $token -Labels agent-harness-staging `
   -InstallDir D:\Agents\github-runner-staging -Name dflippotower-agent-harness-staging `
   -TaskName AgentHarness-GitHubRunner-Staging
-.\ops\harness\install-task-staging.ps1     # registers AgentHarness-Daemon-Staging
-.\ops\tailscale\serve-staging.ps1          # publishes :8444 -> 8101, leaving :443 alone
+D:\Projects\agent-harness\ops\harness\install-task-staging.ps1   # registers AgentHarness-Daemon-Staging
+D:\Projects\agent-harness\ops\tailscale\serve-staging.ps1        # publishes :8444 -> 8101, leaving :443 alone
 ```
 
+Install the task from the **production** checkout, not the staging one: the scheduled task remembers the supervisor
+path it was registered with, and that supervisor must stay trusted `main` code even though everything it starts and
+writes is staging. Python must be on the runner account's `PATH`; the first deploy creates
+`D:\Agents\harness-staging\venv` with it and later deploys reuse it.
+
 Then dispatch once, edit `D:\Agents\harness-staging\harness.local.yaml` when the first run tells you to set
-`allowed_logins`, and dispatch again.
+`allowed_logins` (and set `public_url` to `https://<tower>.<tailnet>.ts.net:8444` so the run summary links straight
+to the slot), and dispatch again.
 
 ### Real-tower checklist
 

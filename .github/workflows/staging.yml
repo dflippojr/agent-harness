@@ -52,7 +52,7 @@ jobs:
       - name: Validate the ref and resolve an immutable commit
         id: resolve
         run: >-
-          python scripts/resolve_staging_ref.py
+          python3 scripts/resolve_staging_ref.py
           --branch "$INPUT_BRANCH"
           --pr-number "$INPUT_PR_NUMBER"
           --reset "$INPUT_RESET"

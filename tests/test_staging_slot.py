@@ -464,6 +464,8 @@ def test_report_names_the_running_commit_and_the_staging_url(tmp_path):
     data_root = tmp_path / "harness-staging"
     data_root.mkdir(parents=True)
     (data_root / "deployed-sha.txt").write_text(SHA, encoding="utf-8")
+    (data_root / "harness.local.yaml").write_text(
+        'public_url: "https://tower.example-tailnet.ts.net:8444"\n', encoding="utf-8")
     summary = tmp_path / "summary.md"
     env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
     result = subprocess.run(
@@ -472,6 +474,6 @@ def test_report_names_the_running_commit_and_the_staging_url(tmp_path):
          "-StagingDataDir", str(data_root)],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=False)
     assert result.returncode == 0, output(result)
-    assert SHA in result.stdout and ":8444/" in result.stdout
+    assert SHA in result.stdout and "https://tower.example-tailnet.ts.net:8444/" in result.stdout
     assert OTHER_SHA in result.stdout  # a moved head is reported, not chased
     assert "8100" in summary.read_text(encoding="utf-8")
