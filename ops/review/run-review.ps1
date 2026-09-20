@@ -99,6 +99,54 @@ function Get-ReviewDiagnosticTail {
     return $redacted
 }
 
+function Get-ReviewBackendEnvironment {
+    [CmdletBinding()]
+    param()
+
+    # Provider authentication is read from the runner service user's profile.
+    # Deliberately exclude inherited tokens, API keys, workflow metadata, and
+    # repository-controlled environment variables from reviewer processes.
+    $allowedNames = @(
+        'ALLUSERSPROFILE', 'APPDATA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+        'COLORTERM', 'COMSPEC', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'LANG',
+        'LC_ALL', 'LOCALAPPDATA', 'NO_COLOR', 'NUMBER_OF_PROCESSORS', 'OS',
+        'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
+        'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'PROGRAMDATA', 'PROGRAMFILES',
+        'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PSMODULEPATH', 'SYSTEMDRIVE',
+        'SYSTEMROOT', 'TEMP', 'TERM', 'TMP', 'USERDOMAIN',
+        'USERDOMAIN_ROAMINGPROFILE', 'USERNAME', 'USERPROFILE', 'WINDIR'
+    )
+    $environment = @{}
+    foreach ($name in $allowedNames) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if ($null -ne $value) { $environment[$name] = $value }
+    }
+    return $environment
+}
+
+function Get-ProcessEnvironmentSnapshot {
+    [CmdletBinding()]
+    param()
+
+    $snapshot = @{}
+    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        $snapshot[[string]$entry.Key] = [string]$entry.Value
+    }
+    return $snapshot
+}
+
+function Set-ProcessEnvironmentSnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Environment)
+
+    foreach ($name in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+        [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process')
+    }
+    foreach ($entry in $Environment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+    }
+}
+
 function Get-CompletedReviewText {
     [CmdletBinding()]
     param([AllowEmptyString()][string]$Text)
@@ -189,7 +237,7 @@ function Get-ReviewBackendCommand {
             if (-not $WindowsPlatform) {
                 $arguments += @('--sandbox', 'enabled')
             }
-            $arguments += @('--workspace', $Workspace)
+            $arguments += @('--trust', '--workspace', $Workspace)
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = $entrypoint.Node
@@ -198,6 +246,7 @@ function Get-ReviewBackendCommand {
                 WorkingDirectory = $Workspace
                 ResultPath = $null
                 Model = $null
+                Environment = Get-ReviewBackendEnvironment
             }
         }
         'codex' {
@@ -223,17 +272,19 @@ function Get-ReviewBackendCommand {
                 WorkingDirectory = $Workspace
                 ResultPath = $resultPath
                 Model = $null
+                Environment = Get-ReviewBackendEnvironment
             }
         }
         'claude' {
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'claude'
-                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--strict-mcp-config', '--disable-slash-commands')
+                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--setting-sources', 'user', '--strict-mcp-config', '--disable-slash-commands')
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $null
                 Model = $null
+                Environment = Get-ReviewBackendEnvironment
             }
         }
         default { throw "unsupported review backend '$Backend'" }
@@ -266,6 +317,7 @@ function Invoke-ReviewBackendProcess {
             $previousOutputEncoding = $global:OutputEncoding
             $previousConsoleOutputEncoding = [Console]::OutputEncoding
             $previousConsoleInputEncoding = [Console]::InputEncoding
+            $previousEnvironment = $null
             try {
                 # Windows PowerShell promotes native stderr to error records. Keep
                 # those records redirected without aborting before LASTEXITCODE is read.
@@ -276,6 +328,10 @@ function Invoke-ReviewBackendProcess {
                 $global:OutputEncoding = $utf8NoBom
                 [Console]::OutputEncoding = $utf8NoBom
                 [Console]::InputEncoding = $utf8NoBom
+                if ($Command.PSObject.Properties.Name -contains 'Environment') {
+                    $previousEnvironment = Get-ProcessEnvironmentSnapshot
+                    Set-ProcessEnvironmentSnapshot -Environment $Command.Environment
+                }
                 if ($null -ne $Command.InputText) {
                     $Command.InputText | & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
                 } else {
@@ -286,6 +342,9 @@ function Invoke-ReviewBackendProcess {
                 $global:OutputEncoding = $previousOutputEncoding
                 [Console]::OutputEncoding = $previousConsoleOutputEncoding
                 [Console]::InputEncoding = $previousConsoleInputEncoding
+                if ($null -ne $previousEnvironment) {
+                    Set-ProcessEnvironmentSnapshot -Environment $previousEnvironment
+                }
             }
             $exitCode = $LASTEXITCODE
             if ($null -eq $exitCode) { $exitCode = 0 }

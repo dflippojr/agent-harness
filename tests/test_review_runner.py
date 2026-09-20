@@ -158,6 +158,7 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
         "text",
         "--mode",
         "ask",
+        "--trust",
         "--workspace",
         str(workspace),
     ]
@@ -195,6 +196,7 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
     assert all("Bash" not in arg for arg in claude_args)
     assert not {"Edit", "Write", "NotebookEdit"}.intersection(claude_args)
     assert "--strict-mcp-config" in claude_args
+    assert claude_args[claude_args.index("--setting-sources") + 1] == "user"
     assert commands["claude"]["InputText"] == "prompt"
 
 
@@ -226,6 +228,7 @@ $command.Arguments | ConvertTo-Json -Compress
         "ask",
         "--sandbox",
         "enabled",
+        "--trust",
         "--workspace",
         str(workspace),
     ]
@@ -354,6 +357,61 @@ Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{tmp_path}' | C
     assert value["ExitCode"] == 7
     assert value["Stdout"].strip() == "review"
     assert "diagnostic" in value["Stderr"]
+
+
+def test_process_launcher_scrubs_tokens_from_backend_environment(tmp_path):
+    fake_backend = tmp_path / "show-environment.ps1"
+    fake_backend.write_text(
+        "$value = [ordered]@{\n"
+        "  gh = $env:GH_TOKEN\n"
+        "  github = $env:GITHUB_TOKEN\n"
+        "  apiKey = $env:OPENAI_API_KEY\n"
+        "  pathPresent = -not [string]::IsNullOrWhiteSpace($env:PATH)\n"
+        "  profilePresent = -not [string]::IsNullOrWhiteSpace($env:USERPROFILE)\n"
+        "}\n"
+        "$value | ConvertTo-Json -Compress\n",
+        encoding="utf-8",
+    )
+    result = run_powershell(
+        tmp_path,
+        f"""
+$env:GH_TOKEN = 'github-secret'
+$env:GITHUB_TOKEN = 'actions-secret'
+$env:OPENAI_API_KEY = 'provider-secret'
+$environment = Get-ReviewBackendEnvironment
+$command = [pscustomobject]@{{
+    Backend = 'fake'
+    FilePath = (Get-Command powershell.exe).Source
+    Arguments = @('-NoLogo', '-NoProfile', '-File', '{fake_backend}')
+    InputText = $null
+    WorkingDirectory = '{tmp_path}'
+    ResultPath = $null
+    Model = $null
+    Environment = $environment
+}}
+$attempt = Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{tmp_path}'
+[ordered]@{{
+    child = ($attempt.Stdout | ConvertFrom-Json)
+    allowlistKeys = @($environment.Keys | Sort-Object)
+    parentGhToken = $env:GH_TOKEN
+}} | ConvertTo-Json -Depth 4 -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip())
+    assert value["child"] == {
+        "gh": None,
+        "github": None,
+        "apiKey": None,
+        "pathPresent": True,
+        "profilePresent": True,
+    }
+    assert all(
+        sensitive not in key.lower()
+        for key in value["allowlistKeys"]
+        for sensitive in ("token", "secret", "password", "api_key")
+    )
+    assert value["parentGhToken"] == "github-secret"
 
 
 def test_process_launcher_round_trips_unicode_review_and_posts_it(tmp_path):
