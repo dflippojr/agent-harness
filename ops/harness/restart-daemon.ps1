@@ -3,9 +3,12 @@ param([ValidateSet('Restart', 'Stop', 'Start')][string]$Mode = 'Restart')
 $ErrorActionPreference = 'Stop'
 
 function Get-HarnessDaemonProcesses {
+    # The staging smoke slot (issue #129) also runs `-m harness`, so both matchers exclude each other: a staging
+    # command line always names the D:\Agents\harness-staging data root, and production's never does.
     Get-CimInstance Win32_Process | Where-Object {
-        ($_.Name -eq 'python.exe' -and $_.CommandLine -match '-m harness(\s|$)') -or
-        ($_.Name -eq 'powershell.exe' -and $_.CommandLine -match 'run-daemon\.ps1')
+        (($_.Name -eq 'python.exe' -and $_.CommandLine -match '-m harness(\s|$)') -or
+         ($_.Name -eq 'powershell.exe' -and $_.CommandLine -match 'run-daemon\.ps1')) -and
+        $_.CommandLine -notmatch 'harness-staging'
     }
 }
 
