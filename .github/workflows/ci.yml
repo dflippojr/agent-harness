@@ -13,8 +13,9 @@ concurrency:
 
 jobs:
   test:
-    # Pytest-only runner. SonarQube and automated review stay on
-    # `agent-harness-tower` so those jobs do not share this queue.
+    # Pytest-only runner (`agent-harness-ci`). SonarCloud is GitHub-hosted
+    # (`sonar.yml`); review uses the `agent-harness-review` pool; the tower
+    # runner is deploy only (`ci-cd.yml` `deploy-tower`).
     runs-on: [self-hosted, Windows, X64, agent-harness-ci]
     steps:
       - uses: actions/checkout@v4

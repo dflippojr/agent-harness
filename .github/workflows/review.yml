@@ -41,8 +41,8 @@ jobs:
   review:
     # Pool of dedicated review runners (D:\Agents\github-runner-review-1..3, one job
     # each, same provider CLI logins) so reviews of different PRs run in parallel.
-    # Kept off the tower runner (SonarQube) and the CI runner (pytest). Add or
-    # remove pool members with ops/github/install-runner.ps1 -Labels agent-harness-review.
+    # Add or remove pool members with ops/github/install-runner.ps1 -Labels
+    # agent-harness-review.
     runs-on: [self-hosted, Windows, X64, agent-harness-review]
     steps:
       - uses: actions/checkout@v4
