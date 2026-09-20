@@ -299,6 +299,21 @@ def test_health_reports_the_commit_the_process_is_running(tmp_path, monkeypatch)
         assert client.get("/health").json()["build"]["commit"] == SHA
 
 
+# --- documentation ----------------------------------------------------------------------------------------------
+
+
+def test_docs_describe_the_slot_the_scripts_actually_build():
+    docs = (ROOT / "docs" / "CI-CD.md").read_text(encoding="utf-8")
+    staging = docs.split("## Staging smoke slot", 1)[1].split("\n## Failure behavior", 1)[0]
+    for fact in ("D:\\Projects\\agent-harness-staging", "D:\\Agents\\harness-staging", "127.0.0.1:8101",
+                 ":8444", "AgentHarness-Daemon-Staging", "agent-harness-staging", "tower-staging",
+                 "gh workflow run staging.yml -f pr_number=N", "gh workflow run staging.yml -f reset=true",
+                 "30 minutes", "owner-token.txt", "allowed_logins", "Real-tower checklist"):
+        assert fact in staging, fact
+    assert "install-runner.ps1 -Token $token -Labels agent-harness-staging" in staging
+    assert "serve-staging.ps1" in (ROOT / "ops" / "tailscale" / "serve.ps1").read_text(encoding="utf-8")
+
+
 # --- token bootstrap and rotation -------------------------------------------------------------------------------
 
 
