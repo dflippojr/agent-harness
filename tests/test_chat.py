@@ -61,3 +61,26 @@ def test_chat_owner_only(tmp_path):
         assert client.get(f"/chats/{chat['id']}", headers=gh).status_code in (403, 404)
         assert client.get(f"/sessions/{chat['id']}", headers=gh).status_code == 404
         assert client.get("/sessions", headers=gh).json() == []
+
+
+def test_web_shell_has_chat_home_and_drawer(tmp_path):
+    client, _, _ = make_client(tmp_path, [Completion(content="ok")])
+    with client:
+        html = client.get("/").text
+        js = client.get("/static/app.js").text
+        css = client.get("/static/style.css").text
+    order = [html.index(f'data-nav="{n}"') for n in ("chat", "agents", "jobs", "images")]
+    assert order == sorted(order)
+    assert ">Tasks</a>" in html and 'id="menu-btn"' in html and 'aria-label="Open navigation menu"' in html
+    assert html.index('id="drawer-profile"') > html.index('id="drawer-chats"')
+    assert 'go(canChat() ? "#/chat" : "#/agents", true)' in js
+    assert 'parts[0] === "chat"' in js and 'event.key === "Escape"' in js and "visualViewport" in js
+    assert "safe-area-inset-bottom" in css and "#nav-drawer" in css and ".chat-welcome" in css
+
+
+def test_household_member_cannot_use_chat():
+    from harness.access import member_forbidden
+    from harness.principal import Principal
+    member = Principal(kind="member", user_id="u1", allowed=True, login="kid@example.com")
+    assert member_forbidden(member, "GET", "/chats") == "Chat is only available to the owner"
+    assert member_forbidden(member, "POST", "/chats/abc/messages") == "Chat is only available to the owner"

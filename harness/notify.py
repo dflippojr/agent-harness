@@ -73,6 +73,8 @@ class Notifier:
         sid = event.get("session_id")
         if sid:
             session = self.db.get_session(sid)
+            if session and session.get("kind") == "chat":
+                return  # Chat replies are read live, not pushed
             if session and (session.get("owner_id") or "owner") != "owner":
                 return  # household members do not receive owner ntfy notifications
         try:

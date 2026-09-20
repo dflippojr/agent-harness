@@ -1064,11 +1064,6 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m, sid, _ = owned_chat(request, ref)
         return m.summary(await m.cancel(sid))
 
-    @app.get("/chats/{ref}/events")
-    async def chat_events(ref: str, request: Request, after: int = 0, follow: bool = True):
-        owned_chat(request, ref)
-        return await events(ref, request, after, follow)
-
     @app.post("/sessions/{ref}/cancel")
     async def cancel(ref: str, request: Request):
         m, sid, _ = owned_session(request, ref)

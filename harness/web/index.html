@@ -32,16 +32,35 @@
 </head>
 <body>
   <header id="bar">
-    <a id="profile-icon" class="icon profile-icon" href="#/profile" aria-label="Agent Harness Web profile">🙂</a>
+    <button id="menu-btn" class="icon" type="button" aria-label="Open navigation menu" aria-haspopup="dialog"
+            aria-controls="nav-drawer" aria-expanded="false">☰</button>
     <button id="back" class="icon" aria-label="Back" hidden>‹</button>
-    <select id="feature-nav" aria-label="Feature">
+    <select id="feature-nav" aria-label="Feature" hidden>
+      <option value="chat">Chat</option>
       <option value="agents">Agents</option>
-      <option value="jobs">Jobs</option>
+      <option value="jobs">Tasks</option>
       <option value="images">Images</option>
     </select>
     <h1 id="title" hidden></h1>
+    <a id="profile-icon" class="icon profile-icon" href="#/profile" aria-label="Agent Harness Web profile" hidden>🙂</a>
     <span id="conn" class="conn" title="Agent Harness Server live connection"></span>
   </header>
+  <div id="drawer-scrim" hidden></div>
+  <nav id="nav-drawer" aria-label="Main navigation" role="dialog" aria-modal="true" hidden>
+    <div class="drawer-links">
+      <a href="#/chat" data-nav="chat">Chat</a>
+      <a href="#/agents" data-nav="agents">Agents</a>
+      <a href="#/jobs" data-nav="jobs">Tasks</a>
+      <a href="#/images" data-nav="images">Images</a>
+    </div>
+    <div class="drawer-recent" aria-label="Recent chats">
+      <h2>Recent chats</h2>
+      <div id="drawer-chats"></div>
+    </div>
+    <div class="drawer-foot">
+      <a id="drawer-profile" href="#/profile" data-nav="profile" aria-label="Agent Harness Web profile"><span id="drawer-profile-icon">🙂</span> Profile</a>
+    </div>
+  </nav>
   <div id="guest-banner" hidden role="status"></div>
   <main id="app"></main>
   <div id="fab-host" hidden>
