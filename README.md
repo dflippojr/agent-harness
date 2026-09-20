@@ -22,8 +22,9 @@ Phases 0–8 are built. Open work is GitHub issues, mirrored from `docs/backlog.
 
 The dedicated `agent-harness-ci` runner runs the full suite on pull requests and pushes to `main`. Only after the `CI`
 workflow passes for that exact pushed commit does the `workflow_run` pipeline publish sandbox images to GHCR and let
-the repository-scoped tower runner perform the fail-closed deployment. See
-[`docs/CI-CD.md`](docs/CI-CD.md) for the trust boundary and recovery details.
+the repository-scoped tower runner perform the fail-closed deployment. The `agent-harness-review` pool (three
+self-hosted members) runs automated PR review; rebuild and add/remove steps are in [`docs/CI-CD.md`](docs/CI-CD.md).
+See that page for the trust boundary and recovery details.
 
 ## Install
 
@@ -223,7 +224,7 @@ Agent Harness Server serves Agent Harness Web (an installable PWA) and sends pho
 Details, security model, and the exit-test checklist: `docs/phase2-results.md`.
 
 - Autostart: logon task `AgentHarness-Daemon` (`ops/harness/install-task.ps1`), logs in `D:\Agents\harness\logs`.
-- Tailnet: `ops/tailscale/serve.ps1` publishes `https://tower.your-tailnet.ts.net` (daemon) and `:8443` (ntfy).
+- Tailnet: `ops/tailscale/serve.ps1` publishes `https://tower.your-tailnet.ts.net` (daemon), `:8443` (ntfy), and `:3000` (Grafana dashboard **Agent Harness**, uid `agent-harness`, `https://<tower>.ts.net:3000/d/agent-harness/agent-harness`).
 - Notifications: `notify` in `config/harness.yaml`; ntfy lives in `D:\Docker\ntfy`.
 - Screenshots: `node scripts/ui-shot.mjs runs/shots "list=http://127.0.0.1:8100/#/"`.
 
