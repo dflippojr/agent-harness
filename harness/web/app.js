@@ -787,7 +787,11 @@ async function viewChat(id) {
     };
   }
   setBusy(!TERMINAL.has(session.status));
-  onLeave(openStream(() => agentHarnessWeb.sessionStreamUrl(id, lastSeq), tracked));
+  onLeave(openStream(
+    () => agentHarnessWeb.url(`/chats/${id}/events?after=${lastSeq}`, ownerSurface()),
+    tracked,
+    { authorized: !!agentHarnessWeb.token },
+  ));
 }
 
 // ---------- session list ----------

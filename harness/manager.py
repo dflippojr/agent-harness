@@ -258,8 +258,8 @@ class Manager:
         self.tasks[sid] = task
         task.add_done_callback(lambda t, sid=sid: self.tasks.pop(sid, None) if self.tasks.get(sid) is t else None)
 
-    def resolve_id(self, ref: str, user_id: str | None = None) -> str:
-        ids = self.db.find_session_ids(ref, user_id=user_id)
+    def resolve_id(self, ref: str, user_id: str | None = None, kind: str | None = None) -> str:
+        ids = self.db.find_session_ids(ref, user_id=user_id, kind=kind)
         if ref in ids:
             return ref
         if len(ids) != 1:
@@ -269,8 +269,8 @@ class Manager:
                                f"no session matches {ref!r}" if not ids else f"{ref!r} is ambiguous")
         return ids[0]
 
-    def get(self, ref: str, user_id: str | None = None) -> dict:
-        return self.db.get_session(self.resolve_id(ref, user_id=user_id))
+    def get(self, ref: str, user_id: str | None = None, kind: str | None = None) -> dict:
+        return self.db.get_session(self.resolve_id(ref, user_id=user_id, kind=kind))
 
     def chat_options(self) -> dict:
         """Backends, models, and efforts Chat can start with right now, plus the configured default choice."""

@@ -4,15 +4,73 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from harness.config import GuestAccess
+from fastapi.testclient import TestClient
+import pytest
+
+from harness.api import create_app
+from harness.config import GuestAccess, SearchConfig
+from harness.db import Database
+from harness.fileops import ToolError
 from harness.llm import Completion
+from harness.manager import Manager
 from harness.policy import ChatPolicy
 from harness.runner import Runner
+from harness.search import SessionSearch, search
 
 from test_api import LOGIN, make_client, wait_for
-from test_daemon import call
+from test_daemon import Script, make_cfg
+from test_phase7 import seed
 
 OWNER = {"Tailscale-User-Login": LOGIN}
+CHAT_MARKER = "chatsecretq9w2zx"
+AGENT_MARKER = "agentsecretl4m7yw"
+
+# Agent-facing session routes that must 404 a chat id (owned_session / app visible_session).
+_CHAT_ON_AGENT_ROUTES = (
+    ("GET", "/sessions/{id}"),
+    ("PATCH", "/sessions/{id}", {"title": "nope"}),
+    ("POST", "/sessions/{id}/messages", {"content": "nope"}),
+    ("POST", "/sessions/{id}/rerun"),
+    ("GET", "/sessions/{id}/changes"),
+    ("POST", "/sessions/{id}/review/merge"),
+    ("GET", "/sessions/{id}/approvals"),
+    ("POST", "/sessions/{id}/approvals/pending", {"decision": "deny", "note": ""}),
+    ("POST", "/sessions/{id}/cancel"),
+    ("GET", "/sessions/{id}/transcript"),
+    ("GET", "/sessions/{id}/events", {"follow": "false"}),
+    ("GET", "/api/v1/sessions/{id}"),
+    ("PATCH", "/api/v1/sessions/{id}", {"title": "nope"}),
+    ("POST", "/api/v1/sessions/{id}/messages", {"content": "nope"}),
+    ("POST", "/api/v1/sessions/{id}/rerun"),
+    ("GET", "/api/v1/sessions/{id}/changes"),
+    ("POST", "/api/v1/sessions/{id}/review/merge"),
+    ("GET", "/api/v1/sessions/{id}/approvals"),
+    ("POST", "/api/v1/sessions/{id}/approvals/pending", {"decision": "deny", "note": ""}),
+    ("POST", "/api/v1/sessions/{id}/cancel"),
+    ("GET", "/api/v1/sessions/{id}/transcript"),
+    ("GET", "/api/v1/sessions/{id}/events", {"follow": "false"}),
+    ("POST", "/api/v1/sessions/{id}/context", {"context": [{"title": "n", "content": "x"}]}),
+    ("GET", "/api/v1/sessions/{id}/tool_calls"),
+    ("POST", "/api/v1/sessions/{id}/events/ticket"),
+)
+
+_AGENT_ON_CHAT_ROUTES = (
+    ("GET", "/chats/{id}"),
+    ("PATCH", "/chats/{id}", {"title": "nope"}),
+    ("POST", "/chats/{id}/messages", {"content": "nope"}),
+    ("POST", "/chats/{id}/cancel"),
+    ("DELETE", "/chats/{id}"),
+    ("GET", "/chats/{id}/events", {"follow": "false"}),
+)
+
+
+def _request(client, method, path, body=None, params=None):
+    kw = {}
+    if params:
+        kw["params"] = params
+    if body is not None:
+        kw["json"] = body
+    return client.request(method, path, **kw)
 
 
 def test_chat_is_separate_from_agent_sessions(tmp_path):
@@ -75,6 +133,7 @@ def test_web_shell_has_chat_home_and_drawer(tmp_path):
     assert html.index('id="drawer-profile"') > html.index('id="drawer-chats"')
     assert 'go(canChat() ? "#/chat" : "#/agents", true)' in js
     assert 'parts[0] === "chat"' in js and 'event.key === "Escape"' in js and "visualViewport" in js
+    assert "`/chats/${id}/events?after=${lastSeq}`" in js
     assert "safe-area-inset-bottom" in css and "#nav-drawer" in css and ".chat-welcome" in css
 
 
@@ -84,3 +143,76 @@ def test_household_member_cannot_use_chat():
     member = Principal(kind="member", user_id="u1", allowed=True, login="kid@example.com")
     assert member_forbidden(member, "GET", "/chats") == "Chat is only available to the owner"
     assert member_forbidden(member, "POST", "/chats/abc/messages") == "Chat is only available to the owner"
+
+
+def test_search_index_and_tools_exclude_chat_kind(tmp_path):
+    db = Database(tmp_path / "h.sqlite3")
+    seed(db, "agent00001", "scratch", "Agent task", [
+        ("user_message", {"content": f"keep {AGENT_MARKER} in the agent session"}),
+        ("status", {"status": "done", "answer": f"stored {AGENT_MARKER}"}),
+    ], created=1)
+    seed(db, "chat000001", "scratch", "Private chat", [
+        ("user_message", {"content": f"keep {CHAT_MARKER} in this chat"}),
+        ("status", {"status": "done", "answer": f"stored {CHAT_MARKER}"}),
+    ], created=2)
+    db.update_session("chat000001", kind="chat")
+    db._build_search_index()
+    agent_hits = search(db, CHAT_MARKER)
+    assert agent_hits["results"] == []
+    assert search(db, AGENT_MARKER)["results"][0]["id"] == "agent00001"
+    chat_hits = search(db, CHAT_MARKER, session_kind="chat")
+    assert [r["id"] for r in chat_hits["results"]] == ["chat000001"]
+    assert search(db, AGENT_MARKER, session_kind="chat")["results"] == []
+    assert db.session_brief("chat000001") is None
+    assert db.session_brief("chat000001", kind="chat")["id"] == "chat000001"
+    assert db.find_session_ids("chat000001", kind="agent") == []
+    assert db.find_session_ids("agent00001", kind="agent") == ["agent00001"]
+    tools = SessionSearch(db)
+    assert_no_chat = tools.session_search(CHAT_MARKER, _session="agent00001")
+    assert assert_no_chat.startswith("No earlier sessions match")
+    assert "chat000001" not in assert_no_chat
+    found_agent = tools.session_search(AGENT_MARKER, _session="chat000001")
+    assert "agent00001" in found_agent
+    with pytest.raises(ToolError, match="no session matches"):
+        tools.session_read("chat000001", _session="agent00001")
+    assert AGENT_MARKER in tools.session_read("agent00001", _session="chat000001")
+
+
+def test_http_agent_surfaces_reject_chat_ids_and_search(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.allowed_logins = [LOGIN]
+    cfg.search = SearchConfig(enabled=True)
+    m = Manager(cfg, chat=Script([Completion(content="chat reply"), Completion(content="agent reply")]))
+    m._spawn = lambda *_args, **_kwargs: None
+    client = TestClient(create_app(m))
+    with client:
+        chat = client.post("/chats", json={"prompt": f"private {CHAT_MARKER} notes"}).json()
+        agent = client.post("/sessions", json={"prompt": f"task {AGENT_MARKER} work"}).json()
+        assert chat["kind"] == "chat" and agent["kind"] == "agent"
+        wait_for(lambda: client.get(f"/chats/{chat['id']}").json()["status"] in ("done", "queued", "running", "failed"))
+        hits = client.get("/search", params={"q": CHAT_MARKER}).json()
+        assert hits["results"] == []
+        agent_hits = client.get("/search", params={"q": AGENT_MARKER}).json()
+        assert [r["id"] for r in agent_hits["results"]] == [agent["id"]]
+        app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions", "sessions:all"]}).json()
+        auth = {"Authorization": f"Bearer {app['key']}"}
+        assert client.get("/api/v1/search", params={"q": CHAT_MARKER}, headers=auth).json()["results"] == []
+        for spec in _CHAT_ON_AGENT_ROUTES:
+            method, template, extra = spec[0], spec[1], spec[2] if len(spec) > 2 else None
+            path = template.format(id=chat["id"])
+            body = extra if method in ("POST", "PATCH", "PUT") and isinstance(extra, dict) and "follow" not in extra else None
+            params = extra if isinstance(extra, dict) and "follow" in extra else None
+            r = _request(client, method, path, body=body, params=params)
+            assert r.status_code in (400, 404), f"{method} {path} returned {r.status_code}: {r.text}"
+        for spec in _AGENT_ON_CHAT_ROUTES:
+            method, template, extra = spec[0], spec[1], spec[2] if len(spec) > 2 else None
+            path = template.format(id=agent["id"])
+            body = extra if method in ("POST", "PATCH", "PUT", "DELETE") and isinstance(extra, dict) and "follow" not in extra else None
+            params = extra if isinstance(extra, dict) and "follow" in extra else None
+            r = _request(client, method, path, body=body, params=params)
+            assert r.status_code == 404, f"{method} {path} returned {r.status_code}: {r.text}"
+        # Agent APIs stay backward compatible, and chats keep their own event stream.
+        assert client.get(f"/sessions/{agent['id']}").json()["id"] == agent["id"]
+        replay = client.get(f"/chats/{chat['id']}/events", params={"follow": False})
+        assert replay.status_code == 200 and CHAT_MARKER in replay.text
+        assert chat["id"] not in [s["id"] for s in client.get("/queue").json()]

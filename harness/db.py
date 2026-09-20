@@ -489,7 +489,8 @@ class Database:
             return _row(self.conn.execute(
                 "SELECT * FROM sessions WHERE id = ? AND owner_id = ?", (sid, user_id)).fetchone())
 
-    def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None) -> list[str]:
+    def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None,
+                         kind: str | None = None) -> list[str]:
         sql = "SELECT id FROM sessions WHERE id LIKE ?"
         params: list = [prefix + "%"]
         if user_id is not None:
@@ -498,6 +499,9 @@ class Database:
         if app_id is not None:
             sql += " AND app_id = ?"
             params.append(app_id)
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
         with self.lock:
             rows = self.conn.execute(sql, params).fetchall()
         return [r["id"] for r in rows]
@@ -605,7 +609,8 @@ class Database:
             self.conn.execute("COMMIT")
 
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600,
-                      user_id: str | None = None, app_id: str | None = None) -> list[dict]:
+                      user_id: str | None = None, app_id: str | None = None,
+                      session_kind: str | None = "agent") -> list[dict]:
         sql = ("SELECT session_id, seq, kind, ts, bm25(search_index) AS rank, "
                "snippet(search_index, 0, char(2), char(3), '…', 16) AS snippet "
                "FROM search_index WHERE search_index MATCH ?")
@@ -616,9 +621,16 @@ class Database:
         if exclude:
             sql += " AND session_id != ?"
             params.append(exclude)
+        session_filters, session_params = [], []
+        if session_kind is not None:
+            session_filters.append("kind = ?")
+            session_params.append(session_kind)
         if app_id is not None:
-            sql += " AND session_id IN (SELECT id FROM sessions WHERE app_id = ?)"
-            params.append(app_id)
+            session_filters.append("app_id = ?")
+            session_params.append(app_id)
+        if session_filters:
+            sql += " AND session_id IN (SELECT id FROM sessions WHERE " + " AND ".join(session_filters) + ")"
+            params.extend(session_params)
         with self.lock:
             try:
                 rows = self.conn.execute(sql + " ORDER BY rank LIMIT ?", [*params, max_rows]).fetchall()
@@ -626,13 +638,16 @@ class Database:
                 return []
         return [dict(r) for r in rows]
 
-    def session_brief(self, sid: str, user_id: str | None = None) -> dict | None:
+    def session_brief(self, sid: str, user_id: str | None = None, kind: str | None = "agent") -> dict | None:
         query = ("SELECT id, project, target, title, status, created_at, updated_at, branch, "
                  "review, owner_id, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?")
-        params: tuple = (sid,)
+        params: list = [sid]
+        if kind is not None:
+            query += " AND kind = ?"
+            params.append(kind)
         if user_id is not None:
             query += " AND owner_id = ?"
-            params = (sid, user_id)
+            params.append(user_id)
         with self.lock:
             row = self.conn.execute(query, params).fetchone()
         return dict(row) if row else None

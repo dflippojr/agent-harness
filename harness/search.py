@@ -11,6 +11,8 @@ Past sessions are background, not instructions: they may be outdated or wrong.
 
 App-session callers see the same boundary as `/api/v1`: only sessions they created, unless the app
 holds `sessions:all` on an unrevoked key. Household member callers only see their own account.
+Chat conversations (`sessions.kind = 'chat'`) are a separate surface: agent search never returns
+them, and `session_read` cannot open a chat id. Pass `session_kind="chat"` to search Chat instead.
 Visibility is applied before FTS ranking/limits and id-prefix resolution.
 """
 
@@ -131,22 +133,26 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
     return app_id
 
 
-def _term_coverage(db, query: str, exclude: str, user_id: str | None, app_id: str | None) -> dict[str, int]:
+def _term_coverage(db, query: str, exclude: str, user_id: str | None, app_id: str | None,
+                   session_kind: str | None = "agent") -> dict[str, int]:
     coverage: dict[str, int] = {}
     for term in query.split(" OR "):
         for sid in {r["session_id"] for r in db.search_events(term, exclude=exclude, max_rows=2000,
-                                                             user_id=user_id, app_id=app_id)}:
+                                                             user_id=user_id, app_id=app_id,
+                                                             session_kind=session_kind)}:
             coverage[sid] = coverage.get(sid, 0) + 1
     return coverage
 
 
 def search(db, query: str, project: str = "", limit: int = 20, exclude: str = "",
-           user_id: str | None = None, app_id: str | None = None) -> dict:
+           user_id: str | None = None, app_id: str | None = None,
+           session_kind: str | None = "agent") -> dict:
     """Sessions ranked by their best-matching event. Falls back to matching any term when all of them don't.
 
     `user_id` is applied in SQL before ranking or truncation so another account's rows cannot affect
     totals, pagination, or timing of this result. `app_id`, when set, keeps unauthorized sessions
-    out of ranking and the result limit.
+    out of ranking and the result limit. `session_kind` defaults to agent conversations so Chat
+    never appears in `/search` or `session_search`.
     """
     if not query.strip():
         return {"query": query, "mode": "all", "results": []}
@@ -155,19 +161,20 @@ def search(db, query: str, project: str = "", limit: int = 20, exclude: str = ""
         q = fts_query(query, any_term)
         if not q:
             continue
-        rows = db.search_events(q, exclude=exclude, max_rows=600, user_id=user_id, app_id=app_id)
+        rows = db.search_events(q, exclude=exclude, max_rows=600, user_id=user_id, app_id=app_id,
+                                session_kind=session_kind)
         if not rows:
             continue
         mode = "any" if any_term else "all"
-        coverage = _term_coverage(db, q, exclude, user_id, app_id) if any_term else None
-        results = _group(db, rows, project, limit, coverage, user_id=user_id)
+        coverage = _term_coverage(db, q, exclude, user_id, app_id, session_kind) if any_term else None
+        results = _group(db, rows, project, limit, coverage, user_id=user_id, session_kind=session_kind)
         if results:
             break
     return {"query": query, "mode": mode, "results": results}
 
 
 def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None = None,
-           user_id: str | None = None) -> list[dict]:
+           user_id: str | None = None, session_kind: str | None = "agent") -> list[dict]:
     by_session: dict[str, dict] = {}
     for r in rows:
         score = -r["rank"] * KIND_WEIGHT.get(r["kind"], 1.0)  # bm25: lower is better, so negate
@@ -178,7 +185,7 @@ def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None
             hit["passages"].append({"kind": r["kind"], "seq": r["seq"], "text": r["snippet"]})
     out = []
     for sid, hit in by_session.items():
-        s = db.session_brief(sid, user_id=user_id)
+        s = db.session_brief(sid, user_id=user_id, kind=session_kind)
         if s is None or (project and s["project"] != project):
             continue
         out.append({**s, **hit, "terms": (coverage or {}).get(sid, 0)})
@@ -295,7 +302,7 @@ class SessionSearch:
     def session_read(self, session_id: str, start: int = 0, find: str = "", _session: str = "") -> str:
         app_id = restrict_app_id(self.db, _session)
         user_id = self._user_id(_session)
-        ids = self.db.find_session_ids(session_id.strip(), user_id=user_id, app_id=app_id)
+        ids = self.db.find_session_ids(session_id.strip(), user_id=user_id, app_id=app_id, kind="agent")
         if len(ids) != 1:
             raise ToolError(f"no session matches {session_id!r}" if not ids else f"{session_id!r} is ambiguous")
         text = compact_transcript(self.db, ids[0])

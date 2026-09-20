@@ -180,18 +180,19 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     def principal_of(request: Request):
         return getattr(request.state, "access", None)
 
-    def owned_session(request: Request, ref: str) -> tuple[Manager, str, dict]:
-        """Resolve a human-facing session only inside the caller's durable user scope."""
+    def owned_session(request: Request, ref: str, *, kind: str = "agent") -> tuple[Manager, str, dict]:
+        """Resolve a human-facing conversation of one kind only inside the caller's durable user scope."""
         m = mgr(request)
         ident = request.state.access
         if ident.role == "guest":
             raise HarnessError(404, "no session matches that id")
         scope = owner_id(request)
-        sid = m.resolve_id(ref, user_id=scope)
+        sid = m.resolve_id(ref, user_id=scope, kind=kind)
         session = m.db.get_session(sid)
-        if session is None or session.get("owner_id", "owner") != scope:
+        if (session is None or session.get("owner_id", "owner") != scope
+                or (session.get("kind") or "agent") != kind):
             m.db.insert_audit(scope, scope, "cross_user", "denied")
-            raise HarnessError(404, "no session matches that id")
+            raise HarnessError(404, "no chat matches that id" if kind == "chat" else "no session matches that id")
         return m, sid, session
 
     def require_owner(request: Request) -> Manager:
@@ -782,8 +783,13 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = mgr(request)
         scope = owner_id(request)
         positions = m.scheduler.positions()
-        return [{"session_id": sid, "position": pos} for sid, pos in sorted(positions.items(), key=lambda x: x[1])
-                if (m.db.get_session(sid) or {}).get("owner_id", "owner") == scope]
+        out = []
+        for sid, pos in sorted(positions.items(), key=lambda x: x[1]):
+            session = m.db.get_session(sid) or {}
+            if session.get("owner_id", "owner") != scope or (session.get("kind") or "agent") != "agent":
+                continue
+            out.append({"session_id": sid, "position": pos})
+        return out
 
     @app.get("/sessions")
     async def list_sessions(request: Request, limit: int = 50):
@@ -1014,10 +1020,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return {"id": a["id"], "status": a["status"]}
 
     def owned_chat(request: Request, ref: str) -> tuple[Manager, str, dict]:
-        m, sid, session = owned_session(request, ref)
-        if session.get("kind") != "chat":
-            raise HarnessError(404, "no chat matches that id")
-        return m, sid, session
+        return owned_session(request, ref, kind="chat")
 
     @app.get("/chats/options")
     async def chat_options(request: Request):
@@ -1234,7 +1237,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
                         yield ": keepalive\n\n"
                         continue
                     session = m.db.get_session(e["session_id"])
-                    if e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope:
+                    if (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope
+                            and (session.get("kind") or "agent") == "agent"):
                         if e["type"] == "run_finished":
                             e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}
                         # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
@@ -1245,11 +1249,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/sessions/{ref}/events")
-    async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
-        """Server-sent events: replays persisted events after `after`, then streams live ones.
-        Ephemeral events (token deltas, queue moves) have `seq: null` and are never replayed."""
-        m, sid, _ = owned_session(request, ref)
+    def conversation_event_stream(request: Request, sid: str, after: int, follow: bool):
+        m = mgr(request)
         if request.headers.get("last-event-id", "").isdigit():  # EventSource reconnects resume by itself
             after = max(after, int(request.headers["last-event-id"]))
 
@@ -1291,6 +1292,18 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.get("/sessions/{ref}/events")
+    async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
+        """Server-sent events: replays persisted events after `after`, then streams live ones.
+        Ephemeral events (token deltas, queue moves) have `seq: null` and are never replayed."""
+        _, sid, _ = owned_session(request, ref)
+        return conversation_event_stream(request, sid, after, follow)
+
+    @app.get("/chats/{ref}/events")
+    async def chat_events(ref: str, request: Request, after: int = 0, follow: bool = True):
+        _, sid, _ = owned_chat(request, ref)
+        return conversation_event_stream(request, sid, after, follow)
 
     from . import admin
     admin.register(app, mgr)
