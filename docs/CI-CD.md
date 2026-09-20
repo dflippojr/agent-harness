@@ -36,8 +36,15 @@ scheduled tasks, local repository paths, Docker sandbox creation, GPU/model cont
 
 The owner explicitly approved the repository-scoped self-hosted runners. The `agent-harness-tower` runner gives
 trusted `main` workflow code the tower user's filesystem, Docker, credentials, and service-restart authority. It is
-reserved for deployment; tests use `agent-harness-ci`, SonarCloud uses GitHub-hosted Ubuntu, and automated review uses
+reserved for deployment; tests use `agent-harness-ci`, SonarCloud uses GitHub-hosted Windows, and automated review uses
 the `agent-harness-review` pool.
+
+`.github/workflows/sonar.yml` installs the test extras, runs `pytest` with `pytest-cov` Cobertura output
+(`coverage.xml`) on `windows-latest`, then scans with `sonar.qualitygate.wait=true`. The suite is Windows-native;
+Ubuntu hosted runners fail coverage collection on `msvcrt`, console-creation flags, and Windows paths. Docker-image
+and GPU tests still skip on the hosted runner and do not contribute coverage. Non-Python trees (`harness/web`, `ops`,
+scripts that are not `.py`) are excluded from the coverage metric. Confirm the SonarCloud project still uses a gate
+that includes coverage on new code; the workflow cannot set that condition itself.
 
 ## Automated review backends
 

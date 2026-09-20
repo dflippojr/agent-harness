@@ -561,8 +561,13 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             children = [child for child in children if not image_edit.is_private(child)]
         eligibility = image_edit.edit_eligibility(
             job.get("width"), job.get("height"), max_pixels=svc.cfg.max_pixels)
+        edit = status.get("edit") or {}
+        ready = bool(svc.edit_enabled and edit.get("available"))
+        editable = ready and eligibility["editable"]
+        editable_reason = (eligibility["reason"] if ready
+                           else (edit.get("setup") or svc.edit_status().get("setup", "")))
         return {**job, "service": status, "private": image_edit.is_private(job),
-                "editable": eligibility["editable"], "editable_reason": eligibility["reason"],
+                "editable": editable, "editable_reason": editable_reason,
                 "parent": ({"id": parent["id"], "width": parent["width"], "height": parent["height"]}
                            if parent else None),
                 "children": [{"id": child["id"], "operation": child.get("operation") or "generate",
@@ -656,7 +661,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         svc = images_service(request)
         job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
         try:
-            return svc.cancel(job["id"])
+            return await svc.cancel(job["id"])
         except ToolError as e:
             raise HarnessError(409, str(e))
 

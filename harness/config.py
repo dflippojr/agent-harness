@@ -246,7 +246,7 @@ class EndpointConfig:
 class ImagesConfig:
     """Local image generation with ComfyUI (images.py). The language model is unloaded while jobs run."""
     enabled: bool = False
-    edit_enabled: bool = False                 # optional Qwen-Image-Edit; never implied by images.enabled
+    edit_enabled: bool = False                 # resolved opt-in; absent YAML follows modules.image_edit
     comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
     models_dir: str = DEFAULT_IMAGES_MODELS_DIR  # extra_model_paths root (diffusion_models / text_encoders / vae)
     port: int = 8188
@@ -620,7 +620,13 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     memory_library = MemoryLibraryConfig(**(raw.get("memory_library") or {}))
     web = WebConfig(**(raw.get("web") or {}))
     endpoint = EndpointConfig(**(raw.get("endpoint") or {}))
-    images = ImagesConfig(**(raw.get("images") or {}))
+    raw_images = raw.get("images") or {}
+    images = ImagesConfig(**raw_images)
+    # The switch is tri-state in configuration: absent follows the install/profile
+    # choice, while explicit YAML true/false remains authoritative. Managed Settings
+    # is applied below and provides the same explicit override without rewriting YAML.
+    if "edit_enabled" not in raw_images:
+        images.edit_enabled = selected.image_edit
     search = SearchConfig(**(raw.get("search") or {}))
     jobs = JobsConfig(**(raw.get("jobs") or {}))
     skills = SkillsConfig(**(raw.get("skills") or {}))
@@ -637,7 +643,6 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     web.enabled = module_enabled("web", web.enabled)
     endpoint.enabled = module_enabled("endpoint", endpoint.enabled)
     images.enabled = module_enabled("images", images.enabled) or selected.image_edit
-    images.edit_enabled = bool(selected.image_edit)
     search.enabled = module_enabled("search", search.enabled)
     jobs.enabled = module_enabled("jobs", jobs.enabled)
     skills.enabled = module_enabled("skills", skills.enabled)
@@ -647,7 +652,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         homelab=selected.homelab,
         memory_library=memory_library.enabled,
         images=images.enabled,
-        image_edit=images.edit_enabled,
+        image_edit=selected.image_edit and images.edit_enabled,
         jobs=jobs.enabled,
         gpu_guard=gpu_guard.enabled,
         runners=selected.runners,

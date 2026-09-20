@@ -867,6 +867,101 @@ def test_web_installed_enabled_overlay_matrix(tmp_path, monkeypatch,
     _assert_web_surfaces(manager, on=expect_on, installed=installed, yaml_enabled=yaml_enabled)
 
 
+def _image_edit_loadable(tmp_path, *, installed=True, yaml_enabled=True):
+    from harness import image_edit
+    comfy_dir = tmp_path / "comfy"
+    models_dir = tmp_path / "models"
+    comfy_dir.mkdir()
+    for subdir, key in (("diffusion_models", "unet"), ("text_encoders", "clip"), ("vae", "vae")):
+        target = models_dir / subdir
+        target.mkdir(parents=True)
+        (target / image_edit.EDIT_MODEL[key]["name"]).write_bytes(b"stub")
+    edit_setting = (f"edit_enabled: {str(yaml_enabled).lower()}, "
+                    if yaml_enabled is not None else "")
+    extra = (
+        f"images: {{enabled: true, {edit_setting}"
+        f"work_dir: {(tmp_path / 'images').as_posix()}, comfy_dir: {comfy_dir.as_posix()}, "
+        f"models_dir: {models_dir.as_posix()}}}\n"
+    )
+    cfg_dir, data_dir = _write_loadable_config(tmp_path, extra=extra)
+    (cfg_dir / "profile.yaml").write_text(
+        f"profile: full\nmodules:\n  images: true\n  image_edit: {str(bool(installed)).lower()}\n",
+        encoding="utf-8",
+    )
+    return cfg_dir, data_dir
+
+
+def test_legacy_image_edit_install_opt_in_supplies_missing_enable_switch(tmp_path):
+    cfg_dir, _ = _image_edit_loadable(tmp_path, installed=True, yaml_enabled=None)
+
+    cfg = load(cfg_dir)
+
+    assert cfg.installed.image_edit is True
+    assert cfg.images.edit_enabled is True
+    assert module_effective(cfg, "image_edit") is True
+
+
+def _assert_image_edit_surfaces(manager, *, on: bool, installed: bool, yaml_enabled: bool | None):
+    inherited_enabled = installed if yaml_enabled is None else yaml_enabled
+    assert manager.cfg.installed.image_edit is installed
+    assert manager.cfg.modules.image_edit is (installed and inherited_enabled)
+    assert manager.cfg.images.edit_enabled is (on if installed else inherited_enabled)
+    assert module_effective(manager.cfg, "image_edit") is on
+    assert manager.cfg.capabilities()["modules"]["image_edit"] is on
+    assert manager.images is not None and manager.images.edit_enabled is on
+    manager.db.insert_image({
+        "id": "aaaaaaaaaaaa", "session_id": "", "source": "phone", "prompt": "seed", "model": "fast",
+        "aspect_ratio": "1:1", "resolution": "standard", "width": 64, "height": 64, "seed": 1,
+        "parent_id": "", "operation": "generate", "status": "done", "created_at": 1,
+    })
+    client = TestClient(create_app(manager))
+    with client:
+        health = client.get("/health").json()
+        api = client.get("/api/v1").json()
+        listing = client.get("/images").json()
+        detail = client.get("/images/aaaaaaaaaaaa").json()
+        assert health["capabilities"]["modules"]["image_edit"] is on
+        assert api["capabilities"]["modules"]["image_edit"] is on
+        assert listing["status"]["edit"]["enabled"] is on
+        assert detail["editable"] is on
+
+
+@pytest.mark.parametrize("installed,yaml_enabled,overlay,restart,expect_on", [
+    (False, None, None, False, False),   # unset follows the profile's not-installed choice
+    (True, None, None, False, True),     # unset follows the profile opt-in
+    (False, True, None, False, False),   # explicit on, but profile says not installed
+    (True, False, None, False, False),
+    (True, False, True, False, False),   # pending Settings change does not apply before restart
+    (True, False, True, True, True),     # Settings-on survives the restart when installed
+    (True, True, False, True, False),    # Settings-off overrides explicit YAML-on after restart
+    (True, None, False, True, False),    # Settings-off overrides profile-derived on after restart
+    (True, True, None, False, True),
+])
+def test_image_edit_installed_enabled_overlay_restart_matrix(
+        tmp_path, monkeypatch, installed, yaml_enabled, overlay, restart, expect_on):
+    cfg_dir, _ = _image_edit_loadable(tmp_path, installed=installed, yaml_enabled=yaml_enabled)
+    before = load(cfg_dir)
+    inherited_enabled = installed if yaml_enabled is None else yaml_enabled
+    assert before.images.edit_enabled is inherited_enabled
+    service = SettingsService(before)
+    setting = next(row for row in service.admin_view()["settings"]
+                   if row["key"] == "images.edit_enabled")
+    assert setting["configured"] is None
+    assert setting["effective"] is inherited_enabled
+    assert setting["inherited"] is inherited_enabled
+    assert setting["source"] == ("default" if yaml_enabled is None else "file")
+    if overlay is not None:
+        monkeypatch.setenv("HARNESS_SUPERVISED", "1")
+        service.patch_admin({"images.edit_enabled": overlay}, service.admin_view()["revision"])
+        if restart:
+            service.request_restart(None)
+    manager = _boot(cfg_dir)
+    if restart:
+        manager.settings.confirm_startup()
+    _assert_image_edit_surfaces(
+        manager, on=expect_on, installed=installed, yaml_enabled=yaml_enabled)
+
+
 def test_crash_after_restart_patch_does_not_drop_confirmed_key(tmp_path):
     """YAML web on + confirmed overlay web off; PATCH web on then die before restart
     must keep the confirmed overlay key so YAML cannot turn web back on."""

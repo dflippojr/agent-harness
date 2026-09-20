@@ -119,7 +119,8 @@ class Manager:
             from .images import ImageService
             self.images = ImageService(cfg.images, self.db, self.runner,
                                        ServerControl(cfg.gpu_guard, cfg.models[cfg.default_model]),
-                                       notify=self._image_finished, archive=self.image_archive)
+                                       notify=self._image_finished, archive=self.image_archive,
+                                       edit_enabled=module_effective(cfg, "image_edit"))
             self.runner.images = self.images
         self.remote_control = None
         if module_effective(cfg, "remote_control"):

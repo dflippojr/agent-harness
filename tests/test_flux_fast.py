@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import time
 import threading
@@ -811,6 +812,102 @@ def hanging_comfy():
     return handler
 
 
+def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
+    async def body():
+        m, _, _ = image_manager(tmp_path)
+        interrupt_received = asyncio.Event()
+        deliver_interrupt = asyncio.Event()
+        state = {"prompts": [], "running": "", "interrupted": []}
+
+        async def handler(request: httpx.Request):
+            path = request.url.path
+            if path == "/prompt":
+                prompt_id = f"p{len(state['prompts']) + 1}"
+                state["prompts"].append(prompt_id)
+                state["running"] = prompt_id
+                return httpx.Response(200, json={"prompt_id": prompt_id})
+            if path == "/queue":
+                running = [[0, state["running"]]] if state["running"] else []
+                return httpx.Response(200, json={"queue_running": running, "queue_pending": []})
+            if path == "/interrupt":
+                interrupt_received.set()
+                await deliver_interrupt.wait()
+                if state["running"]:
+                    state["interrupted"].append(state["running"])
+                    state["running"] = ""
+                return httpx.Response(200)
+            if path.startswith("/history/"):
+                prompt_id = path.rsplit("/", 1)[1]
+                if prompt_id in state["interrupted"]:
+                    return httpx.Response(200, json={prompt_id: {
+                        "status": {"status_str": "error", "completed": False, "messages": []}}})
+                if prompt_id == "p2":
+                    state["running"] = ""
+                    return httpx.Response(200, json={prompt_id: {
+                        "status": {"status_str": "success", "completed": True},
+                        "outputs": {"9": {"images": [{"filename": "b.png", "subfolder": "harness",
+                                                           "type": "output"}]}}}})
+                return httpx.Response(200, json={})
+            if path == "/view":
+                return httpx.Response(200, content=PNG)
+            return httpx.Response(404)
+
+        m.images.transport = httpx.MockTransport(handler)
+        await m.start(maintenance=False)
+        first = m.images.submit("cancel A")
+        second = m.images.submit("finish B")
+        for _ in range(100):
+            if state["running"] == "p1":
+                break
+            await asyncio.sleep(0.01)
+        assert state["running"] == "p1"
+
+        cancelling = asyncio.create_task(m.images.cancel(first["id"]))
+        await asyncio.wait_for(interrupt_received.wait(), timeout=2)
+        assert not cancelling.done()
+        assert state["prompts"] == ["p1"]
+
+        deliver_interrupt.set()
+        cancelled = await asyncio.wait_for(cancelling, timeout=2)
+        completed = await asyncio.wait_for(m.images.wait(second["id"]), timeout=2)
+        assert cancelled["status"] == "failed" and cancelled["error"] == "cancelled"
+        assert completed["status"] == "done"
+        assert state["interrupted"] == ["p1"]
+        assert state["prompts"] == ["p1", "p2"]
+        await m.stop()
+
+    asyncio.run(body())
+
+
+def test_cancel_deletes_comfy_prompt_while_still_pending(tmp_path):
+    async def body():
+        m, _, _ = image_manager(tmp_path)
+        state = {"pending": ["p1"], "deleted": []}
+
+        async def handler(request: httpx.Request):
+            path = request.url.path
+            if path == "/history/p1":
+                return httpx.Response(200, json={})
+            if path == "/queue" and request.method == "GET":
+                pending = [[index, prompt_id] for index, prompt_id in enumerate(state["pending"])]
+                return httpx.Response(200, json={"queue_running": [], "queue_pending": pending})
+            if path == "/queue" and request.method == "POST":
+                prompt_ids = json.loads(request.content)["delete"]
+                state["deleted"].extend(prompt_ids)
+                state["pending"] = [prompt_id for prompt_id in state["pending"]
+                                    if prompt_id not in prompt_ids]
+                return httpx.Response(200)
+            return httpx.Response(404)
+
+        m.images.transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=m.images.transport) as client:
+            await m.images._interrupt_comfy_prompt(client, "p1")
+
+        assert state == {"pending": [], "deleted": ["p1"]}
+
+    asyncio.run(body())
+
+
 def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
     async def body():
         m, server, _ = image_manager(tmp_path)
@@ -836,7 +933,7 @@ def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
             if m.images.active_job == job["id"]:
                 break
             await asyncio.sleep(0.01)
-        m.images.cancel(job["id"])
+        await m.images.cancel(job["id"])
         done = await m.images.wait(job["id"])
         assert done["status"] == "failed" and "cancelled" in done["error"]
         for _ in range(100):
@@ -880,7 +977,7 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
     async def body():
         m, server, _ = image_manager(tmp_path / "direct")
         job = m.images.submit("never run")
-        m.images.cancel(job["id"])
+        await m.images.cancel(job["id"])
         await m.images._run_batch(job["id"])
         assert server.calls == []
         assert m.images.phase == "idle" and not m.images.gpu_taken
@@ -888,7 +985,7 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
         m, server, _ = image_manager(tmp_path / "q")
         job = m.images.submit("never run")
         assert job["status"] == "queued"
-        cancelled = m.images.cancel(job["id"])
+        cancelled = await m.images.cancel(job["id"])
         assert cancelled["status"] == "failed" and "cancelled" in cancelled["error"]
         await m.start(maintenance=False)
         done = await m.images.wait(job["id"])
@@ -904,7 +1001,7 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
         m, server, _ = image_manager(tmp_path / "mix")
         skipped = m.images.submit("skip me")
         kept = m.images.submit("keep me")
-        m.images.cancel(skipped["id"])
+        await m.images.cancel(skipped["id"])
         await m.start(maintenance=False)
         assert (await m.images.wait(skipped["id"]))["status"] == "failed"
         assert (await m.images.wait(kept["id"]))["status"] == "done"
@@ -929,7 +1026,7 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
                 break
             await asyncio.sleep(0.02)
         assert m.images.phase == "waiting"
-        m.images.cancel(held["id"])
+        await m.images.cancel(held["id"])
         Hold.active = False
         m.images._guard_wake.set()
         assert (await m.images.wait(held["id"]))["status"] == "failed"
@@ -973,7 +1070,7 @@ def test_cancel_during_exclusive_gate_wait_does_not_boot_comfy(tmp_path):
         job = m.images.submit("behind the language model")
         task = asyncio.create_task(m.images._run_batch(job["id"]))
         await asyncio.wait_for(gate.waiting.wait(), timeout=2)
-        m.images.cancel(job["id"])
+        await m.images.cancel(job["id"])
         gate.allow.set()
         await asyncio.wait_for(task, timeout=2)
         assert (await m.images.wait(job["id"]))["status"] == "failed"

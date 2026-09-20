@@ -1,0 +1,7 @@
+[run]
+branch = True
+relative_files = True
+omit =
+    tests/*
+    sdk/examples/*
+    **/__pycache__/*

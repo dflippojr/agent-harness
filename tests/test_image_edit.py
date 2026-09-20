@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -67,6 +68,7 @@ def stub_edit_assets(tmp_path: Path, cfg) -> Path:
 def edit_manager(tmp_path):
     m, server, state = image_manager(tmp_path)
     stub_edit_assets(tmp_path, m.images.cfg)
+    m.images.edit_enabled = True
     return m, server, state
 
 
@@ -109,13 +111,20 @@ def test_normalize_strips_exif_and_ignores_client_path_bytes():
     assert b"Exif" not in data
 
 
-def test_full_profile_does_not_enable_image_edit_by_default(tmp_path):
+def test_full_profile_image_edit_upgrade_without_force(tmp_path):
     args = ["--config-dir", str(tmp_path / "cfg"), "--data-dir", str(tmp_path / "data"), "--model", "gpt-oss",
             "--pause-flag", str(tmp_path / "paused")]
     assert setup_config.main(args) == 0
     cfg = config.load(tmp_path / "cfg")
     assert not cfg.modules.image_edit and not cfg.images.edit_enabled
-    setup_config.main(args + ["--enable-module", "image_edit"])
+    harness_path = tmp_path / "cfg" / "harness.yaml"
+    original_harness = harness_path.read_text(encoding="utf-8")
+    assert "edit_enabled" not in (yaml.safe_load(original_harness)["images"])
+
+    # This is the install.ps1 -EnableModules image_edit upgrade path: setup_config
+    # keeps harness.yaml without --force but refreshes the profile overlay.
+    assert setup_config.main(args + ["--enable-module", "image_edit"]) == 0
+    assert harness_path.read_text(encoding="utf-8") == original_harness
     enabled = config.load(tmp_path / "cfg")
     assert enabled.modules.image_edit and enabled.images.edit_enabled and enabled.modules.images
 
@@ -351,6 +360,24 @@ def test_image_payload_exposes_editable_flag(tmp_path):
         assert "malformed" not in refused.json()["detail"]
 
 
+def test_image_payload_editable_false_when_edit_assets_unavailable(tmp_path):
+    m, _, _ = image_manager(tmp_path)
+    m.cfg.allowed_logins = [LOGIN]
+    m.images.edit_enabled = True
+    m.images.cfg.models_dir = str(tmp_path / "missing-models")
+    ok = seed_done_image(m, iid="eeeeeeeeeeee", width=1664, height=928)
+    with TestClient(create_app(m)) as client:
+        payload = client.get(f"/images/{ok['id']}")
+        assert payload.status_code == 200
+        body = payload.json()
+        assert body["service"]["edit"]["available"] is False
+        assert body["editable"] is False
+        assert body["editable_reason"]
+        refused = client.post("/images/uploads", files={"file": ("photo.png", png_rgb(), "image/png")})
+        assert refused.status_code == 400
+        assert refused.json()["detail"] == body["editable_reason"]
+
+
 def test_owner_guest_app_authorization(tmp_path):
     m, _, _ = edit_manager(tmp_path)
     m.cfg.allowed_logins = [LOGIN]
@@ -510,8 +537,9 @@ def test_cancel_running_edit_records_cancelled_not_failed(tmp_path):
         await m.start(maintenance=False)
         edit = m.images.submit_edit(parent["id"], "cancel me", png_mask())
         await asyncio.wait_for(started.wait(), timeout=2)
-        m.images.cancel(edit["id"])
+        cancelling = asyncio.create_task(m.images.cancel(edit["id"]))
         release.set()
+        await cancelling
         cancelled = await asyncio.wait_for(m.images.wait(edit["id"]), timeout=2)
         assert cancelled["status"] == "cancelled"
         assert cancelled["error"] == "cancelled"
@@ -551,7 +579,7 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
         await m.start(maintenance=False)
         parent = m.images.ingest_upload(png_rgb())
         queued = m.images.submit_edit(parent["id"], "queued edit", png_mask())
-        m.images.cancel(queued["id"])
+        await m.images.cancel(queued["id"])
         cancelled = await m.images.wait(queued["id"])
         assert cancelled["status"] == "cancelled"
         assert m.images.source_path(cancelled).exists() and m.images.mask_path(cancelled).exists()
@@ -591,6 +619,7 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
 
         fail_m, _, fail_state = image_manager(tmp_path / "fail", fail_prompts=("broken edit",))
         stub_edit_assets(tmp_path / "fail", fail_m.images.cfg)
+        fail_m.images.edit_enabled = True
         parent3 = fail_m.images.ingest_upload(png_rgb())
         failed = fail_m.images.submit_edit(parent3["id"], "broken edit", png_mask())
         await fail_m.start(maintenance=False)

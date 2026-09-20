@@ -244,26 +244,37 @@ class OverlayModel:
         if not self._applies(self.active["values"]):
             return self._adopt_lkg_or_discard()
         if self.active["confirmed"]:
+            if (self.pending is not None
+                    and self.pending["revision"] == self.active["revision"]
+                    and self.pending["values"] == self.active["values"]):
+                self.pending = None
+            self.boot_tried = False
             return "confirmed"
         self.boot_tried = True
         return "try_candidate"
 
 
-def _commit_plan(old: dict, new: dict, *, boot_tried=UNSET) -> list[tuple[str, str, Any]]:
-    """Match ManagedStore.commit order: lkg → pending → boot_tried → active."""
+def _commit_plan(old: dict, new: dict, *, boot_tried=UNSET,
+                 active_first: bool = False) -> list[tuple[str, str, Any]]:
+    """Match ManagedStore.commit order, including active-first startup confirmation."""
     steps: list[tuple[str, str, Any]] = []
     if new["lkg"] is not None and new["lkg"] != old["lkg"]:
         steps.append(("lkg", "lkg", new["lkg"]))
+    active_step = None
+    if new["active"] is None and old["active"] is not None:
+        active_step = ("active", "active", None)
+    elif new["active"] is not None and new["active"] != old["active"]:
+        active_step = ("active", "active", new["active"])
+    if active_first and active_step is not None:
+        steps.append(active_step)
     if new["pending"] is None and old["pending"] is not None:
         steps.append(("pending", "pending", None))
     elif new["pending"] is not None and new["pending"] != old["pending"]:
         steps.append(("pending", "pending", new["pending"]))
     if boot_tried is not UNSET:
         steps.append(("boot_tried", "boot_tried", boot_tried))
-    if new["active"] is None and old["active"] is not None:
-        steps.append(("active", "active", None))
-    elif new["active"] is not None and new["active"] != old["active"]:
-        steps.append(("active", "active", new["active"]))
+    if not active_first and active_step is not None:
+        steps.append(active_step)
     return steps
 
 
@@ -304,7 +315,7 @@ def _assert_files(svc: SettingsService, model: OverlayModel, history: list[str])
     assert _snap(svc.store.read_active()) == model.active, history
     assert _snap(svc.store.read_pending()) == model.pending, history
     assert _snap(svc.store.read_lkg()) == model.lkg, history
-    assert svc.store.boot_tried() is model.boot_tried, history
+    assert svc.store.boot_tried() is model.boot_tried, "\n".join(history)
 
 
 def _assert_boot_applies_active(tmp_path, svc: SettingsService, model: OverlayModel, history: list[str]) -> None:
@@ -316,6 +327,8 @@ def _assert_boot_applies_active(tmp_path, svc: SettingsService, model: OverlayMo
         return
     probe_svc = _fresh(tmp_path, tuple(sorted(model.models)))
     probe_svc.apply_overlay()
+    if active is not None:
+        assert model.reboot() == "confirmed"
     if pending is None:
         return
     probe = probe_svc.cfg
@@ -481,7 +494,7 @@ def _apply_success(svc, model, kind, payload, history, pending_before, seq_dir) 
     _assert_invariants(seq_dir, svc, model, kind, True, pending_before, history, False)
 
 
-def _crash_and_reboot(seq_dir, svc, model, kind, payload, rng, history):
+def _crash_and_reboot(seq_dir, svc, model, kind, payload, rng, history, crash_at=None):
     old = model.snapshot()
     projected = model.clone()
     result = _run_model(projected, kind, payload)
@@ -494,14 +507,18 @@ def _crash_and_reboot(seq_dir, svc, model, kind, payload, rng, history):
         assert got == "ok", history
         _run_model(model, kind, payload)
         return svc, False
-    boot_tried = False if kind == "confirm_restart" and result == "ok" else UNSET
-    plan = _commit_plan(old, projected.snapshot(), boot_tried=boot_tried)
+    boot_tried = False if kind in ("confirm_restart", "confirm_startup") and result == "ok" else UNSET
+    plan = _commit_plan(
+        old, projected.snapshot(), boot_tried=boot_tried,
+        active_first=kind == "confirm_startup",
+    )
     if not plan:
         got = _run_prod(svc, kind, payload)
         assert got == "ok", history
         _run_model(model, kind, payload)
         return svc, False
-    crash_at = rng.choice([name for name, _field, _value in plan])
+    crash_at = crash_at or rng.choice([name for name, _field, _value in plan])
+    assert crash_at in [name for name, _field, _value in plan], (crash_at, plan)
     history.append(f"crash:{kind}@{crash_at}:{payload}")
     svc.store.crash_at = crash_at
     try:
@@ -523,6 +540,7 @@ def test_overlay_lifecycle_property(tmp_path, monkeypatch):
     monkeypatch.setenv("HARNESS_SUPERVISED", "1")
     rng = random.Random(SEED)
     mutating = ("patch_live", "patch_restart", "patch_reset", "rollback", "confirm_restart")
+    crashable = mutating + ("confirm_startup",)
     kinds = mutating + ("confirm_startup", "reboot", "crash_reboot", "shrink_yaml")
     for seq in range(N_SEQUENCES):
         seq_dir = tmp_path / f"s{seq}"
@@ -534,7 +552,7 @@ def test_overlay_lifecycle_property(tmp_path, monkeypatch):
             kind = rng.choice(kinds)
             crash = kind == "crash_reboot"
             if crash:
-                kind = rng.choice(mutating)
+                kind = rng.choice(crashable)
             payload = _payload_for(kind, rng, model.models)
             pending_before = _distinct_pending_restart(model)
             if crash:
@@ -633,3 +651,25 @@ def test_overlay_property_corpus_includes_reported_interleavings(tmp_path, monke
     _assert_invariants(shrink, svc4, model4, "shrink_yaml", True, None, history4, False, boot_result)
     assert svc4.cfg.default_model == "fake"
     assert svc4.cfg.max_turns == 80
+
+    confirm_crash = tmp_path / "confirm-crash"
+    confirm_crash.mkdir()
+    svc5 = _fresh(confirm_crash)
+    model5 = OverlayModel()
+    history5: list[str] = []
+    _apply_success(
+        svc5, model5, "patch_restart", {"web.enabled": True}, history5, None, confirm_crash,
+    )
+    _apply_success(svc5, model5, "confirm_restart", None, history5, None, confirm_crash)
+    history5.append("reboot")
+    svc5 = _reboot(confirm_crash)
+    assert model5.reboot() == "try_candidate"
+    svc5, crashed = _crash_and_reboot(
+        confirm_crash, svc5, model5, "confirm_startup", None, random.Random(0), history5,
+        crash_at="pending",
+    )
+    assert crashed is True
+    assert svc5.cfg.web.enabled is True
+    assert svc5.store.read_pending() is None
+    assert svc5.store.boot_tried() is False
+    assert svc5.store.read_status().get("recovery") != "lkg_restore"
