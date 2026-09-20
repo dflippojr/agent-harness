@@ -2,6 +2,7 @@
 param(
     [string]$Backend = $env:REVIEW_BACKEND,
     [string]$ConfiguredBackends = $env:REVIEW_BACKENDS,
+    [string]$Mode = $env:REVIEW_MODE,
     [string]$Workspace = $env:GITHUB_WORKSPACE,
     [string]$PrNumber = $env:PR_NUMBER,
     [string]$Prompt = $env:REVIEW_PROMPT,
@@ -14,7 +15,9 @@ $ErrorActionPreference = 'Stop'
 
 $script:KnownReviewBackends = @('cursor', 'codex', 'claude')
 $script:DefaultReviewBackends = @('codex', 'claude', 'cursor')
+$script:KnownReviewModes = @('auto', 'full')
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
+$script:ReviewMarkerPattern = '(?i)<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental) -->'
 $script:UntrustedAgentConfigDirectories = @('.claude', '.cursor', '.codex', '.agents')
 $script:UntrustedAgentConfigFiles = @('.mcp.json', '.cursorrules', 'CLAUDE.md', 'AGENTS.md')
 
@@ -53,6 +56,153 @@ function Resolve-ReviewBackends {
         throw 'REVIEW_BACKENDS does not contain a supported backend'
     }
     return @($resolved.ToArray())
+}
+
+function Test-GitObjectId {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Sha)
+
+    return -not [string]::IsNullOrWhiteSpace($Sha) -and $Sha -match '^[0-9a-fA-F]{40}$'
+}
+
+function Get-ReviewMarkerShaFromBody {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Body)
+
+    if ([string]::IsNullOrWhiteSpace($Body)) { return '' }
+    $matchesFound = [regex]::Matches($Body, $script:ReviewMarkerPattern)
+    if ($matchesFound.Count -eq 0) { return '' }
+    $sha = $matchesFound[$matchesFound.Count - 1].Groups[1].Value
+    if (-not (Test-GitObjectId -Sha $sha)) { return '' }
+    return $sha.ToLowerInvariant()
+}
+
+function Resolve-ReviewMode {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [string]$RequestedMode,
+        [AllowEmptyString()]
+        [string]$LastSha,
+        [bool]$CompareSucceeded,
+        [AllowEmptyString()]
+        [string]$MergeBaseSha,
+        [AllowEmptyString()]
+        [string]$HeadSha,
+        [bool]$HasMergeCommit,
+        [AllowEmptyString()]
+        [string]$CompareStatus
+    )
+
+    $requested = $RequestedMode.Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($requested)) { $requested = 'auto' }
+    if ($script:KnownReviewModes -notcontains $requested) {
+        throw "unsupported review mode '$RequestedMode'"
+    }
+
+    if ($requested -eq 'full') {
+        return [pscustomobject]@{ Mode = 'full'; Reason = 'requested mode is full' }
+    }
+    if ([string]::IsNullOrWhiteSpace($LastSha) -or -not (Test-GitObjectId -Sha $LastSha)) {
+        return [pscustomobject]@{ Mode = 'full'; Reason = 'no prior review marker' }
+    }
+    if (-not $CompareSucceeded) {
+        return [pscustomobject]@{ Mode = 'full'; Reason = 'compare api failed' }
+    }
+    if ($MergeBaseSha -ne $LastSha) {
+        return [pscustomobject]@{ Mode = 'full'; Reason = 'last sha is not an ancestor of head' }
+    }
+    if ($HasMergeCommit) {
+        return [pscustomobject]@{ Mode = 'full'; Reason = 'merge commit in range' }
+    }
+    if ($CompareStatus -eq 'identical' -or $LastSha -eq $HeadSha) {
+        return [pscustomobject]@{ Mode = 'full'; Reason = 'empty compare range' }
+    }
+    return [pscustomobject]@{ Mode = 'incremental'; Reason = 'safe incremental range' }
+}
+
+function Get-CompareReviewFacts {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Json)
+
+    if ([string]::IsNullOrWhiteSpace($Json)) { return $null }
+    try {
+        $data = $Json | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    if ($null -eq $data -or $null -eq $data.PSObject -or $data.PSObject.Properties.Name -notcontains 'status') {
+        return $null
+    }
+
+    $mergeBase = ''
+    if ($data.PSObject.Properties.Name -contains 'merge_base_commit' -and $null -ne $data.merge_base_commit -and $data.merge_base_commit.PSObject.Properties.Name -contains 'sha') {
+        $mergeBase = [string]$data.merge_base_commit.sha
+    }
+
+    $hasMerge = $false
+    if ($data.PSObject.Properties.Name -contains 'commits' -and $null -ne $data.commits) {
+        foreach ($commit in @($data.commits)) {
+            $parents = @()
+            if ($null -ne $commit -and $commit.PSObject.Properties.Name -contains 'parents' -and $null -ne $commit.parents) {
+                $parents = @($commit.parents)
+            }
+            if ($parents.Count -gt 1) {
+                $hasMerge = $true
+                break
+            }
+        }
+    }
+
+    $aheadBy = 0
+    if ($data.PSObject.Properties.Name -contains 'ahead_by' -and $null -ne $data.ahead_by) {
+        $aheadBy = [int]$data.ahead_by
+    }
+
+    $lineCount = 0
+    if ($data.PSObject.Properties.Name -contains 'files' -and $null -ne $data.files) {
+        foreach ($file in @($data.files)) {
+            if ($null -ne $file -and $file.PSObject.Properties.Name -contains 'changes' -and $null -ne $file.changes) {
+                $lineCount += [int]$file.changes
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        MergeBaseSha = $mergeBase
+        HasMergeCommit = $hasMerge
+        Status = [string]$data.status
+        AheadBy = $aheadBy
+        LineCount = $lineCount
+    }
+}
+
+function Get-ReviewCoverageLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Mode,
+        [AllowEmptyString()][string]$LastSha,
+        [AllowEmptyString()][string]$HeadSha,
+        [int]$CommitCount = 0,
+        [int]$LineCount = 0
+    )
+
+    if ($Mode -eq 'incremental') {
+        $left = if ($LastSha.Length -ge 7) { $LastSha.Substring(0, 7) } else { $LastSha }
+        $right = if ($HeadSha.Length -ge 7) { $HeadSha.Substring(0, 7) } else { $HeadSha }
+        return "Reviewed $left..$right (incremental; $CommitCount commits, $LineCount lines)"
+    }
+    return 'Reviewed the full diff'
+}
+
+function Get-IncrementalReviewPromptPrefix {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LastSha,
+        [Parameter(Mandatory = $true)][string]$HeadSha
+    )
+
+    return "This pass reviews only the changes between $LastSha and $HeadSha. The remainder of the PR was reviewed in an earlier pass. Still report a change in this range that breaks or invalidates earlier code."
 }
 
 function Test-ReviewRateLimit {
@@ -462,6 +612,161 @@ function Get-ReviewDiff {
     return [string]$attempt.Stdout
 }
 
+function Invoke-ReviewGitHubCli {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [string]$Name = 'github-cli'
+    )
+
+    $command = [pscustomobject]@{
+        Backend = $Name
+        FilePath = 'gh'
+        Arguments = $Arguments
+        InputText = $null
+        WorkingDirectory = $Workspace
+        ResultPath = $null
+        Model = $null
+    }
+    return Invoke-ReviewBackendProcess -Command $command -ScratchDirectory $ScratchDirectory
+}
+
+function Get-PullRequestHeadOid {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory
+    )
+
+    $attempt = Invoke-ReviewGitHubCli -Arguments @('pr', 'view', $PrNumber, '--json', 'headRefOid', '--jq', '.headRefOid') -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-pr-head'
+    $sha = ([string]$attempt.Stdout).Trim()
+    if ($attempt.ExitCode -ne 0 -or -not (Test-GitObjectId -Sha $sha)) {
+        throw "gh pr view $PrNumber did not return a head SHA: $(([string]$attempt.Stderr).Trim())"
+    }
+    return $sha.ToLowerInvariant()
+}
+
+function Get-LastReviewedSha {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Repository)) { return '' }
+
+    $lastSha = ''
+    $page = 1
+    while ($true) {
+        $attempt = Invoke-ReviewGitHubCli -Arguments @('api', "repos/$Repository/issues/$PrNumber/comments?per_page=100&page=$page") -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-comments'
+        if ($attempt.ExitCode -ne 0) { return '' }
+        $raw = ([string]$attempt.Stdout).Trim()
+        if ([string]::IsNullOrWhiteSpace($raw) -or $raw -eq '[]') { break }
+        try {
+            $parsed = $raw | ConvertFrom-Json
+        } catch {
+            return ''
+        }
+        $comments = @($parsed)
+        if ($comments.Count -eq 0) { break }
+        foreach ($comment in $comments) {
+            if ($null -eq $comment) { continue }
+            $login = ''
+            if ($comment.PSObject.Properties.Name -contains 'user' -and $null -ne $comment.user -and $comment.user.PSObject.Properties.Name -contains 'login') {
+                $login = [string]$comment.user.login
+            }
+            if ($login -ne 'github-actions[bot]') { continue }
+            $body = ''
+            if ($comment.PSObject.Properties.Name -contains 'body') { $body = [string]$comment.body }
+            $sha = Get-ReviewMarkerShaFromBody -Body $body
+            if (-not [string]::IsNullOrWhiteSpace($sha)) { $lastSha = $sha }
+        }
+        if ($comments.Count -lt 100) { break }
+        $page += 1
+    }
+    return $lastSha
+}
+
+function Get-ReviewCoverage {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$RequestedMode,
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY
+    )
+
+    $headSha = Get-PullRequestHeadOid -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+    $lastSha = Get-LastReviewedSha -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Repository $Repository
+
+    $compareSucceeded = $false
+    $mergeBaseSha = ''
+    $hasMergeCommit = $false
+    $compareStatus = ''
+    $aheadBy = 0
+    $lineCount = 0
+
+    $shouldCompare = (Test-GitObjectId -Sha $lastSha)
+    if ($shouldCompare -and $lastSha -eq $headSha) {
+        $compareSucceeded = $true
+        $mergeBaseSha = $lastSha
+        $compareStatus = 'identical'
+    } elseif ($shouldCompare) {
+        $compareAttempt = Invoke-ReviewGitHubCli -Arguments @('api', "repos/$Repository/compare/$lastSha...$headSha") -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-compare'
+        if ($compareAttempt.ExitCode -eq 0) {
+            $facts = Get-CompareReviewFacts -Json ([string]$compareAttempt.Stdout)
+            if ($null -ne $facts) {
+                $compareSucceeded = $true
+                $mergeBaseSha = [string]$facts.MergeBaseSha
+                $hasMergeCommit = [bool]$facts.HasMergeCommit
+                $compareStatus = [string]$facts.Status
+                $aheadBy = [int]$facts.AheadBy
+                $lineCount = [int]$facts.LineCount
+            }
+        }
+    }
+
+    $decision = Resolve-ReviewMode -RequestedMode $RequestedMode -LastSha $lastSha -CompareSucceeded $compareSucceeded -MergeBaseSha $mergeBaseSha -HeadSha $headSha -HasMergeCommit $hasMergeCommit -CompareStatus $compareStatus
+    $mode = [string]$decision.Mode
+    $reason = [string]$decision.Reason
+    $diff = $null
+
+    if ($mode -eq 'incremental') {
+        $diffAttempt = Invoke-ReviewGitHubCli -Arguments @('api', '-H', 'Accept: application/vnd.github.v3.diff', "repos/$Repository/compare/$lastSha...$headSha") -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-compare-diff'
+        $diffText = [string]$diffAttempt.Stdout
+        if ($diffAttempt.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($diffText)) {
+            Write-Warning "Incremental compare diff unavailable ($(([string]$diffAttempt.Stderr).Trim())); falling back to full review."
+            $mode = 'full'
+            $reason = 'incremental diff missing; fallback to full'
+        } else {
+            $diff = $diffText
+        }
+    }
+
+    if ($mode -eq 'full') {
+        $diff = Get-ReviewDiff -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+        $aheadBy = 0
+        $lineCount = 0
+    }
+
+    return [pscustomobject]@{
+        Mode = $mode
+        Reason = $reason
+        Diff = $diff
+        LastSha = $lastSha
+        HeadSha = $headSha
+        CommitCount = $aheadBy
+        LineCount = $lineCount
+        CoverageLine = (Get-ReviewCoverageLine -Mode $mode -LastSha $lastSha -HeadSha $headSha -CommitCount $aheadBy -LineCount $lineCount)
+    }
+}
+
 function Add-ReviewDiffContext {
     [CmdletBinding()]
     param(
@@ -518,14 +823,19 @@ function Write-ReviewResult {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]$Result,
-        [Parameter(Mandatory = $true)][string]$OutputPath
+        [Parameter(Mandatory = $true)][string]$OutputPath,
+        [AllowEmptyString()][string]$CoverageLine = 'Reviewed the full diff',
+        [AllowEmptyString()][string]$HeadSha = '',
+        [AllowEmptyString()][string]$Mode = 'full'
     )
 
     $label = $Result.Backend
     if (-not [string]::IsNullOrWhiteSpace([string]$Result.Model)) {
         $label = "$label ($($Result.Model))"
     }
-    $body = "{0}`r`n`r`n---`r`nAutomated review backend: **{1}**." -f $Result.Output.Trim(), $label
+    $postedMode = $Mode.Trim().ToLowerInvariant()
+    if ($postedMode -ne 'incremental') { $postedMode = 'full' }
+    $body = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**.`r`n`r`n<!-- agent-review: sha={3} mode={4} -->" -f $CoverageLine.Trim(), $Result.Output.Trim(), $label, $HeadSha.Trim(), $postedMode
     $body | Out-File -LiteralPath $OutputPath -Encoding utf8
 }
 
@@ -534,6 +844,7 @@ function Invoke-ReviewMain {
     param(
         [string]$Backend,
         [string]$ConfiguredBackends,
+        [string]$Mode,
         [string]$Workspace,
         [string]$PrNumber,
         [string]$Prompt,
@@ -548,13 +859,18 @@ function Invoke-ReviewMain {
     if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'RUNNER_TEMP or TEMP is required' }
     if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $Workspace 'review-output.md' }
 
-    $diff = Get-ReviewDiff -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+    $coverage = Get-ReviewCoverage -RequestedMode $Mode -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+    $promptText = $Prompt
+    if ($coverage.Mode -eq 'incremental') {
+        $prefix = Get-IncrementalReviewPromptPrefix -LastSha $coverage.LastSha -HeadSha $coverage.HeadSha
+        $promptText = "$prefix`r`n`r`n$Prompt"
+    }
     Remove-UntrustedReviewAgentConfiguration -Workspace $Workspace | Out-Null
-    $effectivePrompt = Add-ReviewDiffContext -Prompt $Prompt -Diff $diff
+    $effectivePrompt = Add-ReviewDiffContext -Prompt $promptText -Diff $coverage.Diff
     $backends = @(Resolve-ReviewBackends -RequestedBackend $Backend -ConfiguredBackends $ConfiguredBackends)
     $runner = { param($command) Invoke-ReviewBackendProcess -Command $command -ScratchDirectory $ScratchDirectory }
     $result = Invoke-ReviewFallback -Backends $backends -Workspace $Workspace -Prompt $effectivePrompt -ScratchDirectory $ScratchDirectory -Runner $runner
-    Write-ReviewResult -Result $result -OutputPath $OutputPath
+    Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverage.CoverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -562,9 +878,9 @@ function Invoke-ReviewMain {
             "model=$($result.Model)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         }
     }
-    Write-Host "Review completed with backend: $($result.Backend)"
+    Write-Host "Review completed with backend: $($result.Backend) ($($coverage.Mode))"
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-ReviewMain -Backend $Backend -ConfiguredBackends $ConfiguredBackends -Workspace $Workspace -PrNumber $PrNumber -Prompt $Prompt -OutputPath $OutputPath -ScratchDirectory $ScratchDirectory
+    Invoke-ReviewMain -Backend $Backend -ConfiguredBackends $ConfiguredBackends -Mode $Mode -Workspace $Workspace -PrNumber $PrNumber -Prompt $Prompt -OutputPath $OutputPath -ScratchDirectory $ScratchDirectory
 }

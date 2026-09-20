@@ -59,6 +59,18 @@ rate-limit or quota error, or omits the required completion marker after inspect
 before posting. The successful backend is included in the PR comment footer and the manually created Check Run. Invalid
 backend names fail closed instead of silently changing provider.
 
+The optional `mode` dispatch input accepts `auto` or `full` (default `auto`). `auto` reviews only the commits since
+the last automated review when that range is safe: a prior `github-actions[bot]` comment contains an HTML marker
+`<!-- agent-review: sha=<40-char head sha> mode=<full|incremental> -->`, the GitHub compare API shows that SHA is
+an ancestor of the current PR head, the range is non-empty, and it contains no merge commits. Every other case —
+no marker, `mode=full`, compare failure, rebase/force-push, a merge of the base branch, or an identical SHA —
+falls back to `gh pr diff` for a full pass. Invalid `mode` values fail closed. Posted comments start with a coverage
+line (`Reviewed the full diff` or `Reviewed <7-char>..<7-char> (incremental; N commits, M lines)`) and end with the
+marker for the SHA and mode actually used.
+
+The external orchestrator must dispatch the pre-merge review with `mode=full` so the merge recommendation is always a
+full-diff pass. Intermediate re-reviews after a push can omit the input or pass `mode=auto`.
+
 Set `REVIEW_BACKENDS` under repository **Settings > Secrets and variables > Actions > Variables**. For example,
 `claude,codex,cursor` spends Claude quota first while retaining two fallbacks; changing the variable does not require a
 workflow edit.
@@ -75,6 +87,7 @@ changing a CLI, verify each backend explicitly against a disposable pull request
 gh workflow run review.yml -f pr_number=N -f backend=cursor
 gh workflow run review.yml -f pr_number=N -f backend=codex
 gh workflow run review.yml -f pr_number=N -f backend=claude
+gh workflow run review.yml -f pr_number=N -f mode=full
 ```
 
 Inspect each run and its PR comment. Record any CLI that is not runnable under the runner service user plainly in the
