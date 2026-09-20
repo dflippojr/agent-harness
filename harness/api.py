@@ -56,6 +56,13 @@ class SessionUpdate(BaseModel):
     title: str
 
 
+class CreateChat(BaseModel):
+    prompt: str
+    backend: str = ""
+    model: str = ""
+    effort: str = ""
+
+
 class Decision(BaseModel):
     decision: str  # approve | deny
     note: str = ""
@@ -1005,6 +1012,62 @@ def create_app(manager: Manager | None = None) -> FastAPI:
             raise HarnessError(404, "not found")
         a = mgr(request).decide_by_token(token, decision == "approve")
         return {"id": a["id"], "status": a["status"]}
+
+    def owned_chat(request: Request, ref: str) -> tuple[Manager, str, dict]:
+        m, sid, session = owned_session(request, ref)
+        if session.get("kind") != "chat":
+            raise HarnessError(404, "no chat matches that id")
+        return m, sid, session
+
+    @app.get("/chats/options")
+    async def chat_options(request: Request):
+        m = require_owner(request)
+        return await asyncio.to_thread(m.chat_options)
+
+    @app.get("/chats")
+    async def list_chats(request: Request, limit: int = 50):
+        m = require_owner(request)
+        rows = m.db.list_sessions(max(1, min(limit, 200)), owner_id=owner_id(request), kind="chat")
+        return [m.summary(r) for r in rows]
+
+    @app.post("/chats", status_code=201)
+    async def create_chat(body: CreateChat, request: Request):
+        m = require_owner(request)
+        s = m.create(body.prompt, backend=body.backend or None, model=body.model or None,
+                     effort=body.effort or None, owner_id=owner_id(request), kind="chat")
+        return m.summary(s)
+
+    @app.get("/chats/{ref}")
+    async def get_chat(ref: str, request: Request):
+        m, _, session = owned_chat(request, ref)
+        return m.summary(session)
+
+    @app.patch("/chats/{ref}")
+    @app.put("/chats/{ref}")
+    async def rename_chat(ref: str, body: SessionUpdate, request: Request):
+        m, sid, _ = owned_chat(request, ref)
+        return m.summary(m.rename(sid, body.title))
+
+    @app.delete("/chats/{ref}")
+    async def delete_chat(ref: str, request: Request):
+        m, sid, _ = owned_chat(request, ref)
+        m.delete_chat(sid)
+        return {"deleted": sid}
+
+    @app.post("/chats/{ref}/messages")
+    async def send_chat_message(ref: str, body: SendMessage, request: Request):
+        m, sid, _ = owned_chat(request, ref)
+        return m.summary(await m.send(sid, body.content))
+
+    @app.post("/chats/{ref}/cancel")
+    async def cancel_chat(ref: str, request: Request):
+        m, sid, _ = owned_chat(request, ref)
+        return m.summary(await m.cancel(sid))
+
+    @app.get("/chats/{ref}/events")
+    async def chat_events(ref: str, request: Request, after: int = 0, follow: bool = True):
+        owned_chat(request, ref)
+        return await events(ref, request, after, follow)
 
     @app.post("/sessions/{ref}/cancel")
     async def cancel(ref: str, request: Request):

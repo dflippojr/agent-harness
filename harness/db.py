@@ -334,6 +334,8 @@ TEXT_LOCAL = "TEXT NOT NULL DEFAULT 'local'"
 
 # Columns added after a table first shipped: (table, column, definition).
 MIGRATIONS = [
+    # Conversation kind: 'agent' (default, every pre-existing row) or 'chat' (Chat home, no project workspace).
+    ("sessions", "kind", "TEXT NOT NULL DEFAULT 'agent'"),
     # Secret for deciding one approval from a notification button, without a session cookie or JSON body.
     ("approvals", "token", TEXT_EMPTY),
     # Phase 3: git-backed projects. `review` is '' | merged | pushed | discarded.
@@ -500,9 +502,10 @@ class Database:
             rows = self.conn.execute(sql, params).fetchall()
         return [r["id"] for r in rows]
 
-    def list_sessions(self, limit: int = 50, owner_id: str | None = None) -> list[dict]:
-        where = " WHERE owner_id = ?" if owner_id is not None else ""
-        params = (owner_id, limit) if owner_id is not None else (limit,)
+    def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent") -> list[dict]:
+        """Sessions of one conversation kind, newest first. Agent lists never include Chat and vice versa."""
+        where = " WHERE kind = ?" + (" AND owner_id = ?" if owner_id is not None else "")
+        params = (kind, owner_id, limit) if owner_id is not None else (kind, limit)
         with self.lock:
             rows = self.conn.execute(
                 "SELECT id, project, target, model, backend, title, status, stop_reason, created_at, updated_at, totals, "
@@ -510,6 +513,13 @@ class Database:
                 " ORDER BY created_at DESC LIMIT ?", params
             ).fetchall()
         return [_row(r) for r in rows]
+
+    def delete_session(self, sid: str) -> None:
+        with self.tx():
+            for table in ("events", "approvals"):
+                self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
+            self.conn.execute("DELETE FROM search_index WHERE session_id = ?", (sid,))
+            self.conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
 
     def sessions_with_status(self, *statuses: str, user_id: str | None = None) -> list[dict]:
         marks = ",".join("?" * len(statuses))
