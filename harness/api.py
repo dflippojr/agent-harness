@@ -656,7 +656,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         svc = images_service(request)
         job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
         try:
-            return svc.cancel(job["id"])
+            return await svc.cancel(job["id"])
         except ToolError as e:
             raise HarnessError(409, str(e))
 
