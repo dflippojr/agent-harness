@@ -46,6 +46,41 @@ and GPU tests still skip on the hosted runner and do not contribute coverage. No
 scripts that are not `.py`) are excluded from the coverage metric. Confirm the SonarCloud project still uses a gate
 that includes coverage on new code; the workflow cannot set that condition itself.
 
+## Automated review backends
+
+`.github/workflows/review.yml` reviews a pull request once when it is opened and supports explicit re-reviews through
+`workflow_dispatch`. The optional `backend` dispatch input accepts `auto`, `cursor`, `codex`, or `claude`. An explicit
+provider runs only that provider, which is useful for verification and deliberate quota steering. Omitting the input
+or selecting `auto` tries the comma-separated `REVIEW_BACKENDS` repository variable in order. If the variable is empty,
+the order defaults to `codex,claude,cursor`.
+
+The runner falls through that ordered list when a CLI exits non-zero, returns no review, reports a recognizable
+rate-limit or quota error, or omits the required completion marker after inspecting the diff. The marker is removed
+before posting. The successful backend is included in the PR comment footer and the manually created Check Run. Invalid
+backend names fail closed instead of silently changing provider.
+
+Set `REVIEW_BACKENDS` under repository **Settings > Secrets and variables > Actions > Variables**. For example,
+`claude,codex,cursor` spends Claude quota first while retaining two fallbacks; changing the variable does not require a
+workflow edit.
+
+All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
+with its sandbox enabled. Codex ignores the service user's configuration, restores only the required unelevated Windows
+sandbox setting, disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.
+Claude exposes only Read/Grep/Glob. The wrapper, rather than a model, writes the final comment file. It fetches the pull
+request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review
+sandboxes do not need GitHub network access. Larger diffs identify every omitted file in the prompt. After installing or
+changing a CLI, verify each backend explicitly against a disposable pull request:
+
+```powershell
+gh workflow run review.yml -f pr_number=N -f backend=cursor
+gh workflow run review.yml -f pr_number=N -f backend=codex
+gh workflow run review.yml -f pr_number=N -f backend=claude
+```
+
+Inspect each run and its PR comment. Record any CLI that is not runnable under the runner service user plainly in the
+pull request verification notes; an interactive desktop login is not evidence that the runner service account is
+authenticated.
+
 `workflow_run` executes the workflow file from the default branch and can access secrets, so its jobs reject every
 event except a successful `CI` run caused by a push whose head branch is `main`. They check out and deploy only the
 reported `head_sha`; they never check out or execute pull-request code. Third-party actions are pinned to exact
