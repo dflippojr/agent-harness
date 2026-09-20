@@ -100,6 +100,49 @@ def test_missing_branch_and_invalid_inputs_fail_closed():
         resolve(branch="feat/a..b", api=api)
 
 
+def _bomb_api(path: str) -> dict:
+    raise AssertionError(f"gh api must not be called for a rejected dispatch: {path}")
+
+
+def test_repository_and_ref_payloads_fail_closed_before_any_gh_call():
+    for repository in ("--help", "dflippojr/agent-harness/../../etc", "other/repo",
+                       "/dflippojr/agent-harness", r"dflippojr\agent-harness", ""):
+        with pytest.raises(RefRejected, match="allowed staging repository"):
+            resolve(branch="main", repository=repository, api=_bomb_api)
+    with pytest.raises(RefRejected, match="usable ref name"):
+        resolve(branch=r"feat\escape", api=_bomb_api)
+    with pytest.raises(RefRejected, match="usable ref name"):
+        resolve(branch="/etc/passwd", api=_bomb_api)
+    assert resolve_staging_ref.main(["--branch", "main", "--repository=--upload-pack=evil"]) == 1
+    assert resolve_staging_ref.main(["--branch", "main", "--repository", "dflippojr/agent-harness/../other"]) == 1
+
+
+def test_gh_api_rejects_unsafe_paths_before_subprocess(monkeypatch):
+    called: list[object] = []
+
+    def fake_run(*args, **kwargs):
+        called.append(args)
+        raise AssertionError(f"subprocess.run must not run: {args}")
+
+    monkeypatch.setattr(resolve_staging_ref.subprocess, "run", fake_run)
+    for path in ("--help", "-H", "repos/../etc/passwd", "/repos/dflippojr/agent-harness/pulls/1",
+                 "repos/dflippojr/agent-harness/git/ref/heads/feat/a..b",
+                 "repos/other/repo/pulls/1", "repos/dflippojr/agent-harness/pulls/1;id"):
+        with pytest.raises(RefRejected, match="allowed staging lookup"):
+            resolve_staging_ref.gh_api(path)
+    assert called == []
+
+
+def test_gh_api_passes_a_validated_path_after_a_double_dash(monkeypatch):
+    def fake_run(argv, **kwargs):
+        assert argv[:3] == ["gh", "api", "--"]
+        assert argv[3] == "repos/dflippojr/agent-harness/git/ref/heads/main"
+        return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true}', stderr="")
+
+    monkeypatch.setattr(resolve_staging_ref.subprocess, "run", fake_run)
+    assert resolve_staging_ref.gh_api("repos/dflippojr/agent-harness/git/ref/heads/main") == {"ok": True}
+
+
 def test_branch_pointing_at_a_tag_object_or_nothing_is_rejected():
     with pytest.raises(RefRejected, match="commit SHA"):
         resolve(branch="main", api=api_for({"repos/dflippojr/agent-harness/git/ref/heads/main": {"object": {}}}))
@@ -197,6 +240,15 @@ def test_every_staging_entry_point_asserts_it_is_not_production():
         assert "Assert-StagingTarget" in script
     for script in (DEPLOY, RESTART):
         assert "Assert-StagingTask" in script and "Assert-StagingPort" in script
+
+
+def test_copy_item_passes_destination_on_the_same_line():
+    # Sonar S8429 does not follow PowerShell backtick continuations; Destination must sit on the Copy-Item line.
+    for line in code_only(DEPLOY).splitlines():
+        if "Write-Host" in line:
+            continue
+        if re.search(r"\bCopy-Item\b", line):
+            assert "-Destination" in line, line
 
 
 def test_staging_scripts_never_name_production_locations_as_targets():
@@ -347,6 +399,32 @@ def test_token_minting_refuses_the_production_data_root():
         mint(Path("D:/Agents/harness"), Path("D:/Agents/harness/owner-token.txt"))
     with pytest.raises(SystemExit, match="production data root"):
         mint(Path("D:/Agents/harness/sub"), Path("D:/Agents/harness/sub/owner-token.txt"))
+
+
+def test_token_minting_rejects_escaped_paths_before_any_write(tmp_path):
+    from scripts.staging_owner_token import mint
+
+    data_dir = tmp_path / "harness-staging"
+    data_dir.mkdir()
+    escaped = tmp_path / "escaped.txt"
+    with pytest.raises(SystemExit, match="outside the staging data dir"):
+        mint(data_dir, escaped)
+    assert not escaped.exists()
+    assert not (data_dir / "harness.sqlite3").exists()
+
+    with pytest.raises(SystemExit, match=r"\.\."):
+        mint(data_dir, data_dir / ".." / "escaped.txt")
+    with pytest.raises(SystemExit, match=r"\.\."):
+        mint(data_dir / ".." / "harness", data_dir / "owner-token.txt")
+    with pytest.raises(SystemExit, match="starts with '-'"):
+        mint(data_dir, Path("-owner-token.txt"))
+    with pytest.raises(SystemExit, match="production data root"):
+        mint(data_dir, Path("D:/Agents/harness/owner-token.txt"))
+    with pytest.raises(SystemExit, match="starts with '-'"):
+        mint(data_dir, data_dir / "owner-token.txt", Path("-rf"))
+    assert not escaped.exists()
+    assert not (data_dir / "harness.sqlite3").exists()
+    assert not Path("-owner-token.txt").exists()
 
 
 # --- reset boundaries -------------------------------------------------------------------------------------------

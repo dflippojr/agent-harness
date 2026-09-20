@@ -18,19 +18,57 @@ import sys
 from pathlib import Path
 
 PRODUCTION_DATA_ROOT = Path("D:/Agents/harness")
+PRODUCTION_CHECKOUT = Path("D:/Projects/agent-harness")
 
 
-def _refuse_production(data_dir: Path) -> None:
-    resolved = data_dir.resolve() if data_dir.exists() else data_dir
-    if resolved == PRODUCTION_DATA_ROOT or PRODUCTION_DATA_ROOT in resolved.parents:
-        raise SystemExit(f"refusing to mint a token in the production data root: {resolved}")
+def _collapsed(path: Path) -> Path:
+    return Path(os.path.normpath(os.path.expanduser(str(path))))
+
+
+def _refuse_unsafe_path(path: Path, label: str) -> None:
+    raw = str(path)
+    if raw.startswith("-") or any(
+            part.startswith("-") for part in Path(raw.replace("\\", "/")).parts
+            if part not in ("/", ".") and not (len(part) == 2 and part.endswith(":"))):
+        raise SystemExit(f"refusing {label} that starts with '-': {path}")
+    if ".." in raw:
+        raise SystemExit(f"refusing {label} that contains '..': {path}")
+
+
+def _refuse_production(path: Path) -> None:
+    resolved = path.resolve() if path.exists() else path
+    for candidate in (resolved, _collapsed(path), path):
+        candidate = Path(candidate)
+        if candidate == PRODUCTION_DATA_ROOT or PRODUCTION_DATA_ROOT in candidate.parents:
+            raise SystemExit(f"refusing to mint a token in the production data root: {candidate}")
+        if candidate == PRODUCTION_CHECKOUT or PRODUCTION_CHECKOUT in candidate.parents:
+            raise SystemExit(f"refusing to mint a token from the production checkout: {candidate}")
+
+
+def _require_token_inside_data_dir(token_file: Path, data_dir: Path) -> None:
+    try:
+        relative = _collapsed(token_file).relative_to(_collapsed(data_dir))
+    except ValueError:
+        raise SystemExit(f"refusing to write a token outside the staging data dir: {token_file}") from None
+    if relative == Path("."):
+        raise SystemExit(f"refusing to write a token outside the staging data dir: {token_file}")
 
 
 def mint(data_dir: Path, token_file: Path, harness_root: Path | None = None) -> str:
     """Revoke every existing key in the staging database, then return one fresh owner token."""
-    _refuse_production(data_dir)
+    data_dir, token_file = Path(data_dir), Path(token_file)
+    _refuse_unsafe_path(data_dir, "data dir")
+    _refuse_unsafe_path(token_file, "token file")
     if harness_root is not None:
-        sys.path.insert(0, str(harness_root))
+        harness_root = Path(harness_root)
+        _refuse_unsafe_path(harness_root, "harness root")
+        _refuse_production(harness_root)
+    _refuse_production(data_dir)
+    _refuse_production(token_file)
+    _require_token_inside_data_dir(token_file, data_dir)
+    data_dir, token_file = _collapsed(data_dir), _collapsed(token_file)
+    if harness_root is not None:
+        sys.path.insert(0, str(_collapsed(harness_root)))
     from harness.db import Database
 
     db = Database(data_dir / "harness.sqlite3")

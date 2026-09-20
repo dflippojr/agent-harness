@@ -134,8 +134,9 @@ try {
     }
     if (Test-Path -LiteralPath $StagingLocalConfig) { Assert-NoProductionReference $StagingLocalConfig }
     if (-not $planOnly) {
-        Copy-Item -LiteralPath (Join-Path $ReleaseRoot 'ops\harness\staging-profile.yaml') `
-            -Destination (Join-Path $candidateConfig 'profile.yaml') -Force
+        $profileOverlay = Join-Path $ReleaseRoot 'ops\harness\staging-profile.yaml'
+        $profileDestination = Join-Path $candidateConfig 'profile.yaml'
+        Copy-Item -LiteralPath $profileOverlay -Destination $profileDestination -Force
         Copy-Item -LiteralPath $StagingLocalConfig -Destination (Join-Path $candidateConfig 'harness.local.yaml') -Force
         [System.IO.File]::WriteAllText((Join-Path $StagingDataRoot 'deployed-sha.txt'), $Commit)
     } else {

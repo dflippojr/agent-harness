@@ -23,16 +23,41 @@ from typing import Callable
 
 REPOSITORY = "dflippojr/agent-harness"
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$")
+GH_API_PATH_PATTERN = re.compile(
+    r"^repos/" + re.escape(REPOSITORY)
+    + r"/(?:git/ref/heads/[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?|pulls/[0-9]+)$"
+)
 
 
 class RefRejected(Exception):
     """The dispatch is not an allowed staging target."""
 
 
+def _require_repository(repository: str) -> str:
+    if repository.strip().casefold() != REPOSITORY.casefold():
+        raise RefRejected(f"repository {repository!r} is not the allowed staging repository {REPOSITORY}")
+    return REPOSITORY
+
+
+def _require_branch(branch: str) -> str:
+    if (branch.startswith("-") or branch.startswith("/") or ".." in branch or "//" in branch
+            or "\\" in branch or any(c.isspace() for c in branch) or not BRANCH_PATTERN.fullmatch(branch)):
+        raise RefRejected(f"branch is not a usable ref name: {branch!r}")
+    return branch
+
+
 def gh_api(path: str) -> dict:
-    result = subprocess.run(["gh", "api", path], capture_output=True, text=True, encoding="utf-8")
+    if not isinstance(path, str) or path.startswith("-") or ".." in path or "//" in path or "\\" in path \
+            or any(c.isspace() for c in path):
+        raise RefRejected(f"gh api path is not an allowed staging lookup: {path!r}")
+    matched = GH_API_PATH_PATTERN.fullmatch(path)
+    if matched is None:
+        raise RefRejected(f"gh api path is not an allowed staging lookup: {path!r}")
+    safe_path = matched.group(0)
+    result = subprocess.run(["gh", "api", "--", safe_path], capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
-        raise RefRejected(f"gh api {path} failed: {result.stderr.strip() or result.stdout.strip()}")
+        raise RefRejected(f"gh api {safe_path} failed: {result.stderr.strip() or result.stdout.strip()}")
     return json.loads(result.stdout)
 
 
@@ -45,6 +70,7 @@ def resolve(
 ) -> dict:
     """The resolved dispatch: {"sha", "ref_label", "reset_only"}. Raises RefRejected for anything else."""
     api = api or gh_api
+    repository = _require_repository(repository)
     branch, pr_number = branch.strip(), pr_number.strip()
     if reset:
         if branch or pr_number:
@@ -54,8 +80,7 @@ def resolve(
         raise RefRejected("set exactly one of branch or pr_number (or dispatch reset on its own)")
 
     if branch:
-        if branch.startswith("-") or ".." in branch or any(c.isspace() for c in branch):
-            raise RefRejected(f"branch is not a usable ref name: {branch!r}")
+        branch = _require_branch(branch)
         ref = api(f"repos/{repository}/git/ref/heads/{branch}")
         sha = ((ref.get("object") or {}).get("sha") or "").strip()
         if not SHA_PATTERN.match(sha):
@@ -64,7 +89,7 @@ def resolve(
             raise RefRejected(f"branch {branch} does not point at a commit")
         return {"sha": sha, "ref_label": f"branch {branch}", "reset_only": False}
 
-    if not pr_number.isdigit():
+    if not re.fullmatch(r"[0-9]+", pr_number):
         raise RefRejected(f"pr_number must be a number: {pr_number!r}")
     pull = api(f"repos/{repository}/pulls/{pr_number}")
     head = pull.get("head") or {}
