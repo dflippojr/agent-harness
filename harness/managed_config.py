@@ -29,9 +29,10 @@ restart copies it onto active.
   unusable, active and LKG are timestamp-renamed and YAML defaults take effect.
 
 Every generation change goes through ``ManagedStore.commit``. Writes use a temp
-file, flush/fsync, then ``os.replace``. Multi-file order is quarantine → LKG →
-pending → boot-tried → status → **active** (the single commit point). A crash
-before replacing active leaves the previous confirmed generation in effect.
+file, flush/fsync, then ``os.replace``. Ordinary generation changes prepare LKG,
+pending, boot-tried, and status before replacing **active** (the single commit
+point). Startup confirmation replaces active first, then clears its pending and
+boot-tried markers, so a crash cannot unconfirm a generation that booted successfully.
 """
 
 from __future__ import annotations
@@ -272,8 +273,17 @@ class ManagedStore:
 
     def commit(self, *, active=UNSET, pending=UNSET, lkg=UNSET, unlink_active: bool = False,
                boot_tried=UNSET, status=UNSET, quarantine_envelope: Envelope | None = None,
-               quarantine_reason: str | None = None, quarantine_raw: bool = False) -> None:
+               quarantine_reason: str | None = None, quarantine_raw: bool = False,
+               active_first: bool = False) -> None:
         """Publish one overlay generation. Replacing active is the commit point."""
+        def publish_active() -> None:
+            if unlink_active:
+                self._unlink(self.active_path)
+                self._crash("active")
+            elif active is not UNSET and active is not None:
+                self.write_active(active)
+                self._crash("active")
+
         if quarantine_envelope is not None:
             self.quarantine(quarantine_envelope, quarantine_reason or "")
             self._crash("quarantine")
@@ -287,6 +297,8 @@ class ManagedStore:
         if lkg is not UNSET and lkg is not None:
             self.write_lkg(lkg)
             self._crash("lkg")
+        if active_first:
+            publish_active()
         if pending is not UNSET:
             if pending is None:
                 self.clear_pending()
@@ -302,12 +314,8 @@ class ManagedStore:
         if status is not UNSET and status is not None:
             self.write_status(status)
             self._crash("status")
-        if unlink_active:
-            self._unlink(self.active_path)
-            self._crash("active")
-        elif active is not UNSET and active is not None:
-            self.write_active(active)
-            self._crash("active")
+        if not active_first:
+            publish_active()
 
     def _crash(self, step: str) -> None:
         if self.crash_at == step:

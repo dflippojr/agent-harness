@@ -172,7 +172,7 @@ class Runner:
                 and app_allows(defaults, "search")):
             kits.append(self.sessions)
         if (not member and self.remote_control is not None and s["target"] == "tower"
-                and not s.get("app_id") and app_allows(defaults, "remote_control")):
+                and s.get("app_id", "") == "" and app_allows(defaults, "remote_control")):
             kits.append(self.remote_control)  # not for app sessions: apps launch through /api/v1/remote-control
         if self.skills is not None and self.skills.can_propose(s):
             kits.append(self.skills)
