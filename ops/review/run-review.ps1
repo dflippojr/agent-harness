@@ -153,7 +153,7 @@ function Get-CompletedReviewText {
 
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
     $marker = [regex]::Escape($script:ReviewCompletionMarker)
-    $match = [regex]::Match($Text, "(?:^|\r?\n)$marker(?:\r?\n)?\z")
+    $match = [regex]::Match($Text, "(?:^|\r?\n)$marker\s*\z")
     if (-not $match.Success) { return $null }
     $review = $Text.Substring(0, $match.Index).Trim()
     if ([string]::IsNullOrWhiteSpace($review)) { return $null }

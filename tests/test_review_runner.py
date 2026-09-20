@@ -289,6 +289,28 @@ $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_p
     assert "missing completion marker" in result.stdout
 
 
+def test_completion_marker_accepts_trailing_whitespace_only(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        r"""
+$value = [ordered]@{
+    blank_lines = Get-CompletedReviewText -Text "blank-line review`nREVIEW_STATUS: COMPLETE`n`n`n"
+    crlf = Get-CompletedReviewText -Text "crlf review`r`nREVIEW_STATUS: COMPLETE`r`n`r`n"
+    trailing_spaces = Get-CompletedReviewText -Text "space review`nREVIEW_STATUS: COMPLETE   `n  `n"
+    mid_text = Get-CompletedReviewText -Text "incomplete review`nREVIEW_STATUS: COMPLETE`nmore output"
+}
+$value | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert json.loads(result.stdout.strip()) == {
+        "blank_lines": "blank-line review",
+        "crlf": "crlf review",
+        "trailing_spaces": "space review",
+        "mid_text": None,
+    }
+
+
 def test_unable_to_review_response_without_marker_triggers_fallback(tmp_path):
     result = run_powershell(
         tmp_path,
