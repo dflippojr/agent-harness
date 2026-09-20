@@ -14,6 +14,8 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     scan_at = workflow.index("SonarSource/sonarqube-scan-action")
     assert coverage_at < scan_at
     assert "pytest-cov" in workflow
+    assert "runs-on: windows-latest" in workflow
+    assert "runs-on: ubuntu-latest" not in workflow
     assert "sonar.qualitygate.wait=true" in workflow
 
 

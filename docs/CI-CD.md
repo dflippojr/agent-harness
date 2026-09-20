@@ -36,16 +36,15 @@ scheduled tasks, local repository paths, Docker sandbox creation, GPU/model cont
 
 The owner explicitly approved the repository-scoped self-hosted runners. The `agent-harness-tower` runner gives
 trusted `main` workflow code the tower user's filesystem, Docker, credentials, and service-restart authority. It is
-reserved for deployment; tests use `agent-harness-ci`, SonarCloud uses GitHub-hosted Ubuntu, and automated review uses
+reserved for deployment; tests use `agent-harness-ci`, SonarCloud uses GitHub-hosted Windows, and automated review uses
 the `agent-harness-review` pool.
 
 `.github/workflows/sonar.yml` installs the test extras, runs `pytest` with `pytest-cov` Cobertura output
-(`coverage.xml`), then scans with `sonar.qualitygate.wait=true`. SonarCloud's quality gate (Sonar way by default)
-fails the GitHub check when coverage on new code is below 80%. Windows-only, Docker-image, and GPU tests skip on the
-hosted runner and do not contribute coverage; change those areas with tests that still run on Ubuntu, or expect the
-gate to treat the new Python as uncovered. Non-Python trees (`harness/web`, `ops`, scripts that are not `.py`) are
-excluded from the coverage metric. Confirm the SonarCloud project still uses a gate that includes coverage on new
-code; the workflow cannot set that condition itself.
+(`coverage.xml`) on `windows-latest`, then scans with `sonar.qualitygate.wait=true`. The suite is Windows-native;
+Ubuntu hosted runners fail coverage collection on `msvcrt`, console-creation flags, and Windows paths. Docker-image
+and GPU tests still skip on the hosted runner and do not contribute coverage. Non-Python trees (`harness/web`, `ops`,
+scripts that are not `.py`) are excluded from the coverage metric. Confirm the SonarCloud project still uses a gate
+that includes coverage on new code; the workflow cannot set that condition itself.
 
 `workflow_run` executes the workflow file from the default branch and can access secrets, so its jobs reject every
 event except a successful `CI` run caused by a push whose head branch is `main`. They check out and deploy only the
