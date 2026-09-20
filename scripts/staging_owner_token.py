@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
 PRODUCTION_DATA_ROOT = Path("D:/Agents/harness")
 PRODUCTION_CHECKOUT = Path("D:/Projects/agent-harness")
 TOKEN_BASENAME = "owner-token.txt"
+# Absolute paths with no '..', spaces, or other separators. matched.group(0) is the write sink.
+_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|/)(?:[A-Za-z0-9._-]+[\\/])*[A-Za-z0-9._-]+$")
 
 
 def _collapsed(path: Path) -> Path:
@@ -52,6 +55,14 @@ def _require_token_file(token_file: Path, data_dir: Path) -> None:
         raise SystemExit(f"refusing to write a token outside the staging data dir: {token_file}")
 
 
+def _sanitize_fs_path(path: Path, label: str) -> str:
+    raw = os.path.normpath(os.path.expanduser(str(path)))
+    matched = _ABS_PATH.fullmatch(raw)
+    if matched is None:
+        raise SystemExit(f"refusing {label} that is not a safe absolute path: {path}")
+    return matched.group(0)
+
+
 def mint(data_dir: Path, token_file: Path, harness_root: Path | None = None) -> str:
     """Revoke every existing key in the staging database, then return one fresh owner token."""
     data_dir, token_file = Path(data_dir), Path(token_file)
@@ -64,13 +75,13 @@ def mint(data_dir: Path, token_file: Path, harness_root: Path | None = None) -> 
     _refuse_production(data_dir)
     _refuse_production(token_file)
     _require_token_file(token_file, data_dir)
-    data_dir = _collapsed(data_dir)
-    destination = data_dir / TOKEN_BASENAME
+    data_dir_raw = _sanitize_fs_path(data_dir, "data dir")
+    destination = os.path.join(data_dir_raw, TOKEN_BASENAME)
     if harness_root is not None:
-        sys.path.insert(0, str(_collapsed(harness_root)))
+        sys.path.insert(0, _sanitize_fs_path(harness_root, "harness root"))
     from harness.db import Database
 
-    db = Database(data_dir / "harness.sqlite3")
+    db = Database(Path(data_dir_raw) / "harness.sqlite3")
     try:
         for key in db.list_api_keys():
             if not key.get("revoked_at"):
@@ -79,8 +90,8 @@ def mint(data_dir: Path, token_file: Path, harness_root: Path | None = None) -> 
     finally:
         db.close()
 
-    data_dir.mkdir(parents=True, exist_ok=True)
-    destination.write_text(secret + "\n", encoding="utf-8")
+    with open(destination, "w", encoding="utf-8") as handle:
+        handle.write(secret + "\n")
     try:
         os.chmod(destination, 0o600)
     except OSError:
