@@ -407,6 +407,7 @@ if (fetched.concat(sources.map((s) => s.url)).some((u) => /%5C|%2e|%2F|\\|\.\./i
 await go("#/s/sess1", "valid session after hostile ids");
 await waitFor(() => /Demo session|Transcript/.test(byId.app.textContent), "valid session still loads");
 if (!reached("/sessions/sess1/events")) throw new Error("valid session id no longer opens its stream");
+await go("#/s/sess1/info", "session info again");
 
 const openSources = () => sources.filter((s) => s.readyState === 1);
 if (!openSources().length) throw new Error("expected an app-level EventSource to stay open off Agents");

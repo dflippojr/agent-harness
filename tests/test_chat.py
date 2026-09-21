@@ -133,7 +133,7 @@ def test_web_shell_has_chat_home_and_drawer(tmp_path):
     assert html.index('id="drawer-profile"') > html.index('id="drawer-chats"')
     assert 'go(canChat() ? "#/chat" : "#/agents", true)' in js
     assert 'parts[0] === "chat"' in js and 'event.key === "Escape"' in js and "visualViewport" in js
-    assert "`/chats/${id}/events?after=${lastSeq}`" in js
+    assert "`/chats/${encodeURIComponent(id)}/events?after=${lastSeq}`" in js
     assert "safe-area-inset-bottom" in css and "#nav-drawer" in css and ".chat-welcome" in css
 
 
