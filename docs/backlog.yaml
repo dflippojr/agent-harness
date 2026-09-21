@@ -389,6 +389,30 @@ items:
       Store links and hashes, not artifacts or credentials. Include catalog signing-key rotation without silent
       owner uninstall or token revocation.
 
+      **Readiness (2026-09-21): needs-refinement.** The design (`docs/marketplace-design.md` §4, §6.4, §8, §10, §12) fixes
+      the objects, the signed bytes, the advisory levels and retention, but not where the catalog runs or how it is
+      signed, and there is no code or publisher for it yet. Decide first; this issue gates #162-#164.
+
+      Open decisions (recommended default first):
+      1. **Who operates it and where it lives.** Default: no hosted service yet. A static index of JSON records in a
+         dedicated git repo (audit log = git history, append-only by convention and by signed snapshots), published
+         as release assets or static hosting. A service is a later step if a second-party publisher appears.
+         Confirm whether a catalog is wanted before any third-party publisher exists (the design says the
+         provider-policy review must be repeated before a public launch).
+      2. **Signature scheme and key custody.** Default: Ed25519 detached signatures over `catalog_record_sha256`,
+         an offline root key that signs a rotatable signing-key set, and a pinned key-set file format that clients
+         verify. Pick the library and the format; the rotation snapshot and out-of-band revocation location in
+         section 12 ("exact hosting is an implementation issue") must be settled here.
+      3. **Advisory feed contract.** One signed snapshot versus per-record files, its URL layout, size and freshness
+         fields. #163 and #164 build against this, so it must be written down as part of this issue.
+      4. **Publisher intake in v1.** Domain-proof and `ahpub.<slug>.*` namespace review (section 4.2) manual by the
+         owner, or tooling now? Default: manual, with the checks documented.
+      5. **Code placement.** This repo (public) or a separate catalog repo. The catalog never calls a daemon (section 4.5).
+
+      Acceptance once decided: a verifier and an offline signer with tests for tamper detection, key rotation (a
+      record whose bytes do not match its stored hash is never re-signed, section 12), immutability of approved
+      versions, and advisories appended without rewriting a version record.
+
       Do not put real paths, logins, tokens, or tailnet names in public comments.
 
   - key: marketplace-review-automation
@@ -399,6 +423,27 @@ items:
       provenance, SBOM, secret scan, dependency confusion, permission-diff) and evidence packaging for Stage B.
       If Stage C is added, run it only in a disposable sandbox with synthetic credentials and data, no host mounts,
       and no network except the recorded allowlist. Do not execute untrusted submissions against a real daemon.
+
+      **Readiness (2026-09-21): needs-refinement.** Stage A (section 6.1 of the design) is well specified, but several
+      checks need the catalog's stored state (version reuse, "publisher owns the id", permission-diff against the
+      previous version), which #161 has not defined, and the issue mixes Stage A with an optional Stage C sandbox.
+
+      Open decisions (recommended default first):
+      1. **Split Stage C out.** Default: this issue is Stage A plus Stage B evidence packaging only; Stage C (the
+         disposable sandbox) becomes its own later issue, since it is a separate security-sensitive runner.
+      2. **Offline first.** Default: an offline `check` command that takes a submitted manifest (and optionally the
+         previous version's manifest as a file for the permission diff) and needs no catalog store. Checks that need
+         the store (version reuse, publisher ownership) attach once #161 lands.
+      3. **Typosquat list.** Where the "well-known product names" list comes from and who maintains it.
+      4. **Dependency confusion.** Which registries are queried and whether the checker may reach the network. Default:
+         no network in the check itself; an unchecked result is reported as `unchecked`, never as a pass.
+      5. **SPDX license list.** Vendored at a pinned version.
+      6. **Artifact download limits.** Size cap, timeout, redirect rule (section 6.1 item 3), a scratch directory that
+         is always deleted, and never any download into a catalog store.
+      7. **Evidence format** for Stage B, aligned with the Stage D review object in section 6.4.
+
+      Acceptance once decided: tests per Stage A check (including each secret-scan token prefix in section 6.1 item 7),
+      secret-scan failures cannot be overridden, and no untrusted submission is executed.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
 
@@ -411,6 +456,23 @@ items:
       explicit daemon action; the Web UI may deep-link to Settings but must not mint, transport, or store ha-/ho-
       tokens or provider credentials.
 
+      **Readiness (2026-09-21): blocked and needs-refinement.** Blocked by #161: there is no catalog to discover and
+      no feed or key-set contract yet. The consent content is already specified (`docs/marketplace-design.md` section
+      5.2 scope table, section 9 re-consent, section 14 disclosures).
+
+      Open decisions (recommended default first):
+      1. **Who verifies signatures.** Default: the daemon fetches and verifies the signed listings and exposes them on
+         an owner-only endpoint; the Web client only renders them. Keeps the catalog URL and pinned keys out of the
+         browser and matches the rule that the Web UI never mints, transports or stores `ha-`/`ho-` tokens.
+      2. **Catalog URL and key set.** Owner-managed installer/file configuration, not a Web setting (same pattern as
+         other owner-only settings).
+      3. **Where it lives.** A new Agent Harness Web page under Settings, or its own tab.
+      4. **Stale or unreachable catalog.** Show the last verified listings with their age; never fail open into
+         unverified data.
+
+      Acceptance once decided: every requested scope, origin and hosted-provider mode has consent copy; "catalog
+      presence grants nothing" is visible; the only path to pairing is a deep link to daemon Settings.
+
       Do not put real paths, logins, tokens, or tailnet names in public comments.
 
   - key: marketplace-daemon-revocation-hooks
@@ -421,6 +483,25 @@ items:
       present on a key or pairing request: show warnings, block new pairing, and recommend token revocation.
       Catalog decisions must not silently uninstall software, delete owner data, or revoke tokens without an
       explicit owner action.
+
+      **Readiness (2026-09-21): blocked and needs-refinement.** Blocked by #161 for the signed advisory feed and
+      key-set format. The advisory semantics are specified (`docs/marketplace-design.md` sections 4.5, 8 and 16).
+
+      Open decisions (recommended default first):
+      1. **Two parts, one dependency.** Part A, an optional `catalog_app_id` on key and pairing-code creation
+         (additive within API v1, so the OpenAPI, SDK and `docs/compatibility.md` move together; never inside a token
+         secret, section 8), needs no catalog and could ship first. Part B, feed fetch, verify and enforce, waits on
+         #161.
+      2. **Fetch cadence and failure mode.** Default: periodic fetch; when the feed is unreachable or stale, keep the
+         last verified advisories and show their age. Never treat a missing feed as "no advisories" silently, and
+         never as a reason to block existing apps.
+      3. **Where the feed URL and key set come from.** Owner-managed file configuration.
+      4. **Where warnings show.** Control Center Settings, Apps, next to paired names (section 16).
+      5. **Enforcement point.** `block_new_pairing` only at pairing-code creation; existing tokens keep working;
+         revocation stays an owner click.
+
+      Acceptance once decided: tests for each advisory level, for tampered or unsigned feeds being ignored, and
+      proving no code path uninstalls, deletes or revokes without an explicit owner action.
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
 
@@ -1234,5 +1315,203 @@ items:
       first-party components not breaking silently on Server upgrades, and proactively prompting an update. Related to #24's
       "versioned owner-only API" — worth deciding this alongside #24 rather than after, and relevant background
       for the native installers in #15/#16.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: review-diff-comments
+    kind: feature
+    title: "Review: line comments on the Changes diff, sent back to the agent as one follow-up"
+    body: |
+      Idea from the Orca comparison (`docs/orca-study.md`). Reviewing a session branch today means reading the diff
+      and typing a free-text follow-up that has to re-describe where the problem is. Let the owner comment on diff
+      lines instead.
+
+      Proposed shape:
+      - On the Changes tab, tap a line (or a small range) to add a comment; comments accumulate as a draft
+      - **Send to agent** turns the draft into one structured follow-up message on the same session (file, line
+        range, side, quoted line text, comment), so it works for every backend through the ordinary send path
+      - store the base/head commit each comment was written against; if the file changed before sending, mark the
+        comment stale and quote the current text instead of silently pointing at the wrong line
+      - multi-line ranges and deleted-line comments must round-trip (Orca had review-comment bugs here)
+      - comments stay owner-only; guests see nothing, members only in their own sessions
+      - additive API on the existing session/review surface; no new scope beyond what sending a message needs
+      - keep Ask agent to resolve (merge-conflict card) as is; this is the general case
+
+      Test on a phone-width diff (tap targets, safe areas, large text) and with a daemon restart between drafting
+      and sending. Related: #24 (owner API), merge-conflict card.
+
+      **Verify before designing.** The Orca research behind this item read only Orca's docs, release notes and
+      directory listings, not its source (study: `docs/orca-study.md` tracked in #169, not yet
+      merged). Any research or worker task must first clone `stablyai/orca` at a pinned commit (record the SHA), read
+      the files below, and confirm or correct the claims in this issue. Paths not yet located are marked; find them by
+      searching, do not guess. Do not copy Orca code; reimplement and credit.
+      - `src/renderer` and `src/main`: the diff view and the review-comment send-back path (exact files not yet located; release notes mention multi-line review-comment range handling)
+      - Orca issues and PRs that mention diff comments or review ranges
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: session-fan-out-compare
+    kind: feature
+    title: "Fan one prompt out to several backends or models and compare the branches"
+    body: |
+      Idea from the Orca comparison (`docs/orca-study.md`): "fan one prompt across N agents, each in its own
+      worktree, compare, merge the winner." The harness already has a branch per session and a merge/push/discard
+      Review card, so most of the plumbing exists.
+
+      Proposed shape:
+      - **New task → Compare** takes one prompt plus 2–4 backend/model/effort choices and starts one session each
+        from the same base commit, tied together by a group id
+      - a group view lists each member's status, elapsed time, tokens/usage, files changed and result summary, with
+        the ordinary per-session Changes tab one tap away
+      - **Pick winner** runs the existing Review merge (or push) on that member and offers to discard the rest;
+        discarding all is one action
+      - cap the group size and refuse choices the owner has no quota for: N sessions means N parallel hits on 5h/7d
+        limits (the Cursor budget has already been the binding constraint), and local-model members serialize
+        behind `GpuScheduler`, so show that instead of implying parallelism
+      - hosted members follow their own backend sandboxes and approval rules unchanged; no member can see another's
+        workspace
+      - owner-only; guests cannot start groups; members count each session against their session caps and disk quota
+
+      Out of scope for v1: hunk-level merging across members (Orca has a 3-pane hunk picker), automatic judging by
+      a model, and cross-machine groups.
+
+      **Verify before designing.** The Orca research behind this item read only Orca's docs, release notes and
+      directory listings, not its source (study: `docs/orca-study.md` tracked in #169, not yet
+      merged). Any research or worker task must first clone `stablyai/orca` at a pinned commit (record the SHA), read
+      the files below, and confirm or correct the claims in this issue. Paths not yet located are marked; find them by
+      searching, do not guess. Do not copy Orca code; reimplement and credit.
+      - `src/cli`: the `orca worktree` commands, including the fan-out spawn (`worktree fan` per a third-party review; unconfirmed)
+      - `src/renderer`: the multi-agent compare and merge UI, described as a 3-pane hunk picker by a third-party review; unconfirmed
+      - `docs/reference`: the worktree scan fingerprint and malformed worktree registration docs (titles only so far)
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: github-issue-to-task
+    kind: feature
+    title: "New task from a GitHub issue or PR on a project's repository"
+    body: |
+      Idea from the Orca comparison (`docs/orca-study.md`): Orca browses GitHub (and Linear) issues and PRs
+      inside the app and starts a worktree from one. This backlog itself is mirrored to GitHub issues and the owner
+      launches most work from them, so the round trip through the phone is the friction.
+
+      Proposed shape:
+      - for a project with a GitHub `repo`, New task offers **From issue / PR**: a searchable list of open items
+        (title, number, labels, author) fetched read-only
+      - choosing one prefills the prompt with the title, body, linked review comments (for a PR) and the number, and
+        pre-selects the project and base branch (the PR's head branch for a PR review task)
+      - use the credentials the project already uses for private clones and pushes; never expose them to the
+        agent or the API response, and never widen a member's access beyond their own GitHub authentication
+      - issue and PR text is untrusted input: render as text, cap length, and label it as external content in the
+        prompt so an issue body cannot masquerade as owner instructions
+      - no writes back to GitHub in v1 (no comments, labels or closing); the branch push stays the existing
+        Review action
+      - degrade cleanly when the repo is local-only, the token is missing or GitHub is unreachable
+
+      Linear is out of scope. Related: private-repo push check, member GitHub authentication.
+
+      **Verify before designing.** The Orca research behind this item read only Orca's docs, release notes and
+      directory listings, not its source (study: `docs/orca-study.md` tracked in #169, not yet
+      merged). Any research or worker task must first clone `stablyai/orca` at a pinned commit (record the SHA), read
+      the files below, and confirm or correct the claims in this issue. Paths not yet located are marked; find them by
+      searching, do not guess. Do not copy Orca code; reimplement and credit.
+      - `src/main`: GitHub (and Linear) task provider code and how a task becomes a worktree (exact files not yet located)
+      - `docs/reference`: the task provider identity validation doc (title only so far)
+      - `skills/linear-tickets` and `skills/orca-linear`: how issue text reaches the agent
+
+      **Readiness (2026-09-21): needs-refinement.** The shape above is clear, but it assumes credentials that do not
+      exist. The daemon has no authenticated GitHub client today (`harness/web_tools.py` makes only unauthenticated
+      fetches), and "the credentials the project already uses for private clones and pushes" are host Git credentials,
+      not something the REST API can be assumed to accept. Member GitHub authentication (#63) is itself unrefined.
+
+      Open decisions (recommended default first):
+      1. **How the daemon reads issues and PRs.** Default: an owner-managed, read-only fine-grained token in an
+         owner-only file, used server-side and never returned. Alternatives: the host's `gh` login, or reusing the Git
+         credential helper (rejected: a Git credential is not an API token and would be widened silently).
+      2. **Who can use it.** Default: owner-only in v1; members wait for #63.
+      3. **Prompt framing.** The exact wrapper that marks issue and PR text as external content, plus size caps.
+      4. **PR tasks.** Default: same-repo head branches only; refuse forks in v1.
+      5. **Rate limits and caching** for the searchable list.
+
+      Acceptance once decided: no credential appears in any API response, log or prompt; issue text cannot be
+      confused with owner instructions (test with an issue body that imitates a system message); degrades cleanly
+      when the token is missing or GitHub is unreachable.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: generic-cli-backend
+    kind: feature
+    title: "Config-declared backend adapter for additional agent CLIs (start with OpenCode)"
+    body: |
+      Idea from the Orca comparison (`docs/orca-study.md`): Orca reaches 30+ agents by treating any terminal agent
+      as a launchable command with a thin status integration. The harness has three bespoke CLI backends (claude,
+      codex, cursor). Adding a fourth should be configuration plus one small parser, not a new code path.
+
+      Proposed shape:
+      - a `backends:` entry can declare `kind: cli` with image, pinned version, command template for print/headless
+        mode, auth volume and network, egress proxy allowlist, model/effort flags, and an output parser
+        (`text` or `jsonl` with a documented event mapping)
+      - runs in the same provider-only Docker sandbox and egress network as the existing CLIs; workspace-only
+        mount; branch review afterwards
+      - approvals: map the CLI's permission prompts when it exposes them; when it cannot ask, run only in
+        auto-approve mode inside the sandbox (the Cursor `--force` pattern) and say so on the backend card
+      - Settings → Backends shows model/effort, login state and usage where the CLI offers it, and says plainly
+        when usage is unknown
+      - API keys stay in owner-managed files and are never returned
+      - repeat the provider-policy review (terms, billing, whether a subscription login may be driven headlessly)
+        before enabling any provider, as was done for the existing three; do not ship a provider that fails it
+      - `reference/opencode` already pins OpenCode for the bake-off and is the natural first adapter; a second CLI
+        (for example Gemini CLI) proves the config is generic
+
+      Must not weaken the per-app provider allowlist: a new backend is invisible to apps until the owner grants it.
+      Related: #27 (SDK/OpenAPI across providers), #66 (typed settings registry: adapters are installer/file-only
+      because they name images and secrets).
+
+      **Verify before designing.** The Orca research behind this item read only Orca's docs, release notes and
+      directory listings, not its source (study: `docs/orca-study.md` tracked in #169, not yet
+      merged). Any research or worker task must first clone `stablyai/orca` at a pinned commit (record the SHA), read
+      the files below, and confirm or correct the claims in this issue. Paths not yet located are marked; find them by
+      searching, do not guess. Do not copy Orca code; reimplement and credit.
+      - `src/main`: the managed agent-hook integration and per-agent launch definitions (exact files not yet located)
+      - `docs/reference`: the agent status store and agent skill provider paths docs (titles only so far)
+      - Orca issues #15110, #16286, #14938 and #16771: what breaks when many CLIs are wrapped and when hooks are rewritten externally
+
+      **Readiness (2026-09-21): needs-refinement.** The three existing backends are separate protocol classes in
+      `harness/cli_backends.py` (Claude stream-json, Codex app-server over stdio, Cursor print mode), so "configuration
+      plus one small parser" only holds for one-shot print-mode CLIs. The provider-policy gate can also only be
+      answered by an owner decision.
+
+      Open decisions (recommended default first):
+      1. **Scope of `kind: cli`.** Default: headless print-mode CLIs with `text` or `jsonl` output only; no
+         interactive permission protocol. Anything needing a live approval channel stays a bespoke backend.
+      2. **What OpenCode talks to.** Which provider or endpoint, and whether by API key (owner-managed file) or
+         another auth mode. This sets the egress allowlist and the policy review. Do not enable a provider that has
+         not passed the review recorded in the docs.
+      3. **Image build and pinning.** A new CLI needs an image; the existing `sandbox/cli.Dockerfile` and its CI
+         build cover only the current CLIs. Decide who builds and pins the version.
+      4. **Approvals.** Confirm auto-approve inside the sandbox (the Cursor `--force` pattern) is acceptable for a CLI
+         that cannot ask, and how the backend card states it.
+      5. **Second CLI.** Whether Gemini CLI is a v1 acceptance criterion or a follow-up.
+
+      Acceptance once decided: an adapter is invisible to apps until the owner grants it (per-app allowlist unchanged),
+      a parser test per output mode with recorded fixtures, and adapters remain installer/file-only configuration.
+
+      Do not put real paths, logins, tokens, or tailnet names in public comments.
+
+  - key: orca-study-docs
+    kind: deferred
+    title: "Land the Orca design study and its backlog entries (prerequisite for #165-#168)"
+    body: |
+      `docs/orca-study.md` compares Agent Harness with Orca (stablyai/orca, MIT), maps its design onto in-flight work
+      (native client pairing, version skew, Chat, skills and the catalog, approvals, usage, worktree lifecycle), and
+      lists what to read next. Issues #165-#168 were filed from it and point at it, so it must reach `main` first.
+
+      Scope: merge the docs-only branch that adds the study and the four backlog entries. No code changes.
+
+      Acceptance:
+      - `docs/orca-study.md` is on `main` and renders its links
+      - the four entries (review-diff-comments, session-fan-out-compare, github-issue-to-task, generic-cli-backend)
+        stay in `docs/backlog.yaml` and their issues link to the merged study
+      - the study's verification rule stays at the top: it was written from Orca's docs, release notes and directory
+        listings, not its source, so follow-up work must clone Orca at a pinned commit and read the named files
 
       Do not put real paths, logins, tokens, or tailnet names in public comments.
