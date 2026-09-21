@@ -446,12 +446,12 @@ def register(app: FastAPI, mgr) -> None:
         m = mgr(request)
         user_id = key["user_id"] if key.get("kind") == "member" else "owner"
         try:
-            s = m.get(ref, user_id=user_id)
+            s = m.get(ref, user_id=user_id, kind="agent")
         except HarnessError as e:
             if e.status in (400, 404):
                 raise HarnessError(404, "no session matches that id") from e
             raise
-        if s.get("owner_id", "owner") != user_id:
+        if s.get("owner_id", "owner") != user_id or (s.get("kind") or "agent") != "agent":
             raise HarnessError(404, "no session matches that id")
         return s
 
@@ -705,8 +705,13 @@ def register(app: FastAPI, mgr) -> None:
         key = auth(request, "sessions")
         user_id = key["user_id"] if key.get("kind") == "member" else "owner"
         positions = m.scheduler.positions()
-        return [{"session_id": sid, "position": pos} for sid, pos in sorted(positions.items(), key=lambda x: x[1])
-                if (m.db.get_session(sid) or {}).get("owner_id", "owner") == user_id]
+        out = []
+        for sid, pos in sorted(positions.items(), key=lambda x: x[1]):
+            session = m.db.get_session(sid) or {}
+            if session.get("owner_id", "owner") != user_id or (session.get("kind") or "agent") != "agent":
+                continue
+            out.append({"session_id": sid, "position": pos})
+        return out
 
     @app.get("/api/v1/events")
     async def api_events(request: Request):
@@ -731,7 +736,8 @@ def register(app: FastAPI, mgr) -> None:
                         yield ": keepalive\n\n"
                         continue
                     session = m.db.get_session(e["session_id"])
-                    if e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == user_id:
+                    if (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == user_id
+                            and (session.get("kind") or "agent") == "agent"):
                         if key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"] \
                                 and session.get("app_id") != key["id"]:
                             continue
@@ -762,9 +768,9 @@ def register(app: FastAPI, mgr) -> None:
     async def api_review(ref: str, action: str, request: Request):
         m = mgr(request)
         key = auth(request, "sessions")
+        s = own_session(request, key, ref)
         if key.get("kind") == "app":
             raise HarnessError(403, "app tokens cannot review sessions")
-        s = own_session(request, key, ref)
         return m.summary(await m.review(s["id"], action))
 
     @app.post("/api/v1/sessions", status_code=201, response_model=SessionResponse)

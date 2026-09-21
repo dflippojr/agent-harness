@@ -23,7 +23,7 @@ from .config import Config
 from .db import Database
 from .homelab import Homelab
 from .principal import OWNER_USER_ID, session_user_id
-from .policy import ALLOW, ASK, Policy
+from .policy import ALLOW, ASK, ChatPolicy, Policy
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
@@ -156,6 +156,8 @@ class Runner:
     def daemon_toolkits(self, s: dict) -> list:
         """Tools that run in the daemon for every target (memory library, web, session search), as enabled for the
         project and narrowed by app.capabilities."""
+        if s.get("kind") == "chat":  # Chat gets search/fetch only, never the agent toolkits
+            return [self.web] if self.web is not None else []
         project = self.project_for(s)
         defaults = self._app_defaults_for_session(s)
         member = session_user_id(s) != OWNER_USER_ID
@@ -184,6 +186,8 @@ class Runner:
         return self.settings.app_defaults_for_session(s)
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:
+        if s.get("kind") == "chat":
+            return self.web.schemas() if self.web is not None else []
         schemas = ws.schemas()
         for kit in self.daemon_toolkits(s):
             schemas = schemas + kit.schemas()
@@ -192,6 +196,8 @@ class Runner:
         return schemas
 
     def policy(self, s: dict) -> Policy:
+        if s.get("kind") == "chat":
+            return ChatPolicy()
         project = self.project_for(s)
         return Policy(project.rules if project else [], repo=bool(project and project.repo))
 

@@ -1,5 +1,7 @@
 // Agent Harness web app: plain ES module, no build step. Hash routes:
-//   #/                       session list
+//   #/                       redirects to #/chat (owner) or #/agents
+//   #/chat[/<id>]            Chat home: welcome state, or a durable non-agent conversation
+//   #/agents                 agent session list
 //   #/new                    new task (templates)
 //   #/s/<id>                 session transcript (live)
 //   #/s/<id>/approval/<aid>  same, focused on one approval (notification deep link)
@@ -74,9 +76,9 @@ function repaintBar() {
 }
 
 function setHeader(feature, pageTitle = "", { page = false } = {}) {
-  $feature.value = feature;
-  $feature.hidden = page;
-  $profileIcon.hidden = page;
+  if ([...$feature.options].some((o) => o.value === feature)) $feature.value = feature;
+  $feature.hidden = true;
+  $profileIcon.hidden = page || feature !== "chat";
   $title.textContent = pageTitle;
   $title.hidden = !pageTitle;
   document.getElementById("bar").classList.toggle("page", page);
@@ -328,6 +330,29 @@ function setConnLive(on) {
   $conn.classList.toggle("live", !!on);
 }
 
+// Ids come from the URL hash, so only the characters the daemon issues (hex, "-", "_") may reach a request path.
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const validId = (id) => typeof id === "string" && SAFE_ID.test(id);
+const STREAM_PATH = /^(?:\/api\/v1|\/api\/admin\/v1)?\/(?:(?:sessions|chats)\/[A-Za-z0-9_-]{1,64}\/events|events|queue)$/;
+const STREAM_QUERY = /^(?:\?[A-Za-z0-9_=&.-]*)?$/;
+
+// Returns a rebuilt same-origin stream URL, or null when it is not a known API stream path (fail closed).
+function safeStreamUrl(url) {
+  if (typeof url !== "string" || url.length > 2048) return null;
+  const base = agentHarnessWeb.baseUrl || "";
+  let rest = url;
+  if (base) {
+    if (!url.startsWith(`${base}/`)) return null;
+    rest = url.slice(base.length);
+  }
+  if (!rest.startsWith("/") || rest.startsWith("//") || rest.includes("\\")) return null;
+  const cut = rest.search(/\?/);
+  const path = cut < 0 ? rest : rest.slice(0, cut);
+  const query = cut < 0 ? "" : rest.slice(cut);
+  if (!STREAM_PATH.test(path) || !STREAM_QUERY.test(query)) return null;
+  return `${base}${path}${query}`;
+}
+
 // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
 // Connection-dot updates are opt-in (`indicate`) so page streams can close without a false offline state.
 function openStream(urlFor, handlers, { authorized = false, indicate = false } = {}) {
@@ -378,6 +403,8 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false } =
       if (!closed && run === generation) retry = setTimeout(connect, 3000);
       return;
     }
+    url = safeStreamUrl(url);
+    if (!url) { mark(false); return; }
     if (authorized && agentHarnessWeb.token) {
       try { await fetchStream(url); } catch (_) { /* retry below */ }
       mark(false);
@@ -422,7 +449,8 @@ function watchDaemonConnection() {
 
 // ---------- router ----------
 const hashParts = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-const isTopLevel = (parts) => parts.length === 0 || (parts.length === 1 && (parts[0] === "jobs" || parts[0] === "images"));
+const isTopLevel = (parts) => parts.length === 0 || parts[0] === "chat"
+  || (parts.length === 1 && (parts[0] === "agents" || parts[0] === "jobs" || parts[0] === "images"));
 
 function go(hash, replace = false) {
   if (protocolBlocked) return;
@@ -454,6 +482,7 @@ async function route() {
   }
   route.onImages = images;
   $back.hidden = isTopLevel(parts);
+  $menu.hidden = !$back.hidden;
   const guestBlocked = isGuest() && (
     parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
     || ((parts[0] === "profile" || parts[0] === "settings")
@@ -463,13 +492,16 @@ async function route() {
     || ((parts[0] === "profile" || parts[0] === "settings")
       && ["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"].includes(parts[1])));
   if (guestBlocked) { go(parts[0] === "jobs" ? "#/jobs" : "#/profile", true); return; }
-  if (memberBlocked) { go(parts[0] === "profile" || parts[0] === "settings" ? "#/profile" : "#/", true); return; }
+  if (memberBlocked) { go(parts[0] === "profile" || parts[0] === "settings" ? "#/profile" : "#/agents", true); return; }
   try {
-    if (parts.length === 0) await viewList();
+    if (parts.length === 0) go(canChat() ? "#/chat" : "#/agents", true);
+    else if (parts[0] === "chat") await viewChat(parts[1]);
+    else if (parts[0] === "agents") await viewList();
     else if (parts[0] === "new") await viewNew();
             else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1], parts[2]);
     else if (parts[0] === "images") {
-      if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
+      if (parts[1] && !validId(parts[1])) go("#/images", true);
+      else if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
       else if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
       else if (parts[1]) await viewImage(parts[1]);
       else await viewImages();
@@ -492,9 +524,302 @@ $back.addEventListener("click", () => {
 });
 $feature.addEventListener("change", () => {
   if (protocolBlocked) return;
-  go($feature.value === "jobs" ? "#/jobs" : $feature.value === "images" ? "#/images" : "#/", true);
+  go($feature.value === "jobs" ? "#/jobs" : $feature.value === "images" ? "#/images"
+    : $feature.value === "chat" ? "#/chat" : "#/agents", true);
 });
 window.addEventListener("hashchange", route);
+
+
+// ---------- navigation drawer ----------
+const $menu = document.getElementById("menu-btn");
+const $drawer = document.getElementById("nav-drawer");
+const $scrim = document.getElementById("drawer-scrim");
+const $drawerChats = document.getElementById("drawer-chats");
+const canChat = () => !isGuest() && !isMember();
+let drawerReturnFocus = null;
+
+function drawerFocusable() {
+  return [...$drawer.querySelectorAll("a[href], button")].filter((el) => !el.hidden && !el.closest("[hidden]"));
+}
+
+function currentSection() {
+  const first = hashParts()[0] || "";
+  return first === "s" || first === "new" ? "agents" : first;
+}
+
+async function refreshDrawerChats() {
+  const recent = $drawer.querySelector(".drawer-recent");
+  if (!canChat()) { fill($drawerChats); recent.hidden = true; return; }
+  recent.hidden = false;
+  let chats = [];
+  try { chats = await api("/chats?limit=30"); } catch (_) { return; } // offline: keep what is shown
+  const active = hashParts()[0] === "chat" ? hashParts()[1] : "";
+  fill($drawerChats, chats.length ? chats.map((c) => h("a", {
+    href: `#/chat/${c.id}`, class: c.id === active ? "on" : "", title: c.title,
+    "aria-current": c.id === active ? "page" : false,
+  }, c.title)) : h("p", { class: "muted small" }, "No chats yet."));
+}
+
+function openDrawer() {
+  if (protocolBlocked || !$drawer.hidden) return;
+  drawerReturnFocus = document.activeElement;
+  const section = currentSection();
+  $drawer.querySelectorAll("a[data-nav]").forEach((a) => {
+    const nav = a.dataset.nav;
+    a.hidden = (nav === "chat" && !canChat()) || (isMember() && (nav === "jobs" || nav === "images"));
+    if (nav === section) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  });
+  document.getElementById("drawer-profile-icon").textContent = $profileIcon.textContent || "🙂";
+  $drawer.hidden = false;
+  $scrim.hidden = false;
+  $menu.setAttribute("aria-expanded", "true");
+  document.body.classList.add("drawer-open");
+  refreshDrawerChats();
+  drawerFocusable()[0]?.focus();
+}
+
+function closeDrawer({ restoreFocus = true } = {}) {
+  if ($drawer.hidden) return;
+  $drawer.hidden = true;
+  $scrim.hidden = true;
+  $menu.setAttribute("aria-expanded", "false");
+  document.body.classList.remove("drawer-open");
+  if (restoreFocus) (drawerReturnFocus && document.contains(drawerReturnFocus) ? drawerReturnFocus : $menu).focus?.();
+  drawerReturnFocus = null;
+}
+
+$menu.addEventListener("click", () => ($drawer.hidden ? openDrawer() : closeDrawer()));
+$scrim.addEventListener("click", () => closeDrawer());
+$drawer.addEventListener("click", (event) => {
+  // Choosing the page we are already on does not fire hashchange, so close here as well.
+  if (event.target.closest("a[href]")) closeDrawer({ restoreFocus: false });
+});
+document.addEventListener("keydown", (event) => {
+  if ($drawer.hidden) return;
+  if (event.key === "Escape") { event.preventDefault(); closeDrawer(); return; }
+  if (event.key !== "Tab") return;
+  const items = drawerFocusable();
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+window.addEventListener("hashchange", () => closeDrawer({ restoreFocus: false }));
+
+// ---------- chat ----------
+const CHAT_CHOICE_KEY = "harness.chatChoice";
+const CHAT_STARTERS = ["Explain a concept simply", "Review some code I paste", "Summarize a topic with sources"];
+
+function readChatChoice() {
+  try { return JSON.parse(localStorage.getItem(CHAT_CHOICE_KEY) || "null") || {}; } catch (_) { return {}; }
+}
+
+// Keeps the fixed composer above the on-screen keyboard (iOS does not resize the layout viewport).
+function trackKeyboard(composer) {
+  const vv = window.visualViewport;
+  if (!vv) return () => {};
+  const update = () => {
+    composer.style.bottom = `${Math.max(0, window.innerHeight - vv.height - vv.offsetTop)}px`;
+  };
+  vv.addEventListener("resize", update);
+  vv.addEventListener("scroll", update);
+  update();
+  return () => { vv.removeEventListener("resize", update); vv.removeEventListener("scroll", update); };
+}
+
+function chatComposer(options, session) {
+  const fixed = Boolean(session);
+  const choice = readChatChoice();
+  const backends = options.backends || [];
+  const modelSelect = h("select", { class: "chat-model", "aria-label": "Model", disabled: fixed });
+  const effortSelect = h("select", { class: "chat-effort", "aria-label": "Reasoning effort", disabled: fixed });
+  const input = h("textarea", { placeholder: "Message…", rows: 1, "aria-label": "Message" });
+  const send = h("button", { class: "btn primary", type: "button" }, "Send");
+  const cancel = h("button", { class: "btn bad", type: "button", hidden: true }, "Cancel");
+  const notice = h("p", { class: "note chat-notice", hidden: true });
+
+  const keyOf = (backend, model) => `${backend}|${model}`;
+  if (fixed) {
+    modelSelect.append(h("option", {}, `${session.backend || "local"} · ${session.model}`));
+    effortSelect.append(h("option", {}, session.effort || "default"));
+    effortSelect.hidden = !session.effort;
+    modelSelect.title = effortSelect.title = "Start a new chat to change the model or effort.";
+  } else {
+    for (const b of backends) {
+      modelSelect.append(h("optgroup", { label: b.name === "local" ? "Local" : b.name },
+        b.models.map((m) => h("option", { value: keyOf(b.name, m) }, m))));
+    }
+    const wanted = keyOf(choice.backend, choice.model);
+    const fallback = backends.find((b) => b.name === options.default_backend) || backends[0];
+    modelSelect.value = [...modelSelect.options].some((o) => o.value === wanted) ? wanted
+      : fallback ? keyOf(fallback.name, fallback.model || fallback.models[0]) : "";
+  }
+  const selected = () => {
+    const [backend, ...rest] = (modelSelect.value || "").split("|");
+    return { backend, model: rest.join("|"), spec: backends.find((b) => b.name === backend) };
+  };
+  const syncEffort = () => {
+    if (fixed) return;
+    const { spec } = selected();
+    const efforts = spec?.efforts || [];
+    effortSelect.replaceChildren(...efforts.map((e) => h("option", { value: e }, e)));
+    effortSelect.hidden = !efforts.length;
+    const pick = choice.effort && efforts.includes(choice.effort) ? choice.effort : spec?.effort;
+    if (pick && efforts.includes(pick)) effortSelect.value = pick;
+    notice.textContent = spec?.billing_warning || "";
+    notice.hidden = !spec?.billing_warning;
+  };
+  modelSelect.addEventListener("change", syncEffort);
+  syncEffort();
+
+  input.addEventListener("input", () => { input.style.height = "44px"; input.style.height = `${Math.min(160, input.scrollHeight)}px`; });
+  const el = h("div", { class: "composer chat-composer" }, h("div", { class: "inner", style: "flex-direction:column;align-items:stretch" },
+    notice,
+    h("div", { class: "row chat-pickers" }, modelSelect, effortSelect),
+    h("div", { class: "row", style: "flex-wrap:nowrap;align-items:flex-end" }, input, send, cancel)));
+  const remember = () => {
+    const { backend, model } = selected();
+    try { localStorage.setItem(CHAT_CHOICE_KEY, JSON.stringify({ backend, model, effort: effortSelect.value })); } catch (_) { /* private mode */ }
+  };
+  return { el, input, send, cancel, effortSelect, selected, remember };
+}
+
+async function viewChat(id) {
+  if (!canChat()) { go("#/agents", true); return; }
+  if (id && !validId(id)) { go("#/chat", true); return; }
+  let session = null;
+  let options = { backends: [] };
+  if (id) session = await api(`/chats/${id}`);
+  else options = await api("/chats/options");
+  if (session) id = session.id;
+  setHeader("chat", session ? session.title : "Chat");
+  const ui = chatComposer(options, session);
+  document.body.append(ui.el);
+  document.body.classList.add("chat-page");
+  const stopKeyboard = trackKeyboard(ui.el);
+  onLeave(() => { ui.el.remove(); stopKeyboard(); document.body.classList.remove("chat-page"); });
+
+  const feed = h("div", { class: "chat-feed", "aria-live": "polite" });
+  const welcome = h("div", { class: "chat-welcome" },
+    h("div", { class: "chat-welcome-mark", "aria-hidden": "true" }, "💬"),
+    h("h2", {}, "How can I help?"),
+    h("p", { class: "muted" }, "Ask a question or paste code to review. To change files or run work, use Agents."),
+    h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
+      class: "btn small", type: "button",
+      onclick: () => { ui.input.value = text; ui.input.focus(); },
+    }, text))));
+  const wrap = h("div", { class: "chat-wrap" }, session ? null : welcome, feed);
+  $app.append(wrap);
+  if (!session && !options.backends.length) {
+    feed.append(h("p", { class: "note bad" }, "No model backend is available right now. Check Profile → Backends."));
+    ui.send.disabled = true;
+  }
+
+  const scrollDown = () => window.scrollTo({ top: document.body.scrollHeight });
+  const setBusy = (busy) => { ui.send.hidden = busy; ui.cancel.hidden = !busy; };
+  const send = async () => {
+    const text = ui.input.value.trim();
+    if (!text) return;
+    ui.send.disabled = true;
+    try {
+      if (!session) {
+        const { backend, model, spec } = ui.selected();
+        ui.remember();
+        const created = await api("/chats", { method: "POST", body: {
+          prompt: text, backend, model, effort: spec?.efforts?.length ? ui.effortSelect.value : "" } });
+        ui.input.value = "";
+        go(`#/chat/${created.id}`, true);
+        return;
+      }
+      await api(`/chats/${id}/messages`, { method: "POST", body: { content: text } });
+      ui.input.value = "";
+      ui.input.style.height = "44px";
+      setBusy(true);
+    } catch (e) { toast(e.message); }
+    ui.send.disabled = false;
+  };
+  ui.send.addEventListener("click", send);
+  ui.input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send(); }
+  });
+  ui.cancel.addEventListener("click", async () => {
+    try { await api(`/chats/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
+  });
+  if (!session) { ui.input.focus(); return; }
+
+  wrap.prepend(h("div", { class: "row small chat-tools" },
+    h("span", { class: "muted" }, `${session.backend || "local"} · ${session.model}${session.effort ? ` · ${session.effort}` : ""}`),
+    h("button", { class: "btn small", type: "button", onclick: async () => {
+      const title = prompt("Rename chat", session.title);
+      if (!title || !title.trim()) return;
+      try { session = await api(`/chats/${id}`, { method: "PATCH", body: { title } }); setHeader("chat", session.title); }
+      catch (e) { toast(e.message); }
+    } }, "Rename"),
+    h("button", { class: "btn small bad", type: "button", onclick: async () => {
+      if (!confirm("Delete this chat?")) return;
+      try { await api(`/chats/${id}`, { method: "DELETE" }); go("#/chat", true); } catch (e) { toast(e.message); }
+    } }, "Delete")));
+
+  let lastSeq = 0;
+  let live = null;
+  let sawContent = false;
+  const add = (el) => { feed.append(el); scrollDown(); return el; };
+  const handlers = {
+    user_message: (e) => add(h("div", { class: "msg user" }, e.data.content)),
+    delta: (e) => {
+      if (e.data.kind === "reasoning") return;
+      if (!live) live = add(h("div", { class: "msg assistant" }));
+      live.textContent += e.data.text;
+      scrollDown();
+    },
+    assistant: (e) => {
+      live?.remove();
+      live = null;
+      const d = e.data;
+      if (d.content && d.content.trim()) sawContent = true;
+      if (d.content && d.content.trim()) add(h("div", { class: "msg assistant final", html: md(d.content, []) }));
+      for (const call of d.tool_calls || []) {
+        add(h("p", { class: "note" }, call.function?.name === "web_fetch" ? "Reading a web page…" : "Searching the web…"));
+      }
+    },
+    billing_warning: (e) => add(h("p", { class: "note bad" }, e.data.message)),
+    limit_waiting: (e) => add(h("p", { class: "note" }, `Rate limit reached; waiting until ${new Date(e.data.resets_at * 1000).toLocaleString()}`)),
+    backend_fallback: (e) => add(h("p", { class: "note bad" }, `Rate limit reached; continuing ${e.data.backend} with an API key`)),
+    status: (e) => {
+      const status = e.data.status;
+      session = { ...session, status };
+      setBusy(!TERMINAL.has(status));
+      if (!TERMINAL.has(status)) return;
+      live?.remove();
+      live = null;
+      const answer = (e.data.answer || "").trim();
+      if (answer && !sawContent) {
+        add(h("div", { class: "msg assistant final", html: md(answer, []) }));
+      }
+      if (status !== "done") {
+        add(h("p", { class: `status-line${status === "failed" ? " bad" : ""}` }, badge(status),
+          e.data.stop_reason && !["final_message", "finished"].includes(e.data.stop_reason) ? ` ${e.data.stop_reason}` : ""));
+      }
+    },
+  };
+  const tracked = {};
+  for (const type of Object.keys(handlers)) {
+    tracked[type] = (e) => {
+      if (e.seq !== null && e.seq !== undefined) {
+        if (e.seq <= lastSeq) return;
+        lastSeq = e.seq;
+      }
+      handlers[type](e);
+    };
+  }
+  setBusy(!TERMINAL.has(session.status));
+  onLeave(openStream(
+    () => agentHarnessWeb.url(`/chats/${encodeURIComponent(id)}/events?after=${lastSeq}`, ownerSurface()),
+    tracked,
+    { authorized: !!agentHarnessWeb.token },
+  ));
+}
 
 // ---------- session list ----------
 let searchQuery = "";  // kept while navigating, so Back from a result returns to the results
@@ -977,6 +1302,7 @@ function bindSessionJumps() {
 
 // ---------- session ----------
 async function viewSession(sid, tab, focusApproval) {
+  if (!validId(sid)) { go("#/agents", true); return; }
   let session = await api(`/sessions/${sid}`);
   sid = session.id;
   setHeader("agents");
@@ -1446,7 +1772,7 @@ async function viewSession(sid, tab, focusApproval) {
     };
   }
   onLeave(openStream(() => (isGuest() && !agentHarnessWeb.token
-    ? agentHarnessWeb.url(`/sessions/${sid}/events?after=${lastSeq}`, "legacy")
+    ? agentHarnessWeb.url(`/sessions/${encodeURIComponent(sid)}/events?after=${lastSeq}`, "legacy")
     : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked));
   if (composer) onLeave(() => composer.remove());
 }

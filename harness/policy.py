@@ -166,3 +166,20 @@ class Policy:
         if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
             return Decision(ASK, "deletes files outside the scratch area")
         return Decision(ALLOW)
+
+
+CHAT_ALLOWED_TOOLS = frozenset({"web_search", "web_fetch", "WebSearch", "WebFetch"})
+
+
+class ChatPolicy:
+    """Chat conversations may only search and fetch. Everything else is denied outright, never turned into an approval."""
+
+    rules: list[dict] = [{"tool": "*", "action": DENY, "reason": "not available in Chat; use Agents for that"}]
+
+    def fingerprint(self) -> str:
+        return "chat-allowlist"
+
+    def decide(self, name: str, args: dict) -> Decision:
+        if name in CHAT_ALLOWED_TOOLS:
+            return Decision(ALLOW)
+        return Decision(DENY, "not available in Chat; use Agents for that")
