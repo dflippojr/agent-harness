@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
@@ -12,7 +14,8 @@ from harness.config import GuestAccess, SearchConfig
 from harness.db import Database
 from harness.fileops import ToolError
 from harness.llm import Completion
-from harness.manager import Manager
+from harness.manager import HarnessError, Manager
+from harness.principal import Principal
 from harness.policy import ChatPolicy
 from harness.runner import Runner
 from harness.search import SessionSearch, search
@@ -216,3 +219,124 @@ def test_http_agent_surfaces_reject_chat_ids_and_search(tmp_path):
         replay = client.get(f"/chats/{chat['id']}/events", params={"follow": False})
         assert replay.status_code == 200 and CHAT_MARKER in replay.text
         assert chat["id"] not in [s["id"] for s in client.get("/queue").json()]
+
+
+def _remote_view(logged_in=True, available=True, model="opus", popular=("sonnet",)):
+    return {"available": available, "logged_in": logged_in, "model": model, "effort": None,
+            "notice": "n", "billing_warning": "w", "limits": None,
+            "popular_models": [{"id": p} for p in popular]}
+
+
+def test_chat_options_lists_ready_remote_backends(tmp_path, monkeypatch):
+    client, m, _ = make_client(tmp_path, [Completion(content="")])
+    views = {"claude": _remote_view(), "codex": _remote_view(logged_in=False), "cursor": _remote_view(available=False)}
+    monkeypatch.setattr("harness.backend_state.view", lambda _m, name: views[name])
+    m.cfg.backends = {name: None for name in (*views, "aider")}  # aider is not a chat backend and is skipped
+    m.cfg.modules.local_model = False
+    with client:
+        opts = client.get("/chats/options").json()
+    assert opts["default_backend"] == "claude"
+    assert [b["name"] for b in opts["backends"]] == ["claude"]
+    claude = opts["backends"][0]
+    assert claude["models"] == ["opus", "sonnet"] and claude["efforts"] == ["low", "medium", "high"]
+    assert claude["effort"] == "" and claude["limits"] == {}
+
+
+def test_chat_options_default_falls_back_when_local_unavailable(tmp_path, monkeypatch):
+    client, m, _ = make_client(tmp_path, [Completion(content="")])
+    monkeypatch.setattr("harness.backend_state.view", lambda _m, _name: _remote_view(popular=("opus", "sonnet")))
+    m.cfg.backends = {"codex": None}
+    m.cfg.models = {}  # local model configured but nothing to run: it is not offered, so the default moves on
+    assert m.cfg.modules.local_model
+    opts = m.chat_options()
+    assert opts["default_backend"] == "codex"
+    assert opts["backends"][0]["models"] == ["opus", "sonnet"]
+    m.cfg.backends = {}
+    assert m.chat_options() == {"default_backend": "", "backends": []}
+
+
+def test_chat_delete_rename_and_cancel_guards(tmp_path):
+    client, m, _ = make_client(tmp_path, [Completion(content="")])
+    m._spawn = lambda *_a, **_k: None  # keep sessions queued, with no live task
+    with client:
+        chat = client.post("/chats", json={"prompt": "hello"}).json()
+        agent = client.post("/sessions", json={"prompt": "task"}).json()
+        assert chat["status"] == "queued"
+        assert client.delete(f"/chats/{chat['id']}").status_code == 409
+        assert client.patch(f"/chats/{chat['id']}", json={"title": "   "}).status_code == 400
+        assert client.patch(f"/chats/{chat['id']}", json={"title": "x" * 121}).status_code == 400
+        with pytest.raises(HarnessError) as err:
+            m.delete_chat(agent["id"])
+        assert err.value.status == 404
+        assert client.post(f"/chats/{chat['id']}/cancel").json()["status"] == "cancelled"
+        assert client.post(f"/chats/{chat['id']}/cancel").status_code == 409
+        assert client.post(f"/sessions/{agent['id']}/cancel").json()["status"] == "cancelled"
+        assert client.delete(f"/chats/{chat['id']}").status_code == 200
+
+
+def test_chat_create_is_owner_only_and_uses_chat_toolkit(tmp_path):
+    client, m, _ = make_client(tmp_path, [Completion(content="")])
+    m._spawn = lambda *_a, **_k: None
+    with client:
+        with pytest.raises(HarnessError) as err:
+            m.create("hi", owner_id="guest:someone@example.com", kind="chat")
+        assert err.value.status == 403
+        chat = client.post("/chats", json={"prompt": "hi"}).json()
+        s = m.db.get_session(chat["id"])
+        assert isinstance(m.runner.policy(s), ChatPolicy) and ChatPolicy().fingerprint() == "chat-allowlist"
+        assert m.runner.daemon_toolkits(s) == ([m.runner.web] if m.runner.web is not None else [])
+        m.runner.web, web = None, m.runner.web
+        assert m.runner.daemon_toolkits(s) == []
+        m.runner.web = web
+
+
+def test_queue_lists_only_owned_agent_sessions(tmp_path):
+    client, m, _ = make_client(tmp_path, [Completion(content="")])
+    m._spawn = lambda *_a, **_k: None
+    with client:
+        chat = client.post("/chats", json={"prompt": "hi"}).json()
+        agent = client.post("/sessions", json={"prompt": "task"}).json()
+        key = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions", "sessions:all"]}).json()
+        m.scheduler.positions = lambda: {agent["id"]: 0, chat["id"]: 1}
+        assert client.get("/queue").json() == [{"session_id": agent["id"], "position": 0}]
+        app_queue = client.get("/api/v1/queue", headers={"Authorization": f"Bearer {key['key']}"})
+        assert app_queue.json() == [{"session_id": agent["id"], "position": 0}]
+
+
+@pytest.mark.parametrize("path", ["/events", "/api/v1/events"])
+def test_session_list_stream_hides_chats_and_run_payloads(tmp_path, path):
+    client, m, _ = make_client(tmp_path, [Completion(content="")])
+    m._spawn = lambda *_a, **_k: None
+    with client:
+        chat = client.post("/chats", json={"prompt": "hi"}).json()
+        agent = client.post("/sessions", json={"prompt": "task"}).json()
+        endpoint = next(r.endpoint for r in client.app.routes if getattr(r, "path", "") == path)
+        owner = Principal(kind="owner", user_id="owner", allowed=True, login=LOGIN)
+
+        async def first_event():
+            async def connected():
+                return False
+            request = SimpleNamespace(app=client.app, state=SimpleNamespace(access=owner), headers={},
+                                      is_disconnected=connected)
+            body = (await endpoint(request)).body_iterator
+            assert await body.__anext__() == ": connected\n\n"
+            m.bus.emit(chat["id"], "status", {"status": "done"})
+            m.bus.emit(agent["id"], "run_finished", {"run": {"secret": 1}, "ok": True})
+            chunk = await asyncio.wait_for(body.__anext__(), 5)
+            await body.aclose()
+            return chunk
+
+        chunk = asyncio.run(first_event())
+    assert "run_finished" in chunk and '"ok": true' in chunk and chat["id"] not in chunk
+    assert ("secret" in chunk) == (path == "/api/v1/events")  # only the bundled list stream strips run payloads
+
+
+def test_chat_accepts_follow_up_messages(tmp_path):
+    client, m, _ = make_client(tmp_path, [Completion(content="first"), Completion(content="second")])
+    with client:
+        chat = client.post("/chats", json={"prompt": "hello"}).json()
+        wait_for(lambda: client.get(f"/chats/{chat['id']}").json()["status"] == "done")
+        sent = client.post(f"/chats/{chat['id']}/messages", json={"content": "and again"})
+        assert sent.status_code == 200
+        wait_for(lambda: m.db.get_session(chat["id"])["status"] == "done"
+                 and "second" in str(m.db.get_session(chat["id"]).get("answer") or ""))
