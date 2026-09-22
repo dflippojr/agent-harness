@@ -300,6 +300,8 @@ class GpuGuard:
             data = json.loads(raw)
             manual = bool(data["manual"])
             manual_until = data.get("manual_until")
+            if manual_until is not None:
+                manual_until = float(manual_until)
             manual_duration_seconds = data.get("manual_duration_seconds")
         except (ValueError, KeyError, TypeError):
             log.warning("GPU guard: ignoring malformed hold state file %s", self._state_path)

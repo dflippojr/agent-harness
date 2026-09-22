@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 from harness.config import GpuGuardConfig
@@ -387,6 +388,7 @@ def test_corrupt_or_empty_state_file_ignored_on_start(tmp_path):
             await guard.stop()
     asyncio.run(body("not json"))
     asyncio.run(body(""))
+    asyncio.run(body(json.dumps({"manual": True, "manual_until": "soon"})))
 
 
 def test_guard_startup_with_leftover_flag_resumes_when_clear():
