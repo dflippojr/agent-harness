@@ -142,7 +142,8 @@ class Manager:
                                   busy=lambda: bool(self.runner.generating) or self.runner.gate.busy
                                   or self.runner.gate.exclusive,
                                   on_pause=self._gpu_paused,
-                                  on_resume=self._gpu_resumed)
+                                  on_resume=self._gpu_resumed,
+                                  data_dir=cfg.data_dir)
             self.runner.guard = self.guard
             self.warmer.blocked = lambda: self.guard.active or self.guard.manual or bool(self.images and self.images.gpu_taken)
         elif self.images is not None:
