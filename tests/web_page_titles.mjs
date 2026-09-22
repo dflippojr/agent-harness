@@ -59,6 +59,17 @@ class El extends Node {
     };
     this.offsetHeight = 48;
     this._text = "";
+    this.parentNode = null;
+  }
+  get isConnected() { return !!this.parentNode; }
+  replaceWith(...nodes) {
+    if (!this.parentNode) return;
+    const parent = this.parentNode;
+    const idx = parent.childNodes.indexOf(this);
+    if (idx === -1) return;
+    for (const n of nodes) if (n instanceof El) n.parentNode = parent;
+    parent.childNodes.splice(idx, 1, ...nodes);
+    this.parentNode = null;
   }
   get textContent() {
     if (this.childNodes.length) {
@@ -73,6 +84,7 @@ class El extends Node {
   append(...nodes) {
     for (const n of nodes.flat()) {
       if (n === null || n === undefined || n === false) continue;
+      if (n instanceof El) n.parentNode = this;
       this.childNodes.push(n instanceof El ? n : String(n));
     }
     if (this.tagName === "SELECT" && !this.value) {
@@ -83,6 +95,9 @@ class El extends Node {
   replaceChildren(...nodes) { this.childNodes = []; this.append(...nodes); }
   remove() { this.removed = true; }
   click() { this.dispatchEvent({ type: "click" }); }
+  focus() {}
+  select() {}
+  blur() { this.dispatchEvent({ type: "blur" }); }
   querySelector() { return null; }
   querySelectorAll() { return []; }
   getContext() {
@@ -200,7 +215,7 @@ const sessionDetail = {
 };
 
 const fetched = [];
-const fakeFetch = async (url) => {
+const fakeFetch = async (url, opts = {}) => {
   const href = String(url);
   fetched.push(href);
   const path = href.replace(/^https?:\/\/[^/]+/, "").replace(/^\/api\/(?:admin\/)?v1/, "");
@@ -212,6 +227,11 @@ const fakeFetch = async (url) => {
   }
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
   if (path === "/sessions" || path.startsWith("/sessions?")) return jsonResp([]);
+  if (path === "/sessions/sess1" && (opts.method === "PATCH" || opts.method === "PUT")) {
+    const body = JSON.parse(opts.body || "{}");
+    sessionDetail.title = body.title;
+    return jsonResp(sessionDetail);
+  }
   if (path === "/sessions/sess1") return jsonResp(sessionDetail);
   if (path === "/queue") return jsonResp([]);
   if (path === "/gpu") return jsonResp({ manual: false, state: "clear" });
@@ -390,6 +410,26 @@ assertTitle("#/images/img1", "Image");
 await go("#/s/sess1");
 await waitFor(() => /Demo session/.test(byId.title.textContent), "session transcript title");
 assertTitle("#/s/sess1", "Demo session");
+
+// Renaming the session via the inline title editor must update the topbar title too (#178).
+const findByClass = (root, cls) => {
+  if (!root) return null;
+  if (root instanceof El && (root.className || "").split(/\s+/).includes(cls)) return root;
+  for (const c of root.childNodes || []) {
+    const found = findByClass(c, cls);
+    if (found) return found;
+  }
+  return null;
+};
+const titleBtn = findByClass(byId.app, "session-title");
+if (!titleBtn) throw new Error("session title button not found");
+titleBtn.click();
+const titleInput = findByClass(byId.app, "session-title-edit");
+if (!titleInput) throw new Error("session title edit input not found");
+titleInput.value = "Renamed session";
+titleInput.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {} });
+await waitFor(() => /Renamed session/.test(byId.title.textContent), "topbar title after rename");
+assertTitle("#/s/sess1", "Renamed session");
 
 await go("#/new");
 await waitFor(() => /New task/.test(byId.title.textContent), "new task title");

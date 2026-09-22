@@ -1257,6 +1257,7 @@ function sessionTitle(session) {
               updated = await api(`/sessions/${session.id}`, { method: "PUT", body });
             }
             session.title = updated.title;
+            setHeader("agents", session.title || "Session");
           } catch (e) { toast(e.message); }
         }
       }
