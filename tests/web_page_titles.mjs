@@ -214,6 +214,7 @@ const sessionDetail = {
   backend: "local", model: "local", totals: {}, created_at: 1, updated_at: 2, workspace: "/tmp",
 };
 
+let pendingRenameGate = null;
 const fetched = [];
 const fakeFetch = async (url, opts = {}) => {
   const href = String(url);
@@ -229,6 +230,7 @@ const fakeFetch = async (url, opts = {}) => {
   if (path === "/sessions" || path.startsWith("/sessions?")) return jsonResp([]);
   if (path === "/sessions/sess1" && (opts.method === "PATCH" || opts.method === "PUT")) {
     const body = JSON.parse(opts.body || "{}");
+    if (pendingRenameGate) await pendingRenameGate;
     sessionDetail.title = body.title;
     return jsonResp(sessionDetail);
   }
@@ -434,5 +436,34 @@ assertTitle("#/s/sess1", "Renamed session");
 await go("#/new");
 await waitFor(() => /New task/.test(byId.title.textContent), "new task title");
 assertTitle("#/new", "New task");
+
+// A rename PATCH that resolves after the user has already navigated away must not
+// clobber the topbar title of the page the user is now on (#178).
+sessionDetail.title = "Demo session";
+await go("#/s/sess1");
+await waitFor(() => /Demo session/.test(byId.title.textContent), "session transcript title (race setup)");
+
+let releaseRename;
+pendingRenameGate = new Promise((r) => { releaseRename = r; });
+
+const titleBtn2 = findByClass(byId.app, "session-title");
+if (!titleBtn2) throw new Error("session title button not found (race test)");
+titleBtn2.click();
+const titleInput2 = findByClass(byId.app, "session-title-edit");
+if (!titleInput2) throw new Error("session title edit input not found (race test)");
+titleInput2.value = "Renamed while leaving";
+titleInput2.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {} });
+
+// Navigate away before the PATCH resolves.
+await go("#/agents");
+await waitFor(() => /Agents/.test(byId.title.textContent), "agents title before rename resolves");
+
+releaseRename();
+pendingRenameGate = null;
+await sleep(60);
+
+if (!/Agents/.test(byId.title.textContent)) {
+  throw new Error(`stale session rename clobbered topbar title after navigating away: "${byId.title.textContent}"`);
+}
 
 console.log("ok");
