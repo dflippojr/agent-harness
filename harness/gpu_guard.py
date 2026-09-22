@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -302,6 +303,8 @@ class GpuGuard:
             manual_until = data.get("manual_until")
             if manual_until is not None:
                 manual_until = float(manual_until)
+                if not math.isfinite(manual_until):
+                    raise ValueError(f"non-finite manual_until: {manual_until!r}")
             manual_duration_seconds = data.get("manual_duration_seconds")
         except (ValueError, KeyError, TypeError):
             log.warning("GPU guard: ignoring malformed hold state file %s", self._state_path)
