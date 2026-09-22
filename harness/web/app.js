@@ -831,7 +831,7 @@ const markPassage = (text) => escapeHtml(text).replace(//g, "<mark>").replace(/
 const PASSAGE_KIND = { title: "title", message: "you", assistant: "agent", tool: "tool output", answer: "answer", context: "app context" };
 
 async function viewList() {
-  setHeader("agents");
+  setHeader("agents", "Agents");
   const list = h("div");
   const results = h("div", { hidden: true });
   const queueNote = h("p", { class: "note" });
@@ -1305,7 +1305,7 @@ async function viewSession(sid, tab, focusApproval) {
   if (!validId(sid)) { go("#/agents", true); return; }
   let session = await api(`/sessions/${sid}`);
   sid = session.id;
-  setHeader("agents");
+  setHeader("agents", session.title || "Session");
 
   const tabs = h("div", { class: "tabs" },
     ["transcript", "changes", "info"].map((name) => h("button", {
@@ -1981,7 +1981,7 @@ function imageModeEntries(status) {
 }
 
 async function viewImages() {
-  setHeader("images");
+  setHeader("images", "Images");
   let data;
   try { data = await api("/images"); } catch (e) { $app.append(h("p", { class: "note bad" }, e.message)); return; }
   const prompt = h("textarea", { placeholder: "Describe the image…" });
@@ -2384,7 +2384,7 @@ const whenText = (ts) => {
 const cronLabel = (cron) => (CRON_PRESETS.find(([c]) => c === cron) || [null, cron])[1];
 
 async function viewJobs() {
-  setHeader("jobs");
+  setHeader("jobs", "Jobs");
   showFab("#/jobs/new", "+ New job");
   const jobs = await api("/jobs");
   if (!jobs.length) {
