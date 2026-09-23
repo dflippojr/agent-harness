@@ -224,6 +224,7 @@ const sessionDetail = {
 
 let pendingRenameGate = null;
 let meRole = "owner";
+let gpuPayload = { manual: false, state: "clear" };
 const fetched = [];
 const fakeFetch = async (url, opts = {}) => {
   const href = String(url);
@@ -245,7 +246,7 @@ const fakeFetch = async (url, opts = {}) => {
   }
   if (path === "/sessions/sess1") return jsonResp(sessionDetail);
   if (path === "/queue") return jsonResp([]);
-  if (path === "/gpu") return jsonResp({ manual: false, state: "clear" });
+  if (path === "/gpu") return jsonResp(gpuPayload);
   if (path === "/projects") return jsonResp([{ name: "scratch", target: "tower" }]);
   if (path === "/jobs") return jsonResp([]);
   if (path === "/jobs/job1") return jsonResp(jobDetail);
@@ -489,6 +490,28 @@ const tabLabels = (root) => {
   walk(root);
   return labels;
 };
+
+const findHref = (root, href) => {
+  let found = null;
+  const walk = (node) => {
+    if (found || !node || typeof node !== "object") return;
+    if (node.tagName === "A" && node.attributes && node.attributes.href === href) found = node;
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(root);
+  return found;
+};
+gpuPayload = {
+  manual: true, state: "paused", manual_remaining_seconds: null,
+  enabled: true, signals: [], reasons: [],
+};
+await go("#/agents");
+await waitFor(() => /Local models held/.test(byId.app.textContent), "gpu hold notice");
+if (!findHref(byId.app, "#/actions/gpu")) {
+  const stale = findHref(byId.app, "#/profile");
+  throw new Error(`gpu hold notice links to ${stale ? stale.attributes.href : "nothing"}`);
+}
+gpuPayload = { manual: false, state: "clear" };
 
 await go("#/actions");
 await waitFor(() => loc.hash === "#/actions/gpu" && /GPU guard disabled|Checking/.test(byId.app.textContent), "default gpu tab");

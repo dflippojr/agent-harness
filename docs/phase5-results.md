@@ -22,7 +22,7 @@ phase added GPU contention handling, monitoring, backups, a read-only memory-lib
 | Queue pause | `harness/scheduler.py` | `set_paused`; a session that steps aside re-queues first in line |
 | Model-call gate | `harness/runner.py` (`_model_call`, `_gpu_gate`) | waits before each model call; retries a call cut off by a stop |
 | Supervisor pause flag | `ops/llama-server/run-qwen.ps1` | doesn't restart llama-server while `C:\AI\llama-server.paused` exists |
-| GPU API | `GET /gpu`, `POST /gpu/pause`, `POST /gpu/resume` | Settings → GPU card; banner on the session list |
+| GPU API | `GET /gpu`, `POST /gpu/pause`, `POST /gpu/resume` | Actions → GPU; banner on the session list |
 | Metrics | `harness/metrics.py`, `GET /metrics` | computed from SQLite per scrape plus live state |
 | Dashboard | `D:\Docker\observability-stack` `grafana/.../agent-harness.json`, Prometheus job `agent_harness` | "Agent Harness" in the Basement PC folder |
 | Backups | `harness/maintenance.py`, `backup:` in config, `POST /maintenance/backup` | status in `D:\Agents\harness\backup-status.json` |

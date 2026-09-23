@@ -953,7 +953,7 @@ async function viewList() {
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     queueNote.replaceChildren(
-      paused ? h("a", { href: "#/profile" }, `⏸ ${gpuText(gpu)}`) : "",
+      paused ? h("a", { href: "#/actions/gpu" }, `⏸ ${gpuText(gpu)}`) : "",
       paused && waiting ? " · " : "",
       waiting ? `${waiting} waiting for the GPU` : "");
     renderTargetSwitch();
@@ -1144,7 +1144,7 @@ async function viewNew() {
     sleeping: "Model is asleep; loading it now (about a minute)",
     waking: "Model is loading (about a minute); you can start the task anyway",
     unreachable: "Model server isn't answering",
-    paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Settings → GPU)",
+    paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → GPU)",
   };
   const pollModel = async () => {
     if (backend.value !== "local") return;
@@ -1749,7 +1749,7 @@ async function viewSession(sid, tab, focusApproval) {
     },
     gpu_paused: (e) => {
       gpuNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
-        `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Settings → GPU to resume now)`)));
+        `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Actions → GPU to resume now)`)));
     },
     gpu_resumed: (e) => {
       const text = `GPU free again after ${e.data.seconds < 90 ? `${e.data.seconds} s` : `${Math.round(e.data.seconds / 60)} min`}; reloading the model`;
