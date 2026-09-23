@@ -50,8 +50,13 @@ Triggers, polled every 10 s:
 
 Details:
 
-- The daemon holds no pause state across restarts except the flag file: on start, a leftover flag means "paused";
-  the first check resumes immediately if nothing is running.
+- A manual hold (from **Pause agents**, timed or indefinite) is persisted to `gpu-guard-hold.json` in the data
+  directory and restored on start: the guard comes back in the manual-hold state, a timed hold keeps its original
+  expiry (or resumes normally if that expiry already passed while the daemon was down), and the model stays
+  unloaded until **Resume now**. `resume` and timed expiry both delete this file. A missing, unreadable or corrupt
+  file is ignored and falls back to today's behaviour without blocking startup. Automatic (game/Plex) pauses are
+  not persisted this way — only the flag file carries those across a restart: on start, a leftover flag with no
+  persisted manual hold means "paused"; the first check resumes immediately if nothing is running.
 - Sessions get `gpu_paused` / `gpu_resumed` events, shown in the transcript and the app. They notify the phone
   (replaced in place via ntfy `sequence_id`), but **only when a session is affected** (running or queued at pause
   time, or started during it). An idle harness pausing for someone's Plex transcode sends nothing.

@@ -20,10 +20,13 @@ override lasts until the set of triggers changes.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import os
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -38,6 +41,7 @@ log = logging.getLogger("harness.gpu_guard")
 
 CLEAR, PAUSING, PAUSED, RESUMING = "clear", "pausing", "paused", "resuming"
 HEALTH_TIMEOUT_SECONDS = 300  # reopen the queue anyway after this; model calls then report their own errors
+MANUAL_HOLD_FILE = "gpu-guard-hold.json"  # survives a daemon restart; the pause_flag file alone does not
 
 
 # ---------- detection ----------
@@ -226,7 +230,8 @@ class GpuGuard:
     def __init__(self, cfg: GpuGuardConfig, model: ModelConfig, scheduler, busy: Callable[[], bool],
                  detect: Callable[[], Awaitable[list[dict]]] | None = None, control: ServerControl | None = None,
                  on_pause: Callable[[list[dict]], None] | None = None,
-                 on_resume: Callable[[float], None] | None = None):
+                 on_resume: Callable[[float], None] | None = None,
+                 data_dir: Path | str | None = None):
         self.cfg = cfg
         self.scheduler = scheduler
         self.busy = busy
@@ -234,6 +239,7 @@ class GpuGuard:
         self.control = control or ServerControl(cfg, model)
         self.on_pause = on_pause
         self.on_resume = on_resume
+        self._state_path = Path(data_dir) / MANUAL_HOLD_FILE if data_dir is not None else None
         self.state = CLEAR
         self.signals: list[dict] = []
         self.reasons: list[dict] = []   # what caused the current pause
@@ -273,11 +279,69 @@ class GpuGuard:
     def start(self) -> None:
         if not self.cfg.enabled or self._task is not None:
             return
+        self._restore_manual_hold()
         if self.control.flagged():  # the daemon stopped while paused: the server is down until we decide
             self._set(PAUSED)
             self.scheduler.set_paused(True)
             self._paused_at = time.time()
         self._task = asyncio.create_task(self._loop(), name="gpu-guard")
+
+    def _restore_manual_hold(self) -> None:
+        """Restore a manual hold persisted before the daemon last stopped, if it hasn't expired."""
+        if self._state_path is None:
+            return
+        try:
+            raw = self._state_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except OSError:
+            log.warning("GPU guard: could not read %s", self._state_path, exc_info=True)
+            return
+        try:
+            data = json.loads(raw)
+            manual = bool(data["manual"])
+            manual_until = data.get("manual_until")
+            if manual_until is not None:
+                manual_until = float(manual_until)
+                if not math.isfinite(manual_until):
+                    raise ValueError(f"non-finite manual_until: {manual_until!r}")
+            manual_duration_seconds = data.get("manual_duration_seconds")
+        except (ValueError, KeyError, TypeError):
+            log.warning("GPU guard: ignoring malformed hold state file %s", self._state_path)
+            return
+        if not manual:
+            return
+        if manual_until is not None and time.time() >= manual_until:
+            self._clear_persisted_hold()  # expired while the daemon was down: resume normally
+            return
+        self.manual = True
+        self.manual_until = manual_until
+        self.manual_duration_seconds = manual_duration_seconds
+        self.reasons = [{"key": "manual", "kind": "manual", "detail": "paused from the app"}]
+
+    def _persist_hold(self) -> None:
+        if self._state_path is None:
+            return
+        payload = {"manual": True, "manual_until": self.manual_until,
+                   "manual_duration_seconds": self.manual_duration_seconds}
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(prefix=self._state_path.name + ".", suffix=".tmp",
+                                            dir=str(self._state_path.parent))
+            tmp = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            os.replace(tmp, self._state_path)
+        except OSError:
+            log.warning("GPU guard: could not persist manual hold to %s", self._state_path, exc_info=True)
+
+    def _clear_persisted_hold(self) -> None:
+        if self._state_path is None:
+            return
+        try:
+            self._state_path.unlink(missing_ok=True)
+        except OSError:
+            log.warning("GPU guard: could not clear persisted manual hold at %s", self._state_path, exc_info=True)
 
     async def stop(self) -> None:
         if self._task:
@@ -289,6 +353,7 @@ class GpuGuard:
         self.manual = True
         self.manual_until = time.time() + duration_seconds if duration_seconds else None
         self.manual_duration_seconds = duration_seconds
+        self._persist_hold()
         if self.state in (CLEAR, RESUMING):
             self.reasons = [{"key": "manual", "kind": "manual", "detail": "paused from the app"}]
             was_clear = self.state == CLEAR
@@ -307,6 +372,7 @@ class GpuGuard:
         self.manual = False
         self.manual_until = None
         self.manual_duration_seconds = None
+        self._clear_persisted_hold()
         keys = frozenset(s["key"] for s in self.signals)
         self.override = (keys or None) if override_signals else None
         self._resume_now = True
