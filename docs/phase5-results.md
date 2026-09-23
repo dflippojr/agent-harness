@@ -60,7 +60,7 @@ Details:
 - Sessions get `gpu_paused` / `gpu_resumed` events, shown in the transcript and the app. They notify the phone
   (replaced in place via ntfy `sequence_id`), but **only when a session is affected** (running or queued at pause
   time, or started during it). An idle harness pausing for someone's Plex transcode sends nothing.
-- **Pause agents** (Settings) pauses by hand until **Resume now**. **Resume anyway** during a trigger ignores the
+- **Pause agents** (Actions → GPU) pauses by hand until **Resume now**. **Resume anyway** during a trigger ignores the
   current triggers until the set changes (a new game or transcode pauses again).
 - `/models/warm` does nothing while paused, so opening the app can't reload the model mid-game.
 

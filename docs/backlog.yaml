@@ -16,7 +16,7 @@ items:
       - the `Steam Big Picture Mode` window title (e.g. started from Moonlight)
       - a real Plex hardware video transcode
 
-      Check: start a task, launch the game, confirm the pause event and the Settings → GPU card, quit, and confirm the queue resumes about 3 minutes later.
+      Check: start a task, launch the game, confirm the pause event and the Actions → GPU card, quit, and confirm the queue resumes about 3 minutes later.
 
   - key: mac-lid-closed-retest
     kind: check
@@ -785,7 +785,7 @@ items:
     kind: feature
     title: "Remote Control card omits homelab because it has no local repo folder"
     body: |
-      Phone feedback: Profile → Claude Remote Control lists invoice-tools, plex-webhook, observability-stack, but
+      Phone feedback: Actions → Claude Remote Control lists invoice-tools, plex-webhook, observability-stack, but
       not **homelab**.
 
       This is intentional with the current rule, not a list bug. `RemoteControl.folder()` only accepts tower
@@ -835,7 +835,7 @@ items:
     kind: feature
     title: "Remote Control: add agent-harness and the memory library"
     body: |
-      Phone question after #45. Profile → Claude Remote Control lists tower projects with a local `repo` folder.
+      Phone question after #45. Actions → Claude Remote Control lists tower projects with a local `repo` folder.
       The user wants to start native Claude in **agent-harness** and in **agent-memory-library** the same way.
 
       This is a `config/projects.yaml` (and maybe `remote_control.projects`) change once the folders exist, not a
@@ -1238,11 +1238,11 @@ items:
         Automatic game / Plex GPU-guard stays. This toggle is the manual hold (today's "Pause agents (I'm gaming)").
         If a game or transcode is active, the row can show that as status; it is not a second switch.
 
-      - **Claude Remote Control** — move the current landing widget to a subpage (e.g. `#/profile/remote-control`).
+      - **Claude Remote Control** — move the current landing widget to a subpage (e.g. `#/actions/remote-control`).
         Keep the existing start/stop/trust/pairing UI and polling; do not redesign the card, just stop embedding
         it on `#/profile`.
       - **Disk** — move up from Settings. Used/free meters plus **Clean up now** are operator maintenance, not a
-        preference. Route stays `#/profile/disk`.
+        preference. Route is `#/actions/disk`.
 
       **Local-model menus (warning + queue)**
       When the GPU hold is on, attempting to use a **local** model from its menu must warn that the request can

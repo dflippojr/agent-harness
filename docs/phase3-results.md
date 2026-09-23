@@ -10,7 +10,7 @@ Built 2026-09-14 against the always-on Qwen3.6-35B-A3B server (64K context), mem
 | Session branches and review | `harness/projects.py`, `Manager.review` | host-side git only; `POST /sessions/{id}/review/{merge,push,discard}` |
 | Homelab tools | `harness/homelab.py`, `homelab:` in `config/harness.yaml` | services, logs, config files, PromQL, approval-gated restart |
 | Cleanup and quotas | `harness/maintenance.py`, `cleanup:` in `config/harness.yaml` | hourly loop, `GET /maintenance`, `POST /maintenance/cleanup` |
-| Web app | `harness/web/app.js` | Review card on the Changes tab, Disk card in Settings, homelab tool/approval rendering |
+| Web app | `harness/web/app.js` | Review card on the Changes tab, Disk card in Actions, homelab tool/approval rendering |
 | Restart helper | `ops/harness/restart-daemon.ps1` | `Stop-ScheduledTask` leaves the old daemon holding the port |
 | Demo service | `D:/Docker/harness-demo` | disposable container for exercising the restart flow |
 | Tests | `tests/test_phase3.py` | 11 tests (39 total), no Docker or GPU needed |
@@ -79,7 +79,7 @@ Allowlist: plex-webhook, prometheus, grafana, cadvisor, ntfy, harness-demo. Port
    `agent/b60745eb38` appeared in `D:/Agents/repos/invoice-tools` with `main` untouched, and the Changes tab shows the
    Review card with the one-line diff. **Not merged** (merging would remove the bug the demo templates rely on).
 3. Live `POST /maintenance/cleanup` parsed the real sandbox containers and removed nothing (all sessions are recent).
-4. Phone-size screenshots of the Review card, Settings Disk card, and the homelab session (`runs/shots`).
+4. Phone-size screenshots of the Review card, Actions Disk card, and the homelab session (`runs/shots`).
 
 ## Phone exit test (user)
 

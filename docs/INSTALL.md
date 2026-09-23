@@ -164,7 +164,7 @@ Agent Harness Server listens only on localhost. To reach Agent Harness Web from 
    in the untracked local file (`login` plus an ISO `until`), restart, and remove the entry when done.
    Guests can browse sessions, jobs and images; they cannot start tasks, approve, mint keys, or use GPU /
    Remote Control / Review. Default stays "this login is the owner."
-   To add a household member, keep an explicit `allowed_logins` owner allowlist, then use **Settings → Accounts**
+   To add a household member, keep an explicit `allowed_logins` owner allowlist, then use **Actions → Accounts**
    (or `POST /api/admin/v1/accounts`) with their exact Tailscale login. Members see only their own work through
    `/api/v1`. Creating the first member while `allowed_logins` is empty fails closed.
 5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Agent Harness Web icon is
