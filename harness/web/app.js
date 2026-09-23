@@ -112,9 +112,18 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-// replaceChildren() would render null as the text "null"; this skips empty children like h() does.
+// Native append/replaceChildren stringify null as "null" and arrays via toString()
+// (an anchor becomes its href, so a list of links becomes comma-joined URLs).
+function kids(...children) {
+  return children.flat().filter((c) => c !== null && c !== undefined && c !== false);
+}
 function fill(el, ...children) {
-  el.replaceChildren(...children.flat().filter((c) => c !== null && c !== undefined && c !== false));
+  el.replaceChildren(...kids(...children));
+  return el;
+}
+function append(el, ...children) {
+  const nodes = kids(...children);
+  if (nodes.length) el.append(...nodes);
   return el;
 }
 
@@ -468,7 +477,7 @@ async function route() {
   watchDaemonConnection();
   cleanup.forEach((fn) => { try { fn(); } catch (_) { /* ignore */ } });
   cleanup = [];
-  $app.replaceChildren();
+  fill($app);
   document.querySelector(".composer")?.remove();
   $fabHost.hidden = true;
   document.querySelectorAll(".jump").forEach((el) => el.remove());
@@ -522,7 +531,7 @@ async function route() {
     else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
     else go("#/", true);
   } catch (e) {
-    $app.append(h("p", { class: "note bad" }, e.message),
+    append($app, h("p", { class: "note bad" }, e.message),
       h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings"));
   }
 }
@@ -686,7 +695,7 @@ function chatComposer(options, session) {
     if (fixed) return;
     const { spec } = selected();
     const efforts = spec?.efforts || [];
-    effortSelect.replaceChildren(...efforts.map((e) => h("option", { value: e }, e)));
+    fill(effortSelect, efforts.map((e) => h("option", { value: e }, e)));
     effortSelect.hidden = !efforts.length;
     const pick = choice.effort && efforts.includes(choice.effort) ? choice.effort : spec?.effort;
     if (pick && efforts.includes(pick)) effortSelect.value = pick;
@@ -729,7 +738,7 @@ async function viewChat(id) {
       onclick: () => { if (!ui) return; ui.input.value = text; ui.input.focus(); },
     }, text))));
   const wrap = h("div", { class: "chat-wrap" }, welcome, feed);
-  $app.append(wrap);
+  append($app, wrap);
 
   let session = null;
   let options = { backends: [] };
@@ -868,7 +877,7 @@ async function viewList() {
   const queueNote = h("p", { class: "note" });
   const search = h("input", { type: "search", placeholder: "Search", value: searchQuery, class: "search" });
   const targetSwitch = h("div", { class: "tabs", role: "group", "aria-label": "Filter sessions by machine" });
-  $app.append(h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
+  append($app, h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
   showFab("#/new", "+ New task");
 
   let sessions = [];
@@ -882,18 +891,18 @@ async function viewList() {
     const visible = sessionTarget === "all" ? sessions : sessions.filter((s) => s.target === sessionTarget);
     if (!sessions.length) {
       delete list.dataset.keys;
-      list.replaceChildren(h("p", { class: "empty" }, "No sessions yet. Start one with “New task”."));
+      fill(list, h("p", { class: "empty" }, "No sessions yet. Start one with “New task”."));
       return;
     }
     if (!visible.length) {
       delete list.dataset.keys;
-      list.replaceChildren(h("p", { class: "empty" }, `No sessions on the ${targetName(sessionTarget)} yet.`));
+      fill(list, h("p", { class: "empty" }, `No sessions on the ${targetName(sessionTarget)} yet.`));
       return;
     }
     const keys = visible.map(sessionCardKey).join("\n");
     if (list.dataset.keys === keys && list.querySelector("a.card")) return;
     list.dataset.keys = keys;
-    list.replaceChildren(...visible.map((s) => {
+    fill(list, visible.map((s) => {
       const pending = (s.pending_approvals || []).length;
       return h("a", { class: "card", href: `#/s/${s.id}${pending ? `/approval/${s.pending_approvals[0].id}` : ""}` },
         h("h3", {}, s.title),
@@ -955,7 +964,7 @@ async function viewList() {
       .sort((a, b) => (a === "tower" ? -1 : b === "tower" ? 1 : a.localeCompare(b)));
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
-    queueNote.replaceChildren(
+    fill(queueNote,
       paused ? h("a", { href: "#/actions/gpu" }, `⏸ ${gpuText(gpu)}`) : "",
       paused && waiting ? " · " : "",
       waiting ? `${waiting} waiting for the GPU` : "");
@@ -1244,10 +1253,10 @@ route();
       },
     }, "Save as template"),
     h("span", { class: "spacer" }), start));
-  $app.append(projectCreator, form);
+  append($app, projectCreator, form);
 
   if (allTemplates.length) {
-    $app.append(h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),
+    append($app, h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),
       allTemplates.map((t) => h("div", { class: "card" },
         h("div", { class: "row" }, h("strong", {}, t.name), h("span", { class: "spacer" }),
           h("button", {
@@ -1348,7 +1357,7 @@ async function viewSession(sid, tab, focusApproval) {
     }, name[0].toUpperCase() + name.slice(1))));
   const head = h("div", { class: "row small" });
   const usage = h("div", { class: "row small usage" });
-  $app.append(h("div", { class: "session-chrome" }, sessionTitle(session, () => !left)), head, usage, tabs);
+  append($app, h("div", { class: "session-chrome" }, sessionTitle(session, () => !left)), head, usage, tabs);
   const jumps = bindSessionJumps();
   const pages = [];
   const fetchById = new Map();
@@ -1382,7 +1391,7 @@ async function viewSession(sid, tab, focusApproval) {
   if (tab === "info") { viewInfo(session); jumps.updateJumps(); return; }
 
   const feed = h("div");
-  $app.append(feed);
+  append($app, feed);
 
   // composer (owner only; guests may watch the live transcript)
   const input = h("textarea", { placeholder: "Message the agent…", rows: 1 });
@@ -1557,9 +1566,9 @@ async function viewSession(sid, tab, focusApproval) {
       }
     };
     if (isGuest()) {
-      buttons.append(h("p", { class: "muted small" }, "Demo access cannot approve or deny."));
+      append(buttons,h("p", { class: "muted small" }, "Demo access cannot approve or deny."));
     } else {
-      buttons.append(
+      append(buttons,
         h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
         h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
     }
@@ -1883,17 +1892,17 @@ function reviewCard(s) {
 async function viewChanges(session) {
   const sid = session.id;
   const box = h("div", {}, h("p", { class: "note" }, "Loading changes…"));
-  $app.append(reviewCard(session), box);
+  append($app, reviewCard(session), box);
   const data = await api(`/sessions/${sid}/changes`);
   if (data.removed) {
-    box.replaceChildren(h("p", { class: "empty" }, "This workspace was cleaned up or discarded."));
+    fill(box, h("p", { class: "empty" }, "This workspace was cleaned up or discarded."));
     return;
   }
   if (!data.repos.length) {
-    box.replaceChildren(h("p", { class: "empty" }, "No git repositories in this workspace yet."));
+    fill(box, h("p", { class: "empty" }, "No git repositories in this workspace yet."));
     return;
   }
-  box.replaceChildren(...data.repos.map((repo) => {
+  fill(box, data.repos.map((repo) => {
     const files = splitDiff(repo.diff);
     return h("section", { class: "card" },
       h("h3", {}, repo.path === "." ? "workspace" : repo.path),
@@ -1941,7 +1950,7 @@ function viewInfo(s) {
   if (frozen.length) {
     rows.push(["Skills", frozen.map((sk) => `${sk.slug} v${sk.version} (${(sk.content_hash || "").slice(0, 12)})`).join(", ")]);
   }
-  $app.append(h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
+  append($app, h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
     h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v))))),
   h("button", { class: "btn", onclick: () => downloadDaemonFile(`/sessions/${s.id}/transcript`, `${s.id}.md`) },
     "Download Markdown transcript"));
@@ -2017,7 +2026,7 @@ function imageModeEntries(status) {
 async function viewImages() {
   setHeader("images", "Images");
   let data;
-  try { data = await api("/images"); } catch (e) { $app.append(h("p", { class: "note bad" }, e.message)); return; }
+  try { data = await api("/images"); } catch (e) { append($app, h("p", { class: "note bad" }, e.message)); return; }
   const prompt = h("textarea", { placeholder: "Describe the image…" });
   const draftKey = "harness.imageDraft";
   try { prompt.value = localStorage.getItem(draftKey) || ""; } catch (_) { /* private mode */ }
@@ -2120,7 +2129,7 @@ async function viewImages() {
   const editHint = (!edit.available || !edit.enabled) && !isGuest()
     ? h("p", { class: "muted small" }, edit.setup || "Masked editing is an optional component.")
     : null;
-  $app.append(
+  append($app, 
     isGuest() ? h("p", { class: "muted small" }, "Demo access can view generated images, not start new ones.") : h("form", {
       onsubmit: async (e) => {
         e.preventDefault();
@@ -2329,12 +2338,12 @@ async function viewImageEdit(id) {
   const edit = (img.service && img.service.edit) || {};
   if (img.status !== "done") { go(`#/images/${id}`, true); return; }
   if (!edit.enabled || !edit.available) {
-    $app.append(h("p", { class: "note" }, edit.setup || "Masked editing is not installed."),
+    append($app, h("p", { class: "note" }, edit.setup || "Masked editing is not installed."),
       h("a", { class: "btn", href: `#/images/${id}` }, "Back"));
     return;
   }
   if (img.editable === false) {
-    $app.append(h("p", { class: "note" },
+    append($app, h("p", { class: "note" },
       img.editable_reason || "This source is too large to edit. Use the original or a non-upscaled image."),
       h("a", { class: "btn", href: `#/images/${id}` }, "Back"));
     return;
@@ -2345,7 +2354,7 @@ async function viewImageEdit(id) {
     source.addEventListener("load", () => resolve(), { once: true });
     source.addEventListener("error", () => reject(new Error("Could not load the source image")), { once: true });
   });
-  try { await waitForImage(); } catch (e) { $app.append(h("p", { class: "note bad" }, e.message)); return; }
+  try { await waitForImage(); } catch (e) { append($app, h("p", { class: "note bad" }, e.message)); return; }
   const width = source.naturalWidth || img.width;
   const height = source.naturalHeight || img.height;
   const editor = maskEditor(width, height, source);
@@ -2357,7 +2366,7 @@ async function viewImageEdit(id) {
   const erase = h("button", { class: "btn", type: "button", onclick: () => { editor.setMode("erase"); erase.classList.add("selected"); draw.classList.remove("selected"); } }, "Erase");
   const preview = h("label", { class: "row" }, h("input", { type: "checkbox", onchange: (e) => editor.preview(e.target.checked) }), " Preview mask");
   const go = h("button", { class: "btn primary", type: "submit" }, "Edit");
-  $app.append(
+  append($app, 
     h("p", { class: "muted small" }, `White is edited, black is preserved · ${width}×${height}`),
     h("div", { class: "mask-stage" }, source, editor.canvas),
     h("form", {
@@ -2422,10 +2431,10 @@ async function viewJobs() {
   showFab("#/jobs/new", "+ New job");
   const jobs = await api("/jobs");
   if (!jobs.length) {
-    $app.append(h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
+    append($app, h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
     return;
   }
-  $app.append(...jobs.map((j) => {
+  append($app, ...jobs.map((j) => {
     const last = j.recent[0];
     return h("a", { class: "card", href: `#/jobs/${j.id}` },
       h("h3", {}, `${j.enabled ? "" : "⏸ "}${j.name}`),
@@ -2505,7 +2514,7 @@ async function viewJob(id) {
   const body = () => ({ name: name.value, prompt: prompt.value, cron: cron.value, project: project.value,
     backend: backend.value, model: backend.value === "local" ? model.value : "", notify: notify.value, enabled: enabled.checked });
   const save = h("button", { class: "btn primary", type: "submit" }, isNew ? "Create" : "Save");
-  $app.append(h("form", {
+  append($app, h("form", {
     onsubmit: async (e) => {
       e.preventDefault();
       if (isNew && backend.value === "local" && !(await confirmGpuQueue("This scheduled job"))) return;
@@ -2545,7 +2554,7 @@ async function viewJob(id) {
     }, "Run now") : null,
     isGuest() ? null : save)));
   if (job) {
-    $app.append(h("h3", { style: "margin-top:28px" }, "Recent runs"),
+    append($app, h("h3", { style: "margin-top:28px" }, "Recent runs"),
       job.last_skip ? h("p", { class: "muted small" }, `Last skipped: ${job.last_skip}`) : null,
       job.last_error ? h("p", { class: "small bad" }, `Last start failed: ${job.last_error}`) : null,
       job.recent.length ? job.recent.map((s) => h("a", { class: "card", href: `#/s/${s.id}` },
@@ -2780,7 +2789,7 @@ async function viewActions(tab) {
     : selected === "accounts" ? await accountsCard()
     : selected === "remote-control" ? remoteControlCard()
     : diskCard();
-  $app.append(tabs, panel);
+  append($app, tabs, panel);
 }
 
 async function viewProfile(page, extra) {
@@ -2788,23 +2797,23 @@ async function viewProfile(page, extra) {
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
   setHeader("agents", titles[page] || "Profile", { page: true });
-  if (page === "connection") return $app.append(connectionCard());
+  if (page === "connection") return append($app, connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
-  if (page === "account") return $app.append(accountCard(me, profile));
-  if (page === "appearance") return $app.append(appearanceCard());
-  if (page === "notifications") return $app.append(notificationsCard(me));
-  if (page === "install") return $app.append(installCard());
-  if (page === "backends") return $app.append(await backendsCard());
-  if (page === "smart-approvals") return $app.append(await smartApprovalsCard());
-  if (page === "daemon") return $app.append(await daemonSettingsCard());
-  if (page === "memory") return $app.append(memoryCard());
-  if (page === "skills") return $app.append(await skillsPage(extra));
-  if (page === "apps") return $app.append(appsCard(me));
-  if (page === "endpoint") return $app.append(endpointCard(me));
+  if (page === "account") return append($app, accountCard(me, profile));
+  if (page === "appearance") return append($app, appearanceCard());
+  if (page === "notifications") return append($app, notificationsCard(me));
+  if (page === "install") return append($app, installCard());
+  if (page === "backends") return append($app, await backendsCard());
+  if (page === "smart-approvals") return append($app, await smartApprovalsCard());
+  if (page === "daemon") return append($app, await daemonSettingsCard());
+  if (page === "memory") return append($app, memoryCard());
+  if (page === "skills") return append($app, await skillsPage(extra));
+  if (page === "apps") return append($app, appsCard(me));
+  if (page === "endpoint") return append($app, endpointCard(me));
   let hidden = new Set();
   if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
   else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
-  $app.append(
+  append($app, 
     h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
         h("span", { class: "identity-emoji" }, profile.emoji || "🙂"),
@@ -3219,8 +3228,8 @@ async function daemonSettingsCard() {
       spec.file_only ? h("span", { class: "muted small" }, "local config") : settingInput(spec, draft)))));
 
   const apply = async ({ restart = false, rollback = false } = {}) => {
-    errorBox.replaceChildren();
-    planBox.replaceChildren();
+    fill(errorBox);
+    fill(planBox);
     const changes = {};
     for (const [key, value] of Object.entries(draft)) changes[key] = value;
     try {
@@ -3234,7 +3243,7 @@ async function daemonSettingsCard() {
         return;
       }
       const plan = await api("/config", { method: "PATCH", body: { revision: view.revision, dry_run: true, changes } });
-      planBox.append(
+      append(planBox,
         h("p", { class: "field-label" }, "Change plan"),
         (plan.changes || []).length
           ? h("ul", { class: "config-plan-list" }, plan.changes.map((c) =>
@@ -3252,13 +3261,13 @@ async function daemonSettingsCard() {
       } else { location.reload(); }
     } catch (e) {
       if (e.code === "revision_conflict") {
-        errorBox.append(h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
+        append(errorBox, h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
       } else if (e.keys) {
-        errorBox.append(h("p", { class: "note bad" }, e.message),
+        append(errorBox, h("p", { class: "note bad" }, e.message),
           h("ul", {}, Object.entries(e.keys).map(([key, info]) =>
             h("li", {}, `${key}: ${info.message || info.code}`))));
       } else {
-        errorBox.append(h("p", { class: "note bad" }, e.message));
+        append(errorBox, h("p", { class: "note bad" }, e.message));
       }
     }
   };
@@ -3283,7 +3292,7 @@ async function confirmRestart(targetRevision, status, errorBox) {
     await api("/config/restart", { method: "POST", body: { revision: targetRevision, confirm: true } });
   } catch (e) {
     if (e.code === "restart_not_supervised") {
-      errorBox.append(h("p", { class: "note bad" }, e.message));
+      append(errorBox, h("p", { class: "note bad" }, e.message));
       return;
     }
     // 202 may still parse as success; a dropped connection is expected.
@@ -3299,19 +3308,19 @@ async function confirmRestart(targetRevision, status, errorBox) {
         return;
       }
       if (next.recovery && next.recovery.recovery === "lkg_restore") {
-        errorBox.append(h("p", { class: "note bad" },
+        append(errorBox, h("p", { class: "note bad" },
           `Automatic recovery restored revision ${next.revision}. ${next.recovery.reason || ""}`.trim()));
         return;
       }
       if (next.recovery && next.recovery.recovery === "overlay_quarantined") {
-        errorBox.append(h("p", { class: "note bad" },
+        append(errorBox, h("p", { class: "note bad" },
           next.warning || next.recovery.warning || next.recovery.reason ||
           "Managed overlay was quarantined; YAML defaults are in effect."));
         return;
       }
     } catch (_) { /* daemon still down */ }
   }
-  errorBox.append(h("p", { class: "note bad" }, "Timed out waiting for the daemon to come back."));
+  append(errorBox, h("p", { class: "note bad" }, "Timed out waiting for the daemon to come back."));
 }
 
 function backupLine(b) {
