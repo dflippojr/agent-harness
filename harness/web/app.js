@@ -710,7 +710,7 @@ async function viewChat(id) {
     h("p", { class: "muted" }, "Ask a question or paste code to review. To change files or run work, use Agents."),
     h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
       class: "btn small", type: "button",
-      onclick: () => { ui.input.value = text; ui.input.focus(); },
+      onclick: () => { if (!ui) return; ui.input.value = text; ui.input.focus(); },
     }, text))));
   const wrap = h("div", { class: "chat-wrap" }, welcome, feed);
   $app.append(wrap);
