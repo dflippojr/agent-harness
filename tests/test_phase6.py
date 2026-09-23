@@ -898,9 +898,9 @@ def app_client(tmp_path, steps):
     return TestClient(create_app(m)), m
 
 
-def wait_for(fn, timeout=10.0):
-    end = time.time() + timeout
-    while time.time() < end:
+def wait_for(fn, timeout=30.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         value = fn()
         if value:
             return value

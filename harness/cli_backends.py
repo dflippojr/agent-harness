@@ -179,7 +179,7 @@ class ClaudeSession:
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
-                await asyncio.to_thread(proc.wait, 2)
+                await asyncio.to_thread(proc.wait, 5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 await asyncio.to_thread(proc.wait)
@@ -404,7 +404,7 @@ class CodexSession:
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
-                await asyncio.to_thread(proc.wait, 2)
+                await asyncio.to_thread(proc.wait, 5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 await asyncio.to_thread(proc.wait)
@@ -601,7 +601,7 @@ class CursorSession:
             if terminate:
                 proc.terminate()
             try:
-                await asyncio.to_thread(proc.wait, 2)
+                await asyncio.to_thread(proc.wait, 5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 await asyncio.to_thread(proc.wait)

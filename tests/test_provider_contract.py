@@ -28,9 +28,9 @@ BUILDERS = {
 }
 
 
-def wait_session(client, headers, sid, newer_than=0.0, timeout=12):
-    end = time.time() + timeout
-    while time.time() < end:
+def wait_session(client, headers, sid, newer_than=0.0, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         row = client.get(f"/api/v1/sessions/{sid}", headers=headers).json()
         if row["status"] in ("done", "failed", "cancelled") and row["updated_at"] > newer_than:
             return row

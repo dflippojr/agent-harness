@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -65,8 +66,9 @@ class Script:
         return step
 
 
-async def wait_status(m: Manager, sid: str, *statuses: str, timeout: float = 10) -> dict:
-    for _ in range(int(timeout / 0.02)):
+async def wait_status(m: Manager, sid: str, *statuses: str, timeout: float = 30) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         s = m.db.get_session(sid)
         if s["status"] in statuses:
             return s

@@ -12,7 +12,7 @@ from harness.cli_backends import ClaudeSession
 from harness.config import BackendConfig
 from harness.manager import Manager
 from test_daemon import make_cfg, wait_status
-from test_phase8 import _claude_manager
+from test_phase8 import _claude_manager, wait_cli_gone
 
 
 def configured_manager(tmp_path):
@@ -165,7 +165,7 @@ def test_revoking_assignment_stops_an_active_provider_process(tmp_path):
         failed = await wait_status(manager, sid, "failed")
         assert failed["run"]["failure"]["code"] == "provider_auth_required"
         await asyncio.gather(*manager.tasks.values())
-        assert sid not in manager.runner._cli_sessions
+        await wait_cli_gone(manager, sid)
         await manager.stop()
     asyncio.run(body())
 

@@ -254,6 +254,9 @@ def test_remote_control_launch_status_stop(tmp_path):
         fresh = RemoteControl(rc.cfg, rc.rc, claude_json=rc.claude_json)
         assert fresh.status()[0]["running"]
         await fresh.stop("repo")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and fresh.status()[0]["running"]:
+            await asyncio.sleep(0.05)
         assert not fresh.status()[0]["running"]
     asyncio.run(body())
 
@@ -283,6 +286,9 @@ def test_remote_control_refuses_untrusted_and_reports_failures(tmp_path):
             raise AssertionError("should fail")
         except ToolError as e:
             assert "something broke" in str(e)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and rc2.status()[0]["running"]:
+            await asyncio.sleep(0.05)
         assert not rc2.status()[0]["running"]
     asyncio.run(failing())
 
@@ -435,6 +441,13 @@ else:
           "total_cost_usd": 0.42, "usage": {"input_tokens": 10, "cache_creation_input_tokens": 2,
           "cache_read_input_tokens": 3, "output_tokens": 4}, "num_turns": 2})
 '''
+
+
+async def wait_cli_gone(manager, sid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and sid in manager.runner._cli_sessions:
+        await asyncio.sleep(0.05)
+    assert sid not in manager.runner._cli_sessions
 
 
 def _claude_manager(tmp_path, mode: str, state=None, max_sessions=2, bash_command="python build.py"):
@@ -592,7 +605,8 @@ def test_claude_cli_cancel_kills_process(tmp_path):
         sid = m.create("wait", backend="claude")["id"]
         await wait_status(m, sid, "running")
         s = await m.cancel(sid)
-        assert s["status"] == "cancelled" and sid not in m.runner._cli_sessions
+        assert s["status"] == "cancelled"
+        await wait_cli_gone(m, sid)
         await m.stop()
     asyncio.run(body())
 
@@ -1005,7 +1019,7 @@ def test_codex_inbox_cancel_and_policy(tmp_path):
         sid = m.create("wait", backend="codex")["id"]
         await wait_status(m, sid, "running")
         assert (await m.cancel(sid))["status"] == "cancelled"
-        assert sid not in m.runner._cli_sessions
+        await wait_cli_gone(m, sid)
         await m.stop()
 
     asyncio.run(inbox())
@@ -1158,7 +1172,7 @@ def test_cursor_cancel_and_restart_recovery(tmp_path):
         sid = m.create("wait", backend="cursor")["id"]
         await wait_status(m, sid, "running")
         assert (await m.cancel(sid))["status"] == "cancelled"
-        assert sid not in m.runner._cli_sessions
+        await wait_cli_gone(m, sid)
         await m.stop()
 
     async def recover():

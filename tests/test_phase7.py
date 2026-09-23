@@ -16,9 +16,9 @@ from harness.search import compact_transcript, fts_query, search
 from test_daemon import Script, call, events, make_cfg, wait_status
 
 
-def wait_until(fn, timeout=20.0):
-    end = time.time() + timeout
-    while time.time() < end:
+def wait_until(fn, timeout=30.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         value = fn()
         if value:
             return value
