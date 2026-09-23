@@ -188,7 +188,7 @@ class Notifier:
             return {**base, "sequence_id": f"gpu-{sid}", "title": f"Paused for the GPU: {title}", "priority": 3,
                     "tags": ["video_game"], "click": self.link(f"/#/s/{sid}"),
                     "message": f"{d['reason']} needs the GPU, so the model was unloaded. The task continues "
-                               f"{minutes} min after it's done (or resume from Settings)."}
+                               f"{minutes} min after it's done (or resume from Actions → GPU)."}
 
         if event["type"] == "gpu_resumed":
             seconds = d.get("seconds", 0)
