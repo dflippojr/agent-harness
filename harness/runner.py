@@ -446,6 +446,10 @@ class Runner:
             self.set_status(sid, "failed", stop_reason=f"internal_error: {type(e).__name__}: {e}")
             await self._end_run(sid)
         finally:
+            if sid in self.user_cancelled:
+                s = self.db.get_session(sid)
+                if s["status"] not in ("cancelled", "done"):
+                    self._record_cancel(sid)
             await asyncio.shield(self._stop_cli(sid))
             self.scheduler.release(sid)
             self.user_cancelled.discard(sid)
