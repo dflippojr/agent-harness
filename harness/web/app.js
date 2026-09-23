@@ -556,7 +556,9 @@ function drawerFocusable() {
 
 function currentSection() {
   const first = hashParts()[0] || "";
-  return first === "s" || first === "new" ? "agents" : first;
+  if (first === "s" || first === "new") return "agents";
+  if (first === "actions") return "actions";
+  return first;
 }
 
 let drawerChatsCache = null;
@@ -587,7 +589,8 @@ function openDrawer() {
     const nav = a.dataset.nav;
     a.hidden = (nav === "chat" && !canChat()) || (isMember() && (nav === "jobs" || nav === "images"))
       || (nav === "actions" && !isOwner());
-    if (nav === section) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    const on = nav === "actions" ? section === "actions" : nav === section;
+    if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
   document.getElementById("drawer-profile-icon").textContent = $profileIcon.textContent || "🙂";
   $drawer.hidden = false;

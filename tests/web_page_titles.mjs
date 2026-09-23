@@ -98,6 +98,15 @@ class El extends Node {
   focus() {}
   select() {}
   blur() { this.dispatchEvent({ type: "blur" }); }
+  closest(sel) {
+    let n = this;
+    while (n instanceof El) {
+      if (sel === "[hidden]" && n.hidden) return n;
+      if (sel === "a[href]" && n.tagName === "A" && n.href) return n;
+      n = n.parentNode;
+    }
+    return null;
+  }
   querySelector() { return null; }
   querySelectorAll() { return []; }
   getContext() {
@@ -154,6 +163,40 @@ make("span", "conn");
 make("a", "profile-icon");
 make("button", "menu-btn");
 make("nav", "nav-drawer");
+byId["nav-drawer"].hidden = true;
+const drawerRecent = new El("div", { class: "drawer-recent" });
+drawerRecent.className = "drawer-recent";
+const indexHtml = readFileSync(join(root, "harness/web/index.html"), "utf8");
+const actionsHrefMatch = indexHtml.match(/<a href="(#[^"]*)" data-nav="actions">/);
+if (!actionsHrefMatch) throw new Error("missing Actions drawer link in index.html");
+const actionsHref = actionsHrefMatch[1];
+const actionsNav = new El("a", { href: actionsHref, "data-nav": "actions" });
+actionsNav.href = actionsHref;
+actionsNav.dataset.nav = "actions";
+const descendants = (root) => {
+  const out = [];
+  const walk = (n) => {
+    for (const c of n.childNodes || []) {
+      if (c instanceof El) { out.push(c); walk(c); }
+    }
+  };
+  walk(root);
+  return out;
+};
+byId["nav-drawer"].querySelectorAll = function queryAll(sel) {
+  return descendants(this).filter((el) => {
+    if (sel === "a[data-nav]") return el.tagName === "A" && !!el.dataset.nav;
+    if (sel === "a[href], button") return (el.tagName === "A" && el.href) || el.tagName === "BUTTON";
+    return false;
+  });
+};
+byId["nav-drawer"].querySelector = function queryOne(sel) {
+  if (sel === ".drawer-recent") {
+    return descendants(this).find((el) => String(el.className).split(/\s+/).includes("drawer-recent")) || null;
+  }
+  return this.querySelectorAll(sel)[0] || null;
+};
+byId["nav-drawer"].append(actionsNav, drawerRecent);
 make("div", "drawer-scrim");
 make("div", "drawer-chats");
 make("span", "drawer-profile-icon");
@@ -163,19 +206,29 @@ make("header", "bar");
 make("div", "guest-banner");
 make("div", "toast");
 
+const historyStack = ["#/"];
 const loc = {
   href: "http://localhost/#/",
   origin: "http://localhost",
-  hash: "#/",
+  _hash: "#/",
+  get hash() { return this._hash; },
+  set hash(v) {
+    const next = !v || v === "#" ? "#/" : String(v);
+    if (next === this._hash) return;
+    this._hash = next;
+    this.href = `http://localhost/${next}`;
+    historyStack.push(next);
+  },
   protocol: "http:",
   pathname: "/",
   // Browsers fire hashchange when location.replace changes the fragment. The app's
   // legacy redirects depend on that second route() being the only one that paints.
   replace(url) {
     const next = String(url).startsWith("#") ? String(url) : `#${url}`;
-    if (next === this.hash) return;
-    this.hash = next;
+    if (next === this._hash) return;
+    this._hash = next;
     this.href = `http://localhost/${next}`;
+    historyStack[historyStack.length - 1] = next;
     this.onHashReplace?.();
   },
 };
@@ -259,6 +312,7 @@ const fakeFetch = async (url, opts = {}) => {
     });
   }
   if (path === "/models") return jsonResp([]);
+  if (path.startsWith("/chats")) return jsonResp([]);
   if (path.startsWith("/backends")) return jsonResp([{ name: "local", available: true }]);
   return jsonResp({});
 };
@@ -293,7 +347,17 @@ Object.assign(win, {
   sessionStorage: storage(),
   location: loc,
   navigator: { serviceWorker: undefined, userAgent: "test" },
-  history: { back() { loc.hash = "#/"; }, replaceState() {} },
+  history: {
+    replaceState() {},
+    back() {
+      if (historyStack.length < 2) return;
+      historyStack.pop();
+      const prev = historyStack[historyStack.length - 1];
+      loc._hash = prev;
+      loc.href = `http://localhost/${prev}`;
+      win.dispatchEvent({ type: "hashchange" });
+    },
+  },
   scrollTo() {},
   confirm: () => false,
   innerHeight: 800,
@@ -534,6 +598,31 @@ const selected = (root) => {
 };
 if (selected(byId.app).join("|") !== "GPU") throw new Error(`expected GPU selected, got ${selected(byId.app)}`);
 
+const followDrawerActions = async () => {
+  if (loc.hash === actionsHref) return;
+  loc.hash = actionsHref;
+  win.dispatchEvent({ type: "hashchange" });
+  await sleep(40);
+};
+await followDrawerActions();
+await waitFor(() => loc.hash === "#/actions/gpu", "drawer Actions stays on GPU");
+win.history.back();
+await sleep(40);
+if (loc.hash !== "#/agents") {
+  throw new Error(`tapping Actions on GPU left extra history; back landed on ${loc.hash}`);
+}
+await go("#/agents");
+await waitFor(() => /Agents/.test(byId.title.textContent), "agents before bare #/actions");
+await go("#/actions");
+await waitFor(() => loc.hash === "#/actions/gpu", "bare #/actions redirects to gpu");
+win.history.back();
+await sleep(40);
+if (loc.hash !== "#/agents") {
+  throw new Error(`bare #/actions left extra history; back landed on ${loc.hash}`);
+}
+await go("#/actions/gpu");
+await waitFor(() => loc.hash === "#/actions/gpu" && /GPU guard disabled|Checking/.test(byId.app.textContent), "gpu after history checks");
+
 const clickTab = (label) => {
   let found = null;
   const walk = (node) => {
@@ -549,6 +638,10 @@ clickTab("Accounts");
 if (loc.hash !== "#/actions/accounts") throw new Error(`accounts tab hash ${loc.hash}`);
 win.dispatchEvent({ type: "hashchange" });
 await waitFor(() => /No household members yet|New member/.test(byId.app.textContent), "accounts tab");
+byId["menu-btn"].click();
+if (actionsNav.attributes["aria-current"] !== "page") {
+  throw new Error(`Actions drawer not current on ${loc.hash}`);
+}
 clickTab("Disk");
 win.dispatchEvent({ type: "hashchange" });
 await waitFor(() => loc.hash === "#/actions/disk" && /Tower|Measuring/.test(byId.app.textContent), "disk tab");

@@ -112,7 +112,7 @@ def test_web_app_and_guard(tmp_path):
         assert js.index('["remote-control", "Claude Remote Control"]') < js.index('["disk", "Disk"]')
         assert 'nav === "actions" && !isOwner()' in js
         assert 'href: "#/profile/remote-control"' not in js and 'href: "#/profile/disk"' not in js
-        assert 'data-nav="actions"' in client.get("/").text and 'href="#/actions"' in client.get("/").text
+        assert 'data-nav="actions"' in client.get("/").text and 'href="#/actions/gpu" data-nav="actions"' in client.get("/").text
         profile_js = js.split("async function viewProfile")[1].split("function connectionCard")[0]
         assert "gpuActionRow()" not in profile_js and "Claude Remote Control" not in profile_js
         assert '"smart-approvals": "Smart approvals"' in js and "function smartApprovalsCard()" in js
