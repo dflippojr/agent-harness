@@ -413,6 +413,7 @@ def test_backend_commands_enforce_read_only_review_access(tmp_path):
     result = run_powershell(
         tmp_path,
         f"""
+Remove-Item Env:REVIEW_MODEL_CURSOR,Env:REVIEW_MODEL_CODEX,Env:REVIEW_MODEL_CLAUDE -ErrorAction SilentlyContinue
 $commands = @(
     Get-ReviewBackendCommand -Backend cursor -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}' -WindowsPlatform $true
     Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
@@ -488,6 +489,7 @@ def test_cursor_enables_sandbox_off_windows(tmp_path):
     result = run_powershell(
         tmp_path,
         f"""
+Remove-Item Env:REVIEW_MODEL_CURSOR,Env:REVIEW_MODEL_CODEX,Env:REVIEW_MODEL_CLAUDE -ErrorAction SilentlyContinue
 $command = Get-ReviewBackendCommand -Backend cursor -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}' -WindowsPlatform $false
 $command.Arguments | ConvertTo-Json -Compress
 """,
@@ -506,6 +508,121 @@ $command.Arguments | ConvertTo-Json -Compress
         "--workspace",
         str(workspace),
     ]
+
+
+def test_review_model_env_set_unset_and_invalid_per_backend(tmp_path):
+    cursor_base = tmp_path / "cursor-agent"
+    version = cursor_base / "versions" / "2026.09.18"
+    version.mkdir(parents=True)
+    (version / "node.exe").touch()
+    (version / "index.js").touch()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    workspace = tmp_path / "checkout"
+    workspace.mkdir()
+    output_path = tmp_path / "review.md"
+    models = {
+        "cursor": "cursor-grok-4.6-high",
+        "codex": "gpt-5",
+        "claude": "claude-sonnet-5",
+    }
+
+    unset = run_powershell(
+        tmp_path,
+        f"""
+Remove-Item Env:REVIEW_MODEL_CURSOR,Env:REVIEW_MODEL_CODEX,Env:REVIEW_MODEL_CLAUDE -ErrorAction SilentlyContinue
+Assert-ReviewModelConfiguration
+$commands = @(
+    Get-ReviewBackendCommand -Backend cursor -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}' -WindowsPlatform $true
+    Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
+    Get-ReviewBackendCommand -Backend claude -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
+)
+$commands | Select-Object Backend,Model,Arguments | ConvertTo-Json -Depth 4 -Compress
+""",
+    )
+    assert unset.returncode == 0, output(unset)
+    unset_commands = {item["Backend"]: item for item in json.loads(unset.stdout.strip())}
+    for backend in models:
+        assert unset_commands[backend]["Model"] in (None, "")
+        assert "--model" not in unset_commands[backend]["Arguments"]
+
+    configured = run_powershell(
+        tmp_path,
+        f"""
+$env:REVIEW_MODEL_CURSOR = '{models["cursor"]}'
+$env:REVIEW_MODEL_CODEX = '{models["codex"]}'
+$env:REVIEW_MODEL_CLAUDE = '{models["claude"]}'
+$commands = @(
+    Get-ReviewBackendCommand -Backend cursor -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}' -WindowsPlatform $true
+    Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
+    Get-ReviewBackendCommand -Backend claude -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
+)
+$runner = {{
+    param($command)
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $command.Model }}
+}}
+$result = Invoke-ReviewFallback -Backends @('claude') -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -Runner $runner
+Write-ReviewResult -Result $result -OutputPath '{output_path}' -CoverageLine 'Reviewed the full diff' -HeadSha '{HEAD_SHA}' -Mode full
+[ordered]@{{
+    commands = @($commands | Select-Object Backend,Model,Arguments)
+    footer_backend = $result.Backend
+    footer_model = $result.Model
+    body = [string](Get-Content -Raw -LiteralPath '{output_path}')
+}} | ConvertTo-Json -Depth 5 -Compress
+""",
+    )
+    assert configured.returncode == 0, output(configured)
+    configured_value = json.loads(configured.stdout.strip().splitlines()[-1])
+    configured_commands = {item["Backend"]: item for item in configured_value["commands"]}
+    for backend, model in models.items():
+        args = configured_commands[backend]["Arguments"]
+        assert configured_commands[backend]["Model"] == model
+        assert "--model" in args
+        assert args[args.index("--model") + 1] == model
+        assert not any(arg.startswith("-") and arg != "--model" and model in arg for arg in args)
+    assert configured_value["footer_backend"] == "claude"
+    assert configured_value["footer_model"] == models["claude"]
+    assert f"Automated review backend: **claude ({models['claude']})**." in configured_value["body"]
+
+    whitespace = run_powershell(
+        tmp_path,
+        f"""
+$env:REVIEW_MODEL_CLAUDE = '   '
+$command = Get-ReviewBackendCommand -Backend claude -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
+[ordered]@{{ Model = $command.Model; Arguments = @($command.Arguments) }} | ConvertTo-Json -Compress
+""",
+    )
+    assert whitespace.returncode == 0, output(whitespace)
+    whitespace_value = json.loads(whitespace.stdout.strip())
+    assert whitespace_value["Model"] in (None, "")
+    assert "--model" not in whitespace_value["Arguments"]
+
+    for backend, env_name in (
+        ("cursor", "REVIEW_MODEL_CURSOR"),
+        ("codex", "REVIEW_MODEL_CODEX"),
+        ("claude", "REVIEW_MODEL_CLAUDE"),
+    ):
+        invalid = run_powershell(
+            tmp_path,
+            f"""
+Remove-Item Env:REVIEW_MODEL_CURSOR,Env:REVIEW_MODEL_CODEX,Env:REVIEW_MODEL_CLAUDE -ErrorAction SilentlyContinue
+$env:{env_name} = '--evil; rm -rf /'
+Assert-ReviewModelConfiguration
+""",
+        )
+        assert invalid.returncode != 0, backend
+        assert f"invalid review model '--evil; rm -rf /' for backend '{backend}'" in output(invalid)
+
+        invalid_command = run_powershell(
+            tmp_path,
+            f"""
+Remove-Item Env:REVIEW_MODEL_CURSOR,Env:REVIEW_MODEL_CODEX,Env:REVIEW_MODEL_CLAUDE -ErrorAction SilentlyContinue
+$env:{env_name} = 'bad model'
+Get-ReviewBackendCommand -Backend {backend} -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}' -WindowsPlatform $true
+""",
+        )
+        assert invalid_command.returncode != 0, backend
+        assert f"invalid review model 'bad model' for backend '{backend}'" in output(invalid_command)
 
 
 def test_fallback_uses_claude_after_codex_failure_and_footer_names_it(tmp_path):
@@ -1107,6 +1224,9 @@ def test_workflow_exposes_backend_input_and_delegates_to_runner():
     assert "Review coverage (auto = incremental when safe)" in dispatch
     assert all(f"          - {name}" in dispatch.split("      mode:", 1)[1] for name in ("auto", "full"))
     assert "${{ vars.REVIEW_BACKENDS }}" in workflow
+    assert "${{ vars.REVIEW_MODEL_CLAUDE }}" in workflow
+    assert "${{ vars.REVIEW_MODEL_CURSOR }}" in workflow
+    assert "${{ vars.REVIEW_MODEL_CODEX }}" in workflow
     assert "REVIEW_MODE: ${{ github.event.inputs.mode }}" in workflow
     assert ".\\ops\\review\\run-review.ps1" in workflow
     assert "-Mode $env:REVIEW_MODE" in workflow
@@ -1154,6 +1274,10 @@ def test_reviews_use_separate_full_history_pr_head_checkout():
 def test_ci_docs_explain_backend_configuration_and_manual_verification():
     docs = CI_DOCS.read_text(encoding="utf-8")
     assert "`REVIEW_BACKENDS`" in docs
+    assert "`REVIEW_MODEL_CLAUDE`" in docs
+    assert "`REVIEW_MODEL_CURSOR`" in docs
+    assert "`REVIEW_MODEL_CODEX`" in docs
+    assert "`--model`" in docs
     assert "`codex,claude,cursor`" in docs
     assert "`backend` dispatch input" in docs
     for backend in ("cursor", "codex", "claude"):

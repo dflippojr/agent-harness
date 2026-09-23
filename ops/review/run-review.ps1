@@ -16,6 +16,7 @@ $ErrorActionPreference = 'Stop'
 $script:KnownReviewBackends = @('cursor', 'codex', 'claude')
 $script:DefaultReviewBackends = @('codex', 'claude', 'cursor')
 $script:KnownReviewModes = @('auto', 'full')
+$script:ReviewModelPattern = '^[A-Za-z0-9][A-Za-z0-9._:+/\-]*$'
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
 $script:ReviewMarkerPattern = '(?i)<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental)(?: base=([A-Za-z0-9._/\-]+))? -->'
 $script:UntrustedAgentConfigDirectories = @('.claude', '.cursor', '.codex', '.agents')
@@ -56,6 +57,45 @@ function Resolve-ReviewBackends {
         throw 'REVIEW_BACKENDS does not contain a supported backend'
     }
     return @($resolved.ToArray())
+}
+
+function Resolve-ReviewModel {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Backend,
+        [AllowEmptyString()][string]$RequestedModel
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RequestedModel)) { return $null }
+    $model = $RequestedModel.Trim()
+    if ($model -notmatch $script:ReviewModelPattern) {
+        throw "invalid review model '$RequestedModel' for backend '$Backend'"
+    }
+    return $model
+}
+
+function Get-ReviewModelFromEnvironment {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Backend)
+
+    $name = $Backend.Trim().ToLowerInvariant()
+    $requested = $null
+    switch ($name) {
+        'cursor' { $requested = [string]$env:REVIEW_MODEL_CURSOR }
+        'codex' { $requested = [string]$env:REVIEW_MODEL_CODEX }
+        'claude' { $requested = [string]$env:REVIEW_MODEL_CLAUDE }
+        default { return $null }
+    }
+    return (Resolve-ReviewModel -Backend $name -RequestedModel $requested)
+}
+
+function Assert-ReviewModelConfiguration {
+    [CmdletBinding()]
+    param()
+
+    foreach ($backend in $script:KnownReviewBackends) {
+        Get-ReviewModelFromEnvironment -Backend $backend | Out-Null
+    }
 }
 
 function Test-GitObjectId {
@@ -405,6 +445,11 @@ function Get-ReviewBackendCommand {
     )
 
     $name = $Backend.Trim().ToLowerInvariant()
+    $model = Get-ReviewModelFromEnvironment -Backend $name
+    $modelArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace([string]$model)) {
+        $modelArgs = @('--model', $model)
+    }
     switch ($name) {
         'cursor' {
             if ([string]::IsNullOrWhiteSpace($CursorBase)) {
@@ -416,7 +461,7 @@ function Get-ReviewBackendCommand {
             if (-not $WindowsPlatform) {
                 $arguments += @('--sandbox', 'enabled')
             }
-            $arguments += @('--trust', '--workspace', $Workspace)
+            $arguments += @('--trust', '--workspace', $Workspace) + $modelArgs
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = $entrypoint.Node
@@ -424,7 +469,7 @@ function Get-ReviewBackendCommand {
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $null
-                Model = $null
+                Model = $model
                 Environment = Get-ReviewBackendEnvironment
             }
         }
@@ -434,7 +479,8 @@ function Get-ReviewBackendCommand {
                 Backend = $name
                 FilePath = 'codex'
                 Arguments = @(
-                    'exec',
+                    'exec'
+                ) + $modelArgs + @(
                     '--ignore-user-config',
                     '-c', 'windows.sandbox="unelevated"',
                     '-c', 'mcp_servers={}',
@@ -450,7 +496,7 @@ function Get-ReviewBackendCommand {
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $resultPath
-                Model = $null
+                Model = $model
                 Environment = Get-ReviewBackendEnvironment
             }
         }
@@ -459,11 +505,11 @@ function Get-ReviewBackendCommand {
                 Backend = $name
                 FilePath = 'claude'
                 # manual is intentional: in -p mode it prevents prompts and denies unapproved tools.
-                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--setting-sources', 'user', '--strict-mcp-config', '--disable-slash-commands')
+                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--setting-sources', 'user', '--strict-mcp-config', '--disable-slash-commands') + $modelArgs
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $null
-                Model = $null
+                Model = $model
                 Environment = Get-ReviewBackendEnvironment
             }
         }
@@ -965,6 +1011,7 @@ function Invoke-ReviewMain {
     if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'RUNNER_TEMP or TEMP is required' }
     if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $Workspace 'review-output.md' }
 
+    Assert-ReviewModelConfiguration
     $coverage = Get-ReviewCoverage -RequestedMode $Mode -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
     $promptText = $Prompt
     if ($coverage.Mode -eq 'incremental') {
