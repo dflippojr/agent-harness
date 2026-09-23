@@ -22,7 +22,7 @@ phase added GPU contention handling, monitoring, backups, a read-only memory-lib
 | Queue pause | `harness/scheduler.py` | `set_paused`; a session that steps aside re-queues first in line |
 | Model-call gate | `harness/runner.py` (`_model_call`, `_gpu_gate`) | waits before each model call; retries a call cut off by a stop |
 | Supervisor pause flag | `ops/llama-server/run-qwen.ps1` | doesn't restart llama-server while `C:\AI\llama-server.paused` exists |
-| GPU API | `GET /gpu`, `POST /gpu/pause`, `POST /gpu/resume` | Settings → GPU card; banner on the session list |
+| GPU API | `GET /gpu`, `POST /gpu/pause`, `POST /gpu/resume` | Actions → GPU; banner on the session list |
 | Metrics | `harness/metrics.py`, `GET /metrics` | computed from SQLite per scrape plus live state |
 | Dashboard | `D:\Docker\observability-stack` `grafana/.../agent-harness.json`, Prometheus job `agent_harness` | "Agent Harness" in the Basement PC folder |
 | Backups | `harness/maintenance.py`, `backup:` in config, `POST /maintenance/backup` | status in `D:\Agents\harness\backup-status.json` |
@@ -60,7 +60,7 @@ Details:
 - Sessions get `gpu_paused` / `gpu_resumed` events, shown in the transcript and the app. They notify the phone
   (replaced in place via ntfy `sequence_id`), but **only when a session is affected** (running or queued at pause
   time, or started during it). An idle harness pausing for someone's Plex transcode sends nothing.
-- **Pause agents** (Settings) pauses by hand until **Resume now**. **Resume anyway** during a trigger ignores the
+- **Pause agents** (Actions → GPU) pauses by hand until **Resume now**. **Resume anyway** during a trigger ignores the
   current triggers until the set changes (a new game or transcode pauses again).
 - `/models/warm` does nothing while paused, so opening the app can't reload the model mid-game.
 

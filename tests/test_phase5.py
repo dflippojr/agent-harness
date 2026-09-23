@@ -408,6 +408,25 @@ def test_guard_startup_with_leftover_flag_resumes_when_clear():
     asyncio.run(body())
 
 
+def test_gpu_pause_notification_points_at_actions_gpu(tmp_path):
+    from harness.db import Database
+    from harness.notify import Notifier
+    from test_phase7 import seed
+
+    cfg = make_cfg(tmp_path)
+    cfg.notify.topic = "t"
+    db = Database(tmp_path / "h.sqlite3")
+    seed(db, "sessgpu001", "scratch", "Write numbers", [])
+    note = Notifier(cfg, db).build({
+        "type": "gpu_paused",
+        "session_id": "sessgpu001",
+        "data": {"reason": "Hades.exe", "resume_after_seconds": 180},
+    })
+    assert note is not None
+    assert "Actions → GPU" in note["message"]
+    assert "Settings" not in note["message"]
+
+
 # guard with sessions
 def test_session_pauses_before_next_turn_and_continues(tmp_path):
     cfg = make_cfg(tmp_path)
@@ -441,7 +460,9 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
         await m.guard.check()
         assert m.guard.state == PAUSED and control.stops == 1
         assert events(m, sid, "gpu_paused")[0]["reason"] == "Hades.exe"
-        assert any((m.notifier.build(e) or {}).get("title", "").startswith("Paused for the GPU") for e in m.db.events(sid))
+        note = next(m.notifier.build(e) for e in m.db.events(sid) if e["type"] == "gpu_paused")
+        assert note["title"].startswith("Paused for the GPU")
+        assert "Actions → GPU" in note["message"] and "Settings" not in note["message"]
 
         # a follow-up while paused waits in the queue, then runs once the GPU is clear
         await m.send(sid, "again")

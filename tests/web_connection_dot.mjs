@@ -154,7 +154,13 @@ const loc = {
   hash: "#/",
   protocol: "http:",
   pathname: "/",
-  replace(url) { this.hash = String(url).startsWith("#") ? String(url) : `#${url}`; },
+  replace(url) {
+    const next = String(url).startsWith("#") ? String(url) : `#${url}`;
+    if (next === this.hash) return;
+    this.hash = next;
+    this.href = `http://localhost/${next}`;
+    this.onHashReplace?.();
+  },
 };
 const storage = () => {
   const m = new Map();
@@ -274,6 +280,7 @@ Object.assign(win, {
 });
 
 globalThis.window = win;
+loc.onHashReplace = () => win.dispatchEvent({ type: "hashchange" });
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
 globalThis.fetch = fakeFetch;
@@ -357,6 +364,7 @@ assertLive("Profile painted");
 
 await go("#/profile/disk", "Disk");
 await waitFor(() => /Tower|Measuring/.test(byId.app.textContent), "disk page");
+if (loc.hash !== "#/actions/disk") throw new Error(`disk bookmark did not redirect: ${loc.hash}`);
 assertLive("Disk painted");
 
 await go("#/images", "Images");

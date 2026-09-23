@@ -130,7 +130,7 @@ def test_web_shell_has_chat_home_and_drawer(tmp_path):
         html = client.get("/").text
         js = client.get("/static/app.js").text
         css = client.get("/static/style.css").text
-    order = [html.index(f'data-nav="{n}"') for n in ("chat", "agents", "jobs", "images")]
+    order = [html.index(f'data-nav="{n}"') for n in ("chat", "agents", "jobs", "images", "actions")]
     assert order == sorted(order)
     assert ">Tasks</a>" in html and 'id="menu-btn"' in html and 'aria-label="Open navigation menu"' in html
     assert html.index('id="drawer-profile"') > html.index('id="drawer-chats"')

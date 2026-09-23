@@ -73,7 +73,7 @@ Terms and billing notes for app builders are in `docs/app-api.md`.
   ordinary harness approvals (web, ntfy, or `/api/v1`). Optional user API-key fallback lives in
   `D:/Agents/harness/secrets/<backend>-api-key` and is never returned from an API. Cursor print mode
   uses `--force` only inside its workspace-mounted container, with branch review afterwards.
-- Remote Control (`remote_control:`): Profile → Claude Remote Control starts
+- Remote Control (`remote_control:`): Actions → Claude Remote Control starts
   `claude remote-control --spawn worktree` in a trusted tower git folder so you can pair from the
   Claude app. Those sessions are native Claude Code (no harness queue, sandbox or transcripts).
   Trust is Claude's own dialog; the harness never accepts it. Untrusted folders offer **Trust in
@@ -89,7 +89,7 @@ Terms and billing notes for app builders are in `docs/app-api.md`.
 ## Agent Harness Web
 
 Agent Harness Server serves Agent Harness Web as an installable phone PWA (Agents, Jobs, Images,
-Profile/Settings). After Phase 8 it grew into the first-party operator UI rather than a thin session list:
+Actions, Profile/Settings). After Phase 8 it grew into the first-party operator UI rather than a thin session list:
 
 - Agents / Jobs / Images are tabs; session Transcript / Changes / Info are tabs. Session titles sit
   on the page, stay sticky, and are editable (`PATCH`/`PUT /sessions/{id}`). Jump arrows appear when
@@ -98,16 +98,16 @@ Profile/Settings). After Phase 8 it grew into the first-party operator UI rather
 - Review shows merge-conflict filenames and **Ask agent to resolve**. Scratch/mac-scratch is
   explained as a disposable empty folder, not a git repo.
 - Settings: Memory (editable agent profile through the approved-write path), Appearance (themes,
-  home-screen icon, in-app text size), Backends as controls including local Qwen, Disk used/free
-  bars and cleanup. New task / New job / job details / Backends paint from `GET /backends?auth=skip`
-  (~50 ms); live login/usage fills in afterwards.
+  home-screen icon, in-app text size), Backends as controls including local Qwen. Disk used/free
+  bars and cleanup live under Actions → Disk. New task / New job / job details / Backends paint from
+  `GET /backends?auth=skip` (~50 ms); live login/usage fills in afterwards.
 - Mac sessions get `generate_image`: after ComfyUI finishes on the tower the PNG is copied into the
   Mac workspace (`put_file`, runner 4.1). Redeploy the runner (`ops\macbook\deploy.ps1`) to pick
   that up.
 - Time-boxed guest/demo access (`guests:` in untracked `config/harness.local.yaml`): a named tailnet
   login can browse read-only until an ISO `until`. Requires `allowed_logins`. Guests cannot start or
   cancel work, approve, mint keys, pause the GPU, use Remote Control, edit memory, or Review.
-- Household members (Settings → Accounts): the owner provisions a Tailscale login with a disk quota and
+- Household members (Actions → Accounts): the owner provisions a Tailscale login with a disk quota and
   session caps. Members authenticate only with that exact `Tailscale-User-Login`, see only their own
   projects/sessions, and run local-model tower tasks. Owner Home/search/review never show member prompts
   or diffs. Open-owner mode (empty `allowed_logins`) remains only while no members exist. The machine
@@ -173,7 +173,7 @@ Details and verification: `docs/phase5-results.md`.
 - GPU guard (`gpu_guard:` in `config/harness.yaml`): while a game (Steam/Epic/GOG/Xbox library executable, or the
   Steam Big Picture window) or a Plex hardware transcode runs, the queue pauses after the current model turn and
   llama-server is stopped (pause flag `C:\AI\llama-server.paused`, honored by `ops/llama-server/run-qwen.ps1`). It
-  reloads after 3 min clear. Settings → GPU pauses or resumes by hand. API: `GET /gpu`, `POST /gpu/{pause|resume}`.
+  reloads after 3 min clear. Actions → GPU pauses or resumes by hand. API: `GET /gpu`, `POST /gpu/{pause|resume}`.
 - Metrics: `GET /metrics`, scraped as Prometheus job `agent_harness`; Grafana dashboard "Agent Harness".
 - Backups (`backup:`): nightly dated database/transcript snapshots, 14 days; `POST /maintenance/backup`. Generated
   PNGs are verified into the separate `images/YYYY/MM` archive once, with JSON metadata. Image retention defaults to
@@ -203,7 +203,7 @@ Details and verification: `docs/phase4-results.md`.
   See [`docs/mac-client.md`](docs/mac-client.md).
 - Sessions for an offline or sleeping Mac wait (`waiting_target`) without holding the GPU, notify, and resume when
   the runner reconnects. While a Mac session runs, the runner holds `caffeinate -i`.
-- `GET /runners` shows runner state; so does the Settings screen's Disk card.
+- `GET /runners` shows runner state; so does the Actions → Disk card.
 
 ## Phase 3: tower projects and homelab tasks
 

@@ -98,6 +98,15 @@ class El extends Node {
   focus() {}
   select() {}
   blur() { this.dispatchEvent({ type: "blur" }); }
+  closest(sel) {
+    let n = this;
+    while (n instanceof El) {
+      if (sel === "[hidden]" && n.hidden) return n;
+      if (sel === "a[href]" && n.tagName === "A" && n.href) return n;
+      n = n.parentNode;
+    }
+    return null;
+  }
   querySelector() { return null; }
   querySelectorAll() { return []; }
   getContext() {
@@ -154,6 +163,40 @@ make("span", "conn");
 make("a", "profile-icon");
 make("button", "menu-btn");
 make("nav", "nav-drawer");
+byId["nav-drawer"].hidden = true;
+const drawerRecent = new El("div", { class: "drawer-recent" });
+drawerRecent.className = "drawer-recent";
+const indexHtml = readFileSync(join(root, "harness/web/index.html"), "utf8");
+const actionsHrefMatch = indexHtml.match(/<a href="(#[^"]*)" data-nav="actions">/);
+if (!actionsHrefMatch) throw new Error("missing Actions drawer link in index.html");
+const actionsHref = actionsHrefMatch[1];
+const actionsNav = new El("a", { href: actionsHref, "data-nav": "actions" });
+actionsNav.href = actionsHref;
+actionsNav.dataset.nav = "actions";
+const descendants = (root) => {
+  const out = [];
+  const walk = (n) => {
+    for (const c of n.childNodes || []) {
+      if (c instanceof El) { out.push(c); walk(c); }
+    }
+  };
+  walk(root);
+  return out;
+};
+byId["nav-drawer"].querySelectorAll = function queryAll(sel) {
+  return descendants(this).filter((el) => {
+    if (sel === "a[data-nav]") return el.tagName === "A" && !!el.dataset.nav;
+    if (sel === "a[href], button") return (el.tagName === "A" && el.href) || el.tagName === "BUTTON";
+    return false;
+  });
+};
+byId["nav-drawer"].querySelector = function queryOne(sel) {
+  if (sel === ".drawer-recent") {
+    return descendants(this).find((el) => String(el.className).split(/\s+/).includes("drawer-recent")) || null;
+  }
+  return this.querySelectorAll(sel)[0] || null;
+};
+byId["nav-drawer"].append(actionsNav, drawerRecent);
 make("div", "drawer-scrim");
 make("div", "drawer-chats");
 make("span", "drawer-profile-icon");
@@ -163,13 +206,31 @@ make("header", "bar");
 make("div", "guest-banner");
 make("div", "toast");
 
+const historyStack = ["#/"];
 const loc = {
   href: "http://localhost/#/",
   origin: "http://localhost",
-  hash: "#/",
+  _hash: "#/",
+  get hash() { return this._hash; },
+  set hash(v) {
+    const next = !v || v === "#" ? "#/" : String(v);
+    if (next === this._hash) return;
+    this._hash = next;
+    this.href = `http://localhost/${next}`;
+    historyStack.push(next);
+  },
   protocol: "http:",
   pathname: "/",
-  replace(url) { this.hash = String(url).startsWith("#") ? String(url) : `#${url}`; },
+  // Browsers fire hashchange when location.replace changes the fragment. The app's
+  // legacy redirects depend on that second route() being the only one that paints.
+  replace(url) {
+    const next = String(url).startsWith("#") ? String(url) : `#${url}`;
+    if (next === this._hash) return;
+    this._hash = next;
+    this.href = `http://localhost/${next}`;
+    historyStack[historyStack.length - 1] = next;
+    this.onHashReplace?.();
+  },
 };
 const storage = () => {
   const m = new Map();
@@ -215,6 +276,8 @@ const sessionDetail = {
 };
 
 let pendingRenameGate = null;
+let meRole = "owner";
+let gpuPayload = { manual: false, state: "clear" };
 const fetched = [];
 const fakeFetch = async (url, opts = {}) => {
   const href = String(url);
@@ -224,7 +287,7 @@ const fakeFetch = async (url, opts = {}) => {
     return jsonResp({ protocols: { admin: { min: 1, max: 4 } }, update_hint: {} });
   }
   if (path === "/me") {
-    return jsonResp({ role: "owner", name: "Owner", login: "owner", public_url: "http://localhost" });
+    return jsonResp({ role: meRole, name: "Owner", login: "owner", public_url: "http://localhost" });
   }
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
   if (path === "/sessions" || path.startsWith("/sessions?")) return jsonResp([]);
@@ -236,7 +299,7 @@ const fakeFetch = async (url, opts = {}) => {
   }
   if (path === "/sessions/sess1") return jsonResp(sessionDetail);
   if (path === "/queue") return jsonResp([]);
-  if (path === "/gpu") return jsonResp({ manual: false, state: "clear" });
+  if (path === "/gpu") return jsonResp(gpuPayload);
   if (path === "/projects") return jsonResp([{ name: "scratch", target: "tower" }]);
   if (path === "/jobs") return jsonResp([]);
   if (path === "/jobs/job1") return jsonResp(jobDetail);
@@ -249,6 +312,7 @@ const fakeFetch = async (url, opts = {}) => {
     });
   }
   if (path === "/models") return jsonResp([]);
+  if (path.startsWith("/chats")) return jsonResp([]);
   if (path.startsWith("/backends")) return jsonResp([{ name: "local", available: true }]);
   return jsonResp({});
 };
@@ -283,7 +347,17 @@ Object.assign(win, {
   sessionStorage: storage(),
   location: loc,
   navigator: { serviceWorker: undefined, userAgent: "test" },
-  history: { back() { loc.hash = "#/"; }, replaceState() {} },
+  history: {
+    replaceState() {},
+    back() {
+      if (historyStack.length < 2) return;
+      historyStack.pop();
+      const prev = historyStack[historyStack.length - 1];
+      loc._hash = prev;
+      loc.href = `http://localhost/${prev}`;
+      win.dispatchEvent({ type: "hashchange" });
+    },
+  },
   scrollTo() {},
   confirm: () => false,
   innerHeight: 800,
@@ -295,6 +369,7 @@ Object.assign(win, {
   cancelAnimationFrame: (id) => clearTimeout(id),
 });
 
+loc.onHashReplace = () => win.dispatchEvent({ type: "hashchange" });
 globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
@@ -392,14 +467,17 @@ assertTitle("#/jobs", "Jobs");
 await go("#/profile");
 await waitFor(() => /Profile/.test(byId.title.textContent), "profile title");
 assertTitle("#/profile", "Profile");
+if (/Claude Remote Control/.test(byId.app.textContent)) {
+  throw new Error("profile still lists Actions");
+}
 
 await go("#/profile/account");
 await waitFor(() => /Account/.test(byId.title.textContent), "profile account title");
 assertTitle("#/profile/account", "Account");
 
 await go("#/profile/disk");
-await waitFor(() => /Disk/.test(byId.title.textContent), "profile disk title");
-assertTitle("#/profile/disk", "Disk");
+await waitFor(() => loc.hash === "#/actions/disk" && /Actions/.test(byId.title.textContent), "disk bookmark redirects to actions");
+assertTitle("#/actions/disk", "Actions");
 
 await go("#/jobs/job1");
 await waitFor(() => byId.title.textContent && !byId.title.hidden, "job detail title");
@@ -465,5 +543,134 @@ await sleep(60);
 if (!/Agents/.test(byId.title.textContent)) {
   throw new Error(`stale session rename clobbered topbar title after navigating away: "${byId.title.textContent}"`);
 }
+
+const tabLabels = (root) => {
+  const labels = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (node.attributes && node.attributes.role === "tab") labels.push(node.textContent);
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(root);
+  return labels;
+};
+
+const findHref = (root, href) => {
+  let found = null;
+  const walk = (node) => {
+    if (found || !node || typeof node !== "object") return;
+    if (node.tagName === "A" && node.attributes && node.attributes.href === href) found = node;
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(root);
+  return found;
+};
+gpuPayload = {
+  manual: true, state: "paused", manual_remaining_seconds: null,
+  enabled: true, signals: [], reasons: [],
+};
+await go("#/agents");
+await waitFor(() => /Local models held/.test(byId.app.textContent), "gpu hold notice");
+if (!findHref(byId.app, "#/actions/gpu")) {
+  const stale = findHref(byId.app, "#/profile");
+  throw new Error(`gpu hold notice links to ${stale ? stale.attributes.href : "nothing"}`);
+}
+gpuPayload = { manual: false, state: "clear" };
+
+await go("#/actions");
+await waitFor(() => loc.hash === "#/actions/gpu" && /GPU guard disabled|Checking/.test(byId.app.textContent), "default gpu tab");
+assertTitle("#/actions", "Actions");
+const gpuTabs = tabLabels(byId.app);
+if (gpuTabs.join("|") !== "GPU|Accounts|Claude Remote Control|Disk") {
+  throw new Error(`tab order ${gpuTabs.join("|")}`);
+}
+const selected = (root) => {
+  const labels = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (node.attributes && node.attributes.role === "tab" && String(node.className).split(/\s+/).includes("on")) {
+      labels.push(node.textContent);
+    }
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(root);
+  return labels;
+};
+if (selected(byId.app).join("|") !== "GPU") throw new Error(`expected GPU selected, got ${selected(byId.app)}`);
+
+const followDrawerActions = async () => {
+  if (loc.hash === actionsHref) return;
+  loc.hash = actionsHref;
+  win.dispatchEvent({ type: "hashchange" });
+  await sleep(40);
+};
+await followDrawerActions();
+await waitFor(() => loc.hash === "#/actions/gpu", "drawer Actions stays on GPU");
+win.history.back();
+await sleep(40);
+if (loc.hash !== "#/agents") {
+  throw new Error(`tapping Actions on GPU left extra history; back landed on ${loc.hash}`);
+}
+await go("#/agents");
+await waitFor(() => /Agents/.test(byId.title.textContent), "agents before bare #/actions");
+await go("#/actions");
+await waitFor(() => loc.hash === "#/actions/gpu", "bare #/actions redirects to gpu");
+win.history.back();
+await sleep(40);
+if (loc.hash !== "#/agents") {
+  throw new Error(`bare #/actions left extra history; back landed on ${loc.hash}`);
+}
+await go("#/actions/gpu");
+await waitFor(() => loc.hash === "#/actions/gpu" && /GPU guard disabled|Checking/.test(byId.app.textContent), "gpu after history checks");
+
+const clickTab = (label) => {
+  let found = null;
+  const walk = (node) => {
+    if (found || !node || typeof node !== "object") return;
+    if (node.attributes && node.attributes.role === "tab" && node.textContent === label) found = node;
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(byId.app);
+  if (!found) throw new Error(`missing tab ${label}`);
+  found.click();
+};
+clickTab("Accounts");
+if (loc.hash !== "#/actions/accounts") throw new Error(`accounts tab hash ${loc.hash}`);
+win.dispatchEvent({ type: "hashchange" });
+await waitFor(() => /No household members yet|New member/.test(byId.app.textContent), "accounts tab");
+byId["menu-btn"].click();
+if (actionsNav.attributes["aria-current"] !== "page") {
+  throw new Error(`Actions drawer not current on ${loc.hash}`);
+}
+clickTab("Disk");
+win.dispatchEvent({ type: "hashchange" });
+await waitFor(() => loc.hash === "#/actions/disk" && /Tower|Measuring/.test(byId.app.textContent), "disk tab");
+
+await go("#/profile/accounts");
+await waitFor(() => loc.hash === "#/actions/accounts" && /New member/.test(byId.app.textContent), "accounts bookmark redirects");
+await sleep(50);
+const accountTabs = tabLabels(byId.app);
+if (accountTabs.join("|") !== "GPU|Accounts|Claude Remote Control|Disk") {
+  throw new Error(`legacy #/profile/accounts duplicated tabs: ${accountTabs.join("|")}`);
+}
+const accountPanels = (byId.app.textContent.match(/New member/g) || []).length;
+if (accountPanels !== 1) {
+  throw new Error(`legacy #/profile/accounts rendered ${accountPanels} Accounts panels`);
+}
+await go("#/profile/remote-control");
+await waitFor(() => loc.hash === "#/actions/remote-control", "remote-control bookmark redirects");
+await go("#/settings/disk");
+await waitFor(() => loc.hash === "#/actions/disk", "settings disk alias redirects");
+
+meRole = "member";
+await go("#/actions/gpu");
+await waitFor(() => loc.hash === "#/agents", "member blocked from actions");
+await go("#/profile/disk");
+await waitFor(() => loc.hash === "#/profile", "member disk bookmark stays off actions");
+meRole = "guest";
+await go("#/actions");
+await waitFor(() => loc.hash === "#/profile", "guest blocked from actions");
+await go("#/profile/remote-control");
+await waitFor(() => loc.hash === "#/profile", "guest remote-control bookmark stays off actions");
 
 console.log("ok");

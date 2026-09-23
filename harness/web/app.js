@@ -7,10 +7,11 @@
 //   #/s/<id>/approval/<aid>  same, focused on one approval (notification deep link)
 //   #/s/<id>/changes         diff viewer
 //   #/s/<id>/info            session details
-//   #/profile                identity plus Actions and Settings menus
+//   #/actions[/<tab>]        owner actions: gpu, accounts, remote-control, disk
+//   #/profile                identity plus Settings menu
 //   #/profile/account        icon picker, account info, connection details
-//   #/profile/remote-control native Claude Code Remote Control sessions
 //   #/profile/<section>      a Settings page (appearance, notifications, backends, …)
+//   #/profile/{accounts,disk,remote-control} redirect to #/actions/<tab>
 //   #/images                 image generation and gallery
 //   #/images/<id>            one result (prompt, metadata, Another one)
 //   #/images/<id>/edit       masked inpainting / photo edit
@@ -449,7 +450,7 @@ function watchDaemonConnection() {
 
 // ---------- router ----------
 const hashParts = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-const isTopLevel = (parts) => parts.length === 0 || parts[0] === "chat"
+const isTopLevel = (parts) => parts.length === 0 || parts[0] === "chat" || parts[0] === "actions"
   || (parts.length === 1 && (parts[0] === "agents" || parts[0] === "jobs" || parts[0] === "images"));
 
 function go(hash, replace = false) {
@@ -498,7 +499,18 @@ async function route() {
     else if (parts[0] === "chat") await viewChat(parts[1]);
     else if (parts[0] === "agents") await viewList();
     else if (parts[0] === "new") await viewNew();
-            else if (parts[0] === "profile" || parts[0] === "settings") await viewProfile(parts[1], parts[2]);
+    else if (parts[0] === "actions") {
+      if (!isOwner()) { go(isMember() ? "#/agents" : "#/profile", true); return; }
+      await viewActions(parts[1]);
+    }
+    else if (parts[0] === "profile" || parts[0] === "settings") {
+      // Bookmarks from when these lived under Profile. Non-owners never land on Actions.
+      if (["accounts", "disk", "remote-control"].includes(parts[1])) {
+        if (!isOwner()) { go("#/profile", true); return; }
+        go(`#/actions/${parts[1]}`, true);
+        return;
+      } else await viewProfile(parts[1], parts[2]);
+    }
     else if (parts[0] === "images") {
       if (parts[1] && !validId(parts[1])) go("#/images", true);
       else if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
@@ -544,7 +556,9 @@ function drawerFocusable() {
 
 function currentSection() {
   const first = hashParts()[0] || "";
-  return first === "s" || first === "new" ? "agents" : first;
+  if (first === "s" || first === "new") return "agents";
+  if (first === "actions") return "actions";
+  return first;
 }
 
 let drawerChatsCache = null;
@@ -573,8 +587,10 @@ function openDrawer() {
   const section = currentSection();
   $drawer.querySelectorAll("a[data-nav]").forEach((a) => {
     const nav = a.dataset.nav;
-    a.hidden = (nav === "chat" && !canChat()) || (isMember() && (nav === "jobs" || nav === "images"));
-    if (nav === section) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    a.hidden = (nav === "chat" && !canChat()) || (isMember() && (nav === "jobs" || nav === "images"))
+      || (nav === "actions" && !isOwner());
+    const on = nav === "actions" ? section === "actions" : nav === section;
+    if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
   document.getElementById("drawer-profile-icon").textContent = $profileIcon.textContent || "🙂";
   $drawer.hidden = false;
@@ -940,7 +956,7 @@ async function viewList() {
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     queueNote.replaceChildren(
-      paused ? h("a", { href: "#/profile" }, `⏸ ${gpuText(gpu)}`) : "",
+      paused ? h("a", { href: "#/actions/gpu" }, `⏸ ${gpuText(gpu)}`) : "",
       paused && waiting ? " · " : "",
       waiting ? `${waiting} waiting for the GPU` : "");
     renderTargetSwitch();
@@ -1131,7 +1147,7 @@ async function viewNew() {
     sleeping: "Model is asleep; loading it now (about a minute)",
     waking: "Model is loading (about a minute); you can start the task anyway",
     unreachable: "Model server isn't answering",
-    paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Settings → GPU)",
+    paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → GPU)",
   };
   const pollModel = async () => {
     if (backend.value !== "local") return;
@@ -1736,7 +1752,7 @@ async function viewSession(sid, tab, focusApproval) {
     },
     gpu_paused: (e) => {
       gpuNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
-        `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Settings → GPU to resume now)`)));
+        `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Actions → GPU to resume now)`)));
     },
     gpu_resumed: (e) => {
       const text = `GPU free again after ${e.data.seconds < 90 ? `${e.data.seconds} s` : `${Math.round(e.data.seconds / 60)} min`}; reloading the model`;
@@ -2743,15 +2759,38 @@ async function accountsCard() {
   return wrap;
 }
 
+const ACTION_TABS = [
+  ["gpu", "GPU"],
+  ["accounts", "Accounts"],
+  ["remote-control", "Claude Remote Control"],
+  ["disk", "Disk"],
+];
+
+async function viewActions(tab) {
+  const selected = ACTION_TABS.some(([id]) => id === tab) ? tab : "gpu";
+  if (tab !== selected) { go("#/actions/gpu", true); return; }
+  setHeader("agents", "Actions");
+  const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Actions" },
+    ACTION_TABS.map(([id, label]) => h("button", {
+      type: "button", role: "tab", class: id === selected ? "on" : "",
+      "aria-selected": id === selected ? "true" : "false",
+      onclick: () => go(`#/actions/${id}`),
+    }, label)));
+  const panel = selected === "gpu" ? h("div", { class: "card settings-list" }, gpuActionRow())
+    : selected === "accounts" ? await accountsCard()
+    : selected === "remote-control" ? remoteControlCard()
+    : diskCard();
+  $app.append(tabs, panel);
+}
+
 async function viewProfile(page, extra) {
-  const titles = { account: "Account", accounts: "Accounts", "remote-control": "Claude Remote Control", disk: "Disk", ...PROFILE_PAGES };
+  const titles = { account: "Account", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
   setHeader("agents", titles[page] || "Profile", { page: true });
   if (page === "connection") return $app.append(connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
   if (page === "account") return $app.append(accountCard(me, profile));
-  if (page === "accounts" && isOwner()) return $app.append(await accountsCard());
   if (page === "appearance") return $app.append(appearanceCard());
   if (page === "notifications") return $app.append(notificationsCard(me));
   if (page === "install") return $app.append(installCard());
@@ -2762,8 +2801,6 @@ async function viewProfile(page, extra) {
   if (page === "skills") return $app.append(await skillsPage(extra));
   if (page === "apps") return $app.append(appsCard(me));
   if (page === "endpoint") return $app.append(endpointCard(me));
-  if (page === "disk") return $app.append(diskCard());
-  if (page === "remote-control") return $app.append(remoteControlCard());
   let hidden = new Set();
   if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
   else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
@@ -2775,12 +2812,6 @@ async function viewProfile(page, extra) {
           h("h3", {}, me.name || "You"),
           h("div", { class: "muted small" }, isMember() ? "Household member" : "Account and connection")),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    isOwner() ? h("p", { class: "section-label" }, "Actions") : null,
-    isOwner() ? h("div", { class: "card settings-list" },
-      gpuActionRow(),
-      h("a", { href: "#/profile/remote-control" }, "Claude Remote Control"),
-      h("a", { href: "#/profile/disk" }, "Disk"),
-      h("a", { href: "#/profile/accounts" }, "Accounts")) : null,
     isMember() && me.usage ? h("div", { class: "card" },
       h("h3", {}, "Usage"),
       h("p", { class: "muted small" }, me.usage.disk_note || ""),

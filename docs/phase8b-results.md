@@ -38,7 +38,7 @@ Issue [#19](https://github.com/dflippojr/agent-harness/issues/19). Commit `e7b67
   A restarted daemon still sees and stops servers it started. The restart script only kills the daemon, so servers
   keep running.
 - **Stop:** kills the process tree. The npm `claude` shim starts `cmd.exe`, then `claude.exe`, then node children.
-- **Web app:** Settings → Claude Remote Control lists each project with its trust state, running state, session
+- **Web app:** Actions → Claude Remote Control lists each project with its trust state, running state, session
   count, and Trust in Claude / Start / Stop / Open in Claude. For a newly configured repository, Trust in Claude
   opens an interactive Claude window in that exact folder on the tower; the user accepts Claude's own workspace
   trust prompt, and the card polls until the repository becomes trusted. The harness never accepts trust itself.
@@ -71,7 +71,7 @@ hour. `test_web_app_js_parses` now runs `node --check` on `app.js`.
 
 ## Exit test (user)
 
-1. From the phone: Settings → Claude Remote Control → invoice-tools → Trust in Claude. On the tower, review the
+1. From the phone: Actions → Claude Remote Control → invoice-tools → Trust in Claude. On the tower, review the
    folder in the new Claude window and accept the one-time workspace trust prompt, then exit Claude.
 2. From the phone: tap Start. The "Remote Control ready" notification
    should arrive. Tap it or "Open in Claude", start a session in the Claude app, and confirm that it works in a
