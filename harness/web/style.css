@@ -120,7 +120,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 #bar > * { position: relative; z-index: 1; }
 #bar h1 {
   flex: 1; min-width: 0; margin: 0; font-size: 0.9375rem; font-weight: 500;
-  overflow-wrap: break-word; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted);
 }
 #bar.page h1 { color: var(--text); font-weight: 650; font-size: 1.0625rem; }
 #feature-nav {

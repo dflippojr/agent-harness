@@ -831,7 +831,7 @@ const markPassage = (text) => escapeHtml(text).replace(//g, "<mark>").replace(/
 const PASSAGE_KIND = { title: "title", message: "you", assistant: "agent", tool: "tool output", answer: "answer", context: "app context" };
 
 async function viewList() {
-  setHeader("agents");
+  setHeader("agents", "Agents");
   const list = h("div");
   const results = h("div", { hidden: true });
   const queueNote = h("p", { class: "note" });
@@ -1232,7 +1232,7 @@ route();
   }
 }
 
-function sessionTitle(session) {
+function sessionTitle(session, isActive) {
   if (isGuest()) return h("h2", { class: "session-title" }, session.title);
   const label = h("button", { class: "session-title", type: "button", title: "Rename session" }, session.title);
   const startEdit = () => {
@@ -1257,6 +1257,7 @@ function sessionTitle(session) {
               updated = await api(`/sessions/${session.id}`, { method: "PUT", body });
             }
             session.title = updated.title;
+            if (isActive()) setHeader("agents", session.title || "Session");
           } catch (e) { toast(e.message); }
         }
       }
@@ -1305,7 +1306,9 @@ async function viewSession(sid, tab, focusApproval) {
   if (!validId(sid)) { go("#/agents", true); return; }
   let session = await api(`/sessions/${sid}`);
   sid = session.id;
-  setHeader("agents");
+  setHeader("agents", session.title || "Session");
+  let left = false;
+  onLeave(() => { left = true; });
 
   const tabs = h("div", { class: "tabs" },
     ["transcript", "changes", "info"].map((name) => h("button", {
@@ -1314,7 +1317,7 @@ async function viewSession(sid, tab, focusApproval) {
     }, name[0].toUpperCase() + name.slice(1))));
   const head = h("div", { class: "row small" });
   const usage = h("div", { class: "row small usage" });
-  $app.append(h("div", { class: "session-chrome" }, sessionTitle(session)), head, usage, tabs);
+  $app.append(h("div", { class: "session-chrome" }, sessionTitle(session, () => !left)), head, usage, tabs);
   const jumps = bindSessionJumps();
   const pages = [];
   const fetchById = new Map();
@@ -1981,7 +1984,7 @@ function imageModeEntries(status) {
 }
 
 async function viewImages() {
-  setHeader("images");
+  setHeader("images", "Images");
   let data;
   try { data = await api("/images"); } catch (e) { $app.append(h("p", { class: "note bad" }, e.message)); return; }
   const prompt = h("textarea", { placeholder: "Describe the image…" });
@@ -2384,7 +2387,7 @@ const whenText = (ts) => {
 const cronLabel = (cron) => (CRON_PRESETS.find(([c]) => c === cron) || [null, cron])[1];
 
 async function viewJobs() {
-  setHeader("jobs");
+  setHeader("jobs", "Jobs");
   showFab("#/jobs/new", "+ New job");
   const jobs = await api("/jobs");
   if (!jobs.length) {
