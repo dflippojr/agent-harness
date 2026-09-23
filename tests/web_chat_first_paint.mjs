@@ -270,6 +270,33 @@ if (byId.title.hidden) {
   throw new Error("header title should be visible (though possibly empty) before data loads");
 }
 
+const findByClass = (node, cls) => {
+  if (!(node instanceof El)) return null;
+  if (node.className && node.className.split(/\s+/).includes(cls)) return node;
+  for (const child of node.childNodes || []) {
+    const found = findByClass(child, cls);
+    if (found) return found;
+  }
+  return null;
+};
+const findTag = (node, tag) => {
+  if (!(node instanceof El)) return null;
+  if (node.tagName === tag) return node;
+  for (const child of node.childNodes || []) {
+    const found = findTag(child, tag);
+    if (found) return found;
+  }
+  return null;
+};
+
+// Clicking a chat-starter button before /chats/options resolves (ui is still null) must be a
+// harmless no-op, not throw (#180 review finding: TypeError on ui.input while ui is null).
+const starters = findByClass(byId.app, "chat-starters");
+if (!starters) throw new Error("chat-starters welcome shell was not painted");
+const starterButton = findTag(starters, "BUTTON");
+if (!starterButton) throw new Error("no chat-starter button found in the welcome shell");
+starterButton.click();
+
 releaseChatOptions();
 await sleep(30);
 
