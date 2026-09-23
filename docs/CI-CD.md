@@ -43,12 +43,24 @@ review uses the `agent-harness-review` pool.
 
 `.github/workflows/sonar.yml` is the analysis. It runs on GitHub-hosted `windows-latest` against SonarCloud
 organization `dflippojr`, project key `dflippojr_agent-harness` (`sonar-project.properties`), host
-`https://sonarcloud.io`, using the repository Actions secret `SONARCLOUD_TOKEN`. It installs the test extras, runs
-`pytest` with `pytest-cov` Cobertura output (`coverage.xml`), then scans with `sonar.qualitygate.wait=true`. The
-suite is Windows-native; Ubuntu hosted runners fail coverage collection on `msvcrt`, console-creation flags, and
-Windows paths. Docker-image and GPU tests still skip on the hosted runner and do not contribute coverage. Non-Python
-trees (`harness/web`, `ops`, scripts that are not `.py`) are excluded from the coverage metric. Confirm the SonarCloud
-project still uses a gate that includes coverage on new code; the workflow cannot set that condition itself.
+`https://sonarcloud.io`, using the repository Actions secret `SONARCLOUD_TOKEN`. It installs `pytest-cov` and
+`pytest-xdist` as extras (not in `requirements.txt`), logs `NUMBER_OF_PROCESSORS` to confirm the hosted 4-vCPU
+shape, then runs `python -m pytest tests -q -n 4 --dist loadfile` with pytest-cov Cobertura output
+(`coverage.xml`). Worker count is fixed at 4 (not pytest's auto count) because a public-repo `windows-latest` runner has
+4 vCPUs; tower CI uses `-n 8` on a larger machine. pytest-cov merges xdist workers into one `coverage.xml`.
+`COVERAGE_CORE=sysmon` is not used: `.coveragerc` sets `branch = True`, and coverage.py's sysmon core cannot
+measure branches on Python 3.12 (this job; sysmon branch support starts at 3.14). The scan still uses
+`sonar.qualitygate.wait=true`. The suite is Windows-native; Ubuntu hosted runners fail coverage collection on
+`msvcrt`, console-creation flags, and Windows paths. Docker-image and GPU tests still skip on the hosted runner
+and do not contribute coverage. Non-Python trees (`harness/web`, `ops`, scripts that are not `.py`) are excluded
+from the coverage metric. Confirm the SonarCloud project still uses a gate that includes coverage on new code;
+the workflow cannot set that condition itself. PR analysis stays on GitHub-hosted Windows; it must not move to
+the tower or reuse the tower CI job's results.
+
+Serial `sonar` job baseline from nine successful hosted runs on 2026-09-23 (createdAt 02:47–19:42 UTC): job
+wall-clock median 818 s, worst 1026 s; `Run tests with coverage` median 684 s, worst 843 s (the 828 s figure in
+issue #191 is run 35911097047). Parallel after timings belong on the first PR that exercises this workflow;
+pushing a branch without a pull request does not trigger `sonar.yml`.
 
 SonarCloud **Automatic Analysis must stay OFF**. This workflow is the analysis; turning Automatic Analysis on would
 duplicate and fight it. To rotate the token, create a new SonarCloud user token, replace the repo Actions secret

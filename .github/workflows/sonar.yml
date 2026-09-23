@@ -10,6 +10,17 @@ name: SonarCloud
 # Coverage is produced here (pytest-cov Cobertura XML) before the scanner
 # runs. sonar.qualitygate.wait then fails the check when the SonarCloud
 # quality gate fails, including coverage on new code (Sonar way: 80%).
+#
+# Coverage pytest uses pytest-xdist as a CI extra (not in requirements.txt)
+# with a fixed -n 4 --dist loadfile. GitHub-hosted windows-latest has 4
+# vCPUs; do not use pytest's auto worker count. The tower CI job uses -n 8
+# on a larger machine;
+# flags stay on this command (no repo-wide addopts) so the two jobs can
+# differ. pytest-cov merges worker data into coverage.xml. COVERAGE_CORE
+# sysmon is not set: .coveragerc enables branch coverage, and sysmon cannot
+# measure branches on Python 3.12 (this job's version; branch sysmon needs
+# 3.14+). The Confirm hosted runner cores step logs NUMBER_OF_PROCESSORS
+# so soak logs can verify the 4-vCPU assumption.
 on:
   push:
     branches: [main]
@@ -43,7 +54,11 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest-cov
+          python -m pip install -r requirements.txt pytest-cov pytest-xdist
+
+      - name: Confirm hosted runner cores
+        shell: powershell
+        run: Write-Host "NUMBER_OF_PROCESSORS=$env:NUMBER_OF_PROCESSORS"
 
       - name: Run tests with coverage
         env:
@@ -52,7 +67,7 @@ jobs:
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: >
-          python -m pytest tests -q
+          python -m pytest tests -q -n 4 --dist loadfile
           --cov=harness --cov=sdk --cov=scripts --cov=macrunner
           --cov-report=xml:coverage.xml --cov-report=term
 
