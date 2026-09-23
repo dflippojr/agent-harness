@@ -357,6 +357,7 @@ assertLive("Profile painted");
 
 await go("#/profile/disk", "Disk");
 await waitFor(() => /Tower|Measuring/.test(byId.app.textContent), "disk page");
+if (loc.hash !== "#/actions/disk") throw new Error(`disk bookmark did not redirect: ${loc.hash}`);
 assertLive("Disk painted");
 
 await go("#/images", "Images");

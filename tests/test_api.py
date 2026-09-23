@@ -106,7 +106,15 @@ def test_web_app_and_guard(tmp_path):
         assert 'href: "#/profile/account"' in js
         assert "gpuActionRow()" in js and "function gpuCard()" not in js
         assert 'h("span", {}, "Duration:")' in js and 'duration.disabled = isGuest() || !g.manual' in js
-        assert 'href: "#/profile/remote-control"' in js and 'href: "#/profile/disk"' in js
+        assert "function viewActions" in js and 'go(`#/actions/${parts[1]}`, true)' in js
+        assert js.index('["gpu", "GPU"]') < js.index('["accounts", "Accounts"]')
+        assert js.index('["accounts", "Accounts"]') < js.index('["remote-control", "Claude Remote Control"]')
+        assert js.index('["remote-control", "Claude Remote Control"]') < js.index('["disk", "Disk"]')
+        assert 'nav === "actions" && !isOwner()' in js
+        assert 'href: "#/profile/remote-control"' not in js and 'href: "#/profile/disk"' not in js
+        assert 'data-nav="actions"' in client.get("/").text and 'href="#/actions"' in client.get("/").text
+        profile_js = js.split("async function viewProfile")[1].split("function connectionCard")[0]
+        assert "gpuActionRow()" not in profile_js and "Claude Remote Control" not in profile_js
         assert '"smart-approvals": "Smart approvals"' in js and "function smartApprovalsCard()" in js
         assert 'skills: "Skills"' in js
         assert 'api("/skills/enabled")' in js

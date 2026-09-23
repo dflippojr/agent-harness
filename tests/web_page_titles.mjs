@@ -215,6 +215,7 @@ const sessionDetail = {
 };
 
 let pendingRenameGate = null;
+let meRole = "owner";
 const fetched = [];
 const fakeFetch = async (url, opts = {}) => {
   const href = String(url);
@@ -224,7 +225,7 @@ const fakeFetch = async (url, opts = {}) => {
     return jsonResp({ protocols: { admin: { min: 1, max: 4 } }, update_hint: {} });
   }
   if (path === "/me") {
-    return jsonResp({ role: "owner", name: "Owner", login: "owner", public_url: "http://localhost" });
+    return jsonResp({ role: meRole, name: "Owner", login: "owner", public_url: "http://localhost" });
   }
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
   if (path === "/sessions" || path.startsWith("/sessions?")) return jsonResp([]);
@@ -392,14 +393,17 @@ assertTitle("#/jobs", "Jobs");
 await go("#/profile");
 await waitFor(() => /Profile/.test(byId.title.textContent), "profile title");
 assertTitle("#/profile", "Profile");
+if (/Claude Remote Control/.test(byId.app.textContent)) {
+  throw new Error("profile still lists Actions");
+}
 
 await go("#/profile/account");
 await waitFor(() => /Account/.test(byId.title.textContent), "profile account title");
 assertTitle("#/profile/account", "Account");
 
 await go("#/profile/disk");
-await waitFor(() => /Disk/.test(byId.title.textContent), "profile disk title");
-assertTitle("#/profile/disk", "Disk");
+await waitFor(() => loc.hash === "#/actions/disk" && /Actions/.test(byId.title.textContent), "disk bookmark redirects to actions");
+assertTitle("#/actions/disk", "Actions");
 
 await go("#/jobs/job1");
 await waitFor(() => byId.title.textContent && !byId.title.hidden, "job detail title");
@@ -465,5 +469,74 @@ await sleep(60);
 if (!/Agents/.test(byId.title.textContent)) {
   throw new Error(`stale session rename clobbered topbar title after navigating away: "${byId.title.textContent}"`);
 }
+
+const tabLabels = (root) => {
+  const labels = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (node.attributes && node.attributes.role === "tab") labels.push(node.textContent);
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(root);
+  return labels;
+};
+
+await go("#/actions");
+await waitFor(() => loc.hash === "#/actions/gpu" && /GPU guard disabled|Checking/.test(byId.app.textContent), "default gpu tab");
+assertTitle("#/actions", "Actions");
+const gpuTabs = tabLabels(byId.app);
+if (gpuTabs.join("|") !== "GPU|Accounts|Claude Remote Control|Disk") {
+  throw new Error(`tab order ${gpuTabs.join("|")}`);
+}
+const selected = (root) => {
+  const labels = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (node.attributes && node.attributes.role === "tab" && String(node.className).split(/\s+/).includes("on")) {
+      labels.push(node.textContent);
+    }
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(root);
+  return labels;
+};
+if (selected(byId.app).join("|") !== "GPU") throw new Error(`expected GPU selected, got ${selected(byId.app)}`);
+
+const clickTab = (label) => {
+  let found = null;
+  const walk = (node) => {
+    if (found || !node || typeof node !== "object") return;
+    if (node.attributes && node.attributes.role === "tab" && node.textContent === label) found = node;
+    for (const child of node.childNodes || []) walk(child);
+  };
+  walk(byId.app);
+  if (!found) throw new Error(`missing tab ${label}`);
+  found.click();
+};
+clickTab("Accounts");
+if (loc.hash !== "#/actions/accounts") throw new Error(`accounts tab hash ${loc.hash}`);
+win.dispatchEvent({ type: "hashchange" });
+await waitFor(() => /No household members yet|New member/.test(byId.app.textContent), "accounts tab");
+clickTab("Disk");
+win.dispatchEvent({ type: "hashchange" });
+await waitFor(() => loc.hash === "#/actions/disk" && /Tower|Measuring/.test(byId.app.textContent), "disk tab");
+
+await go("#/profile/accounts");
+await waitFor(() => loc.hash === "#/actions/accounts", "accounts bookmark redirects");
+await go("#/profile/remote-control");
+await waitFor(() => loc.hash === "#/actions/remote-control", "remote-control bookmark redirects");
+await go("#/settings/disk");
+await waitFor(() => loc.hash === "#/actions/disk", "settings disk alias redirects");
+
+meRole = "member";
+await go("#/actions/gpu");
+await waitFor(() => loc.hash === "#/agents", "member blocked from actions");
+await go("#/profile/disk");
+await waitFor(() => loc.hash === "#/profile", "member disk bookmark stays off actions");
+meRole = "guest";
+await go("#/actions");
+await waitFor(() => loc.hash === "#/profile", "guest blocked from actions");
+await go("#/profile/remote-control");
+await waitFor(() => loc.hash === "#/profile", "guest remote-control bookmark stays off actions");
 
 console.log("ok");
