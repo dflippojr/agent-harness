@@ -125,6 +125,9 @@ jobs:
           REQUESTED_BACKEND: ${{ github.event.inputs.backend }}
           REVIEW_MODE: ${{ github.event.inputs.mode }}
           REVIEW_BACKENDS: ${{ vars.REVIEW_BACKENDS }}
+          REVIEW_MODEL_CLAUDE: ${{ vars.REVIEW_MODEL_CLAUDE }}
+          REVIEW_MODEL_CURSOR: ${{ vars.REVIEW_MODEL_CURSOR }}
+          REVIEW_MODEL_CODEX: ${{ vars.REVIEW_MODEL_CODEX }}
           REVIEW_PROMPT: |
             Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
 

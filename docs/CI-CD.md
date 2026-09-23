@@ -95,6 +95,13 @@ Set `REVIEW_BACKENDS` under repository **Settings > Secrets and variables > Acti
 `claude,codex,cursor` spends Claude quota first while retaining two fallbacks; changing the variable does not require a
 workflow edit.
 
+Optional `REVIEW_MODEL_CLAUDE`, `REVIEW_MODEL_CURSOR`, and `REVIEW_MODEL_CODEX` pin the model each backend CLI is asked
+to use (`--model` on `claude`, Cursor `agent`, and `codex exec`). When a variable is set, the runner passes that flag and
+the PR comment footer plus `model=` job output name it, for example `Automated review backend: **claude (claude-sonnet-5)**.`.
+When a variable is unset, that backend keeps the CLI default and the footer names only the backend. Values must match
+`[A-Za-z0-9][A-Za-z0-9._:+/\-]*`; anything else (spaces, quotes, leading dashes, shell metacharacters) fails closed
+before a backend runs.
+
 All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
 with its sandbox enabled. Codex ignores the service user's configuration, restores only the required unelevated Windows
 sandbox setting, disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.
