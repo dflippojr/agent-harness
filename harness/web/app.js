@@ -547,17 +547,24 @@ function currentSection() {
   return first === "s" || first === "new" ? "agents" : first;
 }
 
+let drawerChatsCache = null;
 async function refreshDrawerChats() {
   const recent = $drawer.querySelector(".drawer-recent");
   if (!canChat()) { fill($drawerChats); recent.hidden = true; return; }
   recent.hidden = false;
-  let chats = [];
+  const render = (chats) => {
+    const active = hashParts()[0] === "chat" ? hashParts()[1] : "";
+    fill($drawerChats, chats.length ? chats.map((c) => h("a", {
+      href: `#/chat/${c.id}`, class: c.id === active ? "on" : "", title: c.title,
+      "aria-current": c.id === active ? "page" : false,
+    }, c.title)) : h("p", { class: "muted small" }, "No chats yet."));
+  };
+  // Show the last known list immediately, then revalidate in the background (#152).
+  if (drawerChatsCache) render(drawerChatsCache);
+  let chats;
   try { chats = await api("/chats?limit=30"); } catch (_) { return; } // offline: keep what is shown
-  const active = hashParts()[0] === "chat" ? hashParts()[1] : "";
-  fill($drawerChats, chats.length ? chats.map((c) => h("a", {
-    href: `#/chat/${c.id}`, class: c.id === active ? "on" : "", title: c.title,
-    "aria-current": c.id === active ? "page" : false,
-  }, c.title)) : h("p", { class: "muted small" }, "No chats yet."));
+  drawerChatsCache = chats;
+  render(chats);
 }
 
 function openDrawer() {
@@ -688,29 +695,37 @@ function chatComposer(options, session) {
 async function viewChat(id) {
   if (!canChat()) { go("#/agents", true); return; }
   if (id && !validId(id)) { go("#/chat", true); return; }
+
+  // Paint the page shell before the data fetch below so the route feels instant; the
+  // composer and header title are filled in once /chats/<id> or /chats/options resolves (#152).
+  setHeader("chat", id ? "" : "Chat");
+  document.body.classList.add("chat-page");
+  onLeave(() => document.body.classList.remove("chat-page"));
+
+  let ui = null;
+  const feed = h("div", { class: "chat-feed", "aria-live": "polite" });
+  const welcome = id ? null : h("div", { class: "chat-welcome" },
+    h("div", { class: "chat-welcome-mark", "aria-hidden": "true" }, "💬"),
+    h("h2", {}, "How can I help?"),
+    h("p", { class: "muted" }, "Ask a question or paste code to review. To change files or run work, use Agents."),
+    h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
+      class: "btn small", type: "button",
+      onclick: () => { if (!ui) return; ui.input.value = text; ui.input.focus(); },
+    }, text))));
+  const wrap = h("div", { class: "chat-wrap" }, welcome, feed);
+  $app.append(wrap);
+
   let session = null;
   let options = { backends: [] };
   if (id) session = await api(`/chats/${id}`);
   else options = await api("/chats/options");
   if (session) id = session.id;
   setHeader("chat", session ? session.title : "Chat");
-  const ui = chatComposer(options, session);
+  ui = chatComposer(options, session);
   document.body.append(ui.el);
-  document.body.classList.add("chat-page");
   const stopKeyboard = trackKeyboard(ui.el);
-  onLeave(() => { ui.el.remove(); stopKeyboard(); document.body.classList.remove("chat-page"); });
+  onLeave(() => { ui.el.remove(); stopKeyboard(); });
 
-  const feed = h("div", { class: "chat-feed", "aria-live": "polite" });
-  const welcome = h("div", { class: "chat-welcome" },
-    h("div", { class: "chat-welcome-mark", "aria-hidden": "true" }, "💬"),
-    h("h2", {}, "How can I help?"),
-    h("p", { class: "muted" }, "Ask a question or paste code to review. To change files or run work, use Agents."),
-    h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
-      class: "btn small", type: "button",
-      onclick: () => { ui.input.value = text; ui.input.focus(); },
-    }, text))));
-  const wrap = h("div", { class: "chat-wrap" }, session ? null : welcome, feed);
-  $app.append(wrap);
   if (!session && !options.backends.length) {
     feed.append(h("p", { class: "note bad" }, "No model backend is available right now. Check Profile → Backends."));
     ui.send.disabled = true;
