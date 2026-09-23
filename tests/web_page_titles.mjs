@@ -169,7 +169,15 @@ const loc = {
   hash: "#/",
   protocol: "http:",
   pathname: "/",
-  replace(url) { this.hash = String(url).startsWith("#") ? String(url) : `#${url}`; },
+  // Browsers fire hashchange when location.replace changes the fragment. The app's
+  // legacy redirects depend on that second route() being the only one that paints.
+  replace(url) {
+    const next = String(url).startsWith("#") ? String(url) : `#${url}`;
+    if (next === this.hash) return;
+    this.hash = next;
+    this.href = `http://localhost/${next}`;
+    this.onHashReplace?.();
+  },
 };
 const storage = () => {
   const m = new Map();
@@ -296,6 +304,7 @@ Object.assign(win, {
   cancelAnimationFrame: (id) => clearTimeout(id),
 });
 
+loc.onHashReplace = () => win.dispatchEvent({ type: "hashchange" });
 globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
@@ -522,7 +531,16 @@ win.dispatchEvent({ type: "hashchange" });
 await waitFor(() => loc.hash === "#/actions/disk" && /Tower|Measuring/.test(byId.app.textContent), "disk tab");
 
 await go("#/profile/accounts");
-await waitFor(() => loc.hash === "#/actions/accounts", "accounts bookmark redirects");
+await waitFor(() => loc.hash === "#/actions/accounts" && /New member/.test(byId.app.textContent), "accounts bookmark redirects");
+await sleep(50);
+const accountTabs = tabLabels(byId.app);
+if (accountTabs.join("|") !== "GPU|Accounts|Claude Remote Control|Disk") {
+  throw new Error(`legacy #/profile/accounts duplicated tabs: ${accountTabs.join("|")}`);
+}
+const accountPanels = (byId.app.textContent.match(/New member/g) || []).length;
+if (accountPanels !== 1) {
+  throw new Error(`legacy #/profile/accounts rendered ${accountPanels} Accounts panels`);
+}
 await go("#/profile/remote-control");
 await waitFor(() => loc.hash === "#/actions/remote-control", "remote-control bookmark redirects");
 await go("#/settings/disk");

@@ -508,7 +508,7 @@ async function route() {
       if (["accounts", "disk", "remote-control"].includes(parts[1])) {
         if (!isOwner()) { go("#/profile", true); return; }
         go(`#/actions/${parts[1]}`, true);
-        await viewActions(parts[1]);
+        return;
       } else await viewProfile(parts[1], parts[2]);
     }
     else if (parts[0] === "images") {
@@ -2765,7 +2765,7 @@ const ACTION_TABS = [
 
 async function viewActions(tab) {
   const selected = ACTION_TABS.some(([id]) => id === tab) ? tab : "gpu";
-  if (tab !== selected) go("#/actions/gpu", true);
+  if (tab !== selected) { go("#/actions/gpu", true); return; }
   setHeader("agents", "Actions");
   const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Actions" },
     ACTION_TABS.map(([id, label]) => h("button", {
