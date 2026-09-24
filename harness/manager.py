@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 
 from .bus import EventBus
+from . import review_comments
+from . import review_comments
 from .changes import workspace_changes
 from .maintenance import Maintenance
 from .image_archive import ImageArchive
@@ -598,6 +600,35 @@ class Manager:
         if s["target"] != "tower":
             return await self.remote(s, "changes", {"base_commit": s["base_commit"]}, timeout=120)
         return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None)
+
+    # draft line comments on the Changes diff
+    def review_comments(self, ref: str) -> list[dict]:
+        return self.db.list_review_comments(self.resolve_id(ref))
+
+    def add_review_comment(self, ref: str, body: dict) -> dict:
+        sid = self.resolve_id(ref)
+        try:
+            comment = review_comments.validate(body)
+        except ValueError as e:
+            raise HarnessError(400, str(e)) from None
+        return self.db.add_review_comment(sid, comment)
+
+    def delete_review_comment(self, ref: str, comment_id: str) -> None:
+        sid = self.resolve_id(ref)
+        if not self.db.delete_review_comments(sid, [comment_id]):
+            raise HarnessError(404, "no draft comment matches that id")
+
+    async def send_review_comments(self, ref: str) -> dict:
+        """Turn the draft into one follow-up on the same session through the ordinary send path."""
+        sid = self.resolve_id(ref)
+        drafts = self.db.list_review_comments(sid)
+        if not drafts:
+            raise HarnessError(400, "no draft comments to send")
+        data = await self.changes(sid)
+        content = review_comments.format_message(drafts, data.get("repos", []))
+        result = await self.send(sid, content)
+        self.db.delete_review_comments(sid, [d["id"] for d in drafts])
+        return result
 
     # review of a git project's session branch
     async def review(self, ref: str, action: str) -> dict:

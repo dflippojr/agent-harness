@@ -17,6 +17,7 @@ FILES = (
     ("harness/fileops.py", "app/harness/fileops.py"),
     ("harness/projects.py", "app/harness/projects.py"),
     ("harness/changes.py", "app/harness/changes.py"),
+    ("harness/review_comments.py", "app/harness/review_comments.py"),
     ("harness/compat.py", "app/harness/compat.py"),
     ("harness/updater.py", "app/harness/updater.py"),
     ("harness/cli.py", "client/harness_cli.py"),

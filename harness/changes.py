@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .projects import git
+from .review_comments import parse_diff
 
 MAX_DIFF_CHARS = 400_000
 SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
@@ -69,5 +70,7 @@ def workspace_changes(workspace: Path, base_commit: str | None = None) -> dict:
         branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
         repos.append({"path": rel or ".", "branch": branch, "files": files, "diff": diff,
                       "truncated": truncated, "base": base[:12],
+                      "head": _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip()[:12],
+                      "parsed": parse_diff(diff),
                       "commits": new_commits.splitlines()})
     return {"repos": repos}
