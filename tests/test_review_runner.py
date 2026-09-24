@@ -1291,3 +1291,72 @@ def test_ci_docs_explain_backend_configuration_and_manual_verification():
     assert "reviews only the commits" in docs
     assert "pre-merge review with `mode=full`" in docs
     assert "runner service user" in docs
+
+
+def test_review_effort_pin_per_backend(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    workspace = tmp_path / "checkout"
+    workspace.mkdir()
+    output_path = tmp_path / "review.md"
+    clear = "Remove-Item Env:REVIEW_EFFORT_CODEX,Env:REVIEW_EFFORT_CLAUDE,Env:REVIEW_MODEL_CLAUDE -ErrorAction SilentlyContinue"
+    build = f"""
+$c = Get-ReviewBackendCommand -Backend claude -Workspace '{workspace}' -Prompt p -ScratchDirectory '{scratch}'
+$x = Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt p -ScratchDirectory '{scratch}'
+"""
+
+    for setup in ("", "$env:REVIEW_EFFORT_CLAUDE = '   '\n$env:REVIEW_EFFORT_CODEX = '   '"):
+        unset = run_powershell(
+            tmp_path,
+            f"""
+{clear}
+{setup}
+Assert-ReviewModelConfiguration
+{build}
+[ordered]@{{ claude = @($c.Arguments); codex = @($x.Arguments) }} | ConvertTo-Json -Compress
+""",
+        )
+        assert unset.returncode == 0, output(unset)
+        value = json.loads(unset.stdout.strip())
+        assert "--effort" not in value["claude"]
+        assert not any("model_reasoning_effort" in a for a in value["codex"])
+
+    configured = run_powershell(
+        tmp_path,
+        f"""
+{clear}
+$env:REVIEW_MODEL_CLAUDE = 'claude-sonnet-5'
+$env:REVIEW_EFFORT_CLAUDE = ' Medium '
+$env:REVIEW_EFFORT_CODEX = 'high'
+{build}
+$runner = {{
+    param($command)
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $command.Model; Effort = $command.Effort }}
+}}
+$result = Invoke-ReviewFallback -Backends @('claude') -Workspace '{workspace}' -Prompt p -ScratchDirectory '{scratch}' -Runner $runner
+Write-ReviewResult -Result $result -OutputPath '{output_path}' -CoverageLine 'Reviewed the full diff' -HeadSha '{HEAD_SHA}' -Mode full
+[ordered]@{{ claude = @($c.Arguments); codex = @($x.Arguments); effort = $result.Effort; body = [string](Get-Content -Raw -LiteralPath '{output_path}') }} | ConvertTo-Json -Compress
+""",
+    )
+    assert configured.returncode == 0, output(configured)
+    value = json.loads(configured.stdout.strip().splitlines()[-1])
+    assert value["claude"][value["claude"].index("--effort") + 1] == "medium"
+    assert value["codex"][value["codex"].index('model_reasoning_effort="high"') - 1] == "-c"
+    assert value["effort"] == "medium"
+    assert "Automated review backend: **claude (claude-sonnet-5, medium)**." in value["body"]
+
+    for backend, env_name, bad in (
+        ("claude", "REVIEW_EFFORT_CLAUDE", "extreme"),
+        ("codex", "REVIEW_EFFORT_CODEX", "max"),
+        ("codex", "REVIEW_EFFORT_CODEX", "high; x"),
+    ):
+        invalid = run_powershell(
+            tmp_path,
+            f"""
+{clear}
+$env:{env_name} = '{bad}'
+Assert-ReviewModelConfiguration
+""",
+        )
+        assert invalid.returncode != 0, bad
+        assert f"invalid review effort '{bad}' for backend '{backend}'" in output(invalid)
