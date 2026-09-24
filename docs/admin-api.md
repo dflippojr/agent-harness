@@ -49,7 +49,7 @@ same; only the prefix and the owner credential check are new.
 | Identity | `/me`, `/profile` |
 | Household accounts | `/accounts`, `/accounts/{user_id}`, `/accounts/audit` |
 | Sessions | `/sessions`, `/sessions/{ref}`, messages, cancel, rerun, approvals, transcript, events |
-| Review | `/sessions/{ref}/changes`, `/sessions/{ref}/review/{action}` (`merge` \| `push` \| `discard`) |
+| Review | `/sessions/{ref}/changes`, `/sessions/{ref}/review/{action}` (`merge` \| `push` \| `discard`) Line comments: `GET/POST /sessions/{ref}/review-comments`, `DELETE .../{comment_id}`, `POST .../send` (one follow-up; owner and members in their own sessions, never app tokens; the same paths under `/api/v1`) |
 | Search | `/search`, `/events`, `/queue` |
 | Projects and jobs | `/projects`, `/templates`, `/jobs` |
 | Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}` |

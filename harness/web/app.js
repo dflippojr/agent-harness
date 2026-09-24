@@ -1977,22 +1977,148 @@ async function viewChanges(session) {
     fill(box, h("p", { class: "empty" }, "No git repositories in this workspace yet."));
     return;
   }
-  fill(box, data.repos.map((repo) => {
-    const files = splitDiff(repo.diff);
-    return h("section", { class: "card" },
-      h("h3", {}, repo.path === "." ? "workspace" : repo.path),
-      h("div", { class: "meta" }, h("span", {}, `branch ${repo.branch}`), repo.base ? h("span", {}, `since ${repo.base.slice(0, 8)}`) : null,
-        h("span", {}, `${repo.files.length} changed file${repo.files.length === 1 ? "" : "s"}`)),
-      repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, `${repo.commits.length} new commit${repo.commits.length === 1 ? "" : "s"}`),
-        h("pre", { class: "small", style: "white-space:pre-wrap" }, repo.commits.join("\n"))) : null,
-      files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 },
-        h("summary", {}, f.name),
-        h("div", { class: "diff" }, f.lines.map((line) => h("div", {
-          class: line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add"
-            : line.startsWith("-") && !line.startsWith("---") ? "del" : "",
-        }, line))))) : h("p", { class: "muted small" }, "No differences."),
-      repo.truncated ? h("p", { class: "note" }, "Diff truncated.") : null);
-  }));
+  const canComment = !isGuest() && data.repos.some((r) => r.parsed);
+  let comments = [];
+  if (canComment) {
+    try { comments = await api(`/sessions/${sid}/review-comments`); } catch { comments = []; }
+  }
+  const state = { comments, sel: null };  // sel: {repo, path, side, anchor, start, end}
+  const render = () => fill(box, data.repos.map((repo) => repoChanges(sid, repo, state, canComment, render)));
+  render();
+}
+
+// Text of each line on one side of a file in a parsed diff: {line number: text}.
+function sideLines(parsed, path, side) {
+  const key = side === "old" ? "old" : "new";
+  const out = {};
+  for (const f of parsed || []) {
+    if (f.name !== path) continue;
+    for (const ln of f.lines) if (ln[key] !== null) out[ln[key]] = ln.text;
+  }
+  return out;
+}
+
+// A draft is stale once any commented line no longer reads the same in the current diff.
+function commentStale(repo, c) {
+  const lines = sideLines(repo.parsed, c.path, c.side);
+  for (let n = c.start_line; n <= c.end_line; n++) if (lines[n] !== c.quoted[n - c.start_line]) return true;
+  return false;
+}
+
+function lineRange(start, end) { return start === end ? `${start}` : `${start}–${end}`; }
+
+function repoChanges(sid, repo, state, canComment, render) {
+  const files = splitDiff(repo.diff);
+  const parsedFiles = new Map((repo.parsed || []).map((f) => [f.name, f]));
+  const mine = state.comments.filter((c) => c.repo === repo.path);
+  const sel = state.sel && state.sel.repo === repo.path ? state.sel : null;
+
+  const pick = (path, side, num) => {
+    if (sel && sel.path === path && sel.side === side) {
+      const lines = sideLines(repo.parsed, path, side);
+      const start = Math.min(sel.anchor, num), end = Math.max(sel.anchor, num);
+      for (let n = start; n <= end; n++) if (lines[n] === undefined) return toast("Pick lines within one hunk.");
+      state.sel = { ...sel, start, end };
+    } else {
+      state.sel = { repo: repo.path, path, side, anchor: num, start: num, end: num };
+    }
+    render();
+  };
+  const composer = () => {
+    const lines = sideLines(repo.parsed, sel.path, sel.side);
+    const quoted = [];
+    for (let n = sel.start; n <= sel.end; n++) quoted.push(lines[n]);
+    const input = h("textarea", { class: "review-input", rows: 3, placeholder: "Comment for the agent", "aria-label": "Comment" });
+    input.value = sel.text || "";  // kept across re-renders while extending the range
+    input.addEventListener("input", () => { sel.text = input.value; });
+    const add = h("button", { class: "btn ok", type: "button", onclick: async () => {
+      const text = input.value.trim();
+      if (!text) return input.focus();
+      add.disabled = true;
+      try {
+        const made = await api(`/sessions/${sid}/review-comments`, { method: "POST", body: {
+          repo: repo.path, path: sel.path, side: sel.side, start_line: sel.start, end_line: sel.end,
+          quoted, comment: text, base: repo.base, head: repo.head } });
+        state.comments.push(made);
+        state.sel = null;
+        render();
+      } catch (e) { toast(e.message, 6000); add.disabled = false; }
+    } }, "Add comment");
+    const where = `${sel.side === "old" ? "removed " : ""}line ${lineRange(sel.start, sel.end)}`;
+    return h("div", { class: "review-composer" },
+      h("div", { class: "muted small" }, `${sel.path} · ${where}. Tap another line to extend.`),
+      input,
+      h("div", { class: "row end" }, h("button", { class: "btn", type: "button", onclick: () => { state.sel = null; render(); } }, "Cancel"), add));
+  };
+  const lineRow = (f, ln) => {
+    if (ln.kind === "hunk") return h("div", { class: "hunk" }, ln.text);
+    const sign = ln.kind === "add" ? "+" : ln.kind === "del" ? "-" : " ";
+    const side = ln.kind === "del" ? "old" : ln.kind === "add" ? "new" : sel && sel.path === f.name ? sel.side : "new";
+    const num = side === "old" ? ln.old : ln.new;
+    const picked = sel && sel.path === f.name && sel.side === side && num >= sel.start && num <= sel.end;
+    const commented = mine.some((c) => c.path === f.name && c.side === side && num >= c.start_line && num <= c.end_line);
+    const tap = canComment ? {
+      role: "button", tabindex: "0", "aria-label": `Comment on ${side === "old" ? "removed " : ""}line ${num}`,
+      onclick: () => pick(f.name, side, num),
+      onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(f.name, side, num); } },
+    } : {};
+    return h("div", { class: `dl ${ln.kind}${picked ? " picked" : ""}${commented ? " commented" : ""}`, ...tap },
+      h("span", { class: "ln" }, ln.old ?? ""), h("span", { class: "ln" }, ln.new ?? ""), h("span", { class: "tx" }, `${sign}${ln.text}`));
+  };
+  const fileBody = (f) => {
+    const parsed = parsedFiles.get(f.name);
+    if (!parsed) {
+      return f.lines.map((line) => h("div", {
+        class: line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add"
+          : line.startsWith("-") && !line.startsWith("---") ? "del" : "",
+      }, line));
+    }
+    const out = [];
+    for (const ln of parsed.lines) {
+      out.push(lineRow(f, ln));
+      // The composer opens under the last selected line.
+      if (sel && sel.path === f.name && ln.kind !== "hunk" && (sel.side === "old" ? ln.old : ln.new) === sel.end) out.push(composer());
+    }
+    return out;
+  };
+  const removeDraft = async (c) => {
+    try {
+      await api(`/sessions/${sid}/review-comments/${c.id}`, { method: "DELETE" });
+      state.comments = state.comments.filter((x) => x.id !== c.id);
+      render();
+    } catch (e) { toast(e.message, 6000); }
+  };
+  const send = async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      await api(`/sessions/${sid}/review-comments/send`, { method: "POST" });
+      state.comments = [];
+      toast("Sent to the agent.");
+      go(`#/s/${sid}`, true);
+    } catch (err) { toast(err.message, 6000); render(); }
+  };
+  const drafts = mine.length ? h("div", { class: "review-drafts" },
+    h("h4", {}, `Draft comments (${mine.length})`),
+    mine.map((c) => h("div", { class: "review-draft" },
+      h("div", { class: "row", style: "justify-content:space-between" },
+        h("span", { class: "small" }, `${c.path} · ${c.side === "old" ? "removed " : ""}line ${lineRange(c.start_line, c.end_line)}`,
+          commentStale(repo, c) ? h("span", { class: "badge cancelled", style: "margin-left:6px" }, "stale") : null),
+        h("button", { class: "btn small bad", type: "button", "aria-label": "Delete comment", onclick: () => removeDraft(c) }, "Delete")),
+      h("pre", { class: "small review-quote" }, c.quoted.join("\n")),
+      h("div", {}, c.comment))),
+    h("div", { class: "row end", style: "margin-top:8px" },
+      h("button", { class: "btn ok", type: "button", onclick: send }, `Send ${state.comments.length} to agent`))) : null;
+  return h("section", { class: "card" },
+    h("h3", {}, repo.path === "." ? "workspace" : repo.path),
+    h("div", { class: "meta" }, h("span", {}, `branch ${repo.branch}`), repo.base ? h("span", {}, `since ${repo.base.slice(0, 8)}`) : null,
+      h("span", {}, `${repo.files.length} changed file${repo.files.length === 1 ? "" : "s"}`)),
+    repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, `${repo.commits.length} new commit${repo.commits.length === 1 ? "" : "s"}`),
+      h("pre", { class: "small", style: "white-space:pre-wrap" }, repo.commits.join("\n"))) : null,
+    drafts,
+    files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 || (sel && sel.path === f.name) || undefined },
+      h("summary", {}, f.name),
+      h("div", { class: "diff" }, fileBody(f)))) : h("p", { class: "muted small" }, "No differences."),
+    repo.truncated ? h("p", { class: "note" }, "Diff truncated.") : null);
 }
 
 function splitDiff(diff) {

@@ -315,6 +315,21 @@ CREATE TABLE IF NOT EXISTS account_audit (
     detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS account_audit_ts ON account_audit(ts);
+CREATE TABLE IF NOT EXISTS review_comments (   -- draft diff line comments, sent as one follow-up (review_comments.py)
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    path TEXT NOT NULL,
+    side TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    quoted TEXT NOT NULL,
+    comment TEXT NOT NULL,
+    base TEXT NOT NULL DEFAULT '',
+    head TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS review_comments_session ON review_comments(session_id, created_at);
 CREATE TABLE IF NOT EXISTS member_projects (
     user_id TEXT NOT NULL,
     slug TEXT NOT NULL,
@@ -520,10 +535,38 @@ class Database:
 
     def delete_session(self, sid: str) -> None:
         with self.tx():
-            for table in ("events", "approvals"):
+            for table in ("events", "approvals", "review_comments"):
                 self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM search_index WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+
+    # draft review comments
+    def add_review_comment(self, sid: str, c: dict) -> dict:
+        row = {"id": "rc-" + secrets.token_hex(5), "session_id": sid, "created_at": time.time(), **c}
+        row["quoted"] = json.dumps(c["quoted"])
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO review_comments (id, session_id, repo, path, side, start_line, end_line, quoted, "
+                "comment, base, head, created_at) VALUES (:id, :session_id, :repo, :path, :side, :start_line, "
+                ":end_line, :quoted, :comment, :base, :head, :created_at)", row)
+        return {**row, "quoted": c["quoted"]}
+
+    def list_review_comments(self, sid: str) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM review_comments WHERE session_id = ? ORDER BY created_at, id", (sid,)).fetchall()
+        return [{**dict(r), "quoted": json.loads(r["quoted"])} for r in rows]
+
+    def delete_review_comments(self, sid: str, ids: list[str] | None = None) -> int:
+        """Delete one session's drafts: the given ids, or all of them."""
+        with self.lock:
+            if ids is None:
+                cur = self.conn.execute("DELETE FROM review_comments WHERE session_id = ?", (sid,))
+            else:
+                marks = ",".join("?" * len(ids))
+                cur = self.conn.execute(
+                    f"DELETE FROM review_comments WHERE session_id = ? AND id IN ({marks})", (sid, *ids))
+            return cur.rowcount
 
     def sessions_with_status(self, *statuses: str, user_id: str | None = None) -> list[dict]:
         marks = ",".join("?" * len(statuses))

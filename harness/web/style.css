@@ -284,6 +284,19 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .diff .add { background: var(--add); }
 .diff .del { background: var(--del); }
 .diff .hunk { color: var(--accent); background: var(--panel-2); }
+.diff .dl { display: flex; padding: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.diff .dl .ln { flex: none; width: 3.2em; padding: 0 6px; text-align: right; color: var(--muted); user-select: none; }
+.diff .dl .tx { flex: 1; padding: 0 12px 0 6px; white-space: pre; }
+.diff .dl.picked { outline: 2px solid var(--accent); outline-offset: -2px; }
+.diff .dl.commented { box-shadow: inset 4px 0 0 var(--accent); }
+.diff .dl:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (pointer: coarse) { .diff .dl { min-height: 40px; align-items: center; } }
+.diff .review-composer { white-space: normal; padding: 8px max(12px, env(safe-area-inset-left, 0px)) 8px max(12px, env(safe-area-inset-right, 0px)); background: var(--panel-2); }
+.diff .review-composer div { white-space: normal; padding: 0; }
+.review-input { width: 100%; box-sizing: border-box; font-size: 1rem; margin: 6px 0; padding: 10px 12px; min-height: 44px; }
+.review-drafts { margin: 10px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.review-draft { padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.review-quote { white-space: pre-wrap; margin: 4px 0; color: var(--muted); }
 
 #toast {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom) + 90px);
