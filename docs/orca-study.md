@@ -136,3 +136,5 @@ The harness design does not depend on Orca's shape: a compare group is a `compar
 v1 API (owner-only): `POST /compare`, `GET /compare/{group}`, `POST /compare/{group}/pick`,
 `POST /compare/{group}/discard`. The comparison UI is not built yet. Pick (with `discard_rest`) and discard stop
 members that are still running before discarding them, and only after the winner's merge or push has completed.
+One pick or discard runs per group at a time; a second concurrent one gets 409 `compare_busy`. A member cancelled
+while it is still cloning waits for the clone to finish and be recorded, so its discard removes the branch and workspace.
