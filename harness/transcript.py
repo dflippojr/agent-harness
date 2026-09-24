@@ -79,6 +79,20 @@ def render(db: Database, sid: str) -> str:
         elif t == "tool_result":
             status = "ok" if d["ok"] else "error"
             lines += [f"#### {at} · Result `{d['name']}` ({status}, {d['seconds']}s)", "", _block(d["output"]), ""]
+        elif t == "snippet_started":
+            lines += [f"#### {at} · Ran {d.get('label', d.get('language'))} snippet `{d['id']}`", "",
+                      _block(d.get("source", "")), ""]
+        elif t == "snippet_result":
+            tc = d.get("toolchain") or {}
+            reasons = f" ({', '.join(d['reasons'])})" if d.get("reasons") else ""
+            lines += [f"#### {at} · Snippet `{d['id']}` {d.get('status')}{reasons} · {tc.get('version') or '-'}", ""]
+            if d.get("error"):
+                lines += [d["error"], ""]
+            if d.get("compile"):
+                lines += [f"Compiler exit {d['compile']['exit_code']}:", "", _block(d["compile"]["output"]), ""]
+            for stream in ("stdout", "stderr"):
+                if (d.get("run") or {}).get(stream):
+                    lines += [f"{stream} (exit {d['run']['exit_code']}):", "", _block(d["run"][stream]), ""]
         elif t == "compaction":
             lines += [f"#### {at} · Context compaction ({d['tier']}): ~{d['tokens_before']} → "
                       f"~{d['tokens_after']} tokens", ""]

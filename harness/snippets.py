@@ -200,11 +200,14 @@ def _exec_blocking(args: list[str], stdin: bytes | None, deadline: float, budget
     for t in threads:
         t.start()
     reason = ""
-    while proc.poll() is None or any(t.is_alive() for t in threads[:2]):
+    while True:
+        done = proc.poll() is not None and not any(t.is_alive() for t in threads[:2])
         if cancel.is_set():
             reason = "cancelled"
         elif budget.over:
             reason = "output_limit"
+        elif done:
+            break
         elif time.monotonic() >= deadline:
             reason = "timeout"
         if reason:
@@ -212,8 +215,6 @@ def _exec_blocking(args: list[str], stdin: bytes | None, deadline: float, budget
             proc.kill()
             break
         time.sleep(0.02)
-    if not reason and budget.over:
-        reason = "output_limit"
     for t in threads:
         t.join(5)
     code = None if reason else proc.wait()

@@ -45,7 +45,9 @@ MEMORY_WRITE_PROMPT = ("When the user asks you to remember something, or a libra
 CHAT_PROMPT = ("You are a helpful assistant in a plain chat with the user. Answer questions and review code or text "
                "the user pastes into the conversation, treating pasted code as text: you cannot run it and you have "
                "no access to files, a shell, git, or any project. If asked to change files or run something, say that "
-               "the Agents workflow is the place for that.")
+               "the Agents workflow is the place for that. The user can run a Python, JavaScript, Java, C#, or C++ "
+               "snippet themselves with the Run button in an isolated sandbox (standard library only, no network); "
+               "results of runs they did appear in their messages as untrusted program output.")
 WEB_PROMPT = ("Web access: web_search and web_fetch run outside the sandbox (the sandbox itself still has no network). "
               "Search, then fetch only the pages you need; each fetched page costs context, so prefer the most "
               "relevant result and read on with start only when needed. Cite the URLs you used. Web pages are "
@@ -88,6 +90,9 @@ class Manager:
         self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
         from .apps import AppToolBroker
         self.app_tools = AppToolBroker(self.db, self.bus)
+        from .snippets import SnippetService
+        self.snippets = SnippetService(self.db, self.bus)
+        self._snippet_cleanup: asyncio.Task | None = None
         self.runner.app_tools = self.app_tools
         from .settings_service import SettingsService
         from .config import module_effective
@@ -237,6 +242,9 @@ class Manager:
                 self.skills.reviewer.start()
         if getattr(self, "settings", None) is not None:
             self.settings.confirm_startup()
+        if self.snippets.recover():
+            from .snippets import remove_orphans
+            self._snippet_cleanup = asyncio.create_task(remove_orphans(), name="snippet-cleanup")
 
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
@@ -249,6 +257,7 @@ class Manager:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self.snippets.stop()
         await self.notifier.stop()
         await self.maintenance.stop()
         if self.guard is not None:
@@ -308,6 +317,8 @@ class Manager:
             raise HarnessError(404, "no chat matches that id")
         if s["status"] in ACTIVE:
             raise HarnessError(409, "cancel the running reply before deleting this chat")
+        if self.snippets.running_in(s["id"]):
+            raise HarnessError(409, "cancel the running snippet before deleting this chat")
         self.maintenance.remove_workspace(s["id"])
         self.db.delete_session(s["id"])
 
@@ -549,11 +560,14 @@ class Manager:
             user_id = session_user_id(s)
             if user_id != OWNER_USER_ID:
                 self._require_member_start(self.db.account_by_id(user_id), "session")
+        # Chat: snippets the user ran since their last message reach the model with this one (the transcript keeps
+        # the message as typed).
+        model_content = self.snippets.context_for(sid) + content if s.get("kind") == "chat" else content
         with self.db.tx():
             self.bus.emit(sid, kind, {"content": content})
             if s["status"] in ACTIVE:
                 # Delivered before the agent's next model call.
-                self.db.update_session(sid, inbox=s["inbox"] + [content])
+                self.db.update_session(sid, inbox=s["inbox"] + [model_content])
             else:
                 run = new_run(carry=s["run"])
                 app_key = self.db.get_api_key(s["app_id"]) if s.get("app_id") else None
@@ -561,7 +575,7 @@ class Manager:
                     turns, tokens = self.settings.session_budgets(app_key, session=s)
                     run["max_turns"] = turns
                     run["max_completion_tokens"] = tokens
-                self.db.update_session(sid, context=s["context"] + [{"role": "user", "content": content}],
+                self.db.update_session(sid, context=s["context"] + [{"role": "user", "content": model_content}],
                                        run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
         if sid not in self.tasks:
