@@ -558,6 +558,21 @@ body.drawer-open { overflow: hidden; }
 .chat-starters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
 .chat-feed { display: flex; flex-direction: column; gap: 10px; }
 .chat-tools { align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.snippet-editor { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 10px; }
+.snippet-editor .row { gap: 8px; margin-bottom: 8px; }
+.snippet-editor select { flex: 1 1 auto; min-width: 0; width: auto; }
+.snippet-editor textarea { width: 100%; font-family: var(--mono); font-size: 0.8125rem; min-height: 8em; }
+.snippet-editor p { margin: 6px 0 0; }
+.snippet-run { justify-content: flex-end; margin: 4px 0 8px; }
+.msg.user .snippet-run .btn { background: var(--panel); color: var(--text); }
+.snippet { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+.snippet-head { align-items: center; gap: 8px; }
+.snippet-head .btn { margin-left: auto; }
+.snippet details { margin: 6px 0; }
+.snippet pre { font-family: var(--mono); font-size: 0.78125rem; background: var(--code-bg); padding: 8px 10px; border-radius: 8px; overflow: auto; max-height: 24em; white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 8px; }
+.snippet p { margin: 6px 0 2px; }
+.snippet-label { font-size: 0.8125rem; font-weight: 600; }
+.snippet-out.stderr, .snippet-out.compile { border-left: 3px solid var(--bad); }
 .chat-composer .chat-pickers { flex-wrap: nowrap; gap: 8px; margin-bottom: 6px; }
 .chat-composer .chat-pickers select { flex: 1 1 0; min-width: 0; min-height: 40px; width: auto; }
 .chat-composer .chat-pickers select.chat-effort { flex: 0 0 auto; max-width: 8em; }
