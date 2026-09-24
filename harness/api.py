@@ -71,6 +71,18 @@ class SendMessage(BaseModel):
     content: str
 
 
+class ReviewComment(BaseModel):
+    repo: str = "."
+    path: str
+    side: str
+    start_line: int
+    end_line: int | None = None
+    quoted: list[str]
+    comment: str
+    base: str = ""
+    head: str = ""
+
+
 class SessionUpdate(BaseModel):
     title: str
 
@@ -1005,6 +1017,27 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def changes(ref: str, request: Request):
         m, sid, _ = owned_session(request, ref)
         return await m.changes(sid)
+
+    @app.get("/sessions/{ref}/review-comments")
+    async def review_comments(ref: str, request: Request):
+        m, sid, _ = owned_session(request, ref)
+        return m.review_comments(sid)
+
+    @app.post("/sessions/{ref}/review-comments", status_code=201)
+    async def add_review_comment(ref: str, body: ReviewComment, request: Request):
+        m, sid, _ = owned_session(request, ref)
+        return m.add_review_comment(sid, body.model_dump())
+
+    @app.delete("/sessions/{ref}/review-comments/{comment_id}", status_code=204)
+    async def delete_review_comment(ref: str, comment_id: str, request: Request):
+        m, sid, _ = owned_session(request, ref)
+        m.delete_review_comment(sid, comment_id)
+
+    @app.post("/sessions/{ref}/review-comments/send")
+    async def send_review_comments(ref: str, request: Request):
+        """Send the drafted line comments to the agent as one follow-up message."""
+        m, sid, _ = owned_session(request, ref)
+        return m.summary(await m.send_review_comments(sid))
 
     @app.post("/sessions/{ref}/review/{action}")
     async def review(ref: str, action: str, request: Request):
