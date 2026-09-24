@@ -8,6 +8,7 @@ approval, or a tool call that was interrupted mid-run).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -86,15 +87,18 @@ def unresolved_calls(context: list[dict]) -> list[dict]:
     return [c for c in context[i]["tool_calls"] if c["id"] not in done]
 
 
-async def ride_out(task: asyncio.Future) -> bool:
-    """Wait for `task` to finish even if the waiter is cancelled meanwhile. True if a cancel arrived."""
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.wait({task})
-        except asyncio.CancelledError:
-            cancelled = True
-    return cancelled
+async def ride_out(task: asyncio.Future) -> None:
+    """Wait for `task` to finish even if the waiter is cancelled meanwhile (repeatedly, too). A cancel is
+    re-raised once the task is done; the task's own outcome is then dropped so the cancel wins."""
+    try:
+        await asyncio.wait({task})
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({task})
+        if not task.cancelled():
+            task.exception()  # mark retrieved: the cancel wins over a setup failure
+        raise
 
 
 class Runner:
@@ -1308,10 +1312,7 @@ class Runner:
         mid-clone waits for the clone and its record: the git work runs in a thread (or on a runner) the cancel
         can't stop, so returning early would leave a workspace and branch nobody records or removes (#203)."""
         setup = asyncio.ensure_future(self._setup_repo(s))
-        if await ride_out(setup):
-            if not setup.cancelled():
-                setup.exception()  # the cancel wins over a setup failure; mark it retrieved
-            raise asyncio.CancelledError
+        await ride_out(setup)
         setup.result()
 
     async def _setup_repo(self, s: dict) -> None:

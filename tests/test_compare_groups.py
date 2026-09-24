@@ -545,3 +545,42 @@ def test_busy_guard_is_per_group(tmp_path):
         run(m.compare_discard(one))
     assert e.value.code == "compare_busy"
     assert [r["review"] for r in run(m.compare_discard(two))["members"]] == ["discarded"] * 2
+
+
+def test_ride_out_survives_repeated_cancels_then_reraises():
+    from harness.runner import ride_out
+
+    async def scenario():
+        release = asyncio.Event()
+
+        async def work():
+            await release.wait()
+            raise RuntimeError("setup failed")
+
+        task = asyncio.ensure_future(work())
+        waiter = asyncio.ensure_future(ride_out(task))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        await asyncio.sleep(0)
+        waiter.cancel()  # a second cancel while still waiting
+        await asyncio.sleep(0)
+        assert not waiter.done() and not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert task.done()
+        return task
+
+    task = asyncio.run(scenario())
+    assert task._log_traceback is False  # exception retrieved, cancel not masked by the failure
+
+
+def test_ride_out_returns_when_not_cancelled():
+    from harness.runner import ride_out
+
+    async def scenario():
+        task = asyncio.ensure_future(asyncio.sleep(0, result=1))
+        await ride_out(task)
+        return task.result()
+
+    assert asyncio.run(scenario()) == 1
