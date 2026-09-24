@@ -114,6 +114,14 @@ When a variable is unset, that backend keeps the CLI default and the footer name
 `[A-Za-z0-9][A-Za-z0-9._:+/\-]*`; anything else (spaces, quotes, leading dashes, shell metacharacters) fails closed
 before a backend runs.
 
+Optional `REVIEW_EFFORT_CLAUDE` and `REVIEW_EFFORT_CODEX` pin reasoning effort: `--effort <value>` on `claude`
+(`low`, `medium`, `high`, `xhigh`, `max`) and `-c model_reasoning_effort="<value>"` on `codex exec` (`low`, `medium`,
+`high`, `xhigh`). When set, the footer and a new `effort=` job output include it, for example
+`Automated review backend: **claude (claude-sonnet-5, medium)**.`. Unset or whitespace-only keeps the CLI default and the
+footer unchanged. Any other value fails closed before a backend runs, and all effort variables are validated up front
+even for backends not used. Cursor has no effort variable: choose effort through the model id (for example
+`cursor-grok-4.6-medium` in `REVIEW_MODEL_CURSOR`).
+
 All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
 with its sandbox enabled. Codex ignores the service user's configuration, restores only the required unelevated Windows
 sandbox setting, disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.

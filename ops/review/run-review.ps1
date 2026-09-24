@@ -17,6 +17,10 @@ $script:KnownReviewBackends = @('cursor', 'codex', 'claude')
 $script:DefaultReviewBackends = @('codex', 'claude', 'cursor')
 $script:KnownReviewModes = @('auto', 'full')
 $script:ReviewModelPattern = '^[A-Za-z0-9][A-Za-z0-9._:+/\-]*$'
+$script:ReviewEffortValues = @{
+    claude = @('low', 'medium', 'high', 'xhigh', 'max')
+    codex = @('low', 'medium', 'high', 'xhigh')
+}
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
 $script:ReviewMarkerPattern = '(?i)<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental)(?: base=([A-Za-z0-9._/\-]+))? -->'
 $script:UntrustedAgentConfigDirectories = @('.claude', '.cursor', '.codex', '.agents')
@@ -89,12 +93,32 @@ function Get-ReviewModelFromEnvironment {
     return (Resolve-ReviewModel -Backend $name -RequestedModel $requested)
 }
 
+function Get-ReviewEffortFromEnvironment {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Backend)
+
+    $name = $Backend.Trim().ToLowerInvariant()
+    $requested = $null
+    switch ($name) {
+        'codex' { $requested = [string]$env:REVIEW_EFFORT_CODEX }
+        'claude' { $requested = [string]$env:REVIEW_EFFORT_CLAUDE }
+        default { return $null }
+    }
+    if ([string]::IsNullOrWhiteSpace($requested)) { return $null }
+    $effort = $requested.Trim().ToLowerInvariant()
+    if ($script:ReviewEffortValues[$name] -cnotcontains $effort) {
+        throw "invalid review effort '$requested' for backend '$name'"
+    }
+    return $effort
+}
+
 function Assert-ReviewModelConfiguration {
     [CmdletBinding()]
     param()
 
     foreach ($backend in $script:KnownReviewBackends) {
         Get-ReviewModelFromEnvironment -Backend $backend | Out-Null
+        Get-ReviewEffortFromEnvironment -Backend $backend | Out-Null
     }
 }
 
@@ -450,6 +474,12 @@ function Get-ReviewBackendCommand {
     if (-not [string]::IsNullOrWhiteSpace([string]$model)) {
         $modelArgs = @('--model', $model)
     }
+    $effort = Get-ReviewEffortFromEnvironment -Backend $name
+    $effortArgs = @()
+    if ($effort) {
+        if ($name -eq 'codex') { $effortArgs = @('-c', "model_reasoning_effort=`"$effort`"") }
+        elseif ($name -eq 'claude') { $effortArgs = @('--effort', $effort) }
+    }
     switch ($name) {
         'cursor' {
             if ([string]::IsNullOrWhiteSpace($CursorBase)) {
@@ -470,6 +500,7 @@ function Get-ReviewBackendCommand {
                 WorkingDirectory = $Workspace
                 ResultPath = $null
                 Model = $model
+                Effort = $effort
                 Environment = Get-ReviewBackendEnvironment
             }
         }
@@ -480,7 +511,7 @@ function Get-ReviewBackendCommand {
                 FilePath = 'codex'
                 Arguments = @(
                     'exec'
-                ) + $modelArgs + @(
+                ) + $modelArgs + $effortArgs + @(
                     '--ignore-user-config',
                     '-c', 'windows.sandbox="unelevated"',
                     '-c', 'mcp_servers={}',
@@ -497,6 +528,7 @@ function Get-ReviewBackendCommand {
                 WorkingDirectory = $Workspace
                 ResultPath = $resultPath
                 Model = $model
+                Effort = $effort
                 Environment = Get-ReviewBackendEnvironment
             }
         }
@@ -505,11 +537,12 @@ function Get-ReviewBackendCommand {
                 Backend = $name
                 FilePath = 'claude'
                 # manual is intentional: in -p mode it prevents prompts and denies unapproved tools.
-                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--setting-sources', 'user', '--strict-mcp-config', '--disable-slash-commands') + $modelArgs
+                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--setting-sources', 'user', '--strict-mcp-config', '--disable-slash-commands') + $modelArgs + $effortArgs
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $null
                 Model = $model
+                Effort = $effort
                 Environment = Get-ReviewBackendEnvironment
             }
         }
@@ -593,6 +626,7 @@ function Invoke-ReviewBackendProcess {
         Stdout = $stdout
         Stderr = $stderr
         Model = $Command.Model
+        Effort = $(if ($Command.PSObject.Properties['Effort']) { $Command.Effort } else { $null })
     }
 }
 
@@ -649,6 +683,7 @@ function Invoke-ReviewFallback {
             return [pscustomobject]@{
                 Backend = $backend
                 Model = $attempt.Model
+                Effort = $(if ($attempt.PSObject.Properties['Effort']) { $attempt.Effort } else { $null })
                 Output = $completedReview
             }
         } catch {
@@ -974,8 +1009,13 @@ function Write-ReviewResult {
     )
 
     $label = $Result.Backend
+    $resultEffort = if ($Result.PSObject.Properties['Effort']) { [string]$Result.Effort } else { '' }
     if (-not [string]::IsNullOrWhiteSpace([string]$Result.Model)) {
-        $label = "$label ($($Result.Model))"
+        $detail = [string]$Result.Model
+        if (-not [string]::IsNullOrWhiteSpace($resultEffort)) { $detail = "$detail, $resultEffort" }
+        $label = "$label ($detail)"
+    } elseif (-not [string]::IsNullOrWhiteSpace($resultEffort)) {
+        $label = "$label ($resultEffort)"
     }
     $postedMode = $Mode.Trim().ToLowerInvariant()
     if ($postedMode -ne 'incremental') { $postedMode = 'full' }
@@ -1031,6 +1071,9 @@ function Invoke-ReviewMain {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         if (-not [string]::IsNullOrWhiteSpace([string]$result.Model)) {
             "model=$($result.Model)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        }
+        if ($result.PSObject.Properties['Effort'] -and -not [string]::IsNullOrWhiteSpace([string]$result.Effort)) {
+            "effort=$($result.Effort)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         }
     }
     Write-Host "Review completed with backend: $($result.Backend) ($($coverage.Mode))"
