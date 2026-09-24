@@ -450,6 +450,17 @@ def test_group_discard_before_members_are_checked_out(tmp_path):
         assert s["workspace_removed"] and not Path(s["workspace"]).exists()
 
 
+def release_on_cancel(m, gate):
+    """Let a held clone go on only once a cancel is under way, so the cancel lands while the clone is in flight."""
+    real_cancel = m.cancel
+
+    async def cancel(ref):
+        asyncio.get_running_loop().call_soon(gate.set)
+        return await real_cancel(ref)
+
+    m.cancel = cancel
+
+
 def test_rollback_stops_members_that_never_ran_and_leaves_none_resumable(tmp_path):
     gate = threading.Event()
 
@@ -461,6 +472,7 @@ def test_rollback_stops_members_that_never_ran_and_leaves_none_resumable(tmp_pat
         src, m = real_manager(tmp_path)
         await m.start(maintenance=False)
         real_prepare, projects.prepare = projects.prepare, slow_prepare
+        release_on_cancel(m, gate)
         try:
             bad = LOCAL[:2] + [{"backend": "local", "model": "nope"}]
             with pytest.raises(HarnessError) as e:
@@ -474,3 +486,62 @@ def test_rollback_stops_members_that_never_ran_and_leaves_none_resumable(tmp_pat
             gate.set()
         await m.stop()
     asyncio.run(body())
+
+
+def test_cancel_during_clone_leaves_no_workspace_or_branch(tmp_path, monkeypatch):
+    cloning, gate = threading.Event(), threading.Event()
+
+    async def body():
+        src, m = real_manager(tmp_path)
+        real_prepare = projects.prepare
+
+        def prepare(project, ws, sid):
+            cloning.set()
+            gate.wait(10)
+            return real_prepare(project, ws, sid)
+
+        monkeypatch.setattr(projects, "prepare", prepare)
+        release_on_cancel(m, gate)
+        await m.start(maintenance=False)
+        view = await m.create_compare("bump", LOCAL[1:], "repo")
+        b, c = (r["id"] for r in view["members"])
+        while not cloning.is_set():
+            await asyncio.sleep(0.02)
+        out = await m.compare_discard(view["group"])
+        assert [(r["status"], r["review"]) for r in out["members"]] == [("cancelled", "discarded")] * 2
+        assert gate.is_set()
+        assert_gone(src, m, b, c)
+        for sid in (b, c):
+            # the clone that finished after the cancel was recorded, so discard removed its branch and workspace
+            assert m.db.get_session(sid)["base_commit"], sid
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_concurrent_picks_and_discards_on_one_group_run_one_at_a_time(tmp_path, monkeypatch):
+    async def body():
+        src, m, group, a, b, c = await running_group(tmp_path, monkeypatch)
+        first, *rest = await asyncio.gather(m.compare_pick(group, a, "merge", True),
+                                            m.compare_pick(group, a, "push", True),
+                                            m.compare_discard(group), return_exceptions=True)
+        assert isinstance(first, dict), first
+        assert [r["review"] for r in first["members"]] == ["merged", "discarded", "discarded"]
+        for e in rest:
+            assert isinstance(e, HarnessError) and e.status == 409 and e.code == "compare_busy", e
+        assert (src / "app.py").read_text() == "VALUE = 2\n"
+        assert_gone(src, m, b, c)
+        # the guard is released when the pick ends; a later discard keeps the merged winner
+        out = await m.compare_discard(group)
+        assert [r["review"] for r in out["members"]] == ["merged", "discarded", "discarded"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_busy_guard_is_per_group(tmp_path):
+    m = make_manager(tmp_path)
+    one, two = (run(m.create_compare("p", CHOICES, "repo"))["group"] for _ in range(2))
+    m.compare_busy.add(("owner", one))
+    with pytest.raises(HarnessError) as e:
+        run(m.compare_discard(one))
+    assert e.value.code == "compare_busy"
+    assert [r["review"] for r in run(m.compare_discard(two))["members"]] == ["discarded"] * 2
