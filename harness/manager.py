@@ -612,7 +612,7 @@ class Manager:
         status = str((self.db.get_backend_usage(backend).get("data") or {}).get("status") or "").lower()
         return f"{backend} reports its usage limit is reached" if status in ("rejected", "exceeded", "limit_reached") else ""
 
-    def create_compare(self, prompt: str, choices: list[dict], project: str = "scratch", owner_id: str = "owner") -> dict:
+    async def create_compare(self, prompt: str, choices: list[dict], project: str = "scratch", owner_id: str = "owner") -> dict:
         if owner_id != OWNER_USER_ID:
             raise HarnessError(403, "comparing backends is only available to the owner")
         if not 2 <= len(choices) <= self.MAX_COMPARE:
@@ -635,11 +635,28 @@ class Manager:
                 created.append(self.create(prompt, project=project, backend=c.get("backend") or "local",
                                            model=c.get("model") or None, effort=c.get("effort") or None,
                                            owner_id=owner_id, compare_group=group))
-        except HarnessError:
-            for s in created:
-                self.db.update_session(s["id"], compare_group="")
+        except Exception:
+            await self._compare_rollback(created)
             raise
         return self.compare_view(group, owner_id)
+
+    async def _compare_rollback(self, created: list[dict]) -> None:
+        """Stop and discard members already started when a later one fails, so none is left running unreachable."""
+        for s in created:
+            sid = s["id"]
+            try:
+                if self.db.get_session(sid)["status"] in ACTIVE:
+                    await self.cancel(sid)
+                await self.review(sid, "discard")
+            except Exception:
+                log.warning("compare rollback could not discard %s cleanly", sid, exc_info=True)
+                try:
+                    if not self.db.get_session(sid)["workspace_removed"]:
+                        await asyncio.to_thread(self.maintenance.remove_workspace, sid)
+                    self.db.update_session(sid, review="discarded", review_detail="compare group failed to start")
+                except Exception:
+                    log.warning("compare rollback could not remove %s", sid, exc_info=True)
+            self.db.update_session(sid, compare_group="")
 
     def compare_view(self, group: str, owner_id: str = "owner") -> dict:
         members = self.db.group_sessions(group, owner_id)
@@ -670,23 +687,35 @@ class Manager:
             raise HarnessError(404, "the winner is not a member of this group")
         if action not in ("merge", "push"):
             raise HarnessError(400, "action must be merge or push")
-        await self.review(winner, action)
+        # retry-safe: a winner already merged/pushed by an earlier attempt is not merged/pushed again
+        if next(s for s in members if s["id"] == winner)["review"] not in ("merged", "pushed"):
+            await self.review(winner, action)
         if discard_rest:
-            await self._compare_discard([s for s in members if s["id"] != winner])
+            failed = await self._compare_discard([s for s in members if s["id"] != winner])
+            if failed:
+                raise HarnessError(500, f"winner {action}ed but could not discard: {failed}; retry to finish")
         return self.compare_view(group, owner_id)
 
     async def compare_discard(self, group: str, owner_id: str = "owner") -> dict:
         members = self.db.group_sessions(group, owner_id)
         if not members:
             raise HarnessError(404, "no compare group matches that id")
-        await self._compare_discard(members)
+        failed = await self._compare_discard(members)
+        if failed:
+            raise HarnessError(500, f"could not discard: {failed}; retry to finish")
         return self.compare_view(group, owner_id)
 
-    async def _compare_discard(self, members: list[dict]) -> None:
+    async def _compare_discard(self, members: list[dict]) -> dict[str, str]:
+        """Discard every member that still can be; return {session id: error} for those that failed."""
+        failed = {}
         for s in members:
             if s["review"] in ("merged", "pushed", "discarded"):
                 continue
-            await self.review(s["id"], "discard")
+            try:
+                await self.review(s["id"], "discard")
+            except Exception as e:
+                failed[s["id"]] = str(e)
+        return failed
 
     # draft line comments on the Changes diff
     def review_comments(self, ref: str) -> list[dict]:

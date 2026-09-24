@@ -977,7 +977,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @app.post("/compare", status_code=201)
     async def create_compare(body: CreateCompare, request: Request):
         m = require_owner(request)
-        return m.create_compare(body.prompt, [c.model_dump() for c in body.choices], body.project, owner_id(request))
+        return await m.create_compare(body.prompt, [c.model_dump() for c in body.choices], body.project, owner_id(request))
 
     @app.get("/compare/{group}")
     async def get_compare(group: str, request: Request):
