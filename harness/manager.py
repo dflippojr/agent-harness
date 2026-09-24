@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import secrets
@@ -82,6 +83,7 @@ class Manager:
         self.hub = RunnerHub(cfg.runners, keep_awake=self._keep_awake)
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
+        self.compare_busy: set[tuple[str, str]] = set()  # (owner, group) with a pick or discard in progress
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
         self.image_archive = ImageArchive(cfg, self.db)
@@ -678,8 +680,25 @@ class Manager:
                 "note": "local-model members run one at a time behind the GPU scheduler"
                 if sum(r["serialized"] for r in rows) > 1 else ""}
 
+    @contextlib.contextmanager
+    def _compare_exclusive(self, group: str, owner_id: str):
+        """One pick or discard per group at a time: a second one would merge or discard alongside the first."""
+        key = (owner_id, group)
+        if key in self.compare_busy:
+            raise HarnessError(409, "another pick or discard is already in progress for this group; "
+                                    "retry when it finishes", "compare_busy")
+        self.compare_busy.add(key)
+        try:
+            yield
+        finally:
+            self.compare_busy.discard(key)
+
     async def compare_pick(self, group: str, winner: str, action: str, discard_rest: bool,
                            owner_id: str = "owner") -> dict:
+        with self._compare_exclusive(group, owner_id):
+            return await self._compare_pick(group, winner, action, discard_rest, owner_id)
+
+    async def _compare_pick(self, group: str, winner: str, action: str, discard_rest: bool, owner_id: str) -> dict:
         members = self.db.group_sessions(group, owner_id)
         if winner not in {s["id"] for s in members}:
             raise HarnessError(404, "the winner is not a member of this group")
@@ -704,7 +723,8 @@ class Manager:
         members = self.db.group_sessions(group, owner_id)
         if not members:
             raise HarnessError(404, "no compare group matches that id")
-        failed = await self._compare_discard(members)
+        with self._compare_exclusive(group, owner_id):
+            failed = await self._compare_discard(members)
         if failed:
             raise HarnessError(500, f"could not discard: {failed}; retry to finish")
         return self.compare_view(group, owner_id)
