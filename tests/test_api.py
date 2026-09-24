@@ -86,15 +86,16 @@ def test_web_app_and_guard(tmp_path):
         assert 'api("/backends?auth=skip")' in js
         assert 'if (images && !route.onImages) api("/images/warmup"' not in js
         assert "function imageModeEntries" in js
-        assert 'disabled: spec.available === false' in js
+        assert "function installedImageModeEntries" in js
+        assert "spec.available !== false" in js
         assert "quality-fast" in js
         assert 'if (prompt.value.trim()) startWarmup()' in js
         assert 'await startWarmup().catch(() => {})' in js
         assert "updateImageStatusView(phase, d.status)" in js
-        assert "data.status.modes" in js
+        assert "IMAGE_MODELS_EMPTY" in js
+        assert "Queue Generation" in js
         assert "not installed" in js
-        assert "updateFluxHint" in js
-        assert "That image mode isn't installed" in js
+        assert "ops/images-models.ps1" in js
         assert "grid.dataset.keys" in js
         assert 'upscaling ? "Upscaling"' in js and 'editing ? "Editing"' in js
         assert "function maskEditor" in js and "viewImageEdit" in js
