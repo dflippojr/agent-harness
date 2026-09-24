@@ -41,6 +41,7 @@ SESSION_URL = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9]+")
 CAPACITY = re.compile(r"Capacity:\s*(\d+)/(\d+)")
 ANSI = re.compile(r"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[A-Za-z]")
 START_TIMEOUT = 30
+STOP_TIMEOUT = 5
 
 
 class RemoteControlError(ToolError):
@@ -291,9 +292,17 @@ class RemoteControl:
             if self._alive(entry):
                 try:
                     proc = psutil.Process(entry["pid"])
-                    for child in proc.children(recursive=True):
-                        child.kill()
-                    proc.kill()
+                    children = proc.children(recursive=True)
+                    for child in children:
+                        try:
+                            child.kill()
+                        except psutil.Error:
+                            pass
+                    try:
+                        proc.kill()
+                    except psutil.Error:
+                        pass
+                    await asyncio.to_thread(psutil.wait_procs, [*children, proc], timeout=STOP_TIMEOUT)
                 except psutil.Error:
                     pass
             entry["stopped_at"] = time.time()

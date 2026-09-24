@@ -401,11 +401,11 @@ class Runner:
                 await self._acquire(sid)
             await self._loop(sid)
         except asyncio.CancelledError:
-            if sid in self.user_cancelled:
-                self._record_cancel(sid)
-                await self._end_run(sid)
+            await self._take_pending_cancel(sid)
             raise
         except CliBackendError as e:
+            if await self._take_pending_cancel(sid):
+                return
             s = self.db.get_session(sid)
             message = str(e)
             code = ("model_unavailable" if s.get("backend", "local") == "local" else
@@ -436,6 +436,8 @@ class Runner:
             self.set_status(sid, "failed", stop_reason=f"workspace_error: {e}")
             await self._end_run(sid)
         except Exception as e:  # noqa: BLE001 - a crash must not leave the session looking active
+            if await self._take_pending_cancel(sid):
+                return
             log.exception("session %s crashed", sid)
             s = self.db.get_session(sid)
             message = f"{type(e).__name__}: {e}"
@@ -1553,6 +1555,17 @@ class Runner:
         return quotes
 
     # run end
+    async def _take_pending_cancel(self, sid: str) -> bool:
+        """If the user cancelled, finalize as cancelled and skip any failure path. False if not pending."""
+        if sid not in self.user_cancelled:
+            return False
+        s = self.db.get_session(sid)
+        if s["status"] in ("cancelled", "done"):
+            return False
+        self._record_cancel(sid)
+        await self._end_run(sid)
+        return True
+
     def _record_cancel(self, sid: str) -> None:
         s = self.db.get_session(sid)
         executing = (s["run"].get("executing") or {}).get("id")
