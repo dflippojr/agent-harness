@@ -142,6 +142,49 @@ def test_pick_retry_skips_merged_winner_and_reports_discard_failures(tmp_path):
     assert [r["review"] for r in out["members"]] == ["merged", "discarded"]
 
 
+@pytest.mark.parametrize("action", ["merge", "push"])
+def test_pick_that_does_not_complete_discards_nobody(tmp_path, action):
+    m = make_manager(tmp_path)
+    view = run(m.create_compare("p", CHOICES, "repo"))
+    a, b = (r["id"] for r in view["members"])
+    calls = []
+
+    async def fake_review(sid, act):
+        calls.append((sid, act))
+        # a conflicted merge returns normally with review="" ; a failed push raises
+        if act == "push":
+            raise HarnessError(502, "push rejected")
+        m.db.update_session(sid, review="", review_detail="merge conflict in a.py")
+
+    m.review = fake_review
+    with pytest.raises(HarnessError) as e:
+        run(m.compare_pick(view["group"], a, action, True))
+    assert calls == [(a, action)]
+    if action == "merge":
+        assert "did not complete" in str(e.value) and "conflict" in str(e.value)
+    assert m.db.get_session(b)["review"] != "discarded"
+
+
+def test_pick_after_conflict_can_succeed_on_retry(tmp_path):
+    m = make_manager(tmp_path)
+    view = run(m.create_compare("p", CHOICES, "repo"))
+    a, b = (r["id"] for r in view["members"])
+    state = {"ok": False}
+
+    async def fake_review(sid, act):
+        if act == "merge":
+            m.db.update_session(sid, review="merged" if state["ok"] else "")
+        else:
+            m.db.update_session(sid, review="discarded")
+
+    m.review = fake_review
+    with pytest.raises(HarnessError):
+        run(m.compare_pick(view["group"], a, "merge", True))
+    state["ok"] = True
+    out = run(m.compare_pick(view["group"], a, "merge", True))
+    assert [r["review"] for r in out["members"]] == ["merged", "discarded"]
+
+
 def test_group_discard_continues_past_a_failure(tmp_path):
     m = make_manager(tmp_path)
     view = run(m.create_compare("p", CHOICES, "repo"))

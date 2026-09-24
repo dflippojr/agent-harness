@@ -690,6 +690,12 @@ class Manager:
         # retry-safe: a winner already merged/pushed by an earlier attempt is not merged/pushed again
         if next(s for s in members if s["id"] == winner)["review"] not in ("merged", "pushed"):
             await self.review(winner, action)
+            # a merge that hit a conflict returns normally with no review state; never discard on an unverified pick
+            current = self.db.get_session(winner)
+            if current["review"] not in ("merged", "pushed"):
+                raise HarnessError(409, f"the {action} of the winner did not complete "
+                                        f"({current['review_detail'] or 'no detail'}); "
+                                        f"the other members were left untouched")
         if discard_rest:
             failed = await self._compare_discard([s for s in members if s["id"] != winner])
             if failed:
