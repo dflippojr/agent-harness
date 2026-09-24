@@ -50,6 +50,37 @@ separately hosted copies do not need to pair again.
 The service worker caches only the static shell. API responses, streams, images, and transcripts are never cached.
 The shell cache version changes when new presentation assets must replace an installed copy.
 
+## Chat snippet runner
+
+The owner can run a short Python, JavaScript, Java, C#, or C++ program from Chat. Chat still only reads code by
+default: sending or pasting a message never runs it, and the model has no tool that can start a run.
+
+- **Starting a run.** A fenced block tagged with a supported language (for example `python`, `js`, `java`, `cs`, or
+  `cpp`) gets a **Run Python**-style button that names the language it uses. **Run code** opens a small editor where
+  you pick the language yourself; there's no default. Blocks with other tags, or no tag, have no Run button.
+- **What runs.** Python and JavaScript run as scripts. Java, C#, and C++ take one complete program and use fixed
+  compile and run commands. Compiler diagnostics are shown apart from the program's stdout and stderr. There are no
+  compiler or runtime flags, arguments, or package installs; standard libraries only.
+- **Toolchains.** `python:3.12-slim`, `node:24-slim`, `eclipse-temurin:25-jdk`, `mcr.microsoft.com/dotnet/sdk:10.0`,
+  and `gcc:15`, each pinned by digest in `harness/snippets.py`. Every result reports the exact toolchain version.
+  Runs never pull an image. Download the pinned images once with `python -m harness.snippets pull`;
+  `python -m harness.doctor` warns when any are missing. To upgrade a toolchain, change its digest in a reviewed
+  commit.
+- **Isolation.** Each run gets a new container that has no mounts (no project, repository, host path, provider login,
+  secret, or Docker socket) and no network. The container runs as an unprivileged user with every capability dropped
+  and a read-only root filesystem. Source goes in on stdin. The container is removed when the run ends, so no file,
+  binary, or cache carries over to the next run.
+- **Limits per run.** 30 seconds for compile plus run, 1 vCPU, 1 GiB memory (no swap), 64 processes, 128 MiB of
+  temporary storage, and 1 MiB of combined output. On a timeout, cancellation, or output overflow the container is
+  removed, which kills every process in it. The result names the limit that was hit and says when output was
+  truncated. At most two runs happen at once, and each chat has one at a time.
+- **Results.** Chat stores the source and the bounded result in its transcript, so both survive a reload. It shows the
+  result as plain text, never HTML. With your next message, the model gets the runs you did since your last message,
+  labeled as untrusted program output. If the server restarts mid-run, the run is marked interrupted and its
+  container is removed.
+- **Access.** Only the owner can run snippets (`POST /api/admin/v1/chats/{id}/snippets`, and `…/snippets/{run}/cancel`).
+  Guests, household members, and app or device tokens can't.
+
 ## Install on iPhone or iPad
 
 In Safari, choose **Share → Add to Home Screen**. The installed icon is labeled **Harness** and opens Agent Harness

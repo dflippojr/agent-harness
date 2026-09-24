@@ -291,10 +291,13 @@ function linkQuotes(html, answer, pages) {
 }
 
 // Small, safe Markdown subset: everything is escaped first, then a few constructs are re-enabled.
+// A fenced block in a language the snippet runner supports is marked so Chat can add its Run button.
 function md(src, pages) {
   const blocks = [];
-  let text = escapeHtml(src || "").replace(/```[\w+-]*\n?([\s\S]*?)```/g, (_, code) => {
-    blocks.push(`<pre><code>${code.replace(/\n$/, "")}</code></pre>`);
+  let text = escapeHtml(src || "").replace(/```([\w+#-]*)([\s\S]*?)```/g, (_, tag, rest) => {
+    const code = rest.replace(/^[^\S\n]*\n?/, "");
+    const lang = snippetLanguage(tag);
+    blocks.push(`<pre${lang ? ` data-snippet-lang="${lang}"` : ""}><code>${code.replace(/\n$/, "")}</code></pre>`);
     return `\u0000${blocks.length - 1}\u0000`;
   });
   const inline = (s) => s
@@ -645,6 +648,133 @@ document.addEventListener("keydown", (event) => {
 });
 window.addEventListener("hashchange", () => closeDrawer({ restoreFocus: false }));
 
+// ---------- chat snippets (#85) ----------
+// Mirrors harness/snippets.py LANGUAGES; the server validates every run. A fence tag only decides whether a block
+// gets a Run button, and the button names the language it runs as. Nothing runs unless the owner clicks.
+const SNIPPET_LANGUAGES = {
+  python: { label: "Python", aliases: ["python", "py", "python3"] },
+  javascript: { label: "JavaScript", aliases: ["javascript", "js", "node", "mjs", "cjs"] },
+  java: { label: "Java", aliases: ["java"] },
+  csharp: { label: "C#", aliases: ["csharp", "cs", "c#"] },
+  cpp: { label: "C++", aliases: ["cpp", "c++", "cxx", "cc"] },
+};
+const SNIPPET_STATUS = {
+  completed: "Completed", failed: "Failed", compile_failed: "Compile failed", timeout: "Timed out",
+  cancelled: "Cancelled", limit_exceeded: "Limit reached", error: "Sandbox error", interrupted: "Interrupted",
+};
+const SNIPPET_REASON = {
+  timeout: "time limit (30 s)", output_limit: "output limit (1 MiB)", memory_limit: "memory limit (1 GiB)",
+  pids_limit: "process limit (64)", temp_storage_limit: "temporary storage limit (128 MiB)",
+  cancelled: "cancelled", daemon_restart: "the server restarted",
+};
+
+function snippetLanguage(tag) {
+  const t = String(tag || "").trim().toLowerCase();
+  return Object.keys(SNIPPET_LANGUAGES).find((id) => SNIPPET_LANGUAGES[id].aliases.includes(t)) || "";
+}
+
+function snippetRunRow(lang, getSource, run) {
+  const label = SNIPPET_LANGUAGES[lang].label;
+  return h("div", { class: "row snippet-run" }, h("button", {
+    class: "btn small", type: "button", title: `Run this code as ${label} in an isolated sandbox`,
+    onclick: () => run(lang, getSource(), "block"),
+  }, `▶ Run ${label}`));
+}
+
+// A user message stays plain text; only fenced blocks in a supported language become code blocks with Run.
+function userMessageParts(content, run) {
+  const text = String(content || "");
+  const parts = [];
+  let last = 0;
+  for (const m of text.matchAll(/```([\w+#-]*)[^\S\n]*\n([\s\S]*?)```/g)) {
+    const lang = snippetLanguage(m[1]);
+    if (!lang) continue;
+    const code = m[2].replace(/\n$/, "");
+    parts.push(text.slice(last, m.index), h("pre", { "data-snippet-lang": lang }, h("code", {}, code)),
+      snippetRunRow(lang, () => code, run));
+    last = m.index + m[0].length;
+  }
+  parts.push(text.slice(last));
+  return parts.filter((p) => p !== "");
+}
+
+// Adds Run buttons under the marked code blocks md() produced. The source is the block's text, never its HTML.
+function addRunControls(root, run) {
+  for (const pre of root.querySelectorAll("pre[data-snippet-lang]")) {
+    const lang = pre.getAttribute("data-snippet-lang");
+    if (SNIPPET_LANGUAGES[lang]) pre.after(snippetRunRow(lang, () => pre.textContent, run));
+  }
+}
+
+// Every value here is source or program output: untrusted, so it only ever becomes text nodes.
+function snippetResultParts(r) {
+  const tc = r.toolchain || {};
+  const meta = [tc.version, tc.image, r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)} s` : ""];
+  const parts = [h("p", { class: "muted small" }, meta.filter(Boolean).join(" · "))];
+  if (r.error) parts.push(h("p", { class: "bad small" }, r.error));
+  const reasons = (r.reasons || []).map((x) => SNIPPET_REASON[x] || x);
+  if (reasons.length) parts.push(h("p", { class: "bad small" }, `Reason: ${reasons.join("; ")}`));
+  if (r.truncated) parts.push(h("p", { class: "bad small" }, "Output was truncated at the 1 MiB limit."));
+  const block = (label, text, cls) => [h("p", { class: "snippet-label" }, label), h("pre", { class: `snippet-out ${cls}` }, text)];
+  const stopped = (code) => code === null || code === undefined;
+  if (r.compile) {
+    const code = r.compile.exit_code;
+    const title = code === 0 ? "Compiled" : stopped(code) ? "Compile stopped" : `Compile failed (exit ${code})`;
+    if (r.compile.output) parts.push(...block(`${title} · compiler diagnostics`, r.compile.output, "compile"));
+    else parts.push(h("p", { class: "snippet-label" }, title));
+  }
+  if (r.run) {
+    const code = r.run.exit_code;
+    parts.push(h("p", { class: "snippet-label" }, stopped(code) ? "Program stopped" : `Exit status ${code}`));
+    if (r.run.stdout) parts.push(...block("stdout", r.run.stdout, "stdout"));
+    if (r.run.stderr) parts.push(...block("stderr", r.run.stderr, "stderr"));
+    if (!r.run.stdout && !r.run.stderr) parts.push(h("p", { class: "muted small" }, "No output."));
+  }
+  return parts;
+}
+
+function snippetCard(started, onCancel) {
+  const label = SNIPPET_LANGUAGES[started.language]?.label || started.language || "Snippet";
+  const status = h("span", { class: "badge running" }, "Running…");
+  const cancel = h("button", { class: "btn small bad", type: "button", onclick: () => onCancel(started.id) }, "Cancel");
+  const body = h("div", { class: "snippet-body" });
+  const el = h("div", { class: "snippet", "data-run": started.id },
+    h("div", { class: "row snippet-head" }, h("strong", {}, `${label} run`), status, cancel),
+    started.source ? h("details", {}, h("summary", {}, "Source"), h("pre", {}, h("code", {}, started.source))) : null,
+    body);
+  const finish = (r) => {
+    cancel.remove();
+    status.className = `badge ${r.status === "completed" ? "done" : "failed"}`;
+    status.textContent = SNIPPET_STATUS[r.status] || r.status || "Finished";
+    fill(body, snippetResultParts(r));
+  };
+  return { el, finish };
+}
+
+// The manual editor: the owner picks the language; there is no default and no guessing from the code.
+function snippetEditor(run) {
+  const select = h("select", { class: "snippet-language", "aria-label": "Snippet language" },
+    h("option", { value: "" }, "Language…"),
+    Object.entries(SNIPPET_LANGUAGES).map(([id, spec]) => h("option", { value: id }, spec.label)));
+  const code = h("textarea", { class: "snippet-code", rows: 8, spellcheck: "false", placeholder: "Code to run…",
+    "aria-label": "Code to run" });
+  const runBtn = h("button", { class: "btn primary small", type: "button", disabled: true }, "▶ Run");
+  const sync = () => { runBtn.disabled = !select.value || !code.value.trim(); };
+  select.addEventListener("change", sync);
+  code.addEventListener("input", sync);
+  runBtn.addEventListener("click", async () => {
+    if (runBtn.disabled) return;
+    runBtn.disabled = true;
+    await run(select.value, code.value, "editor");
+    sync();
+  });
+  const el = h("div", { class: "snippet-editor", hidden: true },
+    h("div", { class: "row" }, select, runBtn),
+    code,
+    h("p", { class: "muted small" }, "Runs once in a fresh sandbox: standard library only, no network, 30 s, 1 GiB memory. Output is shown as untrusted text."));
+  return { el, select, code, runBtn };
+}
+
 // ---------- chat ----------
 const CHAT_CHOICE_KEY = "harness.chatChoice";
 const CHAT_STARTERS = ["Explain a concept simply", "Review some code I paste", "Summarize a topic with sources"];
@@ -794,8 +924,23 @@ async function viewChat(id) {
   });
   if (!session) { ui.input.focus(); return; }
 
+  const runSnippet = async (language, source, origin) => {
+    try { await api(`/chats/${id}/snippets`, { method: "POST", body: { language, source, origin } }); }
+    catch (e) { toast(e.message); }
+  };
+  const cancelSnippet = async (runId) => {
+    try { await api(`/chats/${id}/snippets/${encodeURIComponent(runId)}/cancel`, { method: "POST" }); }
+    catch (e) { toast(e.message); }
+  };
+  const editor = snippetEditor(runSnippet);
+  const editorToggle = h("button", { class: "btn small", type: "button", "aria-expanded": "false", onclick: () => {
+    editor.el.hidden = !editor.el.hidden;
+    editorToggle.setAttribute("aria-expanded", String(!editor.el.hidden));
+    if (!editor.el.hidden) editor.select.focus();
+  } }, "Run code");
   wrap.prepend(h("div", { class: "row small chat-tools" },
     h("span", { class: "muted" }, `${session.backend || "local"} · ${session.model}${session.effort ? ` · ${session.effort}` : ""}`),
+    editorToggle,
     h("button", { class: "btn small", type: "button", onclick: async () => {
       const title = prompt("Rename chat", session.title);
       if (!title || !title.trim()) return;
@@ -805,14 +950,34 @@ async function viewChat(id) {
     h("button", { class: "btn small bad", type: "button", onclick: async () => {
       if (!confirm("Delete this chat?")) return;
       try { await api(`/chats/${id}`, { method: "DELETE" }); go("#/chat", true); } catch (e) { toast(e.message); }
-    } }, "Delete")));
+    } }, "Delete")), editor.el);
 
   let lastSeq = 0;
   let live = null;
   let sawContent = false;
   const add = (el) => { feed.append(el); scrollDown(); return el; };
+  const assistantMessage = (content) => {
+    const el = add(h("div", { class: "msg assistant final", html: md(content, []) }));
+    addRunControls(el, runSnippet);
+    return el;
+  };
+  const snippetCards = {};
   const handlers = {
-    user_message: (e) => add(h("div", { class: "msg user" }, e.data.content)),
+    user_message: (e) => add(h("div", { class: "msg user" }, userMessageParts(e.data.content, runSnippet))),
+    snippet_started: (e) => {
+      const card = snippetCard(e.data, cancelSnippet);
+      snippetCards[e.data.id] = card;
+      add(card.el);
+    },
+    snippet_result: (e) => {
+      let card = snippetCards[e.data.id];
+      if (!card) {
+        card = snippetCards[e.data.id] = snippetCard({ id: e.data.id, language: e.data.language }, cancelSnippet);
+        add(card.el);
+      }
+      card.finish(e.data);
+      scrollDown();
+    },
     delta: (e) => {
       if (e.data.kind === "reasoning") return;
       if (!live) live = add(h("div", { class: "msg assistant" }));
@@ -824,7 +989,7 @@ async function viewChat(id) {
       live = null;
       const d = e.data;
       if (d.content && d.content.trim()) sawContent = true;
-      if (d.content && d.content.trim()) add(h("div", { class: "msg assistant final", html: md(d.content, []) }));
+      if (d.content && d.content.trim()) assistantMessage(d.content);
       for (const call of d.tool_calls || []) {
         add(h("p", { class: "note" }, call.function?.name === "web_fetch" ? "Reading a web page…" : "Searching the web…"));
       }
@@ -840,9 +1005,7 @@ async function viewChat(id) {
       live?.remove();
       live = null;
       const answer = (e.data.answer || "").trim();
-      if (answer && !sawContent) {
-        add(h("div", { class: "msg assistant final", html: md(answer, []) }));
-      }
+      if (answer && !sawContent) assistantMessage(answer);
       if (status !== "done") {
         add(h("p", { class: `status-line${status === "failed" ? " bad" : ""}` }, badge(status),
           e.data.stop_reason && !["final_message", "finished"].includes(e.data.stop_reason) ? ` ${e.data.stop_reason}` : ""));

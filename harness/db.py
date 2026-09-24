@@ -710,6 +710,14 @@ class Database:
             ).fetchall()
         return [_row(r) for r in rows]
 
+    def snippet_events(self) -> list[dict]:
+        """Every chat's snippet run events, oldest first (snippets.py restart recovery)."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM events WHERE session_id IN (SELECT id FROM sessions WHERE kind = 'chat') "
+                "AND type IN ('snippet_started', 'snippet_result') ORDER BY seq").fetchall()
+        return [_row(r) for r in rows]
+
     def last_event_seq(self, sid: str) -> int:
         with self.lock:
             row = self.conn.execute("SELECT MAX(seq) AS seq FROM events WHERE session_id = ?", (sid,)).fetchone()

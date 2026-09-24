@@ -15,7 +15,7 @@ import httpx
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from . import access as access_mod
 from . import compat
@@ -85,6 +85,14 @@ class ReviewComment(BaseModel):
 
 class SessionUpdate(BaseModel):
     title: str
+
+
+class RunSnippet(BaseModel):
+    # Only these fields: no image, flags, arguments, packages, or files.
+    model_config = ConfigDict(extra="forbid")
+    language: str
+    source: str
+    origin: str = "editor"
 
 
 class CreateChat(BaseModel):
@@ -1099,6 +1107,19 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         m = require_owner(request)
         return await asyncio.to_thread(m.chat_options)
 
+    def owner_chat(request: Request, ref: str) -> tuple[Manager, str, dict]:
+        """A chat the caller owns, for owner-only actions (snippets); household members and guests never pass."""
+        require_owner(request)
+        if not request.state.access.is_owner:
+            raise HarnessError(403, "only the owner can run snippets")
+        return owned_chat(request, ref)
+
+    @app.get("/chats/snippet-languages")
+    async def snippet_languages(request: Request):
+        require_owner(request)
+        from .snippets import LIMITS, SnippetService
+        return {"languages": SnippetService.languages(), "limits": LIMITS}
+
     @app.get("/chats")
     async def list_chats(request: Request, limit: int = 50):
         m = require_owner(request)
@@ -1133,6 +1154,17 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     async def send_chat_message(ref: str, body: SendMessage, request: Request):
         m, sid, _ = owned_chat(request, ref)
         return m.summary(await m.send(sid, body.content))
+
+    @app.post("/chats/{ref}/snippets", status_code=202)
+    async def run_snippet(ref: str, body: RunSnippet, request: Request):
+        """Run one snippet the owner chose, in a fresh sandbox. The result arrives as a snippet_result event."""
+        m, sid, _ = owner_chat(request, ref)
+        return m.snippets.start(sid, body.language, body.source, body.origin)
+
+    @app.post("/chats/{ref}/snippets/{run_id}/cancel")
+    async def cancel_snippet(ref: str, run_id: str, request: Request):
+        m, sid, _ = owner_chat(request, ref)
+        return m.snippets.cancel(sid, run_id)
 
     @app.post("/chats/{ref}/cancel")
     async def cancel_chat(ref: str, request: Request):
