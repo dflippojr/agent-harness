@@ -208,6 +208,80 @@ def test_group_discard_continues_past_a_failure(tmp_path):
     assert seen == [a, b]
 
 
+def test_rollback_falls_back_when_discard_fails_for_a_checked_out_member(tmp_path):
+    m = make_manager(tmp_path)
+    real, calls = m.create, []
+
+    def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return real(*a, **kw)
+
+    async def broken_review(sid, action):
+        raise HarnessError(502, "remote unreachable")  # not the never-checked-out refusal
+
+    m.create, m.review = flaky, broken_review
+    with pytest.raises(RuntimeError):
+        run(m.create_compare("p", CHOICES, "repo"))
+    (s,) = m.db.list_sessions()
+    s = m.db.get_session(s["id"])
+    assert s["status"] == "cancelled" and s["review"] == "discarded" and s["workspace_removed"]
+    assert s["compare_group"] == ""
+
+    # and a failing cleanup still ungroups the member instead of aborting the rollback
+    m = make_manager(tmp_path / "again")
+    calls.clear()
+    real = m.create
+
+    def remove_fails(sid):
+        raise OSError("locked")
+
+    m.create, m.review = flaky, broken_review
+    m.maintenance.remove_workspace = remove_fails
+    with pytest.raises(RuntimeError):
+        run(m.create_compare("p", CHOICES, "repo"))
+    (s,) = m.db.list_sessions()
+    assert m.db.get_session(s["id"])["compare_group"] == ""
+
+
+def test_group_discard_reports_a_member_that_cannot_be_stopped(tmp_path):
+    m = make_manager(tmp_path)
+    view = run(m.create_compare("p", CHOICES, "repo"))
+    a, b = (r["id"] for r in view["members"])
+    real_cancel = m.cancel
+
+    async def stuck(ref):
+        if ref == a:
+            raise HarnessError(500, "stuck")
+        return await real_cancel(ref)
+
+    m.cancel = stuck
+    with pytest.raises(HarnessError) as e:
+        run(m.compare_discard(view["group"]))
+    assert a in str(e.value) and "stuck" in str(e.value) and b not in str(e.value)
+    # the one that could not be stopped is left alone and retryable; the other was still discarded
+    assert m.db.get_session(a)["status"] == "queued" and m.db.get_session(a)["review"] == ""
+    assert m.db.get_session(b)["review"] == "discarded"
+    m.cancel = real_cancel
+    out = run(m.compare_discard(view["group"]))
+    assert [r["review"] for r in out["members"]] == ["discarded", "discarded"]
+
+
+def test_compare_rejects_duplicates_unknown_groups_and_actions(tmp_path):
+    m = make_manager(tmp_path)
+    with pytest.raises(HarnessError, match="must differ"):
+        run(m.create_compare("p", [{"backend": "claude"}, {"backend": "claude"}], "repo"))
+    for call_ in (lambda: m.compare_view("nope"), lambda: run(m.compare_discard("nope"))):
+        with pytest.raises(HarnessError) as e:
+            call_()
+        assert e.value.status == 404
+    view = run(m.create_compare("p", CHOICES, "repo"))
+    with pytest.raises(HarnessError) as e:
+        run(m.compare_pick(view["group"], view["members"][0]["id"], "rebase", True))
+    assert e.value.status == 400
+
+
 # Real review()/cancel() against members that are still running. review() refuses a session in ACTIVE, so every path
 # that discards a member has to end its run first; these tests use a real git project and real runner tasks.
 class Gated:

@@ -134,4 +134,5 @@ Read `stablyai/orca` at pinned commit `122b8c25d7c16f76e395bf9a65887d7c4bc5003b`
 
 The harness design does not depend on Orca's shape: a compare group is a `compare_group` id on ordinary sessions.
 v1 API (owner-only): `POST /compare`, `GET /compare/{group}`, `POST /compare/{group}/pick`,
-`POST /compare/{group}/discard`. The comparison UI is not built yet.
+`POST /compare/{group}/discard`. The comparison UI is not built yet. Pick (with `discard_rest`) and discard stop
+members that are still running before discarding them, and only after the winner's merge or push has completed.
