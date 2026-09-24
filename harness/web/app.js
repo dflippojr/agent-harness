@@ -1021,10 +1021,11 @@ async function confirmGpuQueue(label) {
 
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
-  let [projects, models, allTemplates, backends] = await Promise.all([
+  let [projects, models, allTemplates, backends, gpu] = await Promise.all([
     api("/projects"), api("/models"),
     isMember() ? Promise.resolve([]) : api("/templates").catch(() => []),
-    isMember() ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip")]);
+    isMember() ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip"),
+    isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null)]);
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
   const targetKey = "harness.target";
@@ -1129,10 +1130,27 @@ async function viewNew() {
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   let localModel = model.value;
   model.addEventListener("change", () => { localModel = model.value; });
-  const backend = h("select", {}, backends.filter((b) => b.available).map((b) =>
-    h("option", { value: b.name }, b.name === "local" ? "Local model" : b.name)));
+  const gpuHold = () => !!(gpu && (gpu.manual || gpu.state !== "clear"));
+  const availableBackends = backends.filter((b) => b.available);
+  const defaultBackend = (gpuHold() && availableBackends.some((b) => b.name === "claude"))
+    ? "claude" : (availableBackends[0]?.name || "local");
+  const backend = h("select", {}, availableBackends.map((b) =>
+    h("option", { value: b.name, selected: b.name === defaultBackend }, b.name === "local" ? "Local model" : b.name)));
+  backend.value = defaultBackend;
   const backendState = h("div", { class: "muted small", style: "margin-top:6px" });
+  const holdNotice = h("div", { class: "muted small gpu-hold-note", style: "margin-top:6px" },
+    "Model unloaded while something else uses the GPU; tasks wait (",
+    h("a", { href: "#/actions/gpu" }, "Actions → GPU"),
+    ")");
   const modelState = h("div", { class: "muted small", style: "margin-top:6px" });
+  const start = h("button", { class: "btn primary", type: "submit" }, "Start");
+  const syncHoldUi = () => {
+    const queued = gpuHold() && backend.value === "local";
+    holdNotice.hidden = !queued;
+    start.textContent = queued ? "Queue task" : "Start";
+    start.classList.toggle("primary", !queued);
+    start.classList.toggle("queued", queued);
+  };
   const showBackend = () => {
     const b = backends.find((x) => x.name === backend.value);
     const isLocal = backend.value === "local";
@@ -1146,6 +1164,7 @@ async function viewNew() {
     modelState.hidden = !isLocal;
     backendState.textContent = b?.billing_warning || "";
     backendState.classList.toggle("bad", !!b?.billing_warning);
+    syncHoldUi();
   };
   backend.addEventListener("change", showBackend);
   showBackend();
@@ -1159,13 +1178,18 @@ async function viewNew() {
     paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → GPU)",
   };
   const pollModel = async () => {
+    if (!isMember()) {
+      try { gpu = await api("/gpu"); } catch (_) { /* offline */ }
+      syncHoldUi();
+    }
     if (backend.value !== "local") return;
     try {
       const status = await api("/models/status");
       const current = status.find((s) => s.name === model.value) || status[0];
       if (current) {
-        modelState.textContent = MODEL_STATE[current.state] || current.state;
-        modelState.classList.toggle("dots", current.state === "waking" || current.state === "sleeping");
+        const holdPaused = current.state === "paused" && gpuHold();
+        modelState.textContent = holdPaused ? "" : (MODEL_STATE[current.state] || current.state);
+        modelState.classList.toggle("dots", !holdPaused && (current.state === "waking" || current.state === "sleeping"));
       }
     } catch (_) { /* offline: the form's own errors cover it */ }
   };
@@ -1190,7 +1214,6 @@ async function viewNew() {
     syncSkillChecks();
   });
 
-  const start = h("button", { class: "btn primary", type: "submit" }, "Start");
   let enabledSkills = [];
   try { enabledSkills = await api("/skills/enabled"); } catch (_) { enabledSkills = []; }
   const skillInputs = [];
@@ -1232,7 +1255,7 @@ async function viewNew() {
   allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState, projectHint,
-  isMember() ? null : h("label", {}, "Backend"), isMember() ? null : backend, isMember() ? null : backendState,
+  isMember() ? null : h("label", {}, "Backend"), isMember() ? null : backend, isMember() ? null : holdNotice, isMember() ? null : backendState,
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
   skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
