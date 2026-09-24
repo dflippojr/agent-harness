@@ -324,7 +324,8 @@ class Manager:
                backend: str | None = None, effort: str | None = None,
                title: str | None = None, app: dict | None = None, app_context: str = "", app_tools: list | None = None,
                app_metadata: dict | None = None, job_id: str = "", owner_id: str = "owner",
-               skills: list[str] | None = None, skill_missing: str = "error", kind: str = "agent") -> dict:
+               skills: list[str] | None = None, skill_missing: str = "error", kind: str = "agent",
+               compare_group: str = "") -> dict:
         from . import catalog, storage
         chat = kind == "chat"
         if chat:
@@ -517,7 +518,7 @@ class Manager:
             "inbox": [], "branch": branch,
             "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
             "app_defaults": dict(defaults) if app else {},
-            "job_id": job_id, "owner_id": owner_id, "kind": kind,
+            "job_id": job_id, "owner_id": owner_id, "kind": kind, "compare_group": compare_group,
             "skills": self.skills.freeze_public(frozen) if self.skills is not None else [],
         }
         with self.db.tx():
@@ -598,6 +599,92 @@ class Manager:
         if s["target"] != "tower":
             return await self.remote(s, "changes", {"base_commit": s["base_commit"]}, timeout=120)
         return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None)
+
+    # compare groups (issue #166): one prompt, several backend/model choices, one session each
+    MAX_COMPARE = 4
+
+    def _compare_quota_problem(self, backend: str) -> str:
+        """Refuse only when the backend's own usage report says its limit is reached; unknown usage is allowed."""
+        if backend == "local":
+            return ""
+        status = str((self.db.get_backend_usage(backend).get("data") or {}).get("status") or "").lower()
+        return f"{backend} reports its usage limit is reached" if status in ("rejected", "exceeded", "limit_reached") else ""
+
+    def create_compare(self, prompt: str, choices: list[dict], project: str = "scratch", owner_id: str = "owner") -> dict:
+        if owner_id != OWNER_USER_ID:
+            raise HarnessError(403, "comparing backends is only available to the owner")
+        if not 2 <= len(choices) <= self.MAX_COMPARE:
+            raise HarnessError(400, f"compare needs 2 to {self.MAX_COMPARE} choices")
+        spec = self.cfg.projects.get(project)
+        if spec is None or not spec.repo:
+            raise HarnessError(400, "compare needs a git project so each member gets its own branch")
+        seen = set()
+        for c in choices:
+            key = (c.get("backend") or "local", c.get("model") or "", c.get("effort") or "")
+            if key in seen:
+                raise HarnessError(400, "each compare choice must differ")
+            seen.add(key)
+            if problem := self._compare_quota_problem(key[0]):
+                raise HarnessError(429, problem, "quota_reached")
+        group = uuid.uuid4().hex[:10]
+        created = []
+        try:
+            for c in choices:
+                created.append(self.create(prompt, project=project, backend=c.get("backend") or "local",
+                                           model=c.get("model") or None, effort=c.get("effort") or None,
+                                           owner_id=owner_id, compare_group=group))
+        except HarnessError:
+            for s in created:
+                self.db.update_session(s["id"], compare_group="")
+            raise
+        return self.compare_view(group, owner_id)
+
+    def compare_view(self, group: str, owner_id: str = "owner") -> dict:
+        members = self.db.group_sessions(group, owner_id)
+        if not members:
+            raise HarnessError(404, "no compare group matches that id")
+        rows = []
+        for s in members:
+            t = s.get("totals") or {}
+            end = time.time() if s["status"] in ACTIVE else s["updated_at"]
+            rows.append({
+                "id": s["id"], "backend": s["backend"], "model": s["model"], "effort": s.get("effort", ""),
+                "status": s["status"], "review": s["review"], "branch": s["branch"],
+                "elapsed": round(end - s["created_at"], 1),
+                "prompt_tokens": t.get("prompt_tokens", 0), "completion_tokens": t.get("completion_tokens", 0),
+                "cost_usd": t.get("total_cost_usd", 0.0), "answer": (s["answer"] or "")[:500],
+                "queue_position": self.scheduler.positions().get(s["id"]),
+                "serialized": s["backend"] == "local",
+            })
+        bases = {s["base_commit"] for s in members if s["base_commit"]}
+        return {"group": group, "members": rows, "same_base": len(bases) <= 1,
+                "note": "local-model members run one at a time behind the GPU scheduler"
+                if sum(r["serialized"] for r in rows) > 1 else ""}
+
+    async def compare_pick(self, group: str, winner: str, action: str, discard_rest: bool,
+                           owner_id: str = "owner") -> dict:
+        members = self.db.group_sessions(group, owner_id)
+        if winner not in {s["id"] for s in members}:
+            raise HarnessError(404, "the winner is not a member of this group")
+        if action not in ("merge", "push"):
+            raise HarnessError(400, "action must be merge or push")
+        await self.review(winner, action)
+        if discard_rest:
+            await self._compare_discard([s for s in members if s["id"] != winner])
+        return self.compare_view(group, owner_id)
+
+    async def compare_discard(self, group: str, owner_id: str = "owner") -> dict:
+        members = self.db.group_sessions(group, owner_id)
+        if not members:
+            raise HarnessError(404, "no compare group matches that id")
+        await self._compare_discard(members)
+        return self.compare_view(group, owner_id)
+
+    async def _compare_discard(self, members: list[dict]) -> None:
+        for s in members:
+            if s["review"] in ("merged", "pushed", "discarded"):
+                continue
+            await self.review(s["id"], "discard")
 
     # review of a git project's session branch
     async def review(self, ref: str, action: str) -> dict:
