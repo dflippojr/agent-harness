@@ -375,6 +375,8 @@ MIGRATIONS = [
     ("sessions", "job_status", TEXT_EMPTY),
     # Phase 8a: local inference or a hosted CLI session backend.
     ("sessions", "backend", TEXT_LOCAL),
+    # Issue #166: sessions started together from one prompt to compare backends/models share a group id.
+    ("sessions", "compare_group", TEXT_EMPTY),
     ("jobs", "backend", TEXT_LOCAL),
     ("templates", "backend", TEXT_LOCAL),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
@@ -531,6 +533,12 @@ class Database:
                 "branch, review, workspace_removed, app_id, job_id, job_status, owner_id FROM sessions" + where +
                 " ORDER BY created_at DESC LIMIT ?", params
             ).fetchall()
+        return [_row(r) for r in rows]
+
+    def group_sessions(self, group: str, owner_id: str) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM sessions WHERE compare_group = ? AND owner_id = ? "
+                                     "ORDER BY created_at, id", (group, owner_id)).fetchall()
         return [_row(r) for r in rows]
 
     def delete_session(self, sid: str) -> None:

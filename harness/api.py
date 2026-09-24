@@ -42,6 +42,24 @@ class CreateSession(BaseModel):
     skills: list[str] | None = None
 
 
+class CompareChoice(BaseModel):
+    backend: str = "local"
+    model: str | None = None
+    effort: str | None = None
+
+
+class CreateCompare(BaseModel):
+    prompt: str
+    project: str
+    choices: list[CompareChoice]
+
+
+class PickWinner(BaseModel):
+    winner: str
+    action: str = "merge"
+    discard_rest: bool = False
+
+
 class CreateProject(BaseModel):
     name: str
     description: str = ""
@@ -955,6 +973,24 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
                      model=body.model, title=body.title, owner_id=owner_id(request), skills=body.skills)
         return m.summary(s)
+
+    @app.post("/compare", status_code=201)
+    async def create_compare(body: CreateCompare, request: Request):
+        m = require_owner(request)
+        return await m.create_compare(body.prompt, [c.model_dump() for c in body.choices], body.project, owner_id(request))
+
+    @app.get("/compare/{group}")
+    async def get_compare(group: str, request: Request):
+        return require_owner(request).compare_view(group, owner_id(request))
+
+    @app.post("/compare/{group}/pick")
+    async def pick_compare(group: str, body: PickWinner, request: Request):
+        m = require_owner(request)
+        return await m.compare_pick(group, body.winner, body.action, body.discard_rest, owner_id(request))
+
+    @app.post("/compare/{group}/discard")
+    async def discard_compare(group: str, request: Request):
+        return await require_owner(request).compare_discard(group, owner_id(request))
 
     @app.get("/sessions/{ref}")
     async def get_session(ref: str, request: Request):

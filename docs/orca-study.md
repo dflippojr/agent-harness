@@ -122,3 +122,17 @@ removal and a worktree scan fingerprint (**unverified** content). The "fail clos
 - Running N parallel agents without a quota check (Orca's own reviewers note N agents mean N rate-limit hits)
 - A closed-laptop-means-dark-phone dependency: keep sessions on the always-on Server
 - Custom-scheme URLs that carry credentials
+
+## Verification for #166 (fan-out compare), 2026-09-24
+
+Read `stablyai/orca` at pinned commit `122b8c25d7c16f76e395bf9a65887d7c4bc5003b` (shallow clone, not copied).
+- `src/cli` has a `worktree` command family (`rm`, `ps`, `set`, `focus`, `limit`, ...) and orchestration guides; no
+  `worktree fan` command was found, so that name from the third-party review is **unconfirmed / probably wrong**.
+- `src/renderer` has no 3-pane hunk picker component that a search for "hunk" turns up (matches are terminal/dashboard
+  code). The hunk-level compare UI is **unconfirmed**; it is out of scope for v1 anyway.
+- `docs/reference` does contain `worktree-scan-fingerprint.md` and `malformed-worktree-registration-removal.md`.
+
+The harness design does not depend on Orca's shape: a compare group is a `compare_group` id on ordinary sessions.
+v1 API (owner-only): `POST /compare`, `GET /compare/{group}`, `POST /compare/{group}/pick`,
+`POST /compare/{group}/discard`. The comparison UI is not built yet. Pick (with `discard_rest`) and discard stop
+members that are still running before discarding them, and only after the winner's merge or push has completed.
