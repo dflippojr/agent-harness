@@ -77,7 +77,8 @@ jobs:
       # agent-harness-ci jobs. Started at -n 4; a 20-run soak median of 192 s was
       # still above two minutes, so CI uses -n 8 (cap). pytest-xdist is a CI extra,
       # not in requirements.txt. Flags stay on this command (no repo-wide addopts)
-      # so sonar.yml can keep a serial `python -m pytest tests -q` without xdist.
+      # so sonar.yml can use a different fixed -n (4 on 4-vCPU hosted Windows)
+      # without inheriting this job's -n 8.
       # Serial escape hatch locally: python -m pytest tests -q -p no:xdist
       - name: Run test suite
         shell: powershell
