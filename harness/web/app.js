@@ -76,10 +76,16 @@ function repaintBar() {
   });
 }
 
+function profileIconHidden(topLevel, page = false) {
+  // Show on Chat, Agents, Tasks, Images, and Actions. Hide on nested Back pages
+  // and on Profile (page: true). Guest chrome is unchanged; this flag is route-only.
+  return !topLevel || !!page;
+}
+
 function setHeader(feature, pageTitle = "", { page = false } = {}) {
   if ([...$feature.options].some((o) => o.value === feature)) $feature.value = feature;
   $feature.hidden = true;
-  $profileIcon.hidden = page || feature !== "chat";
+  $profileIcon.hidden = profileIconHidden($back.hidden, page);
   $title.textContent = pageTitle;
   $title.hidden = !pageTitle;
   document.getElementById("bar").classList.toggle("page", page);
