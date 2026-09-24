@@ -645,9 +645,7 @@ class Manager:
         for s in created:
             sid = s["id"]
             try:
-                if self.db.get_session(sid)["status"] in ACTIVE:
-                    await self.cancel(sid)
-                await self.review(sid, "discard")
+                await self._compare_drop(sid)
             except Exception:
                 log.warning("compare rollback could not discard %s cleanly", sid, exc_info=True)
                 try:
@@ -714,14 +712,44 @@ class Manager:
     async def _compare_discard(self, members: list[dict]) -> dict[str, str]:
         """Discard every member that still can be; return {session id: error} for those that failed."""
         failed = {}
-        for s in members:
-            if s["review"] in ("merged", "pushed", "discarded"):
-                continue
+        for member in members:
+            sid = member["id"]
             try:
-                await self.review(s["id"], "discard")
+                if self.db.get_session(sid)["review"] in ("merged", "pushed", "discarded"):
+                    continue
+                await self._compare_drop(sid)
             except Exception as e:
-                failed[s["id"]] = str(e)
+                failed[sid] = str(e)
         return failed
+
+    async def _compare_drop(self, sid: str) -> None:
+        """End a member's run, then discard its branch and workspace. review() refuses a session that is still
+        working, and refuses one that was never checked out (it has no branch anywhere to delete)."""
+        await self._compare_stop(sid)
+        try:
+            await self.review(sid, "discard")
+        except HarnessError as e:
+            s = self.db.get_session(sid)
+            if e.status != 409 or s["base_commit"] or s["status"] in ACTIVE:
+                raise
+            await asyncio.to_thread(self.maintenance.remove_workspace, sid)
+            self.db.update_session(sid, review="discarded",
+                                   review_detail="stopped before its repository was checked out")
+
+    async def _compare_stop(self, sid: str) -> None:
+        """Cancel a member that is still running. A run that ends on its own first is just as stopped."""
+        if self.db.get_session(sid)["status"] not in ACTIVE:
+            return
+        try:
+            await self.cancel(sid)
+        except HarnessError:
+            if self.db.get_session(sid)["status"] in ACTIVE:
+                raise
+            return
+        if self.db.get_session(sid)["status"] in ACTIVE:
+            # cancelled before its first step, so the run's own cleanup never ran and it would be resumed on restart
+            self.runner.user_cancelled.discard(sid)
+            self.runner.set_status(sid, "cancelled", stop_reason="cancelled")
 
     # draft line comments on the Changes diff
     def review_comments(self, ref: str) -> list[dict]:
