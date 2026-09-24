@@ -1315,25 +1315,68 @@ function sessionTitle(session, isActive) {
   return label;
 }
 
+// Window vs body vs html disagree on Edge/desktop: use every scroller's metric.
+function pageMetrics() {
+  const se = document.scrollingElement || document.documentElement;
+  const body = document.body;
+  const vv = window.visualViewport;
+  const y = Math.max(
+    window.scrollY || 0, window.pageYOffset || 0, se.scrollTop || 0, body ? body.scrollTop : 0);
+  const viewH = Math.max(
+    1, se.clientHeight || 0, window.innerHeight || 0, vv && vv.height ? vv.height : 0);
+  const pageH = Math.max(
+    se.scrollHeight || 0,
+    document.documentElement.scrollHeight || 0,
+    body ? body.scrollHeight : 0);
+  return { y, viewH, pageH };
+}
+
+function scrollPage(top) {
+  const y = Math.max(0, top);
+  window.scrollTo(0, y);
+  const se = document.scrollingElement || document.documentElement;
+  se.scrollTop = y;
+  if (document.body) document.body.scrollTop = y;
+}
+
+// 0.75*innerHeight on a tall desktop window is often larger than the whole
+// overflow, so both arrows stay hidden unless the transcript is >1.75 viewports.
+function sessionJumpHidden(y, viewH, pageH) {
+  const vh = Math.max(1, Number(viewH) || 0);
+  const far = Math.min(160, 0.75 * vh);
+  return { top: y <= far, bottom: pageH - vh - y <= far, far };
+}
+
 function bindSessionJumps() {
-  const pageHeight = () => document.documentElement.scrollHeight;
+  const pageHeight = () => pageMetrics().pageH;
   const jumpTop = h("button", { class: "btn small jump jump-top", type: "button", hidden: true, "aria-label": "Jump to start" }, "↑");
   const jumpBottom = h("button", { class: "btn small jump jump-bottom", type: "button", hidden: true, "aria-label": "Jump to end" }, "↓");
   const updateJumps = () => {
     layoutBar();
-    const y = window.scrollY;
-    const far = 0.75 * window.innerHeight;
-    jumpTop.hidden = y <= far;
-    jumpBottom.hidden = pageHeight() - window.innerHeight - y <= far;
+    const { y, viewH, pageH } = pageMetrics();
+    const hide = sessionJumpHidden(y, viewH, pageH);
+    jumpTop.hidden = hide.top;
+    jumpBottom.hidden = hide.bottom;
   };
-  jumpTop.addEventListener("click", () => window.scrollTo(0, 0));
-  jumpBottom.addEventListener("click", () => window.scrollTo(0, pageHeight()));
+  jumpTop.addEventListener("click", () => scrollPage(0));
+  jumpBottom.addEventListener("click", () => scrollPage(pageHeight()));
   document.body.append(jumpTop, jumpBottom);
-  window.addEventListener("scroll", updateJumps, { passive: true });
+  window.addEventListener("scroll", updateJumps, { passive: true, capture: true });
+  document.addEventListener("scroll", updateJumps, { passive: true, capture: true });
   window.addEventListener("resize", updateJumps);
+  const vv = window.visualViewport;
+  if (vv) {
+    vv.addEventListener("resize", updateJumps);
+    vv.addEventListener("scroll", updateJumps);
+  }
   onLeave(() => {
-    window.removeEventListener("scroll", updateJumps);
+    window.removeEventListener("scroll", updateJumps, true);
+    document.removeEventListener("scroll", updateJumps, true);
     window.removeEventListener("resize", updateJumps);
+    if (vv) {
+      vv.removeEventListener("resize", updateJumps);
+      vv.removeEventListener("scroll", updateJumps);
+    }
     jumpTop.remove();
     jumpBottom.remove();
   });
@@ -1445,17 +1488,20 @@ async function viewSession(sid, tab, focusApproval) {
   // snap slow upward scrolls back down on every streamed token.
   let follow = true;
   let touching = false;
-  let lastY = window.scrollY;
+  let lastY = pageMetrics().y;
   const pageHeight = jumps.pageHeight;
-  const atBottom = () => window.innerHeight + window.scrollY >= pageHeight() - 2;
+  const atBottom = () => {
+    const { y, viewH, pageH } = pageMetrics();
+    return viewH + y >= pageH - 2;
+  };
   const scrollDown = (force = false) => {
     if (!force && (!follow || touching)) return;
-    window.scrollTo(0, pageHeight());
-    lastY = window.scrollY;
+    scrollPage(pageHeight());
+    lastY = pageMetrics().y;
     jumps.updateJumps();
   };
   const onScroll = () => {
-    const y = window.scrollY;
+    const y = pageMetrics().y;
     if (y < lastY - 0.5 && !atBottom()) follow = false; // content shrinking at the bottom also moves y; ignore that
     else if (atBottom()) follow = true;
     lastY = y;
