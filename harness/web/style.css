@@ -311,7 +311,8 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .row.between { justify-content: space-between; flex-wrap: nowrap; }
 
 /* images */
-.image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.image-generate-row { margin-bottom: 8px; }
+.image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-top: 20px; }
 .image-card { display: block; padding: 6px; margin: 0; position: relative; }
 .image-kind {
   position: absolute; top: 10px; left: 10px; padding: 2px 6px; border-radius: 6px;
@@ -330,6 +331,7 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .mask-tools .btn { min-height: 44px; }
 @media (max-width: 640px) {
   .mask-tools .btn { flex: 1 1 calc(50% - 8px); }
+  .image-grid { margin-top: 24px; }
 }
 .image-card img, .image-placeholder { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; display: block; }
 .image-scale {

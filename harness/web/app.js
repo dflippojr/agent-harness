@@ -2098,10 +2098,20 @@ function imageModeEntries(status) {
   }]);
 }
 
+function installedImageModeEntries(status) {
+  return imageModeEntries(status).filter(([, spec]) => spec.available !== false);
+}
+
+const IMAGE_MODELS_EMPTY = "No image models are installed. Install them with ops/images-models.ps1 into the server's configured Comfy models directory.";
+
 async function viewImages() {
   setHeader("images", "Images");
   let data;
   try { data = await api("/images"); } catch (e) { append($app, h("p", { class: "note bad" }, e.message)); return; }
+  let gpu = null;
+  if (!isMember()) {
+    try { gpu = await api("/gpu"); } catch (_) { /* offline */ }
+  }
   const prompt = h("textarea", { placeholder: "Describe the image…" });
   const draftKey = "harness.imageDraft";
   try { prompt.value = localStorage.getItem(draftKey) || ""; } catch (_) { /* private mode */ }
@@ -2122,25 +2132,13 @@ async function viewImages() {
     try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ }
     if (prompt.value.trim()) startWarmup().catch(() => {});
   });
-  const modeEntries = data.status.modes ? Object.entries(data.status.modes) : imageModeEntries(data.status);
+  const modeEntries = installedImageModeEntries(data.status);
   const modes = Object.fromEntries(modeEntries);
   const modelChoices = modeEntries.map(([key, spec]) => ({ key, ...spec, display_name: spec.label || spec }));
-  const model = h("select", {}, modeEntries.map(([key, spec]) => h("option", {
-    value: key, disabled: spec.available === false,
-  }, spec.available === false ? `${spec.label || spec} — not installed` : (spec.label || spec))));
-  const fluxHint = h("p", { class: "muted small" });
-  const updateFluxHint = () => {
-    const selected = modelChoices.find((m) => m.key === model.value);
-    if (selected && selected.available === false) {
-      fluxHint.hidden = false;
-      fluxHint.textContent = selected.setup || [selected.unavailable_reason, selected.remediation].filter(Boolean).join(". ");
-    } else {
-      fluxHint.hidden = true;
-      fluxHint.textContent = "";
-    }
-  };
-  model.addEventListener("change", updateFluxHint);
-  updateFluxHint();
+  const emptyModels = h("p", { class: "muted small image-models-empty" }, IMAGE_MODELS_EMPTY);
+  const model = modeEntries.length ? h("select", { "aria-label": "Model" }, modeEntries.map(([key, spec]) => h("option", {
+    value: key,
+  }, spec.label || spec))) : null;
   const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
   let resolutionTouched = false;
   const resolutionInputs = Object.entries(data.status.resolutions).map(([name, spec]) => {
@@ -2157,14 +2155,17 @@ async function viewImages() {
     }
   };
   aspect.addEventListener("change", renderResolutions);
-  model.addEventListener("change", () => {
-    if (!resolutionTouched) {
-      const recommended = (modes[model.value] && modes[model.value].resolution)
-        || (model.value === "quality" || model.value === "quality-fast" ? "high" : "standard");
-      resolutionInputs.find((choice) => choice.name === recommended).input.checked = true;
-    }
-    renderResolutions();
-  });
+  if (model) {
+    model.addEventListener("change", () => {
+      if (!resolutionTouched) {
+        const recommended = (modes[model.value] && modes[model.value].resolution)
+          || (model.value === "quality" || model.value === "quality-fast" ? "high" : "standard");
+        const choice = resolutionInputs.find((c) => c.name === recommended);
+        if (choice) choice.input.checked = true;
+      }
+      renderResolutions();
+    });
+  }
   renderResolutions();
   const upscaleInfo = data.status.upscale || {};
   const upscale = h("select", {},
@@ -2186,6 +2187,15 @@ async function viewImages() {
   };
   render(data);
   const go = h("button", { class: "btn primary", type: "submit" }, "Generate");
+  const gpuHold = () => !!(gpu && (gpu.manual || gpu.state !== "clear"));
+  const syncHoldUi = () => {
+    const queued = gpuHold();
+    go.textContent = queued ? "Queue Generation" : "Generate";
+    go.classList.toggle("primary", !queued);
+    go.classList.toggle("queued", queued);
+    go.disabled = !model;
+  };
+  syncHoldUi();
   const upload = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/jpg", hidden: true, "aria-label": "Upload a photo to edit" });
   const uploadBtn = h("button", { class: "btn", type: "button", onclick: () => upload.click() }, "Upload photo");
   upload.addEventListener("change", async () => {
@@ -2209,8 +2219,9 @@ async function viewImages() {
       onsubmit: async (e) => {
         e.preventDefault();
         if (!prompt.value.trim()) return toast("Describe the image first");
+        if (!model) return toast(IMAGE_MODELS_EMPTY);
         const selectedMode = modelChoices.find((m) => m.key === model.value);
-        if (selectedMode && selectedMode.available === false) return toast(selectedMode.unavailable_reason || "That image mode isn't installed");
+        if (!selectedMode) return toast(IMAGE_MODELS_EMPTY);
         if (!(await confirmGpuQueue("This image job"))) return;
         go.disabled = true;
         try {
@@ -2220,13 +2231,12 @@ async function viewImages() {
           try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
           render(await api("/images"));
         } catch (err) { toast(err.message); }
-        go.disabled = false;
+        syncHoldUi();
       },
     },
     h("label", {}, "Prompt"), prompt,
-    h("div", { class: "row" }, h("div", { style: "flex:2" }, h("label", {}, "Model"), model),
+    h("div", { class: "row" }, h("div", { style: "flex:2" }, h("label", {}, "Model"), model || emptyModels),
       h("div", { style: "flex:1" }, h("label", {}, "Aspect ratio"), aspect)),
-    fluxHint,
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
     h("div", { class: "row" }, h("div", { style: "flex:1" }, h("label", {}, "Upscale"), upscale)),
@@ -2234,7 +2244,7 @@ async function viewImages() {
       ? "The language model is unloaded while images generate; running tasks pause for a few minutes. Upscaling is off unless you choose 2× or 4×."
       : "The language model is unloaded while images generate; running tasks pause for a few minutes. Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable."),
     editHint,
-    h("div", { class: "row", style: "margin-top:12px" },
+    h("div", { class: "row image-generate-row", style: "margin-top:12px" },
       (edit.available && edit.enabled) ? upload : null,
       (edit.available && edit.enabled) ? uploadBtn : null,
       h("span", { class: "spacer" }), go)),
