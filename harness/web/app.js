@@ -294,7 +294,8 @@ function linkQuotes(html, answer, pages) {
 // A fenced block in a language the snippet runner supports is marked so Chat can add its Run button.
 function md(src, pages) {
   const blocks = [];
-  let text = escapeHtml(src || "").replace(/```([\w+#-]*)[^\S\n]*\n?([\s\S]*?)```/g, (_, tag, code) => {
+  let text = escapeHtml(src || "").replace(/```([\w+#-]*)([\s\S]*?)```/g, (_, tag, rest) => {
+    const code = rest.replace(/^[^\S\n]*\n?/, "");
     const lang = snippetLanguage(tag);
     blocks.push(`<pre${lang ? ` data-snippet-lang="${lang}"` : ""}><code>${code.replace(/\n$/, "")}</code></pre>`);
     return `\u0000${blocks.length - 1}\u0000`;

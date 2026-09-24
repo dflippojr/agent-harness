@@ -175,6 +175,11 @@ if ((html.match(/data-snippet-lang=/g) || []).length !== 2) fail(`expected two r
 if (!html.includes('data-snippet-lang="python"') || !html.includes('data-snippet-lang="csharp"')) fail(html);
 if (!html.includes("<pre><code>rm -rf /</code></pre>") || !html.includes("<pre><code>plain</code></pre>")) fail(html);
 if (html.includes("<script>") || !html.includes("&lt;script&gt;")) fail(`fence content must stay escaped: ${html}`);
+// A fence opener followed by a long whitespace run and no closing fence must stay linear (Sonar S8786).
+const started = Date.now();
+md("```py" + " ".repeat(100000) + "\n".repeat(100000));
+if (Date.now() - started > 500) fail("md() backtracks super-linearly on an unclosed fence with a whitespace run");
+if (!md("```py  \nprint(1)```").includes("<code>print(1)</code>")) fail("trailing spaces after the tag are dropped");
 for (const [tag, id] of [["py", "python"], ["js", "javascript"], ["node", "javascript"], ["java", "java"], ["cs", "csharp"], ["cpp", "cpp"], ["c++", "cpp"]]) {
   if (runInContext(`snippetLanguage(${JSON.stringify(tag)})`, sandbox) !== id) fail(`fence ${tag} should map to ${id}`);
 }

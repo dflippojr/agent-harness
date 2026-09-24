@@ -75,7 +75,7 @@ def test_container_args_are_the_isolation_checklist():
                      "--user 65534:65534", "--pull never", "--rm", "--init", "--memory 1g", "--memory-swap 1g",
                      "--cpus 1", "--pids-limit 64", "--shm-size 8m", "--log-driver none"):
             assert flag in joined, (lang.id, flag)
-        assert "--tmpfs /tmp:rw,exec,nosuid,nodev,size=120m,mode=1777" in joined
+        assert "--tmpfs /sandbox:rw,exec,nosuid,nodev,size=120m,uid=65534,gid=65534,mode=0700" in joined
         for banned in ("-v", "--volume", "--mount", "--privileged", "--cap-add", "-p", "--publish", "--device",
                        "--env-file", "--ipc", "--pid", "--userns", "--security-opt=seccomp=unconfined"):
             assert banned not in args, (lang.id, banned)
@@ -107,9 +107,9 @@ def test_java_file_and_main_class():
 
 
 def test_parse_stats_reads_cgroup_evidence():
-    out = "[memory]\nlow 0\nmax 12\noom 1\noom_kill 1\n[pids]\nmax 3\n[tmp]\ntmpfs 122880 122000 880 100% /tmp\n"
+    out = "[memory]\nlow 0\nmax 12\noom 1\noom_kill 1\n[pids]\nmax 3\n[tmp]\ntmpfs 122880 122000 880 100% /sandbox\n"
     assert _parse_stats(out) == ["memory_limit", "pids_limit", "temp_storage_limit"]
-    calm = "[memory]\nmax 5\noom_kill 0\n[pids]\nmax 0\n[tmp]\ntmpfs 122880 10 122870 1% /tmp\n"
+    calm = "[memory]\nmax 5\noom_kill 0\n[pids]\nmax 0\n[tmp]\ntmpfs 122880 10 122870 1% /sandbox\n"
     assert _parse_stats(calm) == []  # memory.events "max" (reclaim) is not the pids limit
 
 
@@ -500,7 +500,7 @@ print("workspace", os.path.exists("/workspace"))
 print("secrets", os.path.exists("/run/secrets"))
 print("canary", "canary-secret-value" in repr(dict(os.environ)))
 print("binds", [l.split()[1] for l in mounts.splitlines() if l.split()[1] not in (
-    "/", "/proc", "/dev", "/dev/pts", "/sys", "/sys/fs/cgroup", "/dev/mqueue", "/dev/shm", "/tmp",
+    "/", "/proc", "/dev", "/dev/pts", "/sys", "/sys/fs/cgroup", "/dev/mqueue", "/dev/shm", "/sandbox",
     "/etc/hosts", "/etc/hostname", "/etc/resolv.conf", "/dev/console", "/usr/sbin/docker-init") and not l.split()[1].startswith(("/proc/", "/sys/"))])
 try:
     open("/etc/hosts", "a"); print("etc writable")
@@ -539,7 +539,7 @@ def test_live_memory_pids_and_temp_limits():
                               "ps.append(subprocess.Popen(['sleep', '30']))\nexcept OSError: pass\n"
                               "print(len(ps))\nfor p in ps: p.kill(); p.wait()")
     assert "pids_limit" in pids["reasons"] and int(pids["run"]["stdout"]) < snippets.PIDS
-    tmp = run_live("python", "try:\n    with open('/tmp/big', 'wb') as f:\n        for _ in range(300): "
+    tmp = run_live("python", "try:\n    with open('/sandbox/big', 'wb') as f:\n        for _ in range(300): "
                              "f.write(b'x' * 1024 * 1024)\nexcept OSError as e: print(e.errno)")
     assert "temp_storage_limit" in tmp["reasons"] and tmp["run"]["stdout"].strip() == "28"  # ENOSPC
 
@@ -570,7 +570,7 @@ def test_live_output_limit_truncates_explicitly():
 def test_live_cancel_and_no_files_survive_between_runs():
     r = run_live("python", "import time\nprint('x', flush=True)\ntime.sleep(60)", cancel_after=2)
     assert r["status"] == "cancelled" and r["reasons"] == ["cancelled"]
-    first = run_live("python", "open('/tmp/marker', 'w').write('left behind')\nprint('wrote')")
+    first = run_live("python", "open('/sandbox/marker', 'w').write('left behind')\nprint('wrote')")
     assert first["run"]["stdout"] == "wrote\n"
-    second = run_live("python", "import os\nprint(os.path.exists('/tmp/marker'), sorted(os.listdir('/tmp/src')))")
+    second = run_live("python", "import os\nprint(os.path.exists('/sandbox/marker'), sorted(os.listdir('/sandbox/src')))")
     assert second["run"]["stdout"] == "False ['main.py']\n"

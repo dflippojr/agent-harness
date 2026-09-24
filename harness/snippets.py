@@ -30,7 +30,7 @@ TIMEOUT_SECONDS = 30  # wall clock for compile plus run
 MEMORY = "1g"
 CPUS = "1"
 PIDS = 64
-TMP_MB, SHM_MB = 120, 8  # /tmp plus /dev/shm: 128 MiB of writable temporary storage in all
+TMP_MB, SHM_MB = 120, 8  # /sandbox plus /dev/shm: 128 MiB of writable temporary storage in all
 OUTPUT_BYTES = 1 << 20  # compiler diagnostics, stdout, and stderr together
 SOURCE_BYTES = 128 * 1024
 MAX_CONCURRENT = 2
@@ -42,9 +42,9 @@ LIMITS = {"timeout_seconds": TIMEOUT_SECONDS, "cpus": 1, "memory_mib": 1024, "pi
           "tmp_mib": TMP_MB + SHM_MB, "output_bytes": OUTPUT_BYTES}
 CONTEXT_CHARS = 4000  # per field, when a result is passed to the model with the user's next message
 
-_SETUP = 'umask 077 && mkdir -p /tmp/src /tmp/out && cat > "/tmp/src/$1"'
+_SETUP = 'umask 077 && mkdir -p /sandbox/src /sandbox/out && cat > "/sandbox/src/$1"'
 _STATS = ("echo '[memory]'; cat /sys/fs/cgroup/memory.events 2>/dev/null; echo '[pids]'; "
-          "cat /sys/fs/cgroup/pids.events 2>/dev/null; echo '[tmp]'; df -Pk /tmp 2>/dev/null | tail -n 1")
+          "cat /sys/fs/cgroup/pids.events 2>/dev/null; echo '[tmp]'; df -Pk /sandbox 2>/dev/null | tail -n 1")
 _CSHARP_USINGS = ("System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Net.Http",
                   "System.Threading", "System.Threading.Tasks")  # the same implicit usings as `dotnet new console`
 
@@ -69,46 +69,47 @@ LANGUAGES: dict[str, Language] = {lang.id: lang for lang in (
         id="python", label="Python", tag="python:3.12-slim",
         image="python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
         filename="main.py", version="python3 -V",
-        run="exec python3 -I -B /tmp/src/main.py", aliases=("py", "python3")),
+        run="exec python3 -I -B /sandbox/src/main.py", aliases=("py", "python3")),
     Language(
         id="javascript", label="JavaScript", tag="node:24-slim",
         image="node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6",
         filename="main.js", version='echo "Node.js $(node -v)"',
-        run="exec node /tmp/src/main.js", aliases=("js", "node", "mjs", "cjs")),
+        run="exec node /sandbox/src/main.js", aliases=("js", "node", "mjs", "cjs")),
     Language(
         id="java", label="Java", tag="eclipse-temurin:25-jdk",
         image="eclipse-temurin@sha256:97014c4b396021f9ddb7d592a7dbedb0c4e4215c29e03dc01c393558aefb71c2",
         filename="Main.java", version="java -version 2>&1 | head -n 1",
         compile=('exec 2>&1; exec javac -J-XX:+UseSerialGC -J-XX:TieredStopAtLevel=1 -J-XX:-UsePerfData '
-                 '-encoding UTF-8 -d /tmp/out "/tmp/src/$1"'),
-        run=('cd /tmp/out && c="$1" && { [ -f "$c.class" ] || c=Main; } && '
-             'exec java -XX:+UseSerialGC -XX:-UsePerfData -cp /tmp/out "$c"')),
+                 '-J-Djava.io.tmpdir=/sandbox '
+                 '-encoding UTF-8 -d /sandbox/out "/sandbox/src/$1"'),
+        run=('cd /sandbox/out && c="$1" && { [ -f "$c.class" ] || c=Main; } && '
+             'exec java -XX:+UseSerialGC -XX:-UsePerfData -Djava.io.tmpdir=/sandbox -cp /sandbox/out "$c"')),
     Language(
         id="csharp", label="C#", tag="mcr.microsoft.com/dotnet/sdk:10.0",
         image="mcr.microsoft.com/dotnet/sdk@sha256:35d40304542c8689331f8cab17c65926cdf48fe711e289321d71924b230a7d29",
         filename="main.cs", version='echo ".NET SDK $(dotnet --version)"',
-        setup="printf 'global using %s;\\n' " + " ".join(_CSHARP_USINGS) + " > /tmp/src/GlobalUsings.cs",
+        setup="printf 'global using %s;\\n' " + " ".join(_CSHARP_USINGS) + " > /sandbox/src/GlobalUsings.cs",
         # csc straight from the SDK: a fixed command with no project file, NuGet restore, or MSBuild.
         compile=('exec 2>&1; d=/usr/share/dotnet; '
                  'csc=$(ls -d "$d"/sdk/*/Roslyn/bincore/csc.dll | tail -n 1); '
                  'ref=$(ls -d "$d"/packs/Microsoft.NETCore.App.Ref/*/ref/net* | tail -n 1); '
                  'fw=$(ls "$d"/shared/Microsoft.NETCore.App | tail -n 1); '
-                 'for f in "$ref"/*.dll; do echo "-r:$f"; done > /tmp/out/refs.rsp; '
+                 'for f in "$ref"/*.dll; do echo "-r:$f"; done > /sandbox/out/refs.rsp; '
                  'printf \'{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"%s"}}}\\n\' '
-                 '"$fw" > /tmp/out/main.runtimeconfig.json; '
+                 '"$fw" > /sandbox/out/main.runtimeconfig.json; '
                  'exec dotnet "$csc" -nologo -noconfig -nostdlib+ -target:exe -langversion:latest -nullable:enable '
-                 '-optimize+ -nowarn:1701,1702 -out:/tmp/out/main.dll @/tmp/out/refs.rsp '
-                 '/tmp/src/GlobalUsings.cs /tmp/src/main.cs'),
-        run="exec dotnet /tmp/out/main.dll", aliases=("cs", "c#"),
-        env=(("DOTNET_CLI_TELEMETRY_OPTOUT", "1"), ("DOTNET_NOLOGO", "1"), ("DOTNET_CLI_HOME", "/tmp"),
+                 '-optimize+ -nowarn:1701,1702 -out:/sandbox/out/main.dll @/sandbox/out/refs.rsp '
+                 '/sandbox/src/GlobalUsings.cs /sandbox/src/main.cs'),
+        run="exec dotnet /sandbox/out/main.dll", aliases=("cs", "c#"),
+        env=(("DOTNET_CLI_TELEMETRY_OPTOUT", "1"), ("DOTNET_NOLOGO", "1"), ("DOTNET_CLI_HOME", "/sandbox"),
              ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1"), ("DOTNET_EnableDiagnostics", "0"),
              ("DOTNET_gcServer", "0"))),
     Language(
         id="cpp", label="C++", tag="gcc:15",
         image="gcc@sha256:ead103e6d03b69232962d467f3520c3f70b6718c69ff71efcc08efe9011fadb6",
         filename="main.cpp", version="g++ --version | head -n 1",
-        compile="exec 2>&1; exec g++ -std=c++23 -O2 -pipe -Wall -o /tmp/out/main /tmp/src/main.cpp",
-        run="exec /tmp/out/main", aliases=("c++", "cxx", "cc")),
+        compile="exec 2>&1; exec g++ -std=c++23 -O2 -pipe -Wall -o /sandbox/out/main /sandbox/src/main.cpp",
+        run="exec /sandbox/out/main", aliases=("c++", "cxx", "cc")),
 )}
 
 _JAVA_MODS = r"(?:(?:final|abstract|sealed|non-sealed|strictfp)\s+)*"
@@ -138,12 +139,12 @@ def container_args(lang: Language, run_id: str) -> list[str]:
         "docker", "run", "-d", "--rm", "--init", "--pull", "never",
         "--name", f"harness-snippet-{run_id}", "--label", f"{LABEL}={run_id}",
         "--network", "none", "--read-only",
-        "--tmpfs", f"/tmp:rw,exec,nosuid,nodev,size={TMP_MB}m,mode=1777", "--shm-size", f"{SHM_MB}m",
+        "--tmpfs", f"/sandbox:rw,exec,nosuid,nodev,size={TMP_MB}m,uid=65534,gid=65534,mode=0700", "--shm-size", f"{SHM_MB}m",
         "--memory", MEMORY, "--memory-swap", MEMORY, "--cpus", CPUS, "--pids-limit", str(PIDS),
         "--ulimit", "core=0", "--ulimit", "nofile=1024:1024",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--user", "65534:65534", "--hostname", "snippet", "--log-driver", "none",
-        "--workdir", "/tmp", "-e", "HOME=/tmp", "-e", "TMPDIR=/tmp",
+        "--workdir", "/sandbox", "-e", "HOME=/sandbox", "-e", "TMPDIR=/sandbox",
     ]
     for key, value in lang.env:
         args += ["-e", f"{key}={value}"]
