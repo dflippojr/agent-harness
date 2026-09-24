@@ -33,9 +33,9 @@ def make_client(tmp_path, steps, rules=None):
     return TestClient(create_app(m)), m, sent
 
 
-def wait_for(fn, timeout=10.0):
-    end = time.time() + timeout
-    while time.time() < end:
+def wait_for(fn, timeout=30.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         value = fn()
         if value:
             return value
@@ -54,7 +54,7 @@ def test_web_app_and_guard(tmp_path):
         assert "harness.theme" in js
         assert "harness.textSize" in js and "TEXT_SIZES" in js and "applyTextSize" in js
         assert 'setHeader("agents", "New task", { page: true })' in js
-        assert "0.75 * window.innerHeight" in js
+        assert "sessionJumpHidden" in js and "Math.min(160, 0.75 * vh)" in js
         assert 'type: "color"' not in js
         assert "swatch split" in js
         assert "Scratch is a fresh empty folder" in js

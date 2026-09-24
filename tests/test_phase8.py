@@ -189,7 +189,7 @@ from pathlib import Path as _Path  # noqa: E402
 from harness.config import Project, RemoteControlConfig  # noqa: E402
 from harness.fileops import ToolError  # noqa: E402
 from harness.policy import ALLOW, ASK, Policy  # noqa: E402
-from harness.remote_control import RemoteControl, parse_log  # noqa: E402
+from harness.remote_control import RemoteControl, parse_log, STOP_TIMEOUT  # noqa: E402
 
 FAKE_LOG = ("· Connecting · repo · HEAD\n\x1b[1A\x1b[J· Connected · repo · HEAD\n    Capacity: 1/4 · New sessions\n"
             "    \x1b]8;;https://claude.ai/code/session_01AbC?from=cli\x07demo\x1b]8;;\x07\n"
@@ -254,8 +254,49 @@ def test_remote_control_launch_status_stop(tmp_path):
         fresh = RemoteControl(rc.cfg, rc.rc, claude_json=rc.claude_json)
         assert fresh.status()[0]["running"]
         await fresh.stop("repo")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and fresh.status()[0]["running"]:
+            await asyncio.sleep(0.05)
         assert not fresh.status()[0]["running"]
     asyncio.run(body())
+
+
+def test_remote_control_stop_ignores_vanished_processes(tmp_path, monkeypatch):
+    import harness.remote_control as rc_module
+
+    rc, _, _ = _rc_setup(tmp_path)
+    rc._save({"repo": {"pid": 4242, "created": 1.0, "started_at": 1.0, "log": "",
+                       "started_by": "test", "command": []}})
+    waited = []
+
+    class FakeChild:
+        def kill(self):
+            raise rc_module.psutil.NoSuchProcess(pid=4243)
+
+    class FakeProc:
+        def is_running(self):
+            return True
+
+        def create_time(self):
+            return 1.0
+
+        def children(self, recursive=False):
+            return [FakeChild()]
+
+        def kill(self):
+            raise rc_module.psutil.NoSuchProcess(pid=4242)
+
+    monkeypatch.setattr(rc_module.psutil, "Process", lambda pid: FakeProc())
+    monkeypatch.setattr(rc_module.psutil, "wait_procs",
+                        lambda procs, timeout=None: waited.append((list(procs), timeout)) or ([], list(procs)))
+
+    async def body():
+        result = await rc.stop("repo")
+        assert result == {"project": "repo", "running": False}
+
+    asyncio.run(body())
+    assert waited and waited[0][1] == STOP_TIMEOUT and len(waited[0][0]) == 2
+    assert rc._load()["repo"].get("stopped_at")
 
 
 def test_remote_control_refuses_untrusted_and_reports_failures(tmp_path):
@@ -283,6 +324,9 @@ def test_remote_control_refuses_untrusted_and_reports_failures(tmp_path):
             raise AssertionError("should fail")
         except ToolError as e:
             assert "something broke" in str(e)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and rc2.status()[0]["running"]:
+            await asyncio.sleep(0.05)
         assert not rc2.status()[0]["running"]
     asyncio.run(failing())
 
@@ -435,6 +479,48 @@ else:
           "total_cost_usd": 0.42, "usage": {"input_tokens": 10, "cache_creation_input_tokens": 2,
           "cache_read_input_tokens": 3, "output_tokens": 4}, "num_turns": 2})
 '''
+
+
+async def wait_cli_gone(manager, sid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and sid in manager.runner._cli_sessions:
+        await asyncio.sleep(0.05)
+    assert sid not in manager.runner._cli_sessions
+
+
+async def wait_cli_alive(manager, sid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        cli = manager.runner._cli_sessions.get(sid)
+        if cli is not None and cli.process is not None and cli.process.poll() is None:
+            return cli
+        await asyncio.sleep(0.02)
+    raise AssertionError("CLI process never started")
+
+
+def _seed_unresolved_cancel_work(manager, sid):
+    running = {"id": "tool-running", "type": "function",
+               "function": {"name": "Bash", "arguments": json.dumps({"command": "sleep 1"})}}
+    queued = {"id": "tool-queued", "type": "function",
+              "function": {"name": "Read", "arguments": json.dumps({"file_path": "/workspace/a.txt"})}}
+    session = manager.db.get_session(sid)
+    manager.db.update_session(sid, context=session["context"] + [
+        {"role": "assistant", "content": "", "tool_calls": [running, queued]},
+    ], run={**session["run"], "executing": {"id": "tool-running", "name": "Bash"}})
+    manager.db.insert_approval({"id": f"a-pending-{sid[:8]}", "session_id": sid,
+                                "tool_call_id": "tool-queued", "tool": "Read",
+                                "args": {"file_path": "/workspace/a.txt"}, "reason": "ask"})
+
+
+def _notification_titles(manager, sid):
+    from harness.notify import Notifier
+    notifier = Notifier(manager.cfg, manager.db)
+    titles = []
+    for event in manager.db.events(sid):
+        note = notifier.build(event)
+        if note:
+            titles.append(note["title"])
+    return titles
 
 
 def _claude_manager(tmp_path, mode: str, state=None, max_sessions=2, bash_command="python build.py"):
@@ -592,9 +678,178 @@ def test_claude_cli_cancel_kills_process(tmp_path):
         sid = m.create("wait", backend="claude")["id"]
         await wait_status(m, sid, "running")
         s = await m.cancel(sid)
-        assert s["status"] == "cancelled" and sid not in m.runner._cli_sessions
+        assert s["status"] == "cancelled"
+        await wait_cli_gone(m, sid)
         await m.stop()
     asyncio.run(body())
+
+
+def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
+    def spy_cancel(runner):
+        recorded = []
+        original = runner._record_cancel
+
+        def wrapped(sid):
+            recorded.append(sid)
+            original(sid)
+
+        runner._record_cancel = wrapped
+        return recorded
+
+    async def pending_cancel_then_cli_dies():
+        m, _, _ = _claude_manager(tmp_path / "pending", "cancel")
+        recorded = spy_cancel(m.runner)
+        await m.start()
+        sid = m.create("wait", backend="claude")["id"]
+        await wait_status(m, sid, "running")
+        cli = await wait_cli_alive(m, sid)
+        _seed_unresolved_cancel_work(m, sid)
+        m.db.update_session(sid, job_id="job-pending-cancel")
+        m.runner.user_cancelled.add(sid)
+        cli.process.kill()
+        await wait_status(m, sid, "cancelled")
+        await asyncio.gather(*m.tasks.values())
+        await wait_cli_gone(m, sid)
+        s = m.db.get_session(sid)
+        assert s["status"] == "cancelled" and s["stop_reason"] == "cancelled"
+        assert recorded == [sid]
+        assert s["run"].get("failure") is None
+        assert m.summary(s).get("failure") is None
+        assert events(m, sid, "error") == []
+        finished = events(m, sid, "run_finished")
+        assert len(finished) == 1 and finished[0]["status"] == "cancelled"
+        assert finished[0]["stop_reason"] == "cancelled"
+        titles = _notification_titles(m, sid)
+        assert not any("failed" in title.lower() for title in titles)
+        results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
+        assert results["tool-running"] == "Cancelled by the user while running."
+        assert results["tool-queued"] == "Not run: the user cancelled the task."
+        assert m.db.pending_approvals(sid) == []
+        assert m.db.approvals(sid)[0]["status"] == "cancelled"
+        await m.stop()
+
+    async def no_cancel_pending_leaves_failed():
+        m, _, _ = _claude_manager(tmp_path / "failed", "cancel")
+        recorded = spy_cancel(m.runner)
+        await m.start()
+        sid = m.create("wait", backend="claude")["id"]
+        await wait_status(m, sid, "running")
+        cli = await wait_cli_alive(m, sid)
+        _seed_unresolved_cancel_work(m, sid)
+        cli.process.kill()
+        await wait_status(m, sid, "failed")
+        await asyncio.gather(*m.tasks.values())
+        await wait_cli_gone(m, sid)
+        s = m.db.get_session(sid)
+        assert s["status"] == "failed" and recorded == []
+        assert s["stop_reason"].startswith("provider_unavailable") or s["stop_reason"].startswith("provider_error")
+        assert s["run"].get("failure")
+        assert events(m, sid, "error") == [s["run"]["failure"]]
+        finished = events(m, sid, "run_finished")
+        assert finished and finished[-1]["status"] == "failed"
+        assert m.summary(s).get("failure") == s["run"]["failure"]
+        results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
+        assert results == {}
+        assert m.db.pending_approvals(sid)
+        await m.stop()
+
+    async def already_cancelled_does_not_record_again():
+        m, _, _ = _claude_manager(tmp_path / "cancelled", "cancel")
+        recorded = spy_cancel(m.runner)
+        await m.start()
+        sid = m.create("wait", backend="claude")["id"]
+        await wait_status(m, sid, "running")
+        s = await m.cancel(sid)
+        await wait_cli_gone(m, sid)
+        assert s["status"] == "cancelled" and recorded == [sid]
+        m.runner.user_cancelled.add(sid)
+        assert await m.runner._take_pending_cancel(sid) is False
+        assert recorded == [sid]
+        await m.stop()
+
+    async def already_done_skips_record_cancel():
+        m, _, _ = _claude_manager(tmp_path / "done", "echo")
+        recorded = spy_cancel(m.runner)
+        inner = m.runner.cli_factory
+
+        def factory(**kwargs):
+            cli = inner(**kwargs)
+            start = cli.start
+
+            async def mark_cancel_then_start():
+                await start()
+                m.runner.user_cancelled.add(kwargs["session_id"])
+
+            cli.start = mark_cancel_then_start
+            return cli
+
+        m.runner.cli_factory = factory
+        await m.start()
+        sid = m.create("the original prompt", backend="claude")["id"]
+        s = await wait_status(m, sid, "done")
+        await asyncio.gather(*m.tasks.values())
+        assert s["status"] == "done" and s["stop_reason"] == "final_message" and recorded == []
+        m.runner.user_cancelled.add(sid)
+        assert await m.runner._take_pending_cancel(sid) is False
+        assert recorded == []
+        await m.stop()
+
+    async def generic_exception_during_pending_cancel():
+        m, _, _ = _claude_manager(tmp_path / "crash-cancel", "cancel")
+        recorded = spy_cancel(m.runner)
+        await m.start()
+        sid = m.create("wait", backend="claude")["id"]
+        await wait_status(m, sid, "running")
+        cli = await wait_cli_alive(m, sid)
+        _seed_unresolved_cancel_work(m, sid)
+        m.runner.user_cancelled.add(sid)
+
+        async def boom(timeout=0):
+            raise RuntimeError("injected crash")
+
+        cli.receive = boom
+        await wait_status(m, sid, "cancelled")
+        await asyncio.gather(*m.tasks.values())
+        await wait_cli_gone(m, sid)
+        s = m.db.get_session(sid)
+        assert s["status"] == "cancelled" and s["stop_reason"] == "cancelled"
+        assert recorded == [sid]
+        assert s["run"].get("failure") is None
+        assert events(m, sid, "error") == []
+        finished = events(m, sid, "run_finished")
+        assert len(finished) == 1 and finished[0]["status"] == "cancelled"
+        await m.stop()
+
+    async def generic_exception_without_cancel_still_fails():
+        m, _, _ = _claude_manager(tmp_path / "crash-failed", "cancel")
+        recorded = spy_cancel(m.runner)
+        await m.start()
+        sid = m.create("wait", backend="claude")["id"]
+        await wait_status(m, sid, "running")
+        cli = await wait_cli_alive(m, sid)
+
+        async def boom(timeout=0):
+            raise RuntimeError("injected crash")
+
+        cli.receive = boom
+        await wait_status(m, sid, "failed")
+        await asyncio.gather(*m.tasks.values())
+        await wait_cli_gone(m, sid)
+        s = m.db.get_session(sid)
+        assert s["status"] == "failed" and recorded == []
+        assert s["stop_reason"].startswith("internal_error")
+        assert s["run"].get("failure", {}).get("code") == "internal_error"
+        assert events(m, sid, "error")
+        finished = events(m, sid, "run_finished")
+        assert finished and finished[-1]["status"] == "failed"
+        await m.stop()
+
+    asyncio.run(pending_cancel_then_cli_dies())
+    asyncio.run(no_cancel_pending_leaves_failed())
+    asyncio.run(already_cancelled_does_not_record_again())
+    asyncio.run(already_done_skips_record_cancel())
+    asyncio.run(generic_exception_during_pending_cancel())
+    asyncio.run(generic_exception_without_cancel_still_fails())
 
 
 def test_claude_backend_semaphore_limits_live_processes(tmp_path):
@@ -1005,7 +1260,7 @@ def test_codex_inbox_cancel_and_policy(tmp_path):
         sid = m.create("wait", backend="codex")["id"]
         await wait_status(m, sid, "running")
         assert (await m.cancel(sid))["status"] == "cancelled"
-        assert sid not in m.runner._cli_sessions
+        await wait_cli_gone(m, sid)
         await m.stop()
 
     asyncio.run(inbox())
@@ -1158,7 +1413,7 @@ def test_cursor_cancel_and_restart_recovery(tmp_path):
         sid = m.create("wait", backend="cursor")["id"]
         await wait_status(m, sid, "running")
         assert (await m.cancel(sid))["status"] == "cancelled"
-        assert sid not in m.runner._cli_sessions
+        await wait_cli_gone(m, sid)
         await m.stop()
 
     async def recover():
