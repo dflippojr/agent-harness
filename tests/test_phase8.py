@@ -512,6 +512,17 @@ def _seed_unresolved_cancel_work(manager, sid):
                                 "args": {"file_path": "/workspace/a.txt"}, "reason": "ask"})
 
 
+def _notification_titles(manager, sid):
+    from harness.notify import Notifier
+    notifier = Notifier(manager.cfg, manager.db)
+    titles = []
+    for event in manager.db.events(sid):
+        note = notifier.build(event)
+        if note:
+            titles.append(note["title"])
+    return titles
+
+
 def _claude_manager(tmp_path, mode: str, state=None, max_sessions=2, bash_command="python build.py"):
     tmp_path.mkdir(parents=True, exist_ok=True)
     fake = tmp_path / "fake_claude.py"
@@ -693,6 +704,7 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await wait_status(m, sid, "running")
         cli = await wait_cli_alive(m, sid)
         _seed_unresolved_cancel_work(m, sid)
+        m.db.update_session(sid, job_id="job-pending-cancel")
         m.runner.user_cancelled.add(sid)
         cli.process.kill()
         await wait_status(m, sid, "cancelled")
@@ -701,6 +713,14 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         s = m.db.get_session(sid)
         assert s["status"] == "cancelled" and s["stop_reason"] == "cancelled"
         assert recorded == [sid]
+        assert s["run"].get("failure") is None
+        assert m.summary(s).get("failure") is None
+        assert events(m, sid, "error") == []
+        finished = events(m, sid, "run_finished")
+        assert len(finished) == 1 and finished[0]["status"] == "cancelled"
+        assert finished[0]["stop_reason"] == "cancelled"
+        titles = _notification_titles(m, sid)
+        assert not any("failed" in title.lower() for title in titles)
         results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
         assert results["tool-running"] == "Cancelled by the user while running."
         assert results["tool-queued"] == "Not run: the user cancelled the task."
@@ -723,6 +743,11 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         s = m.db.get_session(sid)
         assert s["status"] == "failed" and recorded == []
         assert s["stop_reason"].startswith("provider_unavailable") or s["stop_reason"].startswith("provider_error")
+        assert s["run"].get("failure")
+        assert events(m, sid, "error") == [s["run"]["failure"]]
+        finished = events(m, sid, "run_finished")
+        assert finished and finished[-1]["status"] == "failed"
+        assert m.summary(s).get("failure") == s["run"]["failure"]
         results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
         assert results == {}
         assert m.db.pending_approvals(sid)
@@ -737,6 +762,9 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         s = await m.cancel(sid)
         await wait_cli_gone(m, sid)
         assert s["status"] == "cancelled" and recorded == [sid]
+        m.runner.user_cancelled.add(sid)
+        assert await m.runner._take_pending_cancel(sid) is False
+        assert recorded == [sid]
         await m.stop()
 
     async def already_done_skips_record_cancel():
@@ -761,12 +789,67 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         s = await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
         assert s["status"] == "done" and s["stop_reason"] == "final_message" and recorded == []
+        m.runner.user_cancelled.add(sid)
+        assert await m.runner._take_pending_cancel(sid) is False
+        assert recorded == []
+        await m.stop()
+
+    async def generic_exception_during_pending_cancel():
+        m, _, _ = _claude_manager(tmp_path / "crash-cancel", "cancel")
+        recorded = spy_cancel(m.runner)
+        await m.start()
+        sid = m.create("wait", backend="claude")["id"]
+        await wait_status(m, sid, "running")
+        cli = await wait_cli_alive(m, sid)
+        _seed_unresolved_cancel_work(m, sid)
+        m.runner.user_cancelled.add(sid)
+
+        async def boom(timeout=0):
+            raise RuntimeError("injected crash")
+
+        cli.receive = boom
+        await wait_status(m, sid, "cancelled")
+        await asyncio.gather(*m.tasks.values())
+        await wait_cli_gone(m, sid)
+        s = m.db.get_session(sid)
+        assert s["status"] == "cancelled" and s["stop_reason"] == "cancelled"
+        assert recorded == [sid]
+        assert s["run"].get("failure") is None
+        assert events(m, sid, "error") == []
+        finished = events(m, sid, "run_finished")
+        assert len(finished) == 1 and finished[0]["status"] == "cancelled"
+        await m.stop()
+
+    async def generic_exception_without_cancel_still_fails():
+        m, _, _ = _claude_manager(tmp_path / "crash-failed", "cancel")
+        recorded = spy_cancel(m.runner)
+        await m.start()
+        sid = m.create("wait", backend="claude")["id"]
+        await wait_status(m, sid, "running")
+        cli = await wait_cli_alive(m, sid)
+
+        async def boom(timeout=0):
+            raise RuntimeError("injected crash")
+
+        cli.receive = boom
+        await wait_status(m, sid, "failed")
+        await asyncio.gather(*m.tasks.values())
+        await wait_cli_gone(m, sid)
+        s = m.db.get_session(sid)
+        assert s["status"] == "failed" and recorded == []
+        assert s["stop_reason"].startswith("internal_error")
+        assert s["run"].get("failure", {}).get("code") == "internal_error"
+        assert events(m, sid, "error")
+        finished = events(m, sid, "run_finished")
+        assert finished and finished[-1]["status"] == "failed"
         await m.stop()
 
     asyncio.run(pending_cancel_then_cli_dies())
     asyncio.run(no_cancel_pending_leaves_failed())
     asyncio.run(already_cancelled_does_not_record_again())
     asyncio.run(already_done_skips_record_cancel())
+    asyncio.run(generic_exception_during_pending_cancel())
+    asyncio.run(generic_exception_without_cancel_still_fails())
 
 
 def test_claude_backend_semaphore_limits_live_processes(tmp_path):
