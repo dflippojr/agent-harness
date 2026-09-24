@@ -242,9 +242,10 @@ class Manager:
                 self.skills.reviewer.start()
         if getattr(self, "settings", None) is not None:
             self.settings.confirm_startup()
-        if self.snippets.recover():
+        orphans = self.snippets.recover()
+        if orphans:
             from .snippets import remove_orphans
-            self._snippet_cleanup = asyncio.create_task(remove_orphans(), name="snippet-cleanup")
+            self._snippet_cleanup = asyncio.create_task(remove_orphans(orphans), name="snippet-cleanup")
 
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""

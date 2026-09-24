@@ -361,8 +361,8 @@ def test_restart_marks_unfinished_runs_interrupted_and_removes_containers(tmp_pa
     m.bus.emit(sid, "snippet_started", {"id": "sn-lost", "language": "java", "label": "Java", "source": "x"})
     removed = []
 
-    async def fake_remove():
-        removed.append(True)
+    async def fake_remove(run_ids):
+        removed.append(run_ids)
     monkeypatch.setattr(snippets, "remove_orphans", fake_remove)
     m2 = Manager(m.cfg, db=m.db, chat=m.runner.chat)
 
@@ -374,7 +374,7 @@ def test_restart_marks_unfinished_runs_interrupted_and_removes_containers(tmp_pa
     result = snippet_events(m2, sid)[-1]
     assert result["type"] == "snippet_result" and result["data"]["id"] == "sn-lost"
     assert result["data"]["status"] == "interrupted" and result["data"]["reasons"] == ["daemon_restart"]
-    assert removed == [True]
+    assert removed == [["sn-lost"]]
     assert not SnippetService(m.db, m.bus).recover()  # nothing left to recover
 
 
@@ -542,6 +542,21 @@ def test_live_memory_pids_and_temp_limits():
     tmp = run_live("python", "try:\n    with open('/tmp/big', 'wb') as f:\n        for _ in range(300): "
                              "f.write(b'x' * 1024 * 1024)\nexcept OSError as e: print(e.errno)")
     assert "temp_storage_limit" in tmp["reasons"] and tmp["run"]["stdout"].strip() == "28"  # ENOSPC
+
+
+@live("python")
+def test_live_restart_removes_the_orphaned_container_only():
+    lang = LANGUAGES["python"]
+    ids = ["t-orphan-" + str(time.monotonic_ns())[-8:], "t-other-" + str(time.monotonic_ns())[-8:]]
+    for rid in ids:
+        assert subprocess.run(container_args(lang, rid), capture_output=True).returncode == 0
+    try:
+        asyncio.run(snippets.remove_orphans(ids[:1]))
+        names = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True).stdout
+        assert f"harness-snippet-{ids[0]}" not in names.split()
+        assert f"harness-snippet-{ids[1]}" in names.split()  # another instance's run is left alone
+    finally:
+        subprocess.run(["docker", "rm", "-f", f"harness-snippet-{ids[1]}"], capture_output=True)
 
 
 @live("python")

@@ -355,12 +355,11 @@ async def remove(name: str) -> None:
         pass
 
 
-async def remove_orphans() -> None:
-    """Remove snippet containers left by a daemon that stopped mid-run."""
+async def remove_orphans(run_ids: list[str]) -> None:
+    """Remove the containers of runs this daemon stopped mid-way. Only these runs: another instance (a staging slot)
+    may share the Docker engine. Missed containers still expire by themselves after LIFETIME_SECONDS."""
     try:
-        code, out, _ = await run_cmd(["docker", "ps", "-aq", "--filter", f"label={LABEL}"], timeout=30)
-        if code == 0 and out.split():
-            await run_cmd(["docker", "rm", "-f", *out.split()], timeout=60)
+        await run_cmd(["docker", "rm", "-f", *(f"harness-snippet-{rid}" for rid in run_ids)], timeout=60)
     except OSError:
         pass
 
@@ -460,8 +459,8 @@ class SnippetService:
         a["cancel"].set()
         return {"id": run_id, "status": "cancelling"}
 
-    def recover(self) -> bool:
-        """At startup: give every run the last daemon left unfinished an 'interrupted' result."""
+    def recover(self) -> list[str]:
+        """At startup: give every run the last daemon left unfinished an 'interrupted' result. Returns their ids."""
         started, finished = {}, set()
         for e in self.db.snippet_events():
             if e["type"] == "snippet_started":
@@ -474,7 +473,7 @@ class SnippetService:
             result = new_result(e["data"]["id"], lang) if lang else {"id": e["data"]["id"], "reasons": []}
             result.update(reasons=["daemon_restart"], status="interrupted")
             self.bus.emit(e["session_id"], "snippet_result", result)
-        return bool(orphans)
+        return [e["data"]["id"] for e in orphans]
 
     async def stop(self) -> None:
         self.stopping = True
