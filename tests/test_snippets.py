@@ -289,6 +289,27 @@ def test_guests_and_other_routes_cannot_run_snippets(tmp_path):
         assert fake.calls == []
 
 
+def test_owner_api_prefix_and_tokens(tmp_path):
+    from harness.admin import ADMIN_SCOPE, OWNER_KIND, PREFIX
+    client, m, fake = chat_client(tmp_path)
+    with client:
+        sid = new_chat(client, m)
+        body = {"language": "javascript", "source": "console.log(1)"}
+        app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions", "sessions:all"]}).json()
+        device = client.post("/keys", json={"name": "zed"}).json()
+        owner = client.post("/keys", json={"name": "cc", "kind": OWNER_KIND, "scopes": [ADMIN_SCOPE]}).json()
+        for key in (app["key"], device["key"]):
+            auth = {"Authorization": f"Bearer {key}"}
+            for path in (f"/chats/{sid}/snippets", f"{PREFIX}/chats/{sid}/snippets"):
+                assert client.post(path, json=body, headers=auth).status_code in (401, 403, 404), (key[:3], path)
+        assert fake.calls == []
+        r = client.post(f"{PREFIX}/chats/{sid}/snippets", json=body, headers={"Authorization": f"Bearer {owner['key']}"})
+        assert r.status_code == 202, r.text
+        wait_for(lambda: len(snippet_events(m, sid)) == 2)
+        assert client.get(f"{PREFIX}/chats/snippet-languages", headers=OWNER).status_code == 200
+        assert fake.calls == [("javascript", "console.log(1)")]
+
+
 def test_cancel_one_run_per_chat_and_delete_guard(tmp_path):
     client, m, fake = chat_client(tmp_path, block=True)
     with client:
@@ -377,6 +398,14 @@ def test_web_client_run_controls_and_untrusted_rendering(tmp_path):
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
+
+
+def test_docs_name_every_toolchain_and_the_pull_command():
+    from pathlib import Path
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "web.md").read_text(encoding="utf-8")
+    for lang in LANGUAGES.values():
+        assert f"`{lang.tag}`" in doc, lang.tag
+    assert "python -m harness.snippets pull" in doc
 
 
 def test_web_client_languages_match_the_server():

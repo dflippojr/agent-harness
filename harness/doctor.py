@@ -103,6 +103,13 @@ def check_docker(r: Report, cfg) -> None:
         r.ok("Sandbox image", cfg.sandbox.image)
     else:
         r.fail("Sandbox image", f"{cfg.sandbox.image} missing: docker build -t {cfg.sandbox.image} sandbox")
+    from .snippets import LANGUAGES
+    missing = [lang.tag for lang in LANGUAGES.values() if run(["docker", "image", "inspect", lang.image])[0] != 0]
+    if missing:
+        r.warn("Chat snippet runner", f"pinned toolchain images missing ({', '.join(missing)}); Run fails for those "
+                                      "languages until you run: python -m harness.snippets pull")
+    else:
+        r.ok("Chat snippet runner", ", ".join(lang.tag for lang in LANGUAGES.values()))
     if cfg.profile == "service":
         check_provider_containers(r, cfg)
 
