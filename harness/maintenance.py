@@ -140,7 +140,6 @@ class Maintenance:
         return result
 
     def _backup_sync(self, now: float) -> dict:
-        import sqlite3
         import zipfile
         from .config import ROOT
 
@@ -150,16 +149,7 @@ class Maintenance:
         remove_tree(tmp)
         tmp.mkdir(parents=True)
         db_copy = tmp / "harness.sqlite3"
-        source = sqlite3.connect(str(self.cfg.db_path))
-        target = sqlite3.connect(str(db_copy))
-        try:
-            source.backup(target)  # consistent snapshot while the daemon keeps writing (WAL)
-            check = target.execute("PRAGMA integrity_check").fetchone()[0]
-        finally:
-            target.close()
-            source.close()
-        if check != "ok":
-            raise RuntimeError(f"backup copy failed its integrity check: {check}")
+        self._backup_db(db_copy)
         with zipfile.ZipFile(tmp / "transcripts.zip", "w", zipfile.ZIP_DEFLATED) as z:
             if self.cfg.transcripts_dir.is_dir():
                 for f in sorted(self.cfg.transcripts_dir.rglob("*")):
@@ -177,8 +167,26 @@ class Maintenance:
         remove_tree(dest)
         tmp.rename(dest)
 
+        removed = self._prune_old_backups(root, dest, now - self.cfg.backup.keep_days * 86400)
+        size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
+        return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": ""}
+
+    def _backup_db(self, db_copy: Path) -> None:
+        import sqlite3
+        source = sqlite3.connect(str(self.cfg.db_path))
+        target = sqlite3.connect(str(db_copy))
+        try:
+            source.backup(target)  # consistent snapshot while the daemon keeps writing (WAL)
+            check = target.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            target.close()
+            source.close()
+        if check != "ok":
+            raise RuntimeError(f"backup copy failed its integrity check: {check}")
+
+    @staticmethod
+    def _prune_old_backups(root: Path, dest: Path, cutoff: float) -> list:
         removed = []
-        cutoff = now - self.cfg.backup.keep_days * 86400
         for old in sorted(root.iterdir()):
             if old.is_dir() and old != dest and len(old.name) >= 10 and old.name[:4].isdigit():
                 try:
@@ -188,8 +196,7 @@ class Maintenance:
                 if stamp < cutoff:
                     remove_tree(old)
                     removed.append(old.name)
-        size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
-        return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": ""}
+        return removed
 
     async def _loop(self) -> None:
         await asyncio.sleep(120)  # let resumed sessions settle after a restart
@@ -225,7 +232,7 @@ class Maintenance:
                 item = json.loads(line)
             except ValueError:
                 continue
-            labels = dict(kv.split("=", 1) for kv in item.get("Labels", "").split(",") if "=" in kv)
+            labels = {k: v for k, _, v in (kv.partition("=") for kv in item.get("Labels", "").split(",") if "=" in kv)}
             sid = labels.get("agent-harness.session", "")
             s = self.db.get_session(sid) if sid else None
             if item.get("State") == "running" and s is not None:
@@ -255,20 +262,23 @@ class Maintenance:
             for path in sorted(root.iterdir()):
                 if not path.is_dir() or is_reparse_point(path):
                     continue
-                s = self.db.get_session(path.name)
-                if s is None:
-                    if now - path.stat().st_mtime > 3600:  # never race a session being created
-                        remove_tree(path)
-                        report["orphans_removed"].append(path.name)
-                    continue
-                if s["status"] in ACTIVE or s["workspace_removed"] or now - s["updated_at"] < retention:
-                    continue
-                reason = self.unsaved_work(s)
-                if reason:
-                    report["kept"].append({"session": s["id"], "reason": reason})
-                    continue
-                self.remove_workspace(s["id"])
-                report["workspaces_removed"].append(s["id"])
+                self._clean_workspace(path, now, retention, report)
+
+    def _clean_workspace(self, path, now: float, retention: float, report: dict) -> None:
+        s = self.db.get_session(path.name)
+        if s is None:
+            if now - path.stat().st_mtime > 3600:  # never race a session being created
+                remove_tree(path)
+                report["orphans_removed"].append(path.name)
+            return
+        if s["status"] in ACTIVE or s["workspace_removed"] or now - s["updated_at"] < retention:
+            return
+        reason = self.unsaved_work(s)
+        if reason:
+            report["kept"].append({"session": s["id"], "reason": reason})
+            return
+        self.remove_workspace(s["id"])
+        report["workspaces_removed"].append(s["id"])
 
     async def _remote_workspaces(self, now: float, report: dict) -> None:
         retention = self.cfg.cleanup.workspace_retention_days * 86400
@@ -279,24 +289,27 @@ class Maintenance:
                 continue
             if not hub.online(target):
                 continue
-            from . import catalog
-            from .principal import session_user_id
-            project = catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
-            try:
-                result = await hub.call(target, "cleanup_workspace", {
-                    "session": s["id"], "repo": project.repo if project else "", "branch": s["branch"],
-                    "base_commit": s["base_commit"], "review": s["review"]}, timeout=300, wait_if_offline=False)
-            except RunnerError as e:
-                report["kept"].append({"session": s["id"], "reason": str(e)})
-                continue
-            except Exception as e:  # noqa: BLE001 - offline between the check and the call
-                report["kept"].append({"session": s["id"], "reason": f"{type(e).__name__}: {e}"})
-                continue
-            if result.get("removed"):
-                self.db.update_session(s["id"], workspace_removed=1)
-                report["workspaces_removed"].append(s["id"])
-            else:
-                report["kept"].append({"session": s["id"], "reason": result.get("reason", "kept by the runner")})
+            await self._remote_cleanup_one(hub, s, report)
+
+    async def _remote_cleanup_one(self, hub, s: dict, report: dict) -> None:
+        from . import catalog
+        from .principal import session_user_id
+        project = catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
+        try:
+            result = await hub.call(s["target"], "cleanup_workspace", {
+                "session": s["id"], "repo": project.repo if project else "", "branch": s["branch"],
+                "base_commit": s["base_commit"], "review": s["review"]}, timeout=300, wait_if_offline=False)
+        except RunnerError as e:
+            report["kept"].append({"session": s["id"], "reason": str(e)})
+            return
+        except Exception as e:  # noqa: BLE001 - offline between the check and the call
+            report["kept"].append({"session": s["id"], "reason": f"{type(e).__name__}: {e}"})
+            return
+        if result.get("removed"):
+            self.db.update_session(s["id"], workspace_removed=1)
+            report["workspaces_removed"].append(s["id"])
+        else:
+            report["kept"].append({"session": s["id"], "reason": result.get("reason", "kept by the runner")})
 
     def unsaved_work(self, s: dict) -> str:
         """Why deleting this workspace would lose work, or ''."""
