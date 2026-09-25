@@ -66,20 +66,23 @@ RESOLUTION_SIZES = {
     "standard": {"1:1": (1024, 1024), "16:9": (1344, 768), "9:16": (768, 1344), "4:3": (1152, 864),
              "3:4": (864, 1152), "3:2": (1216, 832), "2:3": (832, 1216)},
 }
+APACHE_2 = "Apache-2.0"
+QWEN_FP8_MODEL = "qwen_image_2512_fp8_e4m3fn.safetensors"
+EXTRA_PATHS_FILE = "extra_model_paths.yaml"
 MODEL_RESOLUTION = {"fast": "standard", "quality": "high", "quality-fast": "high", "flux-fast": "standard"}
 MODELS = {
     "fast": {"label": "Z-Image-Turbo (fast, Apache 2.0)", "negative": False, "optional": False,
              "steps": 8, "sampler": "res_multistep", "scheduler": "simple", "guidance": 1.0,
-             "license": "Apache-2.0", "base_model": "z_image_turbo_bf16.safetensors"},
+             "license": APACHE_2, "base_model": "z_image_turbo_bf16.safetensors"},
     "quality": {"label": "Qwen-Image-2512 (quality, Apache 2.0)", "negative": True, "optional": False,
                 "steps": 50, "sampler": "euler", "scheduler": "simple", "guidance": 4.0,
-                "license": "Apache-2.0", "base_model": "qwen_image_2512_fp8_e4m3fn.safetensors"},
+                "license": APACHE_2, "base_model": QWEN_FP8_MODEL},
     "quality-fast": {"label": "Qwen quality (fast, 4-step)", "negative": True, "optional": True,
                      "steps": 4, "sampler": "euler", "scheduler": "simple", "guidance": 1.0,
-                     "license": "Apache-2.0", "base_model": "qwen_image_2512_fp8_e4m3fn.safetensors"},
+                     "license": APACHE_2, "base_model": QWEN_FP8_MODEL},
     "flux-fast": {"label": "FLUX.2 klein 4B (fast, Apache 2.0)", "negative": False, "optional": True,
                   "steps": 4, "sampler": "euler", "scheduler": "Flux2Scheduler", "guidance": 1.0,
-                  "license": "Apache-2.0", "base_model": "flux-2-klein-4b-fp8.safetensors"},
+                  "license": APACHE_2, "base_model": "flux-2-klein-4b-fp8.safetensors"},
 }
 QWEN_NEGATIVE = ("low resolution, low quality, deformed limbs, deformed fingers, oversaturated, waxy, no facial "
                  "detail, over-smoothed, AI look, cluttered composition, blurry text, distorted text")
@@ -91,7 +94,7 @@ LIGHTNING_LORA = {
     "filename": "Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors",
     "bytes": 1698951104,
     "sha256": "ad12117461cb41e2ea637fec8df6392ce8e8550c47fbe2b829ed3deb98262066",
-    "license": "Apache-2.0",
+    "license": APACHE_2,
 }
 LIGHTNING_LORA["url"] = (f"https://huggingface.co/{LIGHTNING_LORA['repo']}/resolve/"
                          f"{LIGHTNING_LORA['revision']}/{LIGHTNING_LORA['filename']}")
@@ -105,7 +108,7 @@ def lightning_lora_dirs(cfg: ImagesConfig) -> list[Path]:
     """
     root = Path(cfg.comfy_dir)
     dirs = [root / "ComfyUI" / "models" / "loras", root / "models" / "loras"]
-    for extra in (root / "ComfyUI" / "extra_model_paths.yaml", root / "extra_model_paths.yaml"):
+    for extra in (root / "ComfyUI" / EXTRA_PATHS_FILE, root / EXTRA_PATHS_FILE):
         dirs.extend(_loras_from_extra_paths(extra))
     dirs.append(Path(cfg.models_dir) / "loras")
     seen: set[str] = set()
@@ -130,16 +133,23 @@ def _loras_from_extra_paths(path: Path) -> list[Path]:
         return []
     found: list[Path] = []
     for spec in raw.values():
-        if not isinstance(spec, dict):
-            continue
-        base = Path(str(spec.get("base_path") or spec.get("basepath") or ""))
-        loras = spec.get("loras") or spec.get("lora")
-        if not loras:
-            continue
-        for entry in loras if isinstance(loras, list) else [loras]:
-            folder = Path(str(entry))
-            found.append(folder if folder.is_absolute() else (base / folder if base.parts else folder))
+        if isinstance(spec, dict):
+            found.extend(_lora_folders(spec))
     return found
+
+
+def _lora_folders(spec: dict) -> list[Path]:
+    base = Path(str(spec.get("base_path") or spec.get("basepath") or ""))
+    loras = spec.get("loras") or spec.get("lora")
+    if not loras:
+        return []
+    folders = []
+    for entry in loras if isinstance(loras, list) else [loras]:
+        folder = Path(str(entry))
+        if not folder.is_absolute() and base.parts:
+            folder = base / folder
+        folders.append(folder)
+    return folders
 
 
 def lightning_lora_setup(cfg: ImagesConfig) -> str:
@@ -345,7 +355,7 @@ def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix
         sampled = ["221", 0]
         steps, cfg_scale = 4, 1
     return {
-        "226": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_2512_fp8_e4m3fn.safetensors",
+        "226": {"class_type": "UNETLoader", "inputs": {"unet_name": QWEN_FP8_MODEL,
                                                        "weight_dtype": "default"}},
         **extra,
         "222": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": sampled, "shift": 3.1}},
@@ -421,7 +431,7 @@ class ComfyProcess:
             (work / sub).mkdir(parents=True, exist_ok=True)
         args = [str(root / "python_embeded" / "python.exe"), "-s", str(root / "ComfyUI" / "main.py"),
                 "--listen", "127.0.0.1", "--port", str(self.cfg.port), "--disable-auto-launch",
-                "--extra-model-paths-config", str(root / "ComfyUI" / "extra_model_paths.yaml"),
+                "--extra-model-paths-config", str(root / "ComfyUI" / EXTRA_PATHS_FILE),
                 "--output-directory", str(work / "output"),
                 "--temp-directory", str(work / "temp"),
                 "--input-directory", str(work / "input")]
