@@ -88,6 +88,7 @@ class Executor:
         self.lock = threading.Lock()
         self.procs: dict = {}      # request id -> Popen
         self.proc_sessions: dict = {}  # request id -> session id
+        self.session_tmp: dict = {}  # session id -> private temp directory
 
     # helpers
     def workspace(self, sid: str, create: bool = False) -> Path:
@@ -97,6 +98,21 @@ class Executor:
         if create:
             ws.mkdir(parents=True, exist_ok=True)
         return ws
+
+    def tmpdir(self, sid: str) -> Path:
+        """The session's own TMPDIR: created with mode 0700, so other users and sessions can't read it or plant
+        files in it. It lasts until the workspace is discarded or cleaned up."""
+        with self.lock:
+            path = self.session_tmp.get(sid)
+            if path is None or not path.is_dir():
+                path = self.session_tmp[sid] = Path(tempfile.mkdtemp(prefix=f"harness-{sid}-"))
+            return path
+
+    def drop_tmpdir(self, sid: str) -> None:
+        with self.lock:
+            path = self.session_tmp.pop(sid, None)
+        if path is not None:
+            remove_tree(path)
 
     def project(self, params: dict) -> Project:
         repo = params.get("repo") or ""
@@ -208,7 +224,7 @@ class Executor:
     def run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
                "LOGNAME": os.environ.get("USER", ""), "SHELL": self.shell, "LANG": "en_US.UTF-8", "TERM": "dumb",
-               "TMPDIR": os.environ.get("TMPDIR") or tempfile.gettempdir(), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
+               "TMPDIR": str(self.tmpdir(sid)), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
                "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1"}
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
@@ -322,11 +338,13 @@ class Executor:
         project = self.project(p)
         projects.discard(project, p["branch"])
         remove_tree(self.workspace(p["session"]))
+        self.drop_tmpdir(p["session"])
         return {"head": ""}
 
     def op_cleanup_workspace(self, p: dict):
         ws, sid = self.workspace(p["session"]), p["session"]
         if not ws.exists():
+            self.drop_tmpdir(sid)
             return {"removed": True}
         if p.get("repo") and p.get("base_commit") and (ws / ".git").exists():
             project = self.project(p)
@@ -340,6 +358,7 @@ class Executor:
             elif projects.commits_ahead(ws, p["base_commit"]):
                 return {"removed": False, "reason": "branch was never pushed"}
         remove_tree(ws)
+        self.drop_tmpdir(sid)
         return {"removed": True}
 
 
