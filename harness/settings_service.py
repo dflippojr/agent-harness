@@ -25,10 +25,16 @@ from .settings import (
     looks_hidden, parse_value, redact_value, schema_entry, spec_available, supervised_restart_supported,
     use_live_app_settings,
 )
-from .settings_keys import APP_SPECS, build_registry
+from .settings_keys import (
+    APP_SPECS, KEY_APP_CAPABILITIES, KEY_APP_DEFAULT_BACKEND, KEY_APP_DEFAULT_MODEL, KEY_APP_MAX_COMPLETION_TOKENS,
+    KEY_APP_MAX_TURNS, build_registry,
+)
 
 log = logging.getLogger("harness.settings")
 
+INVALID_CONFIG = "configuration is invalid"
+ADMIN_VIEW_KEYS = ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
+                   "recovery", "etag", "warning")
 YAML_NAMES = ("harness.yaml", "harness.local.yaml", "profile.yaml")
 
 
@@ -158,7 +164,7 @@ class SettingsService:
                     return status
             try:
                 # Boot applies active only. Pending is never the apply map.
-                self._apply_values(self.cfg, active.values, persist=False)
+                self._apply_values(self.cfg, active.values)
             except Exception as e:
                 status.update(self._recover_failed_overlay(active, e))
             if status.get("recovery") != "overlay_quarantined":
@@ -231,7 +237,7 @@ class SettingsService:
             lkg = None
         if lkg is not None:
             try:
-                self._apply_values(self.cfg, lkg.values, persist=False)
+                self._apply_values(self.cfg, lkg.values)
             except Exception as lkg_error:
                 return self._quarantine_unusable_overlay(failed, error, lkg_error)
             old = OverlayState(active=failed, pending=self._pending(), lkg=lkg)
@@ -312,7 +318,7 @@ class SettingsService:
         envelope.revision = max(envelope.revision, 1)
         self.store.write_active(envelope)
         try:
-            self._apply_values(self.cfg, envelope.values, persist=False)
+            self._apply_values(self.cfg, envelope.values)
         except SettingsError:
             log.exception("backend_prefs migration produced invalid values")
         self._audit("system", "migrate_backend_prefs", list(values), "ok", revision=envelope.revision)
@@ -434,39 +440,60 @@ class SettingsService:
         }
 
     def _effective_app_value(self, spec: SettingSpec, configured: Any, key: dict) -> tuple[Any, str | None]:
-        if spec.key == "app.sessions.max_turns" and configured is not None:
-            cap = self.cfg.max_turns
-            if int(configured) > cap:
-                return cap, "sessions.max_turns"
-        if spec.key == "app.sessions.max_completion_tokens" and configured is not None:
-            cap = self.cfg.max_completion_tokens
-            if int(configured) > cap:
-                return cap, "sessions.max_completion_tokens"
-        if spec.key == "app.capabilities" and configured is not None:
-            allowed = self._allowed_app_capabilities(key)
-            filtered = [item for item in configured if item in allowed]
-            if filtered != list(configured):
-                return filtered, "capabilities"
-        if spec.key == "app.default_backend" and configured:
-            if not self._backend_allowed(key, configured):
+        if configured is None:
+            return configured, None
+        checks = {
+            KEY_APP_MAX_TURNS: lambda: self._capped_value(configured, self.cfg.max_turns, "sessions.max_turns"),
+            KEY_APP_MAX_COMPLETION_TOKENS: lambda: self._capped_value(
+                configured, self.cfg.max_completion_tokens, "sessions.max_completion_tokens"),
+            KEY_APP_CAPABILITIES: lambda: self._filtered_capabilities(configured, key),
+            KEY_APP_DEFAULT_BACKEND: lambda: self._policy_checked_backend(configured, key),
+            KEY_APP_DEFAULT_MODEL: lambda: self._policy_checked_model(configured, key),
+        }
+        check = checks.get(spec.key)
+        result = check() if check is not None else None
+        return result if result is not None else (configured, None)
+
+    @staticmethod
+    def _capped_value(configured: Any, cap: int, cap_name: str) -> tuple[Any, str] | None:
+        if int(configured) > cap:
+            return cap, cap_name
+        return None
+
+    def _filtered_capabilities(self, configured: Any, key: dict) -> tuple[Any, str] | None:
+        allowed = self._allowed_app_capabilities(key)
+        filtered = [item for item in configured if item in allowed]
+        if filtered != list(configured):
+            return filtered, "capabilities"
+        return None
+
+    def _policy_checked_backend(self, configured: Any, key: dict) -> tuple[Any, str] | None:
+        if configured and not self._backend_allowed(key, configured):
+            return "", "provider_policy"
+        return None
+
+    def _policy_checked_model(self, configured: Any, key: dict) -> tuple[Any, str | None] | None:
+        if not configured:
+            return None
+        configured_backend = self._app_envelope(key["id"]).values.get(KEY_APP_DEFAULT_BACKEND)
+        if configured_backend:
+            backend, backend_cap = self._effective_app_value(
+                self.registry.get(KEY_APP_DEFAULT_BACKEND), configured_backend, key,
+            )
+            if not backend:
+                return "", backend_cap
+        else:
+            backend = "local" if self.cfg.modules.local_model else ""
+        return self._model_allowed_for_backend(configured, key, backend)
+
+    def _model_allowed_for_backend(self, configured: Any, key: dict, backend: str) -> tuple[Any, str] | None:
+        if backend == "local" and configured not in self.cfg.models:
+            return "", "models"
+        if backend and backend != "local":
+            cred = self.db.app_provider_credential(key["id"], backend) if self.db else None
+            if cred and cred.get("models") and configured not in cred["models"]:
                 return "", "provider_policy"
-        if spec.key == "app.default_model" and configured:
-            configured_backend = self._app_envelope(key["id"]).values.get("app.default_backend")
-            if configured_backend:
-                backend, backend_cap = self._effective_app_value(
-                    self.registry.get("app.default_backend"), configured_backend, key,
-                )
-                if not backend:
-                    return "", backend_cap
-            else:
-                backend = "local" if self.cfg.modules.local_model else ""
-            if backend == "local" and configured not in self.cfg.models:
-                return "", "models"
-            if backend and backend != "local":
-                cred = self.db.app_provider_credential(key["id"], backend) if self.db else None
-                if cred and cred.get("models") and configured not in cred["models"]:
-                    return "", "provider_policy"
-        return configured, None
+        return None
 
     def _allowed_app_capabilities(self, key: dict) -> set[str]:
         scopes = set((key.get("scopes") or "").split()) | set(key.get("scope_set") or [])
@@ -506,10 +533,12 @@ class SettingsService:
         if dry_run:
             body["dry_run"] = True
             return body
-        body.update({k: self.admin_view()[k] for k in
-                     ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
-                      "recovery", "etag", "warning")})
-        body["settings"] = self.admin_view()["settings"]
+        return self._with_admin_view(body)
+
+    def _with_admin_view(self, body: dict[str, Any]) -> dict[str, Any]:
+        view = self.admin_view()
+        body.update({k: view[k] for k in ADMIN_VIEW_KEYS})
+        body["settings"] = view["settings"]
         return body
 
     def rollback(self, revision: int | None, dry_run: bool = False, actor: dict | None = None) -> dict[str, Any]:
@@ -522,12 +551,7 @@ class SettingsService:
                                     "revision_conflict",
                                     details={"expected_revision": revision, "current_revision": old.active.revision})
             candidate = effective_candidate(old.active, old.pending)
-            changes: dict[str, Any] = {}
-            for key in set(candidate) | set(old.lkg.values):
-                if key in old.lkg.values:
-                    changes[key] = old.lkg.values[key]
-                else:
-                    changes[key] = None
+            changes: dict[str, Any] = {key: old.lkg.values.get(key) for key in set(candidate) | set(old.lkg.values)}
             if dry_run:
                 return self._plan_admin(changes, old.active.revision if old.active else 0,
                                         persist=False, apply=False, actor=actor)
@@ -537,64 +561,62 @@ class SettingsService:
                 OverlayRequest(action="rollback", next_revision=current_revision + 1, now=time.time()),
                 self._apply_mode,
             )
-            previous_active = old.active
-            previous_pending = old.pending
             live_applied: list[tuple[SettingSpec, Any, Any]] = []
             committed = False
             try:
                 self._commit_overlay(old, new)
                 committed = True
                 if new.active is not None:
-                    self._apply_rollback_live(old, new, live_applied)
+                    self._apply_rollback_live(new, live_applied)
                 self._audit(_actor_kind(actor), "rollback", list(changes), "ok",
                             revision=new.active.revision if new.active else current_revision, actor=actor)
                 plan = Plan(revision=current_revision,
                             target_revision=new.active.revision if new.active else current_revision)
-                body = plan.as_dict(self.registry)
-                body.update({k: self.admin_view()[k] for k in
-                             ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
-                              "recovery", "etag", "warning")})
-                body["settings"] = self.admin_view()["settings"]
-                return body
+                return self._with_admin_view(plan.as_dict(self.registry))
             except OverlayCrash:
                 raise
             except Exception as e:
-                for spec, old_val, new_val in reversed(live_applied):
-                    try:
-                        spec.setter(self.cfg, old_val)
-                        if spec.live_undo and self.manager is not None:
-                            spec.live_undo(self.manager, new_val, old_val)
-                    except Exception:
-                        log.exception("failed to undo live hook for %s", spec.key)
-                try:
-                    if committed:
-                        if previous_active is not None and (previous_active.revision or previous_active.values):
-                            self.store.write_active(previous_active)
-                        else:
-                            self.store._unlink(self.store.active_path)
-                        if previous_pending is not None:
-                            self.store.write_pending(previous_pending)
-                        else:
-                            self.store.clear_pending()
-                except Exception:
-                    log.exception("failed to restore managed-config after rollback live-hook failure")
+                self._undo_failed_apply(live_applied, committed, old.active, old.pending,
+                                        "failed to restore managed-config after rollback live-hook failure")
                 self._audit(_actor_kind(actor), "live_hook_rollback", list(changes), "failure",
                             revision=current_revision, actor=actor, extra={"reason": str(e)})
                 if isinstance(e, SettingsError):
                     raise
                 raise SettingsError(500, f"failed to apply configuration: {e}", "apply_failed") from e
 
-    def _apply_rollback_live(self, old: OverlayState, new: OverlayState,
+    def _undo_failed_apply(self, live_applied: list[tuple[SettingSpec, Any, Any]], committed: bool,
+                           previous_active: Envelope | None, previous_pending: Envelope | None,
+                           restore_failure: str) -> None:
+        """Undo live hooks in reverse order, then put the previous managed files back if they were replaced."""
+        for spec, old_val, new_val in reversed(live_applied):
+            try:
+                spec.setter(self.cfg, old_val)
+                if spec.live_undo and self.manager is not None:
+                    spec.live_undo(self.manager, new_val, old_val)
+            except Exception:
+                log.exception("failed to undo live hook for %s", spec.key)
+        if not committed:
+            return
+        try:
+            if previous_active is not None and (previous_active.revision or previous_active.values):
+                self.store.write_active(previous_active)
+            else:
+                self.store._unlink(self.store.active_path)
+            if previous_pending is not None:
+                self.store.write_pending(previous_pending)
+            else:
+                self.store.clear_pending()
+        except Exception:
+            log.exception(restore_failure)
+
+    def _apply_rollback_live(self, new: OverlayState,
                              live_applied: list[tuple[SettingSpec, Any, Any]]) -> None:
         new_values = new.active.values if new.active is not None else {}
         for spec in self.registry.writable_admin():
             if spec.apply_mode != "live":
                 continue
             previous = spec.getter(self.cfg)
-            if spec.key in new_values:
-                target = new_values[spec.key]
-            else:
-                target = self.inherited.get(spec.key, spec.default)
+            target = new_values[spec.key] if spec.key in new_values else self.inherited.get(spec.key, spec.default)
             if previous == target:
                 continue
             spec.setter(self.cfg, target)
@@ -654,7 +676,7 @@ class SettingsService:
             if errors:
                 self._audit(_actor_kind(actor), "validate", list(changes), "failure", revision=current_revision,
                             actor=actor, extra={"keys": errors})
-                raise SettingsError(400, "configuration is invalid", "validation_error", keys=errors)
+                raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=errors)
 
             candidate_cfg = copy_cfg(self.cfg)
             next_values = apply_changes(effective_candidate(active_file, pending), parsed)
@@ -681,7 +703,7 @@ class SettingsService:
                     apply_values[key] = RESET
 
             try:
-                self._apply_values(candidate_cfg, apply_values, persist=False)
+                self._apply_values(candidate_cfg, apply_values)
             except SettingsError as e:
                 plan.errors = e.keys
                 raise
@@ -694,7 +716,7 @@ class SettingsService:
                 cross.extend(validator(candidate_cfg, proposed_applied))
             if cross:
                 keys = {item["key"]: {"code": item["code"], "message": item["message"]} for item in cross}
-                raise SettingsError(400, "configuration is invalid", "validation_error", keys=keys)
+                raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=keys)
 
             if not persist:
                 return plan
@@ -787,7 +809,7 @@ class SettingsService:
                 errors[key] = {"code": "invalid_value", "message": str(e)}
         return parsed, errors
 
-    def _apply_values(self, cfg: Config, values: dict[str, Any], persist: bool) -> None:
+    def _apply_values(self, cfg: Config, values: dict[str, Any]) -> None:
         # Apply onto a copy first. Setters mutate key-by-key; committing only after the
         # whole map validates keeps a failed overlay from leaving keys that LKG restore
         # (or unlink) does not mention.
@@ -816,7 +838,7 @@ class SettingsService:
             for item in validator(candidate, proposed):
                 errors.setdefault(item["key"], {"code": item["code"], "message": item["message"]})
         if errors:
-            raise SettingsError(400, "configuration is invalid", "validation_error", keys=errors)
+            raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=errors)
         for key, parsed in parsed_map.items():
             spec = self.registry.get(key)
             if parsed is RESET:
@@ -865,7 +887,7 @@ class SettingsService:
                     errors[name] = extra
         if errors:
             self._audit("app", "validate", list(changes), "failure", actor=key, extra={"keys": errors})
-            raise SettingsError(400, "configuration is invalid", "validation_error", keys=errors)
+            raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=errors)
         plan_changes = []
         new_values = dict(envelope.values)
         for name, value in parsed.items():
@@ -896,12 +918,12 @@ class SettingsService:
     def _app_policy_errors(self, spec: SettingSpec, value: Any, key: dict) -> dict | None:
         if value is RESET or value in (None, "", []):
             return None
-        if spec.key == "app.default_backend":
+        if spec.key == KEY_APP_DEFAULT_BACKEND:
             if not self._backend_allowed(key, str(value)):
                 return {"code": "dependency", "message": "this app cannot select that backend"}
         if spec.key == "app.default_effort" and value not in ("", *("low", "medium", "high")):
             return {"code": "invalid_value", "message": "effort must be inherit-empty, low, medium, or high"}
-        if spec.key == "app.capabilities":
+        if spec.key == KEY_APP_CAPABILITIES:
             allowed = self._allowed_app_capabilities(key)
             extra = [item for item in value if item not in allowed]
             if extra:
@@ -947,10 +969,10 @@ class SettingsService:
             defaults = self.app_defaults(app_key)
         else:
             defaults = {}
-        if defaults.get("app.sessions.max_turns") is not None:
-            turns = int(defaults["app.sessions.max_turns"])
-        if defaults.get("app.sessions.max_completion_tokens") is not None:
-            tokens = int(defaults["app.sessions.max_completion_tokens"])
+        if defaults.get(KEY_APP_MAX_TURNS) is not None:
+            turns = int(defaults[KEY_APP_MAX_TURNS])
+        if defaults.get(KEY_APP_MAX_COMPLETION_TOKENS) is not None:
+            tokens = int(defaults[KEY_APP_MAX_COMPLETION_TOKENS])
         return turns, tokens
 
     # --- persistence helpers --------------------------------------------
