@@ -28,6 +28,7 @@ MANIFEST_PATH = Path(__file__).with_name("images_flux_fast.json")
 RESERVE_BYTES = 5 * 1024 ** 3
 CHUNK = 8 * 1024 * 1024
 ZIMAGE_ENCODER = "qwen_3_4b.safetensors"
+MAIN_PY = "main.py"
 REQUIRED_CLIP_TYPE = "flux2"
 
 
@@ -207,7 +208,7 @@ def encoder_plan(manifest: dict, root: Path, *, hash_if_needed: bool = True) -> 
 def _iter_comfy_python(comfy_root: Path):
     inner = comfy_root / "ComfyUI"
     if not inner.is_dir():
-        inner = comfy_root if (comfy_root / "main.py").is_file() else None
+        inner = comfy_root if (comfy_root / MAIN_PY).is_file() else None
     if inner is None or not inner.is_dir():
         return
     direct = [inner / "nodes.py"]
@@ -232,7 +233,7 @@ def scan_node_classes(comfy_root: Path) -> set[str]:
     found: set[str] = set()
     if not comfy_root.exists():
         return found
-    pattern = re.compile(r"^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.M)
+    pattern = re.compile(r"^class\s+([A-Za-z_]\w*)\s*\(", re.M | re.A)
     for path in _iter_comfy_python(comfy_root):
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -261,13 +262,7 @@ def nodes_from_object_info(object_info: dict | None) -> set[str]:
     return set(object_info)
 
 
-def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | None = None,
-                      comfy_root: Path | None = None, hash_if_needed: bool = True) -> dict:
-    """Availability of flux-fast: assets, encoder sharing, and required ComfyUI nodes. Never starts ComfyUI."""
-    manifest = manifest or load_manifest()
-    root = models_dir(cfg)
-    comfy_root = Path(comfy_root) if comfy_root is not None else comfy_dir(cfg)
-    enc_plan = encoder_plan(manifest, root, hash_if_needed=hash_if_needed)
+def _asset_states(manifest: dict, root: Path, enc_plan: dict, hash_if_needed: bool):
     assets = {}
     missing, corrupt, verifying = [], [], []
     for key, asset in manifest["assets"].items():
@@ -292,10 +287,13 @@ def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | 
             corrupt.append(filename)
         elif state == "verifying":
             verifying.append(filename)
+    return assets, missing, corrupt, verifying
 
-    required = list(manifest["required_nodes"])
+
+def _node_presence(object_info: dict | None, comfy_root: Path, required: list, hash_if_needed: bool,
+                   assets_pending: bool) -> tuple[set, bool]:
+    """Which required nodes exist and whether CLIPLoader offers the FLUX.2 type."""
     if object_info is not None:
-        present = nodes_from_object_info(object_info)
         clip_ok = True
         if object_info:
             clip = object_info.get("CLIPLoader") or {}
@@ -303,16 +301,15 @@ def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | 
             combo = ((info.get("required") or {}).get("type") or [None])[0]
             if isinstance(combo, list):
                 clip_ok = REQUIRED_CLIP_TYPE in combo
-    elif hash_if_needed or not (missing or verifying or corrupt):
+        return nodes_from_object_info(object_info), clip_ok
+    if hash_if_needed or not assets_pending:
         present = scan_node_classes(comfy_root)
-        clip_ok = clip_type_present(comfy_root) if present else False
-    else:
-        present = set(required)
-        clip_ok = True
-    missing_nodes = [name for name in required if name not in present]
-    py = comfy_root / "python_embeded" / "python.exe"
-    comfy_present = py.is_file() or (comfy_root / "ComfyUI" / "main.py").is_file()
+        return present, clip_type_present(comfy_root) if present else False
+    return set(required), True
 
+
+def _unavailable_reasons(missing: list, verifying: list, corrupt: list, comfy_present: bool, comfy_root: Path,
+                         missing_nodes: list, clip_ok: bool) -> tuple[list, str]:
     reasons = []
     remediation = ""
     if missing:
@@ -336,6 +333,27 @@ def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | 
         reasons.append(f"CLIPLoader has no {REQUIRED_CLIP_TYPE} type")
         remediation = remediation or "stage the pinned ComfyUI portable (CLIP type flux2 is required)"
 
+    return reasons, remediation
+
+
+def inspect_flux_fast(cfg, *, manifest: dict | None = None, object_info: dict | None = None,
+                      comfy_root: Path | None = None, hash_if_needed: bool = True) -> dict:
+    """Availability of flux-fast: assets, encoder sharing, and required ComfyUI nodes. Never starts ComfyUI."""
+    manifest = manifest or load_manifest()
+    root = models_dir(cfg)
+    comfy_root = Path(comfy_root) if comfy_root is not None else comfy_dir(cfg)
+    enc_plan = encoder_plan(manifest, root, hash_if_needed=hash_if_needed)
+    assets, missing, corrupt, verifying = _asset_states(manifest, root, enc_plan, hash_if_needed)
+
+    required = list(manifest["required_nodes"])
+    stale = bool(missing or verifying or corrupt)
+    present, clip_ok = _node_presence(object_info, comfy_root, required, hash_if_needed, stale)
+    missing_nodes = [name for name in required if name not in present]
+    py = comfy_root / "python_embeded" / "python.exe"
+    comfy_present = py.is_file() or (comfy_root / "ComfyUI" / MAIN_PY).is_file()
+
+    reasons, remediation = _unavailable_reasons(missing, verifying, corrupt, comfy_present, comfy_root,
+                                                missing_nodes, clip_ok)
     available = not reasons
     reason = "; ".join(reasons)
     if available:
@@ -385,6 +403,17 @@ def _headers() -> dict:
     return {"User-Agent": "agent-harness-flux-fast"}
 
 
+def _write_part(resp, part: Path, have: int) -> None:
+    """Append to the partial file on a 206 resume; a 200 restarts it from scratch."""
+    if have and resp.status_code == 200:
+        part.unlink(missing_ok=True)
+    mode = "ab" if have and resp.status_code == 206 else "wb"
+    with part.open(mode) as fh:
+        for chunk in resp.iter_bytes(CHUNK):
+            if chunk:
+                fh.write(chunk)
+
+
 def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx.Client | None = None,
                   timeout: float | httpx.Timeout | None = None) -> dict:
     """Stream to dest.part, resume with Range when the server honors it, verify, then atomically promote."""
@@ -427,17 +456,7 @@ def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx
                 raise RuntimeError(f"download failed HTTP 416 for {redact_url(url)}")
             if resp.status_code not in (200, 206):
                 raise RuntimeError(f"download failed HTTP {resp.status_code} for {redact_url(url)}")
-            if have and resp.status_code == 200:
-                have = 0
-                part.unlink(missing_ok=True)
-            mode = "ab" if have and resp.status_code == 206 else "wb"
-            if mode == "wb":
-                have = 0
-            with part.open(mode) as fh:
-                for chunk in resp.iter_bytes(CHUNK):
-                    if chunk:
-                        fh.write(chunk)
-                        have += len(chunk)
+            _write_part(resp, part, have)
         return promote(resumed=bool(headers.get("Range")))
     finally:
         if own_client:
@@ -511,36 +530,37 @@ def _dir_bytes(path: Path) -> int:
     return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
 
 
+def _remove_if_owned(manifest: dict, subdir: str, name: str, path: Path, removed: list, skipped: list) -> int:
+    """Delete one flux-fast file when nothing else shares it; the bytes freed."""
+    if not path.exists():
+        return 0
+    if not exclusively_owned_by_flux_fast(manifest, subdir, name):
+        skipped.append({"path": str(path), "reason": "shared with Z-Image fast; left in place"})
+        return 0
+    freed = path.stat().st_size if path.is_file() else _dir_bytes(path)
+    path.unlink()
+    removed.append(str(path))
+    return freed
+
+
 def remove_flux_fast(cfg, *, manifest: dict | None = None) -> dict:
     """Remove files owned solely by flux-fast. Never delete a shared Z-Image encoder or its .part."""
     manifest = manifest or load_manifest()
     root = models_dir(cfg)
     removed, skipped, recovered = [], [], 0
     considered: set[str] = set()
-
-    def consider(subdir: str, name: str, path: Path) -> None:
-        nonlocal recovered
-        key = str(path)
-        if key in considered:
-            return
-        considered.add(key)
-        if not exclusively_owned_by_flux_fast(manifest, subdir, name):
-            if path.exists():
-                skipped.append({"path": key, "reason": "shared with Z-Image fast; left in place"})
-            return
-        if path.exists():
-            recovered += path.stat().st_size if path.is_file() else _dir_bytes(path)
-            path.unlink()
-            removed.append(key)
-
     for asset in manifest["assets"].values():
         names = [asset["filename"]]
         if asset.get("alt_filename"):
             names.append(asset["alt_filename"])
         for name in names:
             dest = root / asset["subdir"] / name
-            consider(asset["subdir"], name, dest)
-            consider(asset["subdir"], name, dest.with_name(name + ".part"))
+            for path in (dest, dest.with_name(name + ".part")):
+                key = str(path)
+                if key in considered:
+                    continue
+                considered.add(key)
+                recovered += _remove_if_owned(manifest, asset["subdir"], name, path, removed, skipped)
     return {"removed": removed, "skipped": skipped, "recovered_bytes": recovered,
             "status": inspect_flux_fast(cfg, manifest=manifest)}
 
@@ -633,7 +653,7 @@ def validate_comfyui(cfg, *, object_info: dict | None = None, probe=None, root: 
             object_info["CLIPLoader"] = {"input": {"required": {"type": [[REQUIRED_CLIP_TYPE]]}}}
     graphs = preflight_graphs(object_info)
     py = (target / "python_embeded" / "python.exe").is_file()
-    main = (target / "ComfyUI" / "main.py").is_file()
+    main = (target / "ComfyUI" / MAIN_PY).is_file()
     ok = py and main and graphs["ok"]
     return {"ok": ok, "root": str(target), "python": py, "main": main, "version": comfy_version_label(target),
             "graphs": graphs, "production": str(comfy_dir(cfg))}
