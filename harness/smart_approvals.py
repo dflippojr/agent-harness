@@ -218,57 +218,87 @@ def save_runtime_mode(db, mode: str) -> str:
     return mode
 
 
+class _CommentStripper:
+    """Single-pass scanner that removes bash comments without touching quoted or escaped text."""
+
+    def __init__(self, command: str):
+        self.command = command
+        self.n = len(command)
+        self.out: list[str] = []
+        self.i = 0
+        self.quote = ""
+        self.word_start = True
+        self.had_comment = False
+
+    def _step_quoted(self, ch: str) -> None:
+        self.out.append(ch)
+        if ch == "\\" and self.quote != "'" and self.i + 1 < self.n:
+            self.out.append(self.command[self.i + 1])
+            self.i += 2
+            return
+        if ch == self.quote:
+            self.quote = ""
+        self.i += 1
+
+    def _open_quote(self, ch: str) -> None:
+        self.quote = ch
+        self.out.append(ch)
+        self.word_start = False
+        self.i += 1
+
+    def _escape(self, ch: str) -> None:
+        self.out.extend((ch, self.command[self.i + 1]))
+        if self.command[self.i + 1] != "\n":
+            self.word_start = False
+        self.i += 2
+
+    def _comment(self) -> bool:
+        """Skip one comment; True when its text looks like a prompt injection."""
+        self.had_comment = True
+        rest = self.command[self.i + 1:]
+        nl = rest.find("\n")
+        text = rest if nl < 0 else rest[:nl]
+        if _INJECTION_RE.search(text):
+            return True
+        self.i = self.n if nl < 0 else self.i + 1 + nl
+        return False
+
+    def run(self) -> tuple[str, str]:
+        while self.i < self.n:
+            ch = self.command[self.i]
+            if self.quote:
+                self._step_quoted(ch)
+            elif ch in "'\"":
+                self._open_quote(ch)
+            elif ch == "\\" and self.i + 1 < self.n:
+                self._escape(ch)
+            # Bash recognizes a comment only when an unquoted # begins a word.
+            # A hash in ``path#suffix`` is ordinary data and everything after it
+            # must remain visible to the safety checks.
+            elif ch == "#" and self.word_start:
+                if self._comment():
+                    return self.command, "prompt-injection comment"
+            else:
+                self.out.append(ch)
+                self.word_start = ch.isspace() or ch in "|&;()<>"
+                self.i += 1
+        if self.quote:
+            return self.command, "unbalanced quotes"
+        stripped = "".join(self.out).strip() if self.had_comment else "".join(self.out)
+        return stripped, ""
+
+
 def strip_shell_comments(command: str) -> tuple[str, str]:
     """Return (stripped, error). error is set when comments cannot be removed safely."""
-    out, i, n = [], 0, len(command)
-    quote = ""
-    comment = []
-    word_start = True
-    had_comment = False
-    while i < n:
-        ch = command[i]
-        if quote:
-            out.append(ch)
-            if ch == "\\" and quote != "'" and i + 1 < n:
-                out.append(command[i + 1])
-                i += 2
-                continue
-            if ch == quote:
-                quote = ""
-            i += 1
-            continue
-        if ch in "'\"":
-            quote = ch
-            out.append(ch)
-            word_start = False
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            out.extend((ch, command[i + 1]))
-            if command[i + 1] != "\n":
-                word_start = False
-            i += 2
-            continue
-        # Bash recognizes a comment only when an unquoted # begins a word.
-        # A hash in ``path#suffix`` is ordinary data and everything after it
-        # must remain visible to the safety checks.
-        if ch == "#" and word_start:
-            had_comment = True
-            rest = command[i + 1:]
-            nl = rest.find("\n")
-            text = rest if nl < 0 else rest[:nl]
-            comment.append(text)
-            if _INJECTION_RE.search(text):
-                return command, "prompt-injection comment"
-            i = n if nl < 0 else i + 1 + nl
-            continue
-        out.append(ch)
-        word_start = ch.isspace() or ch in "|&;()<>"
-        i += 1
-    if quote:
-        return command, "unbalanced quotes"
-    stripped = "".join(out).strip() if had_comment else "".join(out)
-    return stripped, ""
+    return _CommentStripper(command).run()
+
+
+def _advance_in_quote(command: str, i: int, quote: str) -> tuple[int, str]:
+    if command[i] == "\\" and quote != "'" and i + 1 < len(command):
+        return i + 2, quote
+    if command[i] == quote:
+        quote = ""
+    return i + 1, quote
 
 
 def _has_unquoted_hash(command: str) -> bool:
@@ -278,12 +308,7 @@ def _has_unquoted_hash(command: str) -> bool:
     while i < len(command):
         ch = command[i]
         if quote:
-            if ch == "\\" and quote != "'" and i + 1 < len(command):
-                i += 2
-                continue
-            if ch == quote:
-                quote = ""
-            i += 1
+            i, quote = _advance_in_quote(command, i, quote)
             continue
         if ch == "\\" and i + 1 < len(command):
             if command[i + 1] == "#":
