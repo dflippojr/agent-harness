@@ -56,6 +56,7 @@ from . import upscale as upscale_mod
 IMAGE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 log = logging.getLogger("harness.images")
+INVALID_IMAGE_ID = "invalid image id"
 
 TOOLS = ("generate_image",)
 ASPECTS = ("1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3")
@@ -383,6 +384,14 @@ async def _run(args: list[str]) -> tuple[int, str, str]:
 def _comfy_revision(cfg: ImagesConfig) -> str:
     from .images_models import comfy_version_label
     return comfy_version_label(Path(cfg.comfy_dir))
+
+
+def _comfy_error_message(status: dict, stage: str) -> str:
+    messages = [m for m in status.get("messages", []) if m and m[0] == "execution_error"]
+    detail = messages[0][1].get("exception_message", "") if messages else "unknown error"
+    if stage == "upscaling" and ("out of memory" in detail.lower() or "oom" in detail.lower()):
+        return f"upscale ran out of memory: {detail[:500]}"
+    return f"ComfyUI error: {detail[:500]}"
 
 
 async def _ws_read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -858,10 +867,10 @@ class ImageService:
     def _image_path(self, job: dict, suffix: str) -> Path:
         image_id = job.get("id") if isinstance(job, dict) else None
         if not isinstance(image_id, str):
-            raise ToolError("invalid image id")
+            raise ToolError(INVALID_IMAGE_ID)
         safe_id = os.path.basename(image_id)
         if safe_id != image_id or IMAGE_ID_RE.fullmatch(safe_id) is None:
-            raise ToolError("invalid image id")
+            raise ToolError(INVALID_IMAGE_ID)
         safe_id = f"{int(safe_id, 16):012x}"
         images_dir = self.images_dir.resolve()
         path = (images_dir / f"{safe_id}{suffix}").resolve()
@@ -917,10 +926,10 @@ class ImageService:
             raise ToolError("source image is not available")
         raw_parent_id = parent.get("id")
         if not isinstance(raw_parent_id, str):
-            raise ToolError("invalid image id")
+            raise ToolError(INVALID_IMAGE_ID)
         safe_parent_id = os.path.basename(raw_parent_id)
         if safe_parent_id != raw_parent_id or IMAGE_ID_RE.fullmatch(safe_parent_id) is None:
-            raise ToolError("invalid image id")
+            raise ToolError(INVALID_IMAGE_ID)
         safe_parent_id = f"{int(safe_parent_id, 16):012x}"
         parent_path = self.path({"id": safe_parent_id})
         if not parent_path.exists():
@@ -1270,7 +1279,7 @@ class ImageService:
         log.info("image %s (%s) done in %.0f s", job_id, job.get("upscale_model") or job["model"],
                  time.time() - started)
         if (operation or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_GENERATE:
-            await self._queue_requested_upscale(job)
+            self._queue_requested_upscale(job)
 
     async def _after_stored(self, job_id: str, canonical: Path) -> None:
         if self.archive and self.archive.enabled:
@@ -1293,7 +1302,7 @@ class ImageService:
             f.flush()
             os.fsync(f.fileno())
 
-    async def _queue_requested_upscale(self, job: dict) -> None:
+    def _queue_requested_upscale(self, job: dict) -> None:
         requested = job.get("requested_upscale") or "none"
         if requested in ("", "none"):
             return
@@ -1399,6 +1408,29 @@ class ImageService:
             # Failing closed is safer than interrupting whichever prompt may now be active.
             log.warning("could not verify ComfyUI prompt %s for interruption", prompt_id, exc_info=True)
 
+    async def _wait_for_history(self, client: httpx.AsyncClient, prompt_id: str, job_id: str, started: float,
+                                stage: str) -> dict:
+        """Poll ComfyUI until the prompt completes, raising on errors, cancellation and timeout."""
+        deadline = time.monotonic() + self.cfg.job_timeout_seconds
+        while True:
+            if job_id in self._cancel:
+                await self._interrupt_comfy_prompt(client, prompt_id)
+                raise ToolError("cancelled")
+            if time.monotonic() > deadline:
+                await self._interrupt_comfy_prompt(client, prompt_id)
+                action = {"upscaling": "upscale", "editing": "image edit"}.get(stage, "image generation")
+                raise ToolError(f"{action} timed out")
+            hist = (await client.get(f"{self.comfy.url}/history/{prompt_id}")).json().get(prompt_id)
+            if hist:
+                status = hist.get("status") or {}
+                if status.get("status_str") == "error":
+                    raise ToolError(_comfy_error_message(status, stage))
+                if status.get("completed"):
+                    return hist
+            self.progress = {**self.progress, "job": job_id, "stage": stage,
+                             "seconds": round(time.time() - started)}
+            await asyncio.sleep(0.4)
+
     async def _comfy_png(self, job_id: str, graph: dict, started: float, stage: str) -> bytes:
         async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
             resp = await client.post(f"{self.comfy.url}/prompt", json={"prompt": graph,
@@ -1406,31 +1438,7 @@ class ImageService:
             if resp.status_code != 200:
                 raise ToolError(f"ComfyUI refused the workflow: {resp.text[:500]}")
             prompt_id = resp.json()["prompt_id"]
-            deadline = time.monotonic() + self.cfg.job_timeout_seconds
-            hist = None
-            while True:
-                if job_id in self._cancel:
-                    await self._interrupt_comfy_prompt(client, prompt_id)
-                    raise ToolError("cancelled")
-                if time.monotonic() > deadline:
-                    await self._interrupt_comfy_prompt(client, prompt_id)
-                    action = {"upscaling": "upscale", "editing": "image edit"}.get(stage, "image generation")
-                    raise ToolError(f"{action} timed out")
-                hist = (await client.get(f"{self.comfy.url}/history/{prompt_id}")).json().get(prompt_id)
-                if hist:
-                    status = hist.get("status") or {}
-                    if status.get("status_str") == "error":
-                        messages = [m for m in status.get("messages", []) if m and m[0] == "execution_error"]
-                        detail = messages[0][1].get("exception_message", "") if messages else "unknown error"
-                        if "out of memory" in detail.lower() or "oom" in detail.lower():
-                            raise ToolError(f"upscale ran out of memory: {detail[:500]}" if stage == "upscaling"
-                                            else f"ComfyUI error: {detail[:500]}")
-                        raise ToolError(f"ComfyUI error: {detail[:500]}")
-                    if status.get("completed"):
-                        break
-                self.progress = {**self.progress, "job": job_id, "stage": stage,
-                                 "seconds": round(time.time() - started)}
-                await asyncio.sleep(0.4)
+            hist = await self._wait_for_history(client, prompt_id, job_id, started, stage)
             if job_id in self._cancel:
                 raise ToolError("cancelled")
             images = [img for out in hist.get("outputs", {}).values() for img in out.get("images", [])]
@@ -1470,7 +1478,7 @@ class ImageService:
                     continue
                 try:
                     self.apply_comfy_progress(job_id, started, json.loads(payload))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (TypeError, ValueError):
                     pass
         except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.CancelledError):
             return
@@ -1511,16 +1519,7 @@ class ImageService:
         job = await self.wait(job["id"])
         if job["status"] != "done":
             raise ToolError(f"image generation failed: {job.get('error') or job['status']}")
-        result = job
-        if requested != "none":
-            child = self.db.find_image_upscale(job["id"], requested)
-            if child is None:
-                child = self.submit_upscale(job["id"], requested, source="agent",
-                                            session_id=args.get("_session", ""))
-            child = await self.wait(child["id"])
-            if child["status"] != "done":
-                raise ToolError(f"image generated but upscale failed: {child['error']}")
-            result = child
+        result = await self._upscaled_result(job, requested, args.get("_session", ""))
         if put_bytes is not None:
             await put_bytes(filename, self.path(result).read_bytes())
         else:
@@ -1531,3 +1530,15 @@ class ImageService:
             extra = f", upscaled {requested} with {result.get('upscale_model') or 'Real-ESRGAN'}"
         return (f"Saved {filename} ({result['width']}x{result['height']}, {job['model']} model, seed {job['seed']}, "
                 f"{result['seconds']:.0f} s{extra}). The user can see it in the app's Images screen.")
+
+    async def _upscaled_result(self, job: dict, requested: str, session_id: str) -> dict:
+        """The finished job, or its finished upscale child when one was requested."""
+        if requested == "none":
+            return job
+        child = self.db.find_image_upscale(job["id"], requested)
+        if child is None:
+            child = self.submit_upscale(job["id"], requested, source="agent", session_id=session_id)
+        child = await self.wait(child["id"])
+        if child["status"] != "done":
+            raise ToolError(f"image generated but upscale failed: {child['error']}")
+        return child
