@@ -233,6 +233,83 @@ def schedule_launchd_handoff(plist: Path, *, definition_changed: bool,
     return subprocess.Popen([python, "-c", code], **kwargs)
 
 
+RUNNER_PLIST_NAME = "dev.agent-harness.runner.plist"
+
+
+def _fetch_verified_package(server: str, work: Path) -> tuple[dict, Path]:
+    """Download the manifest and package, verify size and SHA-256, and extract; returns (manifest, extracted dir)."""
+    manifest_url = urllib.parse.urljoin(server.rstrip("/") + "/", "mac-client/manifest.json")
+    manifest = json.loads(_download(manifest_url).decode("utf-8"))
+    required = {"version", "sha256", "bytes", "package_url"}
+    if not required <= set(manifest):
+        raise ValueError("update manifest is missing required fields")
+    package_url = urllib.parse.urljoin(server.rstrip("/") + "/", str(manifest["package_url"]).lstrip("/"))
+    if urllib.parse.urlsplit(package_url).netloc != urllib.parse.urlsplit(server).netloc:
+        raise ValueError("update manifest points outside the configured server")
+    package = work / "package.tar.gz"
+    _download(package_url, package)
+    if package.stat().st_size != int(manifest["bytes"]):
+        raise ValueError("downloaded package size does not match the manifest")
+    digest = hashlib.sha256(package.read_bytes()).hexdigest()
+    if digest != str(manifest["sha256"]).lower():
+        raise ValueError("downloaded package SHA-256 does not match the manifest")
+    extracted = work / "extracted"
+    _safe_extract(package, extracted)
+    for required_path in ("app/harness_runner.py", "client/harness_cli.py", "client/harness_client.py",
+                          RUNNER_PLIST_NAME):
+        if not (extracted / required_path).is_file():
+            raise ValueError(f"update package is missing {required_path}")
+    return manifest, extracted
+
+
+def _stage_targets(extracted: Path, work: Path, base: Path, home: Path,
+                   plist_target: Path) -> list[tuple[Path, Path]]:
+    """Prepare the new runtime, client, and plist next to the download; returns (staged, install target) pairs."""
+    runner_new = work / "runner-app.new"
+    client_new = work / "client.new"
+    shutil.copytree(extracted / "app", runner_new)
+    client_new.mkdir()
+    for source in (extracted / "client").iterdir():
+        shutil.copy2(source, client_new / source.name)
+    client_config = base / "client" / "config.json"
+    if client_config.exists():
+        shutil.copy2(client_config, client_new / "config.json")
+
+    targets = [(runner_new, base / "runner" / "app"), (client_new, base / "client")]
+    plist_new = work / "plist.new"
+    plist_text = (extracted / RUNNER_PLIST_NAME).read_text(encoding="utf-8")
+    plist_text = plist_text.replace("__HOME__", str(home)).replace(
+        "__PYTHON__", str(base / "venv" / "bin" / "python"))
+    plist_new.write_text(plist_text, encoding="utf-8")
+    targets.append((plist_new, plist_target))
+    return targets
+
+
+def _install_targets(targets: list[tuple[Path, Path]], backup: Path, moved: list[tuple[Path, Path]],
+                     installed: list[Path]) -> None:
+    backup.mkdir()
+    for index, (source, target) in enumerate(targets):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        prior = backup / str(index)
+        if target.exists():
+            os.replace(target, prior)
+            moved.append((prior, target))
+        os.replace(source, target)
+        installed.append(target)
+
+
+def _roll_back(installed: list[Path], moved: list[tuple[Path, Path]]) -> None:
+    for target in reversed(installed):
+        if target.exists():
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+    for prior, target in reversed(moved):
+        if prior.exists():
+            os.replace(prior, target)
+
+
 def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
                  home: Path | None = None) -> dict:
     """Download, verify, stage, atomically install, and optionally restart launchd.
@@ -242,7 +319,7 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
     """
     base = (base or Path.home() / ".agent-harness").expanduser()
     home = (home or Path.home()).expanduser()
-    plist_target = home / "Library" / "LaunchAgents" / "dev.agent-harness.runner.plist"
+    plist_target = home / "Library" / "LaunchAgents" / RUNNER_PLIST_NAME
     base.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=".update-", dir=str(base)))
     moved: list[tuple[Path, Path]] = []
@@ -250,56 +327,10 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
     launchd_unloaded = False
     result = {"ok": False, "version": "", "at": time.time(), "message": "update did not complete"}
     try:
-        manifest_url = urllib.parse.urljoin(server.rstrip("/") + "/", "mac-client/manifest.json")
-        manifest = json.loads(_download(manifest_url).decode("utf-8"))
-        required = {"version", "sha256", "bytes", "package_url"}
-        if not required <= set(manifest):
-            raise ValueError("update manifest is missing required fields")
-        package_url = urllib.parse.urljoin(server.rstrip("/") + "/", str(manifest["package_url"]).lstrip("/"))
-        if urllib.parse.urlsplit(package_url).netloc != urllib.parse.urlsplit(server).netloc:
-            raise ValueError("update manifest points outside the configured server")
-        package = work / "package.tar.gz"
-        _download(package_url, package)
-        if package.stat().st_size != int(manifest["bytes"]):
-            raise ValueError("downloaded package size does not match the manifest")
-        digest = hashlib.sha256(package.read_bytes()).hexdigest()
-        if digest != str(manifest["sha256"]).lower():
-            raise ValueError("downloaded package SHA-256 does not match the manifest")
-        extracted = work / "extracted"
-        _safe_extract(package, extracted)
-        for required_path in ("app/harness_runner.py", "client/harness_cli.py", "client/harness_client.py",
-                              "dev.agent-harness.runner.plist"):
-            if not (extracted / required_path).is_file():
-                raise ValueError(f"update package is missing {required_path}")
-
-        runner_new = work / "runner-app.new"
-        client_new = work / "client.new"
-        shutil.copytree(extracted / "app", runner_new)
-        client_new.mkdir()
-        for source in (extracted / "client").iterdir():
-            shutil.copy2(source, client_new / source.name)
-        client_config = base / "client" / "config.json"
-        if client_config.exists():
-            shutil.copy2(client_config, client_new / "config.json")
-
-        targets = [(runner_new, base / "runner" / "app"), (client_new, base / "client")]
-        plist_new = work / "plist.new"
-        plist_text = (extracted / "dev.agent-harness.runner.plist").read_text(encoding="utf-8")
-        plist_text = plist_text.replace("__HOME__", str(home)).replace(
-            "__PYTHON__", str(base / "venv" / "bin" / "python"))
-        plist_new.write_text(plist_text, encoding="utf-8")
-        targets.append((plist_new, plist_target))
+        manifest, extracted = _fetch_verified_package(server, work)
+        targets = _stage_targets(extracted, work, base, home, plist_target)
         prior_plist_text = plist_target.read_text(encoding="utf-8") if plist_target.is_file() else None
-        backup = work / "backup"
-        backup.mkdir()
-        for index, (source, target) in enumerate(targets):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            prior = backup / str(index)
-            if target.exists():
-                os.replace(target, prior)
-                moved.append((prior, target))
-            os.replace(source, target)
-            installed.append(target)
+        _install_targets(targets, work / "backup", moved, installed)
 
         plist_changed = prior_plist_text != plist_target.read_text(encoding="utf-8")
         if not restart and prior_plist_text is not None:
@@ -314,15 +345,7 @@ def apply_update(server: str, base: Path | None = None, *, restart: bool = True,
         _write_result(base, result)
         return result
     except Exception as exc:
-        for target in reversed(installed):
-            if target.exists():
-                if target.is_dir():
-                    shutil.rmtree(target)
-                else:
-                    target.unlink()
-        for prior, target in reversed(moved):
-            if prior.exists():
-                os.replace(prior, target)
+        _roll_back(installed, moved)
         message = f"update failed; prior client preserved: {exc}"
         if launchd_unloaded and plist_target.is_file():
             try:
