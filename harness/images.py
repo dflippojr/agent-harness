@@ -1268,7 +1268,7 @@ class ImageService:
         finally:
             try:
                 partial.unlink()
-            except FileNotFoundError:
+            except OSError:  # gone already, or still open in a write a cancel left running: don't mask the cancel
                 pass
         seconds = round(time.time() - started, 1)
         provenance = {**(job.get("provenance") or {}), **self.provenance_for(job), "seconds": seconds}
