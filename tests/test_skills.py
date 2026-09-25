@@ -169,10 +169,12 @@ def test_write_helpers_never_create_files_outside_staging(tmp_path, rel):
     store = store_for(tmp_path)
     _outside_markers(tmp_path)
     payload = {**bundle()["files"], rel: "pwned"}
+    one_dir = store.staging_dir / "one"
     with pytest.raises(ValueError):
-        _write_contained(store.staging_dir / "one", payload)
+        _write_contained(one_dir, payload)
+    proposal = {**bundle(), "files": payload}
     with pytest.raises(ValueError):
-        store._write_proposal_files("deadbeefcafe", {**bundle(), "files": payload}, {"slug": "commit-style"})
+        store._write_proposal_files("deadbeefcafe", proposal, {"slug": "commit-style"})
     result = store._sandbox_validate({**bundle(), "files": payload}, "abcd" * 8)
     assert result["ok"] is False
     assert any(f.get("code") == "traversal" for f in result.get("findings") or [])
@@ -201,13 +203,14 @@ def test_propose_skill_tool_rejects_traversal_reference_path(tmp_path):
     store = store_for(tmp_path)
     _outside_markers(tmp_path)
     session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
+    coro = store.propose_from_tool({
+        "slug": "commit-style", "title": "Commit style",
+        "purpose": "Keep git commit messages conventional and short.",
+        "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
+        "references": json.dumps([{"path": "references/../../../harness.sqlite3", "content": "pwned"}]),
+    }, session)
     with pytest.raises(Exception, match="safe references"):
-        asyncio.run(store.propose_from_tool({
-            "slug": "commit-style", "title": "Commit style",
-            "purpose": "Keep git commit messages conventional and short.",
-            "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
-            "references": json.dumps([{"path": "references/../../../harness.sqlite3", "content": "pwned"}]),
-        }, session))
+        asyncio.run(coro)
     assert store.db.list_skill_proposals() == []
     _assert_nothing_outside_staging(tmp_path)
 
@@ -352,12 +355,13 @@ def test_apps_jobs_guests_cannot_propose(tmp_path):
         {"id": "c", "owner_id": "owner", "app_id": "", "job_id": "", "app_metadata": {"chat": True}},
     ):
         assert not session_eligible(session)
+        coro = store.propose_from_tool({
+            "slug": "commit-style", "title": "Commit style",
+            "purpose": "Keep git commit messages conventional and short.",
+            "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
+        }, session)
         with pytest.raises(Exception, match="owner-created"):
-            asyncio.run(store.propose_from_tool({
-                "slug": "commit-style", "title": "Commit style",
-                "purpose": "Keep git commit messages conventional and short.",
-                "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
-            }, session))
+            asyncio.run(coro)
 
 
 def test_identical_hash_is_deduped(tmp_path):
