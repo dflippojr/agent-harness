@@ -419,7 +419,7 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false } =
   const dispatch = (block) => {
     let type = "message";
     const data = [];
-    for (const line of block.replace(/\r/g, "").split("\n")) {
+    for (const line of block.replaceAll("\r", "").split("\n")) {
       if (line.startsWith("event:")) type = line.slice(6).trim();
       else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
     }
@@ -677,7 +677,7 @@ document.addEventListener("keydown", (event) => {
   const items = drawerFocusable();
   if (!items.length) return;
   const first = items[0];
-  const last = items[items.length - 1];
+  const last = items.at(-1);
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 });
@@ -736,7 +736,7 @@ function userMessageParts(content, run) {
 // Adds Run buttons under the marked code blocks md() produced. The source is the block's text, never its HTML.
 function addRunControls(root, run) {
   for (const pre of root.querySelectorAll("pre[data-snippet-lang]")) {
-    const lang = pre.getAttribute("data-snippet-lang");
+    const lang = pre.dataset.snippetLang;
     if (SNIPPET_LANGUAGES[lang]) pre.after(snippetRunRow(lang, () => pre.textContent, run));
   }
 }
@@ -906,7 +906,11 @@ async function viewChat(id) {
     h("p", { class: "muted" }, "Ask a question or paste code to review. To change files or run work, use Agents."),
     h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
       class: "btn small", type: "button",
-      onclick: () => { if (!ui) return; ui.input.value = text; ui.input.focus(); },
+      onclick: () => {
+        if (!ui) return;
+        ui.input.value = text;
+        ui.input.focus();
+      },
     }, text))));
   const wrap = h("div", { class: "chat-wrap" }, welcome, feed);
   append($app, wrap);
@@ -1220,7 +1224,7 @@ async function confirmGpuQueue(label) {
     const remaining = gpu.manual_remaining_seconds === null ? "until you turn it off"
       : `for about ${gpu.manual_remaining_seconds >= 90 ? `${Math.ceil(gpu.manual_remaining_seconds / 60)} min` : `${gpu.manual_remaining_seconds} s`}`;
     return confirm(`GPU hold is on ${remaining}. ${label} can be queued, but nothing will be sent to the local model until the hold ends. Queue it?`);
-  } catch (_) { return true; }
+  } catch (_) { /* hold unreadable: don't block queueing */ return true; }
 }
 
 async function viewNew() {
@@ -1291,7 +1295,7 @@ async function viewNew() {
     h("option", { value: "empty" }, "Empty workspace"),
     h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"));
   const newProjectRepo = h("input", { type: "text",
-    placeholder: isMember() ? "https://github.com/org/repo" : "D:\\Projects\\example or https://…", hidden: true });
+    placeholder: isMember() ? "https://github.com/org/repo" : String.raw`D:\Projects\example or https://…`, hidden: true });
   newProjectSource.addEventListener("change", () => {
     newProjectRepo.hidden = newProjectSource.value !== "repo";
     newProjectRepo.required = newProjectSource.value === "repo";
@@ -2331,7 +2335,7 @@ function splitDiff(diff) {
       cur.lines.push(line);
     }
   }
-  files.forEach((f) => { while (f.lines.length && !f.lines[f.lines.length - 1]) f.lines.pop(); });
+  files.forEach((f) => { while (f.lines.length && !f.lines.at(-1)) f.lines.pop(); });
   return files;
 }
 
@@ -2544,8 +2548,7 @@ async function viewImages() {
         e.preventDefault();
         if (!prompt.value.trim()) return toast("Describe the image first");
         if (!model) return toast(IMAGE_MODELS_EMPTY);
-        const selectedMode = modelChoices.find((m) => m.key === model.value);
-        if (!selectedMode) return toast(IMAGE_MODELS_EMPTY);
+        if (!modelChoices.some((m) => m.key === model.value)) return toast(IMAGE_MODELS_EMPTY);
         if (!(await confirmGpuQueue("This image job"))) return;
         go.disabled = true;
         try {
@@ -2578,7 +2581,7 @@ async function viewImages() {
     try {
       const d = render(await api("/images"));
       timer = setTimeout(tick, IMAGE_BUSY.has(d.status.phase) ? 400 : 4000);
-    } catch (_) { timer = setTimeout(tick, 4000); }
+    } catch (_) { /* offline: keep polling */ timer = setTimeout(tick, 4000); }
   };
   timer = setTimeout(tick, IMAGE_BUSY.has(data.status.phase) ? 400 : 4000);
   onLeave(() => clearTimeout(timer));
@@ -3004,7 +3007,7 @@ function readTheme() {
   try { return localStorage.getItem("harness.theme") || "auto"; } catch (_) { return "auto"; }
 }
 function readHues() {
-  try { return { ...THEME_COLORS, ...(JSON.parse(localStorage.getItem("harness.themeHues") || "null") || {}) }; }
+  try { return { ...THEME_COLORS, ...JSON.parse(localStorage.getItem("harness.themeHues") || "null") }; }
   catch (_) { return { ...THEME_COLORS }; }
 }
 function applyTheme(name, hues) {
@@ -3037,7 +3040,7 @@ function readTextSize() {
   try {
     const id = localStorage.getItem("harness.textSize") || "m";
     return TEXT_SIZES[id] ? id : "m";
-  } catch (_) { return "m"; }
+  } catch (_) { /* storage unavailable: default size */ return "m"; }
 }
 function applyTextSize(id) {
   const size = TEXT_SIZES[id] ? id : readTextSize();
@@ -3053,7 +3056,7 @@ function copyBox(value) {
     class: "btn small", type: "button",
     onclick: async () => {
       try { await navigator.clipboard.writeText(value); toast("Copied"); }
-      catch (_) { const range = document.createRange(); range.selectNodeContents(code); getSelection().removeAllRanges(); getSelection().addRange(range); }
+      catch (_) { /* clipboard unavailable: select the text instead */ const range = document.createRange(); range.selectNodeContents(code); getSelection().removeAllRanges(); getSelection().addRange(range); }
     },
   }, "Copy");
   return h("div", { class: "copy-box", onclick: () => btn.click() }, code, btn);
@@ -3284,7 +3287,7 @@ function connectionCard() {
       fill(minted,
         h("p", { class: "note" }, "Copy this token now; it is not shown again."), field,
         h("button", { class: "btn small", onclick: async () => {
-          try { await navigator.clipboard.writeText(key.key); toast("Copied"); } catch (_) { field.select(); }
+          try { await navigator.clipboard.writeText(key.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); }
         } }, "Copy token"));
     } catch (e) { toast(e.message, 5000); }
   };
@@ -3421,7 +3424,7 @@ function notificationsCard(me) {
   return h("div", { class: "card" },
     me.notify.enabled ? h("ol", {},
       h("li", {}, "Install the ntfy app from the App Store."),
-      h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password (D:\\Docker\\ntfy\\secrets\\phone-login.txt on the tower)."),
+      h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password", String.raw` (D:\Docker\ntfy\secrets\phone-login.txt on the tower).`),
       h("li", {}, "Settings → Default server → the same URL. Then + → topic ", h("code", {}, me.notify.topic), "."),
       h("li", {}, "Tap a notification to open the session; long-press it for Approve / Deny.")) : h("p", {}, "Disabled in config/harness.yaml."),
     me.notify.enabled ? h("button", {
@@ -3621,7 +3624,8 @@ async function daemonSettingsCard() {
   const errorBox = h("div");
   const groups = {};
   for (const spec of view.settings || []) {
-    (groups[spec.category] ||= []).push(spec);
+    groups[spec.category] ||= [];
+    groups[spec.category].push(spec);
   }
   const rows = Object.entries(groups).map(([category, specs]) => h("div", { class: "card config-category" },
     h("h3", {}, category),
@@ -4035,7 +4039,7 @@ function endpointCard(me) {
                   const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
                   fill(form, h("p", { class: "small" }, `Key for ${k.name}. Copy it now; it isn't shown again.`), field,
                     h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
                       h("button", { class: "btn", onclick: load }, "Done")));
                 } catch (e) { toast(e.message); }
               },
@@ -4115,7 +4119,7 @@ function appsCard(me) {
                   const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
                   fill(form, h("p", { class: "small" }, `Token for ${k.name}. Copy it now; it isn't shown again.`), field,
                     h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
                       h("button", { class: "btn", onclick: load }, "Done")));
                 } catch (e) { toast(e.message); }
               },
@@ -4142,7 +4146,7 @@ function appsCard(me) {
                 fill(form,
                   h("p", { class: "small" }, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`), field,
                   h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(p.code); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(p.code); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
                     h("button", { class: "btn", onclick: load }, "Done")));
               } catch (e) { toast(e.message); }
             } }, "Approve and create code")));
@@ -4165,7 +4169,7 @@ function appsCard(me) {
                 fill(form,
                   h("p", { class: "small" }, `Run this in Terminal on the Mac. The code expires in 10 minutes and works once.`), field,
                   h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(command); toast("Copied"); } catch (_) { field.select(); } } }, "Copy install command"),
+                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(command); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy install command"),
                     h("button", { class: "btn", onclick: load }, "Done")));
               } catch (e) { toast(e.message); }
             } }, "Create install command")));
@@ -4174,7 +4178,7 @@ function appsCard(me) {
         h("p", { class: "small" }, "An Agent Harness App token lets a third-party integration start and follow sessions on Agent Harness Server. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
