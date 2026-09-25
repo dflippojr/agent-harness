@@ -691,6 +691,11 @@ def _command_rejection(command: str, args: dict) -> str | None:
         return "unresolved substitution"
     if _GLOB_RE.search(command):
         return "unresolved glob"
+    return _effect_rejection(command)
+
+
+def _effect_rejection(command: str) -> str | None:
+    """Reason the command reaches the network, publishes, escalates, or deletes outside scratch."""
     if _NETWORK_RE.search(command):
         return "networked command"
     if _PUBLISH_RE.search(command) or _FORCE_RE.search(command):
@@ -807,24 +812,42 @@ def _usage(data: dict) -> tuple[int, int, float]:
     return prompt, completion, cost
 
 
+def _hosted_request(cfg: SmartConfig, secret: str, user: str) -> tuple[str, dict, dict]:
+    """(url, headers, body) for the configured hosted provider."""
+    headers = {"Content-Type": "application/json"}
+    if cfg.provider == "anthropic":
+        headers.update({"x-api-key": secret, "anthropic-version": "2023-06-01"})
+        body = {"model": cfg.model, "max_tokens": 200, "temperature": 0,
+                "system": SYSTEM_PROMPT, "messages": [{"role": "user", "content": user}]}
+        return "https://api.anthropic.com/v1/messages", headers, body
+    headers["Authorization"] = f"Bearer {secret}"
+    body = {"model": cfg.model, "temperature": 0, "max_tokens": 200,
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                         {"role": "user", "content": user}]}
+    return "https://api.openai.com/v1/chat/completions", headers, body
+
+
+def _anthropic_reply(data: dict) -> tuple[str, int, int, float]:
+    blocks = data.get("content") if isinstance(data.get("content"), list) else []
+    text = "".join(b.get("text") or "" for b in blocks if isinstance(b, dict))
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return text, int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0), 0.0
+
+
+def _openai_reply(data: dict) -> tuple[str, int, int, float]:
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    message = (choices[0].get("message") or {}) if choices and isinstance(choices[0], dict) else {}
+    prompt, completion, cost = _usage(data)
+    return str(message.get("content") or ""), prompt, completion, cost
+
+
 async def hosted_complete(cfg: SmartConfig, secret: str, payload: dict) -> Review:
     """Official hosted API only. No tools, browsing, workspace, history, or session reuse."""
     user = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     timeout = httpx.Timeout(cfg.timeout_seconds, connect=min(3.0, cfg.timeout_seconds))
     proxy = cfg.proxy or None
-    headers = {"Content-Type": "application/json"}
-    if cfg.provider == "anthropic":
-        url = "https://api.anthropic.com/v1/messages"
-        headers.update({"x-api-key": secret, "anthropic-version": "2023-06-01"})
-        body = {"model": cfg.model, "max_tokens": 200, "temperature": 0,
-                "system": SYSTEM_PROMPT, "messages": [{"role": "user", "content": user}]}
-    else:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers["Authorization"] = f"Bearer {secret}"
-        body = {"model": cfg.model, "temperature": 0, "max_tokens": 200,
-                "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                             {"role": "user", "content": user}]}
+    url, headers, body = _hosted_request(cfg, secret, user)
     # trust_env=False: HTTP(S)_PROXY must not intercept the reviewer key + command.
     async with httpx.AsyncClient(timeout=timeout, proxy=proxy, trust_env=False) as client:
         resp = await client.post(url, headers=headers, json=body)
@@ -835,18 +858,8 @@ async def hosted_complete(cfg: SmartConfig, secret: str, payload: dict) -> Revie
     if resp.status_code >= 400:
         raise RuntimeError(f"provider HTTP {resp.status_code}")
     data = resp.json()
-    if cfg.provider == "anthropic":
-        blocks = data.get("content") if isinstance(data.get("content"), list) else []
-        text = "".join(b.get("text") or "" for b in blocks if isinstance(b, dict))
-        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-        prompt = int(usage.get("input_tokens") or 0)
-        completion = int(usage.get("output_tokens") or 0)
-        cost = 0.0
-    else:
-        choices = data.get("choices") if isinstance(data.get("choices"), list) else []
-        message = (choices[0].get("message") or {}) if choices and isinstance(choices[0], dict) else {}
-        text = str(message.get("content") or "")
-        prompt, completion, cost = _usage(data)
+    reply = _anthropic_reply if cfg.provider == "anthropic" else _openai_reply
+    text, prompt, completion, cost = reply(data)
     review = parse_reviewer_output(text)
     review.prompt_tokens, review.completion_tokens, review.cost_usd = prompt, completion, cost
     return review
@@ -874,6 +887,10 @@ def sanitized_record(review: Review, *, policy_fingerprint: str, mode: str, outc
     }
 
 
+def _timeout_reason(exc: TimeoutError) -> str:
+    return REASON_RATE_LIMITED if "rate" in str(exc).lower() else "timeout"
+
+
 class SmartReviewer:
     """Per-call reviewer. Reads live mode from SQLite so disable/shadow/auto apply immediately."""
 
@@ -889,6 +906,35 @@ class SmartReviewer:
                            secret_ref=base.secret_ref, timeout_seconds=base.timeout_seconds,
                            min_confidence=base.min_confidence, mode=mode, proxy=base.proxy)
 
+    async def _run_injected(self, payload: dict) -> Review:
+        """Run the injected test completer and normalise its Review, dict or JSON-string result."""
+        result = self.complete(payload)
+        if hasattr(result, "__await__"):
+            result = await result
+        if isinstance(result, Review):
+            return result
+        if isinstance(result, dict):
+            return parse_reviewer_output(json.dumps(result))
+        if isinstance(result, str):
+            return parse_reviewer_output(result)
+        return Review("escalate", escalate_reason="invalid output")
+
+    async def _complete(self, settings: SmartConfig, payload: dict) -> Review:
+        """Call the reviewer; every provider failure becomes an escalating Review."""
+        try:
+            if self.complete is not None:
+                return await self._run_injected(payload)
+            secret = _read_secret(self.cfg, settings.secret_ref)
+            return await hosted_complete(settings, secret, payload)
+        except FileNotFoundError:
+            return Review("escalate", escalate_reason=REASON_MISSING_CREDENTIAL)
+        except TimeoutError as e:
+            return Review("escalate", escalate_reason=_timeout_reason(e))
+        except httpx.TimeoutException:
+            return Review("escalate", escalate_reason="timeout")
+        except Exception:  # includes httpx.HTTPError
+            return Review("escalate", escalate_reason=REASON_PROVIDER_ERROR)
+
     async def consider(self, db, policy: Policy, name: str, args: dict, decision: Decision,
                        *, repo: bool = False) -> tuple[Eligibility, Review | None]:
         """Return (eligibility, review). review is None when the provider was not called."""
@@ -901,42 +947,16 @@ class SmartReviewer:
         payload = reviewer_payload(eligibility)
         self.calls.append(payload)
         started = time.monotonic()
-        review = Review("escalate", escalate_reason=REASON_PROVIDER_ERROR, provider=settings.provider,
-                        model=settings.model, mode=settings.mode)
-        try:
-            if self.complete is not None:
-                result = self.complete(payload)
-                if hasattr(result, "__await__"):
-                    result = await result
-                if isinstance(result, Review):
-                    review = result
-                elif isinstance(result, dict):
-                    review = parse_reviewer_output(json.dumps(result))
-                elif isinstance(result, str):
-                    review = parse_reviewer_output(result)
-                else:
-                    review = Review("escalate", escalate_reason="invalid output")
-            else:
-                secret = _read_secret(self.cfg, settings.secret_ref)
-                review = await hosted_complete(settings, secret, payload)
-        except FileNotFoundError:
-            review = Review("escalate", escalate_reason=REASON_MISSING_CREDENTIAL)
-        except TimeoutError as e:
-            review = Review("escalate", escalate_reason=REASON_RATE_LIMITED if "rate" in str(e).lower() else "timeout")
-        except httpx.TimeoutException:
-            review = Review("escalate", escalate_reason="timeout")
-        except httpx.HTTPError:
-            review = Review("escalate", escalate_reason=REASON_PROVIDER_ERROR)
-        except Exception:
-            review = Review("escalate", escalate_reason=REASON_PROVIDER_ERROR)
+        review = await self._complete(settings, payload)
         review.latency_ms = int((time.monotonic() - started) * 1000)
         review.provider = review.provider or settings.provider
         review.model = review.model or settings.model
         review.mode = settings.mode
-        if review.recommendation == "approve" and review.confidence < settings.min_confidence:
-            review.escalate_reason = review.escalate_reason or "low confidence"
-        if review.risk_flags and review.recommendation == "approve":
-            review.escalate_reason = review.escalate_reason or "risk flags"
+        if review.recommendation == "approve":
+            if review.confidence < settings.min_confidence:
+                review.escalate_reason = review.escalate_reason or "low confidence"
+            if review.risk_flags:
+                review.escalate_reason = review.escalate_reason or "risk flags"
         return eligibility, review
 
     def should_auto_approve(self, review: Review | None) -> bool:
