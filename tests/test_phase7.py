@@ -653,7 +653,8 @@ def test_fixture_recorder_only_asks_the_local_searxng(tmp_path, monkeypatch, cap
     monkeypatch.setattr(web_fixture.httpx, "AsyncClient",
                         lambda **kwargs: real_client(transport=httpx.MockTransport(searxng), **kwargs))
     for url in ("http://169.254.169.254/latest", "https://searx.example.com", "file:///etc/passwd",
-                "http://user:pw@127.0.0.1:8888", "http://127.0.0.1:8888/?engines=x", "http://127.0.0.1.example.com"):
+                "http://user:pw@127.0.0.1:8888", "http://127.0.0.1:8888/?engines=x", "http://127.0.0.1.example.com",
+                "http://127.0.0.1:99999"):
         with pytest.raises(ValueError, match="SearXNG URL"):
             asyncio.run(web_fixture.record(tmp_path / "fx", ["q"], [], 0, url))
     with pytest.raises(SystemExit) as exit_:
@@ -662,6 +663,7 @@ def test_fixture_recorder_only_asks_the_local_searxng(tmp_path, monkeypatch, cap
     assert seen == [] and not (tmp_path / "fx").exists()
 
     assert web_fixture.searxng_search_url("http://localhost:8888/searx/") == "http://localhost:8888/searx/search"
+    assert web_fixture.searxng_search_url("http://[::1]:8888") == "http://[::1]:8888/search"
     asyncio.run(web_fixture.record(tmp_path / "fx", ["disc golf"], [], 0, "http://127.0.0.1:8888/"))
     assert seen == ["http://127.0.0.1:8888/search?q=disc+golf&format=json&pageno=1"]
     assert "disc golf" in Fixture(tmp_path / "fx").manifest["searches"]

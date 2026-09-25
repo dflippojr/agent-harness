@@ -126,10 +126,12 @@ def searxng_search_url(searxng_url: str) -> str:
     if parts.username is not None or parts.password is not None or parts.params or parts.query or parts.fragment:
         raise ValueError(f"the SearXNG URL must be a plain base URL, not {searxng_url!r}")
     try:
-        parts.port
+        port = parts.port
     except ValueError as e:
         raise ValueError(f"the SearXNG URL has a bad port: {searxng_url!r}") from e
-    return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}/search"
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    netloc = host if port is None else f"{host}:{port}"
+    return f"{parts.scheme}://{netloc}{parts.path.rstrip('/')}/search"
 
 
 async def record(root: Path, queries: list[str], urls: list[str], fetch_top: int, searxng_url: str) -> Fixture:
