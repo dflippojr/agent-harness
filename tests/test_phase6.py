@@ -536,8 +536,9 @@ def test_agent_generate_image_tool_saves_into_workspace(tmp_path):
         bad = await m.runner.images.call("generate_image", {"prompt": "x", "filename": "../../escape.png"},
                                          workspace_root=tmp_path / "data" / "workspaces" / s["id"])
         await m.stop()
+    coro = body()
     with pytest.raises(ToolError, match="escapes the workspace"):
-        asyncio.run(body())
+        asyncio.run(coro)
 
 
 def test_images_api_and_generate_image_for_tower_and_mac(tmp_path):
