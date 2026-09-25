@@ -8,9 +8,12 @@ fractions of a second.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import shutil
+import stat
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -305,6 +308,67 @@ def test_executor_shell_timeout_and_absolute_workspace_paths(tmp_path):
     ex.handle("r2", "file", {"session": sid, "name": "write_file",
                              "args": {"path": f"{ws}/sub/a.txt", "content": "x"}, "context_tokens": 1000})
     assert (ws / "sub" / "a.txt").read_text() == "x"
+
+
+def test_executor_gives_each_session_a_private_tmpdir(tmp_path, monkeypatch):
+    envs = []
+
+    class FakeProc:
+        pid, returncode = 1, 0
+
+        def __init__(self, argv, env, **_kw):
+            envs.append(env)
+            self.stdout = io.BytesIO(b"")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    shared = tmp_path / "shared-tmp"
+    shared.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(shared))
+    monkeypatch.setattr(harness_runner.subprocess, "Popen", FakeProc)
+    ex = executor(tmp_path, [tmp_path])
+    a, b = "0123456789", "abcdef0123"
+    for sid in (a, a, b):
+        assert ex.handle("r", "shell", {"session": sid, "command": "true"})["code"] == 0
+    first, again, other = (Path(env["TMPDIR"]) for env in envs)
+    assert first == again and first != other
+    for private in (first, other):
+        assert private.is_dir() and private.parent.parent == shared
+        if os.name == "posix":
+            assert stat.S_IMODE(private.stat().st_mode) == 0o700
+    assert ex.handle("r", "cleanup_workspace", {"session": a}) == {"removed": True}
+    assert not first.exists() and other.is_dir()
+    ex.handle("r", "shell", {"session": a, "command": "true"})
+    assert Path(envs[-1]["TMPDIR"]).is_dir() and Path(envs[-1]["TMPDIR"]) == first
+
+
+def test_session_tmpdir_survives_runner_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    sid = "0123456789"
+    first = executor(tmp_path, [tmp_path]).tmpdir(sid)
+    (first / "scratch").write_text("x")
+    restarted = executor(tmp_path, [tmp_path])
+    assert restarted.tmpdir(sid) == first and (first / "scratch").exists()
+    assert restarted.handle("r", "cleanup_workspace", {"session": sid}) == {"removed": True}
+    assert not first.exists()
+    again = executor(tmp_path, [tmp_path]).tmpdir(sid)
+    executor(tmp_path, [tmp_path]).drop_tmpdir(sid)
+    assert not again.exists()
+
+
+def test_session_tmpdir_rejects_escaping_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    ex = executor(tmp_path, [tmp_path])
+    for bad in ("../x", "..", "a/b", "", "0123456789/../.."):
+        with pytest.raises(harness_runner.OpError):
+            ex.tmpdir(bad)
+        with pytest.raises(harness_runner.OpError):
+            ex.drop_tmpdir(bad)
 
 
 def test_executor_put_file_writes_png_and_refuses_escape(tmp_path, monkeypatch):

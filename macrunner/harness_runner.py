@@ -98,6 +98,41 @@ class Executor:
             ws.mkdir(parents=True, exist_ok=True)
         return ws
 
+    def tmp_base(self) -> Path:
+        """The runner's private base for session temp directories (0700, ours), under the per-user temp area the
+        sandbox profile allows writes to. Session directories are named by session id, so a restarted runner
+        finds the ones its predecessor left."""
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        base = Path(tempfile.gettempdir()) / f"harness-runner-{uid}"
+        base.mkdir(mode=0o700, exist_ok=True)
+        self.check_private(base)
+        return base
+
+    @staticmethod
+    def check_private(path: Path) -> None:
+        if path.is_symlink() or not path.is_dir():
+            raise OpError(f"{path} isn't a plain directory")
+        if hasattr(os, "getuid") and path.stat().st_uid != os.getuid():
+            raise OpError(f"{path} isn't owned by this user")
+
+    def tmpdir(self, sid: str) -> Path:
+        """The session's own TMPDIR, <private base>/<session id>, created with mode 0700 so other users and sessions
+        can't read it or plant files in it. It lasts until the workspace is discarded or cleaned up, across runner
+        restarts."""
+        if not SESSION_RE.match(sid or ""):
+            raise OpError(f"bad session id {sid!r}")
+        with self.lock:
+            path = self.tmp_base() / sid
+            path.mkdir(mode=0o700, exist_ok=True)
+            self.check_private(path)
+            return path
+
+    def drop_tmpdir(self, sid: str) -> None:
+        if not SESSION_RE.match(sid or ""):
+            raise OpError(f"bad session id {sid!r}")
+        with self.lock:
+            remove_tree(self.tmp_base() / sid)
+
     def project(self, params: dict) -> Project:
         repo = params.get("repo") or ""
         if not repo:
@@ -208,7 +243,7 @@ class Executor:
     def run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
                "LOGNAME": os.environ.get("USER", ""), "SHELL": self.shell, "LANG": "en_US.UTF-8", "TERM": "dumb",
-               "TMPDIR": os.environ.get("TMPDIR") or tempfile.gettempdir(), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
+               "TMPDIR": str(self.tmpdir(sid)), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
                "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1"}
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
@@ -322,11 +357,13 @@ class Executor:
         project = self.project(p)
         projects.discard(project, p["branch"])
         remove_tree(self.workspace(p["session"]))
+        self.drop_tmpdir(p["session"])
         return {"head": ""}
 
     def op_cleanup_workspace(self, p: dict):
         ws, sid = self.workspace(p["session"]), p["session"]
         if not ws.exists():
+            self.drop_tmpdir(sid)
             return {"removed": True}
         if p.get("repo") and p.get("base_commit") and (ws / ".git").exists():
             project = self.project(p)
@@ -340,6 +377,7 @@ class Executor:
             elif projects.commits_ahead(ws, p["base_commit"]):
                 return {"removed": False, "reason": "branch was never pushed"}
         remove_tree(ws)
+        self.drop_tmpdir(sid)
         return {"removed": True}
 
 
