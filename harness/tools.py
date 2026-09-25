@@ -84,23 +84,23 @@ def validate_args(schema: dict, args: dict) -> dict:
     missing = [k for k in params.get("required", []) if k not in args]
     if missing:
         raise ToolError(f"missing required argument(s): {', '.join(missing)}")
-    out = {}
-    for key, value in args.items():
-        kind = props[key].get("type")
-        if kind == "integer":
-            if isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
-                value = int(value)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ToolError(f"argument {key} must be an integer")
-        elif kind == "boolean":
-            if isinstance(value, str) and value.lower() in ("true", "false"):
-                value = value.lower() == "true"
-            if not isinstance(value, bool):
-                raise ToolError(f"argument {key} must be true or false")
-        elif kind == "string" and not isinstance(value, str):
-            raise ToolError(f"argument {key} must be a string")
-        out[key] = value
-    return out
+    return {key: _coerce_arg(key, props[key].get("type"), value) for key, value in args.items()}
+
+
+def _coerce_arg(key: str, kind: str | None, value):
+    if kind == "integer":
+        if isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
+            value = int(value)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ToolError(f"argument {key} must be an integer")
+    elif kind == "boolean":
+        if isinstance(value, str) and value.lower() in ("true", "false"):
+            value = value.lower() == "true"
+        if not isinstance(value, bool):
+            raise ToolError(f"argument {key} must be true or false")
+    elif kind == "string" and not isinstance(value, str):
+        raise ToolError(f"argument {key} must be a string")
+    return value
 
 
 def shell_result(code: int, output: str, network: bool, output_chars: int) -> str:
@@ -145,17 +145,16 @@ class Workspace:
         code, output = await self.sandbox.exec(command, timeout=max(1, min(int(timeout), 1800)), network=network)
         return shell_result(code, output, network, self.output_chars)
 
-    async def git_clone(self, url: str, dest: str | None = None, branch: str | None = None) -> str:
-        url = url.strip()
+    def _clone_source(self, url: str) -> tuple[str, Path | None, str]:
+        """(url to clone, local repository to clone from or None, default destination) for a git_clone url."""
         if self.public_clone_only:
             from .clone import CloneRefused, public_https_url
             try:
                 url = public_https_url(url)
             except CloneRefused as e:
                 raise ToolError(str(e)) from e
-            source = None
-            default_dest = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-        elif url.startswith("local:"):
+            return url, None, url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        if url.startswith("local:"):
             name = url[len("local:"):]
             if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name.startswith("."):
                 raise ToolError(f"bad local repository name: {name}")
@@ -163,12 +162,23 @@ class Workspace:
             if source is None:
                 available = sorted(p.name for p in self.repos_dir.iterdir()) if self.repos_dir.is_dir() else []
                 raise ToolError(f"no local repository {name!r}; available: {', '.join(available) or 'none'}")
-            default_dest = name.removesuffix(".git")
-        elif re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+", url):
-            source = None
-            default_dest = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-        else:
-            raise ToolError("url must be https://... or local:<name>")
+            return url, source, name.removesuffix(".git")
+        if re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+", url):
+            return url, None, url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        raise ToolError("url must be https://... or local:<name>")
+
+    async def _clone_public(self, url: str, target: Path, branch_args: list[str]) -> None:
+        from .clone import QuotaExceeded, _run_clone
+        from .projects import GitError
+        cmd = ["git", "-c", "core.quotepath=off", "-c", "credential.helper=", "-c", "core.askPass=",
+               "clone", "--config", "core.autocrlf=false", *branch_args, "--", url, str(target)]
+        try:
+            await asyncio.to_thread(_run_clone, cmd, target, timeout=600, max_bytes=self.clone_max_bytes)
+        except (QuotaExceeded, GitError) as e:
+            raise ToolError(str(e)) from e
+
+    async def git_clone(self, url: str, dest: str | None = None, branch: str | None = None) -> str:
+        url, source, default_dest = self._clone_source(url.strip())
         target = self.resolve(dest or default_dest)
         if target == self.root or target.exists() and any(target.iterdir()):
             raise ToolError(f"destination already exists and is not empty: {self.rel(target)}")
@@ -180,16 +190,7 @@ class Workspace:
                  str(source), str(target)], timeout=600)
             output = out + err
         elif self.public_clone_only:
-            from .clone import QuotaExceeded, _run_clone
-            from .projects import GitError
-            cmd = ["git", "-c", "core.quotepath=off", "-c", "credential.helper=", "-c", "core.askPass=",
-                   "clone", "--config", "core.autocrlf=false", *branch_args, "--", url, str(target)]
-            try:
-                await asyncio.to_thread(_run_clone, cmd, target, timeout=600, max_bytes=self.clone_max_bytes)
-            except QuotaExceeded as e:
-                raise ToolError(str(e)) from e
-            except GitError as e:
-                raise ToolError(str(e)) from e
+            await self._clone_public(url, target, branch_args)
             return f"cloned {url} into {rel}"
         else:
             cmd = " ".join(shlex.quote(a) for a in ["git", "clone", *branch_args, "--", url, rel])
