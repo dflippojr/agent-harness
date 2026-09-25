@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -439,12 +440,25 @@ def run_live(language: str, source: str, timeout: float = 30, output_bytes: int 
     cancel = threading.Event()
     if cancel_after is not None:
         threading.Timer(cancel_after, cancel.set).start()
-    run_id = "t" + str(time.monotonic_ns())[-9:]
+    run_id = _live_run_id()
     result = asyncio.run(runner.run(run_id, language, source, cancel))
     leftover = subprocess.run(["docker", "ps", "-aq", "--filter", f"name=harness-snippet-{run_id}"],
                               capture_output=True, text=True).stdout.strip()
     assert leftover == "", "the sandbox container must be gone after the run"
     return result
+
+
+def _live_run_id() -> str:
+    """A Docker name shared across pytest-xdist workers needs more than a truncated monotonic timestamp."""
+    return "t" + secrets.token_hex(8)
+
+
+def test_live_run_ids_do_not_collide_when_workers_share_a_coarse_clock(monkeypatch):
+    monkeypatch.setattr(time, "monotonic_ns", lambda: 93_000_000)
+    nonces = iter(("a" * 16, "b" * 16))
+    monkeypatch.setattr(snippets.secrets, "token_hex", lambda size: next(nonces))
+    assert _live_run_id() == "t" + "a" * 16
+    assert _live_run_id() == "t" + "b" * 16
 
 
 HELLO = {
