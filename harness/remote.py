@@ -145,12 +145,7 @@ class RunnerHub:
         st = self.state[name]
         was_online = self.online(name)
         if st.instance and instance != st.instance:
-            for req in list(st.requests.values()):
-                if req.delivered_at and req.instance == st.instance and not req.future.done():
-                    req.future.set_exception(RunnerError(
-                        f"the {name} runner restarted while this was running, so its effects are unknown",
-                        kind="restarted"))
-                    st.requests.pop(req.id, None)
+            self._fail_restarted(name, st)
         st.instance = instance
         st.info = info or st.info
         st.last_seen = time.monotonic()
@@ -165,13 +160,7 @@ class RunnerHub:
         while True:
             now = time.monotonic()
             st.last_seen = now  # a held poll is a live connection
-            batch = []
-            for req in st.requests.values():
-                if req.future.done():
-                    continue
-                if not req.delivered_at or (req.id not in inflight_ids and now - req.delivered_at > REDELIVER_SECONDS):
-                    req.delivered_at, req.instance = now, instance
-                    batch.append({"id": req.id, "op": req.op, "params": req.params})
+            batch = self._deliverable(st, inflight_ids, instance, now)
             if batch or self._closing or now >= deadline:
                 return {"requests": batch, "keep_awake": self.keep_awake(name)}
             st.work.clear()
@@ -179,6 +168,29 @@ class RunnerHub:
                 await asyncio.wait_for(st.work.wait(), timeout=min(5.0, deadline - now))
             except asyncio.TimeoutError:
                 pass
+
+    @staticmethod
+    def _fail_restarted(name: str, st) -> None:
+        """Fail the requests the previous runner instance picked up: their effects are unknown."""
+        lost = [req for req in st.requests.values()
+                if req.delivered_at and req.instance == st.instance and not req.future.done()]
+        for req in lost:
+            req.future.set_exception(RunnerError(
+                f"the {name} runner restarted while this was running, so its effects are unknown",
+                kind="restarted"))
+            st.requests.pop(req.id, None)
+
+    @staticmethod
+    def _deliverable(st, inflight_ids: set[str], instance: str, now: float) -> list[dict]:
+        """New requests, plus delivered ones the runner stopped reporting in flight; marks them delivered."""
+        batch = []
+        for req in st.requests.values():
+            if req.future.done():
+                continue
+            if not req.delivered_at or (req.id not in inflight_ids and now - req.delivered_at > REDELIVER_SECONDS):
+                req.delivered_at, req.instance = now, instance
+                batch.append({"id": req.id, "op": req.op, "params": req.params})
+        return batch
 
     def result(self, name: str, rid: str, ok: bool, value=None, error: str = "", kind: str = "internal") -> bool:
         st = self.state[name]
