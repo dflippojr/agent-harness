@@ -277,41 +277,47 @@ class Harness:
             value = schema["components"]["schemas"][value["$ref"].rsplit("/", 1)[-1]]
         return value
 
+    def _check_request_fields(self, schema: dict, name: str, method: str, path: str) -> str | None:
+        operation = (schema.get("paths", {}).get(path) or {}).get(method)
+        if operation is None:
+            return f"{name}: missing {method.upper()} {path}"
+        expected = SDK_REQUEST_FIELDS.get((method, path))
+        if expected is None:
+            return None
+        body = (((operation.get("requestBody") or {}).get("content") or {}).get(JSON_MEDIA_TYPE) or {}).get(
+            "schema")
+        if not body:
+            return f"{name}: OpenAPI has no JSON request schema"
+        body = self._resolve_schema(schema, body)
+        actual = set((body.get("properties") or {}).keys())
+        if expected != actual:
+            return f"{name}: SDK fields {sorted(expected)} != OpenAPI fields {sorted(actual)}"
+        return None
+
+    def _check_response_fields(self, schema: dict, method: str, path: str, status: str, response_type: type,
+                               is_list: bool) -> str | None:
+        operation = (schema.get("paths", {}).get(path) or {}).get(method) or {}
+        response = (((operation.get("responses") or {}).get(status) or {}).get("content") or {}).get(
+            JSON_MEDIA_TYPE, {}).get("schema")
+        if not response:
+            return f"{method.upper()} {path}: OpenAPI has no JSON response schema"
+        if is_list:
+            response = response.get("items") or {}
+        response = self._resolve_schema(schema, response)
+        missing = set(response_type.__annotations__) - set((response.get("properties") or {}).keys())
+        if missing:
+            return f"{method.upper()} {path}: SDK response fields missing from OpenAPI: {sorted(missing)}"
+        return None
+
     def validate_openapi(self, schema: dict | None = None) -> None:
         """Fail if this SDK's operations or JSON body fields drift from the daemon OpenAPI document."""
         fetched = schema is None
         schema = schema or self.client.get("/openapi.json").json()
-        errors: list[str] = []
-        for name, (method, path) in SDK_OPERATIONS.items():
-            operation = (schema.get("paths", {}).get(path) or {}).get(method)
-            if operation is None:
-                errors.append(f"{name}: missing {method.upper()} {path}")
-                continue
-            expected = SDK_REQUEST_FIELDS.get((method, path))
-            if expected is None:
-                continue
-            body = (((operation.get("requestBody") or {}).get("content") or {}).get(JSON_MEDIA_TYPE) or {}).get(
-                "schema")
-            if not body:
-                errors.append(f"{name}: OpenAPI has no JSON request schema")
-                continue
-            body = self._resolve_schema(schema, body)
-            actual = set((body.get("properties") or {}).keys())
-            if expected != actual:
-                errors.append(f"{name}: SDK fields {sorted(expected)} != OpenAPI fields {sorted(actual)}")
-        for (method, path), (status, response_type, is_list) in SDK_RESPONSE_TYPES.items():
-            operation = (schema.get("paths", {}).get(path) or {}).get(method) or {}
-            response = (((operation.get("responses") or {}).get(status) or {}).get("content") or {}).get(
-                JSON_MEDIA_TYPE, {}).get("schema")
-            if not response:
-                errors.append(f"{method.upper()} {path}: OpenAPI has no JSON response schema")
-                continue
-            if is_list:
-                response = response.get("items") or {}
-            response = self._resolve_schema(schema, response)
-            missing = set(response_type.__annotations__) - set((response.get("properties") or {}).keys())
-            if missing:
-                errors.append(f"{method.upper()} {path}: SDK response fields missing from OpenAPI: {sorted(missing)}")
+        found = [self._check_request_fields(schema, name, method, path)
+                 for name, (method, path) in SDK_OPERATIONS.items()]
+        found += [self._check_response_fields(schema, method, path, status, response_type, is_list)
+                  for (method, path), (status, response_type, is_list) in SDK_RESPONSE_TYPES.items()]
+        errors = [e for e in found if e]
         version = str((self.info() if fetched else {}).get("api_version") or "")
         if version and version.split(".", 1)[0] != SDK_API_MAJOR:
             errors.append(f"SDK supports API major {SDK_API_MAJOR}, daemon reports {version}")
@@ -357,6 +363,17 @@ class Harness:
         return self._call("POST", f"/sessions/{sid}/approvals/{approval_id}",
                           json={"decision": "approve" if approve else "deny", "note": note})
 
+    @staticmethod
+    def _sse_events(resp: httpx.Response) -> Iterator[Event]:
+        data = []
+        for line in resp.iter_lines():
+            if line.startswith("data:"):
+                data.append(line[5:].strip())
+            elif not line and data:
+                event = json.loads("\n".join(data))
+                data = []
+                yield event
+
     def events(self, sid: str, after: int = 0, follow: bool = True) -> Iterator[Event]:
         """Server-sent events of a session. Reconnects on network errors, resuming after the last event seen."""
         last = after
@@ -368,20 +385,29 @@ class Harness:
                     if resp.status_code >= 400:
                         resp.read()
                         self._raise_response(resp)
-                    data = []
-                    for line in resp.iter_lines():
-                        if line.startswith("data:"):
-                            data.append(line[5:].strip())
-                        elif not line and data:
-                            event = json.loads("\n".join(data))
-                            data = []
-                            if event.get("seq"):
-                                last = event["seq"]
-                            yield event
+                    for event in self._sse_events(resp):
+                        if event.get("seq"):
+                            last = event["seq"]
+                        yield event
                 if not follow:
                     return
             except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectError):
                 time.sleep(2)
+
+    def _serve_tool_call(self, sid: str, by_name: dict[str, Tool], handled: set[str], call: dict) -> None:
+        if call["call_id"] in handled:
+            return
+        handled.add(call["call_id"])
+        t = by_name.get(call["name"])
+        try:
+            output, ok = (str(t.fn(**(call.get("args") or {}))), True) if t else (f"unknown tool {call['name']}", False)
+        except Exception as e:  # noqa: BLE001 - report the app-side failure to the agent
+            output, ok = f"{type(e).__name__}: {e}", False
+        try:
+            self.submit_tool_result(sid, call["call_id"], output, ok)
+        except HarnessError as e:
+            if e.status != 409:  # 409: already answered (e.g. after a reconnect)
+                raise
 
     def run(self, prompt: str, tools: list[Tool] | None = None, on_event: Callable[[dict], None] | None = None,
             **create_args) -> RunResult:
@@ -391,32 +417,16 @@ class Harness:
         result = RunResult(session=s)
         handled: set[str] = set()
 
-        def serve(call: dict) -> None:
-            if call["call_id"] in handled:
-                return
-            handled.add(call["call_id"])
-            t = by_name.get(call["name"])
-            try:
-                output, ok = (str(t.fn(**(call.get("args") or {}))), True) if t else (f"unknown tool {call['name']}", False)
-            except Exception as e:  # noqa: BLE001 - report the app-side failure to the agent
-                output, ok = f"{type(e).__name__}: {e}", False
-            try:
-                self.submit_tool_result(s["id"], call["call_id"], output, ok)
-            except HarnessError as e:
-                if e.status != 409:  # 409: already answered (e.g. after a reconnect)
-                    raise
-
         for call in self.pending_tool_calls(s["id"]):
-            serve(call)
+            self._serve_tool_call(s["id"], by_name, handled, call)
         for event in self.events(s["id"]):
             result.events.append(event)
             if on_event:
                 on_event(event)
             if event["type"] == "app_tool_call":
-                serve({**event["data"]})
-            if event["type"] == "run_finished" or (event["type"] == "status" and event["data"]["status"] in TERMINAL):
-                if event["type"] == "run_finished":
-                    break
+                self._serve_tool_call(s["id"], by_name, handled, {**event["data"]})
+            if event["type"] == "run_finished":
+                break
         result.session = self.session(s["id"])
         return result
 
