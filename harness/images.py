@@ -43,6 +43,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import httpx
 import yaml
@@ -591,22 +592,27 @@ class ImageService:
                 self._done.setdefault(job["id"], asyncio.Event())
                 self.queue.put_nowait(job["id"])
             for job in self.db.list_images(limit=500):
-                if job["status"] != "done":
-                    continue
-                requested = job.get("requested_upscale") or "none"
-                if job.get("operation", "generate") != "generate" or requested in ("", "none"):
-                    continue
-                if self.db.find_image_upscale(job["id"], requested) is None:
-                    try:
-                        child = self.submit_upscale(job["id"], requested, source=job.get("source") or "phone",
-                                                    session_id=job.get("session_id") or "")
-                        log.info("re-queued upscale %s for image %s after restart", child["id"], job["id"])
-                    except ToolError as e:
-                        log.warning("could not recover upscale for %s: %s", job["id"], e)
+                self._recover_upscale(job)
             self._schedule_flux_verify()
             if self.edit_enabled:
                 self.edit_status()
             self._task = asyncio.create_task(self._loop(), name="images")
+
+    def _recover_upscale(self, job: dict) -> None:
+        """Re-queue the upscale of a finished image that a daemon restart interrupted."""
+        if job["status"] != "done":
+            return
+        requested = job.get("requested_upscale") or "none"
+        if job.get("operation", "generate") != "generate" or requested in ("", "none"):
+            return
+        if self.db.find_image_upscale(job["id"], requested) is not None:
+            return
+        try:
+            child = self.submit_upscale(job["id"], requested, source=job.get("source") or "phone",
+                                        session_id=job.get("session_id") or "")
+            log.info("re-queued upscale %s for image %s after restart", child["id"], job["id"])
+        except ToolError as e:
+            log.warning("could not recover upscale for %s: %s", job["id"], e)
 
     def _schedule_flux_verify(self) -> None:
         """Hash matching-but-uncached flux-fast files once, off the event loop, with retry backoff."""
@@ -692,7 +698,7 @@ class ImageService:
         if self.phase == "idle" and await self.comfy.ready():
             log.warning("stopping a ComfyUI left over from before the daemon started")
             await self.comfy.stop()
-            code, out, _ = await _run(["netstat", "-ano", "-p", "TCP"])
+            _, out, _ = await _run(["netstat", "-ano", "-p", "TCP"])
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) >= 5 and parts[3] == "LISTENING" and parts[1].endswith(f":{self.cfg.port}"):
@@ -748,15 +754,8 @@ class ImageService:
                 "seed": job["seed"], "steps": spec["steps"], "sampler": spec["sampler"],
                 "scheduler": spec["scheduler"], "guidance": spec["guidance"], **extra}
 
-    # jobs
-    def submit(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", resolution: str = "auto",
-               source: str = "phone", session_id: str = "", seed: int | None = None,
-               upscale: str = "none") -> dict:
-        prompt = prompt.strip()
-        if not prompt:
-            raise ToolError("prompt is empty")
-        if model not in MODELS:
-            raise ToolError(f"model must be one of {', '.join(MODELS)}")
+    def _validate_submit(self, model: str, aspect_ratio: str, resolution: str, upscale: str) -> tuple[str, str]:
+        """Check a generate request against the model catalog; returns the resolved resolution and upscale."""
         if not self.mode_available(model):
             unavailable = self.mode_catalog()[model]
             raise ToolError(unavailable.get("setup") or unavailable.get("unavailable_reason") or
@@ -783,6 +782,18 @@ class ImageService:
             width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
             upscale_mod.require_weights(self.cfg, scale)
             upscale_mod.check_dimensions(width, height, scale, upscale_mod.max_pixels(self.cfg))
+        return resolution, requested
+
+    # jobs
+    def submit(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", resolution: str = "auto",
+               source: str = "phone", session_id: str = "", seed: int | None = None,
+               upscale: str = "none") -> dict:
+        prompt = prompt.strip()
+        if not prompt:
+            raise ToolError("prompt is empty")
+        if model not in MODELS:
+            raise ToolError(f"model must be one of {', '.join(MODELS)}")
+        resolution, requested = self._validate_submit(model, aspect_ratio, resolution, upscale)
         width, height = RESOLUTION_SIZES[resolution][aspect_ratio]
         job = {"id": uuid.uuid4().hex[:12], "session_id": session_id, "source": source, "prompt": prompt[:4000],
                "model": model, "aspect_ratio": aspect_ratio, "resolution": resolution, "width": width, "height": height,
@@ -956,6 +967,14 @@ class ImageService:
             await event.wait()
         return self.db.get_image(job_id)
 
+    def _deletable(self, path: Path, backup_root: Path | None) -> bool:
+        if not path.exists():
+            return False
+        resolved = path.resolve()
+        if backup_root is not None and (resolved == backup_root or backup_root in resolved.parents):
+            return False
+        return resolved.parent.resolve() == self.images_dir.resolve()
+
     async def delete(self, job_id: str, *, backup_dir: Path | None = None) -> dict:
         """Remove this live row and its files. Never walks a backup/archive directory."""
         job = self.db.get_image(job_id)
@@ -973,14 +992,8 @@ class ImageService:
         job = self.db.get_image(job_id) or job
         backup_root = backup_dir.resolve() if backup_dir is not None else None
         for path in self._job_files(job):
-            if not path.exists():
-                continue
-            resolved = path.resolve()
-            if backup_root is not None and (resolved == backup_root or backup_root in resolved.parents):
-                continue
-            if resolved.parent.resolve() != self.images_dir.resolve():
-                continue
-            path.unlink()
+            if self._deletable(path, backup_root):
+                path.unlink()
         self.db.delete_image(job_id)
         return {"deleted": job_id, "parent_id": job.get("parent_id") or ""}
 
@@ -1088,7 +1101,6 @@ class ImageService:
             return
         slot = await self.runner.gate.acquire_exclusive()
         flagged = False
-        ran_job = False
         took_over = False
         try:
             first, empty = self._batch_is_empty(first)
@@ -1106,56 +1118,77 @@ class ImageService:
             first, empty = self._batch_is_empty(first)
             if empty:
                 return
-            job_id: str | None = first
-            while True:
-                if paused():
-                    if self._live_job(job_id):
-                        self.db.update_image(job_id, status="queued")
-                        self.queue.put_nowait(job_id)
-                    break
-                if job_id:
-                    job_id, empty = self._batch_is_empty(job_id)
-                    if empty:
-                        return
-                    if job_id:
-                        await self._run_job(job_id)
-                        ran_job = True
-                    job_id = None
-                if not self.queue.empty():
-                    job_id = self.queue.get_nowait()
-                    continue
-                if self._keep_warm and not ran_job:
-                    self.phase = "warm"
-                    self.progress = {}
-                    self._wake = asyncio.Event()
-                    waiter = asyncio.create_task(self.queue.get())
-                    wake = asyncio.create_task(self._wake.wait())
-                    done, pending = await asyncio.wait({waiter, wake}, return_when=asyncio.FIRST_COMPLETED)
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
-                    self._wake = None
-                    if waiter in done:
-                        job_id = waiter.result()
-                        continue
-                    break
-                break
+            await self._drain_queue(first, paused)
         finally:
             self._keep_warm = False
             self._wake = None
-            if took_over:
-                self.phase = "restoring"
-                await self.comfy.stop()
-            if flagged and not paused():  # when the guard is paused it restores the model itself later
-                self.phase = "restoring"
-                await self.control.start()  # llama-server restarts and reloads the model
-                for _ in range(150):
-                    if await self.control.healthy():
-                        break
-                    await asyncio.sleep(2)
+            await self._restore_after_batch(took_over, flagged, paused)
             await slot.release()
             self.phase = "idle"
             self.progress = {}
+
+    async def _drain_queue(self, first: str | None, paused: Callable[[], bool]) -> None:
+        """Run the batch's jobs until the queue is empty, the guard pauses, or (kept warm) Generate never comes."""
+        ran_job = False
+        job_id: str | None = first
+        while True:
+            if paused():
+                self._requeue_live(job_id)
+                return
+            if job_id:
+                ran = await self._run_pending(job_id)
+                if ran is None:
+                    return
+                ran_job |= ran
+            if not self.queue.empty():
+                job_id = self.queue.get_nowait()
+            elif self._keep_warm and not ran_job:
+                job_id = await self._wait_warm()
+            else:
+                job_id = None
+            if job_id is None:
+                return
+
+    def _requeue_live(self, job_id: str | None) -> None:
+        if self._live_job(job_id):
+            self.db.update_image(job_id, status="queued")
+            self.queue.put_nowait(job_id)
+
+    async def _run_pending(self, job_id: str) -> bool | None:
+        """Run one queued job; None when the batch turned out to be empty, else whether a job ran."""
+        job_id, empty = self._batch_is_empty(job_id)
+        if empty:
+            return None
+        if job_id:
+            await self._run_job(job_id)
+            return True
+        return False
+
+    async def _wait_warm(self) -> str | None:
+        """Sit warm until a job is queued (its id) or the wake event fires (None)."""
+        self.phase = "warm"
+        self.progress = {}
+        self._wake = asyncio.Event()
+        waiter = asyncio.create_task(self.queue.get())
+        wake = asyncio.create_task(self._wake.wait())
+        done, pending = await asyncio.wait({waiter, wake}, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        self._wake = None
+        return waiter.result() if waiter in done else None
+
+    async def _restore_after_batch(self, took_over: bool, flagged: bool, paused: Callable[[], bool]) -> None:
+        if took_over:
+            self.phase = "restoring"
+            await self.comfy.stop()
+        if flagged and not paused():  # when the guard is paused it restores the model itself later
+            self.phase = "restoring"
+            await self.control.start()  # llama-server restarts and reloads the model
+            for _ in range(150):
+                if await self.control.healthy():
+                    break
+                await asyncio.sleep(2)
 
     async def _run_job(self, job_id: str | None) -> None:
         if not job_id:
@@ -1165,63 +1198,19 @@ class ImageService:
             return
         if job_id in self._cancel:
             self.db.update_image(job_id, status="failed", finished_at=time.time(), error="cancelled")
-            event = self._done.pop(job_id, None)
-            if event:
-                event.set()
+            self._release_waiters(job_id)
             return
         self.active_job = job_id
         self.phase = "generating"
         started = time.time()
         self.db.update_image(job_id, status="running", started_at=started)
-        upscaling = job.get("operation") == "upscale"
-        stage = "upscaling" if upscaling else (
-            "editing" if job.get("operation") == image_edit.OPERATION_EDIT else "queued in ComfyUI")
+        operation = job.get("operation")
+        stage = {"upscale": "upscaling", image_edit.OPERATION_EDIT: "editing"}.get(operation, "queued in ComfyUI")
         self.progress = {"job": job_id, "stage": stage}
         stop_progress = asyncio.Event()
         listener = asyncio.create_task(self._listen_progress(job_id, started, stop_progress))
         try:
-            if upscaling:
-                content = await self._run_upscale(job, started)
-            elif (job.get("operation") or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_EDIT:
-                content = await self._run_edit(job, started)
-            else:
-                content = await self._run_generate(job, started)
-            if job_id in self._cancel:
-                status = "cancelled" if job.get("operation") == image_edit.OPERATION_EDIT else "failed"
-                self.db.update_image(job_id, status=status, finished_at=time.time(), error="cancelled")
-                return
-            self.images_dir.mkdir(parents=True, exist_ok=True)
-            canonical = self.path(job)
-            partial = canonical.with_name(canonical.name + ".partial")
-            try:
-                await asyncio.to_thread(self._write_durable, partial, content)
-                os.replace(partial, canonical)
-            finally:
-                try:
-                    partial.unlink()
-                except FileNotFoundError:
-                    pass
-            seconds = round(time.time() - started, 1)
-            provenance = {**(job.get("provenance") or {}), **self.provenance_for(job), "seconds": seconds}
-            self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=seconds,
-                                 bytes=len(content), width=job["width"], height=job["height"],
-                                 sha256=hashlib.sha256(content).hexdigest(), provenance=provenance)
-            if self.archive and self.archive.enabled:
-                archive_job = self.db.get_image(job_id)
-                try:
-                    await asyncio.to_thread(self.archive.archive, archive_job, canonical)
-                except Exception as archive_error:  # image success is independent of backup health
-                    self.archive.record_error(archive_job, archive_error)
-                    log.warning("image %s archive failed: %s", job_id, archive_error)
-            elif self.on_stored:
-                try:
-                    self.on_stored(self.db.get_image(job_id))
-                except Exception:  # noqa: BLE001 - archive must not fail the image job
-                    log.exception("image archive hook failed for %s", job_id)
-            log.info("image %s (%s) done in %.0f s", job_id, job.get("upscale_model") or job["model"],
-                     time.time() - started)
-            if (job.get("operation") or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_GENERATE:
-                await self._queue_requested_upscale(job)
+            await self._produce_and_store(job, started)
         except (ToolError, httpx.HTTPError, KeyError, ValueError, OSError) as e:
             cancelled_edit = (job_id in self._cancel
                               and job.get("operation") == image_edit.OPERATION_EDIT)
@@ -1234,9 +1223,7 @@ class ImageService:
             listener.cancel()
             await asyncio.gather(listener, return_exceptions=True)
             self.active_job = ""
-            event = self._done.pop(job_id, None)
-            if event:
-                event.set()
+            self._release_waiters(job_id)
             finished = self.db.get_image(job_id)
             if self.notify and finished and finished["source"] == "phone":
                 if (finished.get("operation") == "generate" and finished.get("status") == "done"
@@ -1244,6 +1231,60 @@ class ImageService:
                     pass  # notify when the derived upscale settles
                 else:
                     self.notify(finished)
+
+    def _release_waiters(self, job_id: str) -> None:
+        event = self._done.pop(job_id, None)
+        if event:
+            event.set()
+
+    async def _produce_and_store(self, job: dict, started: float) -> None:
+        job_id = job["id"]
+        operation = job.get("operation")
+        if operation == "upscale":
+            content = await self._run_upscale(job, started)
+        elif (operation or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_EDIT:
+            content = await self._run_edit(job, started)
+        else:
+            content = await self._run_generate(job, started)
+        if job_id in self._cancel:
+            status = "cancelled" if operation == image_edit.OPERATION_EDIT else "failed"
+            self.db.update_image(job_id, status=status, finished_at=time.time(), error="cancelled")
+            return
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        canonical = self.path(job)
+        partial = canonical.with_name(canonical.name + ".partial")
+        try:
+            await asyncio.to_thread(self._write_durable, partial, content)
+            os.replace(partial, canonical)
+        finally:
+            try:
+                partial.unlink()
+            except FileNotFoundError:
+                pass
+        seconds = round(time.time() - started, 1)
+        provenance = {**(job.get("provenance") or {}), **self.provenance_for(job), "seconds": seconds}
+        self.db.update_image(job_id, status="done", finished_at=time.time(), seconds=seconds,
+                             bytes=len(content), width=job["width"], height=job["height"],
+                             sha256=hashlib.sha256(content).hexdigest(), provenance=provenance)
+        await self._after_stored(job_id, canonical)
+        log.info("image %s (%s) done in %.0f s", job_id, job.get("upscale_model") or job["model"],
+                 time.time() - started)
+        if (operation or image_edit.OPERATION_GENERATE) == image_edit.OPERATION_GENERATE:
+            await self._queue_requested_upscale(job)
+
+    async def _after_stored(self, job_id: str, canonical: Path) -> None:
+        if self.archive and self.archive.enabled:
+            archive_job = self.db.get_image(job_id)
+            try:
+                await asyncio.to_thread(self.archive.archive, archive_job, canonical)
+            except Exception as archive_error:  # image success is independent of backup health
+                self.archive.record_error(archive_job, archive_error)
+                log.warning("image %s archive failed: %s", job_id, archive_error)
+        elif self.on_stored:
+            try:
+                self.on_stored(self.db.get_image(job_id))
+            except Exception:  # noqa: BLE001 - archive must not fail the image job
+                log.exception("image archive hook failed for %s", job_id)
 
     @staticmethod
     def _write_durable(path: Path, content: bytes) -> None:
