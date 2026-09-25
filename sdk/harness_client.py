@@ -319,7 +319,7 @@ class Harness:
                   for (method, path), (status, response_type, is_list) in SDK_RESPONSE_TYPES.items()]
         errors = [e for e in found if e]
         version = str((self.info() if fetched else {}).get("api_version") or "")
-        if version and version.split(".", 1)[0] != SDK_API_MAJOR:
+        if version and version.partition(".")[0] != SDK_API_MAJOR:
             errors.append(f"SDK supports API major {SDK_API_MAJOR}, daemon reports {version}")
         if errors:
             raise ContractError("; ".join(errors))
