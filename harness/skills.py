@@ -70,11 +70,26 @@ REJECTABLE_STATUSES = (
 REVIEWABLE_STATUSES = ("draft", "validating", "validated", "review_pending")
 INSTALL_FROM_STATUSES = REJECTABLE_STATUSES + ("installed",)
 INSTALL_LOCK_NAME = "install.lock"
+SKILL_MD = "SKILL.md"
+MANIFEST_JSON = "manifest.json"
+NO_SUCH_PROPOSAL = "no skill proposal with that id"
+NO_SUCH_SKILL = "no installed skill with that slug"
+PATH_ESCAPES_STAGING = "path escapes the staging directory"
 _WINDOWS_RESERVED = frozenset({
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 })
+
+
+def _check_segment(part: str) -> None:
+    if part in ("", ".", ".."):
+        raise ValueError("'.' / '..' / empty path segments are forbidden")
+    stem = part.split(".", 1)[0].rstrip(" ").upper()
+    if stem in _WINDOWS_RESERVED:
+        raise ValueError("reserved Windows device names are forbidden")
+    if part.endswith((" ", ".")):
+        raise ValueError("trailing spaces and dots are forbidden in skill paths")
 
 
 def _rel_parts(rel: str) -> list[str]:
@@ -86,34 +101,19 @@ def _rel_parts(rel: str) -> list[str]:
     if rel.startswith(("\\\\", "//", "\\\\?\\")) or rel.startswith("\\"):
         raise ValueError("absolute, UNC, and device paths are forbidden")
     normalized = rel.replace("\\", "/")
-    if normalized.startswith("/") or normalized.startswith("\\"):
+    if normalized.startswith(("/", "\\")):
         raise ValueError("absolute paths are forbidden")
     first = normalized.split("/", 1)[0]
     if ":" in first:
         raise ValueError("drive letters and UNC shares are forbidden")
     parts = normalized.split("/")
     for part in parts:
-        if part in ("", ".", ".."):
-            raise ValueError("'.' / '..' / empty path segments are forbidden")
-        stem = part.split(".", 1)[0].rstrip(" ").upper()
-        if stem in _WINDOWS_RESERVED:
-            raise ValueError("reserved Windows device names are forbidden")
-        if part.endswith(" ") or part.endswith("."):
-            raise ValueError("trailing spaces and dots are forbidden in skill paths")
+        _check_segment(part)
     return parts
 
 
-def _safe_join(root: Path, rel: str) -> Path:
-    """Resolve ``rel`` under ``root`` and refuse any path that could land outside it.
-
-    Rejects absolute paths, drive letters, UNC, ``..`` / empty / ``.`` segments, NUL and
-    other control characters, reserved Windows device names, and symlink/junction escapes.
-    The returned path is the lexical join (not a followed link) after the resolved target
-    has been proven to stay inside ``root``.
-    """
-    parts = _rel_parts(rel)
-    root = Path(root)
-    dest = root.joinpath(*parts)
+def _refuse_links(dest: Path, root: Path) -> None:
+    """Refuse a symlink or junction anywhere from ``dest`` up to ``root``."""
     cur = dest
     while True:
         try:
@@ -130,6 +130,20 @@ def _safe_join(root: Path, rel: str) -> Path:
         except ValueError:
             break
         cur = cur.parent
+
+
+def _safe_join(root: Path, rel: str) -> Path:
+    """Resolve ``rel`` under ``root`` and refuse any path that could land outside it.
+
+    Rejects absolute paths, drive letters, UNC, ``..`` / empty / ``.`` segments, NUL and
+    other control characters, reserved Windows device names, and symlink/junction escapes.
+    The returned path is the lexical join (not a followed link) after the resolved target
+    has been proven to stay inside ``root``.
+    """
+    parts = _rel_parts(rel)
+    root = Path(root)
+    dest = root.joinpath(*parts)
+    _refuse_links(dest, root)
     try:
         root_res = resolve_path(root)
         dest_res = resolve_path(dest)
@@ -138,9 +152,9 @@ def _safe_join(root: Path, rel: str) -> Path:
     try:
         dest_res.relative_to(root_res)
     except ValueError as e:
-        raise ValueError("path escapes the staging directory") from e
+        raise ValueError(PATH_ESCAPES_STAGING) from e
     if not contained(dest, root, allow_missing=True):
-        raise ValueError("path escapes the staging directory")
+        raise ValueError(PATH_ESCAPES_STAGING)
     return dest
 
 
@@ -360,8 +374,8 @@ class SkillStore:
         title = str(args.get("title") or "").strip()
         purpose = str(args.get("purpose") or "").strip()
         activation = str(args.get("activation_suggestion") or "").strip()
-        skill_md = str(args.get("skill_md") or args.get("SKILL.md") or "")
-        files = {"SKILL.md": skill_md, **_references_from_args(args.get("references"))}
+        skill_md = str(args.get("skill_md") or args.get(SKILL_MD) or "")
+        files = {SKILL_MD: skill_md, **_references_from_args(args.get("references"))}
         examples = _examples_from_args(args.get("examples"))
         bundle = {
             "slug": slug, "title": title, "purpose": purpose,
@@ -400,7 +414,7 @@ class SkillStore:
         if installed:
             current = self.db.skill_version(installed["slug"], installed["current_version"])
             if current:
-                diff = _unified_diff(current.get("skill_md") or "", bundle["files"].get("SKILL.md") or "",
+                diff = _unified_diff(current.get("skill_md") or "", bundle["files"].get(SKILL_MD) or "",
                                      f"{installed['slug']}/SKILL.md")
         sandbox = {"ok": True, "findings": []}
         if static["ok"]:
@@ -420,8 +434,8 @@ class SkillStore:
             "id": pid, "slug": bundle["slug"], "title": bundle["title"], "purpose": bundle["purpose"],
             "activation_suggestion": bundle["activation_suggestion"], "content_hash": content_hash,
             "status": status, "source_session_id": source_session_id,
-            "skill_md": bundle["files"].get("SKILL.md") or "",
-            "references": [{"path": p, "content": c} for p, c in sorted(bundle["files"].items()) if p != "SKILL.md"],
+            "skill_md": bundle["files"].get(SKILL_MD) or "",
+            "references": [{"path": p, "content": c} for p, c in sorted(bundle["files"].items()) if p != SKILL_MD],
             "examples": bundle["examples"], "manifest": manifest, "static_findings": findings,
             "review": {}, "review_status": review_status,
             "target_slug": bundle["slug"] if installed else "", "diff": diff,
@@ -469,7 +483,7 @@ class SkillStore:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
         extra = {
-            "manifest.json": json.dumps({**manifest, "examples": bundle["examples"]}, indent=2),
+            MANIFEST_JSON: json.dumps({**manifest, "examples": bundle["examples"]}, indent=2),
             "examples.json": json.dumps({"examples": bundle["examples"]}, indent=2),
         }
         _write_contained(tmp, self._bundle_file_map(bundle, extra))
@@ -487,7 +501,7 @@ class SkillStore:
                 "activation_suggestion": bundle["activation_suggestion"], "content_hash": content_hash,
             }
             extra = {
-                "manifest.json": json.dumps({**manifest, "examples": bundle["examples"]}, indent=2),
+                MANIFEST_JSON: json.dumps({**manifest, "examples": bundle["examples"]}, indent=2),
                 "examples.json": json.dumps({"examples": bundle["examples"]}, indent=2),
             }
             _write_contained(staging, self._bundle_file_map(bundle, extra))
@@ -550,14 +564,14 @@ class SkillStore:
     def get_proposal(self, pid: str, *, include_body: bool = True) -> dict:
         row = self.db.skill_proposal(pid)
         if row is None:
-            raise SkillError(404, "no skill proposal with that id")
+            raise SkillError(404, NO_SUCH_PROPOSAL)
         return public_proposal(row, include_body=include_body)
 
     def reject(self, pid: str, reason: str = "") -> dict:
         with self.db.tx() as db:
             row = db.skill_proposal(pid)
             if row is None:
-                raise SkillError(404, "no skill proposal with that id")
+                raise SkillError(404, NO_SUCH_PROPOSAL)
             if row["status"] == "installed":
                 raise SkillError(409, "an installed proposal cannot be rejected; uninstall it instead")
             if row["status"] != "rejected":
@@ -573,7 +587,7 @@ class SkillStore:
         with self.db.tx() as db:
             row = db.skill_proposal(pid)
             if row is None:
-                raise SkillError(404, "no skill proposal with that id")
+                raise SkillError(404, NO_SUCH_PROPOSAL)
             banned = db.skill_hash_rejected(row["content_hash"])
             if row["status"] != "rejected" and not banned:
                 raise SkillError(409, "only a rejected proposal can be reopened")
@@ -587,7 +601,7 @@ class SkillStore:
         with self.db.tx() as db:
             row = db.skill_proposal(pid)
             if row is None:
-                raise SkillError(404, "no skill proposal with that id")
+                raise SkillError(404, NO_SUCH_PROPOSAL)
             if row["status"] == "installed":
                 raise SkillError(409, "delete the draft before install, or uninstall the skill")
             if not db.delete_skill_proposal(pid, not_status="installed"):
@@ -621,7 +635,7 @@ class SkillStore:
                 with self.db.tx() as db:
                     latest = db.skill_proposal(pid)
                     if latest is None:
-                        raise SkillError(404, "no skill proposal with that id")
+                        raise SkillError(404, NO_SUCH_PROPOSAL)
                     if latest["status"] == "rejected" or db.skill_hash_rejected(want):
                         raise SkillError(409, "this content hash is rejected")
                     if latest["content_hash"].lower() != want or canonical_hash(self._bundle_from_row(latest)).lower() != want:
@@ -649,7 +663,7 @@ class SkillStore:
                     now = time.time()
                     db.insert_skill_version({
                         "slug": latest["slug"], "version": version, "content_hash": live_hash, "title": latest["title"],
-                        "purpose": latest["purpose"], "skill_md": bundle["files"]["SKILL.md"],
+                        "purpose": latest["purpose"], "skill_md": bundle["files"][SKILL_MD],
                         "references": bundle_refs(bundle), "examples": bundle["examples"],
                         "manifest": latest.get("manifest") or {}, "installed_at": now,
                     })
@@ -671,14 +685,14 @@ class SkillStore:
     def set_enabled(self, slug: str, enabled: bool) -> dict:
         row = self.db.skill_installed(slug)
         if row is None:
-            raise SkillError(404, "no installed skill with that slug")
+            raise SkillError(404, NO_SUCH_SKILL)
         self.db.upsert_skill_installed({**row, "enabled": 1 if enabled else 0, "updated_at": time.time()})
         return self._public_installed(self.db.skill_installed(slug))
 
     def rollback(self, slug: str) -> dict:
         row = self.db.skill_installed(slug)
         if row is None:
-            raise SkillError(404, "no installed skill with that slug")
+            raise SkillError(404, NO_SUCH_SKILL)
         versions = self.db.list_skill_versions(slug)
         older = [v for v in versions if v["version"] < row["current_version"]]
         if not older:
@@ -695,7 +709,7 @@ class SkillStore:
     def uninstall(self, slug: str) -> None:
         row = self.db.skill_installed(slug)
         if row is None:
-            raise SkillError(404, "no installed skill with that slug")
+            raise SkillError(404, NO_SUCH_SKILL)
         with self.db.tx():
             self.db.delete_skill_installed(slug)
             self.db.clear_skill_allowlist(slug)
@@ -706,7 +720,7 @@ class SkillStore:
     def set_allowlist(self, slug: str, projects: list[str], known_projects: list[str]) -> dict:
         row = self.db.skill_installed(slug)
         if row is None:
-            raise SkillError(404, "no installed skill with that slug")
+            raise SkillError(404, NO_SUCH_SKILL)
         clean = []
         for name in projects:
             name = str(name).strip()
@@ -722,7 +736,7 @@ class SkillStore:
     def export_bundle(self, slug: str) -> dict:
         row = self.db.skill_installed(slug)
         if row is None:
-            raise SkillError(404, "no installed skill with that slug")
+            raise SkillError(404, NO_SUCH_SKILL)
         version = self.db.skill_version(slug, row["current_version"])
         if version is None:
             raise SkillError(409, "installed version files are missing")
@@ -793,7 +807,7 @@ class SkillStore:
     def _require_proposal(self, pid: str) -> dict:
         row = self.db.skill_proposal(pid)
         if row is None:
-            raise SkillError(404, "no skill proposal with that id")
+            raise SkillError(404, NO_SUCH_PROPOSAL)
         return row
 
     def _cas_status(self, db, pid: str, new_status: str, expected) -> None:
@@ -801,13 +815,13 @@ class SkillStore:
             return
         latest = db.skill_proposal(pid)
         if latest is None:
-            raise SkillError(404, "no skill proposal with that id")
+            raise SkillError(404, NO_SUCH_PROPOSAL)
         if latest["status"] == "rejected" or db.skill_hash_rejected(latest["content_hash"]):
             raise SkillError(409, "this content hash is rejected")
         raise SkillError(409, "proposal status changed")
 
     def _bundle_from_row(self, row: dict) -> dict:
-        files = {"SKILL.md": row.get("skill_md") or ""}
+        files = {SKILL_MD: row.get("skill_md") or ""}
         for ref in row.get("references") or []:
             path = ref.get("path") if isinstance(ref, dict) else None
             content = ref.get("content") if isinstance(ref, dict) else None
@@ -833,7 +847,7 @@ class SkillStore:
 
     def _materialize(self, dest: Path, bundle: dict, row: dict) -> None:
         extra = {
-            "manifest.json": json.dumps({
+            MANIFEST_JSON: json.dumps({
                 "slug": bundle["slug"], "title": bundle["title"], "purpose": bundle["purpose"],
                 "activation_suggestion": bundle["activation_suggestion"],
                 "content_hash": row["content_hash"], "examples": bundle["examples"],
@@ -853,7 +867,7 @@ class SkillStore:
 
 
 def bundle_refs(bundle: dict) -> list[dict]:
-    return [{"path": p, "content": c} for p, c in sorted(bundle["files"].items()) if p != "SKILL.md"]
+    return [{"path": p, "content": c} for p, c in sorted(bundle["files"].items()) if p != SKILL_MD]
 
 
 def _unified_diff(old: str, new: str, path: str) -> str:
