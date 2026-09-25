@@ -648,7 +648,8 @@ class SettingsService:
             new = next_overlay(old, OverlayRequest(action="confirm_restart", now=time.time()), self._apply_mode)
             if pending is not None:
                 self._commit_overlay(old, new, boot_tried=False)
-            target_revision = new.active.revision if new.active else (active.revision if active else 0)
+            fallback_revision = active.revision if active else 0
+            target_revision = new.active.revision if new.active else fallback_revision
             self._audit(_actor_kind(actor), "restart", [], "ok", revision=target_revision, actor=actor)
             self._restarting = True
         return {"accepted": True, "target_revision": target_revision, "status": "restarting"}
