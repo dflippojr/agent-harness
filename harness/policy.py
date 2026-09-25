@@ -70,38 +70,48 @@ class Decision:
     smart_eligible: bool = False
 
 
-def _matches(rule: dict, name: str, args: dict) -> bool:
+def _in_workspace(value) -> bool:
+    raw = str(value).strip().replace("\\", "/")
+    normalized = posixpath.normpath(raw)
+    return normalized == "/workspace" or normalized.startswith("/workspace/")
+
+
+def _path_rule_matches(rule: dict, args: dict) -> bool:
+    if "path" not in args:
+        return False
+    globs = [rule["path"]] if isinstance(rule["path"], str) else rule["path"]
+    path = normalize_path(args["path"])
+    return any(fnmatch.fnmatch(path, g) for g in globs)
+
+
+def _workspace_paths_match(rule: dict, args: dict) -> bool:
+    values = args.get(rule["workspace_paths"])
+    if not isinstance(values, list) or not values:
+        return False
+    return all(_in_workspace(value) for value in values)
+
+
+def _tool_matches(rule: dict, name: str) -> bool:
     tools = rule.get("tool", "*")
     tools = [tools] if isinstance(tools, str) else tools
     aliases = {name, "run_shell"} if name in ("Bash", "exec_command") else {name}
-    if "*" not in tools and not aliases.intersection(tools):
+    return "*" in tools or bool(aliases.intersection(tools))
+
+
+def _matches(rule: dict, name: str, args: dict) -> bool:
+    if not _tool_matches(rule, name):
         return False
     if "network" in rule and bool(args.get("network", False)) != bool(rule["network"]):
         return False
     for key, pattern in (rule.get("args") or {}).items():
         if not re.search(pattern, str(args.get(key, ""))):
             return False
-    if "path" in rule:
-        if "path" not in args:
-            return False
-        globs = [rule["path"]] if isinstance(rule["path"], str) else rule["path"]
-        path = normalize_path(args["path"])
-        if not any(fnmatch.fnmatch(path, g) for g in globs):
-            return False
-    if "workspace_path" in rule:
-        raw = str(args.get(rule["workspace_path"], "")).strip().replace("\\", "/")
-        normalized = posixpath.normpath(raw)
-        if normalized != "/workspace" and not normalized.startswith("/workspace/"):
-            return False
-    if "workspace_paths" in rule:
-        values = args.get(rule["workspace_paths"])
-        if not isinstance(values, list) or not values:
-            return False
-        for value in values:
-            raw = str(value).strip().replace("\\", "/")
-            normalized = posixpath.normpath(raw)
-            if normalized != "/workspace" and not normalized.startswith("/workspace/"):
-                return False
+    if "path" in rule and not _path_rule_matches(rule, args):
+        return False
+    if "workspace_path" in rule and not _in_workspace(args.get(rule["workspace_path"], "")):
+        return False
+    if "workspace_paths" in rule and not _workspace_paths_match(rule, args):
+        return False
     return True
 
 
@@ -118,25 +128,29 @@ def _delete_outside_scratch(command: str) -> bool:
         return False
     if re.search(r"\bcd\b|\$|`|\*", command.replace("*.pyc", "")):
         return True  # relative targets depend on cwd or expansion we can't evaluate
-    for part in _SPLIT.split(command):
-        try:
-            tokens = shlex.split(part)
-        except ValueError:
-            return True
-        while tokens and tokens[0] in ("sudo", "command", "exec", "xargs"):
-            tokens = tokens[1:]
-        if not tokens or tokens[0] not in _DELETERS:
-            continue
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
-        if not targets:
-            return True
-        for target in targets:
-            path = target if target.startswith("/tmp") else normalize_path(target)
-            if path in (".", "..") or path.startswith("../") or "/../" in path:
-                return True
-            if not any(fnmatch.fnmatch(path, g) for g in SCRATCH_GLOBS):
-                return True
-    return False
+    return any(_part_deletes_outside_scratch(part) for part in _SPLIT.split(command))
+
+
+def _part_deletes_outside_scratch(part: str) -> bool:
+    try:
+        tokens = shlex.split(part)
+    except ValueError:
+        return True
+    while tokens and tokens[0] in ("sudo", "command", "exec", "xargs"):
+        tokens = tokens[1:]
+    if not tokens or tokens[0] not in _DELETERS:
+        return False
+    targets = [t for t in tokens[1:] if not t.startswith("-")]
+    if not targets:
+        return True
+    return any(_target_outside_scratch(target) for target in targets)
+
+
+def _target_outside_scratch(target: str) -> bool:
+    path = target if target.startswith("/tmp") else normalize_path(target)
+    if path in (".", "..") or path.startswith("../") or "/../" in path:
+        return True
+    return not any(fnmatch.fnmatch(path, g) for g in SCRATCH_GLOBS)
 
 
 class Policy:
@@ -179,7 +193,7 @@ class ChatPolicy:
     def fingerprint(self) -> str:
         return "chat-allowlist"
 
-    def decide(self, name: str, args: dict) -> Decision:
+    def decide(self, name: str, _args: dict | None = None) -> Decision:
         if name in CHAT_ALLOWED_TOOLS:
             return Decision(ALLOW)
         return Decision(DENY, "not available in Chat; use Agents for that")
