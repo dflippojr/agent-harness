@@ -94,7 +94,7 @@ Base `(allow default)`, then:
   connections (their local address), letting `curl https://example.com` through. The rules now use
   `network-bind`/`network-inbound` for the local side and `network-outbound (remote ip ...)` for the remote side.
 - Commands get a clean environment (PATH with Homebrew locations first, HOME, LANG, `GIT_TERMINAL_PROMPT=0`, and a
-  TMPDIR private to the session, created with mode 0700 and removed with the workspace) and run in their own process
+  TMPDIR private to the session, created with mode 0700 and named by session id under a private per-user base, so it survives runner restarts, and removed with the workspace) and run in their own process
   group; timeout and cancel kill the group.
 
 ### Verified on the Mac (real profile, runner executor, 2026-09-14)

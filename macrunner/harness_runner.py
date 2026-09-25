@@ -88,7 +88,6 @@ class Executor:
         self.lock = threading.Lock()
         self.procs: dict = {}      # request id -> Popen
         self.proc_sessions: dict = {}  # request id -> session id
-        self.session_tmp: dict = {}  # session id -> private temp directory
 
     # helpers
     def workspace(self, sid: str, create: bool = False) -> Path:
@@ -99,20 +98,40 @@ class Executor:
             ws.mkdir(parents=True, exist_ok=True)
         return ws
 
+    def tmp_base(self) -> Path:
+        """The runner's private base for session temp directories (0700, ours), under the per-user temp area the
+        sandbox profile allows writes to. Session directories are named by session id, so a restarted runner
+        finds the ones its predecessor left."""
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        base = Path(tempfile.gettempdir()) / f"harness-runner-{uid}"
+        base.mkdir(mode=0o700, exist_ok=True)
+        self.check_private(base)
+        return base
+
+    @staticmethod
+    def check_private(path: Path) -> None:
+        if path.is_symlink() or not path.is_dir():
+            raise OpError(f"{path} isn't a plain directory")
+        if hasattr(os, "getuid") and path.stat().st_uid != os.getuid():
+            raise OpError(f"{path} isn't owned by this user")
+
     def tmpdir(self, sid: str) -> Path:
-        """The session's own TMPDIR: created with mode 0700, so other users and sessions can't read it or plant
-        files in it. It lasts until the workspace is discarded or cleaned up."""
+        """The session's own TMPDIR, <private base>/<session id>, created with mode 0700 so other users and sessions
+        can't read it or plant files in it. It lasts until the workspace is discarded or cleaned up, across runner
+        restarts."""
+        if not SESSION_RE.match(sid or ""):
+            raise OpError(f"bad session id {sid!r}")
         with self.lock:
-            path = self.session_tmp.get(sid)
-            if path is None or not path.is_dir():
-                path = self.session_tmp[sid] = Path(tempfile.mkdtemp(prefix=f"harness-{sid}-"))
+            path = self.tmp_base() / sid
+            path.mkdir(mode=0o700, exist_ok=True)
+            self.check_private(path)
             return path
 
     def drop_tmpdir(self, sid: str) -> None:
+        if not SESSION_RE.match(sid or ""):
+            raise OpError(f"bad session id {sid!r}")
         with self.lock:
-            path = self.session_tmp.pop(sid, None)
-        if path is not None:
-            remove_tree(path)
+            remove_tree(self.tmp_base() / sid)
 
     def project(self, params: dict) -> Project:
         repo = params.get("repo") or ""

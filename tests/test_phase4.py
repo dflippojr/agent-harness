@@ -337,13 +337,38 @@ def test_executor_gives_each_session_a_private_tmpdir(tmp_path, monkeypatch):
     first, again, other = (Path(env["TMPDIR"]) for env in envs)
     assert first == again and first != other
     for private in (first, other):
-        assert private.is_dir() and private.parent == shared
+        assert private.is_dir() and private.parent.parent == shared
         if os.name == "posix":
             assert stat.S_IMODE(private.stat().st_mode) == 0o700
     assert ex.handle("r", "cleanup_workspace", {"session": a}) == {"removed": True}
     assert not first.exists() and other.is_dir()
     ex.handle("r", "shell", {"session": a, "command": "true"})
-    assert Path(envs[-1]["TMPDIR"]).is_dir() and Path(envs[-1]["TMPDIR"]) != first
+    assert Path(envs[-1]["TMPDIR"]).is_dir() and Path(envs[-1]["TMPDIR"]) == first
+
+
+def test_session_tmpdir_survives_runner_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    sid = "0123456789"
+    first = executor(tmp_path, [tmp_path]).tmpdir(sid)
+    (first / "scratch").write_text("x")
+    restarted = executor(tmp_path, [tmp_path])
+    assert restarted.tmpdir(sid) == first and (first / "scratch").exists()
+    assert restarted.handle("r", "cleanup_workspace", {"session": sid}) == {"removed": True}
+    assert not first.exists()
+    again = executor(tmp_path, [tmp_path]).tmpdir(sid)
+    executor(tmp_path, [tmp_path]).drop_tmpdir(sid)
+    assert not again.exists()
+
+
+def test_session_tmpdir_rejects_escaping_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    ex = executor(tmp_path, [tmp_path])
+    for bad in ("../x", "..", "a/b", "", "0123456789/../.."):
+        with pytest.raises(harness_runner.OpError):
+            ex.tmpdir(bad)
+        with pytest.raises(harness_runner.OpError):
+            ex.drop_tmpdir(bad)
 
 
 def test_executor_put_file_writes_png_and_refuses_escape(tmp_path, monkeypatch):
