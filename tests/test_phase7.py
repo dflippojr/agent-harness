@@ -361,8 +361,9 @@ def test_cron_next(expr, after, expected):
 
 @pytest.mark.parametrize("bad", ["61 * * * *", "* * *", "0 8 * * funday", "5-1 * * * *", "*/0 * * * *", "0 0 31 2 *"])
 def test_cron_rejects(bad):
+    after = ts(2026, 1, 1, 0, 0)
     with pytest.raises(CronError):
-        Cron(bad).next_after(ts(2026, 1, 1, 0, 0))
+        Cron(bad).next_after(after)
 
 
 def test_parse_status():

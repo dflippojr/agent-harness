@@ -560,7 +560,7 @@ def test_claude_docker_command_is_sandboxed_and_resumable(tmp_path):
     assert not any("bypass" in arg or "skip-permissions" in arg for arg in command)
     keyed = ClaudeSession(session_id="keyed", workspace=tmp_path, backend=backend, sandbox=sandbox,
                           system_prompt="system", api_key="secret-value").command()
-    assert ["-e", "ANTHROPIC_API_KEY"] == keyed[keyed.index("ANTHROPIC_API_KEY") - 1:keyed.index("ANTHROPIC_API_KEY") + 1]
+    assert keyed[keyed.index("ANTHROPIC_API_KEY") - 1:keyed.index("ANTHROPIC_API_KEY") + 1] == ["-e", "ANTHROPIC_API_KEY"]
     assert "secret-value" not in keyed
 
 
@@ -1170,7 +1170,7 @@ def test_codex_docker_command_is_sandboxed(tmp_path):
     assert not any("bypass" in arg or "danger-full-access" in arg for arg in command)
     keyed = CodexSession(session_id="keyed", workspace=tmp_path, backend=backend, sandbox=SandboxConfig(),
                          system_prompt="system", api_key="secret-value").command()
-    assert ["-e", "OPENAI_API_KEY"] == keyed[keyed.index("OPENAI_API_KEY") - 1:keyed.index("OPENAI_API_KEY") + 1]
+    assert keyed[keyed.index("OPENAI_API_KEY") - 1:keyed.index("OPENAI_API_KEY") + 1] == ["-e", "OPENAI_API_KEY"]
     assert "secret-value" not in keyed
 
 
@@ -1364,7 +1364,7 @@ def test_cursor_docker_command_is_sandboxed_forced_and_resumable(tmp_path):
     assert command[-1] == "do it"
     keyed = CursorSession(session_id="keyed", workspace=tmp_path, backend=backend, sandbox=SandboxConfig(),
                           system_prompt="system", api_key="secret-value").command("task")
-    assert ["-e", "CURSOR_API_KEY"] == keyed[keyed.index("CURSOR_API_KEY") - 1:keyed.index("CURSOR_API_KEY") + 1]
+    assert keyed[keyed.index("CURSOR_API_KEY") - 1:keyed.index("CURSOR_API_KEY") + 1] == ["-e", "CURSOR_API_KEY"]
     assert "secret-value" not in keyed
 
 

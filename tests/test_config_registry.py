@@ -67,8 +67,9 @@ def test_registry_specs_are_explicit_and_reject_unknown_keys(tmp_path):
             spec.getter(cfg)
     with pytest.raises(KeyError):
         registry.get("this.is.not.registered")
+    max_turns = registry.get("sessions.max_turns")
     with pytest.raises(ValueError):
-        parse_value(registry.get("sessions.max_turns"), "80")
+        parse_value(max_turns, "80")
     hidden = registry.get("backup.dir")
     assert hidden.apply_mode == "installer_only" and looks_hidden(hidden.key, hidden)
     assert schema_entry(hidden, cfg)["guidance"] == "managed in local configuration"
