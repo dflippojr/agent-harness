@@ -377,6 +377,19 @@ def test_parse_status():
     assert summary("x" * 500).endswith("…") and len(summary("x" * 500)) == 300
 
 
+def test_status_line_edges_and_linear_scan():
+    from harness.jobs import summary
+    # Leading non-word characters may span lines: the blank line and the rule go with the STATUS line.
+    assert summary("Done and dusted, all good here.\n\n---\n\n**STATUS: OK**") == "Done and dusted, all good here."
+    assert parse_status("the STATUS: OK line") == ("", "")  # not at the start of a line
+    assert parse_status("STATUS: ATTENTION\n\n  disk full\nmore") == ("attention", "disk full")
+    assert summary("STATUS: ATTENTION\n\n  disk full\nmore") == "more"
+    assert parse_status("> STATUS: attention - backup is 3 days old") == ("attention", "backup is 3 days old")
+    started = time.monotonic()  # a regex retrying each line start of this run took ~20 s
+    assert parse_status("*\n" * 50_000 + "xSTATUS: OK") == ("", "")
+    assert time.monotonic() - started < 1
+
+
 def jobs_cfg(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.jobs = JobsConfig(enabled=True, poll_seconds=3600)  # tests drive tick() themselves
