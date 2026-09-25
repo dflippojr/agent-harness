@@ -76,15 +76,17 @@ def test_open_owner_legacy_only_without_members(tmp_path):
     cfg_open.allowed_logins = []
     with pytest.raises(ValueError, match="explicit allowed_logins"):
         require_owner_allowlist(cfg_open, 1)
+    db = Database(cfg.db_path)
     with pytest.raises(ValueError, match="explicit allowed_logins"):
-        Manager(cfg_open, db=Database(cfg.db_path))
+        Manager(cfg_open, db=db)
 
 
 def test_first_member_requires_owner_allowlist(tmp_path):
     cfg = make_cfg(tmp_path)
     m = Manager(cfg, chat=Script([Completion(content="x")]))
+    accounts = AccountService(m)
     with pytest.raises(HarnessError) as exc:
-        AccountService(m).create(OWNER_USER_ID, ALICE, "Alice")
+        accounts.create(OWNER_USER_ID, ALICE, "Alice")
     assert exc.value.status == 400
     assert "allowlist" in str(exc.value)
 
