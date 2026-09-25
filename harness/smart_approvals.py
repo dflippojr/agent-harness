@@ -23,8 +23,14 @@ RECOMMENDATIONS = frozenset({"approve", "deny", "escalate"})
 RISK_FLAGS = ("network", "destructive", "secrets", "privilege", "publication", "injection", "ambiguous", "other")
 # Any listed flag, including ambiguous/other, forces a human card (issue #18).
 BLOCKING_FLAGS = frozenset(RISK_FLAGS)
+REASON_MISSING_CREDENTIAL = "missing credential"
+REASON_RATE_LIMITED = "rate limited"
+REASON_PROVIDER_ERROR = "provider error"
+REASON_MALFORMED_JSON = "malformed JSON"
+REASON_UNPARSEABLE_COMMAND = "unparseable command"
+REASON_SCHEMA_VIOLATION = "schema violation"
 FAILURE_REASONS = frozenset({
-    "timeout", "malformed JSON", "provider error", "missing credential", "invalid output", "rate limited",
+    "timeout", REASON_MALFORMED_JSON, REASON_PROVIDER_ERROR, REASON_MISSING_CREDENTIAL, "invalid output", REASON_RATE_LIMITED,
 })
 MODES = ("off", "shadow", "auto")
 PROVIDERS = ("openai", "anthropic")
@@ -59,8 +65,8 @@ _CARGO = frozenset({"test", "check", "build", "clippy"})
 _GO = frozenset({"test", "vet", "build", "fmt"})
 _GO_PKG_RE = re.compile(r"^\.(?:/.*)?$")
 _PY_SCRIPT_RE = re.compile(r".+\.py$")
-_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-_NUMERIC_SHORT_RE = re.compile(r"^-[0-9]+$")
+_ASSIGN_RE = re.compile(r"(?a)^([A-Za-z_]\w*)=(.*)$")
+_NUMERIC_SHORT_RE = re.compile(r"(?a)^-\d+$")
 _CLUSTER_RE = re.compile(r"^-[A-Za-z]+$")
 _GIT_FORCE_RE = re.compile(r"(?i)\s(-d|--delete|--force|-f)\b")
 
@@ -85,8 +91,8 @@ _PUBLISH_RE = re.compile(
 )
 _FORCE_RE = re.compile(r"(?i)\b(git\s+(reset\s+--hard|clean\s+-\w*f)|--force\b|\b-f\b\s|--no-verify)\b")
 _PRIV_RE = re.compile(r"(?i)\b(sudo|doas|pkexec|chmod\s+[0-7]{3,4}|chown\b|chgrp\b|newgrp\b)\b")
-_SUBST_RE = re.compile(r"(?<!\\)(?:\$|`)")
-_WIN_ENV_RE = re.compile(r"%[A-Za-z_~][^%\s]{0,127}%|![A-Za-z_][A-Za-z0-9_]*!")
+_SUBST_RE = re.compile(r"(?<!\\)[$`]")
+_WIN_ENV_RE = re.compile(r"%[A-Za-z_~][^%\s]{0,127}%|![A-Za-z_](?a:\w*)!")
 _BRACE_RE = re.compile(r"(?<!\\)\{[^{}\n]{0,200}[,.][^{}\n]{0,200}\}")
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _GLOB_RE = re.compile(r"(?<!\\)[*?\[]")
@@ -212,57 +218,87 @@ def save_runtime_mode(db, mode: str) -> str:
     return mode
 
 
+class _CommentStripper:
+    """Single-pass scanner that removes bash comments without touching quoted or escaped text."""
+
+    def __init__(self, command: str):
+        self.command = command
+        self.n = len(command)
+        self.out: list[str] = []
+        self.i = 0
+        self.quote = ""
+        self.word_start = True
+        self.had_comment = False
+
+    def _step_quoted(self, ch: str) -> None:
+        self.out.append(ch)
+        if ch == "\\" and self.quote != "'" and self.i + 1 < self.n:
+            self.out.append(self.command[self.i + 1])
+            self.i += 2
+            return
+        if ch == self.quote:
+            self.quote = ""
+        self.i += 1
+
+    def _open_quote(self, ch: str) -> None:
+        self.quote = ch
+        self.out.append(ch)
+        self.word_start = False
+        self.i += 1
+
+    def _escape(self, ch: str) -> None:
+        self.out.extend((ch, self.command[self.i + 1]))
+        if self.command[self.i + 1] != "\n":
+            self.word_start = False
+        self.i += 2
+
+    def _comment(self) -> bool:
+        """Skip one comment; True when its text looks like a prompt injection."""
+        self.had_comment = True
+        rest = self.command[self.i + 1:]
+        nl = rest.find("\n")
+        text = rest if nl < 0 else rest[:nl]
+        if _INJECTION_RE.search(text):
+            return True
+        self.i = self.n if nl < 0 else self.i + 1 + nl
+        return False
+
+    def run(self) -> tuple[str, str]:
+        while self.i < self.n:
+            ch = self.command[self.i]
+            if self.quote:
+                self._step_quoted(ch)
+            elif ch in "'\"":
+                self._open_quote(ch)
+            elif ch == "\\" and self.i + 1 < self.n:
+                self._escape(ch)
+            # Bash recognizes a comment only when an unquoted # begins a word.
+            # A hash in ``path#suffix`` is ordinary data and everything after it
+            # must remain visible to the safety checks.
+            elif ch == "#" and self.word_start:
+                if self._comment():
+                    return self.command, "prompt-injection comment"
+            else:
+                self.out.append(ch)
+                self.word_start = ch.isspace() or ch in "|&;()<>"
+                self.i += 1
+        if self.quote:
+            return self.command, "unbalanced quotes"
+        stripped = "".join(self.out).strip() if self.had_comment else "".join(self.out)
+        return stripped, ""
+
+
 def strip_shell_comments(command: str) -> tuple[str, str]:
     """Return (stripped, error). error is set when comments cannot be removed safely."""
-    out, i, n = [], 0, len(command)
-    quote = ""
-    comment = []
-    word_start = True
-    had_comment = False
-    while i < n:
-        ch = command[i]
-        if quote:
-            out.append(ch)
-            if ch == "\\" and quote != "'" and i + 1 < n:
-                out.append(command[i + 1])
-                i += 2
-                continue
-            if ch == quote:
-                quote = ""
-            i += 1
-            continue
-        if ch in "'\"":
-            quote = ch
-            out.append(ch)
-            word_start = False
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            out.extend((ch, command[i + 1]))
-            if command[i + 1] != "\n":
-                word_start = False
-            i += 2
-            continue
-        # Bash recognizes a comment only when an unquoted # begins a word.
-        # A hash in ``path#suffix`` is ordinary data and everything after it
-        # must remain visible to the safety checks.
-        if ch == "#" and word_start:
-            had_comment = True
-            rest = command[i + 1:]
-            nl = rest.find("\n")
-            text = rest if nl < 0 else rest[:nl]
-            comment.append(text)
-            if _INJECTION_RE.search(text):
-                return command, "prompt-injection comment"
-            i = n if nl < 0 else i + 1 + nl
-            continue
-        out.append(ch)
-        word_start = ch.isspace() or ch in "|&;()<>"
-        i += 1
-    if quote:
-        return command, "unbalanced quotes"
-    stripped = "".join(out).strip() if had_comment else "".join(out)
-    return stripped, ""
+    return _CommentStripper(command).run()
+
+
+def _advance_in_quote(command: str, i: int, quote: str) -> tuple[int, str]:
+    if command[i] == "\\" and quote != "'" and i + 1 < len(command):
+        return i + 2, quote
+    if command[i] == quote:
+        quote = ""
+    return i + 1, quote
 
 
 def _has_unquoted_hash(command: str) -> bool:
@@ -272,12 +308,7 @@ def _has_unquoted_hash(command: str) -> bool:
     while i < len(command):
         ch = command[i]
         if quote:
-            if ch == "\\" and quote != "'" and i + 1 < len(command):
-                i += 2
-                continue
-            if ch == quote:
-                quote = ""
-            i += 1
+            i, quote = _advance_in_quote(command, i, quote)
             continue
         if ch == "\\" and i + 1 < len(command):
             if command[i + 1] == "#":
@@ -503,6 +534,36 @@ _SHAPES.update({name: (
 ) for name in _NPM})
 
 
+def _consume_flag(tok: str, shape: _ArgvShape, flags: set[str], has_next: bool) -> int | None:
+    """Accept one dash-prefixed token; returns how many argv entries it consumed, or None to reject."""
+    name, eq, _val = tok.partition("=")
+    if eq:
+        if name not in shape.value_flags:
+            return None
+        flags.add(name)
+        return 1
+    if shape.numeric_short and _NUMERIC_SHORT_RE.fullmatch(tok):
+        flags.add(tok)
+        return 1
+    if tok in shape.value_flags:
+        if not has_next:
+            return None
+        flags.add(tok)
+        return 2
+    if tok in shape.flags:
+        flags.add(tok)
+        return 1
+    if len(tok) > 2 and tok[1] != "-" and tok[:2] in shape.value_flags:
+        flags.add(tok[:2])
+        return 1
+    if shape.clustered and _CLUSTER_RE.fullmatch(tok):
+        letters = [f"-{c}" for c in tok[1:]]
+        if all(letter in shape.flags for letter in letters):
+            flags.update(letters)
+            return 1
+    return None
+
+
 def _parse_closed_argv(rest: list[str], shape: _ArgvShape) -> tuple[set[str], list[str]] | None:
     """Split rest into (flags, positionals) or None if the argv is outside the shape."""
     flags: set[str] = set()
@@ -517,43 +578,29 @@ def _parse_closed_argv(rest: list[str], shape: _ArgvShape) -> tuple[set[str], li
             if assign.group(1) not in shape.assign_names:
                 return None
             i += 1
-            continue
-        if tok.startswith("-"):
-            name, eq, _val = tok.partition("=")
-            if eq:
-                if name not in shape.value_flags:
-                    return None
-                flags.add(name)
-                i += 1
-                continue
-            if shape.numeric_short and _NUMERIC_SHORT_RE.fullmatch(tok):
-                flags.add(tok)
-                i += 1
-                continue
-            if tok in shape.value_flags:
-                if i + 1 >= n:
-                    return None
-                flags.add(tok)
-                i += 2
-                continue
-            if tok in shape.flags:
-                flags.add(tok)
-                i += 1
-                continue
-            if len(tok) > 2 and tok[1] != "-" and tok[:2] in shape.value_flags:
-                flags.add(tok[:2])
-                i += 1
-                continue
-            if shape.clustered and _CLUSTER_RE.fullmatch(tok):
-                letters = [f"-{c}" for c in tok[1:]]
-                if all(letter in shape.flags for letter in letters):
-                    flags.update(letters)
-                    i += 1
-                    continue
-            return None
-        positionals.append(tok)
-        i += 1
+        elif tok.startswith("-"):
+            step = _consume_flag(tok, shape, flags, i + 1 < n)
+            if step is None:
+                return None
+            i += step
+        else:
+            positionals.append(tok)
+            i += 1
     return flags, positionals
+
+
+def _strip_verbs(positionals: list[str], shape: _ArgvShape) -> list[str] | None:
+    """Positionals left after the verb (and npm-style script), or None if the verb is not allowed."""
+    if shape.verbs is None:
+        return positionals
+    if not positionals or positionals[0] not in shape.verbs:
+        return None
+    extras = positionals[1:]
+    if shape.run_verb and positionals[0] == shape.run_verb:
+        if not extras or extras[0] not in (shape.scripts or frozenset()):
+            return None
+        extras = extras[1:]
+    return extras
 
 
 def _matches(tokens: list[str], shape: _ArgvShape) -> bool:
@@ -563,15 +610,9 @@ def _matches(tokens: list[str], shape: _ArgvShape) -> bool:
     flags, positionals = parsed
     if not shape.require_flags <= flags:
         return False
-    extras = positionals
-    if shape.verbs is not None:
-        if not positionals or positionals[0] not in shape.verbs:
-            return False
-        extras = positionals[1:]
-        if shape.run_verb and positionals[0] == shape.run_verb:
-            if not extras or extras[0] not in (shape.scripts or frozenset()):
-                return False
-            extras = extras[1:]
+    extras = _strip_verbs(positionals, shape)
+    if extras is None:
+        return False
     if len(extras) < shape.min_positionals or len(extras) > shape.max_positionals:
         return False
     if shape.allowed_positionals is not None and any(p not in shape.allowed_positionals for p in extras):
@@ -612,64 +653,88 @@ def _binary_ok(tokens: list[str]) -> bool:
     return _shape_ok(tokens)
 
 
-def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool = False) -> Eligibility:
-    """Static gate. Must succeed before any provider call. The model is not the parser."""
-    rule = decision.reason or ""
-    base = Eligibility(ok=False, tool=name, rule=rule, repo=repo,
-                       network=bool(args.get("network")), workspace=True)
+def _policy_rejection(name: str, args: dict, decision: Decision) -> tuple[str, dict] | None:
+    """Reason (and extra Eligibility fields) when the tool call fails before its command is inspected."""
     if decision.action != ASK:
-        return Eligibility(ok=False, reason=f"policy {decision.action}", tool=name, rule=rule)
+        return f"policy {decision.action}", {}
     if not decision.smart_eligible:
-        return Eligibility(ok=False, reason="rule is not smart-eligible", tool=name, rule=rule)
+        return "rule is not smart-eligible", {}
     if name not in SHELL_TOOLS:
-        return Eligibility(ok=False, reason="tool is not a hosted-backend shell", tool=name, rule=rule)
+        return "tool is not a hosted-backend shell", {}
     if args.get("network"):
-        return Eligibility(ok=False, reason="networked command", tool=name, rule=rule, network=True)
+        return "networked command", {"network": True}
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
-        return Eligibility(ok=False, reason="unparseable command", tool=name, rule=rule)
+        return REASON_UNPARSEABLE_COMMAND, {}
     if len(command) > MAX_COMMAND:
-        return Eligibility(ok=False, reason="command too long", tool=name, rule=rule)
+        return "command too long", {}
+    return None
+
+
+def _command_rejection(command: str, args: dict) -> str | None:
+    """Reason the command text is not eligible, checked in a fixed order, or None."""
     _stripped, err = strip_shell_comments(command)
     if err:
-        return Eligibility(ok=False, reason=err, tool=name, rule=rule, command=command)
+        return err
     # The runner executes args["command"], not a comment-stripped copy. Keep
     # every hash outside quotes human-only so the reviewed and executed bytes
     # can never diverge, even for escaped hashes or genuine Bash comments.
     if _has_unquoted_hash(command):
-        return Eligibility(ok=False, reason="unquoted hash", tool=name, rule=rule, command=command)
+        return "unquoted hash"
     if _INJECTION_RE.search(command) or _INJECTION_RE.search(str(args.get("description") or "")):
-        return Eligibility(ok=False, reason="prompt-injection text", tool=name, rule=rule, command=command)
+        return "prompt-injection text"
     if _secretish(command) or any(_secretish(str(v)) for v in args.values() if isinstance(v, str)):
-        return Eligibility(ok=False, reason="possible secret", tool=name, rule=rule, command=command)
+        return "possible secret"
     if _CHAIN_RE.search(command):
-        return Eligibility(ok=False, reason="shell chaining", tool=name, rule=rule, command=command)
+        return "shell chaining"
     if _SUBST_RE.search(command) or _WIN_ENV_RE.search(command) or _BRACE_RE.search(command):
-        return Eligibility(ok=False, reason="unresolved substitution", tool=name, rule=rule, command=command)
+        return "unresolved substitution"
     if _GLOB_RE.search(command):
-        return Eligibility(ok=False, reason="unresolved glob", tool=name, rule=rule, command=command)
+        return "unresolved glob"
+    return _effect_rejection(command)
+
+
+def _effect_rejection(command: str) -> str | None:
+    """Reason the command reaches the network, publishes, escalates, or deletes outside scratch."""
     if _NETWORK_RE.search(command):
-        return Eligibility(ok=False, reason="networked command", tool=name, rule=rule, command=command)
+        return "networked command"
     if _PUBLISH_RE.search(command) or _FORCE_RE.search(command):
-        return Eligibility(ok=False, reason="publication or force operation", tool=name, rule=rule, command=command)
+        return "publication or force operation"
     if _PRIV_RE.search(command):
-        return Eligibility(ok=False, reason="privilege escalation", tool=name, rule=rule, command=command)
+        return "privilege escalation"
     if _delete_outside_scratch(command):
-        return Eligibility(ok=False, reason="deletes files outside the scratch area", tool=name, rule=rule,
-                           command=command)
+        return "deletes files outside the scratch area"
+    return None
+
+
+def _tokens_rejection(command: str) -> str | None:
+    """Reason the tokenised command is not routine workspace work, or None."""
     try:
         tokens = shlex.split(command)
     except ValueError:
-        return Eligibility(ok=False, reason="unparseable command", tool=name, rule=rule, command=command)
+        return REASON_UNPARSEABLE_COMMAND
     if not tokens:
-        return Eligibility(ok=False, reason="unparseable command", tool=name, rule=rule, command=command)
+        return REASON_UNPARSEABLE_COMMAND
     while tokens and tokens[0] in ("command",):
         tokens = tokens[1:]
     if not tokens or not _binary_ok(tokens):
-        return Eligibility(ok=False, reason="command is not routine workspace work", tool=name, rule=rule,
-                           command=command)
+        return "command is not routine workspace work"
     if not _paths_confined(command, tokens):
-        return Eligibility(ok=False, reason="path escapes workspace", tool=name, rule=rule, command=command)
+        return "path escapes workspace"
+    return None
+
+
+def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool = False) -> Eligibility:
+    """Static gate. Must succeed before any provider call. The model is not the parser."""
+    rule = decision.reason or ""
+    early = _policy_rejection(name, args, decision)
+    if early is not None:
+        reason, extra = early
+        return Eligibility(ok=False, reason=reason, tool=name, rule=rule, **extra)
+    command = args["command"]
+    reason = _command_rejection(command, args) or _tokens_rejection(command)
+    if reason is not None:
+        return Eligibility(ok=False, reason=reason, tool=name, rule=rule, command=command)
     return Eligibility(ok=True, reason="eligible", tool=name, rule=rule, command=command,
                        repo=repo, network=False, workspace=True)
 
@@ -689,37 +754,37 @@ def reviewer_payload(eligibility: Eligibility) -> dict:
 def parse_reviewer_output(text: str) -> Review:
     """Strict structured output. Extra text or schema violations escalate."""
     if text is None or not isinstance(text, str):
-        return Review("escalate", escalate_reason="malformed JSON")
+        return Review("escalate", escalate_reason=REASON_MALFORMED_JSON)
     raw = text.strip()
     if not raw:
-        return Review("escalate", escalate_reason="malformed JSON")
+        return Review("escalate", escalate_reason=REASON_MALFORMED_JSON)
     try:
         data = json.loads(raw)
     except ValueError:
-        return Review("escalate", escalate_reason="malformed JSON")
+        return Review("escalate", escalate_reason=REASON_MALFORMED_JSON)
     if not isinstance(data, dict):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     allowed = {"recommendation", "confidence", "reason", "risk_flags"}
     if set(data) - allowed or allowed - set(data):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     rec = data.get("recommendation")
     if rec not in RECOMMENDATIONS:
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     try:
         confidence = float(data.get("confidence"))
     except (TypeError, ValueError):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     if not 0 <= confidence <= 1:  # NaN, below 0, or above 1
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     reason = data.get("reason")
     if not isinstance(reason, str):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     flags = data.get("risk_flags")
     if not isinstance(flags, list) or any(not isinstance(f, str) for f in flags):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     unknown = [f for f in flags if f not in RISK_FLAGS]
     if unknown:
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     return Review(rec, confidence=confidence, reason=reason.strip()[:REASON_LIMIT],
                   risk_flags=list(dict.fromkeys(flags)))
 
@@ -727,10 +792,10 @@ def parse_reviewer_output(text: str) -> Review:
 def _read_secret(cfg, secret_ref: str) -> str:
     path = (cfg.provider_secret_files or {}).get(secret_ref, "") if cfg is not None else ""
     if not secret_ref or not path:
-        raise FileNotFoundError("missing credential")
+        raise FileNotFoundError(REASON_MISSING_CREDENTIAL)
     text = Path(path).read_text(encoding="utf-8").strip()
     if not text:
-        raise FileNotFoundError("missing credential")
+        raise FileNotFoundError(REASON_MISSING_CREDENTIAL)
     return text
 
 
@@ -747,46 +812,54 @@ def _usage(data: dict) -> tuple[int, int, float]:
     return prompt, completion, cost
 
 
+def _hosted_request(cfg: SmartConfig, secret: str, user: str) -> tuple[str, dict, dict]:
+    """(url, headers, body) for the configured hosted provider."""
+    headers = {"Content-Type": "application/json"}
+    if cfg.provider == "anthropic":
+        headers.update({"x-api-key": secret, "anthropic-version": "2023-06-01"})
+        body = {"model": cfg.model, "max_tokens": 200, "temperature": 0,
+                "system": SYSTEM_PROMPT, "messages": [{"role": "user", "content": user}]}
+        return "https://api.anthropic.com/v1/messages", headers, body
+    headers["Authorization"] = f"Bearer {secret}"
+    body = {"model": cfg.model, "temperature": 0, "max_tokens": 200,
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                         {"role": "user", "content": user}]}
+    return "https://api.openai.com/v1/chat/completions", headers, body
+
+
+def _anthropic_reply(data: dict) -> tuple[str, int, int, float]:
+    blocks = data.get("content") if isinstance(data.get("content"), list) else []
+    text = "".join(b.get("text") or "" for b in blocks if isinstance(b, dict))
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return text, int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0), 0.0
+
+
+def _openai_reply(data: dict) -> tuple[str, int, int, float]:
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    message = (choices[0].get("message") or {}) if choices and isinstance(choices[0], dict) else {}
+    prompt, completion, cost = _usage(data)
+    return str(message.get("content") or ""), prompt, completion, cost
+
+
 async def hosted_complete(cfg: SmartConfig, secret: str, payload: dict) -> Review:
     """Official hosted API only. No tools, browsing, workspace, history, or session reuse."""
     user = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     timeout = httpx.Timeout(cfg.timeout_seconds, connect=min(3.0, cfg.timeout_seconds))
     proxy = cfg.proxy or None
-    headers = {"Content-Type": "application/json"}
-    if cfg.provider == "anthropic":
-        url = "https://api.anthropic.com/v1/messages"
-        headers.update({"x-api-key": secret, "anthropic-version": "2023-06-01"})
-        body = {"model": cfg.model, "max_tokens": 200, "temperature": 0,
-                "system": SYSTEM_PROMPT, "messages": [{"role": "user", "content": user}]}
-    else:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers["Authorization"] = f"Bearer {secret}"
-        body = {"model": cfg.model, "temperature": 0, "max_tokens": 200,
-                "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                             {"role": "user", "content": user}]}
+    url, headers, body = _hosted_request(cfg, secret, user)
     # trust_env=False: HTTP(S)_PROXY must not intercept the reviewer key + command.
     async with httpx.AsyncClient(timeout=timeout, proxy=proxy, trust_env=False) as client:
         resp = await client.post(url, headers=headers, json=body)
     if resp.status_code == 429:
-        raise TimeoutError("rate limited")
+        raise TimeoutError(REASON_RATE_LIMITED)
     if resp.status_code in (401, 403):
-        raise FileNotFoundError("missing credential")
+        raise FileNotFoundError(REASON_MISSING_CREDENTIAL)
     if resp.status_code >= 400:
         raise RuntimeError(f"provider HTTP {resp.status_code}")
     data = resp.json()
-    if cfg.provider == "anthropic":
-        blocks = data.get("content") if isinstance(data.get("content"), list) else []
-        text = "".join(b.get("text") or "" for b in blocks if isinstance(b, dict))
-        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-        prompt = int(usage.get("input_tokens") or 0)
-        completion = int(usage.get("output_tokens") or 0)
-        cost = 0.0
-    else:
-        choices = data.get("choices") if isinstance(data.get("choices"), list) else []
-        message = (choices[0].get("message") or {}) if choices and isinstance(choices[0], dict) else {}
-        text = str(message.get("content") or "")
-        prompt, completion, cost = _usage(data)
+    reply = _anthropic_reply if cfg.provider == "anthropic" else _openai_reply
+    text, prompt, completion, cost = reply(data)
     review = parse_reviewer_output(text)
     review.prompt_tokens, review.completion_tokens, review.cost_usd = prompt, completion, cost
     return review
@@ -814,6 +887,10 @@ def sanitized_record(review: Review, *, policy_fingerprint: str, mode: str, outc
     }
 
 
+def _timeout_reason(exc: TimeoutError) -> str:
+    return REASON_RATE_LIMITED if "rate" in str(exc).lower() else "timeout"
+
+
 class SmartReviewer:
     """Per-call reviewer. Reads live mode from SQLite so disable/shadow/auto apply immediately."""
 
@@ -829,6 +906,35 @@ class SmartReviewer:
                            secret_ref=base.secret_ref, timeout_seconds=base.timeout_seconds,
                            min_confidence=base.min_confidence, mode=mode, proxy=base.proxy)
 
+    async def _run_injected(self, payload: dict) -> Review:
+        """Run the injected test completer and normalise its Review, dict or JSON-string result."""
+        result = self.complete(payload)
+        if hasattr(result, "__await__"):
+            result = await result
+        if isinstance(result, Review):
+            return result
+        if isinstance(result, dict):
+            return parse_reviewer_output(json.dumps(result))
+        if isinstance(result, str):
+            return parse_reviewer_output(result)
+        return Review("escalate", escalate_reason="invalid output")
+
+    async def _complete(self, settings: SmartConfig, payload: dict) -> Review:
+        """Call the reviewer; every provider failure becomes an escalating Review."""
+        try:
+            if self.complete is not None:
+                return await self._run_injected(payload)
+            secret = _read_secret(self.cfg, settings.secret_ref)
+            return await hosted_complete(settings, secret, payload)
+        except FileNotFoundError:
+            return Review("escalate", escalate_reason=REASON_MISSING_CREDENTIAL)
+        except TimeoutError as e:
+            return Review("escalate", escalate_reason=_timeout_reason(e))
+        except httpx.TimeoutException:
+            return Review("escalate", escalate_reason="timeout")
+        except Exception:  # includes httpx.HTTPError
+            return Review("escalate", escalate_reason=REASON_PROVIDER_ERROR)
+
     async def consider(self, db, policy: Policy, name: str, args: dict, decision: Decision,
                        *, repo: bool = False) -> tuple[Eligibility, Review | None]:
         """Return (eligibility, review). review is None when the provider was not called."""
@@ -841,42 +947,16 @@ class SmartReviewer:
         payload = reviewer_payload(eligibility)
         self.calls.append(payload)
         started = time.monotonic()
-        review = Review("escalate", escalate_reason="provider error", provider=settings.provider,
-                        model=settings.model, mode=settings.mode)
-        try:
-            if self.complete is not None:
-                result = self.complete(payload)
-                if hasattr(result, "__await__"):
-                    result = await result
-                if isinstance(result, Review):
-                    review = result
-                elif isinstance(result, dict):
-                    review = parse_reviewer_output(json.dumps(result))
-                elif isinstance(result, str):
-                    review = parse_reviewer_output(result)
-                else:
-                    review = Review("escalate", escalate_reason="invalid output")
-            else:
-                secret = _read_secret(self.cfg, settings.secret_ref)
-                review = await hosted_complete(settings, secret, payload)
-        except FileNotFoundError:
-            review = Review("escalate", escalate_reason="missing credential")
-        except TimeoutError as e:
-            review = Review("escalate", escalate_reason="rate limited" if "rate" in str(e).lower() else "timeout")
-        except httpx.TimeoutException:
-            review = Review("escalate", escalate_reason="timeout")
-        except httpx.HTTPError:
-            review = Review("escalate", escalate_reason="provider error")
-        except Exception:
-            review = Review("escalate", escalate_reason="provider error")
+        review = await self._complete(settings, payload)
         review.latency_ms = int((time.monotonic() - started) * 1000)
         review.provider = review.provider or settings.provider
         review.model = review.model or settings.model
         review.mode = settings.mode
-        if review.recommendation == "approve" and review.confidence < settings.min_confidence:
-            review.escalate_reason = review.escalate_reason or "low confidence"
-        if review.risk_flags and review.recommendation == "approve":
-            review.escalate_reason = review.escalate_reason or "risk flags"
+        if review.recommendation == "approve":
+            if review.confidence < settings.min_confidence:
+                review.escalate_reason = review.escalate_reason or "low confidence"
+            if review.risk_flags:
+                review.escalate_reason = review.escalate_reason or "risk flags"
         return eligibility, review
 
     def should_auto_approve(self, review: Review | None) -> bool:

@@ -19,6 +19,7 @@ from .storage import account_usage_bytes, ensure_user_dirs
 LOGIN_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}$")
 NAME_MAX = 80
 HINT_LEN = 8
+ONE_ROLE_ONLY = "a login cannot occupy more than one role"
 
 
 def account_hint(user_id: str) -> str:
@@ -73,10 +74,10 @@ class AccountService:
         display_name = validate_display_name(display_name)
         if login in self._cfg().allowed_logins:
             self._db().insert_audit(actor_id, "", "create", "denied", "login is an owner")
-            raise HarnessError(400, "a login cannot occupy more than one role")
+            raise HarnessError(400, ONE_ROLE_ONLY)
         if any(g.login == login for g in self._cfg().guests):
             self._db().insert_audit(actor_id, "", "create", "denied", "login is a guest")
-            raise HarnessError(400, "a login cannot occupy more than one role")
+            raise HarnessError(400, ONE_ROLE_ONLY)
         if self._db().account_by_login(login) is not None:
             self._db().insert_audit(actor_id, "", "create", "denied", "login already a member")
             raise HarnessError(409, "a household account already uses that login")
@@ -119,7 +120,7 @@ class AccountService:
             return self.public_account(account)
         if login in self._cfg().allowed_logins or any(g.login == login for g in self._cfg().guests):
             self._db().insert_audit(actor_id, user_id, "rebind", "denied", "login occupies another role")
-            raise HarnessError(400, "a login cannot occupy more than one role")
+            raise HarnessError(400, ONE_ROLE_ONLY)
         existing = self._db().account_by_login(login)
         if existing is not None and existing["user_id"] != user_id:
             self._db().insert_audit(actor_id, user_id, "rebind", "denied", "login already a member")

@@ -376,7 +376,7 @@ class MemoryLibrary:
         args = {"path": path, "content": content, "summary": summary}
         async with self._lock:
             await self._sync_for_write()
-            f, rel, old, new = self._proposal("memory_write", args)
+            f, rel, _, new = self._proposal("memory_write", args)
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(new, encoding="utf-8")
             message = f"{' '.join(summary.split())[:150]}\n\nSaved from Agent Harness Web Settings."

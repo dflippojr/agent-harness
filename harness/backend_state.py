@@ -104,6 +104,18 @@ def local_view(manager) -> dict:
     }
 
 
+def _credential_state(cfg, provider_policy: dict | None, check_auth: bool) -> tuple[bool, str, bool]:
+    """(allowed, effective auth mode, api key ready) for a backend under an optional app provider policy."""
+    if provider_policy and provider_policy["managed"]:
+        allowed = provider_policy["allowed"]
+        effective_auth = provider_policy["policy"] if allowed else "denied"
+        key_ready = provider_policy["available"] if provider_policy["credential_source"] == "app_file" else False
+        return allowed, effective_auth, key_ready
+    # An unauthenticated discovery response must not reveal whether the owner has a key file.
+    key_ready = bool(check_auth and cfg.api_key_file and Path(cfg.api_key_file).is_file())
+    return True, cfg.auth, key_ready
+
+
 def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
          include_usage: bool = True) -> dict:
     cfg = manager.cfg.backends[name]
@@ -112,15 +124,7 @@ def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
     local_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     week = now - 7 * 86400
     provider_policy = manager.app_provider_status(app_id, name) if app_id is not None else None
-    effective_auth = cfg.auth
-    allowed = True
-    if provider_policy and provider_policy["managed"]:
-        allowed = provider_policy["allowed"]
-        effective_auth = provider_policy["policy"] if allowed else "denied"
-        key_ready = provider_policy["available"] if provider_policy["credential_source"] == "app_file" else False
-    else:
-        # An unauthenticated discovery response must not reveal whether the owner has a key file.
-        key_ready = bool(check_auth and cfg.api_key_file and Path(cfg.api_key_file).is_file())
+    allowed, effective_auth, key_ready = _credential_state(cfg, provider_policy, check_auth)
     subscription = (_subscription_status(name, cfg)
                     if check_auth and effective_auth not in ("api_key", "denied") else False)
     logged_in = key_ready if effective_auth == "api_key" else subscription
@@ -160,69 +164,84 @@ def _prefs(manager) -> dict:
 def apply_prefs(manager) -> None:
     """Overlay Settings → Backends model/effort choices onto the in-memory config."""
     for name, spec in _prefs(manager).items():
-        if not isinstance(spec, dict):
-            continue
-        model = str(spec.get("model") or "").strip()[:80]
-        effort = str(spec.get("effort") or "").strip()
-        if name == "local":
-            if model in manager.cfg.models:
-                manager.cfg.default_model = model
-        elif name in manager.cfg.backends:
-            if model:
-                manager.cfg.backends[name].model = model
-            if effort in EFFORTS:
-                manager.cfg.backends[name].effort = effort
+        if isinstance(spec, dict):
+            _apply_pref(manager, name, spec)
+
+
+def _apply_pref(manager, name: str, spec: dict) -> None:
+    model = str(spec.get("model") or "").strip()[:80]
+    effort = str(spec.get("effort") or "").strip()
+    if name == "local":
+        if model in manager.cfg.models:
+            manager.cfg.default_model = model
+    elif name in manager.cfg.backends:
+        if model:
+            manager.cfg.backends[name].model = model
+        if effort in EFFORTS:
+            manager.cfg.backends[name].effort = effort
+
+
+def _save_prefs_via_settings(manager, settings, name: str, model: str | None, effort: str | None) -> dict:
+    changes = {}
+    if name == "local":
+        if model is not None:
+            changes["backends.local.model"] = model
+    elif f"backends.{name}.model" in settings.registry.specs or name in manager.cfg.backends:
+        if model is not None:
+            changes[f"backends.{name}.model"] = model
+        if effort is not None:
+            changes[f"backends.{name}.effort"] = effort
+    else:
+        raise KeyError(name)
+    if not changes:
+        raise ValueError("set model or effort")
+    try:
+        settings.patch_admin(changes, settings.admin_view()["revision"])
+    except Exception as e:
+        from .settings_service import SettingsError
+        if isinstance(e, SettingsError):
+            raise ValueError(str(e)) from e
+        raise
+    if name == "local":
+        return {"model": manager.cfg.default_model}
+    backend = manager.cfg.backends[name]
+    return {"model": backend.model, "effort": backend.effort}
+
+
+def _update_local_pref(manager, spec: dict, model: str | None) -> None:
+    if not manager.cfg.modules.local_model:
+        raise ValueError("the local model is disabled by this service profile")
+    if model is not None:
+        model = model.strip()
+        if model not in manager.cfg.models:
+            raise ValueError(f"unknown model {model!r}; known: {', '.join(manager.cfg.models)}")
+        spec["model"] = model
+        spec.pop("effort", None)
+
+
+def _update_hosted_pref(spec: dict, model: str | None, effort: str | None) -> None:
+    if model is not None:
+        model = model.strip()[:80]
+        if not model:
+            raise ValueError("model is empty")
+        spec["model"] = model
+    if effort is not None:
+        if effort not in EFFORTS:
+            raise ValueError(f"effort must be one of {', '.join(EFFORTS)}")
+        spec["effort"] = effort
 
 
 def save_prefs(manager, name: str, model: str | None = None, effort: str | None = None) -> dict:
     """Persist a default model/effort for `name` (`local` or a hosted backend) and apply it now."""
     settings = getattr(manager, "settings", None)
     if settings is not None:
-        changes = {}
-        if name == "local":
-            if model is not None:
-                changes["backends.local.model"] = model
-        elif f"backends.{name}.model" in settings.registry.specs or name in manager.cfg.backends:
-            if model is not None:
-                changes[f"backends.{name}.model"] = model
-            if effort is not None:
-                changes[f"backends.{name}.effort"] = effort
-        else:
-            raise KeyError(name)
-        if not changes:
-            raise ValueError("set model or effort")
-        try:
-            settings.patch_admin(changes, settings.admin_view()["revision"])
-        except Exception as e:
-            from .settings_service import SettingsError
-            if isinstance(e, SettingsError):
-                raise ValueError(str(e)) from e
-            raise
-        if name == "local":
-            return {"model": manager.cfg.default_model}
-        backend = manager.cfg.backends[name]
-        return {"model": backend.model, "effort": backend.effort}
+        return _save_prefs_via_settings(manager, settings, name, model, effort)
     prefs = _prefs(manager)
     spec = dict(prefs.get(name) or {})
     if name == "local":
-        if not manager.cfg.modules.local_model:
-            raise ValueError("the local model is disabled by this service profile")
-        if model is not None:
-            model = model.strip()
-            if model not in manager.cfg.models:
-                raise ValueError(f"unknown model {model!r}; known: {', '.join(manager.cfg.models)}")
-            spec["model"] = model
-            spec.pop("effort", None)
+        _update_local_pref(manager, spec, model)
     elif name in manager.cfg.backends:
-        if model is not None:
-            model = model.strip()[:80]
-            if not model:
-                raise ValueError("model is empty")
-            spec["model"] = model
-        if effort is not None:
-            if effort not in EFFORTS:
-                raise ValueError(f"effort must be one of {', '.join(EFFORTS)}")
-            spec["effort"] = effort
+        _update_hosted_pref(spec, model, effort)
     else:
         raise KeyError(name)
     prefs[name] = spec

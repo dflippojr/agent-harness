@@ -160,6 +160,22 @@ def check_dimensions(width: int, height: int, scale: int, max_px: int = MAX_PIXE
     return out_w, out_h
 
 
+def _axis_spans(length: int, tile: int, step: int) -> list[tuple[int, int]]:
+    """(start, size) of each tile along one axis; the last tile is pulled back so it stays `tile` wide."""
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    while pos < length:
+        size = min(tile, length - pos)
+        if pos > 0 and pos + tile >= length:
+            pos = max(0, length - tile)
+            size = length - pos
+        spans.append((pos, size))
+        if pos + size >= length:
+            break
+        pos += step
+    return spans
+
+
 def plan_tiles(width: int, height: int, tile: int = TILE, overlap: int = OVERLAP) -> list[Tile]:
     """Cover an image with overlapping tiles no larger than `tile` (ComfyUI ImageUpscaleWithModel defaults)."""
     if width < 1 or height < 1:
@@ -169,28 +185,12 @@ def plan_tiles(width: int, height: int, tile: int = TILE, overlap: int = OVERLAP
     step = max(tile - overlap, 1)
     tiles: list[Tile] = []
     seen: set[tuple[int, int, int, int]] = set()
-    y = 0
-    while y < height:
-        x = 0
-        th = min(tile, height - y)
-        if y > 0 and y + tile >= height:
-            y = max(0, height - tile)
-            th = height - y
-        while x < width:
-            tw = min(tile, width - x)
-            if x > 0 and x + tile >= width:
-                x = max(0, width - tile)
-                tw = width - x
+    for y, th in _axis_spans(height, tile, step):
+        for x, tw in _axis_spans(width, tile, step):
             key = (x, y, tw, th)
             if key not in seen:
                 seen.add(key)
                 tiles.append(Tile(*key))
-            if x + tw >= width:
-                break
-            x += step
-        if y + th >= height:
-            break
-        y += step
     return tiles
 
 

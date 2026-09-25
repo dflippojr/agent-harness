@@ -36,6 +36,46 @@ DeltaCallback = Callable[[str, str], Awaitable[None]]  # (kind: "content" | "rea
 ProgressCallback = Callable[[int, int, int], Awaitable[None]]
 
 
+async def _apply_chunk(chunk: dict, out: Completion, calls: dict[int, dict],
+                       on_delta: DeltaCallback | None, on_progress: ProgressCallback | None) -> None:
+    progress = chunk.get("prompt_progress")
+    if progress and on_progress:
+        await on_progress(int(progress.get("processed", 0)), int(progress.get("total", 0)),
+                          int(progress.get("cache", -1)))
+    if chunk.get("usage"):
+        out.prompt_tokens = chunk["usage"].get("prompt_tokens", 0)
+        out.completion_tokens = chunk["usage"].get("completion_tokens", 0)
+    timings = chunk.get("timings") or {}
+    if timings:
+        out.prompt_tps = timings.get("prompt_per_second", 0.0)
+        out.gen_tps = timings.get("predicted_per_second", 0.0)
+    for choice in chunk.get("choices") or []:
+        await _apply_choice(choice, out, calls, on_delta)
+
+
+async def _apply_choice(choice: dict, out: Completion, calls: dict[int, dict],
+                        on_delta: DeltaCallback | None) -> None:
+    delta = choice.get("delta") or {}
+    if delta.get("reasoning_content"):
+        out.reasoning += delta["reasoning_content"]
+        if on_delta:
+            await on_delta("reasoning", delta["reasoning_content"])
+    if delta.get("content"):
+        out.content += delta["content"]
+        if on_delta:
+            await on_delta("content", delta["content"])
+    for tc in delta.get("tool_calls") or []:
+        slot = calls.setdefault(tc.get("index", 0), {
+            "id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+        if tc.get("id"):
+            slot["id"] = tc["id"]
+        fn = tc.get("function") or {}
+        slot["function"]["name"] += fn.get("name") or ""
+        slot["function"]["arguments"] += fn.get("arguments") or ""
+    if choice.get("finish_reason"):
+        out.finish_reason = choice["finish_reason"]
+
+
 async def chat(
     model: ModelConfig,
     messages: list[dict],
@@ -81,37 +121,7 @@ async def chat(
                     chunk = json.loads(data)
                     if "error" in chunk:
                         raise LLMError(f"stream error: {json.dumps(chunk['error'])[:500]}", retryable=True)
-                    progress = chunk.get("prompt_progress")
-                    if progress and on_progress:
-                        await on_progress(int(progress.get("processed", 0)), int(progress.get("total", 0)),
-                                          int(progress.get("cache", -1)))
-                    if chunk.get("usage"):
-                        out.prompt_tokens = chunk["usage"].get("prompt_tokens", 0)
-                        out.completion_tokens = chunk["usage"].get("completion_tokens", 0)
-                    timings = chunk.get("timings") or {}
-                    if timings:
-                        out.prompt_tps = timings.get("prompt_per_second", 0.0)
-                        out.gen_tps = timings.get("predicted_per_second", 0.0)
-                    for choice in chunk.get("choices") or []:
-                        delta = choice.get("delta") or {}
-                        if delta.get("reasoning_content"):
-                            out.reasoning += delta["reasoning_content"]
-                            if on_delta:
-                                await on_delta("reasoning", delta["reasoning_content"])
-                        if delta.get("content"):
-                            out.content += delta["content"]
-                            if on_delta:
-                                await on_delta("content", delta["content"])
-                        for tc in delta.get("tool_calls") or []:
-                            slot = calls.setdefault(tc.get("index", 0), {
-                                "id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                            if tc.get("id"):
-                                slot["id"] = tc["id"]
-                            fn = tc.get("function") or {}
-                            slot["function"]["name"] += fn.get("name") or ""
-                            slot["function"]["arguments"] += fn.get("arguments") or ""
-                        if choice.get("finish_reason"):
-                            out.finish_reason = choice["finish_reason"]
+                    await _apply_chunk(chunk, out, calls, on_delta, on_progress)
     except httpx.HTTPError as e:
         raise LLMError(f"{type(e).__name__}: {e}", retryable=isinstance(e, (httpx.ReadError, httpx.RemoteProtocolError,
                                                                               httpx.ConnectError)))

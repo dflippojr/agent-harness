@@ -103,6 +103,28 @@ def split_for_summary(messages: list[dict], keep_chars: int) -> tuple[int, int] 
     return start, end
 
 
+def _render_assistant(m: dict) -> str:
+    text = ""
+    if m.get("reasoning_content"):
+        # Local reasoning models keep running state (counts, plans) in their reasoning, not their replies.
+        reasoning = m["reasoning_content"].strip()
+        if len(reasoning) > 3000:
+            reasoning = reasoning[:1000] + " ... " + reasoning[-2000:]
+        text += f"(thinking: {reasoning})\n"
+    text += m.get("content") or ""
+    for call in m.get("tool_calls") or []:
+        text += f"\n-> {call['function']['name']}({call['function']['arguments'][:1500]})"
+    return f"ASSISTANT: {text.strip()}"
+
+
+def _render_tool(m: dict, tool_limit: int) -> str:
+    content = m.get("content") or ""
+    if len(content) > tool_limit:
+        half = tool_limit // 2
+        content = content[:half] + f"\n...[{len(content) - 2 * half} chars omitted]...\n" + content[-half:]
+    return f"TOOL RESULT: {content}"
+
+
 def render_excerpt(messages: list[dict], max_chars: int) -> str:
     parts = []
     # Spread the budget: a few large tool results shouldn't crowd out everything else.
@@ -110,23 +132,9 @@ def render_excerpt(messages: list[dict], max_chars: int) -> str:
     for m in messages:
         role = m["role"]
         if role == "assistant":
-            text = ""
-            if m.get("reasoning_content"):
-                # Local reasoning models keep running state (counts, plans) in their reasoning, not their replies.
-                reasoning = m["reasoning_content"].strip()
-                if len(reasoning) > 3000:
-                    reasoning = reasoning[:1000] + " ... " + reasoning[-2000:]
-                text += f"(thinking: {reasoning})\n"
-            text += m.get("content") or ""
-            for call in m.get("tool_calls") or []:
-                text += f"\n-> {call['function']['name']}({call['function']['arguments'][:1500]})"
-            parts.append(f"ASSISTANT: {text.strip()}")
+            parts.append(_render_assistant(m))
         elif role == "tool":
-            content = m.get("content") or ""
-            if len(content) > tool_limit:
-                half = tool_limit // 2
-                content = content[:half] + f"\n...[{len(content) - 2 * half} chars omitted]...\n" + content[-half:]
-            parts.append(f"TOOL RESULT: {content}")
+            parts.append(_render_tool(m, tool_limit))
         else:
             parts.append(f"{role.upper()}: {m.get('content') or ''}")
     text = "\n\n".join(parts)

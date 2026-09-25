@@ -12,7 +12,7 @@ from .principal import OWNER_USER_ID
 from .storage import repos_dir
 
 
-def member_project(cfg, row: dict) -> Project:
+def member_project(row: dict) -> Project:
     """Build a Project for a member row. Owner-only modules are forced off regardless of defaults."""
     repo = (row.get("repo") or "").strip()
     return Project(
@@ -45,7 +45,7 @@ def get_project(cfg, db, user_id: str, slug: str) -> Project | None:
     if db is None:
         return None
     row = db.get_member_project(user_id, slug)
-    return member_project(cfg, row) if row else None
+    return member_project(row) if row else None
 
 
 def list_projects(cfg, db, user_id: str) -> list[Project]:
@@ -53,7 +53,7 @@ def list_projects(cfg, db, user_id: str) -> list[Project]:
         return [p for p in cfg.projects.values() if getattr(p, "owner_id", OWNER_USER_ID) in ("", OWNER_USER_ID)]
     if db is None:
         return []
-    return [member_project(cfg, row) for row in db.list_member_projects(user_id)]
+    return [member_project(row) for row in db.list_member_projects(user_id)]
 
 
 def public_project(project: Project, *, include_repo: bool = False) -> dict:

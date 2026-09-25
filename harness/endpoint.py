@@ -242,6 +242,46 @@ async def proxy(m, request: Request, path: str) -> Response:
     return await _relay_upstream(upstream, client, slot, stream, finish, wait_ms)
 
 
+def _models_payload(m) -> dict:
+    data = [{"id": mc.name, "object": "model", "type": "model", "display_name": mc.name, "owned_by": "tower",
+             "created": 0, "created_at": "2026-01-01T00:00:00Z", "context_length": mc.context_tokens}
+            for mc in available_models(m)]
+    return {"object": "list", "data": data, "has_more": False,
+            "first_id": data[0]["id"] if data else None, "last_id": data[-1]["id"] if data else None}
+
+
+def _capabilities_payload(m) -> dict:
+    return {
+        "server": "agent-harness", "api_version": 1,
+        "routes": {path: {"method": "POST", "api": api} for path, api in ROUTES.items()
+                   if path != EMBEDDINGS_PATH or embeddings_enabled(m)}
+        | {"/v1/models": {"method": "GET", "api": "both"}},
+        "models": [{"id": mc.name, "context_tokens": mc.context_tokens, "max_tokens": mc.max_tokens,
+                    "default": mc.name == (m.cfg.endpoint.default_model or m.cfg.default_model)}
+                   for mc in available_models(m)],
+        "features": {"streaming": True, "tool_calls": True, "reasoning": True,
+                     "embeddings": embeddings_enabled(m),
+                     "images": bool(m.images)},
+        "model_aliases": m.cfg.endpoint.model_aliases,
+        "gpu": {"shared_with_agents": True, "guard_state": m.guard.state if m.guard else "clear"},
+    }
+
+
+def _key_origins(body: dict, kind: str) -> list:
+    if not body.get("origins"):
+        return []
+    if kind != "owner":
+        raise HarnessError(400, "browser origins on manually minted keys are owner-only; pair app tokens")
+    raw_origins = body["origins"]
+    if not isinstance(raw_origins, list) or not all(isinstance(value, str) for value in raw_origins):
+        raise HarnessError(400, "origins must be a list of browser origins")
+    from .apps import normalize_origin
+    try:
+        return list(dict.fromkeys(normalize_origin(value) for value in raw_origins))
+    except ValueError as e:
+        raise HarnessError(400, str(e))
+
+
 def register(app: FastAPI, mgr) -> None:
     @app.get("/v1/models")
     async def v1_models(request: Request):
@@ -250,31 +290,14 @@ def register(app: FastAPI, mgr) -> None:
             return error(flavor_of(request), 404, "not_found_error", "the inference endpoint is disabled")
         if authenticate(m, request) is None:
             return error(flavor_of(request), 401, "authentication_error", BAD_KEY)
-        data = [{"id": mc.name, "object": "model", "type": "model", "display_name": mc.name, "owned_by": "tower",
-                 "created": 0, "created_at": "2026-01-01T00:00:00Z", "context_length": mc.context_tokens}
-                for mc in available_models(m)]
-        return {"object": "list", "data": data, "has_more": False,
-                "first_id": data[0]["id"] if data else None, "last_id": data[-1]["id"] if data else None}
+        return _models_payload(m)
 
     @app.get("/v1/capabilities")
     async def v1_capabilities(request: Request):
         m = mgr(request)
         if not m.cfg.endpoint.enabled or authenticate(m, request) is None:
             return error("openai", 401, "authentication_error", BAD_KEY)
-        return {
-            "server": "agent-harness", "api_version": 1,
-            "routes": {path: {"method": "POST", "api": api} for path, api in ROUTES.items()
-                       if path != EMBEDDINGS_PATH or embeddings_enabled(m)}
-            | {"/v1/models": {"method": "GET", "api": "both"}},
-            "models": [{"id": mc.name, "context_tokens": mc.context_tokens, "max_tokens": mc.max_tokens,
-                        "default": mc.name == (m.cfg.endpoint.default_model or m.cfg.default_model)}
-                       for mc in available_models(m)],
-            "features": {"streaming": True, "tool_calls": True, "reasoning": True,
-                         "embeddings": embeddings_enabled(m),
-                         "images": bool(m.images)},
-            "model_aliases": m.cfg.endpoint.model_aliases,
-            "gpu": {"shared_with_agents": True, "guard_state": m.guard.state if m.guard else "clear"},
-        }
+        return _capabilities_payload(m)
 
     def route_handler(path: str):
         async def handler(request: Request):
@@ -295,18 +318,7 @@ def register(app: FastAPI, mgr) -> None:
         body = await request.json()
         from .admin import parse_key_spec
         name, scopes, kind = parse_key_spec(body)
-        origins = []
-        if body.get("origins"):
-            if kind != "owner":
-                raise HarnessError(400, "browser origins on manually minted keys are owner-only; pair app tokens")
-            raw_origins = body["origins"]
-            if not isinstance(raw_origins, list) or not all(isinstance(value, str) for value in raw_origins):
-                raise HarnessError(400, "origins must be a list of browser origins")
-            from .apps import normalize_origin
-            try:
-                origins = list(dict.fromkeys(normalize_origin(value) for value in raw_origins))
-            except ValueError as e:
-                raise HarnessError(400, str(e))
+        origins = _key_origins(body, kind)
         row, key = mgr(request).db.create_api_key(name, scopes, kind, origins)
         return {**row, "key": key}
 

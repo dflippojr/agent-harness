@@ -120,6 +120,32 @@ class ImageArchive:
                        f"configured warning threshold is {self.cfg.backup.image_archive_min_free_gb:g} GB")
         return {"free_bytes": free, "free_space_warning": warning}
 
+    def _ensure_png(self, source: Path, png: Path, size: int, digest: str) -> None:
+        valid = False
+        if png.is_file():
+            try:
+                valid = self._hash(png) == (size, digest)
+            except OSError:
+                valid = False
+        if not valid:
+            self._atomic_copy(source, png, size, digest)
+        archived_size, archived_hash = self._hash(png)
+        if archived_size != size or archived_hash != digest:
+            raise ImageArchiveError("archived PNG failed byte-count or SHA-256 verification")
+
+    def _ensure_sidecar(self, job: dict, sidecar: Path, size: int, digest: str) -> None:
+        metadata = (json.dumps(self._metadata(job, size, digest), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            current = sidecar.read_bytes()
+        except OSError:
+            current = b""
+        if current != metadata:
+            self._atomic_bytes(sidecar, metadata)
+        # Read it back as part of the same success boundary; malformed/truncated JSON is never marked archived.
+        saved = json.loads(sidecar.read_text(encoding="utf-8"))
+        if saved.get("job_id") != job["id"] or saved.get("bytes") != size or saved.get("sha256") != digest:
+            raise ImageArchiveError("image archive metadata failed verification")
+
     def archive(self, job: dict, source: Path | None = None) -> dict:
         """Archive one PNG, then mark its row only after target verification.
 
@@ -140,29 +166,8 @@ class ImageArchive:
 
         png, sidecar = self.paths(job)
         png.parent.mkdir(parents=True, exist_ok=True)
-        valid = False
-        if png.is_file():
-            try:
-                valid = self._hash(png) == (size, digest)
-            except OSError:
-                valid = False
-        if not valid:
-            self._atomic_copy(source, png, size, digest)
-        archived_size, archived_hash = self._hash(png)
-        if archived_size != size or archived_hash != digest:
-            raise ImageArchiveError("archived PNG failed byte-count or SHA-256 verification")
-
-        metadata = (json.dumps(self._metadata(job, size, digest), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        try:
-            current = sidecar.read_bytes()
-        except OSError:
-            current = b""
-        if current != metadata:
-            self._atomic_bytes(sidecar, metadata)
-        # Read it back as part of the same success boundary; malformed/truncated JSON is never marked archived.
-        saved = json.loads(sidecar.read_text(encoding="utf-8"))
-        if saved.get("job_id") != job["id"] or saved.get("bytes") != size or saved.get("sha256") != digest:
-            raise ImageArchiveError("image archive metadata failed verification")
+        self._ensure_png(source, png, size, digest)
+        self._ensure_sidecar(job, sidecar, size, digest)
 
         archived_at = float(job.get("archived_at") or time.time())
         self.db.update_image(job["id"], sha256=digest, archive_bytes=size, archived_at=archived_at,
@@ -171,6 +176,47 @@ class ImageArchive:
 
     def record_error(self, job: dict, error: Exception | str) -> None:
         self.db.update_image(job["id"], archive_error=str(error)[:1000], archived_at=None, archive_bytes=0)
+
+    def _remove_partials(self, report: dict) -> None:
+        for partial in self.root.rglob("*.partial"):
+            try:
+                partial.unlink()
+            except OSError as e:
+                report["warnings"].append(f"could not remove interrupted archive file: {e}")
+
+    def _verified_archive(self, job: dict) -> tuple[int, str] | None:
+        """(size, sha256) when the job's PNG and sidecar are already present and consistent, else None."""
+        png, sidecar = self.paths(job)
+        if not (png.is_file() and sidecar.is_file()):
+            return None
+        expected = str(job.get("sha256") or "")
+        try:
+            size, digest = self._hash(png)
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            valid = (meta.get("job_id") == job["id"] and meta.get("bytes") == size
+                     and meta.get("sha256") == digest and (not expected or expected == digest))
+        except (OSError, ValueError, TypeError):
+            return None
+        return (size, digest) if valid else None
+
+    def _reconcile_job(self, job: dict, now: float, report: dict) -> None:
+        verified = self._verified_archive(job)
+        if verified is not None:
+            size, digest = verified
+            self.db.update_image(job["id"], sha256=digest, archive_bytes=size,
+                                 archived_at=job.get("archived_at") or now, archive_error="")
+            report["archived"] += 1
+            report["bytes"] += size
+            return
+        try:
+            result = self.archive(job)
+            report["archived"] += 1
+            report["bytes"] += result["bytes"]
+        except (OSError, ValueError, ImageArchiveError) as e:
+            self.record_error(job, e)
+            report["missing"] += 1
+            report["errors"] += 1
+            report["warnings"].append(f"image {job['id']}: {e}")
 
     def reconcile(self, now: float | None = None) -> dict:
         now = now or time.time()
@@ -185,11 +231,7 @@ class ImageArchive:
             report["warnings"].append(report["free_space_warning"])
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-            for partial in self.root.rglob("*.partial"):
-                try:
-                    partial.unlink()
-                except OSError as e:
-                    report["warnings"].append(f"could not remove interrupted archive file: {e}")
+            self._remove_partials(report)
         except OSError as e:
             report["errors"] = 1
             report["warnings"].append(f"image archive destination is not writable: {e}")
@@ -197,34 +239,8 @@ class ImageArchive:
             return report
 
         for job in self.db.images_for_archive():
-            if job.get("archive_deleted_at") is not None:
-                continue
-            png, sidecar = self.paths(job)
-            expected = str(job.get("sha256") or "")
-            valid = False
-            if png.is_file() and sidecar.is_file():
-                try:
-                    size, digest = self._hash(png)
-                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                    valid = (meta.get("job_id") == job["id"] and meta.get("bytes") == size
-                             and meta.get("sha256") == digest and (not expected or expected == digest))
-                except (OSError, ValueError, TypeError):
-                    valid = False
-                if valid:
-                    self.db.update_image(job["id"], sha256=digest, archive_bytes=size,
-                                         archived_at=job.get("archived_at") or now, archive_error="")
-                    report["archived"] += 1
-                    report["bytes"] += size
-                    continue
-            try:
-                result = self.archive(job)
-                report["archived"] += 1
-                report["bytes"] += result["bytes"]
-            except (OSError, ValueError, ImageArchiveError) as e:
-                self.record_error(job, e)
-                report["missing"] += 1
-                report["errors"] += 1
-                report["warnings"].append(f"image {job['id']}: {e}")
+            if job.get("archive_deleted_at") is None:
+                self._reconcile_job(job, now, report)
         self.last_reconciliation = report
         return report
 

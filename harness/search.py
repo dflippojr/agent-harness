@@ -63,30 +63,35 @@ def schemas() -> list[dict]:
 
 
 # ---------- indexing ----------
+_SIMPLE_EVENT_TEXT = {  # event type -> (index kind, data key)
+    "session_created": ("title", "title"),
+    "user_message": ("message", "content"),
+    "app_context": ("context", "content"),
+    "error": ("tool", "message"),
+}
+
+
+def _assistant_text(data: dict) -> tuple[str, str] | None:
+    parts = [data.get("content") or ""]
+    for call in data.get("tool_calls") or []:
+        fn = call.get("function") or {}
+        parts.append(f"{fn.get('name', '')} {(fn.get('arguments') or '')[:500]}")
+    text = "\n".join(p for p in parts if p.strip())
+    return ("assistant", text) if text else None
+
+
 def event_text(type_: str, data: dict) -> tuple[str, str] | None:
     """(kind, text) to index for a persisted event, or None."""
-    if type_ == "session_created":
-        return "title", data.get("title", "")
-    if type_ == "user_message":
-        return "message", data.get("content", "")
     if type_ == "assistant":
-        parts = [data.get("content") or ""]
-        for call in data.get("tool_calls") or []:
-            fn = call.get("function") or {}
-            parts.append(f"{fn.get('name', '')} {(fn.get('arguments') or '')[:500]}")
-        text = "\n".join(p for p in parts if p.strip())
-        return ("assistant", text) if text else None
+        return _assistant_text(data)
     if type_ == "tool_result":
         if data.get("name") in TOOLS:  # earlier search results would only echo other sessions back
             return None
         return "tool", f"{data.get('name', '')}: {(data.get('output') or '')[:TOOL_OUTPUT_CHARS]}"
-    if type_ == "status" and data.get("answer"):
-        return "answer", data["answer"]
-    if type_ == "app_context":
-        return "context", data.get("content", "")
-    if type_ == "error":
-        return "tool", data.get("message", "")
-    return None
+    if type_ == "status":
+        return ("answer", data["answer"]) if data.get("answer") else None
+    simple = _SIMPLE_EVENT_TEXT.get(type_)
+    return (simple[0], data.get(simple[1], "")) if simple else None
 
 
 def fts_query(query: str, any_term: bool = False) -> str:
@@ -196,6 +201,52 @@ def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None
 
 
 # ---------- compact transcript for session_read ----------
+def _compact_assistant(d: dict, lines: list[str], last_content: str) -> str:
+    content = (d.get("content") or "").strip()
+    if content:
+        last_content = content
+        lines += ["## Assistant", content, ""]
+    for call in d.get("tool_calls") or []:
+        fn = call.get("function") or {}
+        lines.append(f"- call {fn.get('name', '')} {(fn.get('arguments') or '')[:300]}")
+    return last_content
+
+
+def _compact_tool_result(d: dict) -> str:
+    out = (d.get("output") or "").strip()
+    if len(out) > 600:
+        out = out[:400] + f" … [{len(out) - 500} characters] … " + out[-100:]
+    return f"  result ({'ok' if d.get('ok') else 'error'}): {out}"
+
+
+def _compact_run_ended(d: dict, last_content: str) -> list[str]:
+    lines = ["", f"## Run ended: {d['status']} ({d.get('stop_reason', '')})"]
+    answer = (d.get("answer") or "").strip()
+    if answer and answer != last_content:
+        lines.append(answer)
+    lines.append("")
+    return lines
+
+
+def _compact_event(t: str, d: dict, lines: list[str], last_content: str) -> str:
+    """Append one event's compact lines; returns the latest assistant content seen."""
+    if t == "user_message":
+        lines += ["## User", d["content"].strip(), ""]
+    elif t == "app_context":
+        lines += ["## Context from app", d["content"].strip()[:2000], ""]
+    elif t == "assistant":
+        last_content = _compact_assistant(d, lines, last_content)
+    elif t == "tool_result":
+        lines.append(_compact_tool_result(d))
+    elif t == "approval_decided":
+        lines.append(f"- user {d['status']} an approval" + (f": {d['note']}" if d.get("note") else ""))
+    elif t == "review":
+        lines += [f"- review: {d.get('action')} ({d.get('detail', '')})", ""]
+    elif t == "status" and d.get("status") in ("done", "failed", "cancelled"):
+        lines += _compact_run_ended(d, last_content)
+    return last_content
+
+
 def compact_transcript(db, sid: str) -> str:
     s = db.get_session(sid)
     if s is None:
@@ -205,34 +256,7 @@ def compact_transcript(db, sid: str) -> str:
              + (f" · branch {s['branch']} ({s['review'] or 'not reviewed'})" if s.get("branch") else ""), ""]
     last_content = ""
     for e in db.events(sid):
-        t, d = e["type"], e["data"]
-        if t == "user_message":
-            lines += ["## User", d["content"].strip(), ""]
-        elif t == "app_context":
-            lines += ["## Context from app", d["content"].strip()[:2000], ""]
-        elif t == "assistant":
-            content = (d.get("content") or "").strip()
-            if content:
-                last_content = content
-                lines += ["## Assistant", content, ""]
-            for call in d.get("tool_calls") or []:
-                fn = call.get("function") or {}
-                lines.append(f"- call {fn.get('name', '')} {(fn.get('arguments') or '')[:300]}")
-        elif t == "tool_result":
-            out = (d.get("output") or "").strip()
-            if len(out) > 600:
-                out = out[:400] + f" … [{len(out) - 500} characters] … " + out[-100:]
-            lines.append(f"  result ({'ok' if d.get('ok') else 'error'}): {out}")
-        elif t == "approval_decided":
-            lines.append(f"- user {d['status']} an approval" + (f": {d['note']}" if d.get("note") else ""))
-        elif t == "review":
-            lines += [f"- review: {d.get('action')} ({d.get('detail', '')})", ""]
-        elif t == "status" and d.get("status") in ("done", "failed", "cancelled"):
-            lines += ["", f"## Run ended: {d['status']} ({d.get('stop_reason', '')})"]
-            answer = (d.get("answer") or "").strip()
-            if answer and answer != last_content:
-                lines.append(answer)
-            lines.append("")
+        last_content = _compact_event(e["type"], e["data"], lines, last_content)
     return "\n".join(lines)
 
 
