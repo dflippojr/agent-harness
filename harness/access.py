@@ -69,14 +69,28 @@ def resolve_access(cfg, login: str | None, db=None) -> Access:
     return resolve_human(cfg, login, db)
 
 
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def _under_any_prefix(path: str, prefixes) -> bool:
+    return any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
+
+
+def _member_owner_only_detail(path: str) -> str:
+    for prefixes, detail in MEMBER_FORBIDDEN_DETAILS:
+        if path.startswith(prefixes):
+            return detail
+    return "members cannot use owner-only operations"
+
+
 def guest_forbidden(access: Access, method: str, path: str) -> str | None:
     """Return an error detail if this guest request is refused, else None."""
     if access.role != "guest":
         return None
     if path == ADMIN_API or path.startswith(ADMIN_API + "/"):
         return "demo access cannot use the owner API"
-    if method in ("GET", "HEAD", "OPTIONS"):
-        if any(path == prefix or path.startswith(prefix + "/") for prefix in OWNER_GET_PREFIXES):
+    if method in SAFE_METHODS:
+        if _under_any_prefix(path, OWNER_GET_PREFIXES):
             return "demo access cannot view owner credentials"
         return None
     if path.startswith(RUNNER_PREFIX):
@@ -99,13 +113,12 @@ def member_forbidden(access: Access, method: str, path: str) -> str | None:
     if path == "/runners" or path.startswith(RUNNER_PREFIX):
         # GET /runners is the status list; /runners/{name}/… is poll/results (runner tokens, not members).
         return "members cannot use Mac or other runners"
-    if any(path == prefix or path.startswith(prefix + "/") for prefix in MEMBER_FORBIDDEN_PREFIXES):
-        for prefixes, detail in MEMBER_FORBIDDEN_DETAILS:
-            if path.startswith(prefixes):
-                return detail
-        return "members cannot use owner-only operations"
-    if path.startswith("/backends/") and method not in ("GET", "HEAD", "OPTIONS"):
+    if _under_any_prefix(path, MEMBER_FORBIDDEN_PREFIXES):
+        return _member_owner_only_detail(path)
+    if method in SAFE_METHODS:
+        return None
+    if path.startswith("/backends/"):
         return "members cannot change machine settings"
-    if path == "/profile" and method not in ("GET", "HEAD", "OPTIONS"):
+    if path == "/profile":
         return "members cannot change the owner profile"
     return None
