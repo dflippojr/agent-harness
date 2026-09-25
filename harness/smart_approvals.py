@@ -653,64 +653,83 @@ def _binary_ok(tokens: list[str]) -> bool:
     return _shape_ok(tokens)
 
 
-def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool = False) -> Eligibility:
-    """Static gate. Must succeed before any provider call. The model is not the parser."""
-    rule = decision.reason or ""
-    base = Eligibility(ok=False, tool=name, rule=rule, repo=repo,
-                       network=bool(args.get("network")), workspace=True)
+def _policy_rejection(name: str, args: dict, decision: Decision) -> tuple[str, dict] | None:
+    """Reason (and extra Eligibility fields) when the tool call fails before its command is inspected."""
     if decision.action != ASK:
-        return Eligibility(ok=False, reason=f"policy {decision.action}", tool=name, rule=rule)
+        return f"policy {decision.action}", {}
     if not decision.smart_eligible:
-        return Eligibility(ok=False, reason="rule is not smart-eligible", tool=name, rule=rule)
+        return "rule is not smart-eligible", {}
     if name not in SHELL_TOOLS:
-        return Eligibility(ok=False, reason="tool is not a hosted-backend shell", tool=name, rule=rule)
+        return "tool is not a hosted-backend shell", {}
     if args.get("network"):
-        return Eligibility(ok=False, reason="networked command", tool=name, rule=rule, network=True)
+        return "networked command", {"network": True}
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
-        return Eligibility(ok=False, reason=REASON_UNPARSEABLE_COMMAND, tool=name, rule=rule)
+        return REASON_UNPARSEABLE_COMMAND, {}
     if len(command) > MAX_COMMAND:
-        return Eligibility(ok=False, reason="command too long", tool=name, rule=rule)
+        return "command too long", {}
+    return None
+
+
+def _command_rejection(command: str, args: dict) -> str | None:
+    """Reason the command text is not eligible, checked in a fixed order, or None."""
     _stripped, err = strip_shell_comments(command)
     if err:
-        return Eligibility(ok=False, reason=err, tool=name, rule=rule, command=command)
+        return err
     # The runner executes args["command"], not a comment-stripped copy. Keep
     # every hash outside quotes human-only so the reviewed and executed bytes
     # can never diverge, even for escaped hashes or genuine Bash comments.
     if _has_unquoted_hash(command):
-        return Eligibility(ok=False, reason="unquoted hash", tool=name, rule=rule, command=command)
+        return "unquoted hash"
     if _INJECTION_RE.search(command) or _INJECTION_RE.search(str(args.get("description") or "")):
-        return Eligibility(ok=False, reason="prompt-injection text", tool=name, rule=rule, command=command)
+        return "prompt-injection text"
     if _secretish(command) or any(_secretish(str(v)) for v in args.values() if isinstance(v, str)):
-        return Eligibility(ok=False, reason="possible secret", tool=name, rule=rule, command=command)
+        return "possible secret"
     if _CHAIN_RE.search(command):
-        return Eligibility(ok=False, reason="shell chaining", tool=name, rule=rule, command=command)
+        return "shell chaining"
     if _SUBST_RE.search(command) or _WIN_ENV_RE.search(command) or _BRACE_RE.search(command):
-        return Eligibility(ok=False, reason="unresolved substitution", tool=name, rule=rule, command=command)
+        return "unresolved substitution"
     if _GLOB_RE.search(command):
-        return Eligibility(ok=False, reason="unresolved glob", tool=name, rule=rule, command=command)
+        return "unresolved glob"
     if _NETWORK_RE.search(command):
-        return Eligibility(ok=False, reason="networked command", tool=name, rule=rule, command=command)
+        return "networked command"
     if _PUBLISH_RE.search(command) or _FORCE_RE.search(command):
-        return Eligibility(ok=False, reason="publication or force operation", tool=name, rule=rule, command=command)
+        return "publication or force operation"
     if _PRIV_RE.search(command):
-        return Eligibility(ok=False, reason="privilege escalation", tool=name, rule=rule, command=command)
+        return "privilege escalation"
     if _delete_outside_scratch(command):
-        return Eligibility(ok=False, reason="deletes files outside the scratch area", tool=name, rule=rule,
-                           command=command)
+        return "deletes files outside the scratch area"
+    return None
+
+
+def _tokens_rejection(command: str) -> str | None:
+    """Reason the tokenised command is not routine workspace work, or None."""
     try:
         tokens = shlex.split(command)
     except ValueError:
-        return Eligibility(ok=False, reason=REASON_UNPARSEABLE_COMMAND, tool=name, rule=rule, command=command)
+        return REASON_UNPARSEABLE_COMMAND
     if not tokens:
-        return Eligibility(ok=False, reason=REASON_UNPARSEABLE_COMMAND, tool=name, rule=rule, command=command)
+        return REASON_UNPARSEABLE_COMMAND
     while tokens and tokens[0] in ("command",):
         tokens = tokens[1:]
     if not tokens or not _binary_ok(tokens):
-        return Eligibility(ok=False, reason="command is not routine workspace work", tool=name, rule=rule,
-                           command=command)
+        return "command is not routine workspace work"
     if not _paths_confined(command, tokens):
-        return Eligibility(ok=False, reason="path escapes workspace", tool=name, rule=rule, command=command)
+        return "path escapes workspace"
+    return None
+
+
+def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool = False) -> Eligibility:
+    """Static gate. Must succeed before any provider call. The model is not the parser."""
+    rule = decision.reason or ""
+    early = _policy_rejection(name, args, decision)
+    if early is not None:
+        reason, extra = early
+        return Eligibility(ok=False, reason=reason, tool=name, rule=rule, **extra)
+    command = args["command"]
+    reason = _command_rejection(command, args) or _tokens_rejection(command)
+    if reason is not None:
+        return Eligibility(ok=False, reason=reason, tool=name, rule=rule, command=command)
     return Eligibility(ok=True, reason="eligible", tool=name, rule=rule, command=command,
                        repo=repo, network=False, workspace=True)
 
