@@ -191,9 +191,58 @@ def _check_path(rel: str, root: Path, findings: list[dict]) -> Path | None:
     return root.joinpath(*parts)
 
 
-def validate_bundle(bundle: dict) -> dict:
-    """Validate an in-memory instruction-only skill. Never executes file contents."""
-    findings: list[dict] = []
+def _check_file(path, content, names_lower: dict[str, str], findings: list[dict]) -> tuple[int, int]:
+    """Validate one bundle file; returns (bytes to count toward the total, 1 if it is a reference file)."""
+    if not isinstance(path, str) or not isinstance(content, str):
+        findings.append(Finding.make("files", "each file path and body must be a string"))
+        return 0, 0
+    lowered = path.lower()
+    if lowered in names_lower and names_lower[lowered] != path:
+        findings.append(Finding.make("case-collision", f"file name collides with {names_lower[lowered]}", path))
+    names_lower[lowered] = path
+    parts = path.replace("\\", "/").split("/")
+    if any(p in ("", ".", "..") for p in parts) or path.startswith(("/", "\\")) or "\\" in path:
+        findings.append(Finding.make("traversal", "paths must stay inside the skill package", path))
+        return 0, 0
+    raw = content.encode("utf-8")
+    if path != SKILL_MD:
+        _utf8_text(raw, path, findings)
+    suffix = Path(path.lower()).suffix
+    name = Path(path.lower()).name
+    if suffix in FORBIDDEN_SUFFIXES or name in FORBIDDEN_NAMES:
+        findings.append(Finding.make("forbidden-type", f"{name} is not allowed in a v1 instruction skill", path))
+    if path in (SKILL_MD, MANIFEST_JSON):
+        return len(raw), 0
+    if not path.startswith("references/") or path.count("/") != 1:
+        findings.append(Finding.make("path", "only SKILL.md, manifest.json, and references/*.md are allowed", path))
+        return len(raw), 0
+    ref_name = path.split("/", 1)[1]
+    if not REF_NAME_RE.fullmatch(ref_name):
+        findings.append(Finding.make("path", "reference files must be references/<lowercase-name>.md", path))
+    if len(raw) > MAX_REFERENCE_BYTES:
+        findings.append(Finding.make("oversize", f"reference exceeds {MAX_REFERENCE_BYTES} bytes", path))
+    _scan_text(content, path, findings)
+    return len(raw), 1
+
+
+def _check_examples(examples, findings: list[dict]) -> None:
+    if not isinstance(examples, list) or not (MIN_EXAMPLES <= len(examples) <= MAX_EXAMPLES):
+        findings.append(Finding.make("examples", f"provide {MIN_EXAMPLES}–{MAX_EXAMPLES} example prompts with expected behavior"))
+        return
+    for i, item in enumerate(examples):
+        if not isinstance(item, dict):
+            findings.append(Finding.make("examples", f"example {i + 1} must be an object"))
+            continue
+        prompt = str(item.get("prompt") or "").strip()
+        expected = str(item.get("expected") or item.get("expected_behavior") or "").strip()
+        if not prompt or not expected:
+            findings.append(Finding.make("examples", f"example {i + 1} needs prompt and expected behavior"))
+        if len(prompt) > MAX_EXAMPLE_CHARS or len(expected) > MAX_EXAMPLE_CHARS:
+            findings.append(Finding.make("examples", f"example {i + 1} is too long"))
+        _scan_text(prompt + "\n" + expected, f"examples[{i}]", findings)
+
+
+def _check_header(bundle: dict, findings: list[dict]) -> tuple[str, str, str, str]:
     slug = normalize_slug(str(bundle.get("slug") or ""))
     if not SLUG_RE.fullmatch(slug):
         findings.append(Finding.make("slug", "slug must be 2–40 lowercase letters, numbers, or dashes"))
@@ -206,80 +255,53 @@ def validate_bundle(bundle: dict) -> dict:
     activation = str(bundle.get("activation_suggestion") or "").strip()
     if len(activation) > MAX_ACTIVATION:
         findings.append(Finding.make("activation", f"activation suggestion is at most {MAX_ACTIVATION} characters"))
+    return slug, title, purpose, activation
 
-    files = bundle.get("files") or {}
-    if not isinstance(files, dict):
-        findings.append(Finding.make("files", "files must be a mapping of path → UTF-8 text"))
-        files = {}
+
+def _check_skill_md(files: dict, findings: list[dict]) -> str:
     skill_md = files.get(SKILL_MD)
     if not isinstance(skill_md, str) or not skill_md.strip():
         findings.append(Finding.make("skill-md", "SKILL.md is required", SKILL_MD))
         skill_md = skill_md if isinstance(skill_md, str) else ""
     if len(skill_md.encode("utf-8")) > MAX_SKILL_MD_BYTES:
         findings.append(Finding.make("oversize", f"SKILL.md exceeds {MAX_SKILL_MD_BYTES} bytes", SKILL_MD))
+    return skill_md
+
+
+def _check_skill_md_text(skill_md: str, slug: str, findings: list[dict]) -> None:
+    _scan_text(skill_md, SKILL_MD, findings)
+    fm_name = FRONTMATTER_NAME_RE.search(skill_md)
+    if fm_name and normalize_slug(fm_name.group(1)) not in ("", slug):
+        findings.append(Finding.make("slug-mismatch", "SKILL.md name/slug does not match the proposal slug", SKILL_MD))
+
+
+def validate_bundle(bundle: dict) -> dict:
+    """Validate an in-memory instruction-only skill. Never executes file contents."""
+    findings: list[dict] = []
+    slug, title, purpose, activation = _check_header(bundle, findings)
+
+    files = bundle.get("files") or {}
+    if not isinstance(files, dict):
+        findings.append(Finding.make("files", "files must be a mapping of path → UTF-8 text"))
+        files = {}
+    skill_md = _check_skill_md(files, findings)
 
     names_lower: dict[str, str] = {}
     total = 0
     ref_count = 0
     for path, content in files.items():
-        if not isinstance(path, str) or not isinstance(content, str):
-            findings.append(Finding.make("files", "each file path and body must be a string"))
-            continue
-        lowered = path.lower()
-        if lowered in names_lower and names_lower[lowered] != path:
-            findings.append(Finding.make("case-collision", f"file name collides with {names_lower[lowered]}", path))
-        names_lower[lowered] = path
-        parts = path.replace("\\", "/").split("/")
-        if any(p in ("", ".", "..") for p in parts) or path.startswith("/") or path.startswith("\\") or "\\" in path:
-            findings.append(Finding.make("traversal", "paths must stay inside the skill package", path))
-            continue
-        raw = content.encode("utf-8")
-        total += len(raw)
-        if path != SKILL_MD:
-            _utf8_text(raw, path, findings)
-        suffix = Path(path.lower()).suffix
-        name = Path(path.lower()).name
-        if suffix in FORBIDDEN_SUFFIXES or name in FORBIDDEN_NAMES:
-            findings.append(Finding.make("forbidden-type", f"{name} is not allowed in a v1 instruction skill", path))
-        if path == SKILL_MD:
-            continue
-        if path == MANIFEST_JSON:
-            continue
-        if not path.startswith("references/") or path.count("/") != 1:
-            findings.append(Finding.make("path", "only SKILL.md, manifest.json, and references/*.md are allowed", path))
-            continue
-        ref_name = path.split("/", 1)[1]
-        if not REF_NAME_RE.fullmatch(ref_name):
-            findings.append(Finding.make("path", "reference files must be references/<lowercase-name>.md", path))
-        if len(raw) > MAX_REFERENCE_BYTES:
-            findings.append(Finding.make("oversize", f"reference exceeds {MAX_REFERENCE_BYTES} bytes", path))
-        ref_count += 1
-        _scan_text(content, path, findings)
+        added, is_ref = _check_file(path, content, names_lower, findings)
+        total += added
+        ref_count += is_ref
     if ref_count > MAX_REFERENCE_FILES:
         findings.append(Finding.make("count", f"at most {MAX_REFERENCE_FILES} reference files are allowed"))
     if total > MAX_TOTAL_BYTES:
         findings.append(Finding.make("oversize", f"total skill bytes exceed {MAX_TOTAL_BYTES}"))
     if skill_md:
-        _scan_text(skill_md, SKILL_MD, findings)
-        fm_name = FRONTMATTER_NAME_RE.search(skill_md)
-        if fm_name and normalize_slug(fm_name.group(1)) not in ("", slug):
-            findings.append(Finding.make("slug-mismatch", "SKILL.md name/slug does not match the proposal slug", SKILL_MD))
+        _check_skill_md_text(skill_md, slug, findings)
 
     examples = bundle.get("examples") or []
-    if not isinstance(examples, list) or not (MIN_EXAMPLES <= len(examples) <= MAX_EXAMPLES):
-        findings.append(Finding.make("examples", f"provide {MIN_EXAMPLES}–{MAX_EXAMPLES} example prompts with expected behavior"))
-    else:
-        for i, item in enumerate(examples):
-            if not isinstance(item, dict):
-                findings.append(Finding.make("examples", f"example {i + 1} must be an object"))
-                continue
-            prompt = str(item.get("prompt") or "").strip()
-            expected = str(item.get("expected") or item.get("expected_behavior") or "").strip()
-            if not prompt or not expected:
-                findings.append(Finding.make("examples", f"example {i + 1} needs prompt and expected behavior"))
-            if len(prompt) > MAX_EXAMPLE_CHARS or len(expected) > MAX_EXAMPLE_CHARS:
-                findings.append(Finding.make("examples", f"example {i + 1} is too long"))
-            _scan_text(prompt + "\n" + expected, f"examples[{i}]", findings)
+    _check_examples(examples, findings)
 
     _scan_text(f"{title}\n{purpose}\n{activation}", "manifest", findings)
 
