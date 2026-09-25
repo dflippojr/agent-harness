@@ -40,6 +40,12 @@ from .sandbox import run_cmd
 log = logging.getLogger("harness.gpu_guard")
 
 CLEAR, PAUSING, PAUSED, RESUMING = "clear", "pausing", "paused", "resuming"
+
+
+def _manual_reason() -> dict:
+    return {"key": "manual", "kind": "manual", "detail": "paused from the app"}
+
+
 HEALTH_TIMEOUT_SECONDS = 300  # reopen the queue anyway after this; model calls then report their own errors
 MANUAL_HOLD_FILE = "gpu-guard-hold.json"  # survives a daemon restart; the pause_flag file alone does not
 
@@ -205,7 +211,7 @@ class ServerControl:
             log.info("stopped model server pid %s (exit %s) %s", pid, code, (out + err).strip()[:200])
 
     async def start(self) -> None:
-        self.flag.unlink(missing_ok=True)
+        await asyncio.to_thread(self.flag.unlink, missing_ok=True)
 
     async def healthy(self) -> bool:
         try:
@@ -215,7 +221,7 @@ class ServerControl:
             return False
 
     async def _listening_pids(self) -> set[int]:
-        code, out, _ = await run_cmd(["netstat", "-ano", "-p", "TCP"], timeout=30)
+        _, out, _ = await run_cmd(["netstat", "-ano", "-p", "TCP"], timeout=30)
         pids = set()
         for line in out.splitlines():
             parts = line.split()
@@ -317,7 +323,7 @@ class GpuGuard:
         self.manual = True
         self.manual_until = manual_until
         self.manual_duration_seconds = manual_duration_seconds
-        self.reasons = [{"key": "manual", "kind": "manual", "detail": "paused from the app"}]
+        self.reasons = [_manual_reason()]
 
     def _persist_hold(self) -> None:
         if self._state_path is None:
@@ -355,7 +361,7 @@ class GpuGuard:
         self.manual_duration_seconds = duration_seconds
         self._persist_hold()
         if self.state in (CLEAR, RESUMING):
-            self.reasons = [{"key": "manual", "kind": "manual", "detail": "paused from the app"}]
+            self.reasons = [_manual_reason()]
             was_clear = self.state == CLEAR
             self._set(PAUSING)
             self.scheduler.set_paused(True)
@@ -414,25 +420,7 @@ class GpuGuard:
         now = time.monotonic()
 
         if want:
-            self._clear_since = None
-            self._resume_now = False
-            if self.state == PAUSED and not self.manual and self.signals:
-                self.reasons = list(self.signals)
-            if self.state in (CLEAR, RESUMING):
-                self.reasons = list(self.signals) if self.signals else [
-                    {"key": "manual", "kind": "manual", "detail": "paused from the app"}]
-                was_clear = self.state == CLEAR
-                self._set(PAUSING)
-                self.scheduler.set_paused(True)
-                self._drain_deadline = now + self.cfg.drain_timeout_seconds
-                if was_clear:
-                    self._paused_at = time.time()
-                    self.pauses += 1
-                    if self.on_pause:
-                        self.on_pause(self.reasons)
-            if self.state == PAUSING and (not self.busy() or now >= self._drain_deadline):
-                await self.control.stop()
-                self._set(PAUSED)
+            await self._hold(now)
             return
 
         if self._clear_since is None:
@@ -448,6 +436,26 @@ class GpuGuard:
         if self.state == RESUMING and (await self.control.healthy()
                                        or now - self._resume_started >= HEALTH_TIMEOUT_SECONDS):
             self._finish_resume()
+
+    async def _hold(self, now: float) -> None:
+        self._clear_since = None
+        self._resume_now = False
+        if self.state == PAUSED and not self.manual and self.signals:
+            self.reasons = list(self.signals)
+        if self.state in (CLEAR, RESUMING):
+            self.reasons = list(self.signals) if self.signals else [_manual_reason()]
+            was_clear = self.state == CLEAR
+            self._set(PAUSING)
+            self.scheduler.set_paused(True)
+            self._drain_deadline = now + self.cfg.drain_timeout_seconds
+            if was_clear:
+                self._paused_at = time.time()
+                self.pauses += 1
+                if self.on_pause:
+                    self.on_pause(self.reasons)
+        if self.state == PAUSING and (not self.busy() or now >= self._drain_deadline):
+            await self.control.stop()
+            self._set(PAUSED)
 
     def _finish_resume(self) -> None:
         seconds = time.time() - self._paused_at if self._paused_at else 0.0
