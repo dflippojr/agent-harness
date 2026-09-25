@@ -140,6 +140,17 @@ def asset_modes(key: str) -> frozenset[str]:
     return frozenset({"image_edit"}) if key == "unet" else frozenset({"quality", "quality-fast", "image_edit"})
 
 
+def _remove_owned(candidate: Path, owned: bool, removed: list, skipped: list) -> None:
+    if not owned:
+        skipped.append(str(candidate))
+        return
+    try:
+        candidate.unlink()
+        removed.append(str(candidate))
+    except OSError as exc:
+        skipped.append(f"{candidate}: {exc}")
+
+
 def remove_assets(cfg: ImagesConfig) -> dict:
     """Remove only files exclusively owned by image_edit, including only its own partial download."""
     root = models_dir(cfg)
@@ -148,20 +159,36 @@ def remove_assets(cfg: ImagesConfig) -> dict:
         spec = EDIT_MODEL[key]
         for folder in spec["folders"]:
             path = root / folder / spec["name"]
-            candidates = (path, path.with_name(path.name + ".part"))
-            for candidate in candidates:
-                if not candidate.exists():
-                    continue
-                if asset_modes(key) != frozenset({"image_edit"}):
-                    skipped.append(str(candidate))
-                    continue
-                try:
-                    candidate.unlink()
-                    removed.append(str(candidate))
-                except OSError as exc:
-                    skipped.append(f"{candidate}: {exc}")
+            for candidate in (path, path.with_name(path.name + ".part")):
+                if candidate.exists():
+                    _remove_owned(candidate, asset_modes(key) == frozenset({"image_edit"}), removed, skipped)
     clear_hash_cache()
     return {"removed": removed, "skipped": skipped}
+
+
+def _full_size_hash_ok(path: Path, size: int, verify_hash: bool) -> bool | None:
+    try:
+        key = _hash_key(path, size)
+    except OSError:
+        return False
+    with _HASH_LOCK:
+        cached = _HASH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if not verify_hash:
+        return None
+    try:
+        result = file_sha256(path).lower() == EDIT_MODEL["unet"]["sha256"].lower()
+        unchanged = _hash_key(path, size) == key
+    except OSError:
+        return False
+    if unchanged:
+        with _HASH_LOCK:
+            stale = [old for old in _HASH_CACHE if old[0] == key[0] and old != key]
+            for old in stale:
+                _HASH_CACHE.pop(old, None)
+            _HASH_CACHE[key] = result
+    return result
 
 
 def unet_hash_ok(path: Path | None, *, verify_hash: bool = False) -> bool | None:
@@ -171,31 +198,18 @@ def unet_hash_ok(path: Path | None, *, verify_hash: bool = False) -> bool | None
     size = path.stat().st_size
     expected = EDIT_MODEL["unet"]["bytes"]
     if size == expected:
-        try:
-            key = _hash_key(path, size)
-        except OSError:
-            return False
-        with _HASH_LOCK:
-            cached = _HASH_CACHE.get(key)
-        if cached is not None:
-            return cached
-        if not verify_hash:
-            return None
-        try:
-            result = file_sha256(path).lower() == EDIT_MODEL["unet"]["sha256"].lower()
-            unchanged = _hash_key(path, size) == key
-        except OSError:
-            return False
-        if unchanged:
-            with _HASH_LOCK:
-                stale = [old for old in _HASH_CACHE if old[0] == key[0] and old != key]
-                for old in stale:
-                    _HASH_CACHE.pop(old, None)
-                _HASH_CACHE[key] = result
-        return result
+        return _full_size_hash_ok(path, size, verify_hash)
     if size < 1_000_000:
         return None
     return False
+
+
+def _setup_text(available: bool, verifying: bool) -> str:
+    if available:
+        return ""
+    if verifying:
+        return "Verifying the pinned Qwen-Image-Edit checkpoint in the background."
+    return SETUP_GUIDANCE
 
 
 def assets_status(cfg: ImagesConfig, *, verify_hash: bool = False) -> dict:
@@ -220,8 +234,7 @@ def assets_status(cfg: ImagesConfig, *, verify_hash: bool = False) -> dict:
         "revision": EDIT_MODEL["revision"],
         "sha256": EDIT_MODEL["unet"]["sha256"],
         "bytes": EDIT_MODEL["unet"]["bytes"],
-        "setup": "" if available else ("Verifying the pinned Qwen-Image-Edit checkpoint in the background."
-                                         if verifying else SETUP_GUIDANCE),
+        "setup": _setup_text(available, verifying),
     }
 
 
@@ -237,7 +250,7 @@ def is_private(job: dict | None) -> bool:
 
 
 def _open_image(data: bytes, max_pixels: int):
-    from PIL import Image, ImageOps, UnidentifiedImageError
+    from PIL import Image, ImageOps
 
     if not data:
         raise ToolError("image is empty")
@@ -247,7 +260,7 @@ def _open_image(data: bytes, max_pixels: int):
         image.load()
     except Image.DecompressionBombError as exc:
         raise ToolError("image exceeds the pixel cap") from exc
-    except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as exc:
+    except (OSError, ValueError, SyntaxError) as exc:
         raise ToolError("malformed image") from exc
     fmt = (image.format or "").upper()
     if fmt == "JPG":
