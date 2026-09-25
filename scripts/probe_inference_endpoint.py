@@ -23,6 +23,24 @@ def request(url: str, token: str, body: dict | None = None):
     return urllib.request.urlopen(req, timeout=180)  # noqa: S310 - caller explicitly supplies its own daemon
 
 
+def read_stream(response) -> tuple[int, bool]:
+    """Count the SSE data chunks and report whether any delta carried a tool call."""
+    if response.headers.get_content_type() != "text/event-stream":
+        raise RuntimeError(f"expected text/event-stream, got {response.headers.get_content_type()}")
+    chunks = 0
+    tool_call = False
+    for raw in response:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:") or line == "data: [DONE]":
+            continue
+        chunks += 1
+        event = json.loads(line[5:].strip())
+        for choice in event.get("choices", []):
+            if (choice.get("delta") or {}).get("tool_calls"):
+                tool_call = True
+    return chunks, tool_call
+
+
 def main() -> int:
     if len(sys.argv) != 2 or not os.environ.get("HARNESS_API_KEY"):
         print("usage: HARNESS_API_KEY=... probe_inference_endpoint.py BASE_URL", file=sys.stderr)
@@ -54,20 +72,8 @@ def main() -> int:
         }],
         "tool_choice": "required",
     }
-    chunks = 0
-    tool_call = False
     with request(f"{base}/v1/chat/completions", token, body) as response:
-        if response.headers.get_content_type() != "text/event-stream":
-            raise RuntimeError(f"expected text/event-stream, got {response.headers.get_content_type()}")
-        for raw in response:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:") or line == "data: [DONE]":
-                continue
-            chunks += 1
-            event = json.loads(line[5:].strip())
-            for choice in event.get("choices", []):
-                if (choice.get("delta") or {}).get("tool_calls"):
-                    tool_call = True
+        chunks, tool_call = read_stream(response)
     if not chunks or not tool_call:
         raise RuntimeError(f"stream ended without a tool call ({chunks} data chunks)")
     print(json.dumps({
