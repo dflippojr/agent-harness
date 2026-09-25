@@ -16,7 +16,6 @@ Layout under ~/.agent-harness:
 from __future__ import annotations
 
 import base64
-import binascii
 import json
 import logging
 import os
@@ -28,8 +27,8 @@ import signal
 import subprocess
 import sys
 import threading
+import tempfile
 import time
-import traceback
 import urllib.error
 import urllib.request
 import uuid
@@ -50,6 +49,7 @@ POLL_TIMEOUT = 60           # the daemon holds a poll for up to 25 s
 OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trims further for the model)
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
 HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+")
+RID_OPS = frozenset({"shell", "git_clone"})  # the ops that need the request id
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 WORKSPACE = "/workspace"  # the sandbox path the daemon addresses tool paths by
 OFFLINE_RULES = """;; No network except localhost (tests that start a server); no DNS either, so nothing leaks through lookups.
@@ -138,7 +138,7 @@ class Executor:
         if fn is None:
             raise OpError(f"unknown op {op!r} (runner version {VERSION}); redeploy the runner")
         try:
-            return fn(rid, params)
+            return fn(rid, params) if op in RID_OPS else fn(params)
         except ToolError as e:
             raise OpError(str(e), "tool")
         except projects.GitError as e:
@@ -147,28 +147,28 @@ class Executor:
             raise OpError(f"{type(e).__name__}: {e}", "tool")
 
     # tools
-    def op_file(self, rid: str, p: dict):
+    def op_file(self, p: dict):
         if p["name"] not in FILE_TOOLS:
             raise OpError(f"not a file tool: {p['name']}")
         ws = self.workspace(p["session"], create=True)
         files = FileOps(ws, int(p.get("context_tokens") or 65536), prefixes=(str(ws), WORKSPACE))
         return getattr(files, p["name"])(**p["args"])
 
-    def op_preview(self, rid: str, p: dict):
+    def op_preview(self, p: dict):
         ws = self.workspace(p["session"], create=True)
         return FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE)).preview_diff(p["name"], p["args"])
 
-    def op_size(self, rid: str, p: dict):
+    def op_size(self, p: dict):
         ws = self.workspace(p["session"])
         return dir_size(ws) if ws.exists() else 0
 
-    def op_put_file(self, rid: str, p: dict):
+    def op_put_file(self, p: dict):
         raw = p.get("content_b64") or ""
         if not isinstance(raw, str) or not raw.strip():
             raise OpError("content_b64 is required", "tool")
         try:
             data = base64.b64decode(raw, validate=True)
-        except (binascii.Error, ValueError):
+        except ValueError:  # binascii.Error is a ValueError
             raise OpError("content_b64 is not valid base64", "tool")
         ws = self.workspace(p["session"], create=True)
         files = FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE))
@@ -197,7 +197,7 @@ class Executor:
             raise OpError(f"git clone failed (exit {out['code']}): {out['output'][-2000:].strip()}", "tool")
         return f"cloned {url} into {files.rel(target)}"
 
-    def op_update_client(self, rid: str, p: dict):
+    def op_update_client(self, p: dict):
         if not self.server:
             raise OpError("runner has no configured server for updates")
         try:
@@ -208,7 +208,7 @@ class Executor:
     def run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
                "LOGNAME": os.environ.get("USER", ""), "SHELL": self.shell, "LANG": "en_US.UTF-8", "TERM": "dumb",
-               "TMPDIR": os.environ.get("TMPDIR", "/tmp"), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
+               "TMPDIR": tempfile.gettempdir(), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
                "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1"}
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
@@ -266,14 +266,14 @@ class Executor:
             except (ProcessLookupError, PermissionError):
                 pass
 
-    def op_cancel(self, rid: str, p: dict):
+    def op_cancel(self, p: dict):
         with self.lock:
             proc = self.procs.get(p["request_id"])
         if proc:
             self.kill(proc)
         return bool(proc)
 
-    def op_kill_session(self, rid: str, p: dict):
+    def op_kill_session(self, p: dict):
         with self.lock:
             procs = [self.procs[r] for r, s in self.proc_sessions.items() if s == p["session"]]
         for proc in procs:
@@ -281,7 +281,7 @@ class Executor:
         return len(procs)
 
     # git projects (outside the sandbox, with the user's git setup)
-    def op_prepare(self, rid: str, p: dict):
+    def op_prepare(self, p: dict):
         project = self.project(p)
         if self.free_gb() < self.min_free_gb:
             raise OpError(f"only {self.free_gb()} GB free on the MacBook (minimum {self.min_free_gb} GB)")
@@ -290,41 +290,41 @@ class Executor:
         # source, and the session branch is fetched back into it after every run.
         return projects.prepare(project, ws, p["session"], shared=not projects.is_url(project.repo))
 
-    def op_refresh_origin(self, rid: str, p: dict):
+    def op_refresh_origin(self, p: dict):
         return projects.refresh_origin(self.workspace(p["session"]))
 
-    def op_save_branch(self, rid: str, p: dict):
+    def op_save_branch(self, p: dict):
         project, ws, sid = self.project(p), self.workspace(p["session"]), p["session"]
         committed = projects.snapshot(ws, f"Uncommitted work at the end of a run (session {sid})")
         published = projects.publish_local(project, ws, p["branch"])
         return {"auto_commit": committed, "published": published, "head": projects.head(ws)[:12],
                 "commits": projects.commits_ahead(ws, p["base_commit"])}
 
-    def op_changes(self, rid: str, p: dict):
+    def op_changes(self, p: dict):
         ws = self.workspace(p["session"])
         if not ws.exists():
             return {"repos": [], "removed": True}
         return workspace_changes(ws, p.get("base_commit") or None)
 
-    def op_merge(self, rid: str, p: dict):
+    def op_merge(self, p: dict):
         project, ws, sid = self.project(p), self.workspace(p["session"]), p["session"]
         result = projects.merge(project, ws, sid, p["branch"], p["base_branch"], p["title"])
         result["head"] = projects.head(ws) if (ws / ".git").exists() else ""
         return result
 
-    def op_push(self, rid: str, p: dict):
+    def op_push(self, p: dict):
         project, ws, sid = self.project(p), self.workspace(p["session"]), p["session"]
         projects.snapshot(ws, f"Work in progress from session {sid}")
         return {"message": projects.push(project, ws, p["branch"]), "head": projects.head(ws)}
 
-    def op_discard(self, rid: str, p: dict):
-        self.op_kill_session(rid, p)
+    def op_discard(self, p: dict):
+        self.op_kill_session(p)
         project = self.project(p)
         projects.discard(project, p["branch"])
         remove_tree(self.workspace(p["session"]))
         return {"head": ""}
 
-    def op_cleanup_workspace(self, rid: str, p: dict):
+    def op_cleanup_workspace(self, p: dict):
         ws, sid = self.workspace(p["session"]), p["session"]
         if not ws.exists():
             return {"removed": True}
@@ -401,7 +401,7 @@ class Runner:
                 return
             except urllib.error.HTTPError as e:
                 if e.code in (400, 404, 413, 422):
-                    log.error("result %s refused: HTTP %s", payload["id"], e.code)
+                    log.exception("result %s refused: HTTP %s", payload["id"], e.code)
                     return
                 log.warning("posting result %s failed: HTTP %s", payload["id"], e.code)
             except (OSError, ValueError) as e:
@@ -417,8 +417,8 @@ class Runner:
             payload = {"id": rid, "ok": True, "value": value}
         except OpError as e:
             payload = {"id": rid, "ok": False, "error": str(e), "kind": e.kind}
-        except Exception as e:  # noqa: BLE001 - report, don't die
-            log.error("request %s (%s) crashed:\n%s", rid, op, traceback.format_exc())
+        except Exception as e:  # noqa: BLE001
+            log.exception("request %s (%s) crashed", rid, op)
             payload = {"id": rid, "ok": False, "error": f"runner error: {type(e).__name__}: {e}", "kind": "internal"}
         log.info("%s %s %s in %.1fs", rid, op, "ok" if payload["ok"] else f"failed ({payload.get('kind')})",
                  time.monotonic() - started)
@@ -446,39 +446,47 @@ class Runner:
                 app_dir=base / "runner" / "app",
             )
 
+    def poll_once(self, delay: float) -> tuple[dict | None, float, float]:
+        """One poll. Returns (response or None, seconds to sleep before the next poll, next backoff delay)."""
+        try:
+            resp = self.client.post("/poll", {"instance": self.instance, "inflight": self.inflight_ids(),
+                                              "info": self.executor.info()}, timeout=POLL_TIMEOUT)
+            return resp, 0.0, 1.0
+        except urllib.error.HTTPError as e:
+            log.warning("poll refused: HTTP %s%s", e.code, " (check the token)" if e.code == 401 else "")
+            return None, 60 if e.code in (401, 404) else delay, min(30.0, delay * 2)
+        except (OSError, ValueError) as e:  # offline, daemon restarting, just woke up
+            log.info("poll failed: %s", e)
+            return None, delay, min(30.0, delay * 2)
+
+    def inflight_ids(self) -> list:
+        with self.lock:
+            return list(self.inflight)
+
+    def dispatch(self, req: dict) -> None:
+        rid = req["id"]
+        with self.lock:
+            if rid in self.inflight:
+                return
+            cached = self.results.get(rid)
+            if cached is None:
+                self.inflight[rid] = req
+        if cached is not None:
+            threading.Thread(target=self.post_result, args=(cached,), daemon=True).start()
+        else:
+            threading.Thread(target=self.work, args=(req,), name=f"req-{rid}", daemon=True).start()
+
     def loop(self) -> None:
         log.info("runner %s (instance %s) polling %s", VERSION, self.instance[:8], self.client.base)
         delay = 1.0
         while not self.stopping.is_set():
-            with self.lock:
-                inflight = list(self.inflight)
-            try:
-                resp = self.client.post("/poll", {"instance": self.instance, "inflight": inflight,
-                                                  "info": self.executor.info()}, timeout=POLL_TIMEOUT)
-                delay = 1.0
-            except urllib.error.HTTPError as e:
-                log.warning("poll refused: HTTP %s%s", e.code, " (check the token)" if e.code == 401 else "")
-                time.sleep(60 if e.code in (401, 404) else delay)
-                delay = min(30.0, delay * 2)
-                continue
-            except (OSError, ValueError) as e:  # offline, daemon restarting, just woke up
-                log.info("poll failed: %s", e)
-                time.sleep(delay)
-                delay = min(30.0, delay * 2)
+            resp, sleep_for, delay = self.poll_once(delay)
+            if resp is None:
+                time.sleep(sleep_for)
                 continue
             self.keep_awake(bool(resp.get("keep_awake")))
             for req in resp.get("requests", []):
-                rid = req["id"]
-                with self.lock:
-                    if rid in self.inflight:
-                        continue
-                    cached = self.results.get(rid)
-                    if cached is None:
-                        self.inflight[rid] = req
-                if cached is not None:
-                    threading.Thread(target=self.post_result, args=(cached,), daemon=True).start()
-                else:
-                    threading.Thread(target=self.work, args=(req,), name=f"req-{rid}", daemon=True).start()
+                self.dispatch(req)
 
 
 def main() -> None:
