@@ -292,57 +292,92 @@ function linkQuotes(html, answer, pages) {
 
 // Small, safe Markdown subset: everything is escaped first, then a few constructs are re-enabled.
 // A fenced block in a language the snippet runner supports is marked so Chat can add its Run button.
+const MD_BLOCK_MARK = "\u0000";   // brackets a fenced-block placeholder; escaped input never contains it as text we render
+const MD_BLOCK_LINE = new RegExp(`^${MD_BLOCK_MARK}\\d+${MD_BLOCK_MARK}$`);
+const MD_BLOCK_REF = new RegExp(`${MD_BLOCK_MARK}(\\d+)${MD_BLOCK_MARK}`, "g");
+const MD_TABLE_ROW = /^\s*\|.*\|\s*$/;
+const MD_LIST_ITEM = /^\s*([-*]|\d+\.) /;
+
+const isMdTagChar = (ch) => /[\w+#-]/.test(ch);
+
+// Replaces each ``` fence (escaped text in, language tag optional) with a placeholder; onBlock(tag, rest) makes the block's html.
+function replaceFences(text, onBlock) {
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const open = text.indexOf("```", pos);
+    const close = open < 0 ? -1 : text.indexOf("```", open + 3);
+    if (close < 0) break;
+    let tagEnd = open + 3;
+    while (tagEnd < close && isMdTagChar(text[tagEnd])) tagEnd++;
+    out += text.slice(pos, open) + onBlock(text.slice(open + 3, tagEnd), text.slice(tagEnd, close));
+    pos = close + 3;
+  }
+  return out + text.slice(pos);
+}
+
+const mdInline = (s) => s
+  .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+  .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+  .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+  .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+// Each block reader returns [html, index of the last line it used].
+function mdHeading(line, i) {
+  const level = Math.min(6, line.match(/^#+/)[0].length + 2);
+  return [`<h${level}>${mdInline(line.replace(/^#+ /, ""))}</h${level}>`, i];
+}
+
+function mdTable(lines, i) {
+  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => mdInline(c.trim()));
+  let html = "<table><thead><tr>" + cells(lines[i]).map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
+  i += 2;
+  while (i < lines.length && MD_TABLE_ROW.test(lines[i])) {
+    html += "<tr>" + cells(lines[i]).map((c) => `<td>${c}</td>`).join("") + "</tr>";
+    i++;
+  }
+  return [`<div class="md-table">${html}</tbody></table></div>`, i - 1];
+}
+
+function mdList(lines, i) {
+  const ordered = /^\s*\d+\./.test(lines[i]);
+  let html = ordered ? "<ol>" : "<ul>";
+  while (i < lines.length && MD_LIST_ITEM.test(lines[i])) {
+    html += `<li>${mdInline(lines[i].replace(MD_LIST_ITEM, ""))}</li>`;
+    i++;
+  }
+  return [html + (ordered ? "</ol>" : "</ul>"), i - 1];
+}
+
+const isMdTableStart = (lines, i) => MD_TABLE_ROW.test(lines[i]) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1]);
+
+function mdBlock(lines, i) {
+  const line = lines[i];
+  if (MD_BLOCK_LINE.test(line.trim())) return [line.trim(), i];
+  if (/^#{1,6} /.test(line)) return mdHeading(line, i);
+  if (isMdTableStart(lines, i)) return mdTable(lines, i);
+  if (MD_LIST_ITEM.test(line)) return mdList(lines, i);
+  if (/^&gt; ?/.test(line)) return [`<blockquote>${mdInline(line.replace(/^&gt; ?/, ""))}</blockquote>`, i];
+  if (!line.trim()) return ["", i];
+  return [`<p>${mdInline(line)}</p>`, i];
+}
+
 function md(src, pages) {
   const blocks = [];
-  let text = escapeHtml(src || "").replace(/```([\w+#-]*)([\s\S]*?)```/g, (_, tag, rest) => {
+  const text = replaceFences(escapeHtml(src || ""), (tag, rest) => {
     const code = rest.replace(/^[^\S\n]*\n?/, "");
     const lang = snippetLanguage(tag);
     blocks.push(`<pre${lang ? ` data-snippet-lang="${lang}"` : ""}><code>${code.replace(/\n$/, "")}</code></pre>`);
-    return `\u0000${blocks.length - 1}\u0000`;
+    return `${MD_BLOCK_MARK}${blocks.length - 1}${MD_BLOCK_MARK}`;
   });
-  const inline = (s) => s
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   const out = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\u0000\d+\u0000$/.test(line.trim())) { out.push(line.trim()); continue; }
-    if (/^#{1,6} /.test(line)) {
-      const level = Math.min(6, line.match(/^#+/)[0].length + 2);
-      out.push(`<h${level}>${inline(line.replace(/^#+ /, ""))}</h${level}>`);
-      continue;
-    }
-    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
-      const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => inline(c.trim()));
-      let html = "<table><thead><tr>" + cells(line).map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
-      i += 2;
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
-        html += "<tr>" + cells(lines[i]).map((c) => `<td>${c}</td>`).join("") + "</tr>";
-        i++;
-      }
-      i--;
-      out.push(`<div class="md-table">${html}</tbody></table></div>`);
-      continue;
-    }
-    if (/^\s*([-*]|\d+\.) /.test(line)) {
-      const ordered = /^\s*\d+\./.test(line);
-      let html = ordered ? "<ol>" : "<ul>";
-      while (i < lines.length && /^\s*([-*]|\d+\.) /.test(lines[i])) {
-        html += `<li>${inline(lines[i].replace(/^\s*([-*]|\d+\.) /, ""))}</li>`;
-        i++;
-      }
-      i--;
-      out.push(html + (ordered ? "</ol>" : "</ul>"));
-      continue;
-    }
-    if (/^&gt; ?/.test(line)) { out.push(`<blockquote>${inline(line.replace(/^&gt; ?/, ""))}</blockquote>`); continue; }
-    if (!line.trim()) { out.push(""); continue; }
-    out.push(`<p>${inline(line)}</p>`);
+    const [html, last] = mdBlock(lines, i);
+    out.push(html);
+    i = last;
   }
-  return linkQuotes(out.join("\n").replace(/\u0000(\d+)\u0000/g, (_, n) => blocks[Number(n)]), src, pages);
+  return linkQuotes(out.join("\n").replace(MD_BLOCK_REF, (_, n) => blocks[Number(n)]), src, pages);
 }
 
 function setConnLive(on) {
@@ -1035,8 +1070,8 @@ let searchQuery = "";  // kept while navigating, so Back from a result returns t
 let sessionTarget = "all";
 try { sessionTarget = localStorage.getItem("harness.sessionTarget") || "all"; } catch (_) { /* private mode */ }
 
-// Search passages mark matches with  … ; everything else is escaped.
-const markPassage = (text) => escapeHtml(text).replace(//g, "<mark>").replace(//g, "</mark>");
+// Search passages mark matches with U+0002 … U+0003 (control characters, matched on purpose); everything else is escaped.
+const markPassage = (text) => escapeHtml(text).replaceAll("\u0002", "<mark>").replaceAll("\u0003", "</mark>");
 const PASSAGE_KIND = { title: "title", message: "you", assistant: "agent", tool: "tool output", answer: "answer", context: "app context" };
 
 async function viewList() {
