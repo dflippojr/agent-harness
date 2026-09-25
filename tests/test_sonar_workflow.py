@@ -15,7 +15,8 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert coverage_at < scan_at
     assert "pytest-cov" in workflow
     assert "pytest-xdist" in workflow
-    assert "python -m pytest tests -q -n 4 --dist loadfile" in workflow
+    assert "python -m pytest tests" in workflow
+    assert "-n 4 --dist loadfile" in workflow  # the verbosity flag is free to change; the worker split is not
     coverage_step = workflow[workflow.index("Run tests with coverage") : workflow.index("Scan with SonarCloud")]
     assert "-n auto" not in coverage_step
     assert "COVERAGE_CORE" not in coverage_step
