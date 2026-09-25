@@ -336,18 +336,7 @@ def _load_sidecar_json(path: Path, findings: list[dict]) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def validate_dir(root: Path) -> dict:
-    """Read a proposal directory as data. Never follows links or executes files."""
-    root = Path(root)
-    findings: list[dict] = []
-    if not root.is_dir():
-        return {"ok": False, "validator_version": VALIDATOR_VERSION, "slug": "", "content_hash": "",
-                "findings": [Finding.make("missing", "proposal directory is missing")], "codes": ["missing"]}
-    if _is_reparse_point(root):
-        return {"ok": False, "validator_version": VALIDATOR_VERSION, "slug": "", "content_hash": "",
-                "findings": [Finding.make("symlink", "proposal root may not be a symlink or junction")],
-                "codes": ["symlink"]}
-
+def _read_dir_files(root: Path, findings: list[dict]) -> dict[str, str]:
     files: dict[str, str] = {}
     seen_lower: dict[str, str] = {}
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -362,30 +351,50 @@ def validate_dir(root: Path) -> dict:
         if rel_dir == ".":
             rel_dir = ""
         for name in sorted(filenames):
-            path = current / name
             rel = name if not rel_dir else f"{rel_dir}/{name}"
-            if _is_reparse_point(path):
-                findings.append(Finding.make("symlink", "symlinks and junctions are forbidden", rel))
-                continue
-            lowered = rel.lower()
-            if lowered in seen_lower and seen_lower[lowered] != rel:
-                findings.append(Finding.make("case-collision", f"collides with {seen_lower[lowered]}", rel))
-            seen_lower[lowered] = rel
-            if not path.is_file() or path.is_symlink():
-                findings.append(Finding.make("forbidden-type", "only regular files are allowed", rel))
-                continue
-            try:
-                raw = path.read_bytes()
-            except OSError as exc:
-                findings.append(Finding.make("read", f"could not read file: {exc}", rel))
-                continue
-            text = _utf8_text(raw, rel, findings)
-            if text is None:
-                continue
-            if rel in ALLOWED_ROOT_FILES or rel.startswith("references/"):
-                files[rel] = text
-            else:
-                findings.append(Finding.make("forbidden-type", "only SKILL.md, manifest.json, examples.json, and references/*.md are allowed", rel))
+            _read_dir_file(current / name, rel, seen_lower, files, findings)
+    return files
+
+
+def _read_dir_file(path: Path, rel: str, seen_lower: dict[str, str], files: dict[str, str],
+                   findings: list[dict]) -> None:
+    if _is_reparse_point(path):
+        findings.append(Finding.make("symlink", "symlinks and junctions are forbidden", rel))
+        return
+    lowered = rel.lower()
+    if lowered in seen_lower and seen_lower[lowered] != rel:
+        findings.append(Finding.make("case-collision", f"collides with {seen_lower[lowered]}", rel))
+    seen_lower[lowered] = rel
+    if not path.is_file() or path.is_symlink():
+        findings.append(Finding.make("forbidden-type", "only regular files are allowed", rel))
+        return
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        findings.append(Finding.make("read", f"could not read file: {exc}", rel))
+        return
+    text = _utf8_text(raw, rel, findings)
+    if text is None:
+        return
+    if rel in ALLOWED_ROOT_FILES or rel.startswith("references/"):
+        files[rel] = text
+    else:
+        findings.append(Finding.make("forbidden-type", "only SKILL.md, manifest.json, examples.json, and references/*.md are allowed", rel))
+
+
+def validate_dir(root: Path) -> dict:
+    """Read a proposal directory as data. Never follows links or executes files."""
+    root = Path(root)
+    findings: list[dict] = []
+    if not root.is_dir():
+        return {"ok": False, "validator_version": VALIDATOR_VERSION, "slug": "", "content_hash": "",
+                "findings": [Finding.make("missing", "proposal directory is missing")], "codes": ["missing"]}
+    if _is_reparse_point(root):
+        return {"ok": False, "validator_version": VALIDATOR_VERSION, "slug": "", "content_hash": "",
+                "findings": [Finding.make("symlink", "proposal root may not be a symlink or junction")],
+                "codes": ["symlink"]}
+
+    files = _read_dir_files(root, findings)
 
     meta = _load_sidecar_json(root / MANIFEST_JSON, findings)
     examples_file = _load_sidecar_json(root / EXAMPLES_JSON, findings)
@@ -441,6 +450,21 @@ def sandbox_command(image: str, proposal_dir: Path, validator_path: Path) -> lis
     ]
 
 
+def _mount_reasons(argv: list[str]) -> list[str]:
+    reasons = []
+    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "--mount" and i + 1 < len(argv)]
+    if len(mounts) != 2:
+        reasons.append("sandbox must mount only the proposal and the validator")
+        return reasons
+    targets = " ".join(mounts)
+    if "target=/proposal" not in targets or "target=/run/validate.py" not in targets:
+        reasons.append("sandbox mounts must be /proposal and /run/validate.py")
+    if any("readonly" not in m.replace(" ", "").lower() and "readonly" not in m for m in mounts):
+        if not all("readonly" in m for m in mounts):
+            reasons.append("proposal and validator mounts must be read-only")
+    return reasons
+
+
 def sandbox_command_is_isolated(argv: list[str]) -> list[str]:
     """Return reasons the docker argv would violate the v1 sandbox contract."""
     reasons = []
@@ -460,16 +484,7 @@ def sandbox_command_is_isolated(argv: list[str]) -> list[str]:
     for needle in forbidden_needles:
         if needle.lower() in joined.lower():
             reasons.append(f"forbidden mount or path {needle}")
-    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "--mount" and i + 1 < len(argv)]
-    if len(mounts) != 2:
-        reasons.append("sandbox must mount only the proposal and the validator")
-    else:
-        targets = " ".join(mounts)
-        if "target=/proposal" not in targets or "target=/run/validate.py" not in targets:
-            reasons.append("sandbox mounts must be /proposal and /run/validate.py")
-        if any("readonly" not in m.replace(" ", "").lower() and "readonly" not in m for m in mounts):
-            if not all("readonly" in m for m in mounts):
-                reasons.append("proposal and validator mounts must be read-only")
+    reasons += _mount_reasons(argv)
     if any(a in argv for a in ("--privileged", "--pid=host", "--network=host")):
         reasons.append("host namespaces are forbidden")
     return reasons
