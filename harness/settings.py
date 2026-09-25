@@ -185,32 +185,43 @@ def parse_value(spec: SettingSpec, value: Any) -> Any:
         "string_list": parse_string_list,
     }
     parsed = parsers[spec.value_type](value)
-    bounds = spec.bounds
     if spec.value_type in ("int", "float"):
-        if bounds.minimum is not None and parsed < bounds.minimum:
-            raise ValueError(f"must be >= {bounds.minimum}")
-        if bounds.maximum is not None and parsed > bounds.maximum:
-            raise ValueError(f"must be <= {bounds.maximum}")
-    if spec.value_type in ("string", "enum"):
-        if bounds.min_length is not None and len(parsed) < bounds.min_length:
-            raise ValueError(f"must be at least {bounds.min_length} characters")
-        if bounds.max_length is not None and len(parsed) > bounds.max_length:
-            raise ValueError(f"must be at most {bounds.max_length} characters")
-        if bounds.enum is not None and parsed not in bounds.enum:
-            raise ValueError(f"must be one of {', '.join(bounds.enum)}")
-        if bounds.pattern is not None:
-            import re
-            if not re.fullmatch(bounds.pattern, parsed):
-                raise ValueError(f"must match {bounds.pattern}")
-    if spec.value_type == "string_list":
-        if bounds.enum is not None:
-            unknown = [item for item in parsed if item not in bounds.enum]
-            if unknown:
-                raise ValueError(f"unknown values {unknown}; known: {', '.join(bounds.enum)}")
-        if spec.key == "app.capabilities":
-            if len(parsed) != len(set(parsed)):
-                raise ValueError("capabilities must not repeat")
+        _check_number_bounds(spec.bounds, parsed)
+    elif spec.value_type in ("string", "enum"):
+        _check_string_bounds(spec.bounds, parsed)
+    elif spec.value_type == "string_list":
+        _check_list_bounds(spec, parsed)
     return parsed
+
+
+def _check_number_bounds(bounds, parsed) -> None:
+    if bounds.minimum is not None and parsed < bounds.minimum:
+        raise ValueError(f"must be >= {bounds.minimum}")
+    if bounds.maximum is not None and parsed > bounds.maximum:
+        raise ValueError(f"must be <= {bounds.maximum}")
+
+
+def _check_string_bounds(bounds, parsed) -> None:
+    if bounds.min_length is not None and len(parsed) < bounds.min_length:
+        raise ValueError(f"must be at least {bounds.min_length} characters")
+    if bounds.max_length is not None and len(parsed) > bounds.max_length:
+        raise ValueError(f"must be at most {bounds.max_length} characters")
+    if bounds.enum is not None and parsed not in bounds.enum:
+        raise ValueError(f"must be one of {', '.join(bounds.enum)}")
+    if bounds.pattern is not None:
+        import re
+        if not re.fullmatch(bounds.pattern, parsed):
+            raise ValueError(f"must match {bounds.pattern}")
+
+
+def _check_list_bounds(spec: SettingSpec, parsed) -> None:
+    enum = spec.bounds.enum
+    if enum is not None:
+        unknown = [item for item in parsed if item not in enum]
+        if unknown:
+            raise ValueError(f"unknown values {unknown}; known: {', '.join(enum)}")
+    if spec.key == "app.capabilities" and len(parsed) != len(set(parsed)):
+        raise ValueError("capabilities must not repeat")
 
 
 def module_installed(cfg: Config, name: str) -> bool:
@@ -223,7 +234,7 @@ def module_installed(cfg: Config, name: str) -> bool:
 def spec_available(cfg: Config, spec: SettingSpec) -> bool:
     if cfg.profile not in spec.profiles:
         return False
-    platform = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")
+    platform = sys.platform if sys.platform in ("win32", "darwin") else "linux"
     if platform not in spec.platforms:
         return False
     return all(module_installed(cfg, name) for name in spec.modules)
@@ -274,6 +285,18 @@ def yaml_get(raw: dict, path: tuple[str, ...]) -> Any:
     return cur
 
 
+def _backend_inherited_source(spec: SettingSpec, path: tuple[str, ...], local: dict, base: dict,
+                              profile: dict) -> str:
+    name = spec.key.split(".")[1]
+    if yaml_has(local, ("backends", name, path[-1])):
+        return "local"
+    if yaml_has(base, ("backends", name, path[-1])):
+        return "file"
+    if yaml_has(profile, ("backends", name, path[-1])) and not yaml_has(base, ("backends", name)):
+        return "profile"
+    return "default"
+
+
 def inherited_source(spec: SettingSpec, files: dict[str, dict]) -> str:
     """Provenance of the YAML-inherited value. profile.yaml is not a generic overlay."""
     path = spec.yaml_path
@@ -283,14 +306,7 @@ def inherited_source(spec: SettingSpec, files: dict[str, dict]) -> str:
     base = files.get("base") or {}
     profile = files.get("profile") or {}
     if spec.key.startswith("backends.") and spec.key != "backends.local.model":
-        name = spec.key.split(".")[1]
-        if yaml_has(local, ("backends", name, path[-1])):
-            return "local"
-        if yaml_has(base, ("backends", name, path[-1])):
-            return "file"
-        if yaml_has(profile, ("backends", name, path[-1])) and not yaml_has(base, ("backends", name)):
-            return "profile"
-        return "default"
+        return _backend_inherited_source(spec, path, local, base, profile)
     if yaml_has(local, path):
         return "local"
     if yaml_has(base, path):

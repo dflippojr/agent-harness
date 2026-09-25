@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel, Field
 
@@ -27,6 +29,15 @@ def _changes(body: AdminPatch) -> dict:
     for key in body.reset:
         changes[key] = None
     return changes
+
+
+@contextmanager
+def _settings_errors():
+    """Translate SettingsError into the HTTP-facing HarnessError."""
+    try:
+        yield
+    except SettingsError as e:
+        _raise(e)
 
 
 def _raise(error: SettingsError):
@@ -65,20 +76,16 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
     @app.post(prefix + "/config/validate")
     async def admin_validate(body: AdminPatch, request: Request):
         require_admin(request, mgr)
-        try:
+        with _settings_errors():
             plan = service(request).validate_admin(_changes(body), body.revision, actor=actor(request))
-        except SettingsError as e:
-            _raise(e)
         return plan.as_dict(service(request).registry)
 
     @app.patch(prefix + "/config")
     async def admin_patch(body: AdminPatch, request: Request, response: Response):
         require_admin(request, mgr)
-        try:
+        with _settings_errors():
             view = service(request).patch_admin(_changes(body), body.revision, dry_run=body.dry_run,
                                                 actor=actor(request))
-        except SettingsError as e:
-            _raise(e)
         response.headers["ETag"] = f'"{view.get("revision", 0)}"'
         return view
 
@@ -87,20 +94,16 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         require_admin(request, mgr)
         if not body.confirm and not body.dry_run:
             raise_confirm("rollback")
-        try:
+        with _settings_errors():
             return service(request).rollback(body.revision, dry_run=body.dry_run, actor=actor(request))
-        except SettingsError as e:
-            _raise(e)
 
     @app.post(prefix + "/config/restart", status_code=202)
     async def admin_restart(body: AdminRevision, request: Request):
         require_admin(request, mgr)
         if not body.confirm:
             raise_confirm("restart")
-        try:
+        with _settings_errors():
             result = service(request).request_restart(body.revision, actor=actor(request))
-        except SettingsError as e:
-            _raise(e)
         schedule_exit()
         return result
 
@@ -129,14 +132,6 @@ def register_app(app: FastAPI, mgr, auth, owner_key) -> None:
             raise HarnessError(401, "missing or invalid app token")
         return key
 
-    def catch(fn):
-        def wrapped(*args, **kwargs):
-            try:
-                return fn(*args, **kwargs)
-            except SettingsError as e:
-                _raise(e)
-        return wrapped
-
     @app.get("/api/v1/config/schema")
     async def app_schema(request: Request):
         key = require_app(request, "sessions")
@@ -152,10 +147,8 @@ def register_app(app: FastAPI, mgr, auth, owner_key) -> None:
     @app.patch("/api/v1/config")
     async def app_patch(body: AdminPatch, request: Request, response: Response):
         key = require_app(request, "sessions")
-        try:
+        with _settings_errors():
             view = mgr(request).settings.patch_app(key["id"], key, _changes(body), body.revision,
                                                    dry_run=body.dry_run)
-        except SettingsError as e:
-            _raise(e)
         response.headers["ETag"] = f'"{view.get("revision", 0)}"'
         return view

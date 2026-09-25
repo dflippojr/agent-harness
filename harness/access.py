@@ -23,16 +23,45 @@ from .principal import (  # re-exported for existing imports
 
 Access = Principal
 
-OWNER_GET_PREFIXES = ("/keys", "/metrics", "/maintenance", "/skills", "/chats")
+KEYS = "/keys"
+METRICS = "/metrics"
+MAINTENANCE = "/maintenance"
+SKILLS = "/skills"
+CHATS = "/chats"
+JOBS = "/jobs"
+IMAGES = "/images"
+MEMORY = "/memory"
+TEMPLATES = "/templates"
+SMART_APPROVALS = "/smart-approvals"
+ADMIN_API = "/api/admin"
+
+OWNER_GET_PREFIXES = (KEYS, METRICS, MAINTENANCE, SKILLS, CHATS)
 RUNNER_PREFIX = "/runners/"
 MEMBER_FORBIDDEN_PREFIXES = (
-    "/keys", "/metrics", "/maintenance", "/jobs", "/images", "/gpu",
-    "/remote-control", "/memory", "/templates", "/notify", "/pairing-codes",
-    "/runner-pairing-codes", "/smart-approvals", "/api/admin", "/api/v1/images",
-    "/api/v1/remote-control", "/skills", "/chats",
+    KEYS, METRICS, MAINTENANCE, JOBS, IMAGES, "/gpu",
+    "/remote-control", MEMORY, TEMPLATES, "/notify", "/pairing-codes",
+    "/runner-pairing-codes", SMART_APPROVALS, ADMIN_API, "/api/v1/images",
+    "/api/v1/remote-control", SKILLS, CHATS,
 )
-MEMBER_FORBIDDEN_EXACT = frozenset({"/chats", "/keys", "/metrics", "/maintenance", "/jobs", "/images", "/gpu",
-                                    "/memory", "/templates", "/notify/test", "/smart-approvals"})
+MEMBER_FORBIDDEN_EXACT = frozenset({CHATS, KEYS, METRICS, MAINTENANCE, JOBS, IMAGES, "/gpu",
+                                    MEMORY, TEMPLATES, "/notify/test", SMART_APPROVALS})
+# First match wins; a forbidden prefix matching none of these gets a generic message.
+MEMBER_FORBIDDEN_DETAILS = (
+    ((JOBS,), "members cannot use scheduled jobs"),
+    ((IMAGES, "/api/v1/images"), "members cannot use image generation"),
+    (("/gpu",), "members cannot change GPU or machine settings"),
+    (("/remote-control", "/api/v1/remote-control"), "members cannot use Remote Control"),
+    ((MEMORY,), "members cannot use the memory library"),
+    ((KEYS, "/pairing-codes", "/runner-pairing-codes"),
+     "members cannot manage owner, app, or device credentials"),
+    ((MAINTENANCE,), "members cannot use maintenance or backups"),
+    ((TEMPLATES,), "members cannot manage owner templates"),
+    (("/notify",), "members cannot use notifications"),
+    ((METRICS,), "members cannot view owner metrics"),
+    ((SMART_APPROVALS,), "members cannot use smart approvals"),
+    ((SKILLS,), "members cannot manage instruction skills"),
+    ((CHATS,), "Chat is only available to the owner"),
+)
 
 
 def resolve_access(cfg, login: str | None, db=None) -> Access:
@@ -40,14 +69,28 @@ def resolve_access(cfg, login: str | None, db=None) -> Access:
     return resolve_human(cfg, login, db)
 
 
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def _under_any_prefix(path: str, prefixes) -> bool:
+    return any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
+
+
+def _member_owner_only_detail(path: str) -> str:
+    for prefixes, detail in MEMBER_FORBIDDEN_DETAILS:
+        if path.startswith(prefixes):
+            return detail
+    return "members cannot use owner-only operations"
+
+
 def guest_forbidden(access: Access, method: str, path: str) -> str | None:
     """Return an error detail if this guest request is refused, else None."""
     if access.role != "guest":
         return None
-    if path == "/api/admin" or path.startswith("/api/admin/"):
+    if path == ADMIN_API or path.startswith(ADMIN_API + "/"):
         return "demo access cannot use the owner API"
-    if method in ("GET", "HEAD", "OPTIONS"):
-        if any(path == prefix or path.startswith(prefix + "/") for prefix in OWNER_GET_PREFIXES):
+    if method in SAFE_METHODS:
+        if _under_any_prefix(path, OWNER_GET_PREFIXES):
             return "demo access cannot view owner credentials"
         return None
     if path.startswith(RUNNER_PREFIX):
@@ -65,41 +108,17 @@ def member_forbidden(access: Access, method: str, path: str) -> str | None:
         return None
     if not access.allowed:
         return access.detail or "this household account is disabled"
-    if path == "/api/admin" or path.startswith("/api/admin/"):
+    if path == ADMIN_API or path.startswith(ADMIN_API + "/"):
         return "members cannot use the owner API"
     if path == "/runners" or path.startswith(RUNNER_PREFIX):
         # GET /runners is the status list; /runners/{name}/… is poll/results (runner tokens, not members).
         return "members cannot use Mac or other runners"
-    if any(path == prefix or path.startswith(prefix + "/") for prefix in MEMBER_FORBIDDEN_PREFIXES):
-        if path.startswith("/jobs") or path == "/jobs":
-            return "members cannot use scheduled jobs"
-        if path.startswith("/images") or path == "/images" or path.startswith("/api/v1/images"):
-            return "members cannot use image generation"
-        if path.startswith("/gpu"):
-            return "members cannot change GPU or machine settings"
-        if path.startswith("/remote-control") or path.startswith("/api/v1/remote-control"):
-            return "members cannot use Remote Control"
-        if path.startswith("/memory"):
-            return "members cannot use the memory library"
-        if path.startswith("/keys") or path.startswith("/pairing-codes") or path.startswith("/runner-pairing-codes"):
-            return "members cannot manage owner, app, or device credentials"
-        if path.startswith("/maintenance"):
-            return "members cannot use maintenance or backups"
-        if path.startswith("/templates"):
-            return "members cannot manage owner templates"
-        if path.startswith("/notify"):
-            return "members cannot use notifications"
-        if path.startswith("/metrics"):
-            return "members cannot view owner metrics"
-        if path.startswith("/smart-approvals") or path == "/smart-approvals":
-            return "members cannot use smart approvals"
-        if path.startswith("/skills"):
-            return "members cannot manage instruction skills"
-        if path.startswith("/chats"):
-            return "Chat is only available to the owner"
-        return "members cannot use owner-only operations"
-    if path.startswith("/backends/") and method not in ("GET", "HEAD", "OPTIONS"):
+    if _under_any_prefix(path, MEMBER_FORBIDDEN_PREFIXES):
+        return _member_owner_only_detail(path)
+    if method in SAFE_METHODS:
+        return None
+    if path.startswith("/backends/"):
         return "members cannot change machine settings"
-    if path == "/profile" and method not in ("GET", "HEAD", "OPTIONS"):
+    if path == "/profile":
         return "members cannot change the owner profile"
     return None
