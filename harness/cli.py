@@ -20,8 +20,9 @@ except ImportError:  # installed native bundle imports these as sibling modules
     from harness_update import apply_update
 
 HOME_DIR = ".agent-harness"
-DEFAULT_CONFIG = Path.home() / HOME_DIR / "client" / "config.json"
-DEFAULT_RUNNER_CONFIG = Path.home() / HOME_DIR / "runner" / "config.json"
+HARNESS_HOME = Path.home() / HOME_DIR
+DEFAULT_CONFIG = HARNESS_HOME / "client" / "config.json"
+DEFAULT_RUNNER_CONFIG = HARNESS_HOME / "runner" / "config.json"
 BASE = "http://127.0.0.1:8100"
 TOKEN = ""
 CONFIG_PATH = DEFAULT_CONFIG
@@ -53,15 +54,26 @@ def _headers(extra: dict | None = None) -> dict:
     return headers
 
 
+def _harness_file(parser: argparse.ArgumentParser, flag: str, value: str) -> Path:
+    """A --config / --runner-config path. Both live under ~/.agent-harness (see macrunner/install.sh), and the
+    CLI writes credentials to them, so anything that resolves elsewhere is refused."""
+    base = HARNESS_HOME.expanduser().resolve()
+    path = Path(value).expanduser().resolve()
+    if path == base or not path.is_relative_to(base):
+        parser.error(f"{flag} must be a file under {base}")
+    return path
+
+
 def _write_private_json(path: Path, data: dict) -> None:
+    """Replace `path` with `data`. The temp file is created new and owner-only before the credentials go in, so a
+    file or link already sitting at its name is removed rather than written through."""
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".new")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with open(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(data, indent=2) + "\n")
     tmp.replace(path)
 
 
@@ -99,6 +111,12 @@ def add_project_root(path: str, runner_path: Path = DEFAULT_RUNNER_CONFIG) -> Pa
     config["repo_roots"] = roots
     _write_private_json(runner_path, config)
     return root
+
+
+def tail_command(log: Path, lines: int, follow: bool) -> list[str]:
+    """`tail` for the runner log: the count is parsed as a whole number (at least 1) and `--` ends the options,
+    so no other option can reach `tail` through --lines."""
+    return ["tail", "-n", str(max(1, int(lines))), *(["-f"] if follow else []), "--", str(log)]
 
 
 def launchctl(*args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -346,10 +364,13 @@ def main() -> int:
     logs.add_argument("--follow", action="store_true")
     logs.add_argument("--lines", type=int, default=80)
     args = parser.parse_args()
+    args.config = _harness_file(parser, "--config", args.config)
+    if getattr(args, "runner_config", None) is not None:
+        args.runner_config = _harness_file(parser, "--runner-config", args.runner_config)
     configure(args.config)
 
     if args.cmd == "pair":
-        paired = pair_native(args.server, args.code, Path(args.config), Path(args.runner_config))
+        paired = pair_native(args.server, args.code, args.config, args.runner_config)
         print(f"paired {paired['runner']['name']} with {paired['server']}")
         return 0
     if args.cmd == "version":
@@ -376,7 +397,7 @@ def main() -> int:
         return 0
     if args.cmd == "projects":
         try:
-            root = add_project_root(args.path, Path(args.runner_config))
+            root = add_project_root(args.path, args.runner_config)
             launchctl("kickstart", "-k", check=True)
         except (ValueError, OSError, subprocess.CalledProcessError) as exc:
             sys.exit(f"could not add project: {exc}")
@@ -388,11 +409,7 @@ def main() -> int:
             print("runner restarted")
             return 0
         if args.runner_cmd == "logs":
-            log = Path.home() / HOME_DIR / "logs" / "runner.log"
-            command = ["tail", "-n", str(max(1, args.lines))]
-            if args.follow:
-                command.append("-f")
-            return subprocess.call([*command, str(log)])
+            return subprocess.call(tail_command(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow))
         local = launchctl("print")
         config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
         remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
