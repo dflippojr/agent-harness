@@ -332,6 +332,20 @@ def test_memory_api(tmp_path):
         assert client.put("/memory/profile", json={"content": "x" * 400, "summary": "too long"}).status_code == 400
 
 
+def test_owner_write_that_fails_leaves_the_profile_whole(tmp_path):
+    """Issue #221: the owner's profile save goes through the contained, atomic write, so a save that fails part way
+    (here: text that can't be encoded) doesn't leave a truncated profile in the clone for the next session to read."""
+    bare, lib_cfg = library_remote(tmp_path)
+    lib = MemoryLibrary(lib_cfg, db=None)
+
+    async def body():
+        with pytest.raises(UnicodeEncodeError):
+            await lib.owner_write("agent-profile.md", "# Agent profile\n- \ud800\n", "broken text")
+    asyncio.run(body())
+    assert "Prefers short answers." in lib.profile_text()
+    assert sorted(p.name for p in lib.root.iterdir()) == [".git", "agent-profile.md", "categories"]
+
+
 # 7d: scheduled jobs
 from datetime import datetime  # noqa: E402
 
