@@ -11,13 +11,27 @@ from .settings import (
     module_installed, parse_value,
 )
 
+GPU_GUARD = "GPU guard"
+SMART_APPROVALS = "Smart approvals"
+APP_DEFAULTS = "App defaults"
+KEY_IMAGES_EDIT_ENABLED = "images.edit_enabled"
+KEY_COMPACTION_SUMMARIZE_AT = "compaction.summarize_at"
+KEY_COMPACTION_KEEP_RECENT = "compaction.keep_recent"
+KEY_APP_DEFAULT_BACKEND = "app.default_backend"
+KEY_APP_DEFAULT_MODEL = "app.default_model"
+KEY_APP_DEFAULT_EFFORT = "app.default_effort"
+KEY_APP_MAX_TURNS = "app.sessions.max_turns"
+KEY_APP_MAX_COMPLETION_TOKENS = "app.sessions.max_completion_tokens"
+KEY_APP_CAPABILITIES = "app.capabilities"
+KEY_APP_NOTIFY_COMPLETION = "app.notify.completion"
+
 TIME_OF_DAY = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 
 
 def _require_url(value: str, label: str) -> list[str]:
     if not value.strip():
         return [f"{label} is not configured"]
-    if not (value.startswith("http://") or value.startswith("https://")):
+    if not value.startswith(("http://", "https://")):
         return [f"{label} must be an http(s) URL"]
     return []
 
@@ -114,7 +128,7 @@ ENABLE_CHECKS = {
     "jobs.enabled": check_jobs,
     "endpoint.enabled": check_endpoint,
     "images.enabled": check_images,
-    "images.edit_enabled": check_image_edit,
+    KEY_IMAGES_EDIT_ENABLED: check_image_edit,
     "gpu_guard.enabled": check_gpu_guard,
     "notifications.enabled": check_notifications,
     "backup.enabled": check_backup,
@@ -178,14 +192,14 @@ def apply_backup_schedule(manager, old, new) -> None:
 
 def validate_compaction(cfg: Config, proposed: dict) -> list[dict]:
     elide = proposed.get("compaction.elide_at", cfg.elide_at)
-    summarize = proposed.get("compaction.summarize_at", cfg.summarize_at)
-    keep = proposed.get("compaction.keep_recent", cfg.keep_recent)
+    summarize = proposed.get(KEY_COMPACTION_SUMMARIZE_AT, cfg.summarize_at)
+    keep = proposed.get(KEY_COMPACTION_KEEP_RECENT, cfg.keep_recent)
     errors = []
-    if not (elide < summarize):
-        errors.append({"key": "compaction.summarize_at", "code": "cross_field",
+    if elide >= summarize:
+        errors.append({"key": KEY_COMPACTION_SUMMARIZE_AT, "code": "cross_field",
                        "message": "compaction.summarize_at must be greater than compaction.elide_at"})
-    if not (keep < summarize):
-        errors.append({"key": "compaction.keep_recent", "code": "cross_field",
+    if keep >= summarize:
+        errors.append({"key": KEY_COMPACTION_KEEP_RECENT, "code": "cross_field",
                        "message": "compaction.keep_recent must be less than compaction.summarize_at"})
     return errors
 
@@ -198,8 +212,7 @@ def validate_enables(cfg: Config, proposed: dict) -> list[dict]:
         if proposed[key] is not True:
             continue
         spec_name = key.split(".", 1)[0]
-        module = "image_edit" if key == "images.edit_enabled" else (
-            "notifications" if spec_name == "notifications" else spec_name)
+        module = "image_edit" if key == KEY_IMAGES_EDIT_ENABLED else spec_name
         if not module_installed(cfg, module):
             errors.append({"key": key, "code": "dependency",
                            "message": f"{module} is not installed for this profile"})
@@ -210,22 +223,22 @@ def validate_enables(cfg: Config, proposed: dict) -> list[dict]:
 
 
 def _int(key, label, help, category, default, getter, setter, minimum, maximum, yaml_path,
-         apply_mode="live", modules=(), live_apply=None, live_undo=None):
+         apply_mode="live", modules=(), live_apply=None):
     return SettingSpec(
         key=key, label=label, help=help, category=category, value_type="int", default=default,
         scope="admin", apply_mode=apply_mode, getter=getter, setter=setter,
         bounds=Bounds(minimum=minimum, maximum=maximum), yaml_path=yaml_path, modules=modules,
-        live_apply=live_apply, live_undo=live_undo,
+        live_apply=live_apply, live_undo=live_apply,
     )
 
 
 def _float(key, label, help, category, default, getter, setter, minimum, maximum, yaml_path,
-           apply_mode="live", modules=(), live_apply=None, live_undo=None):
+           apply_mode="live", modules=(), live_apply=None):
     return SettingSpec(
         key=key, label=label, help=help, category=category, value_type="float", default=default,
         scope="admin", apply_mode=apply_mode, getter=getter, setter=setter,
         bounds=Bounds(minimum=minimum, maximum=maximum), yaml_path=yaml_path, modules=modules,
-        live_apply=live_apply, live_undo=live_undo,
+        live_apply=live_apply, live_undo=live_apply,
     )
 
 
@@ -239,12 +252,12 @@ def _bool(key, label, help, category, default, getter, setter, yaml_path, apply_
 
 
 def _enum(key, label, help, category, default, getter, setter, values, yaml_path, modules=(),
-          apply_mode="live", max_length=80, live_apply=None, live_undo=None):
+          apply_mode="live", max_length=80, live_apply=None):
     return SettingSpec(
         key=key, label=label, help=help, category=category, value_type="enum", default=default,
         scope="admin", apply_mode=apply_mode, getter=getter, setter=setter,
         bounds=Bounds(enum=values, max_length=max_length), yaml_path=yaml_path, modules=modules,
-        live_apply=live_apply, live_undo=live_undo,
+        live_apply=live_apply, live_undo=live_apply,
     )
 
 
@@ -652,10 +665,10 @@ STATIC_ADMIN: list[SettingSpec] = [
     _float("compaction.elide_at", "Elide at",
            "Fraction of context at which old tool outputs are shortened.",
            "Compaction", 0.55, _get_elide, _set_elide, 0.10, 0.90, ("compaction", "elide_at")),
-    _float("compaction.summarize_at", "Summarize at",
+    _float(KEY_COMPACTION_SUMMARIZE_AT, "Summarize at",
            "Fraction of context at which older turns are summarized. Must be greater than elide_at.",
            "Compaction", 0.65, _get_summarize, _set_summarize, 0.15, 0.95, ("compaction", "summarize_at")),
-    _float("compaction.keep_recent", "Keep recent",
+    _float(KEY_COMPACTION_KEEP_RECENT, "Keep recent",
            "Fraction of context kept verbatim after a summary. Must be less than summarize_at.",
            "Compaction", 0.20, _get_keep, _set_keep, 0.05, 0.50, ("compaction", "keep_recent")),
     _float("cleanup.container_idle_hours", "Container idle hours",
@@ -673,7 +686,7 @@ STATIC_ADMIN: list[SettingSpec] = [
     _int("cleanup.interval_minutes", "Cleanup interval (minutes)",
          "How often idle containers and old workspaces are swept. Applied live by rescheduling the cleanup task.",
          "Cleanup", 60, _get_interval, _set_interval, 5, 1440, ("cleanup", "interval_minutes"),
-         live_apply=apply_cleanup_interval, live_undo=apply_cleanup_interval),
+         live_apply=apply_cleanup_interval),
     _int("web.page_chars", "Page character limit",
          "Characters returned per web_fetch page.",
          "Web", 15000, _get_page_chars, _set_page_chars, 1000, 200_000, ("web", "page_chars"),
@@ -696,11 +709,11 @@ STATIC_ADMIN: list[SettingSpec] = [
     _int("endpoint.max_waiting", "Endpoint queue depth",
          "Inference requests waiting for the GPU before new ones get 429.",
          "Endpoint", 4, _get_max_waiting, _set_max_waiting, 0, 32, ("endpoint", "max_waiting"),
-         modules=("endpoint",), live_apply=apply_endpoint_queue, live_undo=apply_endpoint_queue),
+         modules=("endpoint",), live_apply=apply_endpoint_queue),
     _float("endpoint.agent_fair_seconds", "Agent fairness (seconds)",
            "After an agent turn waits this long, new endpoint requests queue behind it.",
            "Endpoint", 90, _get_fair, _set_fair, 10, 600, ("endpoint", "agent_fair_seconds"),
-           modules=("endpoint",), live_apply=apply_endpoint_queue, live_undo=apply_endpoint_queue),
+           modules=("endpoint",), live_apply=apply_endpoint_queue),
     _float("endpoint.request_timeout_seconds", "Endpoint request timeout (seconds)",
            "Give up on a hung inference request after this long.",
            "Endpoint", 1800, _get_req_timeout, _set_req_timeout, 30, 7200,
@@ -723,20 +736,20 @@ STATIC_ADMIN: list[SettingSpec] = [
          1_000_000, 100_000_000, ("images", "max_pixels"), modules=("image_edit",)),
     _float("gpu_guard.poll_seconds", "GPU guard poll (seconds)",
            "How often the GPU guard looks for games or Plex transcodes.",
-           "GPU guard", 10, _get_gpu_poll, _set_gpu_poll, 2, 60, ("gpu_guard", "poll_seconds"),
+           GPU_GUARD, 10, _get_gpu_poll, _set_gpu_poll, 2, 60, ("gpu_guard", "poll_seconds"),
            modules=("gpu_guard",)),
     _float("gpu_guard.resume_after_seconds", "GPU resume delay (seconds)",
            "The GPU must stay clear this long before the model is reloaded.",
-           "GPU guard", 180, _get_gpu_resume, _set_gpu_resume, 10, 1800,
+           GPU_GUARD, 180, _get_gpu_resume, _set_gpu_resume, 10, 1800,
            ("gpu_guard", "resume_after_seconds"), modules=("gpu_guard",)),
     _float("gpu_guard.drain_timeout_seconds", "GPU drain timeout (seconds)",
            "Longest wait for the current model turn before the server is stopped.",
-           "GPU guard", 300, _get_gpu_drain, _set_gpu_drain, 30, 1800,
+           GPU_GUARD, 300, _get_gpu_drain, _set_gpu_drain, 30, 1800,
            ("gpu_guard", "drain_timeout_seconds"), modules=("gpu_guard",)),
     _float("jobs.poll_seconds", "Job polling interval (seconds)",
            "How often scheduled jobs are checked.",
            "Jobs", 30, _get_jobs_poll, _set_jobs_poll, 5, 300, ("jobs", "poll_seconds"),
-           modules=("jobs",), live_apply=apply_jobs_poll, live_undo=apply_jobs_poll),
+           modules=("jobs",), live_apply=apply_jobs_poll),
     SettingSpec(
         key="backup.at", label="Backup time", help="Local time (HH:MM) for the nightly backup.",
         category="Backup", value_type="string", default="03:30", scope="admin", apply_mode="live",
@@ -748,34 +761,34 @@ STATIC_ADMIN: list[SettingSpec] = [
          "Delete dated backup folders older than this.",
          "Backup", 14, _get_backup_keep, _set_backup_keep, 1, 365, ("backup", "keep_days"),
          modules=("backup",)),
-    _bool("smart_approvals.enabled", "Smart approvals",
+    _bool("smart_approvals.enabled", SMART_APPROVALS,
           "Runtime enable for the hosted smart-approval reviewer. Does not configure a secret_ref.",
-          "Smart approvals", False, _get_smart_enabled, _set_smart_enabled,
+          SMART_APPROVALS, False, _get_smart_enabled, _set_smart_enabled,
           ("smart_approvals", "enabled")),
     _enum("smart_approvals.mode", "Smart-approval mode",
           "off, shadow, or auto. Last writer among this setting and PUT /smart-approvals "
           "wins; off means no reviewer calls.",
-          "Smart approvals", "shadow", _get_smart_mode, _set_smart_mode,
+          SMART_APPROVALS, "shadow", _get_smart_mode, _set_smart_mode,
           ("off", "shadow", "auto"), ("smart_approvals", "mode"),
-          live_apply=apply_smart_mode, live_undo=apply_smart_mode),
+          live_apply=apply_smart_mode),
     _enum("smart_approvals.provider", "Smart-approval provider",
           "Hosted reviewer provider. openai or anthropic.",
-          "Smart approvals", "openai", _get_smart_provider, _set_smart_provider,
+          SMART_APPROVALS, "openai", _get_smart_provider, _set_smart_provider,
           ("openai", "anthropic"), ("smart_approvals", "provider")),
     SettingSpec(
         key="smart_approvals.model", label="Smart-approval model",
         help="Hosted reviewer model id. Existing in-flight reviews keep the model they started with.",
-        category="Smart approvals", value_type="string", default="gpt-4.1-mini", scope="admin",
+        category=SMART_APPROVALS, value_type="string", default="gpt-4.1-mini", scope="admin",
         apply_mode="live", getter=_get_smart_model, setter=_set_smart_model,
         bounds=Bounds(min_length=1, max_length=80), yaml_path=("smart_approvals", "model"),
     ),
     _float("smart_approvals.timeout_seconds", "Smart-approval timeout (seconds)",
            "Give up on a hung reviewer request after this long.",
-           "Smart approvals", 8, _get_smart_timeout, _set_smart_timeout, 0.1, 60,
+           SMART_APPROVALS, 8, _get_smart_timeout, _set_smart_timeout, 0.1, 60,
            ("smart_approvals", "timeout_seconds")),
     _float("smart_approvals.min_confidence", "Smart-approval min confidence",
            "Hosted reviewer must meet this confidence before auto mode may approve.",
-           "Smart approvals", 0.85, _get_smart_confidence, _set_smart_confidence, 0, 1,
+           SMART_APPROVALS, 0.85, _get_smart_confidence, _set_smart_confidence, 0, 1,
            ("smart_approvals", "min_confidence")),
     _bool("web.enabled", "Web tools",
           "Runtime enable for web_search / web_fetch. Does not install the web module.",
@@ -797,12 +810,12 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for local image generation.",
           "Features", False, _enable_get("images"), _enable_set("images"), ("images", "enabled"),
           apply_mode="daemon_restart", modules=("images",), enable_check=check_images),
-    _bool("images.edit_enabled", "Masked image editing",
+    _bool(KEY_IMAGES_EDIT_ENABLED, "Masked image editing",
           "Runtime enable for the installed Qwen-Image-Edit component. Does not download model weights.",
           "Features", False, _enable_get("image_edit"), _enable_set("image_edit"),
           ("images", "edit_enabled"), apply_mode="daemon_restart", modules=("image_edit",),
           enable_check=check_image_edit),
-    _bool("gpu_guard.enabled", "GPU guard",
+    _bool("gpu_guard.enabled", GPU_GUARD,
           "Runtime enable for pausing the model while a game or Plex transcode needs the GPU.",
           "Features", False, _enable_get("gpu_guard"), _enable_set("gpu_guard"), ("gpu_guard", "enabled"),
           apply_mode="daemon_restart", modules=("gpu_guard",), enable_check=check_gpu_guard),
@@ -837,10 +850,10 @@ STATIC_ADMIN: list[SettingSpec] = [
             "Notifications", ("notify", "token_file"), modules=("notifications",)),
     _hidden("smart_approvals.secret_ref", "Smart-approval secret",
             "Opaque name of the hosted reviewer key file. Managed in local configuration.",
-            "Smart approvals", ("smart_approvals", "secret_ref")),
+            SMART_APPROVALS, ("smart_approvals", "secret_ref")),
     _hidden("smart_approvals.proxy", "Smart-approval proxy",
             "Optional explicit proxy for the hosted reviewer. Managed in local configuration.",
-            "Smart approvals", ("smart_approvals", "proxy")),
+            SMART_APPROVALS, ("smart_approvals", "proxy")),
     _hidden("install.profile", "Install profile", "full or service. Chosen by the installer.", "Install",
             ("profile",)),
 ]
@@ -855,53 +868,53 @@ for _mod in MODULE_NAMES:
 
 APP_SPECS: list[SettingSpec] = [
     SettingSpec(
-        key="app.default_backend", label="Default backend",
+        key=KEY_APP_DEFAULT_BACKEND, label="Default backend",
         help="Used only when a session request omits backend. Cannot select an unassigned provider.",
-        category="App defaults", value_type="string", default="", scope="app", apply_mode="live",
-        getter=_app_get("app.default_backend", ""), setter=_app_set("app.default_backend"),
+        category=APP_DEFAULTS, value_type="string", default="", scope="app", apply_mode="live",
+        getter=_app_get(KEY_APP_DEFAULT_BACKEND, ""), setter=_app_set(KEY_APP_DEFAULT_BACKEND),
         bounds=Bounds(max_length=40), capabilities=("sessions",),
     ),
     SettingSpec(
-        key="app.default_model", label="Default model",
+        key=KEY_APP_DEFAULT_MODEL, label="Default model",
         help="Used only when a session request omits model.",
-        category="App defaults", value_type="string", default="", scope="app", apply_mode="live",
-        getter=_app_get("app.default_model", ""), setter=_app_set("app.default_model"),
+        category=APP_DEFAULTS, value_type="string", default="", scope="app", apply_mode="live",
+        getter=_app_get(KEY_APP_DEFAULT_MODEL, ""), setter=_app_set(KEY_APP_DEFAULT_MODEL),
         bounds=Bounds(max_length=80), capabilities=("sessions",),
     ),
     SettingSpec(
-        key="app.default_effort", label="Default effort",
+        key=KEY_APP_DEFAULT_EFFORT, label="Default effort",
         help="Used only when a hosted-backend session request omits effort.",
-        category="App defaults", value_type="enum", default="", scope="app", apply_mode="live",
-        getter=_app_get("app.default_effort", ""), setter=_app_set("app.default_effort"),
+        category=APP_DEFAULTS, value_type="enum", default="", scope="app", apply_mode="live",
+        getter=_app_get(KEY_APP_DEFAULT_EFFORT, ""), setter=_app_set(KEY_APP_DEFAULT_EFFORT),
         bounds=Bounds(enum=("",) + EFFORTS), capabilities=("sessions",),
     ),
     SettingSpec(
-        key="app.sessions.max_turns", label="Maximum turns",
+        key=KEY_APP_MAX_TURNS, label="Maximum turns",
         help="Per-session turn cap, never higher than the owner limit.",
         category="App budgets", value_type="int", default=None, scope="app", apply_mode="live",
-        getter=_app_get("app.sessions.max_turns", None), setter=_app_set("app.sessions.max_turns"),
+        getter=_app_get(KEY_APP_MAX_TURNS, None), setter=_app_set(KEY_APP_MAX_TURNS),
         bounds=Bounds(minimum=1, maximum=500), capabilities=("sessions",),
     ),
     SettingSpec(
-        key="app.sessions.max_completion_tokens", label="Maximum completion tokens",
+        key=KEY_APP_MAX_COMPLETION_TOKENS, label="Maximum completion tokens",
         help="Per-session completion-token cap, never higher than the owner limit.",
         category="App budgets", value_type="int", default=None, scope="app", apply_mode="live",
-        getter=_app_get("app.sessions.max_completion_tokens", None),
-        setter=_app_set("app.sessions.max_completion_tokens"),
+        getter=_app_get(KEY_APP_MAX_COMPLETION_TOKENS, None),
+        setter=_app_set(KEY_APP_MAX_COMPLETION_TOKENS),
         bounds=Bounds(minimum=1000, maximum=2_000_000), capabilities=("sessions",),
     ),
     SettingSpec(
-        key="app.capabilities", label="Enabled capabilities",
+        key=KEY_APP_CAPABILITIES, label="Enabled capabilities",
         help="Subset of capabilities already granted by the token, installed by the daemon, and allowed by policy.",
         category="App capabilities", value_type="string_list", default=None, scope="app", apply_mode="live",
-        getter=_app_get("app.capabilities", None), setter=_app_set("app.capabilities"),
+        getter=_app_get(KEY_APP_CAPABILITIES, None), setter=_app_set(KEY_APP_CAPABILITIES),
         bounds=Bounds(enum=APP_CAPABILITIES), capabilities=("sessions",),
     ),
     SettingSpec(
-        key="app.notify.completion", label="Completion notifications",
+        key=KEY_APP_NOTIFY_COMPLETION, label="Completion notifications",
         help="inherit uses the owner channel; never silences this app's session-completion notifications.",
         category="App notifications", value_type="enum", default="inherit", scope="app", apply_mode="live",
-        getter=_app_get("app.notify.completion", "inherit"), setter=_app_set("app.notify.completion"),
+        getter=_app_get(KEY_APP_NOTIFY_COMPLETION, "inherit"), setter=_app_set(KEY_APP_NOTIFY_COMPLETION),
         bounds=Bounds(enum=NOTIFY_COMPLETION), capabilities=("sessions",),
     ),
 ]
