@@ -264,30 +264,31 @@ def nodes_from_object_info(object_info: dict | None) -> set[str]:
 
 def _asset_states(manifest: dict, root: Path, enc_plan: dict, hash_if_needed: bool):
     assets = {}
-    missing, corrupt, verifying = [], [], []
+    buckets: dict[str, list] = {"missing": [], "corrupt": [], "verifying": []}
     for key, asset in manifest["assets"].items():
         if key == "encoder":
-            dest = enc_plan["path"]
-            filename = enc_plan["filename"]
-            state = file_state(dest, asset["sha256"], asset["bytes"],
-                              hash_if_needed=hash_if_needed) if dest.exists() else "missing"
-            if enc_plan["action"] == "reuse":
-                state = "ok"
-            elif enc_plan["state"] == "verifying":
-                state = "verifying"
+            dest, filename = enc_plan["path"], enc_plan["filename"]
+            state = _encoder_state(enc_plan, asset, hash_if_needed)
         else:
             dest = asset_dest(asset, root)
             filename = asset["filename"]
             state = file_state(dest, asset["sha256"], asset["bytes"], hash_if_needed=hash_if_needed)
         assets[key] = {"filename": filename, "path": str(dest), "state": state, "sha256": asset["sha256"],
                        "bytes": asset["bytes"], "revision": asset["revision"]}
-        if state == "missing":
-            missing.append(filename)
-        elif state == "corrupt":
-            corrupt.append(filename)
-        elif state == "verifying":
-            verifying.append(filename)
-    return assets, missing, corrupt, verifying
+        if state in buckets:
+            buckets[state].append(filename)
+    return assets, buckets["missing"], buckets["corrupt"], buckets["verifying"]
+
+
+def _encoder_state(enc_plan: dict, asset: dict, hash_if_needed: bool) -> str:
+    if enc_plan["action"] == "reuse":
+        return "ok"
+    if enc_plan["state"] == "verifying":
+        return "verifying"
+    dest = enc_plan["path"]
+    if not dest.exists():
+        return "missing"
+    return file_state(dest, asset["sha256"], asset["bytes"], hash_if_needed=hash_if_needed)
 
 
 def _node_presence(object_info: dict | None, comfy_root: Path, required: list, hash_if_needed: bool,
@@ -403,6 +404,23 @@ def _headers() -> dict:
     return {"User-Agent": "agent-harness-flux-fast"}
 
 
+def _size_or_zero(path: Path) -> int:
+    return path.stat().st_size if path.is_file() else 0
+
+
+def _promote_part(part: Path, dest: Path, sha256: str, size: int, resumed: bool) -> dict:
+    actual = part.stat().st_size
+    if actual != size:
+        part.unlink(missing_ok=True)
+        raise RuntimeError(f"{dest.name} size {actual} != {size}; partial file removed")
+    digest = sha256_file(part, size)
+    if digest.lower() != sha256.lower():
+        part.unlink(missing_ok=True)
+        raise RuntimeError(f"{dest.name} SHA-256 mismatch; partial file removed")
+    os.replace(part, dest)
+    return {"path": str(dest), "bytes": size, "sha256": digest, "resumed": resumed}
+
+
 def _write_part(resp, part: Path, have: int) -> None:
     """Append to the partial file on a 206 resume; a 200 restarts it from scratch."""
     if have and resp.status_code == 200:
@@ -424,19 +442,10 @@ def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx
     client = client or httpx.Client(timeout=timeout, follow_redirects=True, headers=_headers())
 
     def promote(*, resumed: bool) -> dict:
-        actual = part.stat().st_size
-        if actual != size:
-            part.unlink(missing_ok=True)
-            raise RuntimeError(f"{dest.name} size {actual} != {size}; partial file removed")
-        digest = sha256_file(part, size)
-        if digest.lower() != sha256.lower():
-            part.unlink(missing_ok=True)
-            raise RuntimeError(f"{dest.name} SHA-256 mismatch; partial file removed")
-        os.replace(part, dest)
-        return {"path": str(dest), "bytes": size, "sha256": digest, "resumed": resumed}
+        return _promote_part(part, dest, sha256, size, resumed)
 
     try:
-        have = part.stat().st_size if part.is_file() else 0
+        have = _size_or_zero(part)
         if have > size:
             part.unlink(missing_ok=True)
             have = 0
@@ -449,8 +458,7 @@ def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx
         log.info("downloading %s (%s bytes, resume %s)", redact_url(url), size, have)
         with client.stream("GET", url, headers=headers) as resp:
             if resp.status_code == 416:
-                have_now = part.stat().st_size if part.is_file() else 0
-                if have_now == size:
+                if _size_or_zero(part) == size:
                     return promote(resumed=True)
                 part.unlink(missing_ok=True)
                 raise RuntimeError(f"download failed HTTP 416 for {redact_url(url)}")

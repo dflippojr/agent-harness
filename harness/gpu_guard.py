@@ -423,6 +423,9 @@ class GpuGuard:
             await self._hold(now)
             return
 
+        await self._release(startup, now)
+
+    async def _release(self, startup: bool, now: float) -> None:
         if self._clear_since is None:
             self._clear_since = now
         if self.state == PAUSING:  # the trigger went away before the model was stopped
