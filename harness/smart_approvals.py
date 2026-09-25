@@ -23,8 +23,14 @@ RECOMMENDATIONS = frozenset({"approve", "deny", "escalate"})
 RISK_FLAGS = ("network", "destructive", "secrets", "privilege", "publication", "injection", "ambiguous", "other")
 # Any listed flag, including ambiguous/other, forces a human card (issue #18).
 BLOCKING_FLAGS = frozenset(RISK_FLAGS)
+REASON_MISSING_CREDENTIAL = "missing credential"
+REASON_RATE_LIMITED = "rate limited"
+REASON_PROVIDER_ERROR = "provider error"
+REASON_MALFORMED_JSON = "malformed JSON"
+REASON_UNPARSEABLE_COMMAND = "unparseable command"
+REASON_SCHEMA_VIOLATION = "schema violation"
 FAILURE_REASONS = frozenset({
-    "timeout", "malformed JSON", "provider error", "missing credential", "invalid output", "rate limited",
+    "timeout", REASON_MALFORMED_JSON, REASON_PROVIDER_ERROR, REASON_MISSING_CREDENTIAL, "invalid output", REASON_RATE_LIMITED,
 })
 MODES = ("off", "shadow", "auto")
 PROVIDERS = ("openai", "anthropic")
@@ -59,8 +65,8 @@ _CARGO = frozenset({"test", "check", "build", "clippy"})
 _GO = frozenset({"test", "vet", "build", "fmt"})
 _GO_PKG_RE = re.compile(r"^\.(?:/.*)?$")
 _PY_SCRIPT_RE = re.compile(r".+\.py$")
-_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-_NUMERIC_SHORT_RE = re.compile(r"^-[0-9]+$")
+_ASSIGN_RE = re.compile(r"(?a)^([A-Za-z_]\w*)=(.*)$")
+_NUMERIC_SHORT_RE = re.compile(r"(?a)^-\d+$")
 _CLUSTER_RE = re.compile(r"^-[A-Za-z]+$")
 _GIT_FORCE_RE = re.compile(r"(?i)\s(-d|--delete|--force|-f)\b")
 
@@ -85,8 +91,8 @@ _PUBLISH_RE = re.compile(
 )
 _FORCE_RE = re.compile(r"(?i)\b(git\s+(reset\s+--hard|clean\s+-\w*f)|--force\b|\b-f\b\s|--no-verify)\b")
 _PRIV_RE = re.compile(r"(?i)\b(sudo|doas|pkexec|chmod\s+[0-7]{3,4}|chown\b|chgrp\b|newgrp\b)\b")
-_SUBST_RE = re.compile(r"(?<!\\)(?:\$|`)")
-_WIN_ENV_RE = re.compile(r"%[A-Za-z_~][^%\s]{0,127}%|![A-Za-z_][A-Za-z0-9_]*!")
+_SUBST_RE = re.compile(r"(?<!\\)[$`]")
+_WIN_ENV_RE = re.compile(r"%[A-Za-z_~][^%\s]{0,127}%|![A-Za-z_](?a:\w*)!")
 _BRACE_RE = re.compile(r"(?<!\\)\{[^{}\n]{0,200}[,.][^{}\n]{0,200}\}")
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _GLOB_RE = re.compile(r"(?<!\\)[*?\[]")
@@ -627,7 +633,7 @@ def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool 
         return Eligibility(ok=False, reason="networked command", tool=name, rule=rule, network=True)
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
-        return Eligibility(ok=False, reason="unparseable command", tool=name, rule=rule)
+        return Eligibility(ok=False, reason=REASON_UNPARSEABLE_COMMAND, tool=name, rule=rule)
     if len(command) > MAX_COMMAND:
         return Eligibility(ok=False, reason="command too long", tool=name, rule=rule)
     _stripped, err = strip_shell_comments(command)
@@ -660,9 +666,9 @@ def assess_eligibility(name: str, args: dict, decision: Decision, *, repo: bool 
     try:
         tokens = shlex.split(command)
     except ValueError:
-        return Eligibility(ok=False, reason="unparseable command", tool=name, rule=rule, command=command)
+        return Eligibility(ok=False, reason=REASON_UNPARSEABLE_COMMAND, tool=name, rule=rule, command=command)
     if not tokens:
-        return Eligibility(ok=False, reason="unparseable command", tool=name, rule=rule, command=command)
+        return Eligibility(ok=False, reason=REASON_UNPARSEABLE_COMMAND, tool=name, rule=rule, command=command)
     while tokens and tokens[0] in ("command",):
         tokens = tokens[1:]
     if not tokens or not _binary_ok(tokens):
@@ -689,37 +695,37 @@ def reviewer_payload(eligibility: Eligibility) -> dict:
 def parse_reviewer_output(text: str) -> Review:
     """Strict structured output. Extra text or schema violations escalate."""
     if text is None or not isinstance(text, str):
-        return Review("escalate", escalate_reason="malformed JSON")
+        return Review("escalate", escalate_reason=REASON_MALFORMED_JSON)
     raw = text.strip()
     if not raw:
-        return Review("escalate", escalate_reason="malformed JSON")
+        return Review("escalate", escalate_reason=REASON_MALFORMED_JSON)
     try:
         data = json.loads(raw)
     except ValueError:
-        return Review("escalate", escalate_reason="malformed JSON")
+        return Review("escalate", escalate_reason=REASON_MALFORMED_JSON)
     if not isinstance(data, dict):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     allowed = {"recommendation", "confidence", "reason", "risk_flags"}
     if set(data) - allowed or allowed - set(data):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     rec = data.get("recommendation")
     if rec not in RECOMMENDATIONS:
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     try:
         confidence = float(data.get("confidence"))
     except (TypeError, ValueError):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     if not 0 <= confidence <= 1:  # NaN, below 0, or above 1
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     reason = data.get("reason")
     if not isinstance(reason, str):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     flags = data.get("risk_flags")
     if not isinstance(flags, list) or any(not isinstance(f, str) for f in flags):
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     unknown = [f for f in flags if f not in RISK_FLAGS]
     if unknown:
-        return Review("escalate", escalate_reason="schema violation")
+        return Review("escalate", escalate_reason=REASON_SCHEMA_VIOLATION)
     return Review(rec, confidence=confidence, reason=reason.strip()[:REASON_LIMIT],
                   risk_flags=list(dict.fromkeys(flags)))
 
@@ -727,10 +733,10 @@ def parse_reviewer_output(text: str) -> Review:
 def _read_secret(cfg, secret_ref: str) -> str:
     path = (cfg.provider_secret_files or {}).get(secret_ref, "") if cfg is not None else ""
     if not secret_ref or not path:
-        raise FileNotFoundError("missing credential")
+        raise FileNotFoundError(REASON_MISSING_CREDENTIAL)
     text = Path(path).read_text(encoding="utf-8").strip()
     if not text:
-        raise FileNotFoundError("missing credential")
+        raise FileNotFoundError(REASON_MISSING_CREDENTIAL)
     return text
 
 
@@ -769,9 +775,9 @@ async def hosted_complete(cfg: SmartConfig, secret: str, payload: dict) -> Revie
     async with httpx.AsyncClient(timeout=timeout, proxy=proxy, trust_env=False) as client:
         resp = await client.post(url, headers=headers, json=body)
     if resp.status_code == 429:
-        raise TimeoutError("rate limited")
+        raise TimeoutError(REASON_RATE_LIMITED)
     if resp.status_code in (401, 403):
-        raise FileNotFoundError("missing credential")
+        raise FileNotFoundError(REASON_MISSING_CREDENTIAL)
     if resp.status_code >= 400:
         raise RuntimeError(f"provider HTTP {resp.status_code}")
     data = resp.json()
@@ -841,7 +847,7 @@ class SmartReviewer:
         payload = reviewer_payload(eligibility)
         self.calls.append(payload)
         started = time.monotonic()
-        review = Review("escalate", escalate_reason="provider error", provider=settings.provider,
+        review = Review("escalate", escalate_reason=REASON_PROVIDER_ERROR, provider=settings.provider,
                         model=settings.model, mode=settings.mode)
         try:
             if self.complete is not None:
@@ -860,15 +866,15 @@ class SmartReviewer:
                 secret = _read_secret(self.cfg, settings.secret_ref)
                 review = await hosted_complete(settings, secret, payload)
         except FileNotFoundError:
-            review = Review("escalate", escalate_reason="missing credential")
+            review = Review("escalate", escalate_reason=REASON_MISSING_CREDENTIAL)
         except TimeoutError as e:
-            review = Review("escalate", escalate_reason="rate limited" if "rate" in str(e).lower() else "timeout")
+            review = Review("escalate", escalate_reason=REASON_RATE_LIMITED if "rate" in str(e).lower() else "timeout")
         except httpx.TimeoutException:
             review = Review("escalate", escalate_reason="timeout")
         except httpx.HTTPError:
-            review = Review("escalate", escalate_reason="provider error")
+            review = Review("escalate", escalate_reason=REASON_PROVIDER_ERROR)
         except Exception:
-            review = Review("escalate", escalate_reason="provider error")
+            review = Review("escalate", escalate_reason=REASON_PROVIDER_ERROR)
         review.latency_ms = int((time.monotonic() - started) * 1000)
         review.provider = review.provider or settings.provider
         review.model = review.model or settings.model
