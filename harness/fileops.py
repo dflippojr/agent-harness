@@ -88,21 +88,20 @@ class FileOps:
         """For entries found while walking: a symlink pointing out of the workspace is skipped."""
         return not p.is_symlink() or self.contains(resolve_path(p))
 
+    def _walk(self, d: Path, depth: int, max_depth: int, entries: list[str]) -> None:
+        for child in sorted(d.iterdir()):
+            if child.name in SKIP_DIRS or len(entries) >= 500 or not self._inside(child):
+                continue
+            entries.append(self.rel(child) + ("/" if child.is_dir() else ""))
+            if child.is_dir() and not child.is_symlink() and depth < max_depth:
+                self._walk(child, depth + 1, max_depth, entries)
+
     def list_files(self, path: str = ".", max_depth: int = 2) -> str:
         base = self.resolve(path)
         if not base.is_dir():
             raise ToolError(f"not a directory: {path}")
         entries: list[str] = []
-
-        def walk(d: Path, depth: int) -> None:
-            for child in sorted(d.iterdir()):
-                if child.name in SKIP_DIRS or len(entries) >= 500 or not self._inside(child):
-                    continue
-                entries.append(self.rel(child) + ("/" if child.is_dir() else ""))
-                if child.is_dir() and not child.is_symlink() and depth < max_depth:
-                    walk(child, depth + 1)
-
-        walk(base, 1)
+        self._walk(base, 1, max_depth, entries)
         suffix = "\n... (listing truncated at 500 entries)" if len(entries) >= 500 else ""
         return "\n".join(entries) + suffix if entries else "(empty directory)"
 
