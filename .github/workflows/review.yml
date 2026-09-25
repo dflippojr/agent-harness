@@ -130,6 +130,7 @@ jobs:
           REVIEW_MODEL_CODEX: ${{ vars.REVIEW_MODEL_CODEX }}
           REVIEW_EFFORT_CLAUDE: ${{ vars.REVIEW_EFFORT_CLAUDE }}
           REVIEW_EFFORT_CODEX: ${{ vars.REVIEW_EFFORT_CODEX }}
+          REVIEW_MAX_DIFF_BYTES: ${{ vars.REVIEW_MAX_DIFF_BYTES }}
           REVIEW_PROMPT: |
             Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
 
