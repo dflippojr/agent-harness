@@ -203,7 +203,7 @@ def test_cold_edit_hash_runs_in_background_and_is_cached(tmp_path, monkeypatch):
         monkeypatch.setattr(image_edit, "file_sha256", slow_hash)
         before = time.monotonic()
         status = m.images.status()["edit"]
-        assert time.monotonic() - before < 0.5
+        assert time.monotonic() - before < 1.5  # a blocking hash waits the full 2 s; generous for loaded runners
         assert status["verifying"] is True and status["available"] is False
         assert started.wait(1) and m.images._edit_verify_in_flight
         release.set()
