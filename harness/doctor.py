@@ -171,32 +171,47 @@ def check_daemon(r: Report, cfg) -> None:
         r.fail("Daemon", f"{base} not answering ({type(e).__name__}); see {cfg.data_dir / 'logs'}")
 
 
+IMAGE_EDITING = "Image editing"
+
+
+def _autostart_windows(r: Report, args, with_server: bool) -> None:
+    for suffix in (("LlamaServer", "Daemon") if with_server else ("Daemon",)):
+        task = f"AgentHarness-{args.instance}-{suffix}"
+        code, out = run(["schtasks", "/Query", "/TN", task, "/FO", "CSV", "/NH"])
+        if code == 0:
+            r.ok("Autostart", f"{task}: {out.split(',')[-1].strip(chr(34))}")
+        else:
+            r.warn("Autostart", f"{task} not registered (run install.ps1 without -NoTasks)")
+
+
+def _autostart_linux(r: Report, args, with_server: bool) -> None:
+    for suffix in (("llama", "daemon") if with_server else ("daemon",)):
+        unit = f"agent-harness-{args.instance.lower()}-{suffix}.service"
+        code, status = run(["systemctl", "--user", "is-active", unit])
+        (r.ok if code == 0 and status == "active" else r.warn)(
+            "Autostart", f"{unit}: {status or 'not active'}")
+
+
+def _autostart_macos(r: Report, args) -> None:
+    label = f"com.agent-harness.{args.instance.lower()}.daemon"
+    code, _ = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
+    (r.ok if code == 0 else r.warn)("Autostart", f"{label}: " + ("loaded" if code == 0 else "not loaded"))
+
+
 def check_autostart(r: Report, cfg, args) -> None:
     """Scheduled task / systemd unit / launchd agent, whichever the platform installs."""
     if not args.instance:
         return
     with_server = not (args.existing_server or not cfg.modules.local_model)
     if sys.platform == "win32":
-        for suffix in (("LlamaServer", "Daemon") if with_server else ("Daemon",)):
-            task = f"AgentHarness-{args.instance}-{suffix}"
-            code, out = run(["schtasks", "/Query", "/TN", task, "/FO", "CSV", "/NH"])
-            if code == 0:
-                r.ok("Autostart", f"{task}: {out.split(',')[-1].strip(chr(34))}")
-            else:
-                r.warn("Autostart", f"{task} not registered (run install.ps1 without -NoTasks)")
+        _autostart_windows(r, args, with_server)
     elif sys.platform.startswith("linux"):
-        for suffix in (("llama", "daemon") if with_server else ("daemon",)):
-            unit = f"agent-harness-{args.instance.lower()}-{suffix}.service"
-            code, status = run(["systemctl", "--user", "is-active", unit])
-            (r.ok if code == 0 and status == "active" else r.warn)(
-                "Autostart", f"{unit}: {status or 'not active'}")
+        _autostart_linux(r, args, with_server)
     elif sys.platform == "darwin":
-        label = f"com.agent-harness.{args.instance.lower()}.daemon"
-        code, _ = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
-        (r.ok if code == 0 else r.warn)("Autostart", f"{label}: " + ("loaded" if code == 0 else "not loaded"))
+        _autostart_macos(r, args)
 
 
-def check_images(r: Report, cfg) -> None:
+def _check_image_models(r: Report, cfg) -> None:
     py = Path(cfg.images.comfy_dir) / "python_embeded" / "python.exe"
     (r.ok if py.exists() else r.fail)("Image generation", f"ComfyUI at {cfg.images.comfy_dir}"
                                       + ("" if py.exists() else " not found"))
@@ -214,35 +229,53 @@ def check_images(r: Report, cfg) -> None:
         r.warn("FLUX.2 klein 4B (optional)", flux_warning)
     else:
         r.ok("FLUX.2 klein 4B (optional)", "flux-fast assets and nodes are ready")
+
+
+def _check_image_edit_ram(r: Report) -> None:
+    try:
+        import psutil
+        ram_gb = psutil.virtual_memory().total / 2**30
+        (r.ok if ram_gb >= 30 else r.warn)(
+            "Image editing RAM", f"{ram_gb:.0f} GB (Qwen-Image-Edit fp8 was tested with 32 GB)")
+    except (ImportError, OSError):
+        r.warn("Image editing RAM", "could not read installed RAM")
+
+
+def _check_image_edit_disk(r: Report, cfg, edit: dict) -> None:
+    from . import image_edit
+    models = image_edit.models_dir(cfg.images)
+    try:
+        free = shutil.disk_usage(models if models.exists() else cfg.data_dir).free / 2**30
+        need = 22 if not edit["available"] else 1
+        (r.ok if free >= need else r.fail)(
+            "Image editing disk", f"{free:.0f} GB free at {models} (need about {need} GB)")
+    except OSError as e:
+        r.warn("Image editing disk", str(e))
+
+
+def _check_image_editing(r: Report, cfg) -> None:
     from . import image_edit
     from .config import module_effective
     edit = image_edit.assets_status(cfg.images, verify_hash=True)
-    if module_effective(cfg, "image_edit"):
-        if edit["available"] and edit["hash_ok"] is not False:
-            extra = "checksum verified" if edit["hash_ok"] else "stub or unpackaged file present"
-            r.ok("Image editing", f"{edit['model']} {edit['revision'][:12]} ({extra})")
+    if not module_effective(cfg, "image_edit"):
+        if bool(getattr(cfg.installed, "image_edit", False)):
+            r.ok(IMAGE_EDITING, "installed but disabled; text-to-image is unchanged")
         else:
-            missing = ", ".join(edit["missing"]) or "checksum mismatch"
-            r.fail("Image editing", f"image_edit is enabled but assets are not ready ({missing}). {edit['setup']}")
-        try:
-            import psutil
-            ram_gb = psutil.virtual_memory().total / 2**30
-            (r.ok if ram_gb >= 30 else r.warn)(
-                "Image editing RAM", f"{ram_gb:.0f} GB (Qwen-Image-Edit fp8 was tested with 32 GB)")
-        except (ImportError, OSError):
-            r.warn("Image editing RAM", "could not read installed RAM")
-        models = image_edit.models_dir(cfg.images)
-        try:
-            free = shutil.disk_usage(models if models.exists() else cfg.data_dir).free / 2**30
-            need = 22 if not edit["available"] else 1
-            (r.ok if free >= need else r.fail)(
-                "Image editing disk", f"{free:.0f} GB free at {models} (need about {need} GB)")
-        except OSError as e:
-            r.warn("Image editing disk", str(e))
-    elif bool(getattr(cfg.installed, "image_edit", False)):
-        r.ok("Image editing", "installed but disabled; text-to-image is unchanged")
+            r.ok(IMAGE_EDITING, "optional component not installed; text-to-image is unchanged")
+        return
+    if edit["available"] and edit["hash_ok"] is not False:
+        extra = "checksum verified" if edit["hash_ok"] else "stub or unpackaged file present"
+        r.ok(IMAGE_EDITING, f"{edit['model']} {edit['revision'][:12]} ({extra})")
     else:
-        r.ok("Image editing", "optional component not installed; text-to-image is unchanged")
+        missing = ", ".join(edit["missing"]) or "checksum mismatch"
+        r.fail(IMAGE_EDITING, f"image_edit is enabled but assets are not ready ({missing}). {edit['setup']}")
+    _check_image_edit_ram(r)
+    _check_image_edit_disk(r, cfg, edit)
+
+
+def check_images(r: Report, cfg) -> None:
+    _check_image_models(r, cfg)
+    _check_image_editing(r, cfg)
     from . import upscale as upscale_mod
     if upscale_mod.missing_weights(cfg.images, verify_hash=True):
         r.warn("Image upscaling", upscale_mod.remediation(cfg.images))

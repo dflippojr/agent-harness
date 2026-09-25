@@ -585,41 +585,29 @@ def _load_projects(raw_projects: dict, raw_overlay: dict, selected: ModulesConfi
     return projects
 
 
-def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
-    from .smart_approvals import load_smart_config
-    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
-    raw = _read_raw_config(config_dir)
-    profile, raw_modules, selected = _resolve_profile(raw)
+def _load_provider_secret_files(raw: dict) -> dict:
     provider_secret_files = raw.get("provider_secret_files") or {}
     if not isinstance(provider_secret_files, dict) or any(not isinstance(k, str) or not isinstance(v, str)
                                                           for k, v in provider_secret_files.items()):
         raise ValueError("provider_secret_files must map opaque names to file paths")
-    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
+    return provider_secret_files
 
-    models = {
-        name: ModelConfig(name=name, **spec) for name, spec in (raw.get("models") or {}).items()
-    }
-    projects = _load_projects(_read_yaml(config_dir / PROJECTS_FILE),
-                              _read_yaml(resolved_data_dir / PROJECTS_FILE), selected)
 
+def _load_homelab(raw: dict, selected) -> HomelabConfig:
     raw_homelab = dict(raw.get("homelab") or {})
     services = {
         name: HomelabService(name=name, **(spec or {})) for name, spec in (raw_homelab.pop("services", None) or {}).items()
     }
-    homelab = HomelabConfig(**raw_homelab, services=services if selected.homelab else {})
+    return HomelabConfig(**raw_homelab, services=services if selected.homelab else {})
 
-    runners = ({name: RunnerConfig(name=name, **(spec or {})) for name, spec in (raw.get("runners") or {}).items()}
-               if selected.runners else {})
-    backends = {name: BackendConfig(**(spec or {})) for name, spec in (raw.get("backends") or {}).items()}
-    listen = raw.get("listen") or {}
-    budgets = raw.get("budgets") or {}
-    compaction = raw.get("compaction") or {}
-    notify = NotifyConfig(**(raw.get("notify") or {}))
-    gpu_guard = GpuGuardConfig(**(raw.get("gpu_guard") or {}))
-    backup = BackupConfig(**(raw.get("backup") or {}))
-    memory_library = MemoryLibraryConfig(**(raw.get("memory_library") or {}))
-    web = WebConfig(**(raw.get("web") or {}))
-    endpoint = EndpointConfig(**(raw.get("endpoint") or {}))
+
+def _load_runners(raw: dict, selected) -> dict:
+    if not selected.runners:
+        return {}
+    return {name: RunnerConfig(name=name, **(spec or {})) for name, spec in (raw.get("runners") or {}).items()}
+
+
+def _load_images(raw: dict, selected) -> ImagesConfig:
     raw_images = raw.get("images") or {}
     images = ImagesConfig(**raw_images)
     # The switch is tri-state in configuration: absent follows the install/profile
@@ -627,14 +615,30 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     # is applied below and provides the same explicit override without rewriting YAML.
     if "edit_enabled" not in raw_images:
         images.edit_enabled = selected.image_edit
+    return images
+
+
+def _module_enabled(profile: str, raw_modules: dict, selected, name: str, configured: bool) -> bool:
+    # In the service profile, an explicit module opt-in is the enable switch. Full-profile settings keep their
+    # historical two-level behavior: a module must be selected and enabled in its own config section.
+    return bool(raw_modules.get(name)) if profile == "service" else configured and getattr(selected, name)
+
+
+def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) -> dict:
+    """Build the per-module config sections, apply module enablement, and derive ModulesConfig."""
+    notify = NotifyConfig(**(raw.get("notify") or {}))
+    gpu_guard = GpuGuardConfig(**(raw.get("gpu_guard") or {}))
+    backup = BackupConfig(**(raw.get("backup") or {}))
+    memory_library = MemoryLibraryConfig(**(raw.get("memory_library") or {}))
+    web = WebConfig(**(raw.get("web") or {}))
+    endpoint = EndpointConfig(**(raw.get("endpoint") or {}))
+    images = _load_images(raw, selected)
     search = SearchConfig(**(raw.get("search") or {}))
     jobs = JobsConfig(**(raw.get("jobs") or {}))
     skills = SkillsConfig(**(raw.get("skills") or {}))
     remote_control = RemoteControlConfig(**(raw.get("remote_control") or {}))
     def module_enabled(name: str, configured: bool) -> bool:
-        # In the service profile, an explicit module opt-in is the enable switch. Full-profile settings keep their
-        # historical two-level behavior: a module must be selected and enabled in its own config section.
-        return bool(raw_modules.get(name)) if profile == "service" else configured and getattr(selected, name)
+        return _module_enabled(profile, raw_modules, selected, name, configured)
 
     notify.enabled = module_enabled("notifications", notify.enabled)
     gpu_guard.enabled = module_enabled("gpu_guard", gpu_guard.enabled)
@@ -664,6 +668,38 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         backup=backup.enabled,
         skills=skills.enabled,
     )
+    return {
+        "notify": notify, "gpu_guard": gpu_guard, "backup": backup, "memory_library": memory_library,
+        "web": web, "endpoint": endpoint, "images": images, "search": search, "jobs": jobs,
+        "skills": skills, "remote_control": remote_control, "modules": modules,
+    }
+
+
+def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
+    from .smart_approvals import load_smart_config
+    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+    raw = _read_raw_config(config_dir)
+    profile, raw_modules, selected = _resolve_profile(raw)
+    provider_secret_files = _load_provider_secret_files(raw)
+    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
+
+    models = {
+        name: ModelConfig(name=name, **spec) for name, spec in (raw.get("models") or {}).items()
+    }
+    projects = _load_projects(_read_yaml(config_dir / PROJECTS_FILE),
+                              _read_yaml(resolved_data_dir / PROJECTS_FILE), selected)
+
+    homelab = _load_homelab(raw, selected)
+    runners = _load_runners(raw, selected)
+    backends = {name: BackendConfig(**(spec or {})) for name, spec in (raw.get("backends") or {}).items()}
+    listen = raw.get("listen") or {}
+    budgets = raw.get("budgets") or {}
+    compaction = raw.get("compaction") or {}
+    sections = _load_module_sections(raw, profile, raw_modules, selected)
+    notify, gpu_guard, backup, memory_library = (sections[k] for k in ("notify", "gpu_guard", "backup", "memory_library"))
+    web, endpoint, images, search = (sections[k] for k in ("web", "endpoint", "images", "search"))
+    jobs, skills, remote_control = (sections[k] for k in ("jobs", "skills", "remote_control"))
+    modules = sections["modules"]
     if not selected.local_model:
         models = {}
     cfg = Config(
@@ -724,11 +760,16 @@ def _validate_loaded(cfg: Config) -> None:
     if local_dependents and not cfg.modules.local_model:
         raise ValueError(f"modules {', '.join(local_dependents)} require local_model")
     for project in cfg.projects.values():
-        if project.target != "tower":
-            if project.target not in cfg.runners:
-                raise ValueError(f"project {project.name}: target {project.target!r} is not in runners")
-            if project.homelab:
-                raise ValueError(f"project {project.name}: homelab tools only run on the tower")
+        _validate_project_target(cfg, project)
+
+
+def _validate_project_target(cfg: Config, project) -> None:
+    if project.target == "tower":
+        return
+    if project.target not in cfg.runners:
+        raise ValueError(f"project {project.name}: target {project.target!r} is not in runners")
+    if project.homelab:
+        raise ValueError(f"project {project.name}: homelab tools only run on the tower")
 
 
 def _apply_managed_overlay(cfg: Config) -> None:

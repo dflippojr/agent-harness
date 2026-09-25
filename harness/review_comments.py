@@ -24,6 +24,20 @@ def _path(marker: str, line: str) -> str | None:
     return rest[2:] if rest[:2] in ("a/", "b/") else rest
 
 
+def _hunk_line(cur: dict, raw: str, old: int, new: int) -> tuple[int, int]:
+    """Record one add/del/context line of a hunk body; returns the advanced (old, new) line numbers."""
+    if raw.startswith("+"):
+        cur["lines"].append({"kind": "add", "old": None, "new": new, "text": raw[1:]})
+        return old, new + 1
+    if raw.startswith("-"):
+        cur["lines"].append({"kind": "del", "old": old, "new": None, "text": raw[1:]})
+        return old + 1, new
+    if raw.startswith(" "):
+        cur["lines"].append({"kind": "ctx", "old": old, "new": new, "text": raw[1:]})
+        return old + 1, new + 1
+    return old, new
+
+
 def parse_diff(diff: str) -> list[dict]:
     """Unified diff -> [{name, lines: [{kind, old, new, text}]}]. kind: hunk | add | del | ctx.
 
@@ -50,16 +64,8 @@ def parse_diff(diff: str) -> list[dict]:
             if m:
                 old, new = int(m.group(1)), int(m.group(2))
             cur["lines"].append({"kind": "hunk", "old": None, "new": None, "text": raw})
-        elif in_hunk and raw.startswith("+"):
-            cur["lines"].append({"kind": "add", "old": None, "new": new, "text": raw[1:]})
-            new += 1
-        elif in_hunk and raw.startswith("-"):
-            cur["lines"].append({"kind": "del", "old": old, "new": None, "text": raw[1:]})
-            old += 1
-        elif in_hunk and raw.startswith(" "):
-            cur["lines"].append({"kind": "ctx", "old": old, "new": new, "text": raw[1:]})
-            old += 1
-            new += 1
+        elif in_hunk:
+            old, new = _hunk_line(cur, raw, old, new)
         # "\ No newline at end of file", headers, and the trailing blank line carry no content
     return files
 
@@ -76,14 +82,7 @@ def side_lines(files: list[dict], path: str, side: str) -> dict[int, str]:
     return out
 
 
-def validate(body: dict) -> dict:
-    """Normalise one incoming comment; raises ValueError with a user-facing message."""
-    side = body.get("side")
-    if side not in SIDES:
-        raise ValueError("side must be 'old' or 'new'")
-    path = str(body.get("path") or "").strip()
-    if not path:
-        raise ValueError("path is required")
+def _validate_range(body: dict) -> tuple[int, int]:
     try:
         start, end = int(body["start_line"]), int(body.get("end_line") or body["start_line"])
     except (KeyError, TypeError, ValueError):
@@ -92,6 +91,18 @@ def validate(body: dict) -> dict:
         raise ValueError("line range must satisfy 1 <= start_line <= end_line")
     if end - start + 1 > MAX_QUOTED_LINES:
         raise ValueError(f"a comment can span at most {MAX_QUOTED_LINES} lines")
+    return start, end
+
+
+def validate(body: dict) -> dict:
+    """Normalise one incoming comment; raises ValueError with a user-facing message."""
+    side = body.get("side")
+    if side not in SIDES:
+        raise ValueError("side must be 'old' or 'new'")
+    path = str(body.get("path") or "").strip()
+    if not path:
+        raise ValueError("path is required")
+    start, end = _validate_range(body)
     comment = str(body.get("comment") or "").strip()
     if not comment:
         raise ValueError("comment is empty")

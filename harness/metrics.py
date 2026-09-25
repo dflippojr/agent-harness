@@ -31,8 +31,7 @@ class _Out:
             self.lines.append(f"{name}{{{label}}} {float(value):g}" if label else f"{name} {float(value):g}")
 
 
-def render(m: Manager) -> str:
-    db, out = m.db, _Out()
+def _core_metrics(m: Manager, out: _Out, db) -> dict:
     with db.lock:
         by_status = dict(db.conn.execute("SELECT status, COUNT(*) FROM sessions GROUP BY status").fetchall())
         tokens = db.conn.execute(
@@ -85,6 +84,9 @@ def render(m: Manager) -> str:
                [({"status": st}, secs) for st, _, secs in approvals if st != "pending"])
     out.metric("harness_approvals_pending", "gauge", "Approvals waiting now.",
                [({}, sum(n for st, n, _ in approvals if st == "pending"))])
+    return by_status
+
+def _smart_review_metrics(out: _Out, db) -> None:
     with db.lock:
         smart_rows = db.conn.execute(
             "SELECT outcome, COALESCE(NULLIF(escalate_reason, ''), ''), COUNT(*), "
@@ -106,6 +108,9 @@ def render(m: Manager) -> str:
     out.metric("harness_smart_review_cost_usd_total", "counter",
                "Estimated or API-reported smart-review cost.",
                [({}, sum(cost for _, _, _, _, cost in smart_rows))])
+
+
+def _backend_metrics(m: Manager, out: _Out, db) -> None:
     backend_limits, backend_costs = [], []
     for name in m.cfg.backends:
         state = db.get_backend_usage(name)["data"]
@@ -121,6 +126,8 @@ def render(m: Manager) -> str:
     out.metric("harness_backend_cost_usd_total", "counter", "Hosted-backend reported cost estimate.",
                backend_costs)
 
+
+def _endpoint_metrics(m: Manager, out: _Out, db) -> None:
     with db.lock:
         endpoint = db.conn.execute(
             "SELECT k.name, r.route, r.status, COUNT(*), COALESCE(SUM(r.prompt_tokens), 0), "
@@ -142,6 +149,8 @@ def render(m: Manager) -> str:
     out.metric("harness_endpoint_active", "gauge", "Endpoint requests running and waiting now.",
                [({"state": "running"}, gate.endpoint_active), ({"state": "waiting"}, gate.endpoint_waiting)])
 
+
+def _image_metrics(m: Manager, out: _Out, db) -> None:
     if m.images is not None:
         with db.lock:
             images = db.conn.execute("SELECT model, source, status, COUNT(*), COALESCE(SUM(seconds), 0) FROM images "
@@ -159,10 +168,14 @@ def render(m: Manager) -> str:
                    "1 when optional Real-ESRGAN 2×/4× weights are installed.",
                    [({}, 1 if upscale.get("available") else 0)])
 
+
+def _runner_metrics(m: Manager, out: _Out) -> None:
     hub = m.hub.status()
     out.metric("harness_runner_online", "gauge", "1 while a runner (the MacBook) is connected.",
                [({"runner": r["name"]}, 1 if r["online"] else 0) for r in hub])
 
+
+def _guard_metrics(m: Manager, out: _Out) -> None:
     g = m.guard
     if g is not None:
         out.metric("harness_gpu_guard_paused", "gauge", "1 while the GPU guard holds the queue (pausing, paused, "
@@ -176,6 +189,8 @@ def render(m: Manager) -> str:
         out.metric("harness_gpu_guard_paused_seconds_total", "counter", "Time paused since the daemon started.",
                    [({}, g.paused_seconds_total + extra)])
 
+
+def _maintenance_metrics(m: Manager, out: _Out) -> None:
     backup = m.maintenance.last_backup
     if backup.get("ok_at"):
         out.metric("harness_backup_last_success_timestamp_seconds", "gauge", "Last successful backup.",
@@ -202,6 +217,9 @@ def render(m: Manager) -> str:
         out.metric("harness_data_disk_free_bytes", "gauge", "Free space on the data drive.", [({}, free)])
     except OSError:
         pass
+
+
+def _skill_metrics(out: _Out, db, by_status) -> None:
     active = sum(by_status.get(s, 0) for s in ACTIVE)
     out.metric("harness_sessions_active", "gauge", "Sessions not yet finished.", [({}, active)])
     with db.lock:
@@ -214,4 +232,17 @@ def render(m: Manager) -> str:
                [({"enabled": "true"}, skill_installed[1] or 0), ({"enabled": "false"}, (skill_installed[0] or 0) - (skill_installed[1] or 0))])
     out.metric("harness_skill_reviews", "gauge", "Advisory skill reviews by status.",
                [({"status": st}, n) for st, n in skill_reviews.items()])
+
+
+def render(m: Manager) -> str:
+    db, out = m.db, _Out()
+    by_status = _core_metrics(m, out, db)
+    _smart_review_metrics(out, db)
+    _backend_metrics(m, out, db)
+    _endpoint_metrics(m, out, db)
+    _image_metrics(m, out, db)
+    _runner_metrics(m, out)
+    _guard_metrics(m, out)
+    _maintenance_metrics(m, out)
+    _skill_metrics(out, db, by_status)
     return "\n".join(out.lines) + "\n"

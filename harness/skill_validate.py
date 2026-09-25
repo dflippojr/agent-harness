@@ -27,7 +27,10 @@ MAX_PURPOSE = 500
 MAX_ACTIVATION = 400
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$")
 REF_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}\.md$")
-ALLOWED_ROOT_FILES = frozenset({"SKILL.md", "manifest.json", "examples.json"})
+SKILL_MD = "SKILL.md"
+MANIFEST_JSON = "manifest.json"
+EXAMPLES_JSON = "examples.json"
+ALLOWED_ROOT_FILES = frozenset({SKILL_MD, MANIFEST_JSON, EXAMPLES_JSON})
 FORBIDDEN_SUFFIXES = frozenset({
     ".py", ".pyw", ".pyc", ".pyo", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd", ".exe", ".dll",
     ".so", ".dylib", ".bin", ".com", ".msi", ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx", ".wasm",
@@ -40,27 +43,25 @@ FORBIDDEN_NAMES = frozenset({
     "pyproject.toml", "setup.py", "setup.cfg", "pipfile", "pipfile.lock", "gemfile", "cargo.toml",
     "makefile", "dockerfile", "compose.yaml", "compose.yml", "docker-compose.yml",
 })
-REMOTE_INCLUDE_RE = re.compile(
-    r"""(?ix)
-        (?:!\[.*?\]\(\s*(?:https?|file|data):)
-        | <(?:script|iframe|object|embed|link)\b
-        | \b(?:include|import|require)\s*::
-        | \{\%\s*include\b
-        | \bfrom\s+['"]https?://
-        | \]\(\s*javascript:
-        | src\s*=\s*['"]https?://
-        """
-)
+REMOTE_INCLUDE_RES = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r"!\[.*?\]\(\s*(?:https?|file|data):",
+    r"<(?:script|iframe|object|embed|link)\b",
+    r"\b(?:include|import|require)\s*::",
+    r"\{%\s*include\b",
+    r"\bfrom\s+['\"]https?://",
+    r"\]\(\s*javascript:",
+    r"src\s*=\s*['\"]https?://",
+))
 SECRET_RES = [
     ("private-key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
     ("aws-key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("github-token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b")),
-    ("github-pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
+    ("github-token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_(?a:\w){20,}\b")),
+    ("github-pat", re.compile(r"\bgithub_pat_(?a:\w){20,}\b")),
     ("slack-token", re.compile(r"\bxox[baprs]-")),
     ("openai-key", re.compile(r"\bsk-[A-Za-z0-9]{16,}\b")),
     ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{16,}\b")),
     ("generic-secret", re.compile(
-        r"(?i)\b(api[_ -]?key|secret[_ -]?key|access[_ -]?token|auth[_ -]?token|password|passwd)\b\s*[:=]\s*\S{8,}")),
+        r"(?i)\b((?:api|secret)[_ -]?key|(?:access|auth)[_ -]?token|password|passwd)\b\s*[:=]\s*\S{8,}")),
 ]
 POLICY_RES = [
     ("approval-bypass", re.compile(
@@ -159,7 +160,7 @@ def _utf8_text(raw: bytes, path: str, findings: list[dict]) -> str | None:
 
 
 def _scan_text(text: str, path: str, findings: list[dict]) -> None:
-    if REMOTE_INCLUDE_RE.search(text) or HTML_RE.search(text):
+    if any(rx.search(text) for rx in REMOTE_INCLUDE_RES) or HTML_RE.search(text):
         findings.append(Finding.make("remote-include", "HTML, remote includes, or unsafe links are forbidden", path))
     for code, rx in SECRET_RES:
         if rx.search(text):
@@ -190,9 +191,58 @@ def _check_path(rel: str, root: Path, findings: list[dict]) -> Path | None:
     return root.joinpath(*parts)
 
 
-def validate_bundle(bundle: dict) -> dict:
-    """Validate an in-memory instruction-only skill. Never executes file contents."""
-    findings: list[dict] = []
+def _check_file(path, content, names_lower: dict[str, str], findings: list[dict]) -> tuple[int, int]:
+    """Validate one bundle file; returns (bytes to count toward the total, 1 if it is a reference file)."""
+    if not isinstance(path, str) or not isinstance(content, str):
+        findings.append(Finding.make("files", "each file path and body must be a string"))
+        return 0, 0
+    lowered = path.lower()
+    if lowered in names_lower and names_lower[lowered] != path:
+        findings.append(Finding.make("case-collision", f"file name collides with {names_lower[lowered]}", path))
+    names_lower[lowered] = path
+    parts = path.replace("\\", "/").split("/")
+    if any(p in ("", ".", "..") for p in parts) or path.startswith(("/", "\\")) or "\\" in path:
+        findings.append(Finding.make("traversal", "paths must stay inside the skill package", path))
+        return 0, 0
+    raw = content.encode("utf-8")
+    if path != SKILL_MD:
+        _utf8_text(raw, path, findings)
+    suffix = Path(path.lower()).suffix
+    name = Path(path.lower()).name
+    if suffix in FORBIDDEN_SUFFIXES or name in FORBIDDEN_NAMES:
+        findings.append(Finding.make("forbidden-type", f"{name} is not allowed in a v1 instruction skill", path))
+    if path in (SKILL_MD, MANIFEST_JSON):
+        return len(raw), 0
+    if not path.startswith("references/") or path.count("/") != 1:
+        findings.append(Finding.make("path", "only SKILL.md, manifest.json, and references/*.md are allowed", path))
+        return len(raw), 0
+    ref_name = path.split("/", 1)[1]
+    if not REF_NAME_RE.fullmatch(ref_name):
+        findings.append(Finding.make("path", "reference files must be references/<lowercase-name>.md", path))
+    if len(raw) > MAX_REFERENCE_BYTES:
+        findings.append(Finding.make("oversize", f"reference exceeds {MAX_REFERENCE_BYTES} bytes", path))
+    _scan_text(content, path, findings)
+    return len(raw), 1
+
+
+def _check_examples(examples, findings: list[dict]) -> None:
+    if not isinstance(examples, list) or not (MIN_EXAMPLES <= len(examples) <= MAX_EXAMPLES):
+        findings.append(Finding.make("examples", f"provide {MIN_EXAMPLES}–{MAX_EXAMPLES} example prompts with expected behavior"))
+        return
+    for i, item in enumerate(examples):
+        if not isinstance(item, dict):
+            findings.append(Finding.make("examples", f"example {i + 1} must be an object"))
+            continue
+        prompt = str(item.get("prompt") or "").strip()
+        expected = str(item.get("expected") or item.get("expected_behavior") or "").strip()
+        if not prompt or not expected:
+            findings.append(Finding.make("examples", f"example {i + 1} needs prompt and expected behavior"))
+        if len(prompt) > MAX_EXAMPLE_CHARS or len(expected) > MAX_EXAMPLE_CHARS:
+            findings.append(Finding.make("examples", f"example {i + 1} is too long"))
+        _scan_text(prompt + "\n" + expected, f"examples[{i}]", findings)
+
+
+def _check_header(bundle: dict, findings: list[dict]) -> tuple[str, str, str, str]:
     slug = normalize_slug(str(bundle.get("slug") or ""))
     if not SLUG_RE.fullmatch(slug):
         findings.append(Finding.make("slug", "slug must be 2–40 lowercase letters, numbers, or dashes"))
@@ -205,80 +255,53 @@ def validate_bundle(bundle: dict) -> dict:
     activation = str(bundle.get("activation_suggestion") or "").strip()
     if len(activation) > MAX_ACTIVATION:
         findings.append(Finding.make("activation", f"activation suggestion is at most {MAX_ACTIVATION} characters"))
+    return slug, title, purpose, activation
+
+
+def _check_skill_md(files: dict, findings: list[dict]) -> str:
+    skill_md = files.get(SKILL_MD)
+    if not isinstance(skill_md, str) or not skill_md.strip():
+        findings.append(Finding.make("skill-md", "SKILL.md is required", SKILL_MD))
+        skill_md = skill_md if isinstance(skill_md, str) else ""
+    if len(skill_md.encode("utf-8")) > MAX_SKILL_MD_BYTES:
+        findings.append(Finding.make("oversize", f"SKILL.md exceeds {MAX_SKILL_MD_BYTES} bytes", SKILL_MD))
+    return skill_md
+
+
+def _check_skill_md_text(skill_md: str, slug: str, findings: list[dict]) -> None:
+    _scan_text(skill_md, SKILL_MD, findings)
+    fm_name = FRONTMATTER_NAME_RE.search(skill_md)
+    if fm_name and normalize_slug(fm_name.group(1)) not in ("", slug):
+        findings.append(Finding.make("slug-mismatch", "SKILL.md name/slug does not match the proposal slug", SKILL_MD))
+
+
+def validate_bundle(bundle: dict) -> dict:
+    """Validate an in-memory instruction-only skill. Never executes file contents."""
+    findings: list[dict] = []
+    slug, title, purpose, activation = _check_header(bundle, findings)
 
     files = bundle.get("files") or {}
     if not isinstance(files, dict):
         findings.append(Finding.make("files", "files must be a mapping of path → UTF-8 text"))
         files = {}
-    skill_md = files.get("SKILL.md")
-    if not isinstance(skill_md, str) or not skill_md.strip():
-        findings.append(Finding.make("skill-md", "SKILL.md is required", "SKILL.md"))
-        skill_md = skill_md if isinstance(skill_md, str) else ""
-    if len(skill_md.encode("utf-8")) > MAX_SKILL_MD_BYTES:
-        findings.append(Finding.make("oversize", f"SKILL.md exceeds {MAX_SKILL_MD_BYTES} bytes", "SKILL.md"))
+    skill_md = _check_skill_md(files, findings)
 
     names_lower: dict[str, str] = {}
     total = 0
     ref_count = 0
     for path, content in files.items():
-        if not isinstance(path, str) or not isinstance(content, str):
-            findings.append(Finding.make("files", "each file path and body must be a string"))
-            continue
-        lowered = path.lower()
-        if lowered in names_lower and names_lower[lowered] != path:
-            findings.append(Finding.make("case-collision", f"file name collides with {names_lower[lowered]}", path))
-        names_lower[lowered] = path
-        parts = path.replace("\\", "/").split("/")
-        if any(p in ("", ".", "..") for p in parts) or path.startswith("/") or path.startswith("\\") or "\\" in path:
-            findings.append(Finding.make("traversal", "paths must stay inside the skill package", path))
-            continue
-        raw = content.encode("utf-8")
-        total += len(raw)
-        if path != "SKILL.md":
-            _utf8_text(raw, path, findings)
-        suffix = Path(path.lower()).suffix
-        name = Path(path.lower()).name
-        if suffix in FORBIDDEN_SUFFIXES or name in FORBIDDEN_NAMES:
-            findings.append(Finding.make("forbidden-type", f"{name} is not allowed in a v1 instruction skill", path))
-        if path == "SKILL.md":
-            continue
-        if path == "manifest.json":
-            continue
-        if not path.startswith("references/") or path.count("/") != 1:
-            findings.append(Finding.make("path", "only SKILL.md, manifest.json, and references/*.md are allowed", path))
-            continue
-        ref_name = path.split("/", 1)[1]
-        if not REF_NAME_RE.fullmatch(ref_name):
-            findings.append(Finding.make("path", "reference files must be references/<lowercase-name>.md", path))
-        if len(raw) > MAX_REFERENCE_BYTES:
-            findings.append(Finding.make("oversize", f"reference exceeds {MAX_REFERENCE_BYTES} bytes", path))
-        ref_count += 1
-        _scan_text(content, path, findings)
+        added, is_ref = _check_file(path, content, names_lower, findings)
+        total += added
+        ref_count += is_ref
     if ref_count > MAX_REFERENCE_FILES:
         findings.append(Finding.make("count", f"at most {MAX_REFERENCE_FILES} reference files are allowed"))
     if total > MAX_TOTAL_BYTES:
         findings.append(Finding.make("oversize", f"total skill bytes exceed {MAX_TOTAL_BYTES}"))
     if skill_md:
-        _scan_text(skill_md, "SKILL.md", findings)
-        fm_name = FRONTMATTER_NAME_RE.search(skill_md)
-        if fm_name and normalize_slug(fm_name.group(1)) not in ("", slug):
-            findings.append(Finding.make("slug-mismatch", "SKILL.md name/slug does not match the proposal slug", "SKILL.md"))
+        _check_skill_md_text(skill_md, slug, findings)
 
     examples = bundle.get("examples") or []
-    if not isinstance(examples, list) or not (MIN_EXAMPLES <= len(examples) <= MAX_EXAMPLES):
-        findings.append(Finding.make("examples", f"provide {MIN_EXAMPLES}–{MAX_EXAMPLES} example prompts with expected behavior"))
-    else:
-        for i, item in enumerate(examples):
-            if not isinstance(item, dict):
-                findings.append(Finding.make("examples", f"example {i + 1} must be an object"))
-                continue
-            prompt = str(item.get("prompt") or "").strip()
-            expected = str(item.get("expected") or item.get("expected_behavior") or "").strip()
-            if not prompt or not expected:
-                findings.append(Finding.make("examples", f"example {i + 1} needs prompt and expected behavior"))
-            if len(prompt) > MAX_EXAMPLE_CHARS or len(expected) > MAX_EXAMPLE_CHARS:
-                findings.append(Finding.make("examples", f"example {i + 1} is too long"))
-            _scan_text(prompt + "\n" + expected, f"examples[{i}]", findings)
+    _check_examples(examples, findings)
 
     _scan_text(f"{title}\n{purpose}\n{activation}", "manifest", findings)
 
@@ -290,7 +313,7 @@ def validate_bundle(bundle: dict) -> dict:
         "files": {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)},
         "examples": examples if isinstance(examples, list) else [],
     }
-    content_hash = canonical_hash(normalized) if slug and title and "SKILL.md" in normalized["files"] else ""
+    content_hash = canonical_hash(normalized) if slug and title and SKILL_MD in normalized["files"] else ""
     codes = {f["code"] for f in findings}
     return {
         "ok": not findings,
@@ -313,18 +336,7 @@ def _load_sidecar_json(path: Path, findings: list[dict]) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def validate_dir(root: Path) -> dict:
-    """Read a proposal directory as data. Never follows links or executes files."""
-    root = Path(root)
-    findings: list[dict] = []
-    if not root.is_dir():
-        return {"ok": False, "validator_version": VALIDATOR_VERSION, "slug": "", "content_hash": "",
-                "findings": [Finding.make("missing", "proposal directory is missing")], "codes": ["missing"]}
-    if _is_reparse_point(root):
-        return {"ok": False, "validator_version": VALIDATOR_VERSION, "slug": "", "content_hash": "",
-                "findings": [Finding.make("symlink", "proposal root may not be a symlink or junction")],
-                "codes": ["symlink"]}
-
+def _read_dir_files(root: Path, findings: list[dict]) -> dict[str, str]:
     files: dict[str, str] = {}
     seen_lower: dict[str, str] = {}
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -339,40 +351,60 @@ def validate_dir(root: Path) -> dict:
         if rel_dir == ".":
             rel_dir = ""
         for name in sorted(filenames):
-            path = current / name
             rel = name if not rel_dir else f"{rel_dir}/{name}"
-            if _is_reparse_point(path):
-                findings.append(Finding.make("symlink", "symlinks and junctions are forbidden", rel))
-                continue
-            lowered = rel.lower()
-            if lowered in seen_lower and seen_lower[lowered] != rel:
-                findings.append(Finding.make("case-collision", f"collides with {seen_lower[lowered]}", rel))
-            seen_lower[lowered] = rel
-            if not path.is_file() or path.is_symlink():
-                findings.append(Finding.make("forbidden-type", "only regular files are allowed", rel))
-                continue
-            try:
-                raw = path.read_bytes()
-            except OSError as exc:
-                findings.append(Finding.make("read", f"could not read file: {exc}", rel))
-                continue
-            text = _utf8_text(raw, rel, findings)
-            if text is None:
-                continue
-            if rel in ALLOWED_ROOT_FILES or rel.startswith("references/"):
-                files[rel] = text
-            else:
-                findings.append(Finding.make("forbidden-type", "only SKILL.md, manifest.json, examples.json, and references/*.md are allowed", rel))
+            _read_dir_file(current / name, rel, seen_lower, files, findings)
+    return files
 
-    meta = _load_sidecar_json(root / "manifest.json", findings)
-    examples_file = _load_sidecar_json(root / "examples.json", findings)
+
+def _read_dir_file(path: Path, rel: str, seen_lower: dict[str, str], files: dict[str, str],
+                   findings: list[dict]) -> None:
+    if _is_reparse_point(path):
+        findings.append(Finding.make("symlink", "symlinks and junctions are forbidden", rel))
+        return
+    lowered = rel.lower()
+    if lowered in seen_lower and seen_lower[lowered] != rel:
+        findings.append(Finding.make("case-collision", f"collides with {seen_lower[lowered]}", rel))
+    seen_lower[lowered] = rel
+    if not path.is_file() or path.is_symlink():
+        findings.append(Finding.make("forbidden-type", "only regular files are allowed", rel))
+        return
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        findings.append(Finding.make("read", f"could not read file: {exc}", rel))
+        return
+    text = _utf8_text(raw, rel, findings)
+    if text is None:
+        return
+    if rel in ALLOWED_ROOT_FILES or rel.startswith("references/"):
+        files[rel] = text
+    else:
+        findings.append(Finding.make("forbidden-type", "only SKILL.md, manifest.json, examples.json, and references/*.md are allowed", rel))
+
+
+def validate_dir(root: Path) -> dict:
+    """Read a proposal directory as data. Never follows links or executes files."""
+    root = Path(root)
+    findings: list[dict] = []
+    if not root.is_dir():
+        return {"ok": False, "validator_version": VALIDATOR_VERSION, "slug": "", "content_hash": "",
+                "findings": [Finding.make("missing", "proposal directory is missing")], "codes": ["missing"]}
+    if _is_reparse_point(root):
+        return {"ok": False, "validator_version": VALIDATOR_VERSION, "slug": "", "content_hash": "",
+                "findings": [Finding.make("symlink", "proposal root may not be a symlink or junction")],
+                "codes": ["symlink"]}
+
+    files = _read_dir_files(root, findings)
+
+    meta = _load_sidecar_json(root / MANIFEST_JSON, findings)
+    examples_file = _load_sidecar_json(root / EXAMPLES_JSON, findings)
     examples = meta.get("examples") if isinstance(meta.get("examples"), list) else examples_file.get("examples")
     bundle = {
         "slug": meta.get("slug") or "",
         "title": meta.get("title") or "",
         "purpose": meta.get("purpose") or "",
         "activation_suggestion": meta.get("activation_suggestion") or "",
-        "files": {k: v for k, v in files.items() if k not in ("manifest.json", "examples.json")},
+        "files": {k: v for k, v in files.items() if k not in (MANIFEST_JSON, EXAMPLES_JSON)},
         "examples": examples or [],
     }
     result = validate_bundle(bundle)
@@ -418,6 +450,21 @@ def sandbox_command(image: str, proposal_dir: Path, validator_path: Path) -> lis
     ]
 
 
+def _mount_reasons(argv: list[str]) -> list[str]:
+    reasons = []
+    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "--mount" and i + 1 < len(argv)]
+    if len(mounts) != 2:
+        reasons.append("sandbox must mount only the proposal and the validator")
+        return reasons
+    targets = " ".join(mounts)
+    if "target=/proposal" not in targets or "target=/run/validate.py" not in targets:
+        reasons.append("sandbox mounts must be /proposal and /run/validate.py")
+    if any("readonly" not in m.replace(" ", "").lower() and "readonly" not in m for m in mounts):
+        if not all("readonly" in m for m in mounts):
+            reasons.append("proposal and validator mounts must be read-only")
+    return reasons
+
+
 def sandbox_command_is_isolated(argv: list[str]) -> list[str]:
     """Return reasons the docker argv would violate the v1 sandbox contract."""
     reasons = []
@@ -437,16 +484,7 @@ def sandbox_command_is_isolated(argv: list[str]) -> list[str]:
     for needle in forbidden_needles:
         if needle.lower() in joined.lower():
             reasons.append(f"forbidden mount or path {needle}")
-    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "--mount" and i + 1 < len(argv)]
-    if len(mounts) != 2:
-        reasons.append("sandbox must mount only the proposal and the validator")
-    else:
-        targets = " ".join(mounts)
-        if "target=/proposal" not in targets or "target=/run/validate.py" not in targets:
-            reasons.append("sandbox mounts must be /proposal and /run/validate.py")
-        if any("readonly" not in m.replace(" ", "").lower() and "readonly" not in m for m in mounts):
-            if not all("readonly" in m for m in mounts):
-                reasons.append("proposal and validator mounts must be read-only")
+    reasons += _mount_reasons(argv)
     if any(a in argv for a in ("--privileged", "--pid=host", "--network=host")):
         reasons.append("host namespaces are forbidden")
     return reasons

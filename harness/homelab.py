@@ -70,6 +70,29 @@ def schemas(cfg: HomelabConfig) -> list[dict]:
     ]
 
 
+def _container_parts(svc, item: dict) -> list[str]:
+    st = item["State"]
+    health = (st.get("Health") or {}).get("Status")
+    policy = (item.get("HostConfig") or {}).get("RestartPolicy", {}).get("Name", "")
+    parts = [st.get("Status", "?")]
+    if health:
+        parts.append(f"health {health}")
+    if st.get("Status") != "running" or st.get("ExitCode"):
+        parts.append(f"exit code {st.get('ExitCode')}")
+    if st.get("OOMKilled"):
+        parts.append("OOM-killed")
+    if st.get("Error"):
+        parts.append(f"error: {st['Error']}")
+    parts += [f"started {st.get('StartedAt', '')[:19]}", f"finished {st.get('FinishedAt', '')[:19]}",
+              f"restarts {item.get('RestartCount', 0)}", f"restart policy {policy or 'no'}",
+              f"image {item.get('Config', {}).get('Image', '')}", f"stack {svc.stack}"]
+    return parts
+
+
+SINCE_DURATION = re.compile(r"\d+[smhd]")
+SINCE_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?")
+
+
 class Homelab:
     tool_names = TOOLS
 
@@ -86,7 +109,7 @@ class Homelab:
         if not self.cfg.services:
             return "No services are allowlisted."
         containers = [s.container or s.name for s in self.cfg.services.values()]
-        code, out, err = await run_cmd(["docker", "inspect", *containers], timeout=60)
+        _, out, err = await run_cmd(["docker", "inspect", *containers], timeout=60)
         found = {}
         try:
             for item in json.loads(out or "[]"):
@@ -98,23 +121,8 @@ class Homelab:
             item = found.get(svc.container or svc.name)
             if item is None:
                 lines.append(f"- {svc.name}: container missing (stack {svc.stack})")
-                continue
-            st = item["State"]
-            health = (st.get("Health") or {}).get("Status")
-            policy = (item.get("HostConfig") or {}).get("RestartPolicy", {}).get("Name", "")
-            parts = [st.get("Status", "?")]
-            if health:
-                parts.append(f"health {health}")
-            if st.get("Status") != "running" or st.get("ExitCode"):
-                parts.append(f"exit code {st.get('ExitCode')}")
-            if st.get("OOMKilled"):
-                parts.append("OOM-killed")
-            if st.get("Error"):
-                parts.append(f"error: {st['Error']}")
-            parts += [f"started {st.get('StartedAt', '')[:19]}", f"finished {st.get('FinishedAt', '')[:19]}",
-                      f"restarts {item.get('RestartCount', 0)}", f"restart policy {policy or 'no'}",
-                      f"image {item.get('Config', {}).get('Image', '')}", f"stack {svc.stack}"]
-            lines.append(f"- {svc.name}: " + ", ".join(parts))
+            else:
+                lines.append(f"- {svc.name}: " + ", ".join(_container_parts(svc, item)))
         return "\n".join(lines)
 
     async def container_logs(self, service: str, tail: int = 200, since: str = "") -> str:
@@ -122,7 +130,7 @@ class Homelab:
         tail = max(1, min(int(tail), 2000))
         args = ["docker", "logs", "--timestamps", "--tail", str(tail)]
         if since:
-            if not re.fullmatch(r"\d+[smhd]|\d{4}-\d{2}-\d{2}[T ][\d:.]+(Z|[+-]\d{2}:?\d{2})?", since.strip()):
+            if not (SINCE_DURATION.fullmatch(since.strip()) or SINCE_TIMESTAMP.fullmatch(since.strip())):
                 raise HomelabError("since must look like 30m, 2h, 1d, or an RFC 3339 time")
             args += ["--since", since.strip()]
         code, out, err = await run_cmd(args + [svc.container or svc.name], timeout=60)
@@ -147,17 +155,20 @@ class Homelab:
         if target.is_dir():
             if rel == ".":
                 return "\n".join(sorted(f"{s}/" for s in stacks))
-            entries = []
-            for child in sorted(target.iterdir()):
-                child_rel = f"{rel}/{child.name}"
-                if not self._denied(child_rel) and child.name != ".git":
-                    entries.append(child.name + ("/" if child.is_dir() else ""))
-            return "\n".join(entries) or "(empty directory)"
+            return self._list_dir(target, rel)
         if not target.is_file():
             raise HomelabError(f"no such file: {rel}")
         if target.stat().st_size > 200_000:
             raise HomelabError(f"{rel} is too large to read ({target.stat().st_size} bytes)")
         return target.read_text(encoding="utf-8", errors="replace")
+
+    def _list_dir(self, target: Path, rel: str) -> str:
+        entries = []
+        for child in sorted(target.iterdir()):
+            child_rel = f"{rel}/{child.name}"
+            if not self._denied(child_rel) and child.name != ".git":
+                entries.append(child.name + ("/" if child.is_dir() else ""))
+        return "\n".join(entries) or "(empty directory)"
 
     def _denied(self, rel: str) -> bool:
         return any(fnmatch.fnmatch(rel.lower(), g.lower()) for g in self.cfg.deny)
@@ -218,6 +229,21 @@ class Homelab:
         return await getattr(self, name)(**args)
 
 
+def _prom_labels(metric: dict) -> str:
+    name = metric.get("__name__", "")
+    rest = ",".join(f'{k}="{v}"' for k, v in sorted(metric.items()) if k != "__name__")
+    return f"{name}{{{rest}}}" if rest else name or "{}"
+
+
+def _matrix_line(series: dict) -> str:
+    values = series.get("values", [])
+    nums = [float(v[1]) for v in values if v[1] not in ("NaN", "+Inf", "-Inf")]
+    summary = (f"min {min(nums):.4g}, max {max(nums):.4g}, last {values[-1][1]}" if nums else "no numbers")
+    points = values if len(values) <= 12 else values[:: max(1, len(values) // 12)]
+    return (f"{_prom_labels(series['metric'])}: {len(values)} points, {summary}; samples "
+            + ", ".join(f"{int(float(t))}={v}" for t, v in points))
+
+
 def format_prometheus(data: dict, limit: int = 60) -> str:
     kind, result = data.get("resultType"), data.get("result")
     if kind in ("scalar", "string"):
@@ -225,22 +251,12 @@ def format_prometheus(data: dict, limit: int = 60) -> str:
     if not result:
         return "no data"
 
-    def labels(metric: dict) -> str:
-        name = metric.get("__name__", "")
-        rest = ",".join(f'{k}="{v}"' for k, v in sorted(metric.items()) if k != "__name__")
-        return f"{name}{{{rest}}}" if rest else name or "{}"
-
     lines = []
     for series in result[:limit]:
         if kind == "vector":
-            lines.append(f"{labels(series['metric'])} {series['value'][1]}")
+            lines.append(f"{_prom_labels(series['metric'])} {series['value'][1]}")
         else:
-            values = series.get("values", [])
-            nums = [float(v[1]) for v in values if v[1] not in ("NaN", "+Inf", "-Inf")]
-            summary = (f"min {min(nums):.4g}, max {max(nums):.4g}, last {values[-1][1]}" if nums else "no numbers")
-            points = values if len(values) <= 12 else values[:: max(1, len(values) // 12)]
-            lines.append(f"{labels(series['metric'])}: {len(values)} points, {summary}; samples "
-                         + ", ".join(f"{int(float(t))}={v}" for t, v in points))
+            lines.append(_matrix_line(series))
     if len(result) > limit:
         lines.append(f"... {len(result) - limit} more series")
     return "\n".join(lines)

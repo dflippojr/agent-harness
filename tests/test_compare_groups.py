@@ -47,21 +47,25 @@ def test_group_starts_one_session_per_choice(tmp_path):
 def test_group_size_project_and_owner_rules(tmp_path):
     m = make_manager(tmp_path)
     for bad in ([], CHOICES[:1], CHOICES * 3):
+        coro = m.create_compare("p", bad, "repo")
         with pytest.raises(HarnessError) as e:
-            run(m.create_compare("p", bad, "repo"))
+            run(coro)
         assert e.value.status == 400
+    coro = m.create_compare("p", CHOICES, "scratch")
     with pytest.raises(HarnessError):
-        run(m.create_compare("p", CHOICES, "scratch"))
+        run(coro)
+    coro = m.create_compare("p", CHOICES, "repo", owner_id="someone")
     with pytest.raises(HarnessError) as e:
-        run(m.create_compare("p", CHOICES, "repo", owner_id="someone"))
+        run(coro)
     assert e.value.status == 403
 
 
 def test_reported_limit_refuses_but_unknown_usage_allows(tmp_path):
     m = make_manager(tmp_path)
     m.db.set_backend_usage("codex", {"status": "rejected"})
+    coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(HarnessError) as e:
-        run(m.create_compare("p", CHOICES, "repo"))
+        run(coro)
     assert e.value.status == 429
     assert m.db.list_sessions() == []
     m.db.set_backend_usage("codex", {})
@@ -82,8 +86,9 @@ def test_pick_reviews_winner_and_discards_rest(tmp_path):
     out = asyncio.run(m.compare_pick(view["group"], a, "merge", True))
     assert calls == [(a, "merge"), (b, "discard")]
     assert [r["review"] for r in out["members"]] == ["merged", "discarded"]
+    coro = m.compare_pick(view["group"], "nope", "merge", False)
     with pytest.raises(HarnessError):
-        asyncio.run(m.compare_pick(view["group"], "nope", "merge", False))
+        asyncio.run(coro)
 
 
 def test_failed_later_member_discards_the_earlier_ones(tmp_path):
@@ -96,8 +101,9 @@ def test_failed_later_member_discards_the_earlier_ones(tmp_path):
         m.db.update_session(sid, review="discarded")
 
     m.review = fake_review
+    coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(HarnessError):
-        run(m.create_compare("p", CHOICES, "repo"))
+        run(coro)
     (s,) = m.db.list_sessions()
     s = m.db.get_session(s["id"])
     assert discarded == [(s["id"], "discard")]
@@ -118,8 +124,9 @@ def test_rollback_covers_non_harness_errors_and_failed_discard(tmp_path):
         raise HarnessError(409, "never checked out")
 
     m.create, m.review = flaky, bad_review
+    coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(RuntimeError):
-        run(m.create_compare("p", CHOICES, "repo"))
+        run(coro)
     (s,) = m.db.list_sessions()
     s = m.db.get_session(s["id"])
     assert s["review"] == "discarded" and s["workspace_removed"] and s["compare_group"] == ""
@@ -138,8 +145,9 @@ def test_pick_retry_skips_merged_winner_and_reports_discard_failures(tmp_path):
         m.db.update_session(sid, review={"merge": "merged", "discard": "discarded"}[action])
 
     m.review = fake_review
+    coro = m.compare_pick(view["group"], a, "merge", True)
     with pytest.raises(HarnessError) as e:
-        run(m.compare_pick(view["group"], a, "merge", True))
+        run(coro)
     assert b in str(e.value) and m.db.get_session(a)["review"] == "merged"
     fail["on"] = False
     out = run(m.compare_pick(view["group"], a, "merge", True))
@@ -162,8 +170,9 @@ def test_pick_that_does_not_complete_discards_nobody(tmp_path, action):
         m.db.update_session(sid, review="", review_detail="merge conflict in a.py")
 
     m.review = fake_review
+    coro = m.compare_pick(view["group"], a, action, True)
     with pytest.raises(HarnessError) as e:
-        run(m.compare_pick(view["group"], a, action, True))
+        run(coro)
     assert calls == [(a, action)]
     if action == "merge":
         assert "did not complete" in str(e.value) and "conflict" in str(e.value)
@@ -183,8 +192,9 @@ def test_pick_after_conflict_can_succeed_on_retry(tmp_path):
             m.db.update_session(sid, review="discarded")
 
     m.review = fake_review
+    coro = m.compare_pick(view["group"], a, "merge", True)
     with pytest.raises(HarnessError):
-        run(m.compare_pick(view["group"], a, "merge", True))
+        run(coro)
     state["ok"] = True
     out = run(m.compare_pick(view["group"], a, "merge", True))
     assert [r["review"] for r in out["members"]] == ["merged", "discarded"]
@@ -203,8 +213,9 @@ def test_group_discard_continues_past_a_failure(tmp_path):
         m.db.update_session(sid, review="discarded")
 
     m.review = fake_review
+    coro = m.compare_discard(view["group"])
     with pytest.raises(HarnessError):
-        run(m.compare_discard(view["group"]))
+        run(coro)
     assert seen == [a, b]
 
 
@@ -222,8 +233,9 @@ def test_rollback_falls_back_when_discard_fails_for_a_checked_out_member(tmp_pat
         raise HarnessError(502, "remote unreachable")  # not the never-checked-out refusal
 
     m.create, m.review = flaky, broken_review
+    coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(RuntimeError):
-        run(m.create_compare("p", CHOICES, "repo"))
+        run(coro)
     (s,) = m.db.list_sessions()
     s = m.db.get_session(s["id"])
     assert s["status"] == "cancelled" and s["review"] == "discarded" and s["workspace_removed"]
@@ -239,8 +251,9 @@ def test_rollback_falls_back_when_discard_fails_for_a_checked_out_member(tmp_pat
 
     m.create, m.review = flaky, broken_review
     m.maintenance.remove_workspace = remove_fails
+    coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(RuntimeError):
-        run(m.create_compare("p", CHOICES, "repo"))
+        run(coro)
     (s,) = m.db.list_sessions()
     assert m.db.get_session(s["id"])["compare_group"] == ""
 
@@ -257,8 +270,9 @@ def test_group_discard_reports_a_member_that_cannot_be_stopped(tmp_path):
         return await real_cancel(ref)
 
     m.cancel = stuck
+    coro = m.compare_discard(view["group"])
     with pytest.raises(HarnessError) as e:
-        run(m.compare_discard(view["group"]))
+        run(coro)
     assert a in str(e.value) and "stuck" in str(e.value) and b not in str(e.value)
     # the one that could not be stopped is left alone and retryable; the other was still discarded
     assert m.db.get_session(a)["status"] == "queued" and m.db.get_session(a)["review"] == ""
@@ -270,15 +284,17 @@ def test_group_discard_reports_a_member_that_cannot_be_stopped(tmp_path):
 
 def test_compare_rejects_duplicates_unknown_groups_and_actions(tmp_path):
     m = make_manager(tmp_path)
+    coro = m.create_compare("p", [{"backend": "claude"}, {"backend": "claude"}], "repo")
     with pytest.raises(HarnessError, match="must differ"):
-        run(m.create_compare("p", [{"backend": "claude"}, {"backend": "claude"}], "repo"))
+        run(coro)
     for call_ in (lambda: m.compare_view("nope"), lambda: run(m.compare_discard("nope"))):
         with pytest.raises(HarnessError) as e:
             call_()
         assert e.value.status == 404
     view = run(m.create_compare("p", CHOICES, "repo"))
+    coro = m.compare_pick(view["group"], view["members"][0]["id"], "rebase", True)
     with pytest.raises(HarnessError) as e:
-        run(m.compare_pick(view["group"], view["members"][0]["id"], "rebase", True))
+        run(coro)
     assert e.value.status == 400
 
 
@@ -541,8 +557,9 @@ def test_busy_guard_is_per_group(tmp_path):
     m = make_manager(tmp_path)
     one, two = (run(m.create_compare("p", CHOICES, "repo"))["group"] for _ in range(2))
     m.compare_busy.add(("owner", one))
+    coro = m.compare_discard(one)
     with pytest.raises(HarnessError) as e:
-        run(m.compare_discard(one))
+        run(coro)
     assert e.value.code == "compare_busy"
     assert [r["review"] for r in run(m.compare_discard(two))["members"]] == ["discarded"] * 2
 

@@ -241,13 +241,16 @@ def test_hub_timeout_ignores_offline_time(tmp_path, monkeypatch):
         await hub.poll("macbook", "i", [], {})  # delivered
         await asyncio.sleep(4.5)  # offline after 0.6 s: most of this doesn't count
         assert not task.done()
-        with pytest.raises(RunnerError) as e:
+        async def poll_until_done():
             for _ in range(6):  # online again: the remaining budget runs out
                 await hub.poll("macbook", "i", [], {})
                 await asyncio.sleep(0.4)
                 if task.done():
                     break
             await task
+
+        with pytest.raises(RunnerError) as e:
+            await poll_until_done()
         assert e.value.kind == "timeout"
         cancel = await hub.poll("macbook", "i", [], {})
         assert [r["op"] for r in cancel["requests"]] == ["cancel"]
@@ -318,10 +321,9 @@ def test_executor_put_file_writes_png_and_refuses_escape(tmp_path, monkeypatch):
     })
     assert "assets/icon.png" in out
     assert (ex.workspace(sid) / "assets" / "icon.png").read_bytes() == png
+    png_b64 = base64.b64encode(png).decode()
     with pytest.raises(harness_runner.OpError, match="escapes"):
-        ex.handle("r", "put_file", {
-            "session": sid, "path": "../escape.png", "content_b64": base64.b64encode(png).decode(),
-        })
+        ex.handle("r", "put_file", {"session": sid, "path": "../escape.png", "content_b64": png_b64})
     with pytest.raises(harness_runner.OpError, match="base64"):
         ex.handle("r", "put_file", {"session": sid, "path": "x.png", "content_b64": "%%%"})
     with pytest.raises(harness_runner.OpError, match="required"):
@@ -348,3 +350,15 @@ def test_fileops_skip_symlinks_out_of_the_workspace(tmp_path):
     assert "link" not in files.list_files()
     with pytest.raises(ToolError, match="escapes"):
         files.read_file("key-link.txt")
+
+
+def test_github_token_patterns_keep_unicode_word_boundaries():
+    from harness.skill_validate import SECRET_RES
+    patterns = dict(SECRET_RES)
+    token = "ghp_" + "A" * 24
+    assert patterns["github-token"].search(f" {token} ")
+    assert not patterns["github-token"].search("xé" + token)
+    assert not patterns["github-token"].search(token + "é")
+    pat = "github_pat_" + "B" * 24
+    assert patterns["github-pat"].search(f" {pat} ")
+    assert not patterns["github-pat"].search("xé" + pat)

@@ -142,92 +142,100 @@ class Notifier:
         title = _short(session["title"], 60)
         base = {"topic": self.cfg.notify.topic}
 
-        if event["type"] == "approval_requested":
-            approval = self.db.get_approval(d["id"])
-            if approval is None or approval["status"] != "pending":
-                return None
-            payload = {
-                **base,
-                "sequence_id": approval["id"],
-                "title": f"Approve? {title}",
-                "message": f"{d['reason'] or 'needs approval'}: {_short(describe_call(d['tool'], d['args']), 300)}",
-                "priority": 4,
-                "tags": ["warning"],
-                "click": self.link(f"/#/s/{sid}/approval/{approval['id']}"),
-            }
-            if self.cfg.public_url and approval["token"]:
-                payload["actions"] = [
-                    {"action": "http", "label": "Approve", "method": "POST", "clear": True,
-                     "url": self.link(f"/a/{approval['token']}/approve")},
-                    {"action": "http", "label": "Deny", "method": "POST", "clear": True,
-                     "url": self.link(f"/a/{approval['token']}/deny")},
-                ]
-            return payload
+        handler = self._BUILDERS.get(event["type"])
+        return handler(self, sid, title, d, base, session) if handler else None
 
-        if event["type"] == "model_waking":
-            return {**base, "title": f"Waking the model: {title}", "priority": 2, "tags": ["hourglass"],
-                    "message": f"The model was asleep; the first step takes about {d['expected_seconds']} s.",
-                    "click": self.link(f"/#/s/{sid}")}
+    def _approval_requested(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        approval = self.db.get_approval(d["id"])
+        if approval is None or approval["status"] != "pending":
+            return None
+        payload = {
+            **base,
+            "sequence_id": approval["id"],
+            "title": f"Approve? {title}",
+            "message": f"{d['reason'] or 'needs approval'}: {_short(describe_call(d['tool'], d['args']), 300)}",
+            "priority": 4,
+            "tags": ["warning"],
+            "click": self.link(f"/#/s/{sid}/approval/{approval['id']}"),
+        }
+        if self.cfg.public_url and approval["token"]:
+            payload["actions"] = [
+                {"action": "http", "label": "Approve", "method": "POST", "clear": True,
+                 "url": self.link(f"/a/{approval['token']}/approve")},
+                {"action": "http", "label": "Deny", "method": "POST", "clear": True,
+                 "url": self.link(f"/a/{approval['token']}/deny")},
+            ]
+        return payload
 
-        if event["type"] == "target_waiting":
-            # Replaced by the "back online" notification through the same sequence id.
-            return {**base, "sequence_id": f"target-{sid}", "title": f"Waiting for the {d['target']}: {title}",
-                    "priority": 3, "tags": ["zzz"], "click": self.link(f"/#/s/{sid}"),
-                    "message": f"The {d['target']} is offline or asleep. The task continues when it wakes."}
+    def _model_waking(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        return {**base, "title": f"Waking the model: {title}", "priority": 2, "tags": ["hourglass"],
+                "message": f"The model was asleep; the first step takes about {d['expected_seconds']} s.",
+                "click": self.link(f"/#/s/{sid}")}
 
-        if event["type"] == "target_online":
-            seconds = d.get("seconds", 0)
-            waited = f"{round(seconds / 60)} min" if seconds >= 90 else f"{seconds} s"
-            return {**base, "sequence_id": f"target-{sid}", "title": f"Resumed on the {d['target']}: {title}",
-                    "priority": 2 if seconds >= 60 else 1, "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
-                    "message": f"The {d['target']} is back after {waited}; the task is running again."}
+    def _target_waiting(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        # Replaced by the "back online" notification through the same sequence id.
+        return {**base, "sequence_id": f"target-{sid}", "title": f"Waiting for the {d['target']}: {title}",
+                "priority": 3, "tags": ["zzz"], "click": self.link(f"/#/s/{sid}"),
+                "message": f"The {d['target']} is offline or asleep. The task continues when it wakes."}
 
-        if event["type"] == "gpu_paused":
-            # Replaced by the "resumed" notification through the same sequence id.
-            minutes = round(d.get("resume_after_seconds", 180) / 60)
-            return {**base, "sequence_id": f"gpu-{sid}", "title": f"Paused for the GPU: {title}", "priority": 3,
-                    "tags": ["video_game"], "click": self.link(f"/#/s/{sid}"),
-                    "message": f"{d['reason']} needs the GPU, so the model was unloaded. The task continues "
-                               f"{minutes} min after it's done (or resume from Actions → GPU)."}
+    def _target_online(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        seconds = d.get("seconds", 0)
+        waited = f"{round(seconds / 60)} min" if seconds >= 90 else f"{seconds} s"
+        return {**base, "sequence_id": f"target-{sid}", "title": f"Resumed on the {d['target']}: {title}",
+                "priority": 2 if seconds >= 60 else 1, "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
+                "message": f"The {d['target']} is back after {waited}; the task is running again."}
 
-        if event["type"] == "gpu_resumed":
-            seconds = d.get("seconds", 0)
-            waited = f"{round(seconds / 60)} min" if seconds >= 90 else f"{seconds} s"
-            return {**base, "sequence_id": f"gpu-{sid}", "title": f"Resumed: {title}", "priority": 2,
-                    "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
-                    "message": f"The GPU is free again after {waited}; the model is loading and the task continues."}
+    def _gpu_paused(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        # Replaced by the "resumed" notification through the same sequence id.
+        minutes = round(d.get("resume_after_seconds", 180) / 60)
+        return {**base, "sequence_id": f"gpu-{sid}", "title": f"Paused for the GPU: {title}", "priority": 3,
+                "tags": ["video_game"], "click": self.link(f"/#/s/{sid}"),
+                "message": f"{d['reason']} needs the GPU, so the model was unloaded. The task continues "
+                           f"{minutes} min after it's done (or resume from Actions → GPU)."}
 
-        if event["type"] == "approval_decided":
-            approval = self.db.get_approval(d["id"])
-            if approval is None:
-                return None
-            mark = "✅ Approved" if d["status"] == "approved" else "🚫 Denied"
-            return {**base, "sequence_id": approval["id"], "title": f"{mark}: {title}",
-                    "message": _short(describe_call(approval["tool"], approval["args"]), 300),
-                    "priority": 2, "click": self.link(f"/#/s/{sid}")}
+    def _gpu_resumed(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        seconds = d.get("seconds", 0)
+        waited = f"{round(seconds / 60)} min" if seconds >= 90 else f"{seconds} s"
+        return {**base, "sequence_id": f"gpu-{sid}", "title": f"Resumed: {title}", "priority": 2,
+                "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
+                "message": f"The GPU is free again after {waited}; the model is loading and the task continues."}
 
-        if event["type"] == "run_finished" and d.get("job_id"):
+    def _approval_decided(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        approval = self.db.get_approval(d["id"])
+        if approval is None:
+            return None
+        mark = "✅ Approved" if d["status"] == "approved" else "🚫 Denied"
+        return {**base, "sequence_id": approval["id"], "title": f"{mark}: {title}",
+                "message": _short(describe_call(approval["tool"], approval["args"]), 300),
+                "priority": 2, "click": self.link(f"/#/s/{sid}")}
+
+    def _run_finished(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        if d.get("job_id"):
             return self._job_finished(sid, title, d, base)
+        if self._app_silences_completion(session):
+            return None
+        status = d["status"]
+        if status == "done":
+            head, tags, prio = "Done", ["white_check_mark"], 3
+            if d.get("stop_reason", "").startswith("budget"):
+                head, tags = "Stopped (budget)", ["hourglass"]
+        elif status == "failed":
+            head, tags, prio = "Failed", ["x"], 4
+        else:
+            return None  # cancelled by the user: they already know
+        body = d.get("answer") or d.get("stop_reason") or status
+        if d.get("ungrounded_quotes"):
+            head, tags = f"{head} (check quotes)", ["warning"]
+            body = f"⚠ {len(d['ungrounded_quotes'])} quote(s) not found in anything the agent read.\n{body}"
+        return {**base, "title": f"{head}: {title}", "message": _short(body, 400), "priority": prio,
+                "tags": tags, "click": self.link(f"/#/s/{sid}")}
 
-        if event["type"] == "run_finished":
-            if self._app_silences_completion(session):
-                return None
-            status = d["status"]
-            if status == "done":
-                head, tags, prio = "Done", ["white_check_mark"], 3
-                if d.get("stop_reason", "").startswith("budget"):
-                    head, tags = "Stopped (budget)", ["hourglass"]
-            elif status == "failed":
-                head, tags, prio = "Failed", ["x"], 4
-            else:
-                return None  # cancelled by the user: they already know
-            body = d.get("answer") or d.get("stop_reason") or status
-            if d.get("ungrounded_quotes"):
-                head, tags = f"{head} (check quotes)", ["warning"]
-                body = f"⚠ {len(d['ungrounded_quotes'])} quote(s) not found in anything the agent read.\n{body}"
-            return {**base, "title": f"{head}: {title}", "message": _short(body, 400), "priority": prio,
-                    "tags": tags, "click": self.link(f"/#/s/{sid}")}
-        return None
+    _BUILDERS = {
+        "approval_requested": _approval_requested, "model_waking": _model_waking,
+        "target_waiting": _target_waiting, "target_online": _target_online,
+        "gpu_paused": _gpu_paused, "gpu_resumed": _gpu_resumed,
+        "approval_decided": _approval_decided, "run_finished": _run_finished,
+    }
 
     def _app_silences_completion(self, session: dict) -> bool:
         app_id = session.get("app_id") or ""

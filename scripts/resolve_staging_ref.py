@@ -80,16 +80,22 @@ def resolve(
         raise RefRejected("set exactly one of branch or pr_number (or dispatch reset on its own)")
 
     if branch:
-        branch = _require_branch(branch)
-        ref = api(f"repos/{repository}/git/ref/heads/{branch}")
-        sha = ((ref.get("object") or {}).get("sha") or "").strip()
-        if not SHA_PATTERN.match(sha):
-            raise RefRejected(f"branch {branch} did not resolve to a commit SHA")
-        if ((ref.get("object") or {}).get("type") or "commit") != "commit":
-            raise RefRejected(f"branch {branch} does not point at a commit")
-        return {"sha": sha, "ref_label": f"branch {branch}", "reset_only": False}
+        return _resolve_branch(api, repository, _require_branch(branch))
+    return _resolve_pull_request(api, repository, pr_number)
 
-    if not re.fullmatch(r"[0-9]+", pr_number):
+
+def _resolve_branch(api: Callable[[str], dict], repository: str, branch: str) -> dict:
+    ref = api(f"repos/{repository}/git/ref/heads/{branch}")
+    sha = ((ref.get("object") or {}).get("sha") or "").strip()
+    if not SHA_PATTERN.match(sha):
+        raise RefRejected(f"branch {branch} did not resolve to a commit SHA")
+    if ((ref.get("object") or {}).get("type") or "commit") != "commit":
+        raise RefRejected(f"branch {branch} does not point at a commit")
+    return {"sha": sha, "ref_label": f"branch {branch}", "reset_only": False}
+
+
+def _resolve_pull_request(api: Callable[[str], dict], repository: str, pr_number: str) -> dict:
+    if not re.fullmatch(r"\d+", pr_number, re.ASCII):
         raise RefRejected(f"pr_number must be a number: {pr_number!r}")
     pull = api(f"repos/{repository}/pulls/{pr_number}")
     head = pull.get("head") or {}

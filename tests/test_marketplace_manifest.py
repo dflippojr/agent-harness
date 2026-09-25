@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 from harness.apps import SCOPES
 from harness.config import MODULE_NAMES
@@ -103,7 +103,7 @@ def test_admin_is_not_an_app_scope(validator):
 def test_provider_credentials_cannot_be_handled(validator):
     document = load_json(ORDINARY)
     document["app"]["provider_auth"]["never_handles_provider_credentials"] = False
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError, match="True was expected"):
         validator.validate(document)
 
 
@@ -112,7 +112,7 @@ def test_elevated_scope_requires_elevated_tier(validator):
     for item in document["app"]["scopes"]:
         if item["scope"] == "sessions:all":
             item["risk_tier"] = "standard"
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError, match="'elevated' was expected"):
         validator.validate(document)
 
 

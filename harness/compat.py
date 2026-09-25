@@ -107,7 +107,11 @@ def runner_compatibility(info: dict) -> dict:
         return {"state": "invalid", "detected": raw, "supported": dict(PROTOCOLS["runner"]),
                 "update": update_action("runner")}
     supported = PROTOCOLS["runner"]
-    state = ("client_update_required" if version < supported["min"] else
-             "daemon_update_required" if version > supported["max"] else "compatible")
+    if version < supported["min"]:
+        state = "client_update_required"
+    elif version > supported["max"]:
+        state = "daemon_update_required"
+    else:
+        state = "compatible"
     return {"state": state, "detected": version, "supported": dict(supported),
             "update": update_action("runner")}

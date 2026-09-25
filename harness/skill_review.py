@@ -195,25 +195,32 @@ class SkillReviewer:
             job = self._next_job()
             if job is None:
                 continue
-            if job["mode"] == "local":
-                if not self.local_review:
-                    self.db.update_skill_review_job(job["id"], status="error",
-                                                    error="local review is disabled on this profile")
-                    self.db.update_skill_proposal(job["proposal_id"], review_status="waiting_owner")
-                    continue
-                if not self.gpu_is_idle():
-                    continue  # stay queued; real work has the GPU
-            self._current = asyncio.create_task(self._run_job(job), name=f"skill-review-{job['id']}")
-            watcher = asyncio.create_task(self._preempt_if_busy(job, self._current))
-            try:
-                await self._current
-            except asyncio.CancelledError:
-                if self._stopping:
-                    raise
-                # Child task was GPU-preempted; this loop task is still wanted.
-            finally:
-                watcher.cancel()
-                self._current = None
+            if not self._can_start(job):
+                continue
+            await self._run_current(job)
+
+    def _can_start(self, job: dict) -> bool:
+        if job["mode"] != "local":
+            return True
+        if not self.local_review:
+            self.db.update_skill_review_job(job["id"], status="error",
+                                            error="local review is disabled on this profile")
+            self.db.update_skill_proposal(job["proposal_id"], review_status="waiting_owner")
+            return False
+        return self.gpu_is_idle()  # otherwise stay queued; real work has the GPU
+
+    async def _run_current(self, job: dict) -> None:
+        self._current = asyncio.create_task(self._run_job(job), name=f"skill-review-{job['id']}")
+        watcher = asyncio.create_task(self._preempt_if_busy(job, self._current))
+        try:
+            await self._current
+        except asyncio.CancelledError:
+            if self._stopping:
+                raise
+            # Child task was GPU-preempted; this loop task is still wanted.
+        finally:
+            watcher.cancel()
+            self._current = None
 
     def _next_job(self) -> dict | None:
         queued = self.db.list_skill_review_jobs(status=("queued",))

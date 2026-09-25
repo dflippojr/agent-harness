@@ -175,22 +175,25 @@ def _mirror_tree(src: Path, dst: Path) -> None:
     seen = set()
     for child in src.iterdir():
         seen.add(child.name)
-        target = dst / child.name
-        if child.is_dir() and not child.is_symlink():
-            if target.is_symlink() or target.is_file():
-                target.unlink()
-            _mirror_tree(child, target)
-        else:
-            if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
-            shutil.copy2(child, target)
-    for child in list(dst.iterdir()):
+        _mirror_entry(child, dst / child.name)
+    for child in sorted(dst.iterdir()):
         if child.name in seen:
             continue
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
         else:
             child.unlink()
+
+
+def _mirror_entry(child: Path, target: Path) -> None:
+    if child.is_dir() and not child.is_symlink():
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        _mirror_tree(child, target)
+    else:
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        shutil.copy2(child, target)
 
 
 def _copy_git_state(src: Path, dst: Path) -> None:

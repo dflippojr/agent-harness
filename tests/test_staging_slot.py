@@ -144,17 +144,19 @@ def test_gh_api_passes_a_validated_path_after_a_double_dash(monkeypatch):
 
 
 def test_branch_pointing_at_a_tag_object_or_nothing_is_rejected():
+    no_sha_api = api_for({"repos/dflippojr/agent-harness/git/ref/heads/main": {"object": {}}})
     with pytest.raises(RefRejected, match="commit SHA"):
-        resolve(branch="main", api=api_for({"repos/dflippojr/agent-harness/git/ref/heads/main": {"object": {}}}))
+        resolve(branch="main", api=no_sha_api)
+    tag_api = api_for({"repos/dflippojr/agent-harness/git/ref/heads/main": {"object": {"sha": SHA, "type": "tag"}}})
     with pytest.raises(RefRejected, match="does not point at a commit"):
-        resolve(branch="main", api=api_for({"repos/dflippojr/agent-harness/git/ref/heads/main":
-                                           {"object": {"sha": SHA, "type": "tag"}}}))
+        resolve(branch="main", api=tag_api)
 
 
 def test_reset_is_dispatched_on_its_own():
     assert resolve(reset=True, api=api_for({})) == {"sha": "", "ref_label": "reset", "reset_only": True}
+    empty_api = api_for({})
     with pytest.raises(RefRejected, match="on its own"):
-        resolve(branch="main", reset=True, api=api_for({}))
+        resolve(branch="main", reset=True, api=empty_api)
 
 
 def test_resolver_exits_nonzero_and_writes_outputs(tmp_path, monkeypatch, capsys):
@@ -572,3 +574,11 @@ def test_report_names_the_running_commit_and_the_staging_url(tmp_path):
     assert SHA in result.stdout and "https://tower.example-tailnet.ts.net:8444/" in result.stdout
     assert OTHER_SHA in result.stdout  # a moved head is reported, not chased
     assert "8100" in summary.read_text(encoding="utf-8")
+
+
+def test_pull_request_number_must_be_ascii_digits_before_any_api_call():
+    calls = []
+    for bad in ("１２３", "١٢٣"):  # fullwidth and Arabic-Indic digits
+        with pytest.raises(RefRejected, match="must be a number"):
+            resolve(pr_number=bad, api=lambda path: calls.append(path) or {})
+    assert calls == []

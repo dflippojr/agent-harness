@@ -25,10 +25,16 @@ from .settings import (
     looks_hidden, parse_value, redact_value, schema_entry, spec_available, supervised_restart_supported,
     use_live_app_settings,
 )
-from .settings_keys import APP_SPECS, build_registry
+from .settings_keys import (
+    APP_SPECS, KEY_APP_CAPABILITIES, KEY_APP_DEFAULT_BACKEND, KEY_APP_DEFAULT_MODEL, KEY_APP_MAX_COMPLETION_TOKENS,
+    KEY_APP_MAX_TURNS, build_registry,
+)
 
 log = logging.getLogger("harness.settings")
 
+INVALID_CONFIG = "configuration is invalid"
+ADMIN_VIEW_KEYS = ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
+                   "recovery", "etag", "warning")
 YAML_NAMES = ("harness.yaml", "harness.local.yaml", "profile.yaml")
 
 
@@ -148,61 +154,75 @@ class SettingsService:
         """
         status: dict[str, Any] = {"recovery": None}
         with self.store.lock():
-            try:
-                active = self.store.read_active()
-            except ManagedConfigError as e:
-                restored = self.store.restore_lkg(str(e))
-                self._audit("system", "lkg_recovery", [], "failure", extra={"reason": str(e)})
-                if restored is None:
-                    status["recovery"] = self.store.read_status().get("recovery") or "overlay_quarantined"
-                    self._migrate_backend_prefs()
-                    return status
-                active = restored
-                status["recovery"] = self.store.read_status().get("recovery")
-            if active is None:
-                self._migrate_backend_prefs()
+            active, finished = self._load_active_overlay(status)
+            if finished:
                 return status
-            if is_confirmed(active):
-                pending = self._pending()
-                pending_matches = bool(
-                    pending is not None
-                    and pending.revision == active.revision
-                    and pending.values == active.values
-                )
-                if pending_matches or self.store.boot_tried():
-                    # confirm_startup publishes confirmed active first. Finish any
-                    # cleanup left by a crash after that commit point.
-                    self.store.commit(
-                        pending=None if pending_matches else UNSET,
-                        boot_tried=False,
-                    )
+            self._finish_confirmed_cleanup(active)
             if active.unconfirmed or not active.confirmed:
-                # boot-tried is a cross-process crash flag. load() then Manager.__init__ both
-                # call apply_overlay on the same cfg; the in-process marker keeps the first
-                # start from quarantining its own candidate.
-                tried_here = getattr(self.cfg, "_managed_boot_attempt", False)
-                if self.store.boot_tried() and not tried_here:
-                    old = self._overlay_state()
-                    new = next_overlay(old, OverlayRequest(action="restore_lkg"), self._apply_mode)
-                    self._commit_overlay(old, new, boot_tried=False,
-                                         quarantine_reason="unconfirmed managed generation did not finish startup")
-                    self._audit("system", "lkg_recovery", list((active.values or {}).keys()), "ok",
-                                extra={"reason": "unconfirmed", "revision": active.revision})
-                    active = new.active
-                    status["recovery"] = "lkg_restore"
-                    if active is None:
-                        return status
-                else:
-                    self.store.mark_boot_tried()
-                    self.cfg._managed_boot_attempt = True
+                active = self._resolve_unconfirmed(active, status)
+                if active is None:
+                    return status
             try:
                 # Boot applies active only. Pending is never the apply map.
-                self._apply_values(self.cfg, active.values, persist=False)
+                self._apply_values(self.cfg, active.values)
             except Exception as e:
                 status.update(self._recover_failed_overlay(active, e))
             if status.get("recovery") != "overlay_quarantined":
                 self._migrate_backend_prefs()
         return status
+
+    def _load_active_overlay(self, status: dict[str, Any]) -> tuple[Envelope | None, bool]:
+        """Read the active overlay, restoring LKG on a read error. Returns (active, finished)."""
+        try:
+            active = self.store.read_active()
+        except ManagedConfigError as e:
+            restored = self.store.restore_lkg(str(e))
+            self._audit("system", "lkg_recovery", [], "failure", extra={"reason": str(e)})
+            if restored is None:
+                status["recovery"] = self.store.read_status().get("recovery") or "overlay_quarantined"
+                self._migrate_backend_prefs()
+                return None, True
+            active = restored
+            status["recovery"] = self.store.read_status().get("recovery")
+        if active is None:
+            self._migrate_backend_prefs()
+            return None, True
+        return active, False
+
+    def _finish_confirmed_cleanup(self, active: Envelope) -> None:
+        if not is_confirmed(active):
+            return
+        pending = self._pending()
+        pending_matches = bool(
+            pending is not None
+            and pending.revision == active.revision
+            and pending.values == active.values
+        )
+        if pending_matches or self.store.boot_tried():
+            # confirm_startup publishes confirmed active first. Finish any
+            # cleanup left by a crash after that commit point.
+            self.store.commit(
+                pending=None if pending_matches else UNSET,
+                boot_tried=False,
+            )
+
+    def _resolve_unconfirmed(self, active: Envelope, status: dict[str, Any]) -> Envelope | None:
+        # boot-tried is a cross-process crash flag. load() then Manager.__init__ both
+        # call apply_overlay on the same cfg; the in-process marker keeps the first
+        # start from quarantining its own candidate.
+        tried_here = getattr(self.cfg, "_managed_boot_attempt", False)
+        if not self.store.boot_tried() or tried_here:
+            self.store.mark_boot_tried()
+            self.cfg._managed_boot_attempt = True
+            return active
+        old = self._overlay_state()
+        new = next_overlay(old, OverlayRequest(action="restore_lkg"), self._apply_mode)
+        self._commit_overlay(old, new, boot_tried=False,
+                             quarantine_reason="unconfirmed managed generation did not finish startup")
+        self._audit("system", "lkg_recovery", list((active.values or {}).keys()), "ok",
+                    extra={"reason": "unconfirmed", "revision": active.revision})
+        status["recovery"] = "lkg_restore"
+        return new.active
 
     def _recover_failed_overlay(self, failed: Envelope, error: BaseException) -> dict[str, Any]:
         """If active cannot apply, try LKG. If LKG also fails, boot on YAML defaults.
@@ -217,7 +237,7 @@ class SettingsService:
             lkg = None
         if lkg is not None:
             try:
-                self._apply_values(self.cfg, lkg.values, persist=False)
+                self._apply_values(self.cfg, lkg.values)
             except Exception as lkg_error:
                 return self._quarantine_unusable_overlay(failed, error, lkg_error)
             old = OverlayState(active=failed, pending=self._pending(), lkg=lkg)
@@ -251,46 +271,54 @@ class SettingsService:
             self._commit_overlay(old, new, boot_tried=False, active_first=True)
             self._audit("system", "confirm", list(new.active.values), "ok", revision=new.active.revision)
 
+    def _mark_prefs_migrated(self, active: Envelope | None) -> None:
+        if active is not None:
+            active.migrated_backend_prefs = True
+            self.store.write_active(active)
+
+    def _legacy_backend_prefs(self) -> dict:
+        raw = self.db.get_meta("backend_prefs")
+        if not raw:
+            return {}
+        try:
+            prefs = json.loads(raw)
+        except ValueError:
+            return {}
+        return prefs if isinstance(prefs, dict) else {}
+
+    def _merge_backend_prefs(self, values: dict[str, Any], prefs: dict) -> None:
+        local = prefs.get("local")
+        if isinstance(local, dict) and local.get("model"):
+            key = "backends.local.model"
+            if key in self.registry.specs and key not in values:
+                values[key] = local["model"]
+        for name, spec in prefs.items():
+            if name == "local" or not isinstance(spec, dict):
+                continue
+            for field_name in ("model", "effort"):
+                key = f"backends.{name}.{field_name}"
+                if spec.get(field_name) and key in self.registry.specs:
+                    values.setdefault(key, spec[field_name])
+
     def _migrate_backend_prefs(self) -> None:
         if self.db is None:
             return
         active = self.store.read_active()
         if active and active.migrated_backend_prefs:
             return
-        raw = self.db.get_meta("backend_prefs")
-        if not raw:
-            if active is not None:
-                active.migrated_backend_prefs = True
-                self.store.write_active(active)
-            return
-        try:
-            prefs = json.loads(raw)
-        except ValueError:
-            prefs = {}
-        if not isinstance(prefs, dict) or not prefs:
-            if active is not None:
-                active.migrated_backend_prefs = True
-                self.store.write_active(active)
+        prefs = self._legacy_backend_prefs()
+        if not prefs:
+            self._mark_prefs_migrated(active)
             return
         values = dict(active.values if active else {})
-        if "local" in prefs and isinstance(prefs["local"], dict) and prefs["local"].get("model"):
-            key = "backends.local.model"
-            if key in self.registry.specs and key not in values:
-                values[key] = prefs["local"]["model"]
-        for name, spec in prefs.items():
-            if name == "local" or not isinstance(spec, dict):
-                continue
-            if spec.get("model") and f"backends.{name}.model" in self.registry.specs:
-                values.setdefault(f"backends.{name}.model", spec["model"])
-            if spec.get("effort") and f"backends.{name}.effort" in self.registry.specs:
-                values.setdefault(f"backends.{name}.effort", spec["effort"])
+        self._merge_backend_prefs(values, prefs)
         envelope = active or Envelope(revision=1, confirmed=True, migrated_backend_prefs=True)
         envelope.values = values
         envelope.migrated_backend_prefs = True
         envelope.revision = max(envelope.revision, 1)
         self.store.write_active(envelope)
         try:
-            self._apply_values(self.cfg, envelope.values, persist=False)
+            self._apply_values(self.cfg, envelope.values)
         except SettingsError:
             log.exception("backend_prefs migration produced invalid values")
         self._audit("system", "migrate_backend_prefs", list(values), "ok", revision=envelope.revision)
@@ -412,39 +440,60 @@ class SettingsService:
         }
 
     def _effective_app_value(self, spec: SettingSpec, configured: Any, key: dict) -> tuple[Any, str | None]:
-        if spec.key == "app.sessions.max_turns" and configured is not None:
-            cap = self.cfg.max_turns
-            if int(configured) > cap:
-                return cap, "sessions.max_turns"
-        if spec.key == "app.sessions.max_completion_tokens" and configured is not None:
-            cap = self.cfg.max_completion_tokens
-            if int(configured) > cap:
-                return cap, "sessions.max_completion_tokens"
-        if spec.key == "app.capabilities" and configured is not None:
-            allowed = self._allowed_app_capabilities(key)
-            filtered = [item for item in configured if item in allowed]
-            if filtered != list(configured):
-                return filtered, "capabilities"
-        if spec.key == "app.default_backend" and configured:
-            if not self._backend_allowed(key, configured):
+        if configured is None:
+            return configured, None
+        checks = {
+            KEY_APP_MAX_TURNS: lambda: self._capped_value(configured, self.cfg.max_turns, "sessions.max_turns"),
+            KEY_APP_MAX_COMPLETION_TOKENS: lambda: self._capped_value(
+                configured, self.cfg.max_completion_tokens, "sessions.max_completion_tokens"),
+            KEY_APP_CAPABILITIES: lambda: self._filtered_capabilities(configured, key),
+            KEY_APP_DEFAULT_BACKEND: lambda: self._policy_checked_backend(configured, key),
+            KEY_APP_DEFAULT_MODEL: lambda: self._policy_checked_model(configured, key),
+        }
+        check = checks.get(spec.key)
+        result = check() if check is not None else None
+        return result if result is not None else (configured, None)
+
+    @staticmethod
+    def _capped_value(configured: Any, cap: int, cap_name: str) -> tuple[Any, str] | None:
+        if int(configured) > cap:
+            return cap, cap_name
+        return None
+
+    def _filtered_capabilities(self, configured: Any, key: dict) -> tuple[Any, str] | None:
+        allowed = self._allowed_app_capabilities(key)
+        filtered = [item for item in configured if item in allowed]
+        if filtered != list(configured):
+            return filtered, "capabilities"
+        return None
+
+    def _policy_checked_backend(self, configured: Any, key: dict) -> tuple[Any, str] | None:
+        if configured and not self._backend_allowed(key, configured):
+            return "", "provider_policy"
+        return None
+
+    def _policy_checked_model(self, configured: Any, key: dict) -> tuple[Any, str | None] | None:
+        if not configured:
+            return None
+        configured_backend = self._app_envelope(key["id"]).values.get(KEY_APP_DEFAULT_BACKEND)
+        if configured_backend:
+            backend, backend_cap = self._effective_app_value(
+                self.registry.get(KEY_APP_DEFAULT_BACKEND), configured_backend, key,
+            )
+            if not backend:
+                return "", backend_cap
+        else:
+            backend = "local" if self.cfg.modules.local_model else ""
+        return self._model_allowed_for_backend(configured, key, backend)
+
+    def _model_allowed_for_backend(self, configured: Any, key: dict, backend: str) -> tuple[Any, str] | None:
+        if backend == "local" and configured not in self.cfg.models:
+            return "", "models"
+        if backend and backend != "local":
+            cred = self.db.app_provider_credential(key["id"], backend) if self.db else None
+            if cred and cred.get("models") and configured not in cred["models"]:
                 return "", "provider_policy"
-        if spec.key == "app.default_model" and configured:
-            configured_backend = self._app_envelope(key["id"]).values.get("app.default_backend")
-            if configured_backend:
-                backend, backend_cap = self._effective_app_value(
-                    self.registry.get("app.default_backend"), configured_backend, key,
-                )
-                if not backend:
-                    return "", backend_cap
-            else:
-                backend = "local" if self.cfg.modules.local_model else ""
-            if backend == "local" and configured not in self.cfg.models:
-                return "", "models"
-            if backend and backend != "local":
-                cred = self.db.app_provider_credential(key["id"], backend) if self.db else None
-                if cred and cred.get("models") and configured not in cred["models"]:
-                    return "", "provider_policy"
-        return configured, None
+        return None
 
     def _allowed_app_capabilities(self, key: dict) -> set[str]:
         scopes = set((key.get("scopes") or "").split()) | set(key.get("scope_set") or [])
@@ -484,10 +533,12 @@ class SettingsService:
         if dry_run:
             body["dry_run"] = True
             return body
-        body.update({k: self.admin_view()[k] for k in
-                     ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
-                      "recovery", "etag", "warning")})
-        body["settings"] = self.admin_view()["settings"]
+        return self._with_admin_view(body)
+
+    def _with_admin_view(self, body: dict[str, Any]) -> dict[str, Any]:
+        view = self.admin_view()
+        body.update({k: view[k] for k in ADMIN_VIEW_KEYS})
+        body["settings"] = view["settings"]
         return body
 
     def rollback(self, revision: int | None, dry_run: bool = False, actor: dict | None = None) -> dict[str, Any]:
@@ -500,12 +551,7 @@ class SettingsService:
                                     "revision_conflict",
                                     details={"expected_revision": revision, "current_revision": old.active.revision})
             candidate = effective_candidate(old.active, old.pending)
-            changes: dict[str, Any] = {}
-            for key in set(candidate) | set(old.lkg.values):
-                if key in old.lkg.values:
-                    changes[key] = old.lkg.values[key]
-                else:
-                    changes[key] = None
+            changes: dict[str, Any] = {key: old.lkg.values.get(key) for key in set(candidate) | set(old.lkg.values)}
             if dry_run:
                 return self._plan_admin(changes, old.active.revision if old.active else 0,
                                         persist=False, apply=False, actor=actor)
@@ -515,64 +561,62 @@ class SettingsService:
                 OverlayRequest(action="rollback", next_revision=current_revision + 1, now=time.time()),
                 self._apply_mode,
             )
-            previous_active = old.active
-            previous_pending = old.pending
             live_applied: list[tuple[SettingSpec, Any, Any]] = []
             committed = False
             try:
                 self._commit_overlay(old, new)
                 committed = True
                 if new.active is not None:
-                    self._apply_rollback_live(old, new, live_applied)
+                    self._apply_rollback_live(new, live_applied)
                 self._audit(_actor_kind(actor), "rollback", list(changes), "ok",
                             revision=new.active.revision if new.active else current_revision, actor=actor)
                 plan = Plan(revision=current_revision,
                             target_revision=new.active.revision if new.active else current_revision)
-                body = plan.as_dict(self.registry)
-                body.update({k: self.admin_view()[k] for k in
-                             ("revision", "pending_revision", "confirmed", "supervised_restart", "restart_required",
-                              "recovery", "etag", "warning")})
-                body["settings"] = self.admin_view()["settings"]
-                return body
+                return self._with_admin_view(plan.as_dict(self.registry))
             except OverlayCrash:
                 raise
             except Exception as e:
-                for spec, old_val, new_val in reversed(live_applied):
-                    try:
-                        spec.setter(self.cfg, old_val)
-                        if spec.live_undo and self.manager is not None:
-                            spec.live_undo(self.manager, new_val, old_val)
-                    except Exception:
-                        log.exception("failed to undo live hook for %s", spec.key)
-                try:
-                    if committed:
-                        if previous_active is not None and (previous_active.revision or previous_active.values):
-                            self.store.write_active(previous_active)
-                        else:
-                            self.store._unlink(self.store.active_path)
-                        if previous_pending is not None:
-                            self.store.write_pending(previous_pending)
-                        else:
-                            self.store.clear_pending()
-                except Exception:
-                    log.exception("failed to restore managed-config after rollback live-hook failure")
+                self._undo_failed_apply(live_applied, committed, old.active, old.pending,
+                                        "failed to restore managed-config after rollback live-hook failure")
                 self._audit(_actor_kind(actor), "live_hook_rollback", list(changes), "failure",
                             revision=current_revision, actor=actor, extra={"reason": str(e)})
                 if isinstance(e, SettingsError):
                     raise
                 raise SettingsError(500, f"failed to apply configuration: {e}", "apply_failed") from e
 
-    def _apply_rollback_live(self, old: OverlayState, new: OverlayState,
+    def _undo_failed_apply(self, live_applied: list[tuple[SettingSpec, Any, Any]], committed: bool,
+                           previous_active: Envelope | None, previous_pending: Envelope | None,
+                           restore_failure: str) -> None:
+        """Undo live hooks in reverse order, then put the previous managed files back if they were replaced."""
+        for spec, old_val, new_val in reversed(live_applied):
+            try:
+                spec.setter(self.cfg, old_val)
+                if spec.live_undo and self.manager is not None:
+                    spec.live_undo(self.manager, new_val, old_val)
+            except Exception:
+                log.exception("failed to undo live hook for %s", spec.key)
+        if not committed:
+            return
+        try:
+            if previous_active is not None and (previous_active.revision or previous_active.values):
+                self.store.write_active(previous_active)
+            else:
+                self.store._unlink(self.store.active_path)
+            if previous_pending is not None:
+                self.store.write_pending(previous_pending)
+            else:
+                self.store.clear_pending()
+        except Exception:
+            log.exception(restore_failure)
+
+    def _apply_rollback_live(self, new: OverlayState,
                              live_applied: list[tuple[SettingSpec, Any, Any]]) -> None:
         new_values = new.active.values if new.active is not None else {}
         for spec in self.registry.writable_admin():
             if spec.apply_mode != "live":
                 continue
             previous = spec.getter(self.cfg)
-            if spec.key in new_values:
-                target = new_values[spec.key]
-            else:
-                target = self.inherited.get(spec.key, spec.default)
+            target = new_values[spec.key] if spec.key in new_values else self.inherited.get(spec.key, spec.default)
             if previous == target:
                 continue
             spec.setter(self.cfg, target)
@@ -604,7 +648,8 @@ class SettingsService:
             new = next_overlay(old, OverlayRequest(action="confirm_restart", now=time.time()), self._apply_mode)
             if pending is not None:
                 self._commit_overlay(old, new, boot_tried=False)
-            target_revision = new.active.revision if new.active else (active.revision if active else 0)
+            fallback_revision = active.revision if active else 0
+            target_revision = new.active.revision if new.active else fallback_revision
             self._audit(_actor_kind(actor), "restart", [], "ok", revision=target_revision, actor=actor)
             self._restarting = True
         return {"accepted": True, "target_revision": target_revision, "status": "restarting"}
@@ -632,113 +677,99 @@ class SettingsService:
             if errors:
                 self._audit(_actor_kind(actor), "validate", list(changes), "failure", revision=current_revision,
                             actor=actor, extra={"keys": errors})
-                raise SettingsError(400, "configuration is invalid", "validation_error", keys=errors)
+                raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=errors)
 
+            self._classify_changes(plan, parsed)
             candidate_cfg = copy_cfg(self.cfg)
-            next_values = apply_changes(effective_candidate(active_file, pending), parsed)
-            for key, value in parsed.items():
-                spec = self.registry.get(key)
-                before = spec.getter(self.cfg)
-                if value is RESET:
-                    after = self.inherited.get(key, spec.default)
-                    action = "reset"
-                else:
-                    after = value
-                    action = "set"
-                change = Change(key=key, before=before, after=after, apply=spec.apply_mode, action=action)
-                plan.changes.append(change)
-                if spec.apply_mode == "daemon_restart":
-                    plan.pending.append(change)
-                    plan.restart_required = True
-                else:
-                    plan.live.append(change)
-
-            apply_values = dict(next_values)
+            apply_values = dict(apply_changes(effective_candidate(active_file, pending), parsed))
             for key, value in parsed.items():
                 if value is RESET:
                     apply_values[key] = RESET
-
             try:
-                self._apply_values(candidate_cfg, apply_values, persist=False)
+                self._apply_values(candidate_cfg, apply_values)
             except SettingsError as e:
                 plan.errors = e.keys
                 raise
-
-            # Include the inherited post-reset value so cross-field checks see the
-            # generation that would actually run, not the pre-reset overlay left on cfg.
-            proposed_applied = {change.key: change.after for change in plan.changes}
-            cross = []
-            for validator in self.registry.validators:
-                cross.extend(validator(candidate_cfg, proposed_applied))
-            if cross:
-                keys = {item["key"]: {"code": item["code"], "message": item["message"]} for item in cross}
-                raise SettingsError(400, "configuration is invalid", "validation_error", keys=keys)
-
+            self._check_cross_field(candidate_cfg, plan)
             if not persist:
                 return plan
+            self._persist_plan(old, plan, parsed, apply, actor)
+            return plan
 
-            previous_active = active_file
-            previous_pending = pending
-            live_applied: list[tuple[SettingSpec, Any, Any]] = []
-            committed = False
-            try:
-                new = next_overlay(
-                    old,
-                    OverlayRequest(
-                        action="patch",
-                        changes=parsed,
-                        next_revision=plan.target_revision,
-                        now=time.time(),
-                        migrated_backend_prefs=True,
-                    ),
-                    self._apply_mode,
-                )
-                if new.pending is not None:
-                    plan.restart_required = True
-                self._commit_overlay(old, new)
-                committed = True
+    def _classify_changes(self, plan: Plan, parsed: dict[str, Any]) -> None:
+        for key, value in parsed.items():
+            spec = self.registry.get(key)
+            before = spec.getter(self.cfg)
+            if value is RESET:
+                after = self.inherited.get(key, spec.default)
+                action = "reset"
+            else:
+                after = value
+                action = "set"
+            change = Change(key=key, before=before, after=after, apply=spec.apply_mode, action=action)
+            plan.changes.append(change)
+            if spec.apply_mode == "daemon_restart":
+                plan.pending.append(change)
+                plan.restart_required = True
+            else:
+                plan.live.append(change)
 
-                if apply:
-                    for change in plan.live:
-                        spec = self.registry.get(change.key)
-                        old = spec.getter(self.cfg)
-                        new = self.inherited.get(change.key, spec.default) if change.action == "reset" else change.after
-                        spec.setter(self.cfg, new)
-                        live_applied.append((spec, old, new))
-                        if spec.live_apply and self.manager is not None:
-                            spec.live_apply(self.manager, old, new)
+    def _check_cross_field(self, candidate_cfg: Config, plan: Plan) -> None:
+        # Include the inherited post-reset value so cross-field checks see the
+        # generation that would actually run, not the pre-reset overlay left on cfg.
+        proposed_applied = {change.key: change.after for change in plan.changes}
+        cross = []
+        for validator in self.registry.validators:
+            cross.extend(validator(candidate_cfg, proposed_applied))
+        if cross:
+            keys = {item["key"]: {"code": item["code"], "message": item["message"]} for item in cross}
+            raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=keys)
 
-                self._audit(_actor_kind(actor), "patch", [c.key for c in plan.changes], "ok",
-                            revision=plan.target_revision, actor=actor,
-                            extra={"changes": plan.as_dict(self.registry)["changes"]})
-                return plan
-            except OverlayCrash:
+    def _persist_plan(self, old: OverlayState, plan: Plan, parsed: dict[str, Any], apply: bool,
+                      actor: dict | None) -> None:
+        live_applied: list[tuple[SettingSpec, Any, Any]] = []
+        committed = False
+        try:
+            new = next_overlay(
+                old,
+                OverlayRequest(
+                    action="patch",
+                    changes=parsed,
+                    next_revision=plan.target_revision,
+                    now=time.time(),
+                    migrated_backend_prefs=True,
+                ),
+                self._apply_mode,
+            )
+            if new.pending is not None:
+                plan.restart_required = True
+            self._commit_overlay(old, new)
+            committed = True
+            if apply:
+                self._apply_live_changes(plan, live_applied)
+            self._audit(_actor_kind(actor), "patch", [c.key for c in plan.changes], "ok",
+                        revision=plan.target_revision, actor=actor,
+                        extra={"changes": plan.as_dict(self.registry)["changes"]})
+        except OverlayCrash:
+            raise
+        except Exception as e:
+            self._undo_failed_apply(live_applied, committed, old.active, old.pending,
+                                    "failed to restore managed-config after live-hook failure")
+            self._audit(_actor_kind(actor), "live_hook_rollback", [c.key for c in plan.changes], "failure",
+                        revision=plan.revision, actor=actor, extra={"reason": str(e)})
+            if isinstance(e, SettingsError):
                 raise
-            except Exception as e:
-                for spec, old, new in reversed(live_applied):
-                    try:
-                        spec.setter(self.cfg, old)
-                        if spec.live_undo and self.manager is not None:
-                            spec.live_undo(self.manager, new, old)
-                    except Exception:
-                        log.exception("failed to undo live hook for %s", spec.key)
-                try:
-                    if committed:
-                        if previous_active is not None and (previous_active.revision or previous_active.values):
-                            self.store.write_active(previous_active)
-                        else:
-                            self.store._unlink(self.store.active_path)
-                        if previous_pending is not None:
-                            self.store.write_pending(previous_pending)
-                        else:
-                            self.store.clear_pending()
-                except Exception:
-                    log.exception("failed to restore managed-config after live-hook failure")
-                self._audit(_actor_kind(actor), "live_hook_rollback", [c.key for c in plan.changes], "failure",
-                            revision=current_revision, actor=actor, extra={"reason": str(e)})
-                if isinstance(e, SettingsError):
-                    raise
-                raise SettingsError(500, f"failed to apply configuration: {e}", "apply_failed") from e
+            raise SettingsError(500, f"failed to apply configuration: {e}", "apply_failed") from e
+
+    def _apply_live_changes(self, plan: Plan, live_applied: list[tuple[SettingSpec, Any, Any]]) -> None:
+        for change in plan.live:
+            spec = self.registry.get(change.key)
+            previous = spec.getter(self.cfg)
+            target = self.inherited.get(change.key, spec.default) if change.action == "reset" else change.after
+            spec.setter(self.cfg, target)
+            live_applied.append((spec, previous, target))
+            if spec.live_apply and self.manager is not None:
+                spec.live_apply(self.manager, previous, target)
 
     def _parse_admin_changes(self, changes: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict]]:
         parsed: dict[str, Any] = {}
@@ -765,7 +796,7 @@ class SettingsService:
                 errors[key] = {"code": "invalid_value", "message": str(e)}
         return parsed, errors
 
-    def _apply_values(self, cfg: Config, values: dict[str, Any], persist: bool) -> None:
+    def _apply_values(self, cfg: Config, values: dict[str, Any]) -> None:
         # Apply onto a copy first. Setters mutate key-by-key; committing only after the
         # whole map validates keeps a failed overlay from leaving keys that LKG restore
         # (or unlink) does not mention.
@@ -773,34 +804,35 @@ class SettingsService:
         errors: dict[str, dict] = {}
         parsed_map: dict[str, Any] = {}
         for key, value in values.items():
-            spec = self.registry.specs.get(key)
-            if spec is None:
-                errors[key] = {"code": "unknown_key", "message": f"unknown setting {key!r}"}
-                continue
-            if spec.apply_mode == "installer_only":
-                errors[key] = {"code": "installer_only", "message": "installer-only keys cannot be applied"}
-                continue
-            try:
-                parsed = parse_value(spec, value)
-                parsed_map[key] = parsed
-                if parsed is RESET:
-                    spec.setter(candidate, self.inherited.get(key, spec.default))
-                else:
-                    spec.setter(candidate, parsed)
-            except ValueError as e:
-                errors[key] = {"code": "invalid_value", "message": str(e)}
+            error = self._apply_one_value(candidate, key, value, parsed_map)
+            if error is not None:
+                errors[key] = error
         proposed = {k: v for k, v in values.items() if v is not RESET}
         for validator in self.registry.validators:
             for item in validator(candidate, proposed):
                 errors.setdefault(item["key"], {"code": item["code"], "message": item["message"]})
         if errors:
-            raise SettingsError(400, "configuration is invalid", "validation_error", keys=errors)
+            raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=errors)
         for key, parsed in parsed_map.items():
-            spec = self.registry.get(key)
-            if parsed is RESET:
-                spec.setter(cfg, self.inherited.get(key, spec.default))
-            else:
-                spec.setter(cfg, parsed)
+            self._set_parsed(cfg, key, parsed)
+
+    def _set_parsed(self, cfg: Config, key: str, parsed: Any) -> None:
+        spec = self.registry.get(key)
+        spec.setter(cfg, self.inherited.get(key, spec.default) if parsed is RESET else parsed)
+
+    def _apply_one_value(self, candidate: Config, key: str, value: Any, parsed_map: dict[str, Any]) -> dict | None:
+        spec = self.registry.specs.get(key)
+        if spec is None:
+            return {"code": "unknown_key", "message": f"unknown setting {key!r}"}
+        if spec.apply_mode == "installer_only":
+            return {"code": "installer_only", "message": "installer-only keys cannot be applied"}
+        try:
+            parsed = parse_value(spec, value)
+            parsed_map[key] = parsed
+            self._set_parsed(candidate, key, parsed)
+        except ValueError as e:
+            return {"code": "invalid_value", "message": str(e)}
+        return None
 
     # --- app -------------------------------------------------------------
     def patch_app(self, app_id: str, key: dict, changes: dict[str, Any], revision: int | None,
@@ -821,29 +853,10 @@ class SettingsService:
                 "revision_conflict",
                 details={"expected_revision": revision, "current_revision": envelope.revision},
             )
-        scopes = set((key.get("scopes") or "").split()) | set(key.get("scope_set") or [])
-        parsed: dict[str, Any] = {}
-        errors: dict[str, dict] = {}
-        for name, value in changes.items():
-            spec = self.registry.specs.get(name)
-            if spec is None or spec.scope != "app":
-                errors[name] = {"code": "unknown_key", "message": f"unknown setting {name!r}"}
-                continue
-            if any(cap not in scopes for cap in spec.capabilities):
-                errors[name] = {"code": "missing_capability",
-                                "message": f"this token lacks {', '.join(spec.capabilities)}"}
-                continue
-            try:
-                parsed[name] = parse_value(spec, value)
-            except ValueError as e:
-                errors[name] = {"code": "invalid_value", "message": str(e)}
-            else:
-                extra = self._app_policy_errors(spec, parsed[name], key)
-                if extra:
-                    errors[name] = extra
+        parsed, errors = self._parse_app_changes(key, changes)
         if errors:
             self._audit("app", "validate", list(changes), "failure", actor=key, extra={"keys": errors})
-            raise SettingsError(400, "configuration is invalid", "validation_error", keys=errors)
+            raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=errors)
         plan_changes = []
         new_values = dict(envelope.values)
         for name, value in parsed.items():
@@ -871,15 +884,38 @@ class SettingsService:
         view["changes"] = plan_changes
         return view
 
+    def _parse_app_changes(self, key: dict, changes: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict]]:
+        scopes = set((key.get("scopes") or "").split()) | set(key.get("scope_set") or [])
+        parsed: dict[str, Any] = {}
+        errors: dict[str, dict] = {}
+        for name, value in changes.items():
+            error = self._parse_app_change(key, scopes, name, value, parsed)
+            if error is not None:
+                errors[name] = error
+        return parsed, errors
+
+    def _parse_app_change(self, key: dict, scopes: set[str], name: str, value: Any,
+                          parsed: dict[str, Any]) -> dict | None:
+        spec = self.registry.specs.get(name)
+        if spec is None or spec.scope != "app":
+            return {"code": "unknown_key", "message": f"unknown setting {name!r}"}
+        if any(cap not in scopes for cap in spec.capabilities):
+            return {"code": "missing_capability", "message": f"this token lacks {', '.join(spec.capabilities)}"}
+        try:
+            parsed[name] = parse_value(spec, value)
+        except ValueError as e:
+            return {"code": "invalid_value", "message": str(e)}
+        return self._app_policy_errors(spec, parsed[name], key)
+
     def _app_policy_errors(self, spec: SettingSpec, value: Any, key: dict) -> dict | None:
         if value is RESET or value in (None, "", []):
             return None
-        if spec.key == "app.default_backend":
+        if spec.key == KEY_APP_DEFAULT_BACKEND:
             if not self._backend_allowed(key, str(value)):
                 return {"code": "dependency", "message": "this app cannot select that backend"}
         if spec.key == "app.default_effort" and value not in ("", *("low", "medium", "high")):
             return {"code": "invalid_value", "message": "effort must be inherit-empty, low, medium, or high"}
-        if spec.key == "app.capabilities":
+        if spec.key == KEY_APP_CAPABILITIES:
             allowed = self._allowed_app_capabilities(key)
             extra = [item for item in value if item not in allowed]
             if extra:
@@ -925,10 +961,10 @@ class SettingsService:
             defaults = self.app_defaults(app_key)
         else:
             defaults = {}
-        if defaults.get("app.sessions.max_turns") is not None:
-            turns = int(defaults["app.sessions.max_turns"])
-        if defaults.get("app.sessions.max_completion_tokens") is not None:
-            tokens = int(defaults["app.sessions.max_completion_tokens"])
+        if defaults.get(KEY_APP_MAX_TURNS) is not None:
+            turns = int(defaults[KEY_APP_MAX_TURNS])
+        if defaults.get(KEY_APP_MAX_COMPLETION_TOKENS) is not None:
+            tokens = int(defaults[KEY_APP_MAX_COMPLETION_TOKENS])
         return turns, tokens
 
     # --- persistence helpers --------------------------------------------
