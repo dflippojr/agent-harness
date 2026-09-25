@@ -10,6 +10,7 @@ import secrets
 import shutil
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from .bus import EventBus
@@ -33,6 +34,22 @@ from . import llm, projects
 log = logging.getLogger("harness.manager")
 
 TARGETS = ("tower", "macbook")
+ACCOUNT_DISABLED = "this household account is disabled"
+
+
+@dataclass
+class CreateOptions:
+    """The less common keywords of `SessionManager.create`."""
+    app: dict | None = None
+    app_context: str = ""
+    app_tools: list | None = None
+    app_metadata: dict | None = None
+    job_id: str = ""
+    owner_id: str = "owner"
+    skills: list[str] | None = None
+    skill_missing: str = "error"
+    kind: str = "agent"
+    compare_group: str = ""
 REMOTE_WORKSPACE_ROOT = "~/.agent-harness/workspaces"  # where runners keep session workspaces (display only)
 MEMORY_PROMPT = ("User context: memory_index, memory_search, and memory_read give read access to part of the "
                  "user's personal memory library (projects, work, home, tastes). Check it when the task depends on "
@@ -97,13 +114,17 @@ class Manager:
         self._snippet_cleanup: asyncio.Task | None = None
         self.runner.app_tools = self.app_tools
         from .settings_service import SettingsService
-        from .config import module_effective
         self.settings = SettingsService(cfg, db=self.db)
         self.settings.apply_overlay()
         self.settings.manager = self
         self.runner.settings = self.settings
         self.runner.gate.max_waiting = cfg.endpoint.max_waiting
         self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
+        self._init_modules(cfg, chat)
+        self._init_services(cfg)
+
+    def _init_modules(self, cfg: Config, chat) -> None:
+        from .config import module_effective
         self.skills = None
         if module_effective(cfg, "skills"):
             from .skill_review import SkillReviewer
@@ -126,6 +147,9 @@ class Manager:
         if module_effective(cfg, "search"):
             from .search import SessionSearch
             self.runner.sessions = SessionSearch(self.db)
+
+    def _init_services(self, cfg: Config) -> None:
+        from .config import module_effective
         self.images = None
         if module_effective(cfg, "images"):
             from .gpu_guard import ServerControl
@@ -287,6 +311,16 @@ class Manager:
     def get(self, ref: str, user_id: str | None = None, kind: str | None = None) -> dict:
         return self.db.get_session(self.resolve_id(ref, user_id=user_id, kind=kind))
 
+    @staticmethod
+    def _hosted_chat_option(name: str, v: dict) -> dict:
+        models = [m["id"] for m in v.get("popular_models", [])]
+        if v["model"] and v["model"] not in models:
+            models.insert(0, v["model"])
+        return {"name": name, "models": models, "model": v["model"],
+                "efforts": ["low", "medium", "high"], "effort": v["effort"] or "",
+                "notice": v["notice"], "billing_warning": v["billing_warning"],
+                "limits": v.get("limits") or {}}
+
     def chat_options(self) -> dict:
         """Backends, models, and efforts Chat can start with right now, plus the configured default choice."""
         from .backend_state import local_view, view
@@ -296,18 +330,10 @@ class Manager:
             backends.append({"name": "local", "models": list(self.cfg.models), "model": self.cfg.default_model,
                              "efforts": [], "effort": "", "notice": local["notice"], "billing_warning": ""})
         for name in self.cfg.backends:
-            if name not in ("claude", "codex", "cursor"):
-                continue
-            v = view(self, name)
-            if not (v["available"] and v["logged_in"]):
-                continue
-            models = [m["id"] for m in v.get("popular_models", [])]
-            if v["model"] and v["model"] not in models:
-                models.insert(0, v["model"])
-            backends.append({"name": name, "models": models, "model": v["model"],
-                             "efforts": ["low", "medium", "high"], "effort": v["effort"] or "",
-                             "notice": v["notice"], "billing_warning": v["billing_warning"],
-                             "limits": v.get("limits") or {}})
+            if name in ("claude", "codex", "cursor"):
+                v = view(self, name)
+                if v["available"] and v["logged_in"]:
+                    backends.append(self._hosted_chat_option(name, v))
         names = [b["name"] for b in backends]
         default = "local" if self.cfg.modules.local_model else next(iter(names), "")
         if default not in names:
@@ -337,14 +363,78 @@ class Manager:
 
     # operations
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
-               backend: str | None = None, effort: str | None = None,
-               title: str | None = None, app: dict | None = None, app_context: str = "", app_tools: list | None = None,
-               app_metadata: dict | None = None, job_id: str = "", owner_id: str = "owner",
-               skills: list[str] | None = None, skill_missing: str = "error", kind: str = "agent",
-               compare_group: str = "") -> dict:
-        from . import catalog, storage
-        chat = kind == "chat"
-        if chat:
+               backend: str | None = None, effort: str | None = None, title: str | None = None,
+               **options) -> dict:
+        """Start a session. Beyond the first seven arguments the keywords are `CreateOptions` fields."""
+        opts = CreateOptions(**options)
+        chat = opts.kind == "chat"
+        project, target, app, app_tools, skills, owner_id = self._create_scope(opts, prompt, project, target)
+        spec = self._project_for_create(project, owner_id)
+        member = owner_id != OWNER_USER_ID
+        if member:
+            backend = self._check_member(owner_id, backend, target, spec, app)
+        defaults = self.settings.app_defaults(app) if app and getattr(self, "settings", None) else {}
+        backend, model, effort = self._default_choice(backend, model, effort, defaults)
+        target = self._pick_target(target, spec, project)
+        if backend == "local":
+            model, effort = self._local_choice(model)
+        else:
+            model, effort = self._hosted_choice(backend, model, effort, member, target, app)
+        remote = target != "tower"
+        self._check_free_space(remote, member, target, owner_id)
+
+        sid = uuid.uuid4().hex[:10]
+        workspace = self._new_workspace(remote, target, owner_id, sid)
+        system, branch = self._system_prompt(chat, remote, target, sid, spec, defaults, app)
+        tools = self._validated_app_tools(app_tools)
+        session_meta = {"app_id": app["id"] if app else "", "job_id": opts.job_id or "", "owner_id": owner_id,
+                        "app_metadata": opts.app_metadata or {}}
+        system, frozen = self._finish_system(system, chat, project, spec, opts, skills, session_meta)
+        now = time.time()
+        first_line = prompt.strip().splitlines()[0]
+        max_turns, max_tokens = self._create_budgets(app)
+        run = new_run()
+        run["max_turns"] = max_turns
+        run["max_completion_tokens"] = max_tokens
+        session = {
+            "id": sid, "project": project, "target": target, "model": model, "backend": backend,
+            "effort": effort or "",
+            "title": title or (first_line[:80] + ("…" if len(first_line) > 80 else "")),
+            "status": "queued", "workspace": str(workspace), "created_at": now, "updated_at": now,
+            "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "run": run, "totals": {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                                             "total_cost_usd": 0.0},
+            "inbox": [], "branch": branch,
+            "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": opts.app_metadata or {},
+            "app_defaults": dict(defaults) if app else {},
+            "job_id": opts.job_id, "owner_id": owner_id, "kind": opts.kind, "compare_group": opts.compare_group,
+            "skills": self.skills.freeze_public(frozen) if self.skills is not None else [],
+        }
+        self._insert_created(session, app, tools, opts.job_id, prompt)
+        self._spawn(sid)
+        return self.db.get_session(sid)
+
+    def _create_budgets(self, app: dict | None) -> tuple[int, int]:
+        if getattr(self, "settings", None):
+            return self.settings.session_budgets(app)
+        return self.cfg.max_turns, self.cfg.max_completion_tokens
+
+    def _insert_created(self, session: dict, app: dict | None, tools: list, job_id: str, prompt: str) -> None:
+        sid = session["id"]
+        with self.db.tx():
+            self.db.insert_session(session)
+            self.bus.emit(sid, "session_created", {**{k: session[k] for k in
+                                                       ("project", "target", "model", "backend", "title")},
+                                                   **({"app": app["name"], "app_tools": [t["name"] for t in tools]}
+                                                      if app else {}), **({"job_id": job_id} if job_id else {}),
+                                                   **({"skills": session["skills"]} if session["skills"] else {})})
+            self.bus.emit(sid, "user_message", {"content": prompt})
+
+    @staticmethod
+    def _create_scope(opts: CreateOptions, prompt: str, project: str, target: str | None) -> tuple:
+        """Chat pins the project, target and owner; returns (project, target, app, app_tools, skills, owner_id)."""
+        app, app_tools, skills, owner_id = opts.app, opts.app_tools, opts.skills, opts.owner_id
+        if opts.kind == "chat":
             project, target, app, app_tools, skills = "scratch", "tower", None, None, None
             if owner_id not in ("", OWNER_USER_ID):
                 raise HarnessError(403, "Chat is only available to the owner")
@@ -353,24 +443,54 @@ class Manager:
         owner_id = owner_id or OWNER_USER_ID
         if app is not None and owner_id != OWNER_USER_ID:
             raise HarnessError(403, "app tokens cannot attach sessions to a household member")
+        return project, target, app, app_tools, skills, owner_id
+
+    def _finish_system(self, system: str, chat: bool, project: str, spec, opts: CreateOptions,
+                       skills: list[str] | None, session_meta: dict) -> tuple[str, list]:
+        """Append the app context, project instructions and skills; returns the prompt and the frozen skills."""
+        if opts.app_context:
+            system += "\n\n" + opts.app_context
+        instructions = "" if chat else spec.instructions.strip()
+        if instructions:
+            system += f"\n\nProject instructions ({project}):\n{instructions}"
+        if self.skills is None or chat:
+            return system, []
+        return self._add_skills(system, project, skills, session_meta, opts.skill_missing)
+
+    def _project_for_create(self, project: str, owner_id: str):
+        from . import catalog
         spec = catalog.get_project(self.cfg, self.db, owner_id, project)
         if spec is None:
             known = [p.name for p in catalog.list_projects(self.cfg, self.db, owner_id)]
             raise HarnessError(400, f"unknown project {project!r}; known: {', '.join(known)}")
-        member = owner_id != OWNER_USER_ID
-        if member:
-            account = self.db.account_by_id(owner_id)
-            if account is None or not account.get("enabled", 1):
-                raise HarnessError(403, "this household account is disabled")
-            if backend not in (None, "", "local"):
-                raise HarnessError(403, "household members can only use the local model")
-            backend = "local"
-            if (target or spec.target) != "tower":
-                raise HarnessError(403, "household members can only run sessions on the tower")
-            if app is not None:
-                raise HarnessError(403, "app tokens cannot create household member sessions")
-            self._require_member_start(account, "session")
-        defaults = self.settings.app_defaults(app) if app and getattr(self, "settings", None) else {}
+        return spec
+
+    def _check_member(self, owner_id: str, backend: str | None, target: str | None, spec, app: dict | None) -> str:
+        """Household members run on the tower with the local model; returns the backend they get."""
+        account = self.db.account_by_id(owner_id)
+        if account is None or not account.get("enabled", 1):
+            raise HarnessError(403, ACCOUNT_DISABLED)
+        if backend not in (None, "", "local"):
+            raise HarnessError(403, "household members can only use the local model")
+        if (target or spec.target) != "tower":
+            raise HarnessError(403, "household members can only run sessions on the tower")
+        if app is not None:
+            raise HarnessError(403, "app tokens cannot create household member sessions")
+        self._require_member_start(account, "session")
+        return "local"
+
+    @staticmethod
+    def _pick_target(target: str | None, spec, project: str) -> str:
+        # A project's repo is a path on one machine, so the project decides where its sessions run.
+        target = target or spec.target
+        if target not in TARGETS:
+            raise HarnessError(400, f"target must be one of {TARGETS}")
+        if target != spec.target:
+            raise HarnessError(400, f"project {project} runs on the {spec.target}, not the {target}")
+        return target
+
+    def _default_choice(self, backend: str | None, model: str | None, effort: str | None,
+                        defaults: dict) -> tuple[str, str | None, str | None]:
         if not backend:
             backend = str(defaults.get("app.default_backend") or "") or (
                 "local" if self.cfg.modules.local_model else next(
@@ -379,47 +499,57 @@ class Manager:
             model = defaults.get("app.default_model") or None
         if not effort:
             effort = defaults.get("app.default_effort") or None
-        # A project's repo is a path on one machine, so the project decides where its sessions run.
-        target = target or spec.target
-        if target not in TARGETS:
-            raise HarnessError(400, f"target must be one of {TARGETS}")
-        if target != spec.target:
-            raise HarnessError(400, f"project {project} runs on the {spec.target}, not the {target}")
-        if backend == "local":
-            if not self.cfg.modules.local_model:
-                raise HarnessError(400, "the local model is disabled; choose an enabled hosted backend")
-            model = model or self.cfg.default_model
-            if model not in self.cfg.models:
-                raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
-            effort = ""
-        else:
-            if member:
-                raise HarnessError(403, "household members can only use the local model")
-            backend_cfg = self.cfg.backends.get(backend)
-            if backend_cfg is None:
-                raise HarnessError(400, f"unknown backend {backend!r}; known: local"
-                                        + (f", {', '.join(self.cfg.backends)}" if self.cfg.backends else ""))
-            if not backend_cfg.enabled:
-                raise HarnessError(400, f"backend {backend!r} is disabled")
-            if backend not in ("claude", "codex", "cursor"):
-                raise HarnessError(400, f"backend {backend!r} is not built yet")
-            if target != "tower":
-                raise HarnessError(400, f"backend {backend!r} only runs on the tower")
-            model = model or backend_cfg.model
-            if not model:
-                raise HarnessError(400, f"backend {backend!r} has no model configured")
-            effort = effort or backend_cfg.effort
-            if effort and effort not in ("low", "medium", "high"):
-                raise HarnessError(400, "effort must be low, medium, or high")
-            if app is not None and self.db.app_provider_managed(app["id"]):
-                credential = self.db.app_provider_credential(app["id"], backend)
-                if credential is None:
-                    raise HarnessError(403, f"this app is not allowed to use backend {backend!r}",
-                                       "provider_not_allowed")
-                if credential["models"] and model not in credential["models"]:
-                    raise HarnessError(403, f"this app is not allowed to use model {model!r} on {backend}",
-                                       "provider_model_not_allowed")
-        remote = target != "tower"
+        return backend, model, effort
+
+    def _local_choice(self, model: str | None) -> tuple[str, str]:
+        if not self.cfg.modules.local_model:
+            raise HarnessError(400, "the local model is disabled; choose an enabled hosted backend")
+        model = model or self.cfg.default_model
+        if model not in self.cfg.models:
+            raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
+        return model, ""
+
+    def _hosted_choice(self, backend: str, model: str | None, effort: str | None, member: bool, target: str,
+                       app: dict | None) -> tuple[str, str | None]:
+        if member:
+            raise HarnessError(403, "household members can only use the local model")
+        backend_cfg = self._hosted_backend(backend, target)
+        model = model or backend_cfg.model
+        if not model:
+            raise HarnessError(400, f"backend {backend!r} has no model configured")
+        effort = effort or backend_cfg.effort
+        if effort and effort not in ("low", "medium", "high"):
+            raise HarnessError(400, "effort must be low, medium, or high")
+        if app is not None:
+            self._check_app_provider(app, backend, model)
+        return model, effort
+
+    def _check_app_provider(self, app: dict, backend: str, model: str) -> None:
+        if not self.db.app_provider_managed(app["id"]):
+            return
+        credential = self.db.app_provider_credential(app["id"], backend)
+        if credential is None:
+            raise HarnessError(403, f"this app is not allowed to use backend {backend!r}",
+                               "provider_not_allowed")
+        if credential["models"] and model not in credential["models"]:
+            raise HarnessError(403, f"this app is not allowed to use model {model!r} on {backend}",
+                               "provider_model_not_allowed")
+
+    def _hosted_backend(self, backend: str, target: str):
+        backend_cfg = self.cfg.backends.get(backend)
+        if backend_cfg is None:
+            raise HarnessError(400, f"unknown backend {backend!r}; known: local"
+                                    + (f", {', '.join(self.cfg.backends)}" if self.cfg.backends else ""))
+        if not backend_cfg.enabled:
+            raise HarnessError(400, f"backend {backend!r} is disabled")
+        if backend not in ("claude", "codex", "cursor"):
+            raise HarnessError(400, f"backend {backend!r} is not built yet")
+        if target != "tower":
+            raise HarnessError(400, f"backend {backend!r} only runs on the tower")
+        return backend_cfg
+
+    def _check_free_space(self, remote: bool, member: bool, target: str, owner_id: str) -> None:
+        from . import storage
         if remote:
             if member:
                 raise HarnessError(403, "household members can only run sessions on the tower")
@@ -427,27 +557,32 @@ class Manager:
             minimum = self.cfg.runners[target].min_free_gb
             if free_gb is not None and free_gb < minimum:
                 raise HarnessError(507, f"only {free_gb:.1f} GB free on the {target} (minimum {minimum} GB)")
-        else:
-            try:
-                storage.ensure_user_dirs(self.cfg, owner_id)
-            except storage.ContainmentError as e:
-                raise HarnessError(400, str(e)) from e
-            ws_root = storage.workspaces_dir(self.cfg, owner_id)
-            free_gb = shutil.disk_usage(ws_root).free / 2**30
-            if free_gb < self.cfg.cleanup.min_free_gb:
-                raise HarnessError(507, f"only {free_gb:.1f} GB free on the data drive "
-                                        f"(minimum {self.cfg.cleanup.min_free_gb} GB); run cleanup first")
+            return
+        try:
+            storage.ensure_user_dirs(self.cfg, owner_id)
+        except storage.ContainmentError as e:
+            raise HarnessError(400, str(e)) from e
+        ws_root = storage.workspaces_dir(self.cfg, owner_id)
+        free_gb = shutil.disk_usage(ws_root).free / 2**30
+        if free_gb < self.cfg.cleanup.min_free_gb:
+            raise HarnessError(507, f"only {free_gb:.1f} GB free on the data drive "
+                                    f"(minimum {self.cfg.cleanup.min_free_gb} GB); run cleanup first")
 
-        sid = uuid.uuid4().hex[:10]
+    def _new_workspace(self, remote: bool, target: str, owner_id: str, sid: str):
+        from . import storage
         if remote:
-            workspace = f"{target}:{REMOTE_WORKSPACE_ROOT}/{sid}"
-        else:
-            workspace = storage.workspaces_dir(self.cfg, owner_id) / sid
-            try:
-                storage.require_contained(workspace, storage.workspaces_dir(self.cfg, owner_id), allow_missing=True)
-            except storage.ContainmentError as e:
-                raise HarnessError(400, str(e)) from e
-            workspace.mkdir(parents=True, exist_ok=False)
+            return f"{target}:{REMOTE_WORKSPACE_ROOT}/{sid}"
+        workspace = storage.workspaces_dir(self.cfg, owner_id) / sid
+        try:
+            storage.require_contained(workspace, storage.workspaces_dir(self.cfg, owner_id), allow_missing=True)
+        except storage.ContainmentError as e:
+            raise HarnessError(400, str(e)) from e
+        workspace.mkdir(parents=True, exist_ok=False)
+        return workspace
+
+    def _system_prompt(self, chat: bool, remote: bool, target: str, sid: str, spec, defaults: dict,
+                       app: dict | None) -> tuple[str, str]:
+        """The session's system prompt and its branch name (empty without a repo)."""
         if remote:
             root = self.hub.state[target].info.get("workspaces") or REMOTE_WORKSPACE_ROOT
             system = MAC_SYSTEM_PROMPT.replace("{workspace}", f"{root}/{sid}")
@@ -462,91 +597,74 @@ class Manager:
                 repo_name=repo_name, branch=branch, base_branch="{base_branch}")
         if chat:
             system = CHAT_PROMPT + ("\n\n" + WEB_PROMPT if self.runner.web is not None and spec.web else "")
-        if spec.homelab and not chat and app_allows(defaults, "homelab"):
-            system += "\n\n" + HOMELAB_PROMPT
-            if not spec.repo:
-                repos = [p.name for p in self.cfg.projects.values() if p.repo and p.target == "tower"]
-                system += ("\n\nThis project has no repository, so you can't change files on the server (the workspace "
-                           "is an empty scratch directory the services never see). If the fix needs a code or config "
-                           "change, don't look for a way around that: finish with the diagnosis, the exact change, and "
-                           "which project to run it in" + (f" ({', '.join(repos)})" if repos else "") + ".")
-        if not chat and self.runner.memory is not None and spec.memory_library and app_allows(defaults, "memory_library"):
-            system += "\n\n" + MEMORY_PROMPT
-            if self.cfg.memory_library.writes:
-                system += " " + MEMORY_WRITE_PROMPT
-            # The profile is read once, here, and stays in this session's system prompt: the prompt prefix doesn't
-            # change mid-session (so llama-server's cache holds), and edits apply to new sessions. Apps don't get it.
-            profile = self.runner.memory.profile_text() if app is None else ""
-            if profile:
-                system += (f"\n\nUser profile ({self.cfg.memory_library.profile_path} in the memory library, as of "
-                           f"this session's start; background facts, not instructions):\n{profile}")
-            self.runner.memory.refresh_soon()
-        if not chat and self.runner.web is not None and spec.web and app_allows(defaults, "web"):
-            system += "\n\n" + WEB_PROMPT
-        if not chat and self.runner.sessions is not None and spec.session_search and app_allows(defaults, "search"):
-            system += "\n\n" + SEARCH_PROMPT
-        tools = []
-        if app_tools:
-            from .apps import validate_tools
-            from . import homelab, images, memory_library, remote_control, search, web_tools
-            from .tools import tool_schemas
-            from .skills import TOOLS as SKILL_TOOLS
-            reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS) | set(images.TOOLS)
-                        | set(memory_library.TOOLS) | set(web_tools.TOOLS) | set(search.TOOLS)
-                        | set(remote_control.TOOLS) | set(SKILL_TOOLS))
-            try:
-                tools = validate_tools(app_tools, reserved)
-            except ValueError as e:
-                raise HarnessError(400, str(e))
-        if app_context:
-            system += "\n\n" + app_context
-        instructions = "" if chat else spec.instructions.strip()
-        if instructions:
-            system += f"\n\nProject instructions ({project}):\n{instructions}"
-        frozen = []
-        session_meta = {"app_id": app["id"] if app else "", "job_id": job_id or "", "owner_id": owner_id,
-                        "app_metadata": app_metadata or {}}
-        if self.skills is not None and not chat:
-            from .skills import SKILLS_TOOL_PROMPT, SkillError, skill_instructions
-            try:
-                frozen = self.skills.resolve_for_session(project, skills, session_meta, missing=skill_missing)
-            except SkillError as e:
-                raise HarnessError(e.status, str(e)) from e
-            if frozen:
-                system += "\n\n" + skill_instructions(frozen)
-            if self.skills.can_propose(session_meta):
-                system += "\n\n" + SKILLS_TOOL_PROMPT
-        now = time.time()
-        first_line = prompt.strip().splitlines()[0]
-        max_turns, max_tokens = (self.settings.session_budgets(app)
-                                 if getattr(self, "settings", None) else (self.cfg.max_turns, self.cfg.max_completion_tokens))
-        run = new_run()
-        run["max_turns"] = max_turns
-        run["max_completion_tokens"] = max_tokens
-        session = {
-            "id": sid, "project": project, "target": target, "model": model, "backend": backend,
-            "effort": effort or "",
-            "title": title or (first_line[:80] + ("…" if len(first_line) > 80 else "")),
-            "status": "queued", "workspace": str(workspace), "created_at": now, "updated_at": now,
-            "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            "run": run, "totals": {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
-                                             "total_cost_usd": 0.0},
-            "inbox": [], "branch": branch,
-            "app_id": app["id"] if app else "", "app_tools": tools, "app_metadata": app_metadata or {},
-            "app_defaults": dict(defaults) if app else {},
-            "job_id": job_id, "owner_id": owner_id, "kind": kind, "compare_group": compare_group,
-            "skills": self.skills.freeze_public(frozen) if self.skills is not None else [],
-        }
-        with self.db.tx():
-            self.db.insert_session(session)
-            self.bus.emit(sid, "session_created", {**{k: session[k] for k in
-                                                       ("project", "target", "model", "backend", "title")},
-                                                   **({"app": app["name"], "app_tools": [t["name"] for t in tools]}
-                                                      if app else {}), **({"job_id": job_id} if job_id else {}),
-                                                   **({"skills": session["skills"]} if session["skills"] else {})})
-            self.bus.emit(sid, "user_message", {"content": prompt})
-        self._spawn(sid)
-        return self.db.get_session(sid)
+        else:
+            system += self._optional_prompts(spec, defaults, app)
+        return system, branch
+
+    def _optional_prompts(self, spec, defaults: dict, app: dict | None) -> str:
+        """Homelab, memory, web and search sections a non-chat session gets when its project and app allow them."""
+        extra = ""
+        if spec.homelab and app_allows(defaults, "homelab"):
+            extra += self._homelab_prompt(spec)
+        if self.runner.memory is not None and spec.memory_library and app_allows(defaults, "memory_library"):
+            extra += self._memory_prompt(app)
+        if self.runner.web is not None and spec.web and app_allows(defaults, "web"):
+            extra += "\n\n" + WEB_PROMPT
+        if self.runner.sessions is not None and spec.session_search and app_allows(defaults, "search"):
+            extra += "\n\n" + SEARCH_PROMPT
+        return extra
+
+    def _homelab_prompt(self, spec) -> str:
+        extra = "\n\n" + HOMELAB_PROMPT
+        if not spec.repo:
+            repos = [p.name for p in self.cfg.projects.values() if p.repo and p.target == "tower"]
+            extra += ("\n\nThis project has no repository, so you can't change files on the server (the workspace "
+                      "is an empty scratch directory the services never see). If the fix needs a code or config "
+                      "change, don't look for a way around that: finish with the diagnosis, the exact change, and "
+                      "which project to run it in" + (f" ({', '.join(repos)})" if repos else "") + ".")
+        return extra
+
+    def _memory_prompt(self, app: dict | None) -> str:
+        extra = "\n\n" + MEMORY_PROMPT
+        if self.cfg.memory_library.writes:
+            extra += " " + MEMORY_WRITE_PROMPT
+        # The profile is read once, here, and stays in this session's system prompt: the prompt prefix doesn't
+        # change mid-session (so llama-server's cache holds), and edits apply to new sessions. Apps don't get it.
+        profile = self.runner.memory.profile_text() if app is None else ""
+        if profile:
+            extra += (f"\n\nUser profile ({self.cfg.memory_library.profile_path} in the memory library, as of "
+                      f"this session's start; background facts, not instructions):\n{profile}")
+        self.runner.memory.refresh_soon()
+        return extra
+
+    @staticmethod
+    def _validated_app_tools(app_tools: list | None) -> list:
+        if not app_tools:
+            return []
+        from .apps import validate_tools
+        from . import homelab, images, memory_library, remote_control, search, web_tools
+        from .tools import tool_schemas
+        from .skills import TOOLS as SKILL_TOOLS
+        reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS) | set(images.TOOLS)
+                    | set(memory_library.TOOLS) | set(web_tools.TOOLS) | set(search.TOOLS)
+                    | set(remote_control.TOOLS) | set(SKILL_TOOLS))
+        try:
+            return validate_tools(app_tools, reserved)
+        except ValueError as e:
+            raise HarnessError(400, str(e))
+
+    def _add_skills(self, system: str, project: str, skills: list[str] | None, session_meta: dict,
+                    missing: str) -> tuple[str, list]:
+        from .skills import SKILLS_TOOL_PROMPT, SkillError, skill_instructions
+        try:
+            frozen = self.skills.resolve_for_session(project, skills, session_meta, missing=missing)
+        except SkillError as e:
+            raise HarnessError(e.status, str(e)) from e
+        if frozen:
+            system += "\n\n" + skill_instructions(frozen)
+        if self.skills.can_propose(session_meta):
+            system += "\n\n" + SKILLS_TOOL_PROMPT
+        return system, frozen
 
     async def send(self, ref: str, content: str, kind: str = "user_message") -> dict:
         sid = self.resolve_id(ref)
@@ -629,14 +747,7 @@ class Manager:
         status = str((self.db.get_backend_usage(backend).get("data") or {}).get("status") or "").lower()
         return f"{backend} reports its usage limit is reached" if status in ("rejected", "exceeded", "limit_reached") else ""
 
-    async def create_compare(self, prompt: str, choices: list[dict], project: str = "scratch", owner_id: str = "owner") -> dict:
-        if owner_id != OWNER_USER_ID:
-            raise HarnessError(403, "comparing backends is only available to the owner")
-        if not 2 <= len(choices) <= self.MAX_COMPARE:
-            raise HarnessError(400, f"compare needs 2 to {self.MAX_COMPARE} choices")
-        spec = self.cfg.projects.get(project)
-        if spec is None or not spec.repo:
-            raise HarnessError(400, "compare needs a git project so each member gets its own branch")
+    def _check_compare_choices(self, choices: list[dict]) -> None:
         seen = set()
         for c in choices:
             key = (c.get("backend") or "local", c.get("model") or "", c.get("effort") or "")
@@ -645,6 +756,16 @@ class Manager:
             seen.add(key)
             if problem := self._compare_quota_problem(key[0]):
                 raise HarnessError(429, problem, "quota_reached")
+
+    async def create_compare(self, prompt: str, choices: list[dict], project: str = "scratch", owner_id: str = "owner") -> dict:
+        if owner_id != OWNER_USER_ID:
+            raise HarnessError(403, "comparing backends is only available to the owner")
+        if not 2 <= len(choices) <= self.MAX_COMPARE:
+            raise HarnessError(400, f"compare needs 2 to {self.MAX_COMPARE} choices")
+        spec = self.cfg.projects.get(project)
+        if spec is None or not spec.repo:
+            raise HarnessError(400, "compare needs a git project so each member gets its own branch")
+        self._check_compare_choices(choices)
         group = uuid.uuid4().hex[:10]
         created = []
         try:
@@ -836,21 +957,7 @@ class Manager:
             return await self._review_remote(sid, s, project, action)
         ws = Path(s["workspace"])
         try:
-            if action == "merge":
-                result = await asyncio.to_thread(projects.merge, project, ws, sid, s["branch"], s["base_branch"],
-                                                 s["title"])
-                state, detail = ("merged" if result["merged"] else ""), result["message"]
-            elif action == "push":
-                await asyncio.to_thread(projects.snapshot, ws, f"Work in progress from session {sid}")
-                detail, state = await asyncio.to_thread(projects.push, project, ws, s["branch"]), "pushed"
-            elif action == "discard":
-                await asyncio.to_thread(projects.discard, project, s["branch"])
-                await self.runner.sandbox(s).remove()
-                if not s["workspace_removed"]:
-                    await asyncio.to_thread(self.maintenance.remove_workspace, sid)
-                state, detail = "discarded", "branch deleted and workspace removed"
-            else:
-                raise HarnessError(404, f"unknown review action {action!r}")
+            state, detail = await self._review_local(sid, s, project, ws, action)
         except projects.GitError as e:
             self.bus.emit(sid, "error", {"message": f"{action} failed: {e}"})
             raise HarnessError(e.status, str(e))
@@ -860,6 +967,23 @@ class Manager:
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail, "head": head[:12]})
         self.runner.write_transcript(sid)
         return self.db.get_session(sid)
+
+    async def _review_local(self, sid: str, s: dict, project, ws: Path, action: str) -> tuple[str, str]:
+        """Run a review action on the tower; returns the resulting review state and detail."""
+        if action == "merge":
+            result = await asyncio.to_thread(projects.merge, project, ws, sid, s["branch"], s["base_branch"],
+                                             s["title"])
+            return ("merged" if result["merged"] else ""), result["message"]
+        if action == "push":
+            await asyncio.to_thread(projects.snapshot, ws, f"Work in progress from session {sid}")
+            return "pushed", await asyncio.to_thread(projects.push, project, ws, s["branch"])
+        if action == "discard":
+            await asyncio.to_thread(projects.discard, project, s["branch"])
+            await self.runner.sandbox(s).remove()
+            if not s["workspace_removed"]:
+                await asyncio.to_thread(self.maintenance.remove_workspace, sid)
+            return "discarded", "branch deleted and workspace removed"
+        raise HarnessError(404, f"unknown review action {action!r}")
 
     async def _review_remote(self, sid: str, s: dict, project, action: str) -> dict:
         if action not in ("merge", "push", "discard"):
@@ -929,26 +1053,35 @@ class Manager:
         await asyncio.gather(task, return_exceptions=True)
         return self.db.get_session(sid)
 
+    @staticmethod
+    def _failure(s: dict) -> dict | None:
+        failure = (s.get("run") or {}).get("failure") or (s.get("run") or {}).get("provider_failure")
+        if s.get("status") != "failed" or failure:
+            return failure
+        reason = str(s.get("stop_reason") or "failed")
+        prefix = reason.split(":", 1)[0]
+        fallback = "provider_error" if s.get("backend", "local") != "local" else "model_error"
+        code = {"sandbox_unavailable": "backend_unavailable", "workspace_error": "workspace_error",
+                "quota_exceeded": "resource_limit", "internal_error": "internal_error"}.get(prefix, fallback)
+        return {"code": code, "provider": s.get("backend", "local"), "message": reason,
+                "retryable": code in ("backend_unavailable", "internal_error", "provider_error")}
+
+    @staticmethod
+    def _repo_kind(project) -> str:
+        if not project or not project.repo:
+            return ""
+        return "url" if projects.is_url(project.repo) else "local"
+
     def summary(self, s: dict) -> dict:
         out = {k: v for k, v in s.items() if k not in ("context", "inbox")}
-        failure = (s.get("run") or {}).get("failure") or (s.get("run") or {}).get("provider_failure")
-        if s.get("status") == "failed" and not failure:
-            reason = str(s.get("stop_reason") or "failed")
-            prefix = reason.split(":", 1)[0]
-            code = {"sandbox_unavailable": "backend_unavailable", "workspace_error": "workspace_error",
-                    "quota_exceeded": "resource_limit", "internal_error": "internal_error"}.get(
-                        prefix, "provider_error" if s.get("backend", "local") != "local" else "model_error")
-            failure = {"code": code, "provider": s.get("backend", "local"), "message": reason,
-                       "retryable": code in ("backend_unavailable", "internal_error", "provider_error")}
-        out["failure"] = failure
+        out["failure"] = self._failure(s)
         out["queue_position"] = self.scheduler.positions().get(s["id"])
         model = self.cfg.models.get(s["model"])
         out["context_used"] = (s.get("run") or {}).get("context_tokens", 0)
         out["context_limit"] = model.context_tokens if model else 0
         out["last_event_seq"] = self.db.last_event_seq(s["id"])
         project = self.project_for_session(s)
-        out["repo_kind"] = ("" if not project or not project.repo else
-                            "url" if projects.is_url(project.repo) else "local")
+        out["repo_kind"] = self._repo_kind(project)
         if s["target"] != "tower":
             out["target_online"] = self.hub.online(s["target"])
         if s["status"] == "waiting_approval":
@@ -1111,7 +1244,7 @@ class Manager:
 
     def _require_member_start(self, account: dict | None, action: str) -> None:
         if account is None or not account.get("enabled", 1):
-            raise HarnessError(403, "this household account is disabled")
+            raise HarnessError(403, ACCOUNT_DISABLED)
         self._enforce_member_caps(account)
         self._enforce_member_quota(account, action)
 
@@ -1167,10 +1300,10 @@ class Manager:
             await asyncio.gather(*waiting, return_exceptions=True)
 
     def create_member_project(self, user_id: str, name: str, description: str = "", repo: str = "") -> dict:
-        from . import catalog, clone, storage
+        from . import catalog, storage
         account = self.db.account_by_id(user_id)
         if account is None or not account.get("enabled", 1):
-            raise HarnessError(403, "this household account is disabled")
+            raise HarnessError(403, ACCOUNT_DISABLED)
         self._enforce_member_quota(account, "project")
         slug = catalog.validate_slug(name)
         description = (description or "").strip()
@@ -1179,39 +1312,40 @@ class Manager:
         if self.db.get_member_project(user_id, slug) is not None:
             raise HarnessError(400, f"project {slug!r} already exists")
         storage.ensure_user_dirs(self.cfg, user_id)
-        managed = ""
-        source_url = ""
-        repo = (repo or "").strip()
-        if repo:
-            try:
-                source_url = clone.public_https_url(repo)
-            except clone.CloneRefused as e:
-                raise HarnessError(400, str(e)) from e
-            dest = catalog.member_managed_repo(self.cfg, user_id, slug)
-            root = storage.repos_dir(self.cfg, user_id)
-            used = storage.account_usage_bytes(self.cfg, user_id)
-            limit = int(account["disk_quota_bytes"])
-            remaining = limit - used
-            try:
-                clone.clone_public(source_url, dest, root, max_bytes=remaining)
-            except clone.QuotaExceeded:
-                import shutil
-                shutil.rmtree(dest, ignore_errors=True)
-                raise HarnessError(507, "cannot start a project: this clone exceeded the account disk quota") from None
-            except clone.GitError as e:
-                raise HarnessError(e.status if hasattr(e, "status") else 400, str(e)) from e
-            except clone.CloneRefused as e:
-                raise HarnessError(400, str(e)) from e
-            used = storage.account_usage_bytes(self.cfg, user_id)
-            if used > limit:
-                import shutil
-                shutil.rmtree(dest, ignore_errors=True)
-                raise HarnessError(507, f"cannot start a project: {storage.quota_message(used, limit)}")
-            managed = str(dest)
+        managed, source_url = self._clone_member_repo(user_id, slug, account, (repo or "").strip())
         self.db.insert_member_project({
             "user_id": user_id, "slug": slug, "description": description,
             "repo": managed, "source_url": source_url,
         })
         project = catalog.get_project(self.cfg, self.db, user_id, slug)
         return catalog.public_project(project)
+
+    def _clone_member_repo(self, user_id: str, slug: str, account: dict, repo: str) -> tuple[str, str]:
+        """Clone a household member's public repo within their disk quota; returns (managed path, source URL)."""
+        if not repo:
+            return "", ""
+        from . import catalog, clone, storage
+        try:
+            source_url = clone.public_https_url(repo)
+        except clone.CloneRefused as e:
+            raise HarnessError(400, str(e)) from e
+        dest = catalog.member_managed_repo(self.cfg, user_id, slug)
+        root = storage.repos_dir(self.cfg, user_id)
+        used = storage.account_usage_bytes(self.cfg, user_id)
+        limit = int(account["disk_quota_bytes"])
+        remaining = limit - used
+        try:
+            clone.clone_public(source_url, dest, root, max_bytes=remaining)
+        except clone.QuotaExceeded:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise HarnessError(507, "cannot start a project: this clone exceeded the account disk quota") from None
+        except clone.GitError as e:
+            raise HarnessError(e.status if hasattr(e, "status") else 400, str(e)) from e
+        except clone.CloneRefused as e:
+            raise HarnessError(400, str(e)) from e
+        used = storage.account_usage_bytes(self.cfg, user_id)
+        if used > limit:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise HarnessError(507, f"cannot start a project: {storage.quota_message(used, limit)}")
+        return str(dest), source_url
 
