@@ -534,6 +534,36 @@ _SHAPES.update({name: (
 ) for name in _NPM})
 
 
+def _consume_flag(tok: str, shape: _ArgvShape, flags: set[str], has_next: bool) -> int | None:
+    """Accept one dash-prefixed token; returns how many argv entries it consumed, or None to reject."""
+    name, eq, _val = tok.partition("=")
+    if eq:
+        if name not in shape.value_flags:
+            return None
+        flags.add(name)
+        return 1
+    if shape.numeric_short and _NUMERIC_SHORT_RE.fullmatch(tok):
+        flags.add(tok)
+        return 1
+    if tok in shape.value_flags:
+        if not has_next:
+            return None
+        flags.add(tok)
+        return 2
+    if tok in shape.flags:
+        flags.add(tok)
+        return 1
+    if len(tok) > 2 and tok[1] != "-" and tok[:2] in shape.value_flags:
+        flags.add(tok[:2])
+        return 1
+    if shape.clustered and _CLUSTER_RE.fullmatch(tok):
+        letters = [f"-{c}" for c in tok[1:]]
+        if all(letter in shape.flags for letter in letters):
+            flags.update(letters)
+            return 1
+    return None
+
+
 def _parse_closed_argv(rest: list[str], shape: _ArgvShape) -> tuple[set[str], list[str]] | None:
     """Split rest into (flags, positionals) or None if the argv is outside the shape."""
     flags: set[str] = set()
@@ -548,43 +578,29 @@ def _parse_closed_argv(rest: list[str], shape: _ArgvShape) -> tuple[set[str], li
             if assign.group(1) not in shape.assign_names:
                 return None
             i += 1
-            continue
-        if tok.startswith("-"):
-            name, eq, _val = tok.partition("=")
-            if eq:
-                if name not in shape.value_flags:
-                    return None
-                flags.add(name)
-                i += 1
-                continue
-            if shape.numeric_short and _NUMERIC_SHORT_RE.fullmatch(tok):
-                flags.add(tok)
-                i += 1
-                continue
-            if tok in shape.value_flags:
-                if i + 1 >= n:
-                    return None
-                flags.add(tok)
-                i += 2
-                continue
-            if tok in shape.flags:
-                flags.add(tok)
-                i += 1
-                continue
-            if len(tok) > 2 and tok[1] != "-" and tok[:2] in shape.value_flags:
-                flags.add(tok[:2])
-                i += 1
-                continue
-            if shape.clustered and _CLUSTER_RE.fullmatch(tok):
-                letters = [f"-{c}" for c in tok[1:]]
-                if all(letter in shape.flags for letter in letters):
-                    flags.update(letters)
-                    i += 1
-                    continue
-            return None
-        positionals.append(tok)
-        i += 1
+        elif tok.startswith("-"):
+            step = _consume_flag(tok, shape, flags, i + 1 < n)
+            if step is None:
+                return None
+            i += step
+        else:
+            positionals.append(tok)
+            i += 1
     return flags, positionals
+
+
+def _strip_verbs(positionals: list[str], shape: _ArgvShape) -> list[str] | None:
+    """Positionals left after the verb (and npm-style script), or None if the verb is not allowed."""
+    if shape.verbs is None:
+        return positionals
+    if not positionals or positionals[0] not in shape.verbs:
+        return None
+    extras = positionals[1:]
+    if shape.run_verb and positionals[0] == shape.run_verb:
+        if not extras or extras[0] not in (shape.scripts or frozenset()):
+            return None
+        extras = extras[1:]
+    return extras
 
 
 def _matches(tokens: list[str], shape: _ArgvShape) -> bool:
@@ -594,15 +610,9 @@ def _matches(tokens: list[str], shape: _ArgvShape) -> bool:
     flags, positionals = parsed
     if not shape.require_flags <= flags:
         return False
-    extras = positionals
-    if shape.verbs is not None:
-        if not positionals or positionals[0] not in shape.verbs:
-            return False
-        extras = positionals[1:]
-        if shape.run_verb and positionals[0] == shape.run_verb:
-            if not extras or extras[0] not in (shape.scripts or frozenset()):
-                return False
-            extras = extras[1:]
+    extras = _strip_verbs(positionals, shape)
+    if extras is None:
+        return False
     if len(extras) < shape.min_positionals or len(extras) > shape.max_positionals:
         return False
     if shape.allowed_positionals is not None and any(p not in shape.allowed_positionals for p in extras):
