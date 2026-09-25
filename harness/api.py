@@ -9,6 +9,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -197,6 +198,9 @@ def sse(event: dict) -> str:
     return f"{head}event: {event['type']}\ndata: {json.dumps(event)}\n\n"
 
 
+IMAGE_NOT_READY = "image not ready"
+
+
 class RouteTable:
     """Collects route handlers at import time and installs them, in order, on a FastAPI app.
 
@@ -248,9 +252,6 @@ def owner_id(request: Request) -> str:
     return "owner" if ident.role == "owner" else f"guest:{ident.login or 'unknown'}"
 
 
-def principal_of(request: Request):
-    return getattr(request.state, "access", None)
-
 
 def owned_session(request: Request, ref: str, *, kind: str = "agent") -> tuple[Manager, str, dict]:
     """Resolve a human-facing conversation of one kind only inside the caller's durable user scope."""
@@ -276,11 +277,17 @@ def require_owner(request: Request) -> Manager:
     return mgr(request)
 
 
-async def guard(request: Request, call_next):
-    m: Manager = request.app.state.manager
-    cfg = m.cfg
+@dataclass
+class _OriginInfo:
+    raw: str
+    origin: str
+    browser_api: bool
+    cross_origin_api: bool
+    cors_headers: dict
+
+
+def _origin_info(request: Request, m: Manager, public_path: str) -> _OriginInfo:
     from .apps import cors_origin_allowed, daemon_origins, normalize_origin
-    public_path = request.scope.get("harness_original_path", request.url.path)
     raw_origin = request.headers.get("origin", "")
     try:
         origin = normalize_origin(raw_origin) if raw_origin else ""
@@ -288,15 +295,15 @@ async def guard(request: Request, call_next):
         origin = ""
     browser_api = (public_path == "/health" or public_path.startswith("/api/v1")
                    or public_path.startswith("/api/admin/v1"))
-    cross_origin_api = bool(origin and origin not in daemon_origins(cfg)
+    cross_origin_api = bool(origin and origin not in daemon_origins(m.cfg)
                             and browser_api and cors_origin_allowed(m, request, origin))
     cors_headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if cross_origin_api else {}
-    # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
-    login = request.headers.get("tailscale-user-login")
-    ident = access_mod.resolve_access(cfg, login, m.db)
-    request.state.access = ident
-    if ident.kind in ("owner", "member") and ident.allowed and ident.user_id != "owner":
-        m.db.touch_account(ident.user_id)
+    return _OriginInfo(raw_origin, origin, browser_api, cross_origin_api, cors_headers)
+
+
+def _access_refusal(request: Request, m: Manager, ident, login: str | None,
+                    cors_headers: dict) -> JSONResponse | None:
+    """403 when the tailnet login, guest scope, or member scope may not make this request."""
     if not ident.allowed:
         log.warning("refused %s %s from tailnet login %s (%s)",
                     request.method, request.url.path, login, ident.detail)
@@ -313,41 +320,77 @@ async def guard(request: Request, call_next):
         log.warning("refused member %s %s from %s (%s)", request.method, request.url.path, login, member_block)
         m.db.insert_audit(ident.user_id, ident.user_id, "cross_user", "denied", member_block)
         return JSONResponse({"detail": member_block}, status_code=403, headers=cors_headers)
-    surface = compat.surface_for_path(public_path)
-    compatibility = compat.check_client(request.headers.get(compat.CLIENT_HEADER, ""), surface) if surface else None
+    return None
+
+
+def _compat_refusal(request: Request, compatibility: dict | None, public_path: str,
+                    cors_headers: dict) -> JSONResponse | None:
     discovery = request.method in {"GET", "HEAD"} and public_path in {"/api/v1", "/api/admin/v1"}
-    if compatibility and not discovery and compatibility["state"] == "invalid":
+    if not compatibility or discovery:
+        return None
+    if compatibility["state"] == "invalid":
         return JSONResponse({"detail": "invalid first-party client identity", "error": {
             "code": "invalid_client_identity", **compatibility,
         }}, status_code=400, headers=cors_headers)
-    if compatibility and not discovery and compatibility["state"] in {"client_update_required", "daemon_update_required"}:
+    if compatibility["state"] in {"client_update_required", "daemon_update_required"}:
         return JSONResponse({"detail": compatibility["state"].replace("_", " "), "error": {
             "code": compatibility["state"], **compatibility,
         }}, status_code=426, headers=cors_headers)
+    return None
 
-    if request.method == "OPTIONS" and browser_api and raw_origin:
-        requested_method = request.headers.get("access-control-request-method", "").upper()
-        requested_headers = {h.strip().lower() for h in
-                             request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
-        if (not cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
-                or not requested_headers <= {"authorization", "content-type", "last-event-id",
-                                              "x-agent-harness-client"}):
-            return JSONResponse({"detail": "cross-origin request refused"}, status_code=403, headers=cors_headers)
-        return Response(status_code=204, headers={**cors_headers,
-                        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-                        "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID, X-Agent-Harness-Client",
-                        "Access-Control-Max-Age": "600"})
 
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        # Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent).
-        if ((raw_origin and origin not in daemon_origins(cfg) and not cross_origin_api)
-                or (request.headers.get("sec-fetch-site") == "cross-site" and not cross_origin_api)):
-            return JSONResponse({"detail": "cross-origin request refused"}, status_code=403, headers=cors_headers)
+def _cors_preflight(request: Request, info: _OriginInfo) -> Response:
+    requested_method = request.headers.get("access-control-request-method", "").upper()
+    requested_headers = {h.strip().lower() for h in
+                         request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
+    if (not info.cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+            or not requested_headers <= {"authorization", "content-type", "last-event-id",
+                                          "x-agent-harness-client"}):
+        return JSONResponse({"detail": "cross-origin request refused"}, status_code=403,
+                            headers=info.cors_headers)
+    return Response(status_code=204, headers={**info.cors_headers,
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID, X-Agent-Harness-Client",
+                    "Access-Control-Max-Age": "600"})
+
+
+def _cross_site_refused(request: Request, m: Manager, info: _OriginInfo) -> bool:
+    """Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent)."""
+    from .apps import daemon_origins
+    if request.method in ("GET", "HEAD", "OPTIONS") or info.cross_origin_api:
+        return False
+    return bool((info.raw and info.origin not in daemon_origins(m.cfg))
+                or request.headers.get("sec-fetch-site") == "cross-site")
+
+
+async def guard(request: Request, call_next):
+    m: Manager = request.app.state.manager
+    public_path = request.scope.get("harness_original_path", request.url.path)
+    info = _origin_info(request, m, public_path)
+    # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
+    login = request.headers.get("tailscale-user-login")
+    ident = access_mod.resolve_access(m.cfg, login, m.db)
+    request.state.access = ident
+    if ident.kind in ("owner", "member") and ident.allowed and ident.user_id != "owner":
+        m.db.touch_account(ident.user_id)
+    refusal = _access_refusal(request, m, ident, login, info.cors_headers)
+    if refusal is not None:
+        return refusal
+    surface = compat.surface_for_path(public_path)
+    compatibility = compat.check_client(request.headers.get(compat.CLIENT_HEADER, ""), surface) if surface else None
+    refusal = _compat_refusal(request, compatibility, public_path, info.cors_headers)
+    if refusal is not None:
+        return refusal
+    if request.method == "OPTIONS" and info.browser_api and info.raw:
+        return _cors_preflight(request, info)
+    if _cross_site_refused(request, m, info):
+        return JSONResponse({"detail": "cross-origin request refused"}, status_code=403,
+                            headers=info.cors_headers)
     response = await call_next(request)
     if compatibility and compatibility["state"] == "transition":
         response.headers["X-Agent-Harness-Deprecation"] = "missing_client_version"
         response.headers["Warning"] = '299 agent-harness "client version header will be required after this transition release"'
-    for key, value in cors_headers.items():
+    for key, value in info.cors_headers.items():
         response.headers[key] = value
     return response
 
@@ -681,7 +724,7 @@ def image_payload(job: dict, svc, request: Request, status: dict) -> dict:
                           "height": child["height"]} for child in children]}
 
 
-def visible_job(job, request, svc):
+def visible_job(job, request):
     from . import image_edit
     if job is None:
         raise HarnessError(404, "no such image")
@@ -750,7 +793,7 @@ async def edit_image(iid: str, request: Request, prompt: str = Form(...), mask: 
     from .fileops import ToolError
     require_owner(request)
     svc = images_service(request)
-    parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+    parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
     try:
         return svc.submit_edit(parent["id"], prompt, await read_upload(mask, svc.cfg.max_upload_bytes),
                                feather=feather, seed=seed)
@@ -762,7 +805,7 @@ async def edit_image(iid: str, request: Request, prompt: str = Form(...), mask: 
 async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
     from .fileops import ToolError
     svc = images_service(request)
-    parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+    parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
     try:
         return svc.submit_upscale(parent["id"], body.upscale)
     except ToolError as e:
@@ -774,7 +817,7 @@ async def cancel_image(iid: str, request: Request):
     from .fileops import ToolError
     require_owner(request)
     svc = images_service(request)
-    job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+    job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
     try:
         return await svc.cancel(job["id"])
     except ToolError as e:
@@ -786,7 +829,7 @@ async def delete_image(iid: str, request: Request):
     from .fileops import ToolError
     require_owner(request)
     svc = images_service(request)
-    job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request, svc)
+    job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
     backup = Path(mgr(request).cfg.backup.dir) if mgr(request).cfg.backup.dir else None
     try:
         return await svc.delete(job["id"], backup_dir=backup)
@@ -805,19 +848,19 @@ async def get_image(iid: str, request: Request):
         variant, raw = "mask", raw[: -len(".mask.png")]
     elif raw.endswith(".png"):
         variant, raw = "png", raw[: -len(".png")]
-    job = visible_job(svc.db.get_image(raw), request, svc)
+    job = visible_job(svc.db.get_image(raw), request)
     owner = request.state.access.role == "owner"
     if variant == "json":
         status = await asyncio.to_thread(svc.status)
         return image_payload(job, svc, request, status)
     from . import image_edit
     if variant in ("source", "mask") and not owner:
-        raise HarnessError(404, "image not ready")
+        raise HarnessError(404, IMAGE_NOT_READY)
     path = {"png": svc.path, "source": svc.source_path, "mask": svc.mask_path}[variant](job)
     if variant == "png" and job["status"] != "done":
-        raise HarnessError(404, "image not ready")
+        raise HarnessError(404, IMAGE_NOT_READY)
     if not path.exists():
-        raise HarnessError(404, "image not ready")
+        raise HarnessError(404, IMAGE_NOT_READY)
     headers = {"Cache-Control": "private, no-store"} if image_edit.is_private(job) or variant != "png" else {
         "Cache-Control": "max-age=86400"}
     return FileResponse(path, media_type="image/png", headers=headers)
@@ -1357,11 +1400,11 @@ async def preview_cron(cron: str, request: Request, count: int = 3):
 @api_router.post("/jobs", status_code=201)
 async def create_job(body: Job, request: Request):
     import time as _time
-    from .jobs import Cron, CronError, new_job_id, validate
+    from .jobs import Cron, new_job_id, validate
     m = jobs_on(request)
     try:
         job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
-    except (ValueError, CronError) as e:
+    except ValueError as e:
         raise HarnessError(400, str(e))
     job["id"] = new_job_id()
     job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
@@ -1383,14 +1426,14 @@ async def get_job(jid: str, request: Request):
 @api_router.put("/jobs/{jid}")
 async def update_job(jid: str, body: Job, request: Request):
     import time as _time
-    from .jobs import Cron, CronError, validate
+    from .jobs import Cron, validate
     m = jobs_on(request)
     old = m.db.get_job(jid)
     if old is None:
         raise HarnessError(404, NO_SUCH_JOB)
     try:
         job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
-    except (ValueError, CronError) as e:
+    except ValueError as e:
         raise HarnessError(400, str(e))
     job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
     m.db.update_job(jid, **job)
@@ -1470,6 +1513,34 @@ async def notify_test(request: Request):
 
 
 # event streams
+KEEPALIVE = ": keepalive\n\n"
+
+
+def _event_stream_response(stream) -> StreamingResponse:
+    return StreamingResponse(stream, media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+async def _next_bus_event(sub, request: Request) -> tuple[dict | None, bool]:
+    """Wait up to 15s for the next bus event. Returns (event, client_gone); event is None on a quiet interval."""
+    try:
+        return await asyncio.wait_for(sub.queue.get(), timeout=15), False
+    except asyncio.TimeoutError:
+        return None, await request.is_disconnected()
+
+
+def _session_list_payload(m: Manager, scope: str, e: dict) -> str | None:
+    """SSE frame for a status-level event of one of this scope's agent sessions, else None."""
+    session = m.db.get_session(e["session_id"])
+    if not (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope
+            and (session.get("kind") or "agent") == "agent"):
+        return None
+    if e["type"] == "run_finished":
+        e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}
+    # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
+    return sse({**e, "seq": None})
+
+
 @api_router.get("/events")
 async def all_events(request: Request):
     """Status-level events for every session (the session list). Live only; reload the list to catch up."""
@@ -1481,73 +1552,71 @@ async def all_events(request: Request):
         epoch = m.stream_epoch.get(scope, 0)
         try:
             yield ": connected\n\n"
-            while True:
-                if m.stream_epoch.get(scope, 0) != epoch:
+            while m.stream_epoch.get(scope, 0) == epoch:
+                e, gone = await _next_bus_event(sub, request)
+                if gone:
                     return
-                try:
-                    e = await asyncio.wait_for(sub.queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    if await request.is_disconnected():
-                        return
-                    yield ": keepalive\n\n"
+                if e is None:
+                    yield KEEPALIVE
                     continue
-                session = m.db.get_session(e["session_id"])
-                if (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope
-                        and (session.get("kind") or "agent") == "agent"):
-                    if e["type"] == "run_finished":
-                        e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}
-                    # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
-                    yield sse({**e, "seq": None})
+                frame = _session_list_payload(m, scope, e)
+                if frame is not None:
+                    yield frame
         finally:
             m.bus.unsubscribe("*", sub)
 
-    return StreamingResponse(stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _event_stream_response(stream())
+
+
+def _resync_after_overflow(m: Manager, sub, sid: str, last: int) -> list[dict]:
+    """Drop the overflowed live queue and re-read persisted events after `last`."""
+    sub.overflowed = False
+    while not sub.queue.empty():
+        sub.queue.get_nowait()
+    return m.db.events(sid, last)
+
+
+def _advance_seq(last: int, e: dict) -> int | None:
+    """New high-water seq after `e`, or None when a persisted event was already delivered."""
+    seq = e["seq"]
+    if seq is None:
+        return last
+    return seq if seq > last else None
+
+
+async def _conversation_events(request: Request, m: Manager, sid: str, after: int, follow: bool):
+    sub = m.bus.subscribe(sid)
+    last = after
+    epoch = m.stream_epoch.get(owner_id(request), 0)
+    try:
+        yield ": connected\n\n"
+        for e in m.db.events(sid, after):
+            last = e["seq"]
+            yield sse(e)
+        while follow and m.stream_epoch.get(owner_id(request), 0) == epoch:
+            if sub.overflowed:
+                for e in _resync_after_overflow(m, sub, sid, last):
+                    last = e["seq"]
+                    yield sse(e)
+            e, gone = await _next_bus_event(sub, request)
+            if gone:
+                return
+            if e is None:
+                yield KEEPALIVE
+                continue
+            advanced = _advance_seq(last, e)
+            if advanced is None:
+                continue
+            last = advanced
+            yield sse(e)
+    finally:
+        m.bus.unsubscribe(sid, sub)
 
 
 def conversation_event_stream(request: Request, sid: str, after: int, follow: bool):
-    m = mgr(request)
     if request.headers.get("last-event-id", "").isdigit():  # EventSource reconnects resume by itself
         after = max(after, int(request.headers["last-event-id"]))
-
-    async def stream():
-        sub = m.bus.subscribe(sid)
-        last = after
-        epoch = m.stream_epoch.get(owner_id(request), 0)
-        try:
-            yield ": connected\n\n"
-            for e in m.db.events(sid, after):
-                last = e["seq"]
-                yield sse(e)
-            if not follow:
-                return
-            while True:
-                if m.stream_epoch.get(owner_id(request), 0) != epoch:
-                    return
-                if sub.overflowed:
-                    sub.overflowed = False
-                    while not sub.queue.empty():
-                        sub.queue.get_nowait()
-                    for e in m.db.events(sid, last):
-                        last = e["seq"]
-                        yield sse(e)
-                try:
-                    e = await asyncio.wait_for(sub.queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    if await request.is_disconnected():
-                        return
-                    yield ": keepalive\n\n"
-                    continue
-                if e["seq"] is not None:
-                    if e["seq"] <= last:
-                        continue
-                    last = e["seq"]
-                yield sse(e)
-        finally:
-            m.bus.unsubscribe(sid, sub)
-
-    return StreamingResponse(stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _event_stream_response(_conversation_events(request, mgr(request), sid, after, follow))
 
 
 @api_router.get("/sessions/{ref}/events")
