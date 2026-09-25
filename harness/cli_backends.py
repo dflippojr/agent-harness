@@ -129,7 +129,7 @@ class ClaudeSession:
                 self.process.stdin.flush()
         try:
             await asyncio.to_thread(write)
-        except (BrokenPipeError, OSError) as e:
+        except OSError as e:
             raise CliBackendError(f"could not write to Claude CLI: {e}") from e
 
     async def receive(self, timeout: float | None = None) -> dict | None:
@@ -297,7 +297,7 @@ class CodexSession:
                 self.process.stdin.flush()
         try:
             await asyncio.to_thread(write)
-        except (BrokenPipeError, OSError) as e:
+        except OSError as e:
             raise CliBackendError(f"could not write to Codex app-server: {e}") from e
 
     async def _receive_raw(self, timeout: float | None = None) -> dict | None:
