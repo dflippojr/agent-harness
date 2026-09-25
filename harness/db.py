@@ -343,9 +343,17 @@ CREATE TABLE IF NOT EXISTS member_projects (
 CREATE INDEX IF NOT EXISTS member_projects_user ON member_projects(user_id);
 """
 
+AND_OWNER = " AND owner_id = ?"
+AND_APP = " AND app_id = ?"
+AND_KIND = " AND kind = ?"
+AND_JOIN = " AND "
+
 # Column definitions reused across the migration table below.
 TEXT_EMPTY = "TEXT NOT NULL DEFAULT ''"
 TEXT_LOCAL = "TEXT NOT NULL DEFAULT 'local'"
+INT_ZERO = "INTEGER NOT NULL DEFAULT 0"
+TEXT_EMPTY_LIST = "TEXT NOT NULL DEFAULT '[]'"
+TEXT_EMPTY_OBJECT = "TEXT NOT NULL DEFAULT '{}'"
 
 # Columns added after a table first shipped: (table, column, definition).
 MIGRATIONS = [
@@ -360,16 +368,16 @@ MIGRATIONS = [
     ("sessions", "review", TEXT_EMPTY),
     ("sessions", "review_detail", TEXT_EMPTY),
     # Set when cleanup deleted the workspace (or the user discarded it).
-    ("sessions", "workspace_removed", "INTEGER NOT NULL DEFAULT 0"),
+    ("sessions", "workspace_removed", INT_ZERO),
     # Phase 6e: sessions created through the app API, their registered tools and metadata; key scopes.
     ("sessions", "app_id", TEXT_EMPTY),
-    ("sessions", "app_tools", "TEXT NOT NULL DEFAULT '[]'"),
-    ("sessions", "app_metadata", "TEXT NOT NULL DEFAULT '{}'"),
+    ("sessions", "app_tools", TEXT_EMPTY_LIST),
+    ("sessions", "app_metadata", TEXT_EMPTY_OBJECT),
     # Issue #57: human-owned Agent Harness Web data. v1 has one stable owner; guests own nothing.
     ("sessions", "owner_id", "TEXT NOT NULL DEFAULT 'owner'"),
     ("api_keys", "scopes", "TEXT NOT NULL DEFAULT 'inference'"),
     ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
-    ("api_keys", "origins", "TEXT NOT NULL DEFAULT '[]'"),
+    ("api_keys", "origins", TEXT_EMPTY_LIST),
     # Phase 7d: sessions started by a scheduled job, and the STATUS the job's answer ended with (ok | attention).
     ("sessions", "job_id", TEXT_EMPTY),
     ("sessions", "job_status", TEXT_EMPTY),
@@ -381,38 +389,38 @@ MIGRATIONS = [
     ("templates", "backend", TEXT_LOCAL),
     # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
     ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
-    ("images", "base_model", "TEXT NOT NULL DEFAULT ''"),
-    ("images", "lora", "TEXT NOT NULL DEFAULT ''"),
-    ("images", "lora_revision", "TEXT NOT NULL DEFAULT ''"),
-    ("images", "lora_sha256", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "base_model", TEXT_EMPTY),
+    ("images", "lora", TEXT_EMPTY),
+    ("images", "lora_revision", TEXT_EMPTY),
+    ("images", "lora_sha256", TEXT_EMPTY),
     # Issue #86: durable image archive state. The canonical digest detects later source corruption.
-    ("images", "sha256", "TEXT NOT NULL DEFAULT ''"),
-    ("images", "archive_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("images", "sha256", TEXT_EMPTY),
+    ("images", "archive_bytes", INT_ZERO),
     ("images", "archived_at", "REAL"),
-    ("images", "archive_error", "TEXT NOT NULL DEFAULT ''"),
+    ("images", "archive_error", TEXT_EMPTY),
     ("images", "archive_deleted_at", "REAL"),
     # Issue #87: opt-in Real-ESRGAN derived images keep the original PNG unchanged.
     ("images", "parent_id", TEXT_EMPTY),
     # Issue #88: masked edits retain their pinned model revision and feathering input.
     ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
-    ("images", "model_revision", "TEXT NOT NULL DEFAULT ''"),
-    ("images", "feather", "INTEGER NOT NULL DEFAULT 0"),
+    ("images", "model_revision", TEXT_EMPTY),
+    ("images", "feather", INT_ZERO),
     ("images", "scale", "INTEGER NOT NULL DEFAULT 1"),
     ("images", "upscale_model", TEXT_EMPTY),
     ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
     # Issue #17: frozen owner-approved instruction skills for a session.
-    ("sessions", "skills", "TEXT NOT NULL DEFAULT '[]'"),
+    ("sessions", "skills", TEXT_EMPTY_LIST),
     # Issue #18: sanitized smart-review recommendation on the ordinary approval row.
-    ("approvals", "smart", "TEXT NOT NULL DEFAULT '{}'"),
+    ("approvals", "smart", TEXT_EMPTY_OBJECT),
     # Issue #66: freeze hosted effort at session start; app-scoped settings live beside the token.
-    ("sessions", "effort", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "effort", TEXT_EMPTY),
     # Issue #66: in-flight app sessions keep the defaults they started with if the app is revoked.
-    ("sessions", "app_defaults", "TEXT NOT NULL DEFAULT '{}'"),
+    ("sessions", "app_defaults", TEXT_EMPTY_OBJECT),
     # Issue #92: enough to reproduce a generation; old rows stay readable with {}.
     # Keep this PR's migration after every migration already present on main.
-    ("images", "provenance", "TEXT NOT NULL DEFAULT '{}'"),
+    ("images", "provenance", TEXT_EMPTY_OBJECT),
 ]
 
 APP_SETTINGS_SCHEMA = """
@@ -511,13 +519,13 @@ class Database:
         sql = "SELECT id FROM sessions WHERE id LIKE ?"
         params: list = [prefix + "%"]
         if user_id is not None:
-            sql += " AND owner_id = ?"
+            sql += AND_OWNER
             params.append(user_id)
         if app_id is not None:
-            sql += " AND app_id = ?"
+            sql += AND_APP
             params.append(app_id)
         if kind is not None:
-            sql += " AND kind = ?"
+            sql += AND_KIND
             params.append(kind)
         with self.lock:
             rows = self.conn.execute(sql, params).fetchall()
@@ -525,7 +533,7 @@ class Database:
 
     def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent") -> list[dict]:
         """Sessions of one conversation kind, newest first. Agent lists never include Chat and vice versa."""
-        where = " WHERE kind = ?" + (" AND owner_id = ?" if owner_id is not None else "")
+        where = " WHERE kind = ?" + (AND_OWNER if owner_id is not None else "")
         params = (kind, owner_id, limit) if owner_id is not None else (kind, limit)
         with self.lock:
             rows = self.conn.execute(
@@ -581,7 +589,7 @@ class Database:
         query = f"SELECT * FROM sessions WHERE status IN ({marks})"
         params: list = list(statuses)
         if user_id is not None:
-            query += " AND owner_id = ?"
+            query += AND_OWNER
             params.append(user_id)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY updated_at", params).fetchall()
@@ -680,7 +688,7 @@ class Database:
             session_filters.append("app_id = ?")
             session_params.append(app_id)
         if session_filters:
-            sql += " AND session_id IN (SELECT id FROM sessions WHERE " + " AND ".join(session_filters) + ")"
+            sql += " AND session_id IN (SELECT id FROM sessions WHERE " + AND_JOIN.join(session_filters) + ")"
             params.extend(session_params)
         with self.lock:
             try:
@@ -694,10 +702,10 @@ class Database:
                  "review, owner_id, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?")
         params: list = [sid]
         if kind is not None:
-            query += " AND kind = ?"
+            query += AND_KIND
             params.append(kind)
         if user_id is not None:
-            query += " AND owner_id = ?"
+            query += AND_OWNER
             params.append(user_id)
         with self.lock:
             row = self.conn.execute(query, params).fetchone()
@@ -765,7 +773,7 @@ class Database:
             query += " JOIN sessions s ON s.id = a.session_id"
             where.append("s.owner_id = ?")
             params.append(user_id)
-        query += " WHERE " + " AND ".join(where)
+        query += " WHERE " + AND_JOIN.join(where)
         with self.lock:
             return [_row(r) for r in self.conn.execute(query + " ORDER BY a.created_at", params).fetchall()]
 
@@ -807,7 +815,7 @@ class Database:
                                credential_source, time.time()))
 
     def usage_tally(self, backend: str, since: float, app_id: str | None = None) -> dict:
-        app_clause, params = (" AND app_id = ?", [backend, since, app_id]) if app_id is not None else ("", [backend, since])
+        app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
         with self.lock:
             row = self.conn.execute("SELECT COALESCE(SUM(requests),0) requests, "
                                     "COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
@@ -817,7 +825,7 @@ class Database:
         return dict(row)
 
     def usage_by_source(self, backend: str, since: float, app_id: str | None = None) -> dict[str, dict]:
-        app_clause, params = (" AND app_id = ?", [backend, since, app_id]) if app_id is not None else ("", [backend, since])
+        app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
         with self.lock:
             rows = self.conn.execute(
                 "SELECT credential_source, COALESCE(SUM(requests),0) requests, "
@@ -975,7 +983,7 @@ class Database:
             clauses.append(f"COALESCE(operation, 'generate') IN ({','.join('?' * len(operations))})")
             params.extend(operations)
         if clauses:
-            query += " WHERE " + " AND ".join(clauses)
+            query += " WHERE " + AND_JOIN.join(clauses)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC LIMIT ?", [*params, limit]).fetchall()
         return [self._image_row(r) for r in rows]
@@ -1002,7 +1010,11 @@ class Database:
     def find_image_upscale(self, parent_id: str, upscale: str) -> dict | None:
         """Return the existing derived upscale for this parent and scale, if any (including failed)."""
         choice = str(upscale or "").strip().lower().replace("×", "x")
-        scale = 2 if choice in ("2x", "2") else 4 if choice in ("4x", "4") else 0
+        scale = 0
+        if choice in ("2x", "2"):
+            scale = 2
+        elif choice in ("4x", "4"):
+            scale = 4
         with self.lock:
             row = self.conn.execute(
                 "SELECT * FROM images WHERE parent_id = ? AND operation = 'upscale' AND "
@@ -1142,7 +1154,7 @@ class Database:
         query = "SELECT origins FROM api_keys WHERE revoked_at IS NULL"
         params: tuple = ()
         if kind is not None:
-            query += " AND kind = ?"
+            query += AND_KIND
             params = (kind,)
         with self.lock:
             rows = self.conn.execute(query, params).fetchall()
