@@ -19,25 +19,40 @@ class SandboxUnavailable(Exception):
     """Docker isn't reachable or the container can't be started."""
 
 
+def _text(data: bytes) -> str:
+    """Decode like subprocess text mode: UTF-8 with replacement characters, universal newlines."""
+    return data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _kill(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        proc.kill()
+
+
 async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = None,
                   env: dict | None = None) -> tuple[int, str, str]:
     """subprocess.run that can be cancelled: cancelling the awaiting task kills the process. `env` is merged over
     the daemon's environment."""
-    proc = subprocess.Popen(
-        args, stdin=subprocess.PIPE if input_ is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdin=subprocess.PIPE if input_ is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env={**os.environ, **env} if env else None,
     )
+    data = None if input_ is None else input_.replace("\n", os.linesep).encode("utf-8", "replace")
+    io = asyncio.ensure_future(proc.communicate(data))
     try:
-        out, err = await asyncio.to_thread(proc.communicate, input_, timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        out, err = await asyncio.to_thread(proc.communicate)
-        return 124, out, err + f"\n[timed out after {timeout:.0f}s]"
+        done, _ = await asyncio.wait({io}, timeout=timeout)
+        if not done:  # kill, then keep what the command wrote before the deadline
+            _kill(proc)
+            out, err = await io
+            return 124, _text(out), _text(err) + f"\n[timed out after {timeout:.0f}s]"
     except asyncio.CancelledError:
-        proc.kill()
+        io.cancel()
+        _kill(proc)
+        await proc.wait()  # reap it, as the old worker thread did, so the transport closes before the loop can
         raise
-    return proc.returncode, out, err
+    out, err = io.result()
+    return proc.returncode, _text(out), _text(err)
 
 
 async def ensure_networks(cfg: SandboxConfig) -> None:

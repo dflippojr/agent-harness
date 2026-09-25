@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -439,7 +440,7 @@ def run_live(language: str, source: str, timeout: float = 30, output_bytes: int 
     cancel = threading.Event()
     if cancel_after is not None:
         threading.Timer(cancel_after, cancel.set).start()
-    run_id = "t" + str(time.monotonic_ns())[-9:]
+    run_id = "t" + uuid.uuid4().hex[:12]  # unique across xdist workers, whose clocks tick together
     result = asyncio.run(runner.run(run_id, language, source, cancel))
     leftover = subprocess.run(["docker", "ps", "-aq", "--filter", f"name=harness-snippet-{run_id}"],
                               capture_output=True, text=True).stdout.strip()
@@ -547,7 +548,7 @@ def test_live_memory_pids_and_temp_limits():
 @live("python")
 def test_live_restart_removes_the_orphaned_container_only():
     lang = LANGUAGES["python"]
-    ids = ["t-orphan-" + str(time.monotonic_ns())[-8:], "t-other-" + str(time.monotonic_ns())[-8:]]
+    ids = ["t-orphan-" + uuid.uuid4().hex[:12], "t-other-" + uuid.uuid4().hex[:12]]
     for rid in ids:
         assert subprocess.run(container_args(lang, rid), capture_output=True).returncode == 0
     try:
