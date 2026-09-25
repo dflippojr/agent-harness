@@ -148,53 +148,14 @@ class SettingsService:
         """
         status: dict[str, Any] = {"recovery": None}
         with self.store.lock():
-            try:
-                active = self.store.read_active()
-            except ManagedConfigError as e:
-                restored = self.store.restore_lkg(str(e))
-                self._audit("system", "lkg_recovery", [], "failure", extra={"reason": str(e)})
-                if restored is None:
-                    status["recovery"] = self.store.read_status().get("recovery") or "overlay_quarantined"
-                    self._migrate_backend_prefs()
-                    return status
-                active = restored
-                status["recovery"] = self.store.read_status().get("recovery")
-            if active is None:
-                self._migrate_backend_prefs()
+            active, finished = self._load_active_overlay(status)
+            if finished:
                 return status
-            if is_confirmed(active):
-                pending = self._pending()
-                pending_matches = bool(
-                    pending is not None
-                    and pending.revision == active.revision
-                    and pending.values == active.values
-                )
-                if pending_matches or self.store.boot_tried():
-                    # confirm_startup publishes confirmed active first. Finish any
-                    # cleanup left by a crash after that commit point.
-                    self.store.commit(
-                        pending=None if pending_matches else UNSET,
-                        boot_tried=False,
-                    )
+            self._finish_confirmed_cleanup(active)
             if active.unconfirmed or not active.confirmed:
-                # boot-tried is a cross-process crash flag. load() then Manager.__init__ both
-                # call apply_overlay on the same cfg; the in-process marker keeps the first
-                # start from quarantining its own candidate.
-                tried_here = getattr(self.cfg, "_managed_boot_attempt", False)
-                if self.store.boot_tried() and not tried_here:
-                    old = self._overlay_state()
-                    new = next_overlay(old, OverlayRequest(action="restore_lkg"), self._apply_mode)
-                    self._commit_overlay(old, new, boot_tried=False,
-                                         quarantine_reason="unconfirmed managed generation did not finish startup")
-                    self._audit("system", "lkg_recovery", list((active.values or {}).keys()), "ok",
-                                extra={"reason": "unconfirmed", "revision": active.revision})
-                    active = new.active
-                    status["recovery"] = "lkg_restore"
-                    if active is None:
-                        return status
-                else:
-                    self.store.mark_boot_tried()
-                    self.cfg._managed_boot_attempt = True
+                active = self._resolve_unconfirmed(active, status)
+                if active is None:
+                    return status
             try:
                 # Boot applies active only. Pending is never the apply map.
                 self._apply_values(self.cfg, active.values, persist=False)
@@ -203,6 +164,59 @@ class SettingsService:
             if status.get("recovery") != "overlay_quarantined":
                 self._migrate_backend_prefs()
         return status
+
+    def _load_active_overlay(self, status: dict[str, Any]) -> tuple[Envelope | None, bool]:
+        """Read the active overlay, restoring LKG on a read error. Returns (active, finished)."""
+        try:
+            active = self.store.read_active()
+        except ManagedConfigError as e:
+            restored = self.store.restore_lkg(str(e))
+            self._audit("system", "lkg_recovery", [], "failure", extra={"reason": str(e)})
+            if restored is None:
+                status["recovery"] = self.store.read_status().get("recovery") or "overlay_quarantined"
+                self._migrate_backend_prefs()
+                return None, True
+            active = restored
+            status["recovery"] = self.store.read_status().get("recovery")
+        if active is None:
+            self._migrate_backend_prefs()
+            return None, True
+        return active, False
+
+    def _finish_confirmed_cleanup(self, active: Envelope) -> None:
+        if not is_confirmed(active):
+            return
+        pending = self._pending()
+        pending_matches = bool(
+            pending is not None
+            and pending.revision == active.revision
+            and pending.values == active.values
+        )
+        if pending_matches or self.store.boot_tried():
+            # confirm_startup publishes confirmed active first. Finish any
+            # cleanup left by a crash after that commit point.
+            self.store.commit(
+                pending=None if pending_matches else UNSET,
+                boot_tried=False,
+            )
+
+    def _resolve_unconfirmed(self, active: Envelope, status: dict[str, Any]) -> Envelope | None:
+        # boot-tried is a cross-process crash flag. load() then Manager.__init__ both
+        # call apply_overlay on the same cfg; the in-process marker keeps the first
+        # start from quarantining its own candidate.
+        tried_here = getattr(self.cfg, "_managed_boot_attempt", False)
+        if not self.store.boot_tried() or tried_here:
+            self.store.mark_boot_tried()
+            self.cfg._managed_boot_attempt = True
+            return active
+        old = self._overlay_state()
+        new = next_overlay(old, OverlayRequest(action="restore_lkg"), self._apply_mode)
+        self._commit_overlay(old, new, boot_tried=False,
+                             quarantine_reason="unconfirmed managed generation did not finish startup")
+        self._audit("system", "lkg_recovery", list((active.values or {}).keys()), "ok",
+                    extra={"reason": "unconfirmed", "revision": active.revision})
+        status["recovery"] = "lkg_restore"
+        return new.active
 
     def _recover_failed_overlay(self, failed: Envelope, error: BaseException) -> dict[str, Any]:
         """If active cannot apply, try LKG. If LKG also fails, boot on YAML defaults.
@@ -251,39 +265,47 @@ class SettingsService:
             self._commit_overlay(old, new, boot_tried=False, active_first=True)
             self._audit("system", "confirm", list(new.active.values), "ok", revision=new.active.revision)
 
+    def _mark_prefs_migrated(self, active: Envelope | None) -> None:
+        if active is not None:
+            active.migrated_backend_prefs = True
+            self.store.write_active(active)
+
+    def _legacy_backend_prefs(self) -> dict:
+        raw = self.db.get_meta("backend_prefs")
+        if not raw:
+            return {}
+        try:
+            prefs = json.loads(raw)
+        except ValueError:
+            return {}
+        return prefs if isinstance(prefs, dict) else {}
+
+    def _merge_backend_prefs(self, values: dict[str, Any], prefs: dict) -> None:
+        local = prefs.get("local")
+        if isinstance(local, dict) and local.get("model"):
+            key = "backends.local.model"
+            if key in self.registry.specs and key not in values:
+                values[key] = local["model"]
+        for name, spec in prefs.items():
+            if name == "local" or not isinstance(spec, dict):
+                continue
+            for field_name in ("model", "effort"):
+                key = f"backends.{name}.{field_name}"
+                if spec.get(field_name) and key in self.registry.specs:
+                    values.setdefault(key, spec[field_name])
+
     def _migrate_backend_prefs(self) -> None:
         if self.db is None:
             return
         active = self.store.read_active()
         if active and active.migrated_backend_prefs:
             return
-        raw = self.db.get_meta("backend_prefs")
-        if not raw:
-            if active is not None:
-                active.migrated_backend_prefs = True
-                self.store.write_active(active)
-            return
-        try:
-            prefs = json.loads(raw)
-        except ValueError:
-            prefs = {}
-        if not isinstance(prefs, dict) or not prefs:
-            if active is not None:
-                active.migrated_backend_prefs = True
-                self.store.write_active(active)
+        prefs = self._legacy_backend_prefs()
+        if not prefs:
+            self._mark_prefs_migrated(active)
             return
         values = dict(active.values if active else {})
-        if "local" in prefs and isinstance(prefs["local"], dict) and prefs["local"].get("model"):
-            key = "backends.local.model"
-            if key in self.registry.specs and key not in values:
-                values[key] = prefs["local"]["model"]
-        for name, spec in prefs.items():
-            if name == "local" or not isinstance(spec, dict):
-                continue
-            if spec.get("model") and f"backends.{name}.model" in self.registry.specs:
-                values.setdefault(f"backends.{name}.model", spec["model"])
-            if spec.get("effort") and f"backends.{name}.effort" in self.registry.specs:
-                values.setdefault(f"backends.{name}.effort", spec["effort"])
+        self._merge_backend_prefs(values, prefs)
         envelope = active or Envelope(revision=1, confirmed=True, migrated_backend_prefs=True)
         envelope.values = values
         envelope.migrated_backend_prefs = True
