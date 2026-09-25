@@ -10,7 +10,7 @@ restart that copies pending onto active.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, cast
 
 from .managed_config import UNSET, Envelope, SCHEMA_VERSION
 from .settings import RESET
@@ -67,7 +67,7 @@ def next_overlay(state: OverlayState, request: OverlayRequest, apply_mode: Apply
     if request.action == "confirm_startup":
         return _confirm_startup(active, pending, lkg, request)
     if request.action == "restore_lkg":
-        return _restore_lkg(active, pending, lkg)
+        return _restore_lkg(lkg)
     raise ValueError(f"unknown overlay action {request.action!r}")
 
 
@@ -113,7 +113,7 @@ def _same_payload(left: Envelope | None, right: Envelope | None) -> bool:
 def _copy(env: Envelope | None) -> Envelope | None:
     if env is None:
         return None
-    return replace(env, values=dict(env.values))
+    return cast(Envelope, replace(env, values=dict(env.values)))
 
 
 def is_confirmed(env: Envelope | None) -> bool:
@@ -158,7 +158,7 @@ def _empty_confirmed() -> Envelope:
 
 def _snapshot_confirmed(active: Envelope | None) -> Envelope:
     source = active if active is not None else _empty_confirmed()
-    return replace(source, values=dict(source.values), confirmed=True, unconfirmed=False)
+    return cast(Envelope, replace(source, values=dict(source.values), confirmed=True, unconfirmed=False))
 
 
 def _patch(active: Envelope | None, pending: Envelope | None, lkg: Envelope | None,
@@ -249,8 +249,7 @@ def _confirm_startup(active: Envelope | None, pending: Envelope | None,
     return OverlayState(active=new_active, pending=None, lkg=lkg)
 
 
-def _restore_lkg(active: Envelope | None, pending: Envelope | None,
-                 lkg: Envelope | None) -> OverlayState:
+def _restore_lkg(lkg: Envelope | None) -> OverlayState:
     if lkg is None:
         return OverlayState(active=None, pending=None, lkg=None)
     new_active = replace(lkg, values=dict(lkg.values), confirmed=True, unconfirmed=False)

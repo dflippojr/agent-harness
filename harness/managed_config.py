@@ -276,46 +276,55 @@ class ManagedStore:
                quarantine_reason: str | None = None, quarantine_raw: bool = False,
                active_first: bool = False) -> None:
         """Publish one overlay generation. Replacing active is the commit point."""
-        def publish_active() -> None:
-            if unlink_active:
-                self._unlink(self.active_path)
-                self._crash("active")
-            elif active is not UNSET and active is not None:
-                self.write_active(active)
-                self._crash("active")
-
         if quarantine_envelope is not None:
             self.quarantine(quarantine_envelope, quarantine_reason or "")
             self._crash("quarantine")
         elif quarantine_raw and self.active_path.is_file():
-            try:
-                self.quarantine_path.write_text(self.active_path.read_text(encoding="utf-8"), encoding="utf-8")
-            except OSError:
-                pass
-            self.write_status({"recovery": "lkg_restore", "reason": quarantine_reason or "", "at": time.time()})
-            self._crash("quarantine")
+            self._quarantine_raw_active(quarantine_reason)
         if lkg is not UNSET and lkg is not None:
             self.write_lkg(lkg)
             self._crash("lkg")
         if active_first:
-            publish_active()
+            self._publish_active(active, unlink_active)
         if pending is not UNSET:
-            if pending is None:
-                self.clear_pending()
-            else:
-                self.write_pending(pending)
-            self._crash("pending")
+            self._commit_pending(pending)
         if boot_tried is not UNSET:
-            if boot_tried:
-                self.mark_boot_tried()
-            else:
-                self.clear_boot_tried()
-            self._crash("boot_tried")
+            self._commit_boot_tried(boot_tried)
         if status is not UNSET and status is not None:
             self.write_status(status)
             self._crash("status")
         if not active_first:
-            publish_active()
+            self._publish_active(active, unlink_active)
+
+    def _commit_pending(self, pending) -> None:
+        if pending is None:
+            self.clear_pending()
+        else:
+            self.write_pending(pending)
+        self._crash("pending")
+
+    def _commit_boot_tried(self, boot_tried) -> None:
+        if boot_tried:
+            self.mark_boot_tried()
+        else:
+            self.clear_boot_tried()
+        self._crash("boot_tried")
+
+    def _publish_active(self, active, unlink_active: bool) -> None:
+        if unlink_active:
+            self._unlink(self.active_path)
+            self._crash("active")
+        elif active is not UNSET and active is not None:
+            self.write_active(active)
+            self._crash("active")
+
+    def _quarantine_raw_active(self, reason: str | None) -> None:
+        try:
+            self.quarantine_path.write_text(self.active_path.read_text(encoding="utf-8"), encoding="utf-8")
+        except OSError:
+            pass
+        self.write_status({"recovery": "lkg_restore", "reason": reason or "", "at": time.time()})
+        self._crash("quarantine")
 
     def _crash(self, step: str) -> None:
         if self.crash_at == step:

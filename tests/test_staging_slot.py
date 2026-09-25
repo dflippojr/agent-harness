@@ -574,3 +574,11 @@ def test_report_names_the_running_commit_and_the_staging_url(tmp_path):
     assert SHA in result.stdout and "https://tower.example-tailnet.ts.net:8444/" in result.stdout
     assert OTHER_SHA in result.stdout  # a moved head is reported, not chased
     assert "8100" in summary.read_text(encoding="utf-8")
+
+
+def test_pull_request_number_must_be_ascii_digits_before_any_api_call():
+    calls = []
+    for bad in ("１２３", "١٢٣"):  # fullwidth and Arabic-Indic digits
+        with pytest.raises(RefRejected, match="must be a number"):
+            resolve(pr_number=bad, api=lambda path: calls.append(path) or {})
+    assert calls == []

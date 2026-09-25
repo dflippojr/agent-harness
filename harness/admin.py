@@ -124,19 +124,23 @@ ADMIN_PATHS = frozenset({
 })
 
 
-def parse_key_spec(body: dict | None) -> tuple[str, str, str]:
-    """Validate POST /keys (and /api/admin/v1/keys). Returns (name, scopes, kind)."""
+def _validated_scopes(scopes) -> list[str]:
     from .apps import SCOPES
-    body = body or {}
-    name = str(body.get("name") or "").strip()
-    if not name:
-        raise HarnessError(400, "name is required")
-    scopes = body.get("scopes") or ["inference"]
     if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
         raise HarnessError(400, f"unknown scopes {scopes!r}; known: {', '.join(SCOPES)}")
     unknown = [s for s in scopes if s not in SCOPES and s != ADMIN_SCOPE]
     if unknown:
         raise HarnessError(400, f"unknown scopes {unknown}; known: {', '.join(SCOPES)}")
+    return scopes
+
+
+def parse_key_spec(body: dict | None) -> tuple[str, str, str]:
+    """Validate POST /keys (and /api/admin/v1/keys). Returns (name, scopes, kind)."""
+    body = body or {}
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HarnessError(400, "name is required")
+    scopes = _validated_scopes(body.get("scopes") or ["inference"])
     kind_in = body.get("kind") or ""
     wants_admin = ADMIN_SCOPE in scopes or kind_in == OWNER_KIND
     if wants_admin:
@@ -148,6 +152,34 @@ def parse_key_spec(body: dict | None) -> tuple[str, str, str]:
         return name[:60], " ".join(ordered), OWNER_KIND
     kind = "app" if kind_in == "app" else "device"
     return name[:60], " ".join(dict.fromkeys(scopes)), kind
+
+
+def _normalized_origin(raw_origin: str) -> str:
+    from .apps import normalize_origin
+    try:
+        return normalize_origin(raw_origin)
+    except ValueError as e:
+        raise HarnessError(403, str(e))
+
+
+def _check_token_origin(request: Request, m, key: dict) -> None:
+    raw_origin = request.headers.get("origin", "")
+    if not raw_origin:
+        return
+    from .apps import daemon_origins
+    origin = _normalized_origin(raw_origin)
+    if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
+        raise HarnessError(403, "this owner token is not approved for this origin")
+
+
+def _check_browser_origin(request: Request, m) -> None:
+    raw_origin = request.headers.get("origin", "")
+    if raw_origin:
+        from .apps import daemon_origins
+        if _normalized_origin(raw_origin) not in daemon_origins(m.cfg):
+            raise HarnessError(401, "cross-origin browser requests require an owner token")
+    elif request.headers.get("sec-fetch-site") == "cross-site":
+        raise HarnessError(401, "cross-origin browser requests require an owner token")
 
 
 def require_admin(request: Request, mgr) -> dict | None:
@@ -166,27 +198,9 @@ def require_admin(request: Request, mgr) -> dict | None:
         scopes = set((key.get("scopes") or "").split())
         if key.get("kind") != OWNER_KIND or ADMIN_SCOPE not in scopes:
             raise HarnessError(403, "app tokens cannot use the owner API")
-        raw_origin = request.headers.get("origin", "")
-        if raw_origin:
-            from .apps import daemon_origins, normalize_origin
-            try:
-                origin = normalize_origin(raw_origin)
-            except ValueError as e:
-                raise HarnessError(403, str(e))
-            if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
-                raise HarnessError(403, "this owner token is not approved for this origin")
+        _check_token_origin(request, m, key)
         return key
-    raw_origin = request.headers.get("origin", "")
-    if raw_origin:
-        from .apps import daemon_origins, normalize_origin
-        try:
-            origin = normalize_origin(raw_origin)
-        except ValueError as e:
-            raise HarnessError(403, str(e))
-        if origin not in daemon_origins(m.cfg):
-            raise HarnessError(401, "cross-origin browser requests require an owner token")
-    elif request.headers.get("sec-fetch-site") == "cross-site":
-        raise HarnessError(401, "cross-origin browser requests require an owner token")
+    _check_browser_origin(request, m)
     ident = getattr(request.state, "access", None)
     if ident is None:
         ident = access_mod.resolve_access(m.cfg, request.headers.get("tailscale-user-login"), m.db)
@@ -228,8 +242,7 @@ class AccountUpdateRequest(BaseModel):
     max_queued: int | None = None
 
 
-def register(app: FastAPI, mgr) -> None:
-    matchers = [_template_re(path) for path in ADMIN_PATHS]
+def _collect_operations(app: FastAPI, mgr) -> list[dict]:
     operations: list[dict] = []
     existing = [route for route in app.routes if isinstance(route, APIRoute) and route.path in ADMIN_PATHS]
     missing = ADMIN_PATHS - {route.path for route in existing}
@@ -251,6 +264,29 @@ def register(app: FastAPI, mgr) -> None:
     from . import config_api
     operations.extend(config_api.register_admin(app, mgr, require_admin))
     operations.sort(key=lambda row: (row["path"], row["method"]))
+    return operations
+
+
+async def _apply_account_update(svc, actor: str, user_id: str, body: AccountUpdateRequest) -> dict:
+    row = None
+    if body.display_name is not None:
+        row = svc.rename(actor, user_id, body.display_name)
+    if body.login is not None:
+        row = svc.rebind_login(actor, user_id, body.login)
+    if body.enabled is not None:
+        row = await svc.set_enabled(actor, user_id, body.enabled)
+    if body.disk_quota_bytes is not None:
+        row = svc.set_quota(actor, user_id, body.disk_quota_bytes)
+    if body.max_running is not None or body.max_queued is not None:
+        row = svc.set_concurrency(actor, user_id, body.max_running, body.max_queued)
+    if row is None:
+        row = svc.public_account(svc._require(user_id))
+    return row
+
+
+def register(app: FastAPI, mgr) -> None:
+    matchers = [_template_re(path) for path in ADMIN_PATHS]
+    operations = _collect_operations(app, mgr)
 
     @app.get(PREFIX)
     async def admin_root(request: Request):
@@ -321,20 +357,7 @@ def register(app: FastAPI, mgr) -> None:
         require_admin(request, mgr)
         svc = _accounts(request)
         actor = _actor(request)
-        row = None
-        if body.display_name is not None:
-            row = svc.rename(actor, user_id, body.display_name)
-        if body.login is not None:
-            row = svc.rebind_login(actor, user_id, body.login)
-        if body.enabled is not None:
-            row = await svc.set_enabled(actor, user_id, body.enabled)
-        if body.disk_quota_bytes is not None:
-            row = svc.set_quota(actor, user_id, body.disk_quota_bytes)
-        if body.max_running is not None or body.max_queued is not None:
-            row = svc.set_concurrency(actor, user_id, body.max_running, body.max_queued)
-        if row is None:
-            row = svc.public_account(svc._require(user_id))
-        return row
+        return await _apply_account_update(svc, actor, user_id, body)
 
     @app.middleware("http")
     async def admin_alias(request: Request, call_next):

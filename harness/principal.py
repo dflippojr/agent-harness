@@ -121,6 +121,41 @@ def _owner(login: str | None) -> Principal:
                      display_name="", bundled=True)
 
 
+NOT_ALLOWED_DETAIL = "this tailnet login is not allowed"
+
+
+def _member_principal(member: dict, login: str) -> Principal:
+    display_name = member.get("display_name") or ""
+    if not bool(member.get("enabled", 1)):
+        return Principal(kind="member", user_id=member["user_id"], allowed=False, login=login,
+                         display_name=display_name, enabled=False,
+                         detail="this household account is disabled")
+    return Principal(kind="member", user_id=member["user_id"], allowed=True, login=login,
+                     display_name=display_name, enabled=True, bundled=True)
+
+
+def _denied_owner(login: str) -> Principal:
+    return Principal(kind="owner", user_id=OWNER_USER_ID, allowed=False, login=login,
+                     detail=NOT_ALLOWED_DETAIL)
+
+
+def _guest_principal(guest, reason: str, login: str) -> Principal:
+    user_id = f"guest:{login}"
+    if reason == "expired":
+        return Principal(kind="guest", user_id=user_id, allowed=False, login=login,
+                         detail="demo access expired")
+    if reason == "invalid-until":
+        return Principal(kind="guest", user_id=user_id, allowed=False, login=login,
+                         detail=NOT_ALLOWED_DETAIL)
+    until = None
+    if guest.until:
+        try:
+            until = parse_guest_until(guest.until)
+        except ValueError:
+            until = None
+    return Principal(kind="guest", user_id=user_id, allowed=True, login=login, until=until)
+
+
 def resolve_human(cfg: Config, login: str | None, accounts=None) -> Principal:
     """Classify a Tailscale/localhost caller. `accounts` is a Database or any object with
     `member_count()` and `account_by_login(login)`."""
@@ -128,39 +163,16 @@ def resolve_human(cfg: Config, login: str | None, accounts=None) -> Principal:
         return _owner(None)
     member_count = accounts.member_count() if accounts is not None else 0
     member = accounts.account_by_login(login) if accounts is not None else None
-    in_allowlist = login in cfg.allowed_logins
-    if in_allowlist:
+    if login in cfg.allowed_logins:
         return _owner(login)
     if member is not None:
-        enabled = bool(member.get("enabled", 1))
-        if not enabled:
-            return Principal(kind="member", user_id=member["user_id"], allowed=False, login=login,
-                             display_name=member.get("display_name") or "", enabled=False,
-                             detail="this household account is disabled")
-        return Principal(kind="member", user_id=member["user_id"], allowed=True, login=login,
-                         display_name=member.get("display_name") or "", enabled=True, bundled=True)
+        return _member_principal(member, login)
     if not cfg.allowed_logins:
-        if member_count > 0:
-            return Principal(kind="owner", user_id=OWNER_USER_ID, allowed=False, login=login,
-                             detail="this tailnet login is not allowed")
-        return _owner(login)
+        return _denied_owner(login) if member_count > 0 else _owner(login)
     guest, reason = guest_for(cfg, login)
     if guest is not None:
-        if reason == "expired":
-            return Principal(kind="guest", user_id=f"guest:{login}", allowed=False, login=login,
-                             detail="demo access expired")
-        if reason == "invalid-until":
-            return Principal(kind="guest", user_id=f"guest:{login}", allowed=False, login=login,
-                             detail="this tailnet login is not allowed")
-        until = None
-        if guest.until:
-            try:
-                until = parse_guest_until(guest.until)
-            except ValueError:
-                until = None
-        return Principal(kind="guest", user_id=f"guest:{login}", allowed=True, login=login, until=until)
-    return Principal(kind="owner", user_id=OWNER_USER_ID, allowed=False, login=login,
-                     detail="this tailnet login is not allowed")
+        return _guest_principal(guest, reason, login)
+    return _denied_owner(login)
 
 
 def principal_from_key(key: dict) -> Principal:

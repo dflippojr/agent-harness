@@ -350,3 +350,15 @@ def test_fileops_skip_symlinks_out_of_the_workspace(tmp_path):
     assert "link" not in files.list_files()
     with pytest.raises(ToolError, match="escapes"):
         files.read_file("key-link.txt")
+
+
+def test_github_token_patterns_keep_unicode_word_boundaries():
+    from harness.skill_validate import SECRET_RES
+    patterns = dict(SECRET_RES)
+    token = "ghp_" + "A" * 24
+    assert patterns["github-token"].search(f" {token} ")
+    assert not patterns["github-token"].search("xé" + token)
+    assert not patterns["github-token"].search(token + "é")
+    pat = "github_pat_" + "B" * 24
+    assert patterns["github-pat"].search(f" {pat} ")
+    assert not patterns["github-pat"].search("xé" + pat)

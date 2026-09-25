@@ -88,6 +88,23 @@ def _norm_key(path: Path) -> str:
     return text.casefold() if os.name == "nt" else text
 
 
+def _is_within(candidate: Path, root_r: Path) -> bool:
+    try:
+        return candidate == root_r or candidate.is_relative_to(root_r)
+    except (ValueError, OSError):
+        return False
+
+
+def _link_leaves_root(cur: Path, root_r: Path) -> bool:
+    """A reparse point whose canonical target is a different path escapes unless that target is still inside root."""
+    try:
+        if _norm_key(resolve_path(cur)) != _norm_key(cur):
+            return not _is_within(resolve_path(cur), root_r)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return False
+
+
 def contained(path: Path, root: Path, *, allow_missing: bool = False) -> bool:
     """Whether `path` resolves strictly inside `root` without following a link out."""
     try:
@@ -97,24 +114,14 @@ def contained(path: Path, root: Path, *, allow_missing: bool = False) -> bool:
         candidate = resolve_path(path)
     except (OSError, RuntimeError):
         return False
-    try:
-        if not (candidate == root_r or candidate.is_relative_to(root_r)):
-            return False
-    except (ValueError, OSError):
+    if not _is_within(candidate, root_r):
         return False
     # Walk from candidate up to root: a reparse point anywhere in the chain can escape.
     cur = candidate
     root_key = _norm_key(root_r)
     while True:
-        if is_reparse_point(cur) and _norm_key(cur) != root_key:
-            try:
-                if _norm_key(resolve_path(cur)) != _norm_key(cur):
-                    # Link whose canonical target is a different path: only ok if still inside root.
-                    target = resolve_path(cur)
-                    if not (target == root_r or target.is_relative_to(root_r)):
-                        return False
-            except (OSError, RuntimeError, ValueError):
-                return False
+        if is_reparse_point(cur) and _norm_key(cur) != root_key and _link_leaves_root(cur, root_r):
+            return False
         if _norm_key(cur) == root_key:
             break
         parent = cur.parent
