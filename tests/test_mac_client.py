@@ -218,16 +218,36 @@ def test_private_json_never_writes_through_a_file_at_the_temp_name(tmp_path):
         assert target.stat().st_mode & 0o777 == 0o600
 
 
-def test_runner_logs_passes_only_a_count_and_the_log_to_tail(tmp_path, monkeypatch):
-    """Issue #221 (S8705): --lines reaches tail as a whole number, and `--` ends tail's options."""
+def test_runner_logs_print_last_lines_without_external_command(tmp_path, monkeypatch, capsys):
+    """Issue #221 (S8705): runner logs stay in Python and never pass CLI input to an OS command."""
     home = harness_home(tmp_path, monkeypatch)
-    calls = []
-    monkeypatch.setattr(cli.subprocess, "call", lambda args: calls.append(args) or 0)
-    for lines, follow in (("0", True), ("250", False)):
-        monkeypatch.setattr(cli.sys, "argv", ["harness", "runner", "logs", "--lines", lines,
-                                              *(["--follow"] if follow else [])])
+    log = home / "logs" / "runner.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    monkeypatch.setattr(cli.subprocess, "call", lambda *_: pytest.fail("runner logs must not invoke a command"))
+    for lines, expected in (("0", "three\n"), ("2", "two\nthree\n")):
+        monkeypatch.setattr(cli.sys, "argv", ["harness", "runner", "logs", "--lines", lines])
         assert cli.main() == 0
-    log = str(home / "logs" / "runner.log")
-    assert calls == [["tail", "-n", "1", "-f", "--", log], ["tail", "-n", "250", "--", log]]
-    with pytest.raises(ValueError):
-        cli.tail_command(Path(log), "-f --pid=1", False)
+        assert capsys.readouterr().out == expected
+
+
+def test_runner_logs_follow_appended_lines(tmp_path, monkeypatch, capsys):
+    home = harness_home(tmp_path, monkeypatch)
+    log = home / "logs" / "runner.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("older\nlatest\n", encoding="utf-8")
+    sleeps = 0
+
+    def append_then_stop(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            with log.open("a", encoding="utf-8") as stream:
+                stream.write("followed\n")
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", append_then_stop)
+    monkeypatch.setattr(cli.sys, "argv", ["harness", "runner", "logs", "--lines", "1", "--follow"])
+    assert cli.main() == 130
+    assert capsys.readouterr().out == "latest\nfollowed\n"

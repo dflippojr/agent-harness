@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import os
 from pathlib import Path
@@ -113,10 +114,28 @@ def add_project_root(path: str, runner_path: Path = DEFAULT_RUNNER_CONFIG) -> Pa
     return root
 
 
-def tail_command(log: Path, lines: int, follow: bool) -> list[str]:
-    """`tail` for the runner log: the count is parsed as a whole number (at least 1) and `--` ends the options,
-    so no other option can reach `tail` through --lines."""
-    return ["tail", "-n", str(max(1, int(lines))), *(["-f"] if follow else []), "--", str(log)]
+def _show_runner_logs(log: Path, lines: int, follow: bool) -> int:
+    """Print the last `lines` from the runner log, optionally following new lines without invoking a shell tool."""
+    try:
+        stream = log.open("r", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"could not open runner log {log}: {exc}", file=sys.stderr)
+        return 1
+    with stream:
+        sys.stdout.writelines(deque(stream, maxlen=max(1, int(lines))))
+        sys.stdout.flush()
+        if not follow:
+            return 0
+        try:
+            while True:
+                line = stream.readline()
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    time.sleep(0.2)
+        except KeyboardInterrupt:
+            return 130
 
 
 def launchctl(*args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -409,7 +428,7 @@ def main() -> int:
             print("runner restarted")
             return 0
         if args.runner_cmd == "logs":
-            return subprocess.call(tail_command(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow))
+            return _show_runner_logs(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow)
         local = launchctl("print")
         config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
         remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
