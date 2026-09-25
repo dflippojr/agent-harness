@@ -27,7 +27,10 @@ MAX_PURPOSE = 500
 MAX_ACTIVATION = 400
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$")
 REF_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}\.md$")
-ALLOWED_ROOT_FILES = frozenset({"SKILL.md", "manifest.json", "examples.json"})
+SKILL_MD = "SKILL.md"
+MANIFEST_JSON = "manifest.json"
+EXAMPLES_JSON = "examples.json"
+ALLOWED_ROOT_FILES = frozenset({SKILL_MD, MANIFEST_JSON, EXAMPLES_JSON})
 FORBIDDEN_SUFFIXES = frozenset({
     ".py", ".pyw", ".pyc", ".pyo", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd", ".exe", ".dll",
     ".so", ".dylib", ".bin", ".com", ".msi", ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx", ".wasm",
@@ -40,27 +43,25 @@ FORBIDDEN_NAMES = frozenset({
     "pyproject.toml", "setup.py", "setup.cfg", "pipfile", "pipfile.lock", "gemfile", "cargo.toml",
     "makefile", "dockerfile", "compose.yaml", "compose.yml", "docker-compose.yml",
 })
-REMOTE_INCLUDE_RE = re.compile(
-    r"""(?ix)
-        (?:!\[.*?\]\(\s*(?:https?|file|data):)
-        | <(?:script|iframe|object|embed|link)\b
-        | \b(?:include|import|require)\s*::
-        | \{\%\s*include\b
-        | \bfrom\s+['"]https?://
-        | \]\(\s*javascript:
-        | src\s*=\s*['"]https?://
-        """
-)
+REMOTE_INCLUDE_RES = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r"!\[.*?\]\(\s*(?:https?|file|data):",
+    r"<(?:script|iframe|object|embed|link)\b",
+    r"\b(?:include|import|require)\s*::",
+    r"\{%\s*include\b",
+    r"\bfrom\s+['\"]https?://",
+    r"\]\(\s*javascript:",
+    r"src\s*=\s*['\"]https?://",
+))
 SECRET_RES = [
     ("private-key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
     ("aws-key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("github-token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b")),
-    ("github-pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
+    ("github-token", re.compile(r"(?a)\b(?:ghp|gho|ghu|ghs|ghr)_\w{20,}\b")),
+    ("github-pat", re.compile(r"(?a)\bgithub_pat_\w{20,}\b")),
     ("slack-token", re.compile(r"\bxox[baprs]-")),
     ("openai-key", re.compile(r"\bsk-[A-Za-z0-9]{16,}\b")),
     ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{16,}\b")),
     ("generic-secret", re.compile(
-        r"(?i)\b(api[_ -]?key|secret[_ -]?key|access[_ -]?token|auth[_ -]?token|password|passwd)\b\s*[:=]\s*\S{8,}")),
+        r"(?i)\b((?:api|secret)[_ -]?key|(?:access|auth)[_ -]?token|password|passwd)\b\s*[:=]\s*\S{8,}")),
 ]
 POLICY_RES = [
     ("approval-bypass", re.compile(
@@ -159,7 +160,7 @@ def _utf8_text(raw: bytes, path: str, findings: list[dict]) -> str | None:
 
 
 def _scan_text(text: str, path: str, findings: list[dict]) -> None:
-    if REMOTE_INCLUDE_RE.search(text) or HTML_RE.search(text):
+    if any(rx.search(text) for rx in REMOTE_INCLUDE_RES) or HTML_RE.search(text):
         findings.append(Finding.make("remote-include", "HTML, remote includes, or unsafe links are forbidden", path))
     for code, rx in SECRET_RES:
         if rx.search(text):
@@ -210,12 +211,12 @@ def validate_bundle(bundle: dict) -> dict:
     if not isinstance(files, dict):
         findings.append(Finding.make("files", "files must be a mapping of path → UTF-8 text"))
         files = {}
-    skill_md = files.get("SKILL.md")
+    skill_md = files.get(SKILL_MD)
     if not isinstance(skill_md, str) or not skill_md.strip():
-        findings.append(Finding.make("skill-md", "SKILL.md is required", "SKILL.md"))
+        findings.append(Finding.make("skill-md", "SKILL.md is required", SKILL_MD))
         skill_md = skill_md if isinstance(skill_md, str) else ""
     if len(skill_md.encode("utf-8")) > MAX_SKILL_MD_BYTES:
-        findings.append(Finding.make("oversize", f"SKILL.md exceeds {MAX_SKILL_MD_BYTES} bytes", "SKILL.md"))
+        findings.append(Finding.make("oversize", f"SKILL.md exceeds {MAX_SKILL_MD_BYTES} bytes", SKILL_MD))
 
     names_lower: dict[str, str] = {}
     total = 0
@@ -234,15 +235,15 @@ def validate_bundle(bundle: dict) -> dict:
             continue
         raw = content.encode("utf-8")
         total += len(raw)
-        if path != "SKILL.md":
+        if path != SKILL_MD:
             _utf8_text(raw, path, findings)
         suffix = Path(path.lower()).suffix
         name = Path(path.lower()).name
         if suffix in FORBIDDEN_SUFFIXES or name in FORBIDDEN_NAMES:
             findings.append(Finding.make("forbidden-type", f"{name} is not allowed in a v1 instruction skill", path))
-        if path == "SKILL.md":
+        if path == SKILL_MD:
             continue
-        if path == "manifest.json":
+        if path == MANIFEST_JSON:
             continue
         if not path.startswith("references/") or path.count("/") != 1:
             findings.append(Finding.make("path", "only SKILL.md, manifest.json, and references/*.md are allowed", path))
@@ -259,10 +260,10 @@ def validate_bundle(bundle: dict) -> dict:
     if total > MAX_TOTAL_BYTES:
         findings.append(Finding.make("oversize", f"total skill bytes exceed {MAX_TOTAL_BYTES}"))
     if skill_md:
-        _scan_text(skill_md, "SKILL.md", findings)
+        _scan_text(skill_md, SKILL_MD, findings)
         fm_name = FRONTMATTER_NAME_RE.search(skill_md)
         if fm_name and normalize_slug(fm_name.group(1)) not in ("", slug):
-            findings.append(Finding.make("slug-mismatch", "SKILL.md name/slug does not match the proposal slug", "SKILL.md"))
+            findings.append(Finding.make("slug-mismatch", "SKILL.md name/slug does not match the proposal slug", SKILL_MD))
 
     examples = bundle.get("examples") or []
     if not isinstance(examples, list) or not (MIN_EXAMPLES <= len(examples) <= MAX_EXAMPLES):
@@ -290,7 +291,7 @@ def validate_bundle(bundle: dict) -> dict:
         "files": {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)},
         "examples": examples if isinstance(examples, list) else [],
     }
-    content_hash = canonical_hash(normalized) if slug and title and "SKILL.md" in normalized["files"] else ""
+    content_hash = canonical_hash(normalized) if slug and title and SKILL_MD in normalized["files"] else ""
     codes = {f["code"] for f in findings}
     return {
         "ok": not findings,
@@ -364,15 +365,15 @@ def validate_dir(root: Path) -> dict:
             else:
                 findings.append(Finding.make("forbidden-type", "only SKILL.md, manifest.json, examples.json, and references/*.md are allowed", rel))
 
-    meta = _load_sidecar_json(root / "manifest.json", findings)
-    examples_file = _load_sidecar_json(root / "examples.json", findings)
+    meta = _load_sidecar_json(root / MANIFEST_JSON, findings)
+    examples_file = _load_sidecar_json(root / EXAMPLES_JSON, findings)
     examples = meta.get("examples") if isinstance(meta.get("examples"), list) else examples_file.get("examples")
     bundle = {
         "slug": meta.get("slug") or "",
         "title": meta.get("title") or "",
         "purpose": meta.get("purpose") or "",
         "activation_suggestion": meta.get("activation_suggestion") or "",
-        "files": {k: v for k, v in files.items() if k not in ("manifest.json", "examples.json")},
+        "files": {k: v for k, v in files.items() if k not in (MANIFEST_JSON, EXAMPLES_JSON)},
         "examples": examples or [],
     }
     result = validate_bundle(bundle)
