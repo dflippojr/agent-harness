@@ -241,13 +241,16 @@ def test_hub_timeout_ignores_offline_time(tmp_path, monkeypatch):
         await hub.poll("macbook", "i", [], {})  # delivered
         await asyncio.sleep(4.5)  # offline after 0.6 s: most of this doesn't count
         assert not task.done()
-        with pytest.raises(RunnerError) as e:
+        async def poll_until_done():
             for _ in range(6):  # online again: the remaining budget runs out
                 await hub.poll("macbook", "i", [], {})
                 await asyncio.sleep(0.4)
                 if task.done():
                     break
             await task
+
+        with pytest.raises(RunnerError) as e:
+            await poll_until_done()
         assert e.value.kind == "timeout"
         cancel = await hub.poll("macbook", "i", [], {})
         assert [r["op"] for r in cancel["requests"]] == ["cancel"]
@@ -318,10 +321,9 @@ def test_executor_put_file_writes_png_and_refuses_escape(tmp_path, monkeypatch):
     })
     assert "assets/icon.png" in out
     assert (ex.workspace(sid) / "assets" / "icon.png").read_bytes() == png
+    png_b64 = base64.b64encode(png).decode()
     with pytest.raises(harness_runner.OpError, match="escapes"):
-        ex.handle("r", "put_file", {
-            "session": sid, "path": "../escape.png", "content_b64": base64.b64encode(png).decode(),
-        })
+        ex.handle("r", "put_file", {"session": sid, "path": "../escape.png", "content_b64": png_b64})
     with pytest.raises(harness_runner.OpError, match="base64"):
         ex.handle("r", "put_file", {"session": sid, "path": "x.png", "content_b64": "%%%"})
     with pytest.raises(harness_runner.OpError, match="required"):

@@ -158,12 +158,39 @@ def pdf_to_text(body: bytes) -> tuple[str, str]:
     return title, body_text
 
 
+_DOCX_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _docx_para(p) -> str:
+    w = _DOCX_NS
+    out = []
+    for node in p.iter():
+        if node.tag == w + "t":
+            out.append(node.text or "")
+        elif node.tag == w + "tab":
+            out.append("\t")
+        elif node.tag in (w + "br", w + "cr"):
+            out.append("\n")
+    return "".join(out)
+
+
+def _docx_block_lines(block) -> list[str]:
+    w = _DOCX_NS
+    if block.tag == w + "p":
+        style = block.find(f"{w}pPr/{w}pStyle")
+        text = _docx_para(block)
+        level = re.match(r"Heading(\d)", style.get(w + "val", "")) if style is not None else None
+        return [("#" * int(level.group(1)) + " " + text) if level and text else text]
+    if block.tag == w + "tbl":
+        return [" | ".join(_docx_para(c).strip() for c in row.iter(w + "tc")) for row in block.iter(w + "tr")]
+    return []
+
+
 def docx_to_text(body: bytes) -> tuple[str, str]:
     """(title, text) of a Word document: paragraphs and table rows, without the formatting."""
     import io
     import zipfile
     from xml.etree import ElementTree
-    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as z:
             doc = ElementTree.fromstring(z.read("word/document.xml"))
@@ -171,28 +198,10 @@ def docx_to_text(body: bytes) -> tuple[str, str]:
     except (zipfile.BadZipFile, KeyError, ElementTree.ParseError) as e:
         raise ToolError(f"couldn't open the Word document: {e}")
 
-    def para(p) -> str:
-        out = []
-        for node in p.iter():
-            if node.tag == w + "t":
-                out.append(node.text or "")
-            elif node.tag == w + "tab":
-                out.append("\t")
-            elif node.tag in (w + "br", w + "cr"):
-                out.append("\n")
-        return "".join(out)
-
     lines = []
-    body_el = doc.find(w + "body")
+    body_el = doc.find(_DOCX_NS + "body")
     for block in (body_el if body_el is not None else []):
-        if block.tag == w + "p":
-            style = block.find(f"{w}pPr/{w}pStyle")
-            text = para(block)
-            level = re.match(r"Heading(\d)", style.get(w + "val", "")) if style is not None else None
-            lines.append(("#" * int(level.group(1)) + " " + text) if level and text else text)
-        elif block.tag == w + "tbl":
-            for row in block.iter(w + "tr"):
-                lines.append(" | ".join(para(c).strip() for c in row.iter(w + "tc")))
+        lines += _docx_block_lines(block)
     title = ""
     if core:
         m = re.search(rb"<dc:title>(.*?)</dc:title>", core, re.S)
@@ -243,8 +252,20 @@ def github_text(info: dict, bodies: dict[str, bytes]) -> tuple[str, str]:
     lines = []  # web_fetch already prints the repository name as the heading
     if meta.get("description"):
         lines.append(meta["description"])
+    lines += [f"- {k}: {v}" for k, v in _github_facts(meta) if v not in (None, "")]
+    lines += _github_listing(info, bodies.get("contents"))
+    if bodies.get("readme"):
+        readme = json.loads(bodies["readme"])
+        content = readme.get("content") or ""
+        if readme.get("encoding") == "base64":
+            content = base64.b64decode(content).decode("utf-8", errors="replace")
+        lines += ["", f"## {readme.get('path') or 'README'}", "", content]
+    return info["repo"], "\n".join(lines)
+
+
+def _github_facts(meta: dict) -> list[tuple[str, object]]:
     lic = meta.get("license") or {}
-    facts = [
+    return [
         ("License", f"{lic.get('name')} ({lic.get('spdx_id')})" if lic.get("name") else "none detected"),
         ("Language", meta.get("language")),
         ("Stars", meta.get("stargazers_count")), ("Forks", meta.get("forks_count")),
@@ -256,24 +277,64 @@ def github_text(info: dict, bodies: dict[str, bytes]) -> tuple[str, str]:
         ("Archived", "yes" if meta.get("archived") else None),
         ("Fork of", (meta.get("parent") or {}).get("full_name")),
     ]
-    lines += [f"- {k}: {v}" for k, v in facts if v not in (None, "")]
-    if bodies.get("contents"):
-        try:
-            entries = json.loads(bodies["contents"])
-        except ValueError:
-            entries = []
-        if isinstance(entries, list) and entries:
-            names = sorted((e.get("type") != "dir", e.get("name", "")) for e in entries)
-            listing = "  ".join(n if is_file else f"{n}/" for is_file, n in names)
-            where = info["path"] or "the repository root"
-            lines += ["", f"## Files in {where}" + (f" ({info['ref']})" if info["ref"] else ""), listing]
-    if bodies.get("readme"):
-        readme = json.loads(bodies["readme"])
-        content = readme.get("content") or ""
-        if readme.get("encoding") == "base64":
-            content = base64.b64decode(content).decode("utf-8", errors="replace")
-        lines += ["", f"## {readme.get('path') or 'README'}", "", content]
-    return info["repo"], "\n".join(lines)
+
+
+def _github_listing(info: dict, raw: bytes | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(entries, list) or not entries:
+        return []
+    names = sorted((e.get("type") != "dir", e.get("name", "")) for e in entries)
+    listing = "  ".join(n if is_file else f"{n}/" for is_file, n in names)
+    where = info["path"] or "the repository root"
+    return ["", f"## Files in {where}" + (f" ({info['ref']})" if info["ref"] else ""), listing]
+
+
+def _search_lines(data: dict, limit: int) -> list[str]:
+    results = sorted(data.get("results") or [], key=lambda r: -float(r.get("score") or 0))
+    seen, lines = set(), []
+    for r in results:
+        url = r.get("url") or ""
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        snippet = re.sub(r"\s+", " ", r.get("content") or "").strip()
+        lines.append(f"{len(lines) + 1}. {r.get('title') or url}\n   {url}" + (f"\n   {snippet[:300]}" if snippet else ""))
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _reject_internal_host(host: str) -> None:
+    if host in METADATA_HOSTS or host == "localhost" or host.endswith((".localhost", ".local", ".internal",
+                                                                      ".lan", ".home", ".ts.net")):
+        raise ToolError(f"{host} is a local or internal name; only public sites can be fetched")
+
+
+def _reject_blocked_ips(host: str, ips: list[str]) -> None:
+    for ip in ips:
+        reason = blocked_reason(ipaddress.ip_address(ip.split("%", 1)[0]))
+        if reason:
+            raise ToolError(f"{host} resolves to a {reason} address; only public sites can be fetched")
+
+
+def _extract_text(ctype: str, body: bytes, final: str):
+    """The (callable, args) that turns a downloaded body into (title, text); ToolError for unreadable types."""
+    if ctype in PDF_TYPES or body[:5] == b"%PDF-":
+        return pdf_to_text, (body,)
+    if ctype == DOCX_TYPE or (body[:2] == b"PK" and b"word/document.xml" in body[:65536]):
+        return docx_to_text, (body,)
+    text_body = body.decode("utf-8", errors="replace")
+    if ctype in ("text/html", "application/xhtml+xml") or (not ctype and "<html" in text_body[:2000].lower()):
+        return html_to_text, (text_body, final)
+    if ctype.startswith("text/") or ctype in TEXT_TYPES:
+        return (lambda t: ("", t)), (text_body,)
+    raise ToolError(f"can't read {ctype or 'unknown'} content from {final}; only HTML, text, PDF and "
+                    "Word (.docx) documents")
 
 
 class WebTools:
@@ -317,17 +378,7 @@ class WebTools:
             data = resp.json()
         except (httpx.HTTPError, ValueError) as e:
             raise ToolError(f"search backend unavailable: {type(e).__name__}: {e}"[:300])
-        results = sorted(data.get("results") or [], key=lambda r: -float(r.get("score") or 0))
-        seen, lines = set(), []
-        for r in results:
-            url = r.get("url") or ""
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            snippet = re.sub(r"\s+", " ", r.get("content") or "").strip()
-            lines.append(f"{len(lines) + 1}. {r.get('title') or url}\n   {url}" + (f"\n   {snippet[:300]}" if snippet else ""))
-            if len(lines) >= limit:
-                break
+        lines = _search_lines(data, limit)
         if not lines:
             out = f"No results for {query!r}."
             if data.get("unresponsive_engines"):
@@ -348,20 +399,15 @@ class WebTools:
         host = (parts.hostname or "").rstrip(".").lower()
         if not host:
             raise ToolError("the URL has no host")
-        if host in METADATA_HOSTS or host == "localhost" or host.endswith((".localhost", ".local", ".internal",
-                                                                          ".lan", ".home", ".ts.net")):
-            raise ToolError(f"{host} is a local or internal name; only public sites can be fetched")
+        _reject_internal_host(host)
         port = parts.port or (443 if parts.scheme == "https" else 80)
         try:
             ips = await self.resolve(host, port)
-        except (OSError, socket.gaierror) as e:
+        except OSError as e:  # includes socket.gaierror
             raise ToolError(f"can't resolve {host}: {e}")
         if not ips:
             raise ToolError(f"can't resolve {host}")
-        for ip in ips:
-            reason = blocked_reason(ipaddress.ip_address(ip.split("%", 1)[0]))
-            if reason:
-                raise ToolError(f"{host} resolves to a {reason} address; only public sites can be fetched")
+        _reject_blocked_ips(host, ips)
         ip = ips[0]
         netloc = (f"[{ip}]" if ":" in ip else ip) + (f":{parts.port}" if parts.port else "")
         host_header = host + (f":{parts.port}" if parts.port else "")
@@ -386,16 +432,19 @@ class WebTools:
                     ctype = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                     limit = (self.cfg.max_document_bytes if ctype in PDF_TYPES + (DOCX_TYPE, "application/octet-stream")
                              else self.cfg.max_bytes)
-                    body = bytearray()
-                    async for chunk in resp.aiter_bytes():
-                        body += chunk
-                        if len(body) > limit:
-                            raise ToolError(f"{'document' if limit != self.cfg.max_bytes else 'page'} is larger "
-                                            f"than {limit // 2**20} MB")
-                    return current, ctype, bytes(body)
+                    return current, ctype, await self._read_limited(resp, limit)
                 finally:
                     await resp.aclose()
         raise ToolError(f"too many redirects (more than {MAX_REDIRECTS})")
+
+    async def _read_limited(self, resp: httpx.Response, limit: int) -> bytes:
+        body = bytearray()
+        async for chunk in resp.aiter_bytes():
+            body += chunk
+            if len(body) > limit:
+                raise ToolError(f"{'document' if limit != self.cfg.max_bytes else 'page'} is larger "
+                                f"than {limit // 2**20} MB")
+        return bytes(body)
 
     async def _page(self, url: str) -> tuple[str, str, str]:
         hit = self._pages.get(url)
@@ -410,19 +459,8 @@ class WebTools:
             final, ctype, body = await self._download(url)
         except httpx.HTTPError as e:
             raise ToolError(f"fetch failed: {type(e).__name__}: {e}"[:300])
-        if ctype in PDF_TYPES or body[:5] == b"%PDF-":
-            title, text = await asyncio.to_thread(pdf_to_text, body)
-        elif ctype == DOCX_TYPE or (body[:2] == b"PK" and b"word/document.xml" in body[:65536]):
-            title, text = await asyncio.to_thread(docx_to_text, body)
-        else:
-            text_body = body.decode("utf-8", errors="replace")
-            if ctype in ("text/html", "application/xhtml+xml") or (not ctype and "<html" in text_body[:2000].lower()):
-                title, text = await asyncio.to_thread(html_to_text, text_body, final)
-            elif ctype.startswith("text/") or ctype in TEXT_TYPES:
-                title, text = "", text_body
-            else:
-                raise ToolError(f"can't read {ctype or 'unknown'} content from {final}; only HTML, text, PDF and "
-                                "Word (.docx) documents")
+        convert, args = _extract_text(ctype, body, final)
+        title, text = await asyncio.to_thread(convert, *args)
         text = strip_base64_images(re.sub(r"\n{3,}", "\n\n", text)).strip()
         entry = (time.time(), title, f"(final URL: {final})\n\n{text}" if final != url else text)
         self._remember(self._pages, url, entry)

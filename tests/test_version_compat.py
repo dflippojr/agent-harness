@@ -392,7 +392,7 @@ def test_handoff_bootstrap_failure_restores_previous_plist(tmp_path, monkeypatch
 
 
 def test_runner_schedules_shared_handoff_after_posting_update_result(tmp_path, monkeypatch):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "macrunner"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "macrunner"))
     import harness_runner
     home, base = installed_runtime(tmp_path)
     updater.previous_plist_path(base).write_text("old plist", encoding="utf-8")

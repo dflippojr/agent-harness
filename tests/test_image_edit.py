@@ -89,16 +89,20 @@ def test_normalize_rejects_unsupported_and_empty_mask():
     gif = Image.new("RGB", (16, 16), (1, 2, 3))
     buf = io.BytesIO()
     gif.save(buf, format="GIF")
+    gif_bytes = buf.getvalue()
     with pytest.raises(ToolError, match="unsupported"):
-        image_edit.normalize_source(buf.getvalue())
+        image_edit.normalize_source(gif_bytes)
     png, width, height = image_edit.normalize_source(png_rgb())
     assert png[:8] == b"\x89PNG\r\n\x1a\n" and width == 64 and height == 64
+    empty_mask = png_mask(empty=True)
     with pytest.raises(ToolError, match="empty"):
-        image_edit.normalize_mask(png_mask(empty=True), 64, 64)
+        image_edit.normalize_mask(empty_mask, 64, 64)
+    small_mask = png_mask(32, 32)
     with pytest.raises(ToolError, match="does not match"):
-        image_edit.normalize_mask(png_mask(32, 32), 64, 64)
+        image_edit.normalize_mask(small_mask, 64, 64)
+    source_64 = png_rgb(64, 64)
     with pytest.raises(ToolError, match="pixel cap"):
-        image_edit.normalize_source(png_rgb(64, 64), max_pixels=10)
+        image_edit.normalize_source(source_64, max_pixels=10)
 
 
 def test_normalize_strips_exif_and_ignores_client_path_bytes():
@@ -278,8 +282,9 @@ def test_edit_envelope_matches_upload_and_rejects_gallery_upscale(tmp_path):
     assert queued["status"] == "queued" and queued["width"] == 1664
 
     rejected = seed_done_image(m, iid="cccccccccccc", width=1665, height=928)
+    rejected_mask = png_mask(1665, 928)
     with pytest.raises(ToolError, match="too large to edit"):
-        m.images.submit_edit(rejected["id"], "keep the sky", png_mask(1665, 928))
+        m.images.submit_edit(rejected["id"], "keep the sky", rejected_mask)
 
     upscale = seed_done_image(m, iid="dddddddddddd", width=4096, height=4096, operation="upscale")
     with pytest.raises(ToolError, match="non-upscaled"):
@@ -287,21 +292,26 @@ def test_edit_envelope_matches_upload_and_rejects_gallery_upscale(tmp_path):
     assert server.calls == []
 
     m.images.cfg.max_pixels = 10
+    ok_mask = png_mask(1664, 928)
     with pytest.raises(ToolError, match="too large to edit"):
-        m.images.submit_edit(ok["id"], "still too many pixels", png_mask(1664, 928))
+        m.images.submit_edit(ok["id"], "still too many pixels", ok_mask)
+    upload_64 = png_rgb(64, 64)
     with pytest.raises(ToolError, match="pixel cap"):
-        m.images.ingest_upload(png_rgb(64, 64))
+        m.images.ingest_upload(upload_64)
 
 
 def test_edit_validation_and_path_tricks_before_gpu(tmp_path):
     m, server, _ = edit_manager(tmp_path)
     parent = m.images.ingest_upload(png_rgb())
+    mask = png_mask()
     with pytest.raises(ToolError, match="prompt is empty"):
-        m.images.submit_edit(parent["id"], "  ", png_mask())
+        m.images.submit_edit(parent["id"], "  ", mask)
+    empty_mask = png_mask(empty=True)
     with pytest.raises(ToolError, match="empty"):
-        m.images.submit_edit(parent["id"], "fix the sky", png_mask(empty=True))
+        m.images.submit_edit(parent["id"], "fix the sky", empty_mask)
+    small_mask = png_mask(32, 32)
     with pytest.raises(ToolError, match="does not match"):
-        m.images.submit_edit(parent["id"], "fix the sky", png_mask(32, 32))
+        m.images.submit_edit(parent["id"], "fix the sky", small_mask)
     with pytest.raises(ToolError, match="malformed"):
         m.images.ingest_upload(b"MZ-not-an-image")
     # A client-supplied path is ignored; only the bytes matter.
@@ -321,8 +331,9 @@ def test_image_paths_reject_database_id_traversal(tmp_path):
               "operation": image_edit.OPERATION_UPLOAD, "status": "done", "created_at": 1}
     m.db.insert_image(parent)
 
+    mask = png_mask()
     with pytest.raises(ToolError, match="invalid image id"):
-        m.images.submit_edit(parent["id"], "must not escape", png_mask())
+        m.images.submit_edit(parent["id"], "must not escape", mask)
     for builder in (m.images.path, m.images.source_path, m.images.mask_path):
         with pytest.raises(ToolError, match="invalid image id"):
             builder(parent)
@@ -333,8 +344,9 @@ def test_edit_missing_assets_do_not_break_text_to_image(tmp_path):
     async def body():
         m, _, _ = image_manager(tmp_path)
         await m.start(maintenance=False)
+        upload = png_rgb()
         with pytest.raises(ToolError, match="image-edit component"):
-            m.images.ingest_upload(png_rgb())
+            m.images.ingest_upload(upload)
         job = await m.images.wait(m.images.submit("still works")["id"])
         assert job["status"] == "done" and job["operation"] == "generate"
         await m.stop()
