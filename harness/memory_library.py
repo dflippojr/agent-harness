@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 
 from .config import MemoryLibraryConfig
-from .fileops import ToolError, truncate_middle
+from .fileops import ToolError, truncate_middle, write_text_within
 from .sandbox import run_cmd
 
 log = logging.getLogger("harness.memory_library")
@@ -310,8 +310,7 @@ class MemoryLibrary:
             if truncate_middle(diff, 12000) != approved_diff:
                 raise ToolError(f"{rel} changed after this change was proposed, so the approved diff no longer "
                                 "matches. Read the file again and propose the change again.")
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(new, encoding="utf-8")
+            write_text_within(self.root, f, new)
             summary = " ".join(args["summary"].split())[:150]
             message = f"{summary}\n\nApproved by the user; agent-harness session {session_id}."
             for step in (("add", "--", rel), ("commit", "-q", "-m", message)):
@@ -377,8 +376,7 @@ class MemoryLibrary:
         async with self._lock:
             await self._sync_for_write()
             f, rel, _, new = self._proposal("memory_write", args)
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(new, encoding="utf-8")
+            write_text_within(self.root, f, new)
             message = f"{' '.join(summary.split())[:150]}\n\nSaved from Agent Harness Web Settings."
             for step in (("add", "--", rel), ("commit", "-q", "-m", message)):
                 code, out, err = await self._git(*step)

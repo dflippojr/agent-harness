@@ -278,6 +278,19 @@ def test_runner_endpoints_need_the_token(tmp_path):
         assert projects["mac"] == "macbook" and projects["scratch"] == "tower"
 
 
+def test_refused_runner_log_line_cannot_be_forged(tmp_path, caplog):
+    """Issue #221 (S5145): a client address carrying a newline must not start a second log record."""
+    cfg = mac_cfg(tmp_path)
+    m = Manager(cfg, chat=Script([Completion(content="hi")]))
+    body = {"instance": "abc", "inflight": [], "info": {}}
+    with TestClient(create_app(m), client=("10.0.0.9\nCRITICAL forged entry\x1b[2J", 50000)) as client:
+        with caplog.at_level("WARNING", logger="harness.api"):
+            assert client.post("/runners/macbook/poll", json=body,
+                               headers={"Authorization": "Bearer wrong"}).status_code == 401
+    refused = [r.getMessage() for r in caplog.records if "refused runner" in r.getMessage()]
+    assert refused == ["refused runner macbook request from 10.0.0.9\\nCRITICAL forged entry\\x1b[2J"]
+
+
 # runner executor
 def test_runner_info_includes_disk_total(tmp_path):
     ex = executor(tmp_path, [tmp_path / "Projects"])

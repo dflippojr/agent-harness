@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
 
+import pytest
 from fastapi.testclient import TestClient
 
 from harness import cli
@@ -157,3 +159,95 @@ def test_mac_install_script_supports_pairing_and_legacy_update():
     assert "package.tar.gz" in script and "pip install" in script and "launchctl bootstrap" in script
     assert "agent_harness_client.pth" in script
     assert "harness_update.py" in script and "harness_compat.py" in script
+
+
+def harness_home(tmp_path, monkeypatch):
+    """Point the CLI's ~/.agent-harness at a temporary directory."""
+    home = tmp_path / "home" / ".agent-harness"
+    monkeypatch.setattr(cli, "HARNESS_HOME", home)
+    monkeypatch.setattr(cli, "DEFAULT_CONFIG", home / "client" / "config.json")
+    monkeypatch.setattr(cli, "DEFAULT_RUNNER_CONFIG", home / "runner" / "config.json")
+    return home
+
+
+def test_cli_config_paths_must_stay_under_the_harness_home(tmp_path, monkeypatch, capsys):
+    """Issue #221 (S2083): --config / --runner-config can't send the paired credentials anywhere else."""
+    home = harness_home(tmp_path, monkeypatch)
+    posted = []
+
+    class Response:
+        status_code = 201
+
+        @staticmethod
+        def json():
+            return {"server": "https://tower.example", "owner_token": "ho-secret",
+                    "runner": {"server": "https://tower.example", "name": "macbook", "token": "runner-secret"}}
+
+    monkeypatch.setattr(cli.httpx, "post", lambda url, **kwargs: posted.append(url) or Response())
+    outside = tmp_path / "elsewhere.json"
+    for extra in (["--config", str(outside), "pair", "https://tower.example", "hrp-1"],
+                  ["pair", "https://tower.example", "hrp-1", "--runner-config", str(outside)],
+                  ["pair", "https://tower.example", "hrp-1", "--runner-config", str(home / ".." / "runner.json")],
+                  ["projects", "add", str(tmp_path), "--runner-config", str(outside)]):
+        monkeypatch.setattr(cli.sys, "argv", ["harness", *extra])
+        with pytest.raises(SystemExit) as exit_:
+            cli.main()
+        assert exit_.value.code == 2
+    assert posted == [] and not outside.exists() and not (tmp_path / "home" / "runner.json").exists()
+    assert "must be a file under" in capsys.readouterr().err
+
+    monkeypatch.setattr(cli.sys, "argv", ["harness", "--config", str(home / "client" / "config.json"), "pair",
+                                          "https://tower.example", "hrp-1"])
+    assert cli.main() == 0
+    assert json.loads((home / "client" / "config.json").read_text())["token"] == "ho-secret"
+    assert json.loads((home / "runner" / "config.json").read_text())["token"] == "runner-secret"
+
+
+def test_private_json_never_writes_through_a_file_at_the_temp_name(tmp_path):
+    """Issue #221: whatever already sits at `<name>.new` is replaced, not written through."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+    target = tmp_path / "client" / "config.json"
+    target.parent.mkdir()
+    os.link(outside, target.with_name("config.json.new"))
+    cli._write_private_json(target, {"token": "ho-secret"})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"token": "ho-secret"}
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+    assert not target.with_name("config.json.new").exists()
+    if os.name == "posix":
+        assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_runner_logs_print_last_lines_without_external_command(tmp_path, monkeypatch, capsys):
+    """Issue #221 (S8705): runner logs stay in Python and never pass CLI input to an OS command."""
+    home = harness_home(tmp_path, monkeypatch)
+    log = home / "logs" / "runner.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    monkeypatch.setattr(cli.subprocess, "call", lambda *_: pytest.fail("runner logs must not invoke a command"))
+    for lines, expected in (("0", "three\n"), ("2", "two\nthree\n")):
+        monkeypatch.setattr(cli.sys, "argv", ["harness", "runner", "logs", "--lines", lines])
+        assert cli.main() == 0
+        assert capsys.readouterr().out == expected
+
+
+def test_runner_logs_follow_appended_lines(tmp_path, monkeypatch, capsys):
+    home = harness_home(tmp_path, monkeypatch)
+    log = home / "logs" / "runner.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("older\nlatest\n", encoding="utf-8")
+    sleeps = 0
+
+    def append_then_stop(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            with log.open("a", encoding="utf-8") as stream:
+                stream.write("followed\n")
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", append_then_stop)
+    monkeypatch.setattr(cli.sys, "argv", ["harness", "runner", "logs", "--lines", "1", "--follow"])
+    assert cli.main() == 130
+    assert capsys.readouterr().out == "latest\nfollowed\n"

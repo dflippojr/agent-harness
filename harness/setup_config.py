@@ -16,6 +16,7 @@ from pathlib import Path
 import yaml
 
 from .config import DEFAULT_IMAGES_MODELS_DIR, MODULE_NAMES, images_models_dir_matches
+from .fileops import ToolError, write_text_within
 
 PRESETS = {
     # tested on an RTX 4070 Ti Super 16 GB with 32 GB RAM (docs/phase0-results.md)
@@ -119,6 +120,17 @@ def profile_overlay(args) -> dict:
     return overlay
 
 
+def directory_arg(parser: argparse.ArgumentParser, flag: str, value: str) -> Path:
+    """An installer-chosen directory as an absolute, canonical path. Control characters are refused: no installer
+    produces them, and in a path they only serve to hide where the files really go."""
+    if not value.strip() or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        parser.error(f"{flag} must be a directory path")
+    path = Path(value).resolve()
+    if path.exists() and not path.is_dir():
+        parser.error(f"{flag} {path} is not a directory")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--config-dir", required=True)
@@ -143,24 +155,26 @@ def main(argv: list[str] | None = None) -> int:
         enabled.add("images")
     args.enable_module = sorted(enabled)
 
-    config_dir = Path(args.config_dir)
+    config_dir = directory_arg(p, "--config-dir", args.config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
-    Path(args.data_dir).mkdir(parents=True, exist_ok=True)
+    directory_arg(p, "--data-dir", args.data_dir).mkdir(parents=True, exist_ok=True)
     header = ("# Written by the agent-harness installer (harness/setup_config.py). Edit freely; it won't overwrite\n"
               "# it unless run with -Force. Every section is documented in the repository's config/harness.yaml.\n")
-    for name, text in (("harness.yaml", header + yaml.safe_dump(build(args), sort_keys=False)),
-                       ("projects.yaml", PROJECTS)):
-        target = config_dir / name
-        if target.exists() and not args.force:
-            print(f"kept existing {target}")
-            continue
-        target.write_text(text, encoding="utf-8")
-        print(f"wrote {target}")
-    profile_path = config_dir / "profile.yaml"
     profile_header = ("# Written by the agent-harness installer (harness/setup_config.py). It updates this\n"
                       "# reversible profile overlay on every run; put machine-specific settings in harness.local.yaml.\n")
-    profile_path.write_text(profile_header + yaml.safe_dump(profile_overlay(args), sort_keys=False), encoding="utf-8")
-    print(f"wrote {profile_path}")
+    files = (("harness.yaml", header + yaml.safe_dump(build(args), sort_keys=False), args.force),
+             ("projects.yaml", PROJECTS, args.force),
+             ("profile.yaml", profile_header + yaml.safe_dump(profile_overlay(args), sort_keys=False), True))
+    for name, text, overwrite in files:
+        target = config_dir / name
+        if target.exists() and not overwrite:
+            print(f"kept existing {target}")
+            continue
+        try:  # a link at the target must not carry the write out of the config directory
+            write_text_within(config_dir, target, text)
+        except ToolError as e:
+            p.error(str(e))
+        print(f"wrote {target}")
     from . import config
     cfg = config.load(config_dir)  # fail now rather than at daemon start
     model = (f"model {cfg.default_model} at {cfg.models[cfg.default_model].base_url}"
