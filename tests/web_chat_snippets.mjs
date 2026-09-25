@@ -176,9 +176,17 @@ if (!html.includes('data-snippet-lang="python"') || !html.includes('data-snippet
 if (!html.includes("<pre><code>rm -rf /</code></pre>") || !html.includes("<pre><code>plain</code></pre>")) fail(html);
 if (html.includes("<script>") || !html.includes("&lt;script&gt;")) fail(`fence content must stay escaped: ${html}`);
 // A fence opener followed by a long whitespace run and no closing fence must stay linear (Sonar S8786).
-const started = Date.now();
-md("```py" + " ".repeat(100000) + "\n".repeat(100000));
-if (Date.now() - started > 500) fail("md() backtracks super-linearly on an unclosed fence with a whitespace run");
+// Compare 10x the input against a baseline instead of an absolute time: linear growth is about 10x, quadratic
+// about 100x, and an absolute limit flakes on a slow, loaded runner (#217).
+const timeUnclosedFence = (n) => {
+  const t0 = performance.now();
+  md("```py" + " ".repeat(n) + "\n".repeat(n));
+  return performance.now() - t0;
+};
+timeUnclosedFence(1000); // warm up the regex engine
+const baseline = Math.max(timeUnclosedFence(10000), 5);
+const scaled = timeUnclosedFence(100000);
+if (scaled > baseline * 40 + 300) fail(`md() backtracks super-linearly on an unclosed fence with a whitespace run: ${baseline.toFixed(1)}ms at 10k, ${scaled.toFixed(1)}ms at 100k`);
 if (!md("```py  \nprint(1)```").includes("<code>print(1)</code>")) fail("trailing spaces after the tag are dropped");
 for (const [tag, id] of [["py", "python"], ["js", "javascript"], ["node", "javascript"], ["java", "java"], ["cs", "csharp"], ["cpp", "cpp"], ["c++", "cpp"]]) {
   if (runInContext(`snippetLanguage(${JSON.stringify(tag)})`, sandbox) !== id) fail(`fence ${tag} should map to ${id}`);
