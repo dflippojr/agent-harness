@@ -1,0 +1,74 @@
+[
+ [
+  "",
+  ""
+ ],
+ [
+  "hello",
+  "<p>hello</p>"
+ ],
+ [
+  "# T\n## U\n####### x",
+  "<h3>T</h3>\n<h4>U</h4>\n<p>####### x</p>"
+ ],
+ [
+  "```python\nprint(1)\n```\ntext",
+  "<pre data-snippet-lang=\"python\"><code>print(1)</code></pre>\n<p>text</p>"
+ ],
+ [
+  "a ```js x``` b ``` c",
+  "<p>a <pre data-snippet-lang=\"javascript\"><code>x</code></pre> b ``` c</p>"
+ ],
+ [
+  "````\nx\n````",
+  "<p><pre><code>`\nx</code></pre>`</p>"
+ ],
+ [
+  "```\nunclosed",
+  "<p>```</p>\n<p>unclosed</p>"
+ ],
+ [
+  "```a```b```c```",
+  "<p><pre><code></code></pre>b<pre><code></code></pre></p>"
+ ],
+ [
+  "| a | b |\n|---|:-:|\n| 1 | 2 |\n| 3 | 4 |\nafter",
+  "<div class=\"md-table\"><table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr><tr><td>3</td><td>4</td></tr></tbody></table></div>\n<p>after</p>"
+ ],
+ [
+  "- a\n- b\n1. c\n\n* d",
+  "<ul><li>a</li><li>b</li><li>c</li></ul>\n\n<ul><li>d</li></ul>"
+ ],
+ [
+  "1. x\n2. y",
+  "<ol><li>x</li><li>y</li></ol>"
+ ],
+ [
+  "> quote\n&gt; q2",
+  "<blockquote>quote</blockquote>\n<p>&amp;gt; q2</p>"
+ ],
+ [
+  "**b** *i* `c` [l](https://x.y/z) [a [b](http://u)",
+  "<p><strong>b</strong> <em>i</em> <code>c</code> <a href=\"https://x.y/z\" target=\"_blank\" rel=\"noopener\">l</a> <a href=\"http://u\" target=\"_blank\" rel=\"noopener\">a [b</a></p>"
+ ],
+ [
+  "para\n\n\npara2",
+  "<p>para</p>\n\n\n<p>para2</p>"
+ ],
+ [
+  "```\n```",
+  "<pre><code></code></pre>"
+ ],
+ [
+  "x ```py\nfoo\n``` y ```js\nbar\n```",
+  "<p>x <pre><code>foo</code></pre> y <pre data-snippet-lang=\"javascript\"><code>bar</code></pre></p>"
+ ],
+ [
+  "| a |\n| b |",
+  "<p>| a |</p>\n<p>| b |</p>"
+ ],
+ [
+  "<b>&</b>",
+  "<p>&lt;b&gt;&amp;&lt;/b&gt;</p>"
+ ]
+]

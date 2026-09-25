@@ -6,6 +6,12 @@ const TOKEN_KEY = "harness.ownerToken";
 export const WEB_BUILD_ID = "2026.09.17.1";
 export const WEB_PROTOCOL = 2;
 
+function stripTrailingSlashes(text) {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === "/") end--;
+  return text.slice(0, end);
+}
+
 export function normalizeDaemonUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -14,7 +20,7 @@ export function normalizeDaemonUrl(value) {
   if (!(["http:", "https:"].includes(url.protocol)) || url.username || url.password || url.search || url.hash) {
     throw new Error("Agent Harness Server URL must contain only http(s), host, port, and an optional path");
   }
-  url.pathname = url.pathname.replace(/\/+$/, "");
+  url.pathname = stripTrailingSlashes(url.pathname);
   return url.toString().replace(/\/$/, "");
 }
 
@@ -41,7 +47,8 @@ export class AgentHarnessWebClient {
   get independent() { return !!this.baseUrl && this.baseUrl !== location.origin; }
 
   url(path, surface = "admin") {
-    const prefix = surface === "app" ? "/api/v1" : surface === "admin" ? "/api/admin/v1" : "";
+    const prefixes = { app: "/api/v1", admin: "/api/admin/v1" };
+    const prefix = prefixes[surface] || "";
     return `${this.baseUrl}${prefix}${path}`;
   }
 
@@ -69,11 +76,11 @@ export class AgentHarnessWebClient {
     const type = resp.headers.get("content-type") || "";
     const data = type.includes("json") ? await resp.json() : await resp.text();
     if (!resp.ok) {
-      const err = new Error((data && data.detail) || `HTTP ${resp.status}`);
+      const err = new Error(data?.detail || `HTTP ${resp.status}`);
       err.status = resp.status;
-      err.code = data && data.error && data.error.code;
-      err.keys = data && data.error && data.error.keys;
-      err.details = data && data.error && data.error.details;
+      err.code = data?.error?.code;
+      err.keys = data?.error?.keys;
+      err.details = data?.error?.details;
       err.data = data;
       throw err;
     }

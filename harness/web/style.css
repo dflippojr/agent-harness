@@ -93,6 +93,7 @@ body {
 a { color: var(--accent); }
 button, input, select, textarea { font: inherit; color: inherit; }
 
+#guest-banner:not([hidden]) { display: block; }
 #guest-banner {
   position: sticky; top: var(--bar-h, 52px); z-index: 9;
   padding: 8px 16px; padding-left: max(16px, env(safe-area-inset-left, 0px));

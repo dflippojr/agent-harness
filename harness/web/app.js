@@ -292,57 +292,92 @@ function linkQuotes(html, answer, pages) {
 
 // Small, safe Markdown subset: everything is escaped first, then a few constructs are re-enabled.
 // A fenced block in a language the snippet runner supports is marked so Chat can add its Run button.
+const MD_BLOCK_MARK = "\u0000";   // brackets a fenced-block placeholder; escaped input never contains it as text we render
+const MD_BLOCK_LINE = new RegExp(`^${MD_BLOCK_MARK}\\d+${MD_BLOCK_MARK}$`);
+const MD_BLOCK_REF = new RegExp(`${MD_BLOCK_MARK}(\\d+)${MD_BLOCK_MARK}`, "g");
+const MD_TABLE_ROW = /^\s*\|.*\|\s*$/;
+const MD_LIST_ITEM = /^\s*([-*]|\d+\.) /;
+
+const isMdTagChar = (ch) => /[\w+#-]/.test(ch);
+
+// Replaces each ``` fence (escaped text in, language tag optional) with a placeholder; onBlock(tag, rest) makes the block's html.
+function replaceFences(text, onBlock) {
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const open = text.indexOf("```", pos);
+    const close = open < 0 ? -1 : text.indexOf("```", open + 3);
+    if (close < 0) break;
+    let tagEnd = open + 3;
+    while (tagEnd < close && isMdTagChar(text[tagEnd])) tagEnd++;
+    out += text.slice(pos, open) + onBlock(text.slice(open + 3, tagEnd), text.slice(tagEnd, close));
+    pos = close + 3;
+  }
+  return out + text.slice(pos);
+}
+
+const mdInline = (s) => s
+  .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+  .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+  .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+  .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+// Each block reader returns [html, index of the last line it used].
+function mdHeading(line, i) {
+  const level = Math.min(6, line.match(/^#+/)[0].length + 2);
+  return [`<h${level}>${mdInline(line.replace(/^#+ /, ""))}</h${level}>`, i];
+}
+
+function mdTable(lines, i) {
+  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => mdInline(c.trim()));
+  let html = "<table><thead><tr>" + cells(lines[i]).map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
+  i += 2;
+  while (i < lines.length && MD_TABLE_ROW.test(lines[i])) {
+    html += "<tr>" + cells(lines[i]).map((c) => `<td>${c}</td>`).join("") + "</tr>";
+    i++;
+  }
+  return [`<div class="md-table">${html}</tbody></table></div>`, i - 1];
+}
+
+function mdList(lines, i) {
+  const ordered = /^\s*\d+\./.test(lines[i]);
+  let html = ordered ? "<ol>" : "<ul>";
+  while (i < lines.length && MD_LIST_ITEM.test(lines[i])) {
+    html += `<li>${mdInline(lines[i].replace(MD_LIST_ITEM, ""))}</li>`;
+    i++;
+  }
+  return [html + (ordered ? "</ol>" : "</ul>"), i - 1];
+}
+
+const isMdTableStart = (lines, i) => MD_TABLE_ROW.test(lines[i]) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1]);
+
+function mdBlock(lines, i) {
+  const line = lines[i];
+  if (MD_BLOCK_LINE.test(line.trim())) return [line.trim(), i];
+  if (/^#{1,6} /.test(line)) return mdHeading(line, i);
+  if (isMdTableStart(lines, i)) return mdTable(lines, i);
+  if (MD_LIST_ITEM.test(line)) return mdList(lines, i);
+  if (/^&gt; ?/.test(line)) return [`<blockquote>${mdInline(line.replace(/^&gt; ?/, ""))}</blockquote>`, i];
+  if (!line.trim()) return ["", i];
+  return [`<p>${mdInline(line)}</p>`, i];
+}
+
 function md(src, pages) {
   const blocks = [];
-  let text = escapeHtml(src || "").replace(/```([\w+#-]*)([\s\S]*?)```/g, (_, tag, rest) => {
+  const text = replaceFences(escapeHtml(src || ""), (tag, rest) => {
     const code = rest.replace(/^[^\S\n]*\n?/, "");
     const lang = snippetLanguage(tag);
     blocks.push(`<pre${lang ? ` data-snippet-lang="${lang}"` : ""}><code>${code.replace(/\n$/, "")}</code></pre>`);
-    return `\u0000${blocks.length - 1}\u0000`;
+    return `${MD_BLOCK_MARK}${blocks.length - 1}${MD_BLOCK_MARK}`;
   });
-  const inline = (s) => s
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   const out = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\u0000\d+\u0000$/.test(line.trim())) { out.push(line.trim()); continue; }
-    if (/^#{1,6} /.test(line)) {
-      const level = Math.min(6, line.match(/^#+/)[0].length + 2);
-      out.push(`<h${level}>${inline(line.replace(/^#+ /, ""))}</h${level}>`);
-      continue;
-    }
-    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
-      const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => inline(c.trim()));
-      let html = "<table><thead><tr>" + cells(line).map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
-      i += 2;
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
-        html += "<tr>" + cells(lines[i]).map((c) => `<td>${c}</td>`).join("") + "</tr>";
-        i++;
-      }
-      i--;
-      out.push(`<div class="md-table">${html}</tbody></table></div>`);
-      continue;
-    }
-    if (/^\s*([-*]|\d+\.) /.test(line)) {
-      const ordered = /^\s*\d+\./.test(line);
-      let html = ordered ? "<ol>" : "<ul>";
-      while (i < lines.length && /^\s*([-*]|\d+\.) /.test(lines[i])) {
-        html += `<li>${inline(lines[i].replace(/^\s*([-*]|\d+\.) /, ""))}</li>`;
-        i++;
-      }
-      i--;
-      out.push(html + (ordered ? "</ol>" : "</ul>"));
-      continue;
-    }
-    if (/^&gt; ?/.test(line)) { out.push(`<blockquote>${inline(line.replace(/^&gt; ?/, ""))}</blockquote>`); continue; }
-    if (!line.trim()) { out.push(""); continue; }
-    out.push(`<p>${inline(line)}</p>`);
+    const [html, last] = mdBlock(lines, i);
+    out.push(html);
+    i = last;
   }
-  return linkQuotes(out.join("\n").replace(/\u0000(\d+)\u0000/g, (_, n) => blocks[Number(n)]), src, pages);
+  return linkQuotes(out.join("\n").replace(MD_BLOCK_REF, (_, n) => blocks[Number(n)]), src, pages);
 }
 
 function setConnLive(on) {
@@ -384,7 +419,7 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false } =
   const dispatch = (block) => {
     let type = "message";
     const data = [];
-    for (const line of block.replace(/\r/g, "").split("\n")) {
+    for (const line of block.replaceAll("\r", "").split("\n")) {
       if (line.startsWith("event:")) type = line.slice(6).trim();
       else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
     }
@@ -642,7 +677,7 @@ document.addEventListener("keydown", (event) => {
   const items = drawerFocusable();
   if (!items.length) return;
   const first = items[0];
-  const last = items[items.length - 1];
+  const last = items.at(-1);
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 });
@@ -701,7 +736,7 @@ function userMessageParts(content, run) {
 // Adds Run buttons under the marked code blocks md() produced. The source is the block's text, never its HTML.
 function addRunControls(root, run) {
   for (const pre of root.querySelectorAll("pre[data-snippet-lang]")) {
-    const lang = pre.getAttribute("data-snippet-lang");
+    const lang = pre.dataset.snippetLang;
     if (SNIPPET_LANGUAGES[lang]) pre.after(snippetRunRow(lang, () => pre.textContent, run));
   }
 }
@@ -871,7 +906,11 @@ async function viewChat(id) {
     h("p", { class: "muted" }, "Ask a question or paste code to review. To change files or run work, use Agents."),
     h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
       class: "btn small", type: "button",
-      onclick: () => { if (!ui) return; ui.input.value = text; ui.input.focus(); },
+      onclick: () => {
+        if (!ui) return;
+        ui.input.value = text;
+        ui.input.focus();
+      },
     }, text))));
   const wrap = h("div", { class: "chat-wrap" }, welcome, feed);
   append($app, wrap);
@@ -988,8 +1027,8 @@ async function viewChat(id) {
       live?.remove();
       live = null;
       const d = e.data;
-      if (d.content && d.content.trim()) sawContent = true;
-      if (d.content && d.content.trim()) assistantMessage(d.content);
+      if (d.content?.trim()) sawContent = true;
+      if (d.content?.trim()) assistantMessage(d.content);
       for (const call of d.tool_calls || []) {
         add(h("p", { class: "note" }, call.function?.name === "web_fetch" ? "Reading a web page…" : "Searching the web…"));
       }
@@ -1035,8 +1074,8 @@ let searchQuery = "";  // kept while navigating, so Back from a result returns t
 let sessionTarget = "all";
 try { sessionTarget = localStorage.getItem("harness.sessionTarget") || "all"; } catch (_) { /* private mode */ }
 
-// Search passages mark matches with  … ; everything else is escaped.
-const markPassage = (text) => escapeHtml(text).replace(//g, "<mark>").replace(//g, "</mark>");
+// Search passages mark matches with U+0002 … U+0003 (control characters, matched on purpose); everything else is escaped.
+const markPassage = (text) => escapeHtml(text).replaceAll("\u0002", "<mark>").replaceAll("\u0003", "</mark>");
 const PASSAGE_KIND = { title: "title", message: "you", assistant: "agent", tool: "tool output", answer: "answer", context: "app context" };
 
 async function viewList() {
@@ -1185,7 +1224,7 @@ async function confirmGpuQueue(label) {
     const remaining = gpu.manual_remaining_seconds === null ? "until you turn it off"
       : `for about ${gpu.manual_remaining_seconds >= 90 ? `${Math.ceil(gpu.manual_remaining_seconds / 60)} min` : `${gpu.manual_remaining_seconds} s`}`;
     return confirm(`GPU hold is on ${remaining}. ${label} can be queued, but nothing will be sent to the local model until the hold ends. Queue it?`);
-  } catch (_) { return true; }
+  } catch (_) { /* hold unreadable: don't block queueing */ return true; }
 }
 
 async function viewNew() {
@@ -1232,7 +1271,7 @@ async function viewNew() {
     try {
       const r = (await api("/runners")).find((x) => x.name === p.target);
       const label = TARGET_LABEL[p.target] || p.target;
-      targetState.textContent = r && r.online
+      targetState.textContent = r?.online
         ? `Runs on the ${label} (online${r.info.free_gb !== undefined ? `, ${r.info.free_gb} GB free` : ""})`
         : `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
     } catch (_) { /* offline */ }
@@ -1256,7 +1295,7 @@ async function viewNew() {
     h("option", { value: "empty" }, "Empty workspace"),
     h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"));
   const newProjectRepo = h("input", { type: "text",
-    placeholder: isMember() ? "https://github.com/org/repo" : "D:\\Projects\\example or https://…", hidden: true });
+    placeholder: isMember() ? "https://github.com/org/repo" : String.raw`D:\Projects\example or https://…`, hidden: true });
   newProjectSource.addEventListener("change", () => {
     newProjectRepo.hidden = newProjectSource.value !== "repo";
     newProjectRepo.required = newProjectSource.value === "repo";
@@ -1515,7 +1554,7 @@ function pageMetrics() {
   const y = Math.max(
     window.scrollY || 0, window.pageYOffset || 0, se.scrollTop || 0, body ? body.scrollTop : 0);
   const viewH = Math.max(
-    1, se.clientHeight || 0, window.innerHeight || 0, vv && vv.height ? vv.height : 0);
+    1, se.clientHeight || 0, window.innerHeight || 0, vv?.height ? vv.height : 0);
   const pageH = Math.max(
     se.scrollHeight || 0,
     document.documentElement.scrollHeight || 0,
@@ -1814,7 +1853,7 @@ async function viewSession(sid, tab, focusApproval) {
       ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
       : a.tool === "git_clone" ? `git clone ${a.args.url}`
         : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
-    const rec = a.smart && a.smart.recommendation
+    const rec = a.smart?.recommendation
       ? h("p", { class: "smart-rec" },
           `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${a.smart.reason ? `: ${a.smart.reason}` : ""}`)
       : null;
@@ -1889,7 +1928,7 @@ async function viewSession(sid, tab, focusApproval) {
         wrap.append(h("details", { class: "thinking" }, h("summary", {}, `Thought${took ? ` for ${took}` : ""} (${d.completion_tokens} tokens · ${d.gen_tps} tok/s)`),
           h("div", { class: "text" }, d.reasoning)));
       }
-      if (d.content && d.content.trim()) {
+      if (d.content?.trim()) {
         lastContent = d.content.trim();
         wrap.append(h("div", { class: `msg assistant${d.tool_calls.length ? "" : " final"}`, html: md(d.content, pages) }));
       }
@@ -2174,10 +2213,10 @@ function repoChanges(sid, repo, state, canComment, render) {
   const files = splitDiff(repo.diff);
   const parsedFiles = new Map((repo.parsed || []).map((f) => [f.name, f]));
   const mine = state.comments.filter((c) => c.repo === repo.path);
-  const sel = state.sel && state.sel.repo === repo.path ? state.sel : null;
+  const sel = state.sel?.repo === repo.path ? state.sel : null;
 
   const pick = (path, side, num) => {
-    if (sel && sel.path === path && sel.side === side) {
+    if (sel?.path === path && sel.side === side) {
       const lines = sideLines(repo.parsed, path, side);
       const start = Math.min(sel.anchor, num), end = Math.max(sel.anchor, num);
       for (let n = start; n <= end; n++) if (lines[n] === undefined) return toast("Pick lines within one hunk.");
@@ -2216,9 +2255,9 @@ function repoChanges(sid, repo, state, canComment, render) {
   const lineRow = (f, ln) => {
     if (ln.kind === "hunk") return h("div", { class: "hunk" }, ln.text);
     const sign = ln.kind === "add" ? "+" : ln.kind === "del" ? "-" : " ";
-    const side = ln.kind === "del" ? "old" : ln.kind === "add" ? "new" : sel && sel.path === f.name ? sel.side : "new";
+    const side = ln.kind === "del" ? "old" : ln.kind === "add" ? "new" : sel?.path === f.name ? sel.side : "new";
     const num = side === "old" ? ln.old : ln.new;
-    const picked = sel && sel.path === f.name && sel.side === side && num >= sel.start && num <= sel.end;
+    const picked = sel?.path === f.name && sel.side === side && num >= sel.start && num <= sel.end;
     const commented = mine.some((c) => c.path === f.name && c.side === side && num >= c.start_line && num <= c.end_line);
     const tap = canComment ? {
       role: "button", tabindex: "0", "aria-label": `Comment on ${side === "old" ? "removed " : ""}line ${num}`,
@@ -2240,7 +2279,7 @@ function repoChanges(sid, repo, state, canComment, render) {
     for (const ln of parsed.lines) {
       out.push(lineRow(f, ln));
       // The composer opens under the last selected line.
-      if (sel && sel.path === f.name && ln.kind !== "hunk" && (sel.side === "old" ? ln.old : ln.new) === sel.end) out.push(composer());
+      if (sel?.path === f.name && ln.kind !== "hunk" && (sel.side === "old" ? ln.old : ln.new) === sel.end) out.push(composer());
     }
     return out;
   };
@@ -2278,7 +2317,7 @@ function repoChanges(sid, repo, state, canComment, render) {
     repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, `${repo.commits.length} new commit${repo.commits.length === 1 ? "" : "s"}`),
       h("pre", { class: "small", style: "white-space:pre-wrap" }, repo.commits.join("\n"))) : null,
     drafts,
-    files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 || (sel && sel.path === f.name) || undefined },
+    files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 || (sel?.path === f.name) || undefined },
       h("summary", {}, f.name),
       h("div", { class: "diff" }, fileBody(f)))) : h("p", { class: "muted small" }, "No differences."),
     repo.truncated ? h("p", { class: "note" }, "Diff truncated.") : null);
@@ -2296,7 +2335,7 @@ function splitDiff(diff) {
       cur.lines.push(line);
     }
   }
-  files.forEach((f) => { while (f.lines.length && !f.lines[f.lines.length - 1]) f.lines.pop(); });
+  files.forEach((f) => { while (f.lines.length && !f.lines.at(-1)) f.lines.pop(); });
   return files;
 }
 
@@ -2447,7 +2486,7 @@ async function viewImages() {
   if (model) {
     model.addEventListener("change", () => {
       if (!resolutionTouched) {
-        const recommended = (modes[model.value] && modes[model.value].resolution)
+        const recommended = modes[model.value]?.resolution
           || (model.value === "quality" || model.value === "quality-fast" ? "high" : "standard");
         const choice = resolutionInputs.find((c) => c.name === recommended);
         if (choice) choice.input.checked = true;
@@ -2488,7 +2527,7 @@ async function viewImages() {
   const upload = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/jpg", hidden: true, "aria-label": "Upload a photo to edit" });
   const uploadBtn = h("button", { class: "btn", type: "button", onclick: () => upload.click() }, "Upload photo");
   upload.addEventListener("change", async () => {
-    const file = upload.files && upload.files[0];
+    const file = upload.files?.[0];
     upload.value = "";
     if (!file) return;
     if (!(await confirmGpuQueue("This image edit"))) return;
@@ -2509,8 +2548,7 @@ async function viewImages() {
         e.preventDefault();
         if (!prompt.value.trim()) return toast("Describe the image first");
         if (!model) return toast(IMAGE_MODELS_EMPTY);
-        const selectedMode = modelChoices.find((m) => m.key === model.value);
-        if (!selectedMode) return toast(IMAGE_MODELS_EMPTY);
+        if (!modelChoices.some((m) => m.key === model.value)) return toast(IMAGE_MODELS_EMPTY);
         if (!(await confirmGpuQueue("This image job"))) return;
         go.disabled = true;
         try {
@@ -2543,7 +2581,7 @@ async function viewImages() {
     try {
       const d = render(await api("/images"));
       timer = setTimeout(tick, IMAGE_BUSY.has(d.status.phase) ? 400 : 4000);
-    } catch (_) { timer = setTimeout(tick, 4000); }
+    } catch (_) { /* offline: keep polling */ timer = setTimeout(tick, 4000); }
   };
   timer = setTimeout(tick, IMAGE_BUSY.has(data.status.phase) ? 400 : 4000);
   onLeave(() => clearTimeout(timer));
@@ -2554,7 +2592,7 @@ async function viewImage(id) {
   const load = async () => {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
-    const edit = (img.service && img.service.edit) || {};
+    const edit = (img.service?.edit) || {};
     const sizeOk = img.editable !== false;
     const editReady = !isGuest() && img.status === "done" && edit.enabled && edit.available;
     const canEdit = editReady && sizeOk;
@@ -2586,7 +2624,7 @@ async function viewImage(id) {
            img.provenance.sampler, img.provenance.scheduler, img.provenance.guidance != null && `cfg ${img.provenance.guidance}`,
            img.provenance.checkpoint_revision && `ckpt ${String(img.provenance.checkpoint_revision).slice(0, 12)}`,
            img.provenance.comfy_revision && `ComfyUI ${img.provenance.comfy_revision}`].filter(Boolean).join(" · ")) : null,
-        img.parent && img.parent.id ? h("p", { class: "muted small" }, "Derived from ",
+        img.parent?.id ? h("p", { class: "muted small" }, "Derived from ",
           h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
         (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
           ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` },
@@ -2709,7 +2747,7 @@ async function viewImageEdit(id) {
   if (isGuest()) { go(`#/images/${id}`, true); return; }
   setHeader("images", "Edit", { page: true });
   const img = await api(`/images/${id}`);
-  const edit = (img.service && img.service.edit) || {};
+  const edit = (img.service?.edit) || {};
   if (img.status !== "done") { go(`#/images/${id}`, true); return; }
   if (!edit.enabled || !edit.available) {
     append($app, h("p", { class: "note" }, edit.setup || "Masked editing is not installed."),
@@ -2969,7 +3007,7 @@ function readTheme() {
   try { return localStorage.getItem("harness.theme") || "auto"; } catch (_) { return "auto"; }
 }
 function readHues() {
-  try { return { ...THEME_COLORS, ...(JSON.parse(localStorage.getItem("harness.themeHues") || "null") || {}) }; }
+  try { return { ...THEME_COLORS, ...JSON.parse(localStorage.getItem("harness.themeHues") || "null") }; }
   catch (_) { return { ...THEME_COLORS }; }
 }
 function applyTheme(name, hues) {
@@ -3002,7 +3040,7 @@ function readTextSize() {
   try {
     const id = localStorage.getItem("harness.textSize") || "m";
     return TEXT_SIZES[id] ? id : "m";
-  } catch (_) { return "m"; }
+  } catch (_) { /* storage unavailable: default size */ return "m"; }
 }
 function applyTextSize(id) {
   const size = TEXT_SIZES[id] ? id : readTextSize();
@@ -3018,7 +3056,7 @@ function copyBox(value) {
     class: "btn small", type: "button",
     onclick: async () => {
       try { await navigator.clipboard.writeText(value); toast("Copied"); }
-      catch (_) { const range = document.createRange(); range.selectNodeContents(code); getSelection().removeAllRanges(); getSelection().addRange(range); }
+      catch (_) { /* clipboard unavailable: select the text instead */ const range = document.createRange(); range.selectNodeContents(code); getSelection().removeAllRanges(); getSelection().addRange(range); }
     },
   }, "Copy");
   return h("div", { class: "copy-box", onclick: () => btn.click() }, code, btn);
@@ -3249,7 +3287,7 @@ function connectionCard() {
       fill(minted,
         h("p", { class: "note" }, "Copy this token now; it is not shown again."), field,
         h("button", { class: "btn small", onclick: async () => {
-          try { await navigator.clipboard.writeText(key.key); toast("Copied"); } catch (_) { field.select(); }
+          try { await navigator.clipboard.writeText(key.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); }
         } }, "Copy token"));
     } catch (e) { toast(e.message, 5000); }
   };
@@ -3386,7 +3424,7 @@ function notificationsCard(me) {
   return h("div", { class: "card" },
     me.notify.enabled ? h("ol", {},
       h("li", {}, "Install the ntfy app from the App Store."),
-      h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password (D:\\Docker\\ntfy\\secrets\\phone-login.txt on the tower)."),
+      h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password", String.raw` (D:\Docker\ntfy\secrets\phone-login.txt on the tower).`),
       h("li", {}, "Settings → Default server → the same URL. Then + → topic ", h("code", {}, me.notify.topic), "."),
       h("li", {}, "Tap a notification to open the session; long-press it for Approve / Deny.")) : h("p", {}, "Disabled in config/harness.yaml."),
     me.notify.enabled ? h("button", {
@@ -3540,7 +3578,7 @@ function settingInput(spec, draft) {
     box.addEventListener("change", () => { draft[spec.key] = box.checked; });
     return box;
   }
-  if (spec.enum && spec.enum.length) {
+  if (spec.enum?.length) {
     const sel = h("select", { disabled: !spec.writable }, spec.enum.map((item) =>
       h("option", { value: item, selected: item === current }, item)));
     sel.addEventListener("change", () => { draft[spec.key] = sel.value; });
@@ -3579,14 +3617,15 @@ async function daemonSettingsCard() {
     (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
     (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
     (view.warning ? ` · ${view.warning}` :
-      view.recovery && view.recovery.recovery === "overlay_quarantined"
+      view.recovery?.recovery === "overlay_quarantined"
         ? ` · ${view.recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`
-        : (view.recovery && view.recovery.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
+        : (view.recovery?.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
   const planBox = h("div", { class: "config-plan" });
   const errorBox = h("div");
   const groups = {};
   for (const spec of view.settings || []) {
-    (groups[spec.category] ||= []).push(spec);
+    groups[spec.category] ||= [];
+    groups[spec.category].push(spec);
   }
   const rows = Object.entries(groups).map(([category, specs]) => h("div", { class: "card config-category" },
     h("h3", {}, category),
@@ -3681,12 +3720,12 @@ async function confirmRestart(targetRevision, status, errorBox) {
         location.reload();
         return;
       }
-      if (next.recovery && next.recovery.recovery === "lkg_restore") {
+      if (next.recovery?.recovery === "lkg_restore") {
         append(errorBox, h("p", { class: "note bad" },
           `Automatic recovery restored revision ${next.revision}. ${next.recovery.reason || ""}`.trim()));
         return;
       }
-      if (next.recovery && next.recovery.recovery === "overlay_quarantined") {
+      if (next.recovery?.recovery === "overlay_quarantined") {
         append(errorBox, h("p", { class: "note bad" },
           next.warning || next.recovery.warning || next.recovery.reason ||
           "Managed overlay was quarantined; YAML defaults are in effect."));
@@ -4000,7 +4039,7 @@ function endpointCard(me) {
                   const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
                   fill(form, h("p", { class: "small" }, `Key for ${k.name}. Copy it now; it isn't shown again.`), field,
                     h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
                       h("button", { class: "btn", onclick: load }, "Done")));
                 } catch (e) { toast(e.message); }
               },
@@ -4080,7 +4119,7 @@ function appsCard(me) {
                   const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
                   fill(form, h("p", { class: "small" }, `Token for ${k.name}. Copy it now; it isn't shown again.`), field,
                     h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
                       h("button", { class: "btn", onclick: load }, "Done")));
                 } catch (e) { toast(e.message); }
               },
@@ -4107,7 +4146,7 @@ function appsCard(me) {
                 fill(form,
                   h("p", { class: "small" }, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`), field,
                   h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(p.code); toast("Copied"); } catch (_) { field.select(); } } }, "Copy"),
+                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(p.code); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
                     h("button", { class: "btn", onclick: load }, "Done")));
               } catch (e) { toast(e.message); }
             } }, "Approve and create code")));
@@ -4130,7 +4169,7 @@ function appsCard(me) {
                 fill(form,
                   h("p", { class: "small" }, `Run this in Terminal on the Mac. The code expires in 10 minutes and works once.`), field,
                   h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(command); toast("Copied"); } catch (_) { field.select(); } } }, "Copy install command"),
+                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(command); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy install command"),
                     h("button", { class: "btn", onclick: load }, "Done")));
               } catch (e) { toast(e.message); }
             } }, "Create install command")));
@@ -4139,7 +4178,7 @@ function appsCard(me) {
         h("p", { class: "small" }, "An Agent Harness App token lets a third-party integration start and follow sessions on Agent Harness Server. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.split(" ").join(", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
