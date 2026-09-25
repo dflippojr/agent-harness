@@ -1027,8 +1027,8 @@ async function viewChat(id) {
       live?.remove();
       live = null;
       const d = e.data;
-      if (d.content && d.content.trim()) sawContent = true;
-      if (d.content && d.content.trim()) assistantMessage(d.content);
+      if (d.content?.trim()) sawContent = true;
+      if (d.content?.trim()) assistantMessage(d.content);
       for (const call of d.tool_calls || []) {
         add(h("p", { class: "note" }, call.function?.name === "web_fetch" ? "Reading a web page…" : "Searching the web…"));
       }
@@ -1271,7 +1271,7 @@ async function viewNew() {
     try {
       const r = (await api("/runners")).find((x) => x.name === p.target);
       const label = TARGET_LABEL[p.target] || p.target;
-      targetState.textContent = r && r.online
+      targetState.textContent = r?.online
         ? `Runs on the ${label} (online${r.info.free_gb !== undefined ? `, ${r.info.free_gb} GB free` : ""})`
         : `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
     } catch (_) { /* offline */ }
@@ -1554,7 +1554,7 @@ function pageMetrics() {
   const y = Math.max(
     window.scrollY || 0, window.pageYOffset || 0, se.scrollTop || 0, body ? body.scrollTop : 0);
   const viewH = Math.max(
-    1, se.clientHeight || 0, window.innerHeight || 0, vv && vv.height ? vv.height : 0);
+    1, se.clientHeight || 0, window.innerHeight || 0, vv?.height ? vv.height : 0);
   const pageH = Math.max(
     se.scrollHeight || 0,
     document.documentElement.scrollHeight || 0,
@@ -1853,7 +1853,7 @@ async function viewSession(sid, tab, focusApproval) {
       ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
       : a.tool === "git_clone" ? `git clone ${a.args.url}`
         : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
-    const rec = a.smart && a.smart.recommendation
+    const rec = a.smart?.recommendation
       ? h("p", { class: "smart-rec" },
           `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${a.smart.reason ? `: ${a.smart.reason}` : ""}`)
       : null;
@@ -1928,7 +1928,7 @@ async function viewSession(sid, tab, focusApproval) {
         wrap.append(h("details", { class: "thinking" }, h("summary", {}, `Thought${took ? ` for ${took}` : ""} (${d.completion_tokens} tokens · ${d.gen_tps} tok/s)`),
           h("div", { class: "text" }, d.reasoning)));
       }
-      if (d.content && d.content.trim()) {
+      if (d.content?.trim()) {
         lastContent = d.content.trim();
         wrap.append(h("div", { class: `msg assistant${d.tool_calls.length ? "" : " final"}`, html: md(d.content, pages) }));
       }
@@ -2213,10 +2213,10 @@ function repoChanges(sid, repo, state, canComment, render) {
   const files = splitDiff(repo.diff);
   const parsedFiles = new Map((repo.parsed || []).map((f) => [f.name, f]));
   const mine = state.comments.filter((c) => c.repo === repo.path);
-  const sel = state.sel && state.sel.repo === repo.path ? state.sel : null;
+  const sel = state.sel?.repo === repo.path ? state.sel : null;
 
   const pick = (path, side, num) => {
-    if (sel && sel.path === path && sel.side === side) {
+    if (sel?.path === path && sel.side === side) {
       const lines = sideLines(repo.parsed, path, side);
       const start = Math.min(sel.anchor, num), end = Math.max(sel.anchor, num);
       for (let n = start; n <= end; n++) if (lines[n] === undefined) return toast("Pick lines within one hunk.");
@@ -2255,9 +2255,9 @@ function repoChanges(sid, repo, state, canComment, render) {
   const lineRow = (f, ln) => {
     if (ln.kind === "hunk") return h("div", { class: "hunk" }, ln.text);
     const sign = ln.kind === "add" ? "+" : ln.kind === "del" ? "-" : " ";
-    const side = ln.kind === "del" ? "old" : ln.kind === "add" ? "new" : sel && sel.path === f.name ? sel.side : "new";
+    const side = ln.kind === "del" ? "old" : ln.kind === "add" ? "new" : sel?.path === f.name ? sel.side : "new";
     const num = side === "old" ? ln.old : ln.new;
-    const picked = sel && sel.path === f.name && sel.side === side && num >= sel.start && num <= sel.end;
+    const picked = sel?.path === f.name && sel.side === side && num >= sel.start && num <= sel.end;
     const commented = mine.some((c) => c.path === f.name && c.side === side && num >= c.start_line && num <= c.end_line);
     const tap = canComment ? {
       role: "button", tabindex: "0", "aria-label": `Comment on ${side === "old" ? "removed " : ""}line ${num}`,
@@ -2279,7 +2279,7 @@ function repoChanges(sid, repo, state, canComment, render) {
     for (const ln of parsed.lines) {
       out.push(lineRow(f, ln));
       // The composer opens under the last selected line.
-      if (sel && sel.path === f.name && ln.kind !== "hunk" && (sel.side === "old" ? ln.old : ln.new) === sel.end) out.push(composer());
+      if (sel?.path === f.name && ln.kind !== "hunk" && (sel.side === "old" ? ln.old : ln.new) === sel.end) out.push(composer());
     }
     return out;
   };
@@ -2317,7 +2317,7 @@ function repoChanges(sid, repo, state, canComment, render) {
     repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, `${repo.commits.length} new commit${repo.commits.length === 1 ? "" : "s"}`),
       h("pre", { class: "small", style: "white-space:pre-wrap" }, repo.commits.join("\n"))) : null,
     drafts,
-    files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 || (sel && sel.path === f.name) || undefined },
+    files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 || (sel?.path === f.name) || undefined },
       h("summary", {}, f.name),
       h("div", { class: "diff" }, fileBody(f)))) : h("p", { class: "muted small" }, "No differences."),
     repo.truncated ? h("p", { class: "note" }, "Diff truncated.") : null);
@@ -2486,7 +2486,7 @@ async function viewImages() {
   if (model) {
     model.addEventListener("change", () => {
       if (!resolutionTouched) {
-        const recommended = (modes[model.value] && modes[model.value].resolution)
+        const recommended = modes[model.value]?.resolution
           || (model.value === "quality" || model.value === "quality-fast" ? "high" : "standard");
         const choice = resolutionInputs.find((c) => c.name === recommended);
         if (choice) choice.input.checked = true;
@@ -2527,7 +2527,7 @@ async function viewImages() {
   const upload = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/jpg", hidden: true, "aria-label": "Upload a photo to edit" });
   const uploadBtn = h("button", { class: "btn", type: "button", onclick: () => upload.click() }, "Upload photo");
   upload.addEventListener("change", async () => {
-    const file = upload.files && upload.files[0];
+    const file = upload.files?.[0];
     upload.value = "";
     if (!file) return;
     if (!(await confirmGpuQueue("This image edit"))) return;
@@ -2592,7 +2592,7 @@ async function viewImage(id) {
   const load = async () => {
     const img = await api(`/images/${id}`);
     const when = img.finished_at ? ago(img.finished_at) : ago(img.created_at);
-    const edit = (img.service && img.service.edit) || {};
+    const edit = (img.service?.edit) || {};
     const sizeOk = img.editable !== false;
     const editReady = !isGuest() && img.status === "done" && edit.enabled && edit.available;
     const canEdit = editReady && sizeOk;
@@ -2624,7 +2624,7 @@ async function viewImage(id) {
            img.provenance.sampler, img.provenance.scheduler, img.provenance.guidance != null && `cfg ${img.provenance.guidance}`,
            img.provenance.checkpoint_revision && `ckpt ${String(img.provenance.checkpoint_revision).slice(0, 12)}`,
            img.provenance.comfy_revision && `ComfyUI ${img.provenance.comfy_revision}`].filter(Boolean).join(" · ")) : null,
-        img.parent && img.parent.id ? h("p", { class: "muted small" }, "Derived from ",
+        img.parent?.id ? h("p", { class: "muted small" }, "Derived from ",
           h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
         (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
           ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` },
@@ -2747,7 +2747,7 @@ async function viewImageEdit(id) {
   if (isGuest()) { go(`#/images/${id}`, true); return; }
   setHeader("images", "Edit", { page: true });
   const img = await api(`/images/${id}`);
-  const edit = (img.service && img.service.edit) || {};
+  const edit = (img.service?.edit) || {};
   if (img.status !== "done") { go(`#/images/${id}`, true); return; }
   if (!edit.enabled || !edit.available) {
     append($app, h("p", { class: "note" }, edit.setup || "Masked editing is not installed."),
@@ -3578,7 +3578,7 @@ function settingInput(spec, draft) {
     box.addEventListener("change", () => { draft[spec.key] = box.checked; });
     return box;
   }
-  if (spec.enum && spec.enum.length) {
+  if (spec.enum?.length) {
     const sel = h("select", { disabled: !spec.writable }, spec.enum.map((item) =>
       h("option", { value: item, selected: item === current }, item)));
     sel.addEventListener("change", () => { draft[spec.key] = sel.value; });
@@ -3617,9 +3617,9 @@ async function daemonSettingsCard() {
     (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
     (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
     (view.warning ? ` · ${view.warning}` :
-      view.recovery && view.recovery.recovery === "overlay_quarantined"
+      view.recovery?.recovery === "overlay_quarantined"
         ? ` · ${view.recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`
-        : (view.recovery && view.recovery.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
+        : (view.recovery?.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
   const planBox = h("div", { class: "config-plan" });
   const errorBox = h("div");
   const groups = {};
@@ -3720,12 +3720,12 @@ async function confirmRestart(targetRevision, status, errorBox) {
         location.reload();
         return;
       }
-      if (next.recovery && next.recovery.recovery === "lkg_restore") {
+      if (next.recovery?.recovery === "lkg_restore") {
         append(errorBox, h("p", { class: "note bad" },
           `Automatic recovery restored revision ${next.revision}. ${next.recovery.reason || ""}`.trim()));
         return;
       }
-      if (next.recovery && next.recovery.recovery === "overlay_quarantined") {
+      if (next.recovery?.recovery === "overlay_quarantined") {
         append(errorBox, h("p", { class: "note bad" },
           next.warning || next.recovery.warning || next.recovery.reason ||
           "Managed overlay was quarantined; YAML defaults are in effect."));
