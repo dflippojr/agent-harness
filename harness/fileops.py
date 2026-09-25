@@ -33,6 +33,30 @@ def resolve_path(p: Path) -> Path:
     return Path(text[4:]) if text.startswith("\\\\?\\") else resolved
 
 
+def write_text_within(root: Path, target: Path, text: str) -> Path:
+    """Replace the file `target` inside `root` with `text` (UTF-8) and return the resolved path written.
+
+    `target` is resolved first and must land inside the resolved `root`, so neither `..` nor a symlink can move
+    the write elsewhere. The text goes to a new file beside the target that then replaces it, so a hard link at
+    the target is broken rather than written through, and a failed write leaves the old file whole.
+    """
+    root_r = resolve_path(root)
+    dest = resolve_path(target)
+    if dest == root_r or not dest.is_relative_to(root_r):
+        raise ToolError(f"{target} is outside {root}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}-{os.urandom(4).hex()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with open(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return dest
+
+
 def normalize_path(path: str | None, prefixes: tuple[str, ...] = ("/workspace",)) -> str:
     """Workspace-relative form of a path. Absolute paths under one of `prefixes` (the workspace root as the
     agent sees it) are made relative."""

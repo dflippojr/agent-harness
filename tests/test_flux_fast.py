@@ -605,10 +605,13 @@ def test_api_root_and_health_stay_responsive_during_cold_flux_hash(tmp_path, mon
 
     real = images_models_mod.sha256_file
     hashing = threading.Event()
+    release = threading.Event()
 
     def slow_hash(path, expected=None):
         hashing.set()
-        time.sleep(1.2)
+        # Held until the requests below finish; a hash that blocks the event
+        # loop would stall them for the full 5 s and blow the bound.
+        release.wait(5)
         return real(path, expected)
 
     monkeypatch.setattr(images_models_mod, "sha256_file", slow_hash)
@@ -625,7 +628,9 @@ def test_api_root_and_health_stay_responsive_during_cold_flux_hash(tmp_path, mon
         root_json = client.get("/api/v1").json()
         elapsed = time.monotonic() - started
         assert health.status_code == 200 and health.json()["ok"] is True
-        assert elapsed < 0.75
+        release.set()
+        # Generous on purpose: loaded runners took ~1 s here, a blocked loop takes >= 5 s.
+        assert elapsed < 2.5
         flux = root_json["image_modes"]["flux-fast"]
         assert flux["available"] is False
         assert flux["verifying"] is True or "verifying" in (flux.get("unavailable_reason") or "")

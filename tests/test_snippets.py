@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import threading
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -440,12 +440,25 @@ def run_live(language: str, source: str, timeout: float = 30, output_bytes: int 
     cancel = threading.Event()
     if cancel_after is not None:
         threading.Timer(cancel_after, cancel.set).start()
-    run_id = "t" + uuid.uuid4().hex[:12]  # unique across xdist workers, whose clocks tick together
+    run_id = _live_run_id()
     result = asyncio.run(runner.run(run_id, language, source, cancel))
     leftover = subprocess.run(["docker", "ps", "-aq", "--filter", f"name=harness-snippet-{run_id}"],
                               capture_output=True, text=True).stdout.strip()
     assert leftover == "", "the sandbox container must be gone after the run"
     return result
+
+
+def _live_run_id() -> str:
+    """A Docker name shared across pytest-xdist workers needs more than a truncated monotonic timestamp."""
+    return "t" + secrets.token_hex(8)
+
+
+def test_live_run_ids_do_not_collide_when_workers_share_a_coarse_clock(monkeypatch):
+    monkeypatch.setattr(time, "monotonic_ns", lambda: 93_000_000)
+    nonces = iter(("a" * 16, "b" * 16))
+    monkeypatch.setattr(snippets.secrets, "token_hex", lambda size: next(nonces))
+    assert _live_run_id() == "t" + "a" * 16
+    assert _live_run_id() == "t" + "b" * 16
 
 
 HELLO = {
@@ -548,7 +561,7 @@ def test_live_memory_pids_and_temp_limits():
 @live("python")
 def test_live_restart_removes_the_orphaned_container_only():
     lang = LANGUAGES["python"]
-    ids = ["t-orphan-" + uuid.uuid4().hex[:12], "t-other-" + uuid.uuid4().hex[:12]]
+    ids = ["t-orphan-" + str(time.monotonic_ns())[-8:], "t-other-" + str(time.monotonic_ns())[-8:]]
     for rid in ids:
         assert subprocess.run(container_args(lang, rid), capture_output=True).returncode == 0
     try:

@@ -569,13 +569,21 @@ async def create_project(body: CreateProject, request: Request):
             "homelab": False, "target": project.target, "managed": True}
 
 
+def _log_safe(value: object) -> str:
+    """A client-supplied value as one log line: newlines and other control characters are escaped."""
+    return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in str(value))
+
+
 # runners (the MacBook): outbound long-polling, authenticated with a per-runner bearer token
 def runner_auth(request: Request, name: str) -> Manager:
     m = mgr(request)
-    if name not in m.hub.state:
+    runner = m.hub.state.get(name)
+    if runner is None:
         raise HarnessError(404, "unknown runner")
-    if not m.hub.authorized(name, request.headers.get("authorization")):
-        log.warning("refused runner %s request from %s", name, request.client.host if request.client else "?")
+    if not m.hub.authorized(runner.name, request.headers.get("authorization")):
+        # The configured name, not the URL's copy of it; the client address can come from proxy headers.
+        log.warning("refused runner %s request from %s", runner.name,
+                    _log_safe(request.client.host if request.client else "?"))
         raise HarnessError(401, "bad runner token")
     return m
 

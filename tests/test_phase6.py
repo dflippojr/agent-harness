@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import os
 import time
 from pathlib import Path
 
@@ -1108,3 +1109,43 @@ def test_setup_config_writes_a_loadable_config(tmp_path, capsys):
     assert "mine" in config.load(tmp_path / "cfg").projects
     setup_config.main(args + ["--force"])
     assert "mine" not in config.load(tmp_path / "cfg").projects
+
+
+def setup_argv(tmp_path, config_dir, data_dir=None):
+    return ["--config-dir", str(config_dir), "--data-dir", str(data_dir or tmp_path / "data"), "--model", "gpt-oss",
+            "--pause-flag", str(tmp_path / "paused")]
+
+
+def test_setup_config_writes_stay_in_the_config_dir(tmp_path):
+    """Issue #221 (S8707): a link planted in the config directory can't carry a generated file elsewhere."""
+    from harness import setup_config
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("keep: true\n", encoding="utf-8")
+    os.link(outside, cfg_dir / "profile.yaml")  # profile.yaml is rewritten on every run
+    assert setup_config.main(setup_argv(tmp_path, cfg_dir)) == 0
+    assert outside.read_text(encoding="utf-8") == "keep: true\n"
+    assert "profile:" in (cfg_dir / "profile.yaml").read_text(encoding="utf-8")
+
+    (cfg_dir / "harness.yaml").unlink()
+    try:
+        (cfg_dir / "harness.yaml").symlink_to(outside)
+    except OSError:
+        return  # this account can't create symlinks; the hard-link case above still ran
+    with pytest.raises(SystemExit) as exit_:
+        setup_config.main(setup_argv(tmp_path, cfg_dir) + ["--force"])
+    assert exit_.value.code == 2
+    assert outside.read_text(encoding="utf-8") == "keep: true\n"
+
+
+def test_setup_config_refuses_unusable_directories(tmp_path, capsys):
+    from harness import setup_config
+    for config_dir, data_dir in ((f"{tmp_path}/cfg\nx", None), (tmp_path / "cfg", tmp_path / "not-a-dir")):
+        (tmp_path / "not-a-dir").write_text("", encoding="utf-8")
+        with pytest.raises(SystemExit) as exit_:
+            setup_config.main(setup_argv(tmp_path, config_dir, data_dir))
+        assert exit_.value.code == 2
+    err = capsys.readouterr().err
+    assert "--config-dir must be a directory path" in err and "--data-dir" in err and "is not a directory" in err
+    assert not (tmp_path / "cfg" / "harness.yaml").exists()

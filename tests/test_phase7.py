@@ -332,6 +332,20 @@ def test_memory_api(tmp_path):
         assert client.put("/memory/profile", json={"content": "x" * 400, "summary": "too long"}).status_code == 400
 
 
+def test_owner_write_that_fails_leaves_the_profile_whole(tmp_path):
+    """Issue #221: the owner's profile save goes through the contained, atomic write, so a save that fails part way
+    (here: text that can't be encoded) doesn't leave a truncated profile in the clone for the next session to read."""
+    bare, lib_cfg = library_remote(tmp_path)
+    lib = MemoryLibrary(lib_cfg, db=None)
+
+    async def body():
+        with pytest.raises(UnicodeEncodeError):
+            await lib.owner_write("agent-profile.md", "# Agent profile\n- \ud800\n", "broken text")
+    asyncio.run(body())
+    assert "Prefers short answers." in lib.profile_text()
+    assert sorted(p.name for p in lib.root.iterdir()) == [".git", "agent-profile.md", "categories"]
+
+
 # 7d: scheduled jobs
 from datetime import datetime  # noqa: E402
 
@@ -637,3 +651,32 @@ def test_fixture_records_and_replays_without_network(tmp_path):
             await web.web_fetch("https://example.org/not-recorded")
     asyncio.run(body())
     assert web.fixture.misses == ["search: best pizza in akron", "fetch: https://example.org/not-recorded"]
+
+
+def test_fixture_recorder_only_asks_the_local_searxng(tmp_path, monkeypatch, capsys):
+    """Issue #221 (S8703): --searxng-url can't point the recorder at another host."""
+    from harness import web_fixture
+    seen = []
+    real_client = httpx.AsyncClient
+
+    def searxng(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"results": []})
+
+    monkeypatch.setattr(web_fixture.httpx, "AsyncClient",
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(searxng), **kwargs))
+    for url in ("http://169.254.169.254/latest", "https://searx.example.com", "file:///etc/passwd",
+                "http://user:pw@127.0.0.1:8888", "http://127.0.0.1:8888/?engines=x", "http://127.0.0.1.example.com",
+                "http://127.0.0.1:99999"):
+        with pytest.raises(ValueError, match="SearXNG URL"):
+            asyncio.run(web_fixture.record(tmp_path / "fx", ["q"], [], 0, url))
+    with pytest.raises(SystemExit) as exit_:
+        web_fixture.main(["record", str(tmp_path / "fx"), "--query", "q", "--searxng-url", "http://10.0.0.5:8888"])
+    assert exit_.value.code == 2 and "must be http(s) on 127.0.0.1" in capsys.readouterr().err
+    assert seen == [] and not (tmp_path / "fx").exists()
+
+    assert web_fixture.searxng_search_url("http://localhost:8888/searx/") == "http://localhost:8888/searx/search"
+    assert web_fixture.searxng_search_url("http://[::1]:8888") == "http://[::1]:8888/search"
+    asyncio.run(web_fixture.record(tmp_path / "fx", ["disc golf"], [], 0, "http://127.0.0.1:8888/"))
+    assert seen == ["http://127.0.0.1:8888/search?q=disc+golf&format=json&pageno=1"]
+    assert "disc golf" in Fixture(tmp_path / "fx").manifest["searches"]

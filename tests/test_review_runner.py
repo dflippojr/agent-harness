@@ -1360,3 +1360,115 @@ Assert-ReviewModelConfiguration
         )
         assert invalid.returncode != 0, bad
         assert f"invalid review effort '{bad}' for backend '{backend}'" in output(invalid)
+
+
+def _sized_diff(sizes: list[tuple[str, int]]) -> str:
+    return "".join(
+        f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -0,0 +1 @@\n+{'A' * size}\n"
+        for name, size in sizes
+    )
+
+
+def _embedding_facts(tmp_path: Path, sizes: list[tuple[str, int]], cap: int) -> dict:
+    diff_file = tmp_path / "diff.txt"
+    diff_file.write_text(_sized_diff(sizes), encoding="utf-8", newline="")
+    path = str(diff_file).replace("'", "''")
+    result = run_powershell(
+        tmp_path,
+        f"""
+$diff = [System.IO.File]::ReadAllText('{path}')
+$e = Get-ReviewDiffEmbedding -Diff $diff -MaxDiffBytes {cap}
+[ordered]@{{
+    omitted = @($e.OmittedFiles)
+    files = $e.EmbeddedFiles
+    total = $e.TotalFiles
+    embeddedBytes = $e.EmbeddedBytes
+    totalBytes = $e.TotalBytes
+    line = if (@($e.OmittedFiles).Count -gt 0) {{ Get-ReviewOmissionCoverageLine -Embedding $e }} else {{ '' }}
+}} | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    return json.loads(result.stdout.strip())
+
+
+def test_embedding_under_cap_reports_no_omissions(tmp_path):
+    facts = _embedding_facts(tmp_path, [("a.py", 100), ("b.py", 100)], 100000)
+    assert facts["omitted"] == []
+    assert facts["files"] == facts["total"] == 2
+    assert facts["embeddedBytes"] == facts["totalBytes"]
+    assert facts["line"] == ""
+
+
+def test_embedding_exactly_at_cap_keeps_everything(tmp_path):
+    total = len(_sized_diff([("a.py", 100), ("b.py", 100)]).encode())
+    facts = _embedding_facts(tmp_path, [("a.py", 100), ("b.py", 100)], total)
+    assert facts["omitted"] == []
+    assert facts["embeddedBytes"] == total
+
+
+def test_embedding_over_cap_names_omitted_files_and_sizes(tmp_path):
+    facts = _embedding_facts(tmp_path, [("a.py", 1000), ("b.py", 1000), ("c.py", 1000)], 2300)
+    assert facts["omitted"] == ["c.py"]
+    assert facts["files"] == 2 and facts["total"] == 3
+    assert facts["embeddedBytes"] <= 2300 < facts["totalBytes"]
+    assert facts["line"].startswith("PARTIAL REVIEW: reviewed 2 of 3 files (")
+    assert "KB of diff). Not reviewed: c.py" in facts["line"]
+
+
+def test_embedding_single_file_larger_than_cap_is_omitted(tmp_path):
+    facts = _embedding_facts(tmp_path, [("huge.py", 5000)], 1000)
+    assert facts["omitted"] == ["huge.py"]
+    assert facts["files"] == 0 and facts["total"] == 1
+    assert "reviewed 0 of 1 files" in facts["line"]
+    assert "Not reviewed: huge.py" in facts["line"]
+
+
+def test_embedding_drops_low_risk_files_before_source_regardless_of_alphabet(tmp_path):
+    sizes = [("docs/a.md", 1000), ("package-lock.json", 1000), ("tests/test_a.py", 1000), ("zeta/src.py", 1000)]
+    facts = _embedding_facts(tmp_path, sizes, 2300)
+    assert facts["omitted"] == ["docs/a.md", "package-lock.json"]
+
+
+def test_max_diff_bytes_variable_defaults_validates_and_fails_closed(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        r"""
+$env:REVIEW_MAX_DIFF_BYTES = ''
+$default = Get-ReviewMaxDiffBytesFromEnvironment
+$env:REVIEW_MAX_DIFF_BYTES = ' 409600 '
+$custom = Get-ReviewMaxDiffBytesFromEnvironment
+$bad = @()
+foreach ($v in @('abc', '-5', '100', '99999999', '1e6', '204800; rm')) {
+    $env:REVIEW_MAX_DIFF_BYTES = $v
+    try { Assert-ReviewModelConfiguration; $bad += "accepted:$v" } catch { }
+}
+@{ default = $default; custom = $custom; bad = $bad } | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip())
+    assert value == {"default": 204800, "custom": 409600, "bad": []}
+
+
+def test_partial_review_comment_states_omission_and_withholds_marker(tmp_path):
+    out = tmp_path / "posted.md"
+    result = run_powershell(
+        tmp_path,
+        f"""
+$e = [pscustomobject]@{{ OmittedFiles = @('x.py', 'y.py'); EmbeddedFiles = 3; TotalFiles = 5; EmbeddedBytes = 2048; TotalBytes = 4096 }}
+$line = Get-ReviewOmissionCoverageLine -Embedding $e
+$r = [pscustomobject]@{{ Backend = 'claude'; Model = ''; Output = 'No significant findings.' }}
+Write-ReviewResult -Result $r -OutputPath '{str(out).replace("'", "''")}' -CoverageLine $line -HeadSha '{HEAD_SHA}' -PublishMarker:$false
+""",
+    )
+    assert result.returncode == 0, output(result)
+    body = out.read_text(encoding="utf-8-sig")
+    assert body.splitlines()[0] == "PARTIAL REVIEW: reviewed 3 of 5 files (2 of 4 KB of diff). Not reviewed: x.py, y.py"
+    assert "Reviewed the full diff" not in body
+    assert "agent-review:" not in body
+
+
+def test_workflow_and_docs_cover_max_diff_bytes():
+    assert "REVIEW_MAX_DIFF_BYTES: ${{ vars.REVIEW_MAX_DIFF_BYTES }}" in WORKFLOW.read_text(encoding="utf-8")
+    assert "REVIEW_MAX_DIFF_BYTES" in CI_DOCS.read_text(encoding="utf-8")

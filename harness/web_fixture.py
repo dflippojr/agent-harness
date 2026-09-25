@@ -23,11 +23,12 @@ import re
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import httpx
 
 FIXTURE_IP = "93.184.216.34"   # any public address: replayed fetches never connect anywhere
+SEARXNG_HOSTS = ("127.0.0.1", "localhost", "::1")  # the recorder asks the SearXNG on this machine, nothing else
 
 
 def normalize_query(query: str) -> str:
@@ -116,15 +117,33 @@ class Fixture:
         return httpx.MockTransport(self.handler)
 
 
+def searxng_search_url(searxng_url: str) -> str:
+    """The /search endpoint of the local SearXNG at `searxng_url`. Any other host, a scheme other than http(s),
+    credentials, a query or fragment, or a bad port is a ValueError, so the recorder can't be pointed elsewhere."""
+    parts = urlparse(searxng_url.strip())
+    if parts.scheme not in ("http", "https") or parts.hostname not in SEARXNG_HOSTS:
+        raise ValueError(f"the SearXNG URL must be http(s) on {', '.join(SEARXNG_HOSTS)}, not {searxng_url!r}")
+    if parts.username is not None or parts.password is not None or parts.params or parts.query or parts.fragment:
+        raise ValueError(f"the SearXNG URL must be a plain base URL, not {searxng_url!r}")
+    try:
+        port = parts.port
+    except ValueError as e:
+        raise ValueError(f"the SearXNG URL has a bad port: {searxng_url!r}") from e
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    netloc = host if port is None else f"{host}:{port}"
+    return f"{parts.scheme}://{netloc}{parts.path.rstrip('/')}/search"
+
+
 async def record(root: Path, queries: list[str], urls: list[str], fetch_top: int, searxng_url: str) -> Fixture:
     from .config import WebConfig
     from .web_tools import WebTools
+    search_url = searxng_search_url(searxng_url)
     fixture = Fixture(root)
     web = WebTools(WebConfig(enabled=True, searxng_url=searxng_url))
     to_fetch = list(urls)
     async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         for q in queries:
-            resp = await client.get(f"{searxng_url.rstrip('/')}/search", params={"q": q, "format": "json", "pageno": 1})
+            resp = await client.get(search_url, params={"q": q, "format": "json", "pageno": 1})
             resp.raise_for_status()
             data = resp.json()
             results = sorted(data.get("results") or [], key=lambda r: -float(r.get("score") or 0))
@@ -162,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
     show.add_argument("dir")
     args = parser.parse_args(argv)
     if args.command == "record":
+        try:
+            searxng_search_url(args.searxng_url)
+        except ValueError as e:
+            parser.error(str(e))
         asyncio.run(record(Path(args.dir), args.query, args.url, args.fetch_top, args.searxng_url))
     else:
         f = Fixture(args.dir)
