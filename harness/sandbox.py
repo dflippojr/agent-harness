@@ -19,40 +19,35 @@ class SandboxUnavailable(Exception):
     """Docker isn't reachable or the container can't be started."""
 
 
-def _text(data: bytes) -> str:
-    """Decode like subprocess text mode: UTF-8 with replacement characters, universal newlines."""
-    return data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+def _spawn(args: list[str], has_input: bool, env: dict | None) -> subprocess.Popen:
+    """Start the process. Run in a thread: creating a process on Windows can block for a noticeable time."""
+    return subprocess.Popen(
+        args, stdin=subprocess.PIPE if has_input else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env={**os.environ, **env} if env else None,
+    )
 
 
-def _kill(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is None:
-        proc.kill()
+def _kill(proc: subprocess.Popen) -> None:
+    proc.kill()
 
 
 async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = None,
                   env: dict | None = None) -> tuple[int, str, str]:
     """subprocess.run that can be cancelled: cancelling the awaiting task kills the process. `env` is merged over
-    the daemon's environment."""
-    proc = await asyncio.create_subprocess_exec(
-        *args, stdin=subprocess.PIPE if input_ is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env={**os.environ, **env} if env else None,
-    )
-    data = None if input_ is None else input_.replace("\n", os.linesep).encode("utf-8", "replace")
-    io = asyncio.ensure_future(proc.communicate(data))
+    the daemon's environment. Deliberately thread-based rather than asyncio subprocesses: on Python 3.12 the
+    asyncio subprocess machinery left a cancelled call hanging when the loop shut down (#207)."""
+    proc = await asyncio.to_thread(_spawn, args, input_ is not None, env)
     try:
-        done, _ = await asyncio.wait({io}, timeout=timeout)
-        if not done:  # kill, then keep what the command wrote before the deadline
-            _kill(proc)
-            out, err = await io
-            return 124, _text(out), _text(err) + f"\n[timed out after {timeout:.0f}s]"
-    except asyncio.CancelledError:
-        io.cancel()
+        out, err = await asyncio.to_thread(proc.communicate, input_, timeout)
+    except subprocess.TimeoutExpired:
         _kill(proc)
-        await proc.wait()  # reap it, as the old worker thread did, so the transport closes before the loop can
+        out, err = await asyncio.to_thread(proc.communicate)
+        return 124, out, err + f"\n[timed out after {timeout:.0f}s]"
+    except asyncio.CancelledError:
+        _kill(proc)
         raise
-    out, err = io.result()
-    return proc.returncode, _text(out), _text(err)
+    return proc.returncode, out, err
 
 
 async def ensure_networks(cfg: SandboxConfig) -> None:
