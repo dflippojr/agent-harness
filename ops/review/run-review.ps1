@@ -21,6 +21,9 @@ $script:ReviewEffortValues = @{
     claude = @('low', 'medium', 'high', 'xhigh', 'max')
     codex = @('low', 'medium', 'high', 'xhigh')
 }
+$script:DefaultMaxDiffBytes = 204800
+$script:MinMaxDiffBytes = 20480
+$script:MaxMaxDiffBytes = 2097152
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
 $script:ReviewMarkerPattern = '(?i)<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental)(?: base=([A-Za-z0-9._/\-]+))? -->'
 $script:UntrustedAgentConfigDirectories = @('.claude', '.cursor', '.codex', '.agents')
@@ -120,6 +123,7 @@ function Assert-ReviewModelConfiguration {
         Get-ReviewModelFromEnvironment -Backend $backend | Out-Null
         Get-ReviewEffortFromEnvironment -Backend $backend | Out-Null
     }
+    Get-ReviewMaxDiffBytesFromEnvironment | Out-Null
 }
 
 function Test-GitObjectId {
@@ -916,6 +920,34 @@ function Get-ReviewCoverage {
     }
 }
 
+function Get-ReviewMaxDiffBytesFromEnvironment {
+    [CmdletBinding()]
+    param()
+
+    $requested = [string]$env:REVIEW_MAX_DIFF_BYTES
+    if ([string]::IsNullOrWhiteSpace($requested)) { return $script:DefaultMaxDiffBytes }
+    $text = $requested.Trim()
+    $value = 0
+    if ($text -notmatch '^[0-9]{1,8}$' -or -not [int]::TryParse($text, [ref]$value) -or
+        $value -lt $script:MinMaxDiffBytes -or $value -gt $script:MaxMaxDiffBytes) {
+        throw "invalid REVIEW_MAX_DIFF_BYTES '$requested' (expected an integer from $($script:MinMaxDiffBytes) to $($script:MaxMaxDiffBytes))"
+    }
+    return $value
+}
+
+function Get-ReviewFileRiskTier {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $lower = $Path.ToLowerInvariant()
+    if ($lower -match '(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|uv\.lock|cargo\.lock|composer\.lock|gemfile\.lock)$' -or
+        $lower -match '\.(lock|min\.js|min\.css|map|svg|snap)$' -or
+        $lower -match '(^|/)(dist|build|vendor|node_modules|generated|__snapshots__)/') { return 3 }
+    if ($lower -match '\.(md|rst|txt)$' -or $lower -match '^docs/') { return 2 }
+    if ($lower -match '(^|/)(tests?|__tests__)/' -or $lower -match '(^|/)test_[^/]*$' -or $lower -match '[._]tests?\.[a-z]+$') { return 1 }
+    return 0
+}
+
 function Get-ReviewDiffEmbedding {
     [CmdletBinding()]
     param(
@@ -927,19 +959,22 @@ function Get-ReviewDiffEmbedding {
     if ([string]::IsNullOrWhiteSpace($Diff)) { throw 'pull request diff is empty' }
 
     $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $totalBytes = $utf8.GetByteCount($Diff)
     $embeddedDiff = $Diff
+    $embeddedBytes = $totalBytes
+    $totalFiles = @([regex]::Matches($Diff, '(?m)^diff --git .+$')).Count
+    $embeddedFileCount = $totalFiles
     $omittedFiles = New-Object System.Collections.Generic.List[string]
-    if ($utf8.GetByteCount($Diff) -gt $MaxDiffBytes) {
+    if ($totalBytes -gt $MaxDiffBytes) {
         $fileStarts = @([regex]::Matches($Diff, '(?m)^diff --git .+$'))
         if ($fileStarts.Count -eq 0) {
             throw 'oversized pull request diff has no file boundaries'
         }
 
-        $builder = New-Object System.Text.StringBuilder
-        if ($fileStarts[0].Index -gt 0) {
-            [void]$builder.Append($Diff.Substring(0, $fileStarts[0].Index))
-        }
-        $truncated = $false
+        $preamble = ''
+        if ($fileStarts[0].Index -gt 0) { $preamble = $Diff.Substring(0, $fileStarts[0].Index) }
+        $remaining = $MaxDiffBytes - $utf8.GetByteCount($preamble)
+        $entries = New-Object System.Collections.Generic.List[object]
         for ($index = 0; $index -lt $fileStarts.Count; $index++) {
             $start = $fileStarts[$index].Index
             $end = if ($index + 1 -lt $fileStarts.Count) { $fileStarts[$index + 1].Index } else { $Diff.Length }
@@ -949,22 +984,59 @@ function Get-ReviewDiffEmbedding {
             if ($header -match '^diff --git (?:"?a/.*?"?) (?:"?b/(.*)"?)$') {
                 $fileName = $Matches[1].Trim().Trim('"')
             }
+            $entries.Add([pscustomobject]@{
+                Index = $index
+                Name = $fileName
+                Section = $section
+                Bytes = $utf8.GetByteCount($section)
+                Tier = (Get-ReviewFileRiskTier -Path $fileName)
+                Keep = $false
+            })
+        }
 
-            if (-not $truncated -and $utf8.GetByteCount($builder.ToString() + $section) -le $MaxDiffBytes) {
-                [void]$builder.Append($section)
+        # Fill the budget in risk order (source, tests, docs, generated), original order within a tier.
+        # A file that does not fit is omitted, but smaller later files may still fit.
+        foreach ($entry in @($entries | Sort-Object -Property @{ Expression = { $_.Tier } }, @{ Expression = { $_.Index } })) {
+            if ($entry.Bytes -le $remaining) {
+                $entry.Keep = $true
+                $remaining -= $entry.Bytes
+            }
+        }
+
+        $builder = New-Object System.Text.StringBuilder
+        [void]$builder.Append($preamble)
+        $embeddedFileCount = 0
+        foreach ($entry in $entries) {
+            if ($entry.Keep) {
+                [void]$builder.Append($entry.Section)
+                $embeddedFileCount++
             } else {
-                $truncated = $true
-                $omittedFiles.Add($fileName)
+                $omittedFiles.Add($entry.Name)
             }
         }
         $embeddedDiff = $builder.ToString()
+        $embeddedBytes = $utf8.GetByteCount($embeddedDiff)
     }
 
     return [pscustomobject]@{
         EmbeddedDiff = $embeddedDiff
         OmittedFiles = @($omittedFiles.ToArray())
         MaxDiffBytes = $MaxDiffBytes
+        TotalFiles = $totalFiles
+        EmbeddedFiles = $embeddedFileCount
+        TotalBytes = $totalBytes
+        EmbeddedBytes = $embeddedBytes
     }
+}
+
+function Get-ReviewOmissionCoverageLine {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Embedding)
+
+    $omitted = @($Embedding.OmittedFiles)
+    $embeddedKb = [math]::Round([double]$Embedding.EmbeddedBytes / 1024, 1).ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $totalKb = [math]::Round([double]$Embedding.TotalBytes / 1024, 1).ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    return "PARTIAL REVIEW: reviewed $($Embedding.EmbeddedFiles) of $($Embedding.TotalFiles) files ($embeddedKb of $totalKb KB of diff). Not reviewed: $($omitted -join ', ')"
 }
 
 function Format-ReviewDiffPrompt {
@@ -1059,13 +1131,15 @@ function Invoke-ReviewMain {
         $promptText = "$prefix`r`n`r`n$Prompt"
     }
     Remove-UntrustedReviewAgentConfiguration -Workspace $Workspace | Out-Null
-    $embedding = Get-ReviewDiffEmbedding -Diff $coverage.Diff
+    $embedding = Get-ReviewDiffEmbedding -Diff $coverage.Diff -MaxDiffBytes (Get-ReviewMaxDiffBytesFromEnvironment)
     $effectivePrompt = Format-ReviewDiffPrompt -Prompt $promptText -Embedding $embedding
     $backends = @(Resolve-ReviewBackends -RequestedBackend $Backend -ConfiguredBackends $ConfiguredBackends)
     $runner = { param($command) Invoke-ReviewBackendProcess -Command $command -ScratchDirectory $ScratchDirectory }
     $result = Invoke-ReviewFallback -Backends $backends -Workspace $Workspace -Prompt $effectivePrompt -ScratchDirectory $ScratchDirectory -Runner $runner
     $publishMarker = (@($embedding.OmittedFiles).Count -eq 0)
-    Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverage.CoverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -PublishMarker:$publishMarker
+    $coverageLine = $coverage.CoverageLine
+    if (-not $publishMarker) { $coverageLine = Get-ReviewOmissionCoverageLine -Embedding $embedding }
+    Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -PublishMarker:$publishMarker
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
