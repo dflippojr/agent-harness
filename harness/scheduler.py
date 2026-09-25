@@ -26,7 +26,7 @@ class GpuScheduler:
         self._eligible = eligible
 
     def positions(self) -> dict[str, int]:
-        """0 = running, 1 = next, ..."""
+        """Queue position per session: the holder is at 0, the next waiter at 1, and so on."""
         out = {self.holder: 0} if self.holder else {}
         out.update({sid: i + 1 for i, sid in enumerate(self._waiters)})
         return out
@@ -178,10 +178,7 @@ class InferenceGate:
             timer.cancel()
 
     async def _recheck_timer(self) -> None:
-        try:
-            await asyncio.sleep(self._recheck_seconds)
-        except asyncio.CancelledError:
-            return
+        await asyncio.sleep(self._recheck_seconds)  # cancelled, never awaited, when the wait ends first
         async with self._cond:
             self._cond.notify_all()
 

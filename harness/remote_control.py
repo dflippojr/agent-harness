@@ -187,6 +187,11 @@ class RemoteControl:
                                      "(set remote_control.claude_path)")
         return claude
 
+    def _spawn_logged(self, cmd: list[str], path: Path, log_path: Path, flags: int):
+        with open(log_path, "wb") as out:
+            return self.popen(cmd, cwd=str(path), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                              creationflags=flags, start_new_session=sys.platform != "win32")
+
     def _command(self) -> list[str]:
         return [self._claude(), "remote-control", "--spawn", self.rc.spawn,
                 "--permission-mode", self.rc.permission_mode,
@@ -221,9 +226,7 @@ class RemoteControl:
             flags = 0
             if sys.platform == "win32":  # no console window; survives daemon restarts
                 flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-            with open(log_path, "wb") as out:
-                proc = self.popen(cmd, cwd=str(path), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                  creationflags=flags, start_new_session=sys.platform != "win32")
+            proc = await asyncio.to_thread(self._spawn_logged, cmd, path, log_path, flags)
             try:
                 created = psutil.Process(proc.pid).create_time()
             except psutil.Error:

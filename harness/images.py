@@ -415,7 +415,7 @@ class ComfyProcess:
         root = Path(self.cfg.comfy_dir)
         log_dir = Path(self.cfg.log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
-        out = open(log_dir / "comfyui.log", "ab")
+        out = await asyncio.to_thread(open, log_dir / "comfyui.log", "ab")
         work = Path(self.cfg.work_dir)
         for sub in ("output", "temp", "input"):
             (work / sub).mkdir(parents=True, exist_ok=True)
@@ -426,8 +426,9 @@ class ComfyProcess:
                 "--temp-directory", str(work / "temp"),
                 "--input-directory", str(work / "input")]
         log.info("starting ComfyUI")
-        self.proc = subprocess.Popen(args, cwd=str(root), stdout=out, stderr=subprocess.STDOUT,
-                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.proc = await asyncio.to_thread(
+            subprocess.Popen, args, cwd=str(root), stdout=out, stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         started = time.monotonic()
         while time.monotonic() - started < self.cfg.start_timeout_seconds:
             if self.proc.poll() is not None:
@@ -1122,11 +1123,7 @@ class ImageService:
                     done, pending = await asyncio.wait({waiter, wake}, return_when=asyncio.FIRST_COMPLETED)
                     for task in pending:
                         task.cancel()
-                    for task in pending:
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
+                    await asyncio.gather(*pending, return_exceptions=True)
                     self._wake = None
                     if waiter in done:
                         job_id = waiter.result()
@@ -1187,10 +1184,7 @@ class ImageService:
             canonical = self.path(job)
             partial = canonical.with_name(canonical.name + ".partial")
             try:
-                with partial.open("wb") as f:
-                    f.write(content)
-                    f.flush()
-                    os.fsync(f.fileno())
+                await asyncio.to_thread(self._write_durable, partial, content)
                 os.replace(partial, canonical)
             finally:
                 try:
@@ -1240,6 +1234,13 @@ class ImageService:
                     pass  # notify when the derived upscale settles
                 else:
                     self.notify(finished)
+
+    @staticmethod
+    def _write_durable(path: Path, content: bytes) -> None:
+        with path.open("wb") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
 
     async def _queue_requested_upscale(self, job: dict) -> None:
         requested = job.get("requested_upscale") or "none"
