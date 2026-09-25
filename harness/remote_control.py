@@ -120,22 +120,25 @@ class RemoteControl:
                 raise RemoteControlError(f"{name} has no local folder on the tower to open")
             path = Path(os.path.expandvars(configured)).expanduser()
         else:
-            project = self.cfg.projects.get(name)
-            if project is None:
-                raise RemoteControlError(f"no project or Remote Control folder named {name!r}")
-            allowed = self.rc.projects
-            if allowed is not None and name not in allowed:
-                raise RemoteControlError(
-                    f"project {name!r} isn't enabled for Remote Control (remote_control.projects)")
-            if project.target != "tower":
-                raise RemoteControlError(f"{name} runs on the {project.target}; Remote Control launches only work "
-                                         "for tower projects")
-            if not project.repo or "://" in project.repo:
-                raise RemoteControlError(f"{name} has no local folder on the tower to open")
-            path = Path(os.path.expandvars(project.repo)).expanduser()
+            path = self._project_folder(name)
         if not path.is_dir():
             raise RemoteControlError(f"{path} doesn't exist")
         return path
+
+    def _project_folder(self, name: str) -> Path:
+        project = self.cfg.projects.get(name)
+        if project is None:
+            raise RemoteControlError(f"no project or Remote Control folder named {name!r}")
+        allowed = self.rc.projects
+        if allowed is not None and name not in allowed:
+            raise RemoteControlError(
+                f"project {name!r} isn't enabled for Remote Control (remote_control.projects)")
+        if project.target != "tower":
+            raise RemoteControlError(f"{name} runs on the {project.target}; Remote Control launches only work "
+                                     "for tower projects")
+        if not project.repo or "://" in project.repo:
+            raise RemoteControlError(f"{name} has no local folder on the tower to open")
+        return Path(os.path.expandvars(project.repo)).expanduser()
 
     def eligible(self) -> list[str]:
         names = []
