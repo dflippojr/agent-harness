@@ -190,15 +190,20 @@ def apply_backup_schedule(manager, old, new) -> None:
     manager.maintenance.reschedule_backup()
 
 
+def _lt(a: float, b: float) -> bool:
+    """a < b, spelled as a call so that a NaN operand fails the check (every NaN comparison is False)."""
+    return a < b
+
+
 def validate_compaction(cfg: Config, proposed: dict) -> list[dict]:
     elide = proposed.get("compaction.elide_at", cfg.elide_at)
     summarize = proposed.get(KEY_COMPACTION_SUMMARIZE_AT, cfg.summarize_at)
     keep = proposed.get(KEY_COMPACTION_KEEP_RECENT, cfg.keep_recent)
     errors = []
-    if elide >= summarize:
+    if not _lt(elide, summarize):
         errors.append({"key": KEY_COMPACTION_SUMMARIZE_AT, "code": "cross_field",
                        "message": "compaction.summarize_at must be greater than compaction.elide_at"})
-    if keep >= summarize:
+    if not _lt(keep, summarize):
         errors.append({"key": KEY_COMPACTION_KEEP_RECENT, "code": "cross_field",
                        "message": "compaction.keep_recent must be less than compaction.summarize_at"})
     return errors

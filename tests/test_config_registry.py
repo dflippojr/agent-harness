@@ -1164,3 +1164,11 @@ def test_boot_never_fails_when_active_and_lkg_share_removed_yaml_value(tmp_path)
     assert recovery.get("recovery") == "overlay_quarantined"
     assert view.get("warning")
     assert "YAML" in (view.get("warning") or recovery.get("reason") or "")
+
+
+@pytest.mark.parametrize("key", ["compaction.elide_at", "compaction.summarize_at", "compaction.keep_recent"])
+def test_nan_compaction_thresholds_fail_the_cross_field_check(tmp_path, key):
+    from harness.settings_keys import validate_compaction
+    cfg = make_cfg(tmp_path)
+    assert validate_compaction(cfg, {}) == []
+    assert validate_compaction(cfg, {key: float("nan")}), key

@@ -95,7 +95,7 @@ def _resolve_branch(api: Callable[[str], dict], repository: str, branch: str) ->
 
 
 def _resolve_pull_request(api: Callable[[str], dict], repository: str, pr_number: str) -> dict:
-    if not re.fullmatch(r"\d+", pr_number):
+    if not re.fullmatch(r"\d+", pr_number, re.ASCII):
         raise RefRejected(f"pr_number must be a number: {pr_number!r}")
     pull = api(f"repos/{repository}/pulls/{pr_number}")
     head = pull.get("head") or {}

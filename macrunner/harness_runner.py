@@ -208,7 +208,7 @@ class Executor:
     def run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
                "LOGNAME": os.environ.get("USER", ""), "SHELL": self.shell, "LANG": "en_US.UTF-8", "TERM": "dumb",
-               "TMPDIR": tempfile.gettempdir(), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
+               "TMPDIR": os.environ.get("TMPDIR") or tempfile.gettempdir(), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
                "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1"}
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:

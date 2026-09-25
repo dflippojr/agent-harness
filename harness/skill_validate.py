@@ -55,8 +55,8 @@ REMOTE_INCLUDE_RES = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
 SECRET_RES = [
     ("private-key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
     ("aws-key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("github-token", re.compile(r"(?a)\b(?:ghp|gho|ghu|ghs|ghr)_\w{20,}\b")),
-    ("github-pat", re.compile(r"(?a)\bgithub_pat_\w{20,}\b")),
+    ("github-token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_(?a:\w){20,}\b")),
+    ("github-pat", re.compile(r"\bgithub_pat_(?a:\w){20,}\b")),
     ("slack-token", re.compile(r"\bxox[baprs]-")),
     ("openai-key", re.compile(r"\bsk-[A-Za-z0-9]{16,}\b")),
     ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{16,}\b")),
