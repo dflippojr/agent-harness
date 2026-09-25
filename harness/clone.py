@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import stat
+import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -20,6 +25,8 @@ from .storage import ContainmentError, require_contained
 
 _LOCAL_SCHEME = re.compile(r"^(file|git|ssh|git\+ssh|rsync)$", re.I)
 _DRIVE = re.compile(r"^[a-zA-Z]:[\\/]")
+# No credential helper and no askpass program: a member clone never finds or prompts for credentials.
+_NO_HELPERS = ["-c", "credential.helper=", "-c", "core.askPass="]
 
 
 class CloneRefused(ValueError):
@@ -34,6 +41,31 @@ class QuotaExceeded(Exception):
         super().__init__("this clone exceeded the account disk quota")
 
 
+def _refuse_local(text: str) -> None:
+    """Refuse clone aliases and local paths before the text is parsed as a URL."""
+    if text.startswith("local:"):
+        raise CloneRefused("local: clone aliases are not allowed for household members")
+    if _DRIVE.match(text) or text.startswith("\\\\") or text.startswith("//"):
+        raise CloneRefused("local paths are not allowed for household members")
+    # bare paths and relative paths; scp-style git@ is caught after parsing
+    if (os.path.isabs(text) or text.startswith(".") or "/" in text and "@" not in text) and "://" not in text:
+        raise CloneRefused("local paths and SSH URLs are not allowed for household members")
+
+
+def _allowed_host(parsed) -> str:
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if not host or host not in PUBLIC_CLONE_HOSTS:
+        raise CloneRefused(f"host {host or '(missing)'} is not on the public-host allowlist")
+    return host
+
+
+def _repository_path(parsed) -> str:
+    path = parsed.path or ""
+    if not path or path == "/" or ".." in path.split("/") or ":" in path or "@" in path:
+        raise CloneRefused("repository path is invalid")
+    return path
+
+
 def public_https_url(url: str) -> str:
     """Return a canonical https URL or raise CloneRefused."""
     text = (url or "").strip()
@@ -41,14 +73,7 @@ def public_https_url(url: str) -> str:
         raise CloneRefused("repository url is required")
     if "\x00" in text or len(text) > 2048:
         raise CloneRefused("repository url is invalid")
-    if text.startswith("local:"):
-        raise CloneRefused("local: clone aliases are not allowed for household members")
-    if _DRIVE.match(text) or text.startswith("\\\\") or text.startswith("//"):
-        raise CloneRefused("local paths are not allowed for household members")
-    if os.path.isabs(text) or text.startswith(".") or "/" in text and "://" not in text and "@" not in text:
-        # bare paths and relative paths; scp-style git@ still caught below
-        if "://" not in text:
-            raise CloneRefused("local paths and SSH URLs are not allowed for household members")
+    _refuse_local(text)
     parsed = urlsplit(text)
     scheme = (parsed.scheme or "").lower()
     if _LOCAL_SCHEME.match(scheme) or text.startswith("git@"):
@@ -57,20 +82,13 @@ def public_https_url(url: str) -> str:
         raise CloneRefused("only https URLs on the public-host allowlist are allowed")
     if parsed.username or parsed.password:
         raise CloneRefused("embedded credentials are not allowed")
-    host = (parsed.hostname or "").lower().removeprefix("www.")
-    if not host or host not in PUBLIC_CLONE_HOSTS:
-        raise CloneRefused(f"host {host or '(missing)'} is not on the public-host allowlist")
+    host = _allowed_host(parsed)
     if parsed.port not in (None, 443):
         raise CloneRefused("non-default ports are not allowed")
     if parsed.query or parsed.fragment:
         # query/fragment can carry tokens; refuse rather than strip-and-continue
         raise CloneRefused("query strings and fragments are not allowed on clone URLs")
-    path = parsed.path or ""
-    if not path or path == "/" or ".." in path.split("/"):
-        raise CloneRefused("repository path is invalid")
-    if ":" in path or "@" in path:
-        raise CloneRefused("repository path is invalid")
-    return urlunsplit(("https", host, path, "", ""))
+    return urlunsplit(("https", host, _repository_path(parsed), "", ""))
 
 
 def isolated_clone_env() -> dict[str, str]:
@@ -110,7 +128,7 @@ def clone_public(url: str, dest: Path, root: Path, max_bytes: int | None = None)
     if dest.exists():
         raise CloneRefused(f"clone destination already exists: {dest}")
     cmd = [
-        "git", "-c", "core.quotepath=off", "-c", "credential.helper=", "-c", "core.askPass=",
+        "git", "-c", "core.quotepath=off", *_NO_HELPERS,
         "-c", "http.extraHeader=", "clone", "--config", "core.autocrlf=false", "--", canonical, str(dest),
     ]
     result = _run_clone(cmd, dest, max_bytes=max_bytes)
@@ -130,10 +148,6 @@ def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
     Fetch into an existing workspace passes `remove_on_fail=False` so a quota kill does not
     delete the session tree.
     """
-    import subprocess
-    import threading
-    import time
-
     from .fileops import dir_size
 
     proc = subprocess.Popen(
@@ -141,87 +155,94 @@ def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
         encoding="utf-8", errors="replace", env=isolated_clone_env(), stdin=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    over = False
-
-    def stop() -> None:
-        if proc.poll() is not None:
-            return
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        try:
-            proc.kill()
-        except OSError:
-            pass
-
-    def watch() -> None:
-        nonlocal over
-        while proc.poll() is None:
-            if max_bytes is not None and dest.exists() and dir_size(dest) > max_bytes:
-                over = True
-                stop()
-                return
-            time.sleep(0.05)
-
-    watcher = threading.Thread(target=watch, daemon=True)
+    over = threading.Event()
+    watcher = threading.Thread(target=_watch_size, args=(proc, dest, max_bytes, over), daemon=True)
     if max_bytes is not None:
         watcher.start()
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        stop()
+        _stop_clone(proc)
         stdout, stderr = proc.communicate()
-        if remove_on_fail:
-            _remove_tree(dest)
+        _discard(dest, remove_on_fail)
         raise GitError("clone timed out") from None
     if max_bytes is not None:
         watcher.join(timeout=2)
-        stop()
+        _stop_clone(proc)
     result = GitResult(proc.returncode or 0, stdout or "", stderr or "")
     size = dir_size(dest) if dest.exists() else 0
-    if over or (max_bytes is not None and size > max_bytes):
-        if remove_on_fail:
-            _remove_tree(dest)
+    if over.is_set() or (max_bytes is not None and size > max_bytes):
+        _discard(dest, remove_on_fail)
         raise QuotaExceeded(max_bytes or 0)
     if proc.returncode != 0:
-        if remove_on_fail:
-            _remove_tree(dest)
+        _discard(dest, remove_on_fail)
         raise GitError(f"could not clone: {result.text[-1500:]}")
     return result
 
 
+def _stop_clone(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _watch_size(proc: subprocess.Popen, dest: Path, max_bytes: int, over: threading.Event) -> None:
+    """Watcher thread: stop the clone once `dest` grows past `max_bytes`."""
+    from .fileops import dir_size
+
+    while proc.poll() is None:
+        if dest.exists() and dir_size(dest) > max_bytes:
+            over.set()
+            _stop_clone(proc)
+            return
+        time.sleep(0.05)
+
+
+def _discard(dest: Path, remove: bool) -> None:
+    if remove:
+        _remove_tree(dest)
+
+
+def _make_writable(p: str) -> None:
+    try:
+        os.chmod(p, stat.S_IWRITE)
+    except OSError:
+        pass
+
+
+def _retry_writable(func, p, _exc) -> None:
+    """shutil.rmtree onerror: clear the read-only bit and retry once."""
+    _make_writable(p)
+    try:
+        func(p)
+    except OSError:
+        pass
+
+
+def _make_tree_writable(path: Path) -> None:
+    try:
+        for root, dirs, files in os.walk(path):
+            for name in files + dirs:
+                _make_writable(os.path.join(root, name))
+            _make_writable(root)
+    except OSError:
+        pass
+
+
 def _remove_tree(path: Path) -> None:
-    import os
-    import shutil
-    import stat
-    import time
-
-    def writable(p: str) -> None:
-        try:
-            os.chmod(p, stat.S_IWRITE)
-        except OSError:
-            pass
-
-    def onerror(func, p, _exc) -> None:
-        writable(p)
-        try:
-            func(p)
-        except OSError:
-            pass
-
     for _ in range(15):
         if not path.exists():
             return
-        try:
-            for root, dirs, files in os.walk(path):
-                for name in files + dirs:
-                    writable(os.path.join(root, name))
-                writable(root)
-        except OSError:
-            pass
-        shutil.rmtree(path, onerror=onerror)
+        _make_tree_writable(path)
+        shutil.rmtree(path, onerror=_retry_writable)
         if not path.exists():
             return
         time.sleep(0.1)
@@ -238,7 +259,7 @@ def isolated_prepare(workspace: Path, source: Path | str, sid: str, root: Path,
     workspace.mkdir(parents=True, exist_ok=True)
     src = str(source)
     cmd = [
-        "git", "-c", "core.quotepath=off", "-c", "credential.helper=", "-c", "core.askPass=",
+        "git", "-c", "core.quotepath=off", *_NO_HELPERS,
         "clone", "--no-hardlinks", "--config", "core.autocrlf=false", "--", src, str(workspace),
     ]
     _run_clone(cmd, workspace, max_bytes=max_bytes)
@@ -255,10 +276,8 @@ def isolated_prepare(workspace: Path, source: Path | str, sid: str, root: Path,
 
 
 def _isolated_git(workspace: Path, *args: str, timeout: int = 60) -> str:
-    import subprocess
     r = subprocess.run(
-        ["git", "-c", f"safe.directory={workspace.as_posix()}", "-c", "credential.helper=",
-         "-c", "core.askPass=", "-C", str(workspace), *args],
+        ["git", "-c", f"safe.directory={workspace.as_posix()}", *_NO_HELPERS, "-C", str(workspace), *args],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         env=isolated_clone_env(), stdin=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -280,7 +299,7 @@ def _member_origin_allowed(origin: str, root: Path) -> bool:
     try:
         require_contained(Path(text), root)
         return True
-    except (ContainmentError, OSError, ValueError):
+    except (OSError, ValueError):  # ContainmentError is a ValueError
         return False
 
 
@@ -294,8 +313,8 @@ def isolated_refresh_origin(workspace: Path, root: Path, max_bytes: int | None =
     if not _member_origin_allowed(origin, root):
         return "origin is not a public or account-local repository"
     cmd = [
-        "git", "-c", f"safe.directory={workspace.as_posix()}", "-c", "credential.helper=",
-        "-c", "core.askPass=", "-C", str(workspace), "fetch", "--quiet", "--prune", "origin",
+        "git", "-c", f"safe.directory={workspace.as_posix()}", *_NO_HELPERS,
+        "-C", str(workspace), "fetch", "--quiet", "--prune", "origin",
     ]
     try:
         _run_clone(cmd, workspace, timeout=300, max_bytes=max_bytes, remove_on_fail=False)
