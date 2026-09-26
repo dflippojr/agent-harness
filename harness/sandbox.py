@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from .config import SandboxConfig
@@ -19,25 +20,47 @@ class SandboxUnavailable(Exception):
     """Docker isn't reachable or the container can't be started."""
 
 
-async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = None,
-                  env: dict | None = None) -> tuple[int, str, str]:
-    """subprocess.run that can be cancelled: cancelling the awaiting task kills the process. `env` is merged over
-    the daemon's environment."""
-    proc = subprocess.Popen(
-        args, stdin=subprocess.PIPE if input_ is not None else subprocess.DEVNULL,
+def _spawn(args: list[str], has_input: bool, env: dict | None) -> subprocess.Popen:
+    return subprocess.Popen(
+        args, stdin=subprocess.PIPE if has_input else subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env={**os.environ, **env} if env else None,
     )
+
+
+def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict | None,
+                  started: list, cancelled: threading.Event) -> tuple[int, str, str]:
+    """Spawn, wait and kill in one worker thread. The process is published in `started` the moment it exists, and
+    `cancelled` is checked right after: a cancel that lands while Popen is still running cannot be stopped in that
+    thread, so this side kills the child instead (the awaiting side kills whatever is already published)."""
+    proc = _spawn(args, input_ is not None, env)
+    started.append(proc)
+    if cancelled.is_set():
+        proc.kill()
     try:
-        out, err = await asyncio.to_thread(proc.communicate, input_, timeout)
+        out, err = proc.communicate(input_, timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        out, err = await asyncio.to_thread(proc.communicate)
+        out, err = proc.communicate()
         return 124, out, err + f"\n[timed out after {timeout:.0f}s]"
-    except asyncio.CancelledError:
-        proc.kill()
-        raise
     return proc.returncode, out, err
+
+
+async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = None,
+                  env: dict | None = None) -> tuple[int, str, str]:
+    """subprocess.run that can be cancelled: cancelling the awaiting task kills the process, including one that is
+    still being spawned. `env` is merged over the daemon's environment. Deliberately thread-based rather than
+    asyncio subprocesses: on Python 3.12 the asyncio subprocess machinery left a cancelled call hanging when the loop
+    shut down (#207)."""
+    started: list = []
+    cancelled = threading.Event()
+    try:
+        return await asyncio.to_thread(_run_blocking, args, input_, timeout, env, started, cancelled)
+    except asyncio.CancelledError:
+        cancelled.set()
+        for proc in list(started):
+            proc.kill()
+        raise
 
 
 async def ensure_networks(cfg: SandboxConfig) -> None:

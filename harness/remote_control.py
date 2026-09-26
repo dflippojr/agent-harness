@@ -120,22 +120,25 @@ class RemoteControl:
                 raise RemoteControlError(f"{name} has no local folder on the tower to open")
             path = Path(os.path.expandvars(configured)).expanduser()
         else:
-            project = self.cfg.projects.get(name)
-            if project is None:
-                raise RemoteControlError(f"no project or Remote Control folder named {name!r}")
-            allowed = self.rc.projects
-            if allowed is not None and name not in allowed:
-                raise RemoteControlError(
-                    f"project {name!r} isn't enabled for Remote Control (remote_control.projects)")
-            if project.target != "tower":
-                raise RemoteControlError(f"{name} runs on the {project.target}; Remote Control launches only work "
-                                         "for tower projects")
-            if not project.repo or "://" in project.repo:
-                raise RemoteControlError(f"{name} has no local folder on the tower to open")
-            path = Path(os.path.expandvars(project.repo)).expanduser()
+            path = self._project_folder(name)
         if not path.is_dir():
             raise RemoteControlError(f"{path} doesn't exist")
         return path
+
+    def _project_folder(self, name: str) -> Path:
+        project = self.cfg.projects.get(name)
+        if project is None:
+            raise RemoteControlError(f"no project or Remote Control folder named {name!r}")
+        allowed = self.rc.projects
+        if allowed is not None and name not in allowed:
+            raise RemoteControlError(
+                f"project {name!r} isn't enabled for Remote Control (remote_control.projects)")
+        if project.target != "tower":
+            raise RemoteControlError(f"{name} runs on the {project.target}; Remote Control launches only work "
+                                     "for tower projects")
+        if not project.repo or "://" in project.repo:
+            raise RemoteControlError(f"{name} has no local folder on the tower to open")
+        return Path(os.path.expandvars(project.repo)).expanduser()
 
     def eligible(self) -> list[str]:
         names = []
@@ -187,6 +190,11 @@ class RemoteControl:
                                      "(set remote_control.claude_path)")
         return claude
 
+    def _spawn_logged(self, cmd: list[str], path: Path, log_path: Path, flags: int):
+        with open(log_path, "wb") as out:
+            return self.popen(cmd, cwd=str(path), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                              creationflags=flags, start_new_session=sys.platform != "win32")
+
     def _command(self) -> list[str]:
         return [self._claude(), "remote-control", "--spawn", self.rc.spawn,
                 "--permission-mode", self.rc.permission_mode,
@@ -221,9 +229,7 @@ class RemoteControl:
             flags = 0
             if sys.platform == "win32":  # no console window; survives daemon restarts
                 flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-            with open(log_path, "wb") as out:
-                proc = self.popen(cmd, cwd=str(path), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                  creationflags=flags, start_new_session=sys.platform != "win32")
+            proc = await asyncio.to_thread(self._spawn_logged, cmd, path, log_path, flags)
             try:
                 created = psutil.Process(proc.pid).create_time()
             except psutil.Error:

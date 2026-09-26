@@ -168,6 +168,35 @@ class _Budget:
             return k
 
 
+def _pump(pipe, buf: bytearray, budget: _Budget) -> None:
+    try:
+        while chunk := pipe.read1(65536):
+            buf += chunk[:budget.take(len(chunk))]
+    except (OSError, ValueError):
+        pass
+
+
+def _feed(proc, stdin: bytes) -> None:
+    try:
+        proc.stdin.write(stdin)
+        proc.stdin.close()
+    except OSError:
+        pass
+
+
+def _poll_state(cancel: threading.Event, budget: _Budget, done: bool, deadline: float) -> str:
+    """The stop reason, "done" when the process finished on its own, or "" to keep waiting."""
+    if cancel.is_set():
+        return "cancelled"
+    if budget.over:
+        return "output_limit"
+    if done:
+        return "done"
+    if time.monotonic() >= deadline:
+        return "timeout"
+    return ""
+
+
 def _exec_blocking(args: list[str], stdin: bytes | None, deadline: float, budget: _Budget,
                    cancel: threading.Event, stop) -> tuple[int | None, bytes, bytes, str]:
     """Run one `docker exec`, capturing stdout and stderr within the budget.
@@ -179,39 +208,20 @@ def _exec_blocking(args: list[str], stdin: bytes | None, deadline: float, budget
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     bufs = (bytearray(), bytearray())
-
-    def pump(pipe, buf):
-        try:
-            while chunk := pipe.read1(65536):
-                buf += chunk[:budget.take(len(chunk))]
-        except (OSError, ValueError):
-            pass
-
-    def feed():
-        try:
-            proc.stdin.write(stdin)
-            proc.stdin.close()
-        except OSError:
-            pass
-
-    threads = [threading.Thread(target=pump, args=(proc.stdout, bufs[0]), daemon=True),
-               threading.Thread(target=pump, args=(proc.stderr, bufs[1]), daemon=True)]
+    threads = [threading.Thread(target=_pump, args=(proc.stdout, bufs[0], budget), daemon=True),
+               threading.Thread(target=_pump, args=(proc.stderr, bufs[1], budget), daemon=True)]
     if stdin is not None:
-        threads.append(threading.Thread(target=feed, daemon=True))
+        threads.append(threading.Thread(target=_feed, args=(proc, stdin), daemon=True))
     for t in threads:
         t.start()
     reason = ""
     while True:
         done = proc.poll() is not None and not any(t.is_alive() for t in threads[:2])
-        if cancel.is_set():
-            reason = "cancelled"
-        elif budget.over:
-            reason = "output_limit"
-        elif done:
+        state = _poll_state(cancel, budget, done, deadline)
+        if state == "done":
             break
-        elif time.monotonic() >= deadline:
-            reason = "timeout"
-        if reason:
+        if state:
+            reason = state
             stop()
             proc.kill()
             break
@@ -285,6 +295,48 @@ class SnippetRunner:
 
         return await asyncio.to_thread(_exec_blocking, args, stdin, deadline, budget, cancel, stop)
 
+    async def _prepare(self, result: dict, lang, name: str, filename: str, source: str,
+                       cancel: threading.Event) -> bool:
+        """Write the source and read the toolchain version; False when the run should stop here."""
+        setup = " && ".join(s for s in (_SETUP, lang.setup, lang.version) if s)
+        # Setup (writing the source, reading the toolchain version) has its own small allowance and doesn't
+        # count against the run's limits.
+        code, out, err, reason = await self._exec(
+            name, setup, filename, stdin=source.encode("utf-8"), deadline=time.monotonic() + 60,
+            budget=_Budget(4096), cancel=cancel)
+        if reason == "cancelled":
+            result["reasons"].append(reason)
+            return False
+        if code != 0:
+            result["error"] = f"Could not prepare the snippet sandbox: {_text(err or out).strip()[:300]}"
+            return False
+        result["toolchain"]["version"] = _text(out).strip().splitlines()[0][:200] if out.strip() else ""
+        return True
+
+    async def _compile(self, result: dict, lang, name: str, filename: str, deadline: float, budget: _Budget,
+                       cancel: threading.Event) -> bool:
+        t0 = time.monotonic()
+        code, out, err, reason = await self._exec(
+            name, lang.compile, filename, deadline=deadline, budget=budget, cancel=cancel)
+        result["compile"] = {"exit_code": code, "output": _text(out + err),
+                             "duration_ms": int((time.monotonic() - t0) * 1000)}
+        if reason:
+            result["reasons"].append(reason)
+            return False
+        return code == 0
+
+    async def _execute(self, result: dict, lang, name: str, main_class: str, deadline: float, budget: _Budget,
+                       cancel: threading.Event) -> bool:
+        t0 = time.monotonic()
+        code, out, err, reason = await self._exec(
+            name, lang.run, main_class, deadline=deadline, budget=budget, cancel=cancel)
+        result["run"] = {"exit_code": code, "stdout": _text(out), "stderr": _text(err),
+                         "duration_ms": int((time.monotonic() - t0) * 1000)}
+        if reason:
+            result["reasons"].append(reason)
+            return False
+        return True
+
     async def run(self, run_id: str, language: str, source: str, cancel: threading.Event) -> dict:
         lang = self.languages[language]
         name = f"harness-snippet-{run_id}"
@@ -293,49 +345,15 @@ class SnippetRunner:
         started = time.monotonic()
         filename, main_class = java_names(source) if lang.id == "java" else (lang.filename, "")
         try:
-            try:
-                code, out, err = await run_cmd(container_args(lang, run_id), timeout=120)
-            except OSError as e:
-                code, out, err = 127, "", str(e)
-            if code != 0:
-                detail = (err or out).strip()
-                missing = "No such image" in detail or ("not found" in detail.lower() and "image" in detail.lower())
-                result["error"] = (f"The {lang.label} toolchain image ({lang.tag}) isn't installed on this server. "
-                                   "The owner can run `python -m harness.snippets pull`." if missing
-                                   else f"Could not start the snippet sandbox: {detail[:300]}")
+            result["error"] = await _start_container(lang, run_id)
+            if result["error"]:
                 return result
-            setup = " && ".join(s for s in (_SETUP, lang.setup, lang.version) if s)
-            # Setup (writing the source, reading the toolchain version) has its own small allowance and doesn't
-            # count against the run's limits.
-            code, out, err, reason = await self._exec(
-                name, setup, filename, stdin=source.encode("utf-8"), deadline=time.monotonic() + 60,
-                budget=_Budget(4096), cancel=cancel)
-            if reason == "cancelled":
-                result["reasons"].append(reason)
+            if not await self._prepare(result, lang, name, filename, source, cancel):
                 return result
-            if code != 0:
-                result["error"] = f"Could not prepare the snippet sandbox: {_text(err or out).strip()[:300]}"
-                return result
-            result["toolchain"]["version"] = _text(out).strip().splitlines()[0][:200] if out.strip() else ""
             deadline = time.monotonic() + self.timeout
-            if lang.compile:
-                t0 = time.monotonic()
-                code, out, err, reason = await self._exec(
-                    name, lang.compile, filename, deadline=deadline, budget=budget, cancel=cancel)
-                result["compile"] = {"exit_code": code, "output": _text(out + err),
-                                     "duration_ms": int((time.monotonic() - t0) * 1000)}
-                if reason:
-                    result["reasons"].append(reason)
-                    return result
-                if code != 0:
-                    return result
-            t0 = time.monotonic()
-            code, out, err, reason = await self._exec(
-                name, lang.run, main_class, deadline=deadline, budget=budget, cancel=cancel)
-            result["run"] = {"exit_code": code, "stdout": _text(out), "stderr": _text(err),
-                             "duration_ms": int((time.monotonic() - t0) * 1000)}
-            if reason:
-                result["reasons"].append(reason)
+            if lang.compile and not await self._compile(result, lang, name, filename, deadline, budget, cancel):
+                return result
+            if not await self._execute(result, lang, name, main_class, deadline, budget, cancel):
                 return result
             code, out, _, _ = await self._exec(name, _STATS, "", deadline=time.monotonic() + 10,
                                                budget=_Budget(8192), cancel=threading.Event())
@@ -347,6 +365,21 @@ class SnippetRunner:
             result["truncated"] = budget.over
             result["duration_ms"] = int((time.monotonic() - started) * 1000)
             result["status"] = _status(result)
+
+
+async def _start_container(lang, run_id: str) -> str:
+    """Start the sandbox container; the error message, or "" when it is up."""
+    try:
+        code, out, err = await run_cmd(container_args(lang, run_id), timeout=120)
+    except OSError as e:
+        code, out, err = 127, "", str(e)
+    if code == 0:
+        return ""
+    detail = (err or out).strip()
+    if "No such image" in detail or ("not found" in detail.lower() and "image" in detail.lower()):
+        return (f"The {lang.label} toolchain image ({lang.tag}) isn't installed on this server. "
+                "The owner can run `python -m harness.snippets pull`.")
+    return f"Could not start the snippet sandbox: {detail[:300]}"
 
 
 async def remove(name: str) -> None:
