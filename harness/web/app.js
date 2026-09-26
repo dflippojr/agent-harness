@@ -416,7 +416,8 @@ function md(src, pages) {
   const text = replaceFences(escapeHtml(src || ""), (tag, rest) => {
     const code = rest.replace(/^[^\S\n]*\n?/, "");
     const lang = snippetLanguage(tag);
-    blocks.push(`<pre${lang ? ` data-snippet-lang="${lang}"` : ""}><code>${code.replace(/\n$/, "")}</code></pre>`);
+    const langAttr = lang ? ` data-snippet-lang="${lang}"` : "";
+    blocks.push(`<pre${langAttr}><code>${code.replace(/\n$/, "")}</code></pre>`);
     return `${MD_BLOCK_MARK}${blocks.length - 1}${MD_BLOCK_MARK}`;
   });
   const out = [];
@@ -1051,8 +1052,9 @@ async function viewChat(id) {
     editorToggle.setAttribute("aria-expanded", String(!editor.el.hidden));
     if (!editor.el.hidden) editor.select.focus();
   } }, "Run code");
+  const effortSuffix = session.effort ? ` · ${session.effort}` : "";
   wrap.prepend(h("div", { class: "row small chat-tools" },
-    h("span", { class: "muted" }, `${session.backend || "local"} · ${session.model}${session.effort ? ` · ${session.effort}` : ""}`),
+    h("span", { class: "muted" }, `${session.backend || "local"} · ${session.model}${effortSuffix}`),
     editorToggle,
     h("button", { class: "btn small", type: "button", onclick: async () => {
       const title = prompt("Rename chat", session.title);
@@ -1291,10 +1293,14 @@ async function viewList() {
 }
 
 // ---------- new task ----------
+// "45 s" under 90 seconds, otherwise whole minutes.
+const fmtSpan = (seconds, toMinutes = Math.round) => (seconds >= 90 ? `${toMinutes(seconds / 60)} min` : `${seconds} s`);
+const pluralize = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const usedSuffix = (k) => (k.last_used_at ? ` · used ${ago(k.last_used_at)}` : "");
+
 function holdRemainingText(seconds) {
   if (seconds === null) return "until you turn it off";
-  const span = seconds >= 90 ? `${Math.ceil(seconds / 60)} min` : `${seconds} s`;
-  return `for about ${span}`;
+  return `for about ${fmtSpan(seconds, Math.ceil)}`;
 }
 
 async function confirmGpuQueue(label) {
@@ -2001,7 +2007,8 @@ async function viewSession(sid, tab, focusApproval) {
       for (const call of d.tool_calls || []) pendingCalls.add(call.id);
       const wrap = h("div", { class: "ev" });
       if (d.reasoning) {
-        wrap.append(h("details", { class: "thinking" }, h("summary", {}, `Thought${took ? ` for ${took}` : ""} (${d.completion_tokens} tokens · ${d.gen_tps} tok/s)`),
+        const thought = took ? ` for ${took}` : "";
+        wrap.append(h("details", { class: "thinking" }, h("summary", {}, `Thought${thought} (${d.completion_tokens} tokens · ${d.gen_tps} tok/s)`),
           h("div", { class: "text" }, d.reasoning)));
       }
       if (d.content?.trim()) {
@@ -2117,7 +2124,7 @@ async function viewSession(sid, tab, focusApproval) {
         `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Actions → GPU to resume now)`)));
     },
     gpu_resumed: (e) => {
-      const text = `GPU free again after ${e.data.seconds < 90 ? `${e.data.seconds} s` : `${Math.round(e.data.seconds / 60)} min`}; reloading the model`;
+      const text = `GPU free again after ${fmtSpan(e.data.seconds)}; reloading the model`;
       if (gpuNote) fill(gpuNote, text);
       else add(h("p", { class: "note" }, text));
       gpuNote = null;
@@ -2127,7 +2134,7 @@ async function viewSession(sid, tab, focusApproval) {
         `Waiting for the ${TARGET_LABEL[e.data.target] || e.data.target}: it's offline or asleep. The task continues when it wakes`)));
     },
     target_online: (e) => {
-      const text = `${TARGET_LABEL[e.data.target] || e.data.target} is back after ${e.data.seconds < 90 ? `${e.data.seconds} s` : `${Math.round(e.data.seconds / 60)} min`}`;
+      const text = `${TARGET_LABEL[e.data.target] || e.data.target} is back after ${fmtSpan(e.data.seconds)}`;
       if (targetNote) fill(targetNote, text);
       else add(h("p", { class: "note" }, text));
       targetNote = null;
@@ -2418,13 +2425,13 @@ function splitDiff(diff) {
 function viewInfo(s) {
   const t = s.totals || {};
   const rows = [
-    ["Title", s.title], ["Session", s.id], ["Status", `${s.status}${s.stop_reason ? ` (${s.stop_reason})` : ""}`],
+    ["Title", s.title], ["Session", s.id], ["Status", s.stop_reason ? `${s.status} (${s.stop_reason})` : s.status],
     ["Project", s.project], ["Target", s.target], ["Backend", s.backend || "local"], ["Model", s.model],
     ["Created", new Date(s.created_at * 1000).toLocaleString()], ["Updated", new Date(s.updated_at * 1000).toLocaleString()],
     ["Model turns", t.turns || 0], ["Prompt tokens", t.prompt_tokens || 0], ["Completion tokens", t.completion_tokens || 0],
     ["Workspace", s.workspace_removed ? `${s.workspace} (removed)` : s.workspace],
   ];
-  if (s.branch) rows.push(["Branch", `${s.branch}${s.base_branch ? ` from ${s.base_branch}` : ""}`], ["Review", s.review || "pending"]);
+  if (s.branch) rows.push(["Branch", s.base_branch ? `${s.branch} from ${s.base_branch}` : s.branch], ["Review", s.review || "pending"]);
   const frozen = s.skills || [];
   if (frozen.length) {
     rows.push(["Skills", frozen.map((sk) => `${sk.slug} v${sk.version} (${(sk.content_hash || "").slice(0, 12)})`).join(", ")]);
@@ -3554,7 +3561,7 @@ async function smartApprovalsCard() {
     `${data.attempts || 0} reviews · ${data.auto_approvals || 0} auto-approved · ${data.escalations || 0} escalated · `
     + `${data.latency_ms || 0} ms avg · $${Number(data.cost_usd || 0).toFixed(4)}`);
   const recent = (data.recent || []).slice(0, 12).map((row) => h("div", { class: "muted small" },
-    `${row.outcome} · ${row.recommendation}${row.escalate_reason ? ` (${row.escalate_reason})` : ""} · `
+    `${row.outcome} · ${row.recommendation}${row.escalate_reason ? " (" + row.escalate_reason + ")" : ""} · `
     + `${row.provider}/${row.model}`));
   return h("div", {},
     h("div", { class: "card" },
@@ -3856,7 +3863,7 @@ function gpuText(g) {
   if (g.manual) {
     if (g.manual_remaining_seconds === null) return "Local models held until you turn this off";
     const left = g.manual_remaining_seconds;
-    return `Local models held for ${left >= 90 ? `${Math.ceil(left / 60)} min` : `${left} s`}`;
+    return `Local models held for ${fmtSpan(left, Math.ceil)}`;
   }
   if (g.state === "pausing") return `Pausing for ${why}: finishing the current model turn`;
   if (g.state === "paused") return `Paused for ${why}`;
@@ -3937,10 +3944,16 @@ function remoteControlCard() {
     load();
   };
   const row = (p) => {
+    const remoteControlState = (p) => {
+      if (p.running) {
+        const sessions = p.active_sessions ? ` · ${pluralize(p.active_sessions, "session")}` : "";
+        return `running${sessions} · started ${ago(p.started_at)}`;
+      }
+      if (!p.trusted) return p.trust_prompt_open ? "trust window open on the tower" : "needs one-time Claude workspace trust";
+      return "stopped";
+    };
     const state = busy === p.project ? h("span", { class: "dots" }, "working")
-      : p.running ? `running${p.active_sessions ? ` · ${p.active_sessions} session${p.active_sessions === 1 ? "" : "s"}` : ""} · started ${ago(p.started_at)}`
-      : !p.trusted && p.trust_prompt_open ? "trust window open on the tower"
-        : !p.trusted ? "needs one-time Claude workspace trust" : "stopped";
+      : remoteControlState(p);
     return h("div", { class: "rc-row" },
       h("p", {}, h("strong", {}, p.project), " ", h("span", { class: `muted small${!p.running && !p.trusted ? " bad" : ""}` }, state)),
       h("p", { class: "muted small" }, p.path),
@@ -4128,7 +4141,7 @@ function endpointCard(me) {
         h("p", { class: "small", style: "margin-bottom:0" }, "Anthropic-compatible"),
         copyBox(base),
         active.length ? h("ul", { class: "small" }, active.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.requests} request${k.requests === 1 ? "" : "s"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${pluralize(k.requests, "request")}${usedSuffix(k)} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
@@ -4254,7 +4267,7 @@ function appsCard(me) {
         h("p", { class: "small" }, "An Agent Harness App token lets a third-party integration start and follow sessions on Agent Harness Server. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${k.origins?.length ? " · " + k.origins.join(", ") : ""}${usedSuffix(k)} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
@@ -4264,14 +4277,14 @@ function appsCard(me) {
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
         webConnections.length ? [h("p", { class: "section-label" }, "Web connections"),
           h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
-            h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+            h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
               if (!confirm(`Revoke “${k.name}”? That Agent Harness Web connection will stop working.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,
         cliConnections.length ? [h("p", { class: "section-label" }, "CLI connections"),
           h("ul", { class: "small" }, cliConnections.map((k) => h("li", {},
-            h("strong", {}, k.name), ` ${k.prefix}… · non-browser${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+            h("strong", {}, k.name), ` ${k.prefix}… · non-browser${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
               if (!confirm(`Revoke “${k.name}”? That Agent Harness CLI connection will stop working.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
@@ -4340,7 +4353,7 @@ function diskCard() {
               : (r.last_seen_seconds !== null
                 ? `last seen ${Math.round(r.last_seen_seconds / 60)} min ago`
                 : "not connected since Agent Harness Server started")),
-            fact("Compatibility", `${compatibility.state || "not reported"}${compatibility.supported ? ` · Server supports ${compatibility.supported.min}–${compatibility.supported.max}` : ""}`),
+            fact("Compatibility", `${compatibility.state || "not reported"}${compatibility.supported ? " · Server supports " + compatibility.supported.min + "–" + compatibility.supported.max : ""}`),
             r.last_update ? fact("Last update", `${r.last_update.ok ? "succeeded" : "failed"}: ${r.last_update.message}`) : null,
             isGuest() ? null : h("button", {
               class: "btn", type: "button", disabled: !canUpdate,
