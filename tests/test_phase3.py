@@ -69,15 +69,22 @@ def test_session_branch_saved_and_squash_merged(tmp_path):
         s = m.create("bump the value", project="proj")
         s = await finished(m, s["id"])
         sid, branch = s["id"], f"agent/{s['id']}"
-        assert s["status"] == "done" and s["branch"] == branch and s["base_branch"] == "main"
-        assert "`origin/main`" in s["context"][0]["content"] and "{base_branch}" not in s["context"][0]["content"]
+        assert s["status"] == "done"
+        assert s["branch"] == branch
+        assert s["base_branch"] == "main"
+        assert "`origin/main`" in s["context"][0]["content"]
+        assert "{base_branch}" not in s["context"][0]["content"]
         saved = events(m, sid, "branch_saved")[-1]
-        assert saved["auto_commit"] and saved["published"] and len(saved["commits"]) == 1
+        assert saved["auto_commit"]
+        assert saved["published"]
+        assert len(saved["commits"]) == 1
         # the branch is in the source repo; main is untouched
         assert sh(src, "show", f"{branch}:app.py") == "VALUE = 2"
         assert (src / "app.py").read_text() == "VALUE = 1\n"
         diff = (await m.changes(sid))["repos"][0]
-        assert diff["branch"] == branch and "+VALUE = 2" in diff["diff"] and len(diff["commits"]) == 1
+        assert diff["branch"] == branch
+        assert "+VALUE = 2" in diff["diff"]
+        assert len(diff["commits"]) == 1
 
         s = await m.review(sid, "merge")
         assert s["review"] == "merged"
@@ -102,8 +109,10 @@ def test_merge_refusals_leave_source_clean(tmp_path):
         sh(src, "commit", "-qam", "conflicting change")
         with pytest.raises(HarnessError) as e:
             await m.review(s["id"], "merge")
-        assert e.value.status == 409 and "conflicts in app.py" in str(e.value)
-        assert sh(src, "status", "--porcelain") == "" and (src / "app.py").read_text() == "VALUE = 3\n"
+        assert e.value.status == 409
+        assert "conflicts in app.py" in str(e.value)
+        assert sh(src, "status", "--porcelain") == ""
+        assert (src / "app.py").read_text() == "VALUE = 3\n"
         # on another branch: refused before touching anything
         sh(src, "checkout", "-q", "-b", "other")
         with pytest.raises(HarnessError, match="not main"):
@@ -128,8 +137,10 @@ def test_bare_source_merge_and_discard(tmp_path):
         s2 = await finished(m, m.create("try something", project="proj")["id"])
         assert sh(src, "branch", "--list", s2["branch"]) != ""
         s2 = await m.review(s2["id"], "discard")
-        assert s2["review"] == "discarded" and s2["workspace_removed"] == 1
-        assert sh(src, "branch", "--list", s2["branch"]) == "" and not Path(s2["workspace"]).exists()
+        assert s2["review"] == "discarded"
+        assert s2["workspace_removed"] == 1
+        assert sh(src, "branch", "--list", s2["branch"]) == ""
+        assert not Path(s2["workspace"]).exists()
         with pytest.raises(HarnessError) as e:
             await m.send(s2["id"], "continue")
         assert e.value.status == 409
@@ -150,7 +161,8 @@ def test_url_project_push_and_policy(tmp_path):
         with pytest.raises(HarnessError):
             await m.review(s["id"], "merge")
         s = await m.review(s["id"], "push")
-        assert s["review"] == "pushed" and sh(remote, "show", f"{s['branch']}:app.py") == "VALUE = 2"
+        assert s["review"] == "pushed"
+        assert sh(remote, "show", f"{s['branch']}:app.py") == "VALUE = 2"
         await m.stop()
     asyncio.run(body())
 
@@ -167,7 +179,8 @@ def test_clone_failure_fails_session_cleanly(tmp_path):
         m = Manager(cfg, chat=edit_steps())
         await m.start(maintenance=False)
         s = await finished(m, m.create("x", project="proj")["id"])
-        assert s["status"] == "failed" and s["stop_reason"].startswith("workspace_error")
+        assert s["status"] == "failed"
+        assert s["stop_reason"].startswith("workspace_error")
         await m.stop()
     asyncio.run(body())
 
@@ -188,11 +201,13 @@ def test_quota_stops_growth_but_allows_cleanup(tmp_path):
         m = Manager(cfg, chat=script)
         await m.start(maintenance=False)
         s = await finished(m, m.create("fill the disk")["id"])
-        assert s["status"] == "failed" and s["stop_reason"].startswith("quota_exceeded: 3 MB")
+        assert s["status"] == "failed"
+        assert s["stop_reason"].startswith("quota_exceeded: 3 MB")
         assert s["context"][-1]["content"].startswith("Not run: the workspace is over")
         await m.send(s["id"], "delete it")
         s = await finished(m, s["id"])
-        assert s["status"] == "done" and s["answer"] == "cleaned up"
+        assert s["status"] == "done"
+        assert s["answer"] == "cleaned up"
         await m.stop()
     asyncio.run(body())
 
@@ -222,7 +237,8 @@ def test_cleanup_removes_old_workspaces_keeps_unsaved(tmp_path, monkeypatch):
         old = time.time() - 7200
         os.utime(orphan, (old, old))
         fresh = await m.maintenance.cleanup()
-        assert fresh["workspaces_removed"] == [] and fresh["orphans_removed"] == ["orphan123"]
+        assert fresh["workspaces_removed"] == []
+        assert fresh["orphans_removed"] == ["orphan123"]
 
         report = await m.maintenance.cleanup(now=time.time() + 15 * 86400)
         assert sorted(report["workspaces_removed"]) == sorted([scratch["id"], local["id"]])
@@ -231,7 +247,8 @@ def test_cleanup_removes_old_workspaces_keeps_unsaved(tmp_path, monkeypatch):
         assert m.db.get_session(local["id"])["workspace_removed"] == 1
         assert (await m.changes(local["id"]))["removed"]
         usage = await m.maintenance.usage()
-        assert [w["session"] for w in usage["workspaces"]] == [url["id"]] and usage["free_gb"] > 0
+        assert [w["session"] for w in usage["workspaces"]] == [url["id"]]
+        assert usage["free_gb"] > 0
         await m.stop()
     asyncio.run(body())
 
@@ -279,7 +296,10 @@ def test_homelab_docker_calls(tmp_path, monkeypatch):
 
     async def body():
         status = await h.homelab_services()
-        assert "exited" in status and "exit code 137" in status and "OOM-killed" in status and "SECRET" not in status
+        assert "exited" in status
+        assert "exit code 137" in status
+        assert "OOM-killed" in status
+        assert "SECRET" not in status
         logs = await h.container_logs("web", tail=5000, since="30m")
         assert logs.splitlines() == ["2026-09-14T10:00:01Z started", "2026-09-14T10:00:02Z boom"]
         assert calls[-1][:5] == ["docker", "logs", "--timestamps", "--tail", "2000"]
@@ -289,8 +309,9 @@ def test_homelab_docker_calls(tmp_path, monkeypatch):
             await h.restart_service("portainer")
         calls.clear()
         out = await h.restart_service("web")  # container missing -> compose up
-        assert "recreated with docker compose" in out and calls[1][:4] == ["docker", "compose", "--project-directory",
-                                                                           str(Path(h.cfg.docker_root) / "web")]
+        assert "recreated with docker compose" in out
+        assert (calls[1][:4] == ["docker", "compose", "--project-directory",
+                                                                           str(Path(h.cfg.docker_root) / "web")])
     asyncio.run(body())
 
 
@@ -303,7 +324,8 @@ def test_homelab_tools_only_in_homelab_projects(tmp_path):
         s_lab = m.create("x", project="lab")
         s_plain = m.create("y")
         names = lambda s: {t["function"]["name"] for t in m.runner.workspace(m.db.get_session(s["id"])).schemas()}
-        assert "restart_service" in names(s_lab) and "restart_service" not in names(s_plain)
+        assert "restart_service" in names(s_lab)
+        assert "restart_service" not in names(s_plain)
         assert "Homelab access" in m.db.get_session(s_lab["id"])["context"][0]["content"]
         await asyncio.gather(*m.tasks.values(), return_exceptions=True)
     asyncio.run(body())
