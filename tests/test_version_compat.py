@@ -43,9 +43,11 @@ def test_protocol_accepts_current_and_previous_and_rejects_skew(tmp_path, surfac
             response = call(path, headers={**auth, compat.CLIENT_HEADER: f"{kind}/{version}"}, **({"json": body} if body else {}))
             assert response.status_code == 200, response.text
         old = call(path, headers={**auth, compat.CLIENT_HEADER: f"{kind}/0"}, **({"json": body} if body else {}))
-        assert old.status_code == 426 and old.json()["error"]["code"] == "client_update_required"
+        assert old.status_code == 426
+        assert old.json()["error"]["code"] == "client_update_required"
         new = call(path, headers={**auth, compat.CLIENT_HEADER: f"{kind}/99"}, **({"json": body} if body else {}))
-        assert new.status_code == 426 and new.json()["error"]["code"] == "daemon_update_required"
+        assert new.status_code == 426
+        assert new.json()["error"]["code"] == "daemon_update_required"
 
 
 def test_discovery_is_always_reachable_and_omitted_header_has_transition_notice(tmp_path):
@@ -54,11 +56,13 @@ def test_discovery_is_always_reachable_and_omitted_header_has_transition_notice(
         health = client.get("/health", headers={compat.CLIENT_HEADER: "web/99"})
         assert health.status_code == 200
         data = health.json()
-        assert data["release"] == compat.RELEASE and data["build_id"] == compat.BUILD_ID
+        assert data["release"] == compat.RELEASE
+        assert data["build_id"] == compat.BUILD_ID
         assert data["protocols"] == compat.PROTOCOLS
         assert data["minimum_clients"]["runner"] == "4.1"
         serialized = json.dumps(data)
-        assert "runner-secret" not in serialized and str(tmp_path) not in serialized
+        assert "runner-secret" not in serialized
+        assert str(tmp_path) not in serialized
 
         for root, header in (("/api/v1", "web/99"), ("/api/admin/v1", "cli/99")):
             response = client.get(root, headers={compat.CLIENT_HEADER: header})
@@ -233,7 +237,8 @@ def test_mac_update_is_atomic_preserves_credentials_and_restarts(tmp_path, monke
     fake_download(monkeypatch)
     calls = fake_launchctl(monkeypatch)
     result = updater.apply_update("https://tower.example", base, home=home)
-    assert result["ok"] and result["version"] == compat.MAC_CLIENT_VERSION
+    assert result["ok"]
+    assert result["version"] == compat.MAC_CLIENT_VERSION
     assert (base / "runner/app/harness_runner.py").is_file()
     assert json.loads((base / "runner/config.json").read_text())["token"] == "runner-secret"
     assert json.loads((base / "client/config.json").read_text())["token"] == "owner-secret"
@@ -350,7 +355,8 @@ def test_unchanged_plist_update_kickstarts(tmp_path, monkeypatch):
     plist.write_text(packaged_plist_text(home, base), encoding="utf-8")
     fake_download(monkeypatch)
     result = updater.apply_update("https://tower.example", base, restart=False, home=home)
-    assert result["ok"] and result["plist_changed"] is False
+    assert result["ok"]
+    assert result["plist_changed"] is False
     calls = fake_launchctl(monkeypatch, plist=plist)
     recorded = updater.perform_launchd_handoff(
         plist, definition_changed=False, previous_plist=updater.previous_plist_path(base), base=base)
@@ -413,8 +419,11 @@ def test_runner_schedules_shared_handoff_after_posting_update_result(tmp_path, m
 
     harness_runner.Runner(FakeClient(), executor).work(
         {"id": "req-1", "op": "update_client", "params": {}})
-    assert posted and posted[0]["ok"] is True and posted[0]["id"] == "req-1"
-    assert scheduled and scheduled[0][1]["definition_changed"] is True
+    assert posted
+    assert posted[0]["ok"] is True
+    assert posted[0]["id"] == "req-1"
+    assert scheduled
+    assert scheduled[0][1]["definition_changed"] is True
     assert scheduled[0][1]["previous_plist"] == updater.previous_plist_path(base)
     assert scheduled[0][1]["base"] == base
     argv = []
@@ -424,7 +433,8 @@ def test_runner_schedules_shared_handoff_after_posting_update_result(tmp_path, m
         home / "Library/LaunchAgents/dev.agent-harness.runner.plist",
         definition_changed=True, previous_plist=updater.previous_plist_path(base), base=base,
         python=sys.executable, app_dir=base / "runner" / "app")
-    assert argv and "kickstart" not in " ".join(argv[0][0])
+    assert argv
+    assert "kickstart" not in " ".join(argv[0][0])
     assert "perform_launchd_handoff" in argv[0][0][2]
     assert "HARNESS_LAUNCHD_HANDOFF" in argv[0][1]["env"]
 
@@ -441,7 +451,8 @@ def test_old_runner_gets_exact_manual_update_fallback(tmp_path):
     assert "harness update" in response.json()["detail"]
     status = manager.hub.status()[0]
     assert status["compatibility"]["state"] == "compatible"
-    assert status["update_supported"] is False and status["manual_update"] == "harness update"
+    assert status["update_supported"] is False
+    assert status["manual_update"] == "harness update"
 
 
 def test_web_bundle_has_safe_cache_update_and_version_handshake():
@@ -451,14 +462,19 @@ def test_web_bundle_has_safe_cache_update_and_version_handshake():
     worker = (root / "sw.js").read_text(encoding="utf-8")
     assert f'WEB_BUILD_ID = "{compat.WEB_BUILD_ID}"' in client
     assert f'BUILD_ID = "{compat.WEB_BUILD_ID}"' in worker
-    assert "X-Agent-Harness-Client" in client and "compatibility()" in client
-    assert "hasUnsavedInput" in app and "Reload and update" in app
-    assert "sessionStorage" in app and "PURGE_SHELL" in app
+    assert "X-Agent-Harness-Client" in client
+    assert "compatibility()" in client
+    assert "hasUnsavedInput" in app
+    assert "Reload and update" in app
+    assert "sessionStorage" in app
+    assert "PURGE_SHELL" in app
     assert "sessionStorage.setItem(UPDATE_GUARD, WEB_BUILD_ID)" in app
     assert "harness.webUpdatePrompt.${available}" not in app
-    assert "harness-shell-${BUILD_ID}" in worker and "PURGE_SHELL" in worker
+    assert "harness-shell-${BUILD_ID}" in worker
+    assert "PURGE_SHELL" in worker
     assert "event.origin !== self.location.origin" in worker
-    assert "api/v1" not in worker and "api/admin" not in worker
+    assert "api/v1" not in worker
+    assert "api/admin" not in worker
 
 
 def test_blocked_web_ui_ignores_hashchange_and_nav_without_api_calls():
