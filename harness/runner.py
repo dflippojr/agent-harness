@@ -773,7 +773,7 @@ class Runner:
             self.bus.emit(sid, "tool_result", {"id": call_id, "name": name, "ok": ok, "seconds": seconds,
                                                "output": truncate_middle(output, 20000)})
 
-    def _claude_delta(self, sid: str, event: dict, tool_names: dict[str, str] | None = None) -> None:
+    def _claude_delta(self, sid: str, event: dict, _tool_names: dict[str, str] | None = None) -> None:
         delta = (event.get("event") or {}).get("delta") or {}
         text = delta.get("text")
         if isinstance(text, str) and text:
@@ -804,7 +804,7 @@ class Runner:
             self._record_cli_tool_result(sid, call_id, tool_names.get(call_id, ""), not bool(block.get("is_error")),
                                          self._cli_text(block.get("content")))
 
-    def _claude_rate_limits(self, sid: str, event: dict, tool_names: dict[str, str] | None = None) -> None:
+    def _claude_rate_limits(self, sid: str, event: dict, _tool_names: dict[str, str] | None = None) -> None:
         rate_limits = event.get("rate_limit_info") or {}
         s = self.db.get_session(sid)
         self.db.update_session(sid, run={**s["run"], "rate_limits": rate_limits})
@@ -959,29 +959,29 @@ class Runner:
         "item/completed": "_codex_item_completed", "thread/tokenUsage/updated": "_codex_token_usage",
         "account/rateLimits/updated": "_codex_rate_limits_event"}
 
-    def _codex_turn_started(self, sid: str, cli: CodexSession, params: dict, tool_names, method) -> None:
+    def _codex_turn_started(self, _sid: str, cli: CodexSession, params: dict, _tool_names, _method) -> None:
         turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
         cli.active_turn_id = str(turn.get("id") or cli.active_turn_id)
 
-    def _codex_delta(self, sid: str, cli: CodexSession, params: dict, tool_names, method: str) -> None:
+    def _codex_delta(self, sid: str, _cli: CodexSession, params: dict, _tool_names, method: str) -> None:
         text = params.get("delta")
         if isinstance(text, str) and text:
             kind = "content" if method == "item/agentMessage/delta" else "reasoning"
             self.bus.ephemeral(sid, "delta", {"kind": kind, "text": text})
 
-    def _codex_token_usage(self, sid: str, cli: CodexSession, params: dict, tool_names, method) -> None:
+    def _codex_token_usage(self, _sid: str, cli: CodexSession, params: dict, _tool_names, _method) -> None:
         usage = params.get("tokenUsage")
         if isinstance(usage, dict):
             cli.token_usage = usage
 
-    def _codex_thread_started(self, sid: str, cli: CodexSession, params: dict, tool_names=None, method="") -> None:
+    def _codex_thread_started(self, sid: str, cli: CodexSession, params: dict, _tool_names=None, _method="") -> None:
         thread = params.get("thread") if isinstance(params.get("thread"), dict) else {}
         thread_id = str(thread.get("id") or "")
         if thread_id:
             self._bind_backend_session(sid, cli, thread_id)
 
     def _codex_item_started(self, sid: str, cli: CodexSession, params: dict, tool_names: dict[str, str],
-                            method: str = "") -> None:
+                            _method: str = "") -> None:
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
         item_id, kind = str(item.get("id") or ""), str(item.get("type") or "")
         if item_id:
@@ -997,7 +997,7 @@ class Runner:
         self._emit_assistant(sid, "", [self._tool_call_entry(item_id, name, args)])
 
     def _codex_item_completed(self, sid: str, cli: CodexSession, params: dict, tool_names: dict[str, str],
-                              method: str = "") -> None:
+                              _method: str = "") -> None:
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
         item_id, kind = str(item.get("id") or ""), str(item.get("type") or "")
         if item_id:
@@ -1035,7 +1035,7 @@ class Runner:
                    "description": str(params.get("reason") or params.get("command") or "")}
         await self._authorize_cli(sid, cli, event.get("id"), request, recovered=recovered)
 
-    def _codex_rate_limits_event(self, sid: str, cli, params: dict, tool_names=None, method="") -> None:
+    def _codex_rate_limits_event(self, sid: str, _cli, params: dict, _tool_names=None, _method="") -> None:
         snapshot = params.get("rateLimits") if isinstance(params.get("rateLimits"), dict) else {}
         limits = self._codex_rate_limits(snapshot)
         s = self.db.get_session(sid)
@@ -1540,13 +1540,7 @@ class Runner:
                 output = await self.app_tools.call(s, call["id"], name, args, on_wait=waiting,
                                                    on_resume=lambda: self._acquire(sid))
             elif kit is not None and kit is self.images:
-                put_bytes = None
-                root = Path(s["workspace"]) if s["target"] == "tower" else None
-                if root is None and isinstance(ws, RemoteWorkspace):
-                    async def put_bytes(rel: str, data: bytes) -> str:
-                        await self._wait_for_target(sid)
-                        return await self._remote_await(sid, ws, "put_file", ws.put_file(rel, data))
-                output = await kit.call(name, {**args, "_session": sid}, workspace_root=root, put_bytes=put_bytes)
+                output = await self._call_images(sid, s, ws, kit, name, args)
             elif kit is not None and getattr(kit, "wants_session", False):
                 output = await kit.call(name, args, session=s, call_id=call["id"])
             elif kit is not None:
@@ -1564,6 +1558,15 @@ class Runner:
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
         self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started)
         return output
+
+    async def _call_images(self, sid: str, s: dict, ws: Workspace, kit, name: str, args: dict) -> str:
+        put_bytes = None
+        root = Path(s["workspace"]) if s["target"] == "tower" else None
+        if root is None and isinstance(ws, RemoteWorkspace):
+            async def put_bytes(rel: str, data: bytes) -> str:
+                await self._wait_for_target(sid)
+                return await self._remote_await(sid, ws, "put_file", ws.put_file(rel, data))
+        return await kit.call(name, {**args, "_session": sid}, workspace_root=root, put_bytes=put_bytes)
 
     def _bump(self, sid: str, counter: str) -> None:
         s = self.db.get_session(sid)
