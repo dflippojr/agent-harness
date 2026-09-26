@@ -293,6 +293,12 @@ function approvalDiffClass(line) {
   return line.startsWith("-") ? "del" : "";
 }
 
+function diffLineClass(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+") && !line.startsWith("+++")) return "add";
+  return line.startsWith("-") && !line.startsWith("---") ? "del" : "";
+}
+
 function ago(ts) {
   const s = Math.max(0, Date.now() / 1000 - ts);
   if (s < 60) return "just now";
@@ -2337,8 +2343,10 @@ function repoChanges(sid, repo, state, canComment, render) {
   };
   const lineRow = (f, ln) => {
     if (ln.kind === "hunk") return h("div", { class: "hunk" }, ln.text);
-    const sign = ln.kind === "add" ? "+" : ln.kind === "del" ? "-" : " ";
-    const side = ln.kind === "del" ? "old" : ln.kind === "add" ? "new" : sel?.path === f.name ? sel.side : "new";
+    const sign = { add: "+", del: "-" }[ln.kind] || " ";
+    let side = "new";
+    if (ln.kind === "del") side = "old";
+    else if (ln.kind !== "add" && sel?.path === f.name) side = sel.side;
     const num = side === "old" ? ln.old : ln.new;
     const picked = sel?.path === f.name && sel.side === side && num >= sel.start && num <= sel.end;
     const commented = mine.some((c) => c.path === f.name && c.side === side && num >= c.start_line && num <= c.end_line);
@@ -2354,8 +2362,7 @@ function repoChanges(sid, repo, state, canComment, render) {
     const parsed = parsedFiles.get(f.name);
     if (!parsed) {
       return f.lines.map((line) => h("div", {
-        class: line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add"
-          : line.startsWith("-") && !line.startsWith("---") ? "del" : "",
+        class: diffLineClass(line),
       }, line));
     }
     const out = [];
@@ -2473,7 +2480,10 @@ function updateImageStatusView(view, s) {
   const hasSteps = s.phase === "generating" && Number(p.max) > 0;
   const upscaling = s.phase === "generating" && p.stage === "upscaling";
   const editing = s.phase === "generating" && p.stage === "editing";
-  label.textContent = (upscaling ? "Upscaling" : editing ? "Editing" : text) + queued;
+  let stageName = null;
+  if (upscaling) stageName = "Upscaling";
+  else if (editing) stageName = "Editing";
+  label.textContent = (stageName || text) + queued;
   label.classList.toggle("dots", busy);
   bar.hidden = !busy;
   detail.hidden = !hasSteps;
@@ -2482,7 +2492,7 @@ function updateImageStatusView(view, s) {
     if (hasSteps) {
       const fraction = Math.max(0, Math.min(1, Number(p.value || 0) / Number(p.max)));
       barFill.style.width = `${Math.max(2, fraction * 100).toFixed(1)}%`;
-      detail.textContent = `${upscaling ? "Upscaling" : editing ? "Editing" : "Sampling"} ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
+      detail.textContent = `${stageName || "Sampling"} ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
     } else {
       barFill.style.width = "";
       detail.textContent = "";
@@ -2695,10 +2705,17 @@ async function viewImage(id) {
         location.hash = `#/images/${next.id}`;
       } catch (e) { toast(e.message); }
     };
+    const endedBad = img.status === "failed" || img.status === "cancelled";
+    const imageNote = () => {
+      if (img.status === "failed") return `Failed: ${img.error}`;
+      return img.status === "cancelled" ? "Cancelled" : imageStatusView(img.service);
+    };
+    let editControl = null;
+    if (canEdit) editControl = h("a", { class: "btn", href: `#/images/${id}/edit` }, "Edit");
+    else if (editReady) editControl = h("button", { class: "btn", type: "button", disabled: true, title: editBlockedReason }, "Edit");
     fill($app,
       img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
-        : h("p", { class: `note${img.status === "failed" || img.status === "cancelled" ? " bad" : ""}` },
-          img.status === "failed" ? `Failed: ${img.error}` : img.status === "cancelled" ? "Cancelled" : imageStatusView(img.service)),
+        : h("p", { class: `note${endedBad ? " bad" : ""}` }, imageNote()),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, meta.join(" · ")),
@@ -2714,7 +2731,7 @@ async function viewImage(id) {
             c.operation === "upscale" ? `${c.scale}×` : c.operation)]))) : null,
         !isGuest() && (!edit.enabled || !edit.available) ? h("p", { class: "muted small" }, edit.setup || "") : null,
         h("div", { class: "row" },
-          isGuest() ? null : img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
+          !isGuest() && img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
             class: "btn",
             onclick: async () => {
               try {
@@ -2723,8 +2740,7 @@ async function viewImage(id) {
               } catch (e) { toast(e.message); }
             },
           }, "Another one") : null,
-          canEdit ? h("a", { class: "btn", href: `#/images/${id}/edit` }, "Edit")
-            : editReady ? h("button", { class: "btn", type: "button", disabled: true, title: editBlockedReason }, "Edit") : null,
+          editControl,
           canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
           canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
           img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
@@ -2916,7 +2932,10 @@ const fmtWhen = (ts) => new Date(ts * 1000).toLocaleString(undefined, { weekday:
 const whenText = (ts) => {
   if (!ts) return "—";
   const s = ts - Date.now() / 1000;
-  const rel = s < 0 ? "due" : s < 3600 ? `in ${Math.max(1, Math.round(s / 60))} min` : s < 86400 ? `in ${Math.round(s / 3600)} h` : `in ${Math.round(s / 86400)} d`;
+  let rel = `in ${Math.round(s / 86400)} d`;
+  if (s < 0) rel = "due";
+  else if (s < 3600) rel = `in ${Math.max(1, Math.round(s / 60))} min`;
+  else if (s < 86400) rel = `in ${Math.round(s / 3600)} h`;
   return `${fmtWhen(ts)} (${rel})`;
 };
 const cronLabel = (cron) => (CRON_PRESETS.find(([c]) => c === cron) || [null, cron])[1];
@@ -3032,7 +3051,7 @@ async function viewJob(id) {
   h("label", {}, "Notify me"), notify,
   h("label", { class: "row", style: "font-weight:500" }, enabled, "Enabled"),
   h("div", { class: "row", style: "margin-top:18px" },
-    isGuest() ? null : !isNew ? h("button", {
+    !isGuest() && !isNew ? h("button", {
       class: "btn bad", type: "button",
       onclick: async () => {
         if (!confirm(`Delete the job “${j.name}”? Its past sessions stay.`)) return;
@@ -3040,7 +3059,7 @@ async function viewJob(id) {
       },
     }, "Delete") : null,
     h("span", { class: "spacer" }),
-    isGuest() ? null : !isNew ? h("button", {
+    !isGuest() && !isNew ? h("button", {
       class: "btn", type: "button",
       onclick: async () => {
         if (backend.value === "local" && !(await confirmGpuQueue("This job run"))) return;
@@ -3280,10 +3299,10 @@ async function viewActions(tab) {
       "aria-selected": id === selected ? "true" : "false",
       onclick: () => go(`#/actions/${id}`),
     }, label)));
-  const panel = selected === "gpu" ? h("div", { class: "card settings-list" }, gpuActionRow())
-    : selected === "accounts" ? await accountsCard()
-    : selected === "remote-control" ? remoteControlCard()
-    : diskCard();
+  let panel;
+  if (selected === "gpu") panel = h("div", { class: "card settings-list" }, gpuActionRow());
+  else if (selected === "accounts") panel = await accountsCard();
+  else panel = selected === "remote-control" ? remoteControlCard() : diskCard();
   append($app, tabs, panel);
 }
 
@@ -3392,6 +3411,7 @@ function connectionCard() {
       h("button", { class: "btn", onclick: mint }, "Create owner token"), minted));
 }
 
+const iconGlyph = (spec) => (spec.id === "profile" ? ($profileIcon.textContent || "🙂") : spec.emoji);
 const APP_ICONS = [
   { id: "default", label: "Default" },
   { id: "profile", label: "Profile icon" },
@@ -3465,7 +3485,7 @@ function appearanceCard() {
     },
       h("div", { class: "preview" }, spec.id === "default"
         ? h("img", { src: "/static/icon-180.png", alt: "" })
-        : (spec.id === "profile" ? ($profileIcon.textContent || "🙂") : spec.emoji)),
+        : iconGlyph(spec)),
       h("div", { class: "name" }, spec.label))));
   };
   paint();
@@ -3487,7 +3507,7 @@ function appearanceCard() {
       paint();
     });
     return h("label", {},
-      key === "bg" ? "Background" : key === "panel" ? "Panel" : "Accent",
+      { bg: "Background", panel: "Panel" }[key] || "Accent",
       h("div", { class: "hue-control" }, preview, input));
   }));
   return h("div", { class: "card" },
@@ -3529,7 +3549,8 @@ function backendUsage(b) {
   const limits = b.limits || {};
   const pct = limits.utilization === undefined ? null : Math.round(limits.utilization * 100);
   const period = String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h");
-  const sub = pct === null ? (b.logged_in ? "signed in" : "sign-in needed") : `${period} ${pct}% used`;
+  const signedIn = b.logged_in ? "signed in" : "sign-in needed";
+  const sub = pct === null ? signedIn : `${period} ${pct}% used`;
   const req = `${b.today.requests || 0} today · ${b.week.requests || 0} this week`;
   const cost = Number(b.today.cost_usd || 0) + Number(b.week.cost_usd || 0);
   const dollars = cost > 0 ? ` · $${Number(b.today.cost_usd || 0).toFixed(2)} today` : "";
@@ -3628,7 +3649,8 @@ async function backendsCard() {
     input.addEventListener("change", () => save(input.value.trim()));
     return [sel, input];
   };
-  const title = (b) => (b.name === "local" ? "Qwen (this PC)" : b.name === "claude" ? "Claude" : b.name === "codex" ? "Codex" : b.name === "cursor" ? "Cursor" : b.name);
+  const BACKEND_TITLES = { local: "Qwen (this PC)", claude: "Claude", codex: "Codex", cursor: "Cursor" };
+  const title = (b) => BACKEND_TITLES[b.name] || b.name;
   const usage = {};
   fill(body, rows.length ? rows.map((b) => {
     const line = h("p", { class: `small ${b.billing_warning ? "bad" : "muted"}` }, b.billing_warning || backendUsage(b));
@@ -3682,12 +3704,24 @@ function settingInput(spec, draft) {
 
 function settingMeta(spec) {
   const bits = [];
-  bits.push(spec.apply === "live" ? "applies live" : spec.apply === "daemon_restart" ? "needs restart" : "file only");
+  bits.push({ live: "applies live", daemon_restart: "needs restart" }[spec.apply] || "file only");
   if (spec.source) bits.push(`source: ${spec.source}`);
   if (spec.pending != null && spec.apply === "daemon_restart") bits.push(`pending: ${spec.pending}`);
   if (spec.capped_by) bits.push(`capped by ${spec.capped_by}`);
   if (spec.file_only) bits.push(spec.guidance || "managed in local configuration");
   return bits.join(" · ");
+}
+
+function lastSeenText(runner) {
+  if (runner.last_seen_seconds === null) return "not connected since Agent Harness Server started";
+  return `last seen ${Math.round(runner.last_seen_seconds / 60)} min ago`;
+}
+
+function recoveryNote(recovery) {
+  if (recovery?.recovery === "overlay_quarantined") {
+    return ` · ${recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`;
+  }
+  return recovery?.recovery ? ` · recovered from ${recovery.reason || "failed generation"}` : "";
 }
 
 async function daemonSettingsCard() {
@@ -3699,10 +3733,7 @@ async function daemonSettingsCard() {
     `Revision ${view.revision}` +
     (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
     (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
-    (view.warning ? ` · ${view.warning}` :
-      view.recovery?.recovery === "overlay_quarantined"
-        ? ` · ${view.recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`
-        : (view.recovery?.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
+    (view.warning ? ` · ${view.warning}` : recoveryNote(view.recovery)));
   const planBox = h("div", { class: "config-plan" });
   const errorBox = h("div");
   const groups = {};
@@ -3927,7 +3958,8 @@ function remoteControlCard() {
     load();
     try {
       const r = await api(`/remote-control/${encodeURIComponent(project)}${stop ? "/stop" : ""}`, { method: "POST" });
-      toast(stop ? `Stopped Remote Control for ${project}` : r.already_running ? "Already running" : "Remote Control is ready");
+      if (stop) toast(`Stopped Remote Control for ${project}`);
+      else toast(r.already_running ? "Already running" : "Remote Control is ready");
     } catch (e) { toast(e.message); }
     busy = "";
     load();
@@ -3938,10 +3970,21 @@ function remoteControlCard() {
     load();
     try {
       const r = await api(`/remote-control/${encodeURIComponent(project)}/trust`, { method: "POST" });
-      toast(r.already_trusted ? "This repository is already trusted" : r.already_open ? "The trust window is already open" : "Claude trust window opened on the tower", 5000);
+      let message = "Claude trust window opened on the tower";
+      if (r.already_trusted) message = "This repository is already trusted";
+      else if (r.already_open) message = "The trust window is already open";
+      toast(message, 5000);
     } catch (e) { toast(e.message); }
     busy = "";
     load();
+  };
+  const rcButton = (p) => {
+    if (p.running) return h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop");
+    if (!p.trusted) {
+      return h("button", { class: "btn", disabled: !!busy || p.trust_prompt_open, onclick: () => trust(p.project) },
+        p.trust_prompt_open ? "Trust window open" : "Trust in Claude…");
+    }
+    return h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, false) }, "Start");
   };
   const row = (p) => {
     const remoteControlState = (p) => {
@@ -3960,9 +4003,7 @@ function remoteControlCard() {
       !p.trusted && p.trust_prompt_open ? h("p", { class: "note small" }, "On the tower, review the folder in Claude and accept its trust prompt. This page will notice automatically.") : null,
       isGuest() ? h("p", { class: "muted small" }, "Demo access cannot start, stop, or trust Remote Control.") : h("div", { class: "row" },
         p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
-        p.running ? h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop")
-          : !p.trusted ? h("button", { class: "btn", disabled: !!busy || p.trust_prompt_open, onclick: () => trust(p.project) }, p.trust_prompt_open ? "Trust window open" : "Trust in Claude…")
-            : h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, false) }, "Start")));
+        rcButton(p)));
   };
   const load = async () => {
     try {
@@ -4087,14 +4128,17 @@ function memoryCard() {
         } catch (e) { toast(e.message); }
         save.disabled = !mem.writes;
       });
+      const memoryProfileAction = () => {
+        if (isGuest()) return h("p", { class: "muted small" }, "Demo access cannot edit the memory profile.");
+        return mem.writes ? save : h("p", { class: "muted small" }, "Enable memory_library.writes to edit from here.");
+      };
       fill(body,
         h("p", { class: "small" }, "A short purpose statement given to every new session: how agents should use this library. Keep personal biography in category files, not here."),
         h("p", { class: "small" }, `Agents can read ${mem.categories.join(", ")}. `,
           mem.writes ? "They can propose changes; every change asks you first." : "Read-only for agents."),
         editor,
         h("p", { class: "muted small" }, `${mem.profile_path || "profile"} · limit ${mem.profile_max_chars} characters`),
-        isGuest() ? h("p", { class: "muted small" }, "Demo access cannot edit the memory profile.")
-          : mem.writes ? save : h("p", { class: "muted small" }, "Enable memory_library.writes to edit from here."),
+        memoryProfileAction(),
         mem.last_commit?.head ? h("p", { class: "muted small" }, `Last saved change: ${mem.last_commit.summary} (${mem.last_commit.head}, ${ago(mem.last_commit.at)})`) : null,
         mem.refresh_error ? h("p", { class: "small bad" }, `Couldn't refresh the library: ${mem.refresh_error}`) : null);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
@@ -4350,9 +4394,7 @@ function diskCard() {
           const extra = h("div", { class: "disk-facts" },
             fact("Runner", online
               ? `${r.info.version} · protocol ${r.info.protocol ?? "not reported"} · macOS ${r.info.macos}`
-              : (r.last_seen_seconds !== null
-                ? `last seen ${Math.round(r.last_seen_seconds / 60)} min ago`
-                : "not connected since Agent Harness Server started")),
+              : lastSeenText(r)),
             fact("Compatibility", `${compatibility.state || "not reported"}${compatibility.supported ? " · Server supports " + compatibility.supported.min + "–" + compatibility.supported.max : ""}`),
             r.last_update ? fact("Last update", `${r.last_update.ok ? "succeeded" : "failed"}: ${r.last_update.message}`) : null,
             isGuest() ? null : h("button", {
