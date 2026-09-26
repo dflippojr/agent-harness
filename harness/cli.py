@@ -289,52 +289,67 @@ def _decide_approval(sid: str, approval_id: str) -> None:
         print(f"{DIM}left pending; approve later with: approve {sid} {approval_id}{RESET}")
 
 
+def _approval_pending(sid: str, approval_id: str) -> bool:
+    return approval_id in {a["id"] for a in api("GET", f"/sessions/{sid}/approvals")}
+
+
+def _wants_prompt(prompt_for, t: str, args) -> bool:
+    return bool(prompt_for) and t in ("approval_requested", "status") and sys.stdin.isatty() and not args.no_prompt
+
+
+def _note_queue(d: dict, position):
+    if d["position"] != position and d["position"] > 0:
+        print(f"{DIM}queued: position {d['position']}{RESET}")
+    return d["position"]
+
+
+def _watch_event(e: dict, sid: str, args, state: dict) -> int | None:
+    """Handle one event, updating `state`. Returns an exit code once the session has really ended."""
+    t, d = e["type"], e["data"]
+    if t == "delta":
+        if d["kind"] != "reasoning" or args.reasoning:
+            _print_delta(d, state["streamed"])
+    elif t == "queue":
+        state["position"] = _note_queue(d, state["position"])
+    elif t == "compacting":
+        print(f"{DIM}compacting {d['messages']} messages...{RESET}")
+    elif t == "assistant":
+        state["last_content"] = _print_assistant(d, state["streamed"])
+    elif t == "approval_requested":
+        _print_approval_request(d)
+        state["prompt_for"] = d["id"]
+    elif t == "approval_decided":
+        print(f"{YELLOW}approval {d['id']} {d['status']}{RESET}")
+        if state["prompt_for"] == d["id"]:
+            state["prompt_for"] = None
+    elif t == "status":
+        return _terminal_exit(d, sid, state["last_content"])
+    else:
+        _print_event(t, d, args)
+    return None
+
+
 def watch(sid: str, args, after: int = 0) -> int:
-    streamed = {"content": False, "reasoning": False}
-    position = None
-    last_content = ""
+    state = {"streamed": {"content": False, "reasoning": False}, "position": None, "last_content": "",
+             "prompt_for": None}
     while True:
-        prompt_for = None
+        state["prompt_for"] = None
         for e in iter_sse(sid, after):
-            t, d = e["type"], e["data"]
             if e["seq"] is not None:
                 after = e["seq"]
-            if t == "delta":
-                if d["kind"] != "reasoning" or args.reasoning:
-                    _print_delta(d, streamed)
+            code = _watch_event(e, sid, args, state)
+            if code is not None:
+                return code
+            if e["type"] in ("delta", "queue", "compacting"):
                 continue
-            if t == "queue":
-                if d["position"] != position and d["position"] > 0:
-                    print(f"{DIM}queued: position {d['position']}{RESET}")
-                position = d["position"]
-                continue
-            if t == "compacting":
-                print(f"{DIM}compacting {d['messages']} messages...{RESET}")
-                continue
-            if t == "assistant":
-                last_content = _print_assistant(d, streamed)
-            elif t == "approval_requested":
-                _print_approval_request(d)
-                prompt_for = d["id"]
-            elif t == "approval_decided":
-                print(f"{YELLOW}approval {d['id']} {d['status']}{RESET}")
-                if prompt_for == d["id"]:
-                    prompt_for = None
-            elif t == "status":
-                code = _terminal_exit(d, sid, last_content)
-                if code is not None:
-                    return code
-            else:
-                _print_event(t, d, args)
-            if prompt_for and t in ("approval_requested", "status") and sys.stdin.isatty() and not args.no_prompt:
-                pending = {a["id"] for a in api("GET", f"/sessions/{sid}/approvals")}
-                if prompt_for in pending:
+            if _wants_prompt(state["prompt_for"], e["type"], args):
+                if _approval_pending(sid, state["prompt_for"]):
                     break  # leave the stream to ask, then reconnect from `after`
-                prompt_for = None
+                state["prompt_for"] = None
         else:
             time.sleep(2)  # stream ended or dropped; reconnect
             continue
-        _decide_approval(sid, prompt_for)
+        _decide_approval(sid, state["prompt_for"])
 
 
 def main() -> int:
