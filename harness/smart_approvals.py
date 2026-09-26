@@ -608,7 +608,7 @@ def _matches(tokens: list[str], shape: _ArgvShape) -> bool:
     if parsed is None:
         return False
     flags, positionals = parsed
-    if not shape.require_flags <= flags:
+    if not shape.require_flags.issubset(flags):
         return False
     extras = _strip_verbs(positionals, shape)
     if extras is None:
@@ -935,7 +935,7 @@ class SmartReviewer:
         except Exception:  # includes httpx.HTTPError
             return Review("escalate", escalate_reason=REASON_PROVIDER_ERROR)
 
-    async def consider(self, db, policy: Policy, name: str, args: dict, decision: Decision,
+    async def consider(self, db, _policy: Policy, name: str, args: dict, decision: Decision,
                        *, repo: bool = False) -> tuple[Eligibility, Review | None]:
         """Return (eligibility, review). review is None when the provider was not called."""
         eligibility = assess_eligibility(name, args, decision, repo=repo)
