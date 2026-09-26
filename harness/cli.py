@@ -288,6 +288,10 @@ def _note_queue(d: dict, position):
     return d["position"]
 
 
+def _approval_pending(sid: str, approval_id: str) -> bool:
+    return approval_id in {a["id"] for a in api("GET", f"/sessions/{sid}/approvals")}
+
+
 def watch(sid: str, args, after: int = 0) -> int:
     streamed = {"content": False, "reasoning": False}
     position = None
@@ -315,8 +319,7 @@ def watch(sid: str, args, after: int = 0) -> int:
                 prompt_for = d["id"]
             elif t == "approval_decided":
                 print(f"{YELLOW}approval {d['id']} {d['status']}{RESET}")
-                if prompt_for == d["id"]:
-                    prompt_for = None
+                prompt_for = None if prompt_for == d["id"] else prompt_for
             elif t == "status":
                 code = _terminal_exit(d, sid, last_content)
                 if code is not None:
@@ -324,8 +327,7 @@ def watch(sid: str, args, after: int = 0) -> int:
             else:
                 _print_event(t, d, args)
             if prompt_for and t in ("approval_requested", "status") and sys.stdin.isatty() and not args.no_prompt:
-                pending = {a["id"] for a in api("GET", f"/sessions/{sid}/approvals")}
-                if prompt_for in pending:
+                if _approval_pending(sid, prompt_for):
                     break  # leave the stream to ask, then reconnect from `after`
                 prompt_for = None
         else:
@@ -368,6 +370,48 @@ def _cmd_runner(args) -> int:
     print(f"launchd: {'loaded' if local.returncode == 0 else 'not loaded'}")
     print("daemon: " + (json.dumps(remote, indent=2) if remote else "runner not configured on daemon"))
     return 0
+
+
+def _session_cmd(args) -> int:
+    if args.cmd == "new":
+        s = api("POST", "/sessions", json={"prompt": args.prompt, "project": args.project,
+                                           "backend": args.backend, "model": args.model, "title": args.title})
+        print(f"session {s['id']} ({s['project']}, {s['model']})")
+        return 0 if args.detach else watch(s["id"], args)
+    if args.cmd == "watch":
+        return watch(api("GET", f"/sessions/{args.session}")["id"], args)
+    if args.cmd == "list":
+        for s in api("GET", "/sessions"):
+            when = time.strftime("%m-%d %H:%M", time.localtime(s["created_at"]))
+            print(f"{s['id']}  {when}  {s['status']:<16} {s['project']:<10} {s['title']}")
+        return 0
+    if args.cmd == "show":
+        print(json.dumps(api("GET", f"/sessions/{args.session}"), indent=2))
+        return 0
+    if args.cmd == "transcript":
+        print(api("GET", f"/sessions/{args.session}/transcript"))
+        return 0
+    if args.cmd == "cancel":
+        print(api("POST", f"/sessions/{args.session}/cancel")["status"])
+        return 0
+    if args.cmd == "send":
+        before = api("GET", f"/sessions/{args.session}")
+        s = api("POST", f"/sessions/{args.session}/messages", json={"content": args.message})
+        print(f"sent; session is {s['status']}")
+        if args.watch:
+            args.reasoning = args.full = args.no_prompt = False
+            return watch(s["id"], args, after=before["last_event_seq"])
+        return 0
+    if args.cmd in ("approve", "deny"):
+        a = api("POST", f"/sessions/{args.session}/approvals/{args.approval}",
+                json={"decision": args.cmd, "note": args.note})
+        print(f"{a['id']} {a['status']}")
+        return 0
+    if args.cmd == "queue":
+        for q in api("GET", "/queue"):
+            print(f"{q['position']}  {q['session_id']}")
+        return 0
+    return 1
 
 
 def main() -> int:
@@ -453,45 +497,7 @@ def main() -> int:
     if args.cmd == "runner":
         return _cmd_runner(args)
 
-    if args.cmd == "new":
-        s = api("POST", "/sessions", json={"prompt": args.prompt, "project": args.project,
-                                           "backend": args.backend, "model": args.model, "title": args.title})
-        print(f"session {s['id']} ({s['project']}, {s['model']})")
-        return 0 if args.detach else watch(s["id"], args)
-    if args.cmd == "watch":
-        return watch(api("GET", f"/sessions/{args.session}")["id"], args)
-    if args.cmd == "list":
-        for s in api("GET", "/sessions"):
-            when = time.strftime("%m-%d %H:%M", time.localtime(s["created_at"]))
-            print(f"{s['id']}  {when}  {s['status']:<16} {s['project']:<10} {s['title']}")
-        return 0
-    if args.cmd == "show":
-        print(json.dumps(api("GET", f"/sessions/{args.session}"), indent=2))
-        return 0
-    if args.cmd == "transcript":
-        print(api("GET", f"/sessions/{args.session}/transcript"))
-        return 0
-    if args.cmd == "cancel":
-        print(api("POST", f"/sessions/{args.session}/cancel")["status"])
-        return 0
-    if args.cmd == "send":
-        before = api("GET", f"/sessions/{args.session}")
-        s = api("POST", f"/sessions/{args.session}/messages", json={"content": args.message})
-        print(f"sent; session is {s['status']}")
-        if args.watch:
-            args.reasoning = args.full = args.no_prompt = False
-            return watch(s["id"], args, after=before["last_event_seq"])
-        return 0
-    if args.cmd in ("approve", "deny"):
-        a = api("POST", f"/sessions/{args.session}/approvals/{args.approval}",
-                json={"decision": args.cmd, "note": args.note})
-        print(f"{a['id']} {a['status']}")
-        return 0
-    if args.cmd == "queue":
-        for q in api("GET", "/queue"):
-            print(f"{q['position']}  {q['session_id']}")
-        return 0
-    return 1
+    return _session_cmd(args)
 
 
 if __name__ == "__main__":
