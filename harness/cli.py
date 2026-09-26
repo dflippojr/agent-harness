@@ -204,7 +204,7 @@ def _iter_sse(sid: str, after: int):
                 data = []
 
 
-def _print_delta(d: dict, args, streamed: dict) -> None:
+def _print_delta(d: dict, streamed: dict) -> None:
     """One streamed token, opening the `assistant:` line and the dim reasoning block as needed."""
     if not any(streamed.values()):
         print(f"{CYAN}assistant:{RESET} ", end="")
@@ -281,6 +281,13 @@ def _decide_approval(sid: str, approval_id: str) -> None:
         print(f"{DIM}left pending; approve later with: approve {sid} {approval_id}{RESET}")
 
 
+def _note_queue(d: dict, position):
+    """Print a queue-position change and return the new position."""
+    if d["position"] != position and d["position"] > 0:
+        print(f"{DIM}queued: position {d['position']}{RESET}")
+    return d["position"]
+
+
 def watch(sid: str, args, after: int = 0) -> int:
     streamed = {"content": False, "reasoning": False}
     position = None
@@ -293,12 +300,10 @@ def watch(sid: str, args, after: int = 0) -> int:
                 after = e["seq"]
             if t == "delta":
                 if d["kind"] != "reasoning" or args.reasoning:
-                    _print_delta(d, args, streamed)
+                    _print_delta(d, streamed)
                 continue
             if t == "queue":
-                if d["position"] != position and d["position"] > 0:
-                    print(f"{DIM}queued: position {d['position']}{RESET}")
-                position = d["position"]
+                position = _note_queue(d, position)
                 continue
             if t == "compacting":
                 print(f"{DIM}compacting {d['messages']} messages...{RESET}")
@@ -327,6 +332,42 @@ def watch(sid: str, args, after: int = 0) -> int:
             time.sleep(2)  # stream ended or dropped; reconnect
             continue
         _decide_approval(sid, prompt_for)
+
+
+def _cmd_version() -> int:
+    print(f"Agent Harness CLI {MAC_CLIENT_VERSION} (admin protocol {CLIENT_PROTOCOLS['cli']})")
+    try:
+        remote = server_version()
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    supported = remote.get("protocols", {}).get("admin", {})
+    protocol = CLIENT_PROTOCOLS["cli"]
+    if protocol < supported.get("min", protocol):
+        state = "client update required"
+    elif protocol > supported.get("max", protocol):
+        state = "Server update required"
+    else:
+        state = "compatible"
+    print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
+    print(f"compatibility: {state} (Server supports admin protocol "
+          f"{supported.get('min', '?')}–{supported.get('max', '?')})")
+    return 0
+
+
+def _cmd_runner(args) -> int:
+    if args.runner_cmd == "restart":
+        launchctl("kickstart", "-k", check=True)
+        print("runner restarted")
+        return 0
+    if args.runner_cmd == "logs":
+        return _show_runner_logs(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow)
+    local = launchctl("print")
+    config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
+    remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
+    print(f"launchd: {'loaded' if local.returncode == 0 else 'not loaded'}")
+    print("daemon: " + (json.dumps(remote, indent=2) if remote else "runner not configured on daemon"))
+    return 0
 
 
 def main() -> int:
@@ -393,20 +434,7 @@ def main() -> int:
         print(f"paired {paired['runner']['name']} with {paired['server']}")
         return 0
     if args.cmd == "version":
-        print(f"Agent Harness CLI {MAC_CLIENT_VERSION} (admin protocol {CLIENT_PROTOCOLS['cli']})")
-        try:
-            remote = server_version()
-        except RuntimeError as exc:
-            print(str(exc))
-            return 1
-        supported = remote.get("protocols", {}).get("admin", {})
-        protocol = CLIENT_PROTOCOLS["cli"]
-        state = ("client update required" if protocol < supported.get("min", protocol) else
-                 "Server update required" if protocol > supported.get("max", protocol) else "compatible")
-        print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
-        print(f"compatibility: {state} (Server supports admin protocol "
-              f"{supported.get('min', '?')}–{supported.get('max', '?')})")
-        return 0
+        return _cmd_version()
     if args.cmd == "update":
         try:
             result = apply_update(BASE)
@@ -423,18 +451,7 @@ def main() -> int:
         print(f"allowed project root {root}")
         return 0
     if args.cmd == "runner":
-        if args.runner_cmd == "restart":
-            launchctl("kickstart", "-k", check=True)
-            print("runner restarted")
-            return 0
-        if args.runner_cmd == "logs":
-            return _show_runner_logs(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow)
-        local = launchctl("print")
-        config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
-        remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
-        print(f"launchd: {'loaded' if local.returncode == 0 else 'not loaded'}")
-        print("daemon: " + (json.dumps(remote, indent=2) if remote else "runner not configured on daemon"))
-        return 0
+        return _cmd_runner(args)
 
     if args.cmd == "new":
         s = api("POST", "/sessions", json={"prompt": args.prompt, "project": args.project,
