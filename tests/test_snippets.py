@@ -80,7 +80,9 @@ def test_container_args_are_the_isolation_checklist():
         for banned in ("-v", "--volume", "--mount", "--privileged", "--cap-add", "-p", "--publish", "--device",
                        "--env-file", "--ipc", "--pid", "--userns", "--security-opt=seccomp=unconfined"):
             assert banned not in args, (lang.id, banned)
-        assert "docker.sock" not in joined and "/workspace" not in joined and "host" not in args
+        assert "docker.sock" not in joined
+        assert "/workspace" not in joined
+        assert "host" not in args
         assert args[-4:] == ["--entrypoint", "sleep", lang.image, str(snippets.LIFETIME_SECONDS)]
     assert LIMITS == {"timeout_seconds": 30, "cpus": 1, "memory_mib": 1024, "pids": 64, "tmp_mib": 128,
                       "output_bytes": 1 << 20}
@@ -90,8 +92,11 @@ def test_toolchains_are_pinned_by_digest_with_fixed_commands():
     assert set(LANGUAGES) == {"python", "javascript", "java", "csharp", "cpp"}
     for lang in LANGUAGES.values():
         assert re.fullmatch(r"[a-z0-9./-]+@sha256:[0-9a-f]{64}", lang.image), lang.image
-        assert lang.version and lang.run and lang.tag
-    assert not LANGUAGES["python"].compile and not LANGUAGES["javascript"].compile
+        assert lang.version
+        assert lang.run
+        assert lang.tag
+    assert not LANGUAGES["python"].compile
+    assert not LANGUAGES["javascript"].compile
     for lid in ("java", "csharp", "cpp"):
         assert LANGUAGES[lid].compile.startswith("exec 2>&1;"), lid  # diagnostics are one stream, apart from run
 
@@ -104,7 +109,8 @@ def test_java_file_and_main_class():
     assert java_names("class Outer {\n    public class Inner {}\n    static void main(String[] a) {}\n}") == (
         "Main.java", "Outer")
     name, main = java_names("public class x$; rm -rf / {}")
-    assert re.fullmatch(r"\w+\.java", name) and re.fullmatch(r"\w+", main)
+    assert re.fullmatch(r"\w+\.java", name)
+    assert re.fullmatch(r"\w+", main)
 
 
 def test_parse_stats_reads_cgroup_evidence():
@@ -120,7 +126,10 @@ def test_capture_enforces_output_budget_timeout_and_cancel():
     code, out, err, reason = _exec_blocking(
         [sys.executable, "-c", "import sys; sys.stdout.write('x' * 50000); sys.stderr.write('e' * 50000)"],
         None, time.monotonic() + 20, budget, threading.Event(), lambda: stops.append(1))
-    assert reason == "output_limit" and code is None and budget.over and stops
+    assert reason == "output_limit"
+    assert code is None
+    assert budget.over
+    assert stops
     assert len(out) + len(err) == 1000
 
     stops.clear()
@@ -128,14 +137,18 @@ def test_capture_enforces_output_budget_timeout_and_cancel():
     code, out, err, reason = _exec_blocking(
         [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(30)"],
         None, time.monotonic() + 1, _Budget(1000), threading.Event(), lambda: stops.append(1))
-    assert reason == "timeout" and code is None and stops and time.monotonic() - t0 < 10
+    assert reason == "timeout"
+    assert code is None
+    assert stops
+    assert time.monotonic() - t0 < 10
 
     cancel = threading.Event()
     threading.Timer(0.3, cancel.set).start()
     code, out, err, reason = _exec_blocking(
         [sys.executable, "-c", "import time; time.sleep(30)"], None, time.monotonic() + 20, _Budget(1000), cancel,
         lambda: None)
-    assert reason == "cancelled" and code is None
+    assert reason == "cancelled"
+    assert code is None
 
     code, out, err, reason = _exec_blocking(
         [sys.executable, "-c", "import sys; data = sys.stdin.read(); print(len(data)); sys.exit(4)"],
@@ -175,7 +188,8 @@ def test_runner_reports_missing_image_and_always_removes_the_container(monkeypat
     docker = FakeDocker(create=(125, "", "Unable to find image 'gcc@sha256:ead1' locally\nNo such image"))
     docker.patch(monkeypatch, runner)
     result = asyncio.run(runner.run("sn-1", "cpp", "int main(){}", threading.Event()))
-    assert result["status"] == "error" and "python -m harness.snippets pull" in result["error"]
+    assert result["status"] == "error"
+    assert "python -m harness.snippets pull" in result["error"]
     assert ["docker", "rm", "-f", "harness-snippet-sn-1"] in docker.commands
 
 
@@ -185,19 +199,26 @@ def test_runner_keeps_compile_diagnostics_apart_from_runtime_output(monkeypatch)
                                (1, b"main.cpp:1:1: error: expected ';'\n", b"", "")])
     docker.patch(monkeypatch, runner)
     result = asyncio.run(runner.run("sn-2", "cpp", "int main() { return 0 }", threading.Event()))
-    assert result["status"] == "compile_failed" and result["run"] is None
-    assert result["compile"]["exit_code"] == 1 and "expected ';'" in result["compile"]["output"]
+    assert result["status"] == "compile_failed"
+    assert result["run"] is None
+    assert result["compile"]["exit_code"] == 1
+    assert "expected ';'" in result["compile"]["output"]
     assert result["toolchain"] == {"image": "gcc:15", "digest": LANGUAGES["cpp"].image, "version": "g++ (GCC) 15.2.0"}
     setup, filename, stdin = docker.execs[0]
-    assert filename == "main.cpp" and stdin == b"int main() { return 0 }" and "g++ --version" in setup
+    assert filename == "main.cpp"
+    assert stdin == b"int main() { return 0 }"
+    assert "g++ --version" in setup
     assert docker.execs[1][0] == LANGUAGES["cpp"].compile
 
     docker = FakeDocker(steps=[(0, b"g++ (GCC) 15.2.0\n", b"", ""), (0, b"", b"", ""),
                                (2, b"out\n", b"boom\n", ""), (0, b"[memory]\noom_kill 0\n", b"", "")])
     docker.patch(monkeypatch, runner)
     result = asyncio.run(runner.run("sn-3", "cpp", "int main() { return 2; }", threading.Event()))
-    assert result["status"] == "failed" and result["compile"]["exit_code"] == 0
-    assert result["run"]["exit_code"] == 2 and result["run"]["stdout"] == "out\n" and result["run"]["stderr"] == "boom\n"
+    assert result["status"] == "failed"
+    assert result["compile"]["exit_code"] == 0
+    assert result["run"]["exit_code"] == 2
+    assert result["run"]["stdout"] == "out\n"
+    assert result["run"]["stderr"] == "boom\n"
     assert ["docker", "rm", "-f", "harness-snippet-sn-3"] in docker.commands
 
 
@@ -209,12 +230,15 @@ def test_runner_passes_java_main_class_and_reports_limits(monkeypatch):
     result = asyncio.run(runner.run("sn-4", "java", "public class Big { public static void main(String[] a) {} }",
                                     threading.Event()))
     assert [e[1] for e in docker.execs] == ["Big.java", "Big.java", "Big", ""]
-    assert result["status"] == "limit_exceeded" and result["reasons"] == ["memory_limit"]
+    assert result["status"] == "limit_exceeded"
+    assert result["reasons"] == ["memory_limit"]
 
     docker = FakeDocker(steps=[(0, b"Python 3.12\n", b"", ""), (None, b"x" * 10, b"", "timeout")])
     docker.patch(monkeypatch, runner)
     result = asyncio.run(runner.run("sn-5", "python", "while True: pass", threading.Event()))
-    assert result["status"] == "timeout" and result["reasons"] == ["timeout"] and result["compile"] is None
+    assert result["status"] == "timeout"
+    assert result["reasons"] == ["timeout"]
+    assert result["compile"] is None
 
 
 # ---------- API, transcript, access ----------
@@ -225,22 +249,28 @@ def test_owner_runs_snippet_and_result_survives_reload(tmp_path):
         sid = new_chat(client, m)
         r = client.post(f"/chats/{sid}/snippets", json={"language": "python", "source": "print('hi')",
                                                          "origin": "block"}, headers=OWNER)
-        assert r.status_code == 202 and r.json()["status"] == "running"
+        assert r.status_code == 202
+        assert r.json()["status"] == "running"
         run_id = r.json()["id"]
         wait_for(lambda: len(snippet_events(m, sid)) == 2)
         started, result = snippet_events(m, sid)
         assert started["data"] == {"id": run_id, "language": "python", "label": "Python", "toolchain": "python:3.12-slim",
                                    "source": "print('hi')", "origin": "block"}
-        assert result["data"]["id"] == run_id and result["data"]["status"] == "completed"
+        assert result["data"]["id"] == run_id
+        assert result["data"]["status"] == "completed"
         assert result["data"]["toolchain"]["version"] == "Fake 1.0"
         assert fake.calls == [("python", "print('hi')")]
         replay = client.get(f"/chats/{sid}/events", params={"follow": "false"}, headers=OWNER).text
-        assert "snippet_started" in replay and "snippet_result" in replay and "print('hi')" in replay
+        assert "snippet_started" in replay
+        assert "snippet_result" in replay
+        assert "print('hi')" in replay
         langs = client.get("/chats/snippet-languages", headers=OWNER).json()
-        assert [x["id"] for x in langs["languages"]] == list(LANGUAGES) and langs["limits"] == LIMITS
+        assert [x["id"] for x in langs["languages"]] == list(LANGUAGES)
+        assert langs["limits"] == LIMITS
         from harness import transcript
         text = transcript.render(m.db, sid)
-        assert "print('hi')" in text and "completed" in text
+        assert "print('hi')" in text
+        assert "completed" in text
 
 
 def test_snippet_request_accepts_no_flags_images_or_unknown_languages(tmp_path):
@@ -257,7 +287,8 @@ def test_snippet_request_accepts_no_flags_images_or_unknown_languages(tmp_path):
         assert client.post(url, json={"language": "python", "source": "  \n"}, headers=OWNER).status_code == 400
         big = "x" * (snippets.SOURCE_BYTES + 1)
         assert client.post(url, json={"language": "python", "source": big}, headers=OWNER).status_code == 413
-        assert fake.calls == [] and snippet_events(m, sid) == []
+        assert fake.calls == []
+        assert snippet_events(m, sid) == []
 
 
 def test_sending_code_never_runs_it_and_the_model_has_no_runner_tool(tmp_path):
@@ -271,7 +302,8 @@ def test_sending_code_never_runs_it_and_the_model_has_no_runner_tool(tmp_path):
         s = m.db.get_session(chat["id"])
         names = {t["function"]["name"] for t in Runner.tool_schemas(m.runner, s, None)}
         assert not any("snippet" in n or "run" in n for n in names)
-        assert fake.calls == [] and snippet_events(m, chat["id"]) == []
+        assert fake.calls == []
+        assert snippet_events(m, chat["id"]) == []
 
 
 def test_guests_and_other_routes_cannot_run_snippets(tmp_path):
@@ -321,7 +353,8 @@ def test_cancel_one_run_per_chat_and_delete_guard(tmp_path):
         assert client.delete(f"/chats/{sid}", headers=OWNER).status_code == 409
         assert client.post(f"/chats/{sid}/snippets/sn-nope/cancel", headers=OWNER).status_code == 409
         r = client.post(f"/chats/{sid}/snippets/{run_id}/cancel", headers=OWNER)
-        assert r.status_code == 200 and r.json()["status"] == "cancelling"
+        assert r.status_code == 200
+        assert r.json()["status"] == "cancelling"
         wait_for(lambda: len(snippet_events(m, sid)) == 2)
         assert snippet_events(m, sid)[1]["data"]["status"] == "cancelled"
         assert client.delete(f"/chats/{sid}", headers=OWNER).status_code == 200
@@ -349,8 +382,11 @@ def test_results_reach_the_model_with_the_next_message_only(tmp_path):
         client.post(f"/chats/{sid}/messages", json={"content": "thanks"}, headers=OWNER)
         wait_for(lambda: client.get(f"/chats/{sid}").json()["status"] == "done")
         users = [x["content"] for x in m.db.get_session(sid)["context"] if x["role"] == "user"]
-        assert "untrusted" in users[-2] and "print('hi')" in users[-2] and "<b>hi</b>" in users[-2]
-        assert users[-2].endswith("why?") and users[-1] == "thanks"
+        assert "untrusted" in users[-2]
+        assert "print('hi')" in users[-2]
+        assert "<b>hi</b>" in users[-2]
+        assert users[-2].endswith("why?")
+        assert users[-1] == "thanks"
         typed = [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"]
         assert typed[-2:] == ["why?", "thanks"]
 
@@ -373,8 +409,10 @@ def test_restart_marks_unfinished_runs_interrupted_and_removes_containers(tmp_pa
         await m2.stop()
     asyncio.run(boot())
     result = snippet_events(m2, sid)[-1]
-    assert result["type"] == "snippet_result" and result["data"]["id"] == "sn-lost"
-    assert result["data"]["status"] == "interrupted" and result["data"]["reasons"] == ["daemon_restart"]
+    assert result["type"] == "snippet_result"
+    assert result["data"]["id"] == "sn-lost"
+    assert result["data"]["status"] == "interrupted"
+    assert result["data"]["reasons"] == ["daemon_restart"]
     assert removed == [["sn-lost"]]
     assert not SnippetService(m.db, m.bus).recover()  # nothing left to recover
 
@@ -386,7 +424,8 @@ def test_daemon_stop_interrupts_a_running_snippet(tmp_path):
         client.post(f"/chats/{sid}/snippets", json={"language": "python", "source": "x"}, headers=OWNER)
         wait_for(lambda: fake.calls)
     result = snippet_events(m, sid)[-1]
-    assert result["type"] == "snippet_result" and result["data"]["status"] == "interrupted"
+    assert result["type"] == "snippet_result"
+    assert result["data"]["status"] == "interrupted"
     assert result["data"]["reasons"] == ["daemon_restart"]
 
 
@@ -480,11 +519,14 @@ def test_live_hello_world_and_runtime_failure(language):
     ok = run_live(language, HELLO[language][0])
     assert ok["status"] == "completed", ok
     assert ok["run"]["stdout"].strip() == f"hello from {language}"
-    assert ok["toolchain"]["version"] and ok["toolchain"]["digest"] == LANGUAGES[language].image
+    assert ok["toolchain"]["version"]
+    assert ok["toolchain"]["digest"] == LANGUAGES[language].image
     if LANGUAGES[language].compile:
         assert ok["compile"]["exit_code"] == 0
     bad = run_live(language, HELLO[language][1])
-    assert bad["status"] == "failed" and bad["run"]["exit_code"] != 0 and "boom" in bad["run"]["stderr"]
+    assert bad["status"] == "failed"
+    assert bad["run"]["exit_code"] != 0
+    assert "boom" in bad["run"]["stderr"]
 
 
 @pytest.mark.parametrize("language", list(BROKEN))
@@ -492,8 +534,10 @@ def test_live_compile_failure_is_separate_from_runtime(language):
     if not _have(LANGUAGES[language].image):
         pytest.skip(f"needs Docker and the pinned {LANGUAGES[language].tag} image (python -m harness.snippets pull)")
     bad = run_live(language, BROKEN[language])
-    assert bad["status"] == "compile_failed" and bad["run"] is None
-    assert bad["compile"]["exit_code"] != 0 and bad["compile"]["output"].strip()
+    assert bad["status"] == "compile_failed"
+    assert bad["run"] is None
+    assert bad["compile"]["exit_code"] != 0
+    assert bad["compile"]["output"].strip()
 
 
 @live("python")
@@ -534,7 +578,9 @@ def test_live_timeout_kills_the_process_tree():
     src = "import subprocess, time\nsubprocess.Popen(['sleep', '300'])\ntime.sleep(300)"
     t0 = time.monotonic()
     r = run_live("python", src, timeout=3)
-    assert r["status"] == "timeout" and r["reasons"] == ["timeout"] and time.monotonic() - t0 < 25
+    assert r["status"] == "timeout"
+    assert r["reasons"] == ["timeout"]
+    assert time.monotonic() - t0 < 25
 
 
 @live("python")
@@ -542,17 +588,20 @@ def test_live_detached_children_die_with_the_sandbox():
     src = ("import subprocess\nsubprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, "
            "stderr=subprocess.DEVNULL, start_new_session=True)\nprint('spawned')")
     r = run_live("python", src)  # run_live asserts the container, and so every process in it, is gone
-    assert r["status"] == "completed" and r["run"]["stdout"] == "spawned\n"
+    assert r["status"] == "completed"
+    assert r["run"]["stdout"] == "spawned\n"
 
 
 @live("python")
 def test_live_memory_pids_and_temp_limits():
     mem = run_live("python", "b = []\nwhile True: b.append(bytearray(64 * 1024 * 1024))")
-    assert mem["status"] == "limit_exceeded" and "memory_limit" in mem["reasons"]
+    assert mem["status"] == "limit_exceeded"
+    assert "memory_limit" in mem["reasons"]
     pids = run_live("python", "import subprocess\nps = []\ntry:\n    for _ in range(200): "
                               "ps.append(subprocess.Popen(['sleep', '30']))\nexcept OSError: pass\n"
                               "print(len(ps))\nfor p in ps: p.kill(); p.wait()")
-    assert "pids_limit" in pids["reasons"] and int(pids["run"]["stdout"]) < snippets.PIDS
+    assert "pids_limit" in pids["reasons"]
+    assert int(pids["run"]["stdout"]) < snippets.PIDS
     tmp = run_live("python", "try:\n    with open('/sandbox/big', 'wb') as f:\n        for _ in range(300): "
                              "f.write(b'x' * 1024 * 1024)\nexcept OSError as e: print(e.errno)")
     assert "temp_storage_limit" in tmp["reasons"] and tmp["run"]["stdout"].strip() == "28"  # ENOSPC
@@ -576,14 +625,17 @@ def test_live_restart_removes_the_orphaned_container_only():
 @live("python")
 def test_live_output_limit_truncates_explicitly():
     r = run_live("python", "import sys\nwhile True: sys.stdout.write('y' * 65536); sys.stderr.write('z' * 100)")
-    assert r["status"] == "limit_exceeded" and r["reasons"] == ["output_limit"] and r["truncated"]
+    assert r["status"] == "limit_exceeded"
+    assert r["reasons"] == ["output_limit"]
+    assert r["truncated"]
     assert len(r["run"]["stdout"].encode()) + len(r["run"]["stderr"].encode()) == snippets.OUTPUT_BYTES
 
 
 @live("python")
 def test_live_cancel_and_no_files_survive_between_runs():
     r = run_live("python", "import time\nprint('x', flush=True)\ntime.sleep(60)", cancel_after=2)
-    assert r["status"] == "cancelled" and r["reasons"] == ["cancelled"]
+    assert r["status"] == "cancelled"
+    assert r["reasons"] == ["cancelled"]
     first = run_live("python", "open('/sandbox/marker', 'w').write('left behind')\nprint('wrote')")
     assert first["run"]["stdout"] == "wrote\n"
     second = run_live("python", "import os\nprint(os.path.exists('/sandbox/marker'), sorted(os.listdir('/sandbox/src')))")
