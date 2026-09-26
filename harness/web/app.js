@@ -34,6 +34,12 @@ const STATUS_LABEL = {
   done: "done", failed: "failed", cancelled: "cancelled",
 };
 const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };
+// The home machine sorts first, everything else alphabetically.
+function compareTargets(a, b) {
+  if (a === "tower") return -1;
+  if (b === "tower") return 1;
+  return a.localeCompare(b);
+}
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
@@ -46,13 +52,19 @@ const fmtElapsed = (ms) => {
   const s = Math.max(0, Math.floor(ms / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 };
-const fmtTokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : `${n || 0}`);
+const fmtTokens = (n) => {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+  return `${n || 0}`;
+};
 // llama-server's prompt progress counts the cached prefix as processed; the bar covers only the part being read.
 const readFraction = (d) => (d.total > d.cached ? (d.processed - d.cached) / (d.total - d.cached) : null);
-const readingText = (what, d) => `${what} ${fmtTokens(Math.max(0, d.processed - d.cached))} of ${fmtTokens(d.total - d.cached)} new tokens${d.cached ? ` (${fmtTokens(d.cached)} cached)` : ""}`;
+const readingText = (what, d) => {
+  const cached = d.cached ? ` (${fmtTokens(d.cached)} cached)` : "";
+  return `${what} ${fmtTokens(Math.max(0, d.processed - d.cached))} of ${fmtTokens(d.total - d.cached)} new tokens${cached}`;
+};
 const progressBar = (fraction) => h("div", { class: `progress${fraction === null ? " indeterminate" : ""}` },
   h("span", { style: fraction === null ? "" : `width:${Math.max(2, Math.min(100, fraction * 100)).toFixed(1)}%` }));
-
 let cleanup = [];
 const onLeave = (fn) => cleanup.push(fn);
 let protocolBlocked = false;
@@ -102,17 +114,21 @@ async function loadProfileIcon() {
 }
 
 // ---------- utilities ----------
+const isEmptyChild = (c) => c === null || c === undefined || c === false;
+function setAttr(el, k, v) {
+  if (k === "class") el.className = v;
+  else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+  else if (k === "html") el.innerHTML = v;
+  else el.setAttribute(k, v === true ? "" : v);
+}
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === undefined || v === null || v === false) continue;
-    if (k === "class") el.className = v;
-    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (k === "html") el.innerHTML = v;
-    else el.setAttribute(k, v === true ? "" : v);
+    setAttr(el, k, v);
   }
   for (const c of children.flat()) {
-    if (c === null || c === undefined || c === false) continue;
+    if (isEmptyChild(c)) continue;
     el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
   return el;
@@ -244,6 +260,47 @@ async function downloadDaemonFile(path, filename) {
   } catch (e) { toast(e.message); }
 }
 
+// One-line summary of a tool call for its collapsed row.
+function toolSummaryText(fn, args) {
+  if (fn.name === "run_shell") return args.command;
+  if (fn.name === "git_clone" || fn.name === "web_fetch") return args.url;
+  if (fn.name === "prometheus_query") return args.query;
+  if (args.service) {
+    const since = args.since ? ` since ${args.since}` : "";
+    return `${args.service}${since}`;
+  }
+  if (args.path) {
+    const line = args.start_line ? ` :${args.start_line}` : "";
+    return `${args.path}${line}`;
+  }
+  return fn.arguments;
+}
+
+// What an approval card asks the owner to allow.
+function approvalWhat(a) {
+  if (a.tool === "run_shell" || a.tool === "Bash" || a.tool === "exec_command") {
+    const network = a.args.network ? "🌐 network · " : "";
+    return `${network}$ ${a.args.command}`;
+  }
+  if (a.tool === "git_clone") return `git clone ${a.args.url}`;
+  if (a.tool === "restart_service") return `restart ${a.args.service}`;
+  return JSON.stringify(a.args, null, 2);
+}
+
+function approvalDiffClass(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+")) return "add";
+  return line.startsWith("-") ? "del" : "";
+}
+
+function diffLineClass(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+") && !line.startsWith("+++")) return "add";
+  return line.startsWith("-") && !line.startsWith("---") ? "del" : "";
+}
+
+const reviewBadge = (review, label) => h("span", { class: `badge ${review === "discarded" ? "cancelled" : "done"}` }, label);
+
 function ago(ts) {
   const s = Math.max(0, Date.now() / 1000 - ts);
   if (s < 60) return "just now";
@@ -293,8 +350,8 @@ function linkQuotes(html, answer, pages) {
 // Small, safe Markdown subset: everything is escaped first, then a few constructs are re-enabled.
 // A fenced block in a language the snippet runner supports is marked so Chat can add its Run button.
 const MD_BLOCK_MARK = "\u0000";   // brackets a fenced-block placeholder; escaped input never contains it as text we render
-const MD_BLOCK_LINE = new RegExp(`^${MD_BLOCK_MARK}\\d+${MD_BLOCK_MARK}$`);
-const MD_BLOCK_REF = new RegExp(`${MD_BLOCK_MARK}(\\d+)${MD_BLOCK_MARK}`, "g");
+const MD_BLOCK_LINE = new RegExp(String.raw`^${MD_BLOCK_MARK}\d+${MD_BLOCK_MARK}$`);
+const MD_BLOCK_REF = new RegExp(String.raw`${MD_BLOCK_MARK}(\d+)${MD_BLOCK_MARK}`, "g");
 const MD_TABLE_ROW = /^\s*\|.*\|\s*$/;
 const MD_LIST_ITEM = /^\s*([-*]|\d+\.) /;
 
@@ -367,15 +424,17 @@ function md(src, pages) {
   const text = replaceFences(escapeHtml(src || ""), (tag, rest) => {
     const code = rest.replace(/^[^\S\n]*\n?/, "");
     const lang = snippetLanguage(tag);
-    blocks.push(`<pre${lang ? ` data-snippet-lang="${lang}"` : ""}><code>${code.replace(/\n$/, "")}</code></pre>`);
+    const langAttr = lang ? ` data-snippet-lang="${lang}"` : "";
+    blocks.push(`<pre${langAttr}><code>${code.replace(/\n$/, "")}</code></pre>`);
     return `${MD_BLOCK_MARK}${blocks.length - 1}${MD_BLOCK_MARK}`;
   });
   const out = [];
   const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
+  let i = 0;
+  while (i < lines.length) {
     const [html, last] = mdBlock(lines, i);
     out.push(html);
-    i = last;
+    i = last + 1;
   }
   return linkQuotes(out.join("\n").replace(MD_BLOCK_REF, (_, n) => blocks[Number(n)]), src, pages);
 }
@@ -506,14 +565,69 @@ const hashParts = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boo
 const isTopLevel = (parts) => parts.length === 0 || parts[0] === "chat" || parts[0] === "actions"
   || (parts.length === 1 && (parts[0] === "agents" || parts[0] === "jobs" || parts[0] === "images"));
 
+const normalizeHash = (hash) => {
+  if (!hash || hash === "#" || hash === "#/") return "#/";
+  return hash.startsWith("#") ? hash : `#/${hash}`;
+};
+
 function go(hash, replace = false) {
   if (protocolBlocked) return;
-  const url = !hash || hash === "#" || hash === "#/" ? "#/" : (hash.startsWith("#") ? hash : `#/${hash}`);
+  const url = normalizeHash(hash);
   const cur = location.hash || "#/";
   const same = url === cur || (url === "#/" && (cur === "" || cur === "#" || cur === "#/"));
   if (same) return;
   if (replace) location.replace(url);
   else location.hash = url;
+}
+
+const isProfileRoute = (parts) => parts[0] === "profile" || parts[0] === "settings";
+const MEMBER_HIDDEN_PROFILE = ["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"];
+
+// Where a guest or member who asked for a page they may not see should land instead (null = allowed).
+function blockedRedirect(parts) {
+  const guestBlocked = isGuest() && (
+    parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
+    || (isProfileRoute(parts) && ["notifications", "apps", "endpoint"].includes(parts[1])));
+  if (guestBlocked) return parts[0] === "jobs" ? "#/jobs" : "#/profile";
+  const memberBlocked = isMember() && (
+    parts[0] === "jobs" || parts[0] === "images"
+    || (isProfileRoute(parts) && MEMBER_HIDDEN_PROFILE.includes(parts[1])));
+  if (!memberBlocked) return null;
+  return isProfileRoute(parts) ? "#/profile" : "#/agents";
+}
+
+async function routeImages(parts) {
+  if (parts[1] && !validId(parts[1])) go("#/images", true);
+  else if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
+  else if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
+  else if (parts[1]) await viewImage(parts[1]);
+  else await viewImages();
+}
+
+async function routeProfile(parts) {
+  // Bookmarks from when these lived under Profile. Non-owners never land on Actions.
+  if (!["accounts", "disk", "remote-control"].includes(parts[1])) {
+    await viewProfile(parts[1], parts[2]);
+  } else if (!isOwner()) go("#/profile", true);
+  else go(`#/actions/${parts[1]}`, true);
+}
+
+async function routeActions(parts) {
+  if (!isOwner()) go(isMember() ? "#/agents" : "#/profile", true);
+  else await viewActions(parts[1]);
+}
+
+async function routeView(parts) {
+  if (parts.length === 0) go(canChat() ? "#/chat" : "#/agents", true);
+  else if (parts[0] === "chat") await viewChat(parts[1]);
+  else if (parts[0] === "agents") await viewList();
+  else if (parts[0] === "new") await viewNew();
+  else if (parts[0] === "actions") await routeActions(parts);
+  else if (isProfileRoute(parts)) await routeProfile(parts);
+  else if (parts[0] === "images") await routeImages(parts);
+  else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
+  else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
+  else go("#/", true);
 }
 
 async function route() {
@@ -537,43 +651,10 @@ async function route() {
   route.onImages = images;
   $back.hidden = isTopLevel(parts);
   $menu.hidden = !$back.hidden;
-  const guestBlocked = isGuest() && (
-    parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
-    || ((parts[0] === "profile" || parts[0] === "settings")
-      && ["notifications", "apps", "endpoint"].includes(parts[1])));
-  const memberBlocked = isMember() && (
-    parts[0] === "jobs" || parts[0] === "images"
-    || ((parts[0] === "profile" || parts[0] === "settings")
-      && ["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"].includes(parts[1])));
-  if (guestBlocked) { go(parts[0] === "jobs" ? "#/jobs" : "#/profile", true); return; }
-  if (memberBlocked) { go(parts[0] === "profile" || parts[0] === "settings" ? "#/profile" : "#/agents", true); return; }
+  const redirect = blockedRedirect(parts);
+  if (redirect) { go(redirect, true); return; }
   try {
-    if (parts.length === 0) go(canChat() ? "#/chat" : "#/agents", true);
-    else if (parts[0] === "chat") await viewChat(parts[1]);
-    else if (parts[0] === "agents") await viewList();
-    else if (parts[0] === "new") await viewNew();
-    else if (parts[0] === "actions") {
-      if (!isOwner()) { go(isMember() ? "#/agents" : "#/profile", true); return; }
-      await viewActions(parts[1]);
-    }
-    else if (parts[0] === "profile" || parts[0] === "settings") {
-      // Bookmarks from when these lived under Profile. Non-owners never land on Actions.
-      if (["accounts", "disk", "remote-control"].includes(parts[1])) {
-        if (!isOwner()) { go("#/profile", true); return; }
-        go(`#/actions/${parts[1]}`, true);
-        return;
-      } else await viewProfile(parts[1], parts[2]);
-    }
-    else if (parts[0] === "images") {
-      if (parts[1] && !validId(parts[1])) go("#/images", true);
-      else if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
-      else if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
-      else if (parts[1]) await viewImage(parts[1]);
-      else await viewImages();
-    }
-    else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
-    else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
-    else go("#/", true);
+    await routeView(parts);
   } catch (e) {
     append($app, h("p", { class: "note bad" }, e.message),
       h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings"));
@@ -587,10 +668,10 @@ $back.addEventListener("click", () => {
   if (parts[0] === "s" && parts[2] === "approval") go(`#/s/${parts[1]}`, true);
   else history.back();
 });
+const FEATURE_ROUTES = { jobs: "#/jobs", images: "#/images", chat: "#/chat" };
 $feature.addEventListener("change", () => {
   if (protocolBlocked) return;
-  go($feature.value === "jobs" ? "#/jobs" : $feature.value === "images" ? "#/images"
-    : $feature.value === "chat" ? "#/chat" : "#/agents", true);
+  go(FEATURE_ROUTES[$feature.value] || "#/agents", true);
 });
 window.addEventListener("hashchange", route);
 
@@ -742,6 +823,27 @@ function addRunControls(root, run) {
 }
 
 // Every value here is source or program output: untrusted, so it only ever becomes text nodes.
+const snippetStopped = (code) => code === null || code === undefined;
+const snippetBlock = (label, text, cls) => [h("p", { class: "snippet-label" }, label), h("pre", { class: `snippet-out ${cls}` }, text)];
+
+function snippetCompileParts(compile) {
+  const code = compile.exit_code;
+  let title = `Compile failed (exit ${code})`;
+  if (code === 0) title = "Compiled";
+  else if (snippetStopped(code)) title = "Compile stopped";
+  if (compile.output) return snippetBlock(`${title} · compiler diagnostics`, compile.output, "compile");
+  return [h("p", { class: "snippet-label" }, title)];
+}
+
+function snippetRunParts(run) {
+  const code = run.exit_code;
+  const parts = [h("p", { class: "snippet-label" }, snippetStopped(code) ? "Program stopped" : `Exit status ${code}`)];
+  if (run.stdout) parts.push(...snippetBlock("stdout", run.stdout, "stdout"));
+  if (run.stderr) parts.push(...snippetBlock("stderr", run.stderr, "stderr"));
+  if (!run.stdout && !run.stderr) parts.push(h("p", { class: "muted small" }, "No output."));
+  return parts;
+}
+
 function snippetResultParts(r) {
   const tc = r.toolchain || {};
   const meta = [tc.version, tc.image, r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)} s` : ""];
@@ -750,21 +852,8 @@ function snippetResultParts(r) {
   const reasons = (r.reasons || []).map((x) => SNIPPET_REASON[x] || x);
   if (reasons.length) parts.push(h("p", { class: "bad small" }, `Reason: ${reasons.join("; ")}`));
   if (r.truncated) parts.push(h("p", { class: "bad small" }, "Output was truncated at the 1 MiB limit."));
-  const block = (label, text, cls) => [h("p", { class: "snippet-label" }, label), h("pre", { class: `snippet-out ${cls}` }, text)];
-  const stopped = (code) => code === null || code === undefined;
-  if (r.compile) {
-    const code = r.compile.exit_code;
-    const title = code === 0 ? "Compiled" : stopped(code) ? "Compile stopped" : `Compile failed (exit ${code})`;
-    if (r.compile.output) parts.push(...block(`${title} · compiler diagnostics`, r.compile.output, "compile"));
-    else parts.push(h("p", { class: "snippet-label" }, title));
-  }
-  if (r.run) {
-    const code = r.run.exit_code;
-    parts.push(h("p", { class: "snippet-label" }, stopped(code) ? "Program stopped" : `Exit status ${code}`));
-    if (r.run.stdout) parts.push(...block("stdout", r.run.stdout, "stdout"));
-    if (r.run.stderr) parts.push(...block("stderr", r.run.stderr, "stderr"));
-    if (!r.run.stdout && !r.run.stderr) parts.push(h("p", { class: "muted small" }, "No output."));
-  }
+  if (r.compile) parts.push(...snippetCompileParts(r.compile));
+  if (r.run) parts.push(...snippetRunParts(r.run));
   return parts;
 }
 
@@ -855,8 +944,8 @@ function chatComposer(options, session) {
     }
     const wanted = keyOf(choice.backend, choice.model);
     const fallback = backends.find((b) => b.name === options.default_backend) || backends[0];
-    modelSelect.value = [...modelSelect.options].some((o) => o.value === wanted) ? wanted
-      : fallback ? keyOf(fallback.name, fallback.model || fallback.models[0]) : "";
+    if ([...modelSelect.options].some((o) => o.value === wanted)) modelSelect.value = wanted;
+    else modelSelect.value = fallback ? keyOf(fallback.name, fallback.model || fallback.models[0]) : "";
   }
   const selected = () => {
     const [backend, ...rest] = (modelSelect.value || "").split("|");
@@ -977,12 +1066,13 @@ async function viewChat(id) {
     editorToggle.setAttribute("aria-expanded", String(!editor.el.hidden));
     if (!editor.el.hidden) editor.select.focus();
   } }, "Run code");
+  const effortSuffix = session.effort ? ` · ${session.effort}` : "";
   wrap.prepend(h("div", { class: "row small chat-tools" },
-    h("span", { class: "muted" }, `${session.backend || "local"} · ${session.model}${session.effort ? ` · ${session.effort}` : ""}`),
+    h("span", { class: "muted" }, `${session.backend || "local"} · ${session.model}${effortSuffix}`),
     editorToggle,
     h("button", { class: "btn small", type: "button", onclick: async () => {
       const title = prompt("Rename chat", session.title);
-      if (!title || !title.trim()) return;
+      if (!title?.trim()) return;
       try { session = await api(`/chats/${id}`, { method: "PATCH", body: { title } }); setHeader("chat", session.title); }
       catch (e) { toast(e.message); }
     } }, "Rename"),
@@ -1112,13 +1202,14 @@ async function viewList() {
     list.dataset.keys = keys;
     fill(list, visible.map((s) => {
       const pending = (s.pending_approvals || []).length;
-      return h("a", { class: "card", href: `#/s/${s.id}${pending ? `/approval/${s.pending_approvals[0].id}` : ""}` },
+      const approvalPath = pending ? `/approval/${s.pending_approvals[0].id}` : "";
+      return h("a", { class: "card", href: `#/s/${s.id}${approvalPath}` },
         h("h3", {}, s.title),
         h("div", { class: "meta" },
           badge(s.status),
-          pending ? h("span", { class: "badge waiting_approval" }, `${pending} approval${pending > 1 ? "s" : ""}`) : null,
+          pending ? h("span", { class: "badge waiting_approval" }, pluralize(pending, "approval")) : null,
           s.queue_position > 0 ? h("span", {}, `#${s.queue_position} in queue`) : null,
-          s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, REVIEW_LABEL[s.review] || s.review) : null,
+          s.review ? reviewBadge(s.review, REVIEW_LABEL[s.review] || s.review) : null,
           s.job_status ? jobStatusBadge(s.job_status) : null,
           s.target !== "tower" ? h("span", {}, `💻 ${TARGET_LABEL[s.target] || s.target}`) : null,
           h("span", {}, s.project), h("span", {}, ago(s.updated_at))),
@@ -1169,7 +1260,7 @@ async function viewList() {
       api("/sessions"), api("/queue"), isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
     sessions = freshSessions;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
-      .sort((a, b) => (a === "tower" ? -1 : b === "tower" ? 1 : a.localeCompare(b)));
+      .sort(compareTargets);
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     fill(queueNote,
@@ -1216,31 +1307,154 @@ async function viewList() {
 }
 
 // ---------- new task ----------
+// "45 s" under 90 seconds, otherwise whole minutes.
+const fmtSpan = (seconds, toMinutes = Math.round) => (seconds >= 90 ? `${toMinutes(seconds / 60)} min` : `${seconds} s`);
+const pluralize = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const escalateSuffix = (row) => (row.escalate_reason ? ` (${row.escalate_reason})` : "");
+const originsSuffix = (k) => (k.origins?.length ? ` · ${k.origins.join(", ")}` : "");
+const usedSuffix = (k) => (k.last_used_at ? ` · used ${ago(k.last_used_at)}` : "");
+
+function holdRemainingText(seconds) {
+  if (seconds === null) return "until you turn it off";
+  return `for about ${fmtSpan(seconds, Math.ceil)}`;
+}
+
 async function confirmGpuQueue(label) {
   if (isMember()) return true;
   try {
     const gpu = await api("/gpu");
     if (!gpu.manual) return true;
-    const remaining = gpu.manual_remaining_seconds === null ? "until you turn it off"
-      : `for about ${gpu.manual_remaining_seconds >= 90 ? `${Math.ceil(gpu.manual_remaining_seconds / 60)} min` : `${gpu.manual_remaining_seconds} s`}`;
+    const remaining = holdRemainingText(gpu.manual_remaining_seconds);
     return confirm(`GPU hold is on ${remaining}. ${label} can be queued, but nothing will be sent to the local model until the hold ends. Queue it?`);
-  } catch (_) { /* hold unreadable: don't block queueing */ return true; }
+  } catch (err) {
+    console.debug("GPU hold unreadable; not blocking the queue", err);
+    return true;
+  }
+}
+
+const MODEL_STATE = {
+  ready: "✓ Model loaded",
+  sleeping: "Model is asleep; loading it now (about a minute)",
+  waking: "Model is loading (about a minute); you can start the task anyway",
+  unreachable: "Model server isn't answering",
+  paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → GPU)",
+};
+
+function paintModelState(modelState, statuses, modelName, holdActive) {
+  const current = statuses.find((s) => s.name === modelName) || statuses[0];
+  if (!current) return;
+  const holdPaused = current.state === "paused" && holdActive;
+  modelState.textContent = holdPaused ? "" : (MODEL_STATE[current.state] || current.state);
+  modelState.classList.toggle("dots", !holdPaused && (current.state === "waking" || current.state === "sleeping"));
+}
+
+function runnerStateText(targetName, runner) {
+  const label = TARGET_LABEL[targetName] || targetName;
+  if (!runner?.online) return `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
+  const free = runner.info.free_gb !== undefined ? `, ${runner.info.free_gb} GB free` : "";
+  return `Runs on the ${label} (online${free})`;
+}
+
+// With the GPU held, prefer a hosted backend so the task is not stuck behind the hold.
+function pickDefaultBackend(available, holdActive) {
+  if (holdActive && available.some((b) => b.name === "claude")) return "claude";
+  return available[0]?.name || "local";
+}
+
+// localStorage can be unavailable (private mode), so a failed read or write just means "not remembered".
+function storeGet(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+function storeSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) { /* private mode: not remembered */ }
+}
+function storeRemove(key) {
+  try { localStorage.removeItem(key); } catch (_) { /* private mode: nothing to remove */ }
+}
+
+function skillOption(sk, inputs) {
+  const box = h("input", { type: "checkbox", class: "skill-opt", value: sk.slug });
+  inputs.push(box);
+  return h("label", { class: "row", style: "gap:8px;align-items:flex-start;margin:6px 0" }, box,
+    h("span", {}, h("strong", {}, sk.title || sk.slug),
+      h("div", { class: "muted small" }, sk.purpose || `v${sk.version} · ${sk.content_hash.slice(0, 12)}`)));
+}
+
+// Resolves true when the session was created (and the page moved on), false when the form should stay usable.
+async function startSession(fields, draftKey) {
+  try {
+    const s = await api("/sessions", { method: "POST", body: fields });
+    storeRemove(draftKey);
+    location.hash = `#/s/${s.id}`;
+    return true;
+  } catch (err) {
+    toast(err.message);
+    return false;
+  }
+}
+
+async function saveTemplate({ prompt, project, backend, model }) {
+  if (!prompt.trim()) return toast("Write a prompt first");
+  const name = window.prompt("Template name");
+  if (!name) return;
+  try {
+    await api("/templates", { method: "POST", body: { name, project, backend, model, prompt } });
+    toast("Template saved");
+    warmModel();
+    route();
+  } catch (err) { toast(err.message); }
+}
+
+function templateManager(templates) {
+  return h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),
+    templates.map((t) => h("div", { class: "card" },
+      h("div", { class: "row" }, h("strong", {}, t.name), h("span", { class: "spacer" }),
+        h("button", {
+          class: "btn small bad",
+          onclick: async () => {
+            if (!confirm(`Delete template “${t.name}”?`)) return;
+            await api(`/templates/${t.id}`, { method: "DELETE" });
+            warmModel();
+            route();
+          },
+        }, "Delete")),
+      h("div", { class: "preview" }, `${t.project} · ${t.prompt}`))));
+}
+
+const NEW_PROJECT_NOTE = {
+  member: "Saved in your household account. Use a lowercase project id; a public HTTPS git source is cloned into your own area.",
+  owner: "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task.",
+};
+
+const repoPlaceholder = () => (isMember() ? "https://github.com/org/repo" : String.raw`D:\Projects\example or https://…`);
+
+// Members get a fixed "tower" value; the owner picks which machine the new project lives on.
+function projectTargetInput(targets, target) {
+  if (isMember()) return h("input", { type: "hidden", value: "tower" });
+  const select = h("select", {}, targets.map((name) => h("option", { value: name },
+    name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
+  select.value = target;
+  return select;
+}
+
+function loadNewTaskData() {
+  const member = isMember();
+  return Promise.all([
+    api("/projects"), api("/models"),
+    member ? Promise.resolve([]) : api("/templates").catch(() => []),
+    member ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip"),
+    member ? Promise.resolve(null) : api("/gpu").catch(() => null)]);
 }
 
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
-  let [projects, models, allTemplates, backends, gpu] = await Promise.all([
-    api("/projects"), api("/models"),
-    isMember() ? Promise.resolve([]) : api("/templates").catch(() => []),
-    isMember() ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip"),
-    isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null)]);
+  let [projects, models, allTemplates, backends, gpu] = await loadNewTaskData();
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
   const targetKey = "harness.target";
-  let target = "tower";
-  try { target = localStorage.getItem(targetKey) || "tower"; } catch (_) { /* private mode */ }
+  let target = storeGet(targetKey) || "tower";
   if (!targets.includes(target)) target = targets[0] || "tower";
-  const projectTarget = (name) => (projects.find((p) => p.name === name) || {}).target || "tower";
+  const projectTarget = (name) => projects.find((p) => p.name === name)?.target || "tower";
   let templates = [];
   const tplSelect = h("select", {});
   const project = h("select", {});
@@ -1256,7 +1470,7 @@ async function viewNew() {
     type: "button", class: `btn small${name === target ? " primary" : ""}`, "data-target": name,
     onclick: (ev) => {
       target = name;
-      try { localStorage.setItem(targetKey, name); } catch (_) { /* ignore */ }
+      storeSet(targetKey, name);
       newProjectTarget.value = target;
       for (const b of ev.currentTarget.parentNode.children) b.classList.toggle("primary", b === ev.currentTarget);
       fillChoices();
@@ -1270,10 +1484,7 @@ async function viewNew() {
     if (!p || p.target === "tower") { targetState.textContent = ""; return; }
     try {
       const r = (await api("/runners")).find((x) => x.name === p.target);
-      const label = TARGET_LABEL[p.target] || p.target;
-      targetState.textContent = r?.online
-        ? `Runs on the ${label} (online${r.info.free_gb !== undefined ? `, ${r.info.free_gb} GB free` : ""})`
-        : `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
+      targetState.textContent = runnerStateText(p.target, r);
     } catch (_) { /* offline */ }
   };
   const projectHint = h("div", { class: "muted small", style: "margin-top:6px" });
@@ -1288,14 +1499,11 @@ async function viewNew() {
   const newProjectName = h("input", { type: "text", placeholder: "my-project", maxlength: "64", required: true,
     pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
   const newProjectDescription = h("input", { type: "text", placeholder: "Optional description", maxlength: "240" });
-  const newProjectTarget = isMember() ? h("input", { type: "hidden", value: "tower" }) : h("select", {}, targets.map((name) => h("option", { value: name },
-    name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
-  if (!isMember()) newProjectTarget.value = target;
+  const newProjectTarget = projectTargetInput(targets, target);
   const newProjectSource = h("select", {},
     h("option", { value: "empty" }, "Empty workspace"),
     h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"));
-  const newProjectRepo = h("input", { type: "text",
-    placeholder: isMember() ? "https://github.com/org/repo" : String.raw`D:\Projects\example or https://…`, hidden: true });
+  const newProjectRepo = h("input", { type: "text", placeholder: repoPlaceholder(), hidden: true });
   newProjectSource.addEventListener("change", () => {
     newProjectRepo.hidden = newProjectSource.value !== "repo";
     newProjectRepo.required = newProjectSource.value === "repo";
@@ -1312,7 +1520,7 @@ async function viewNew() {
         } });
         projects.push(created);
         target = created.target;
-        try { localStorage.setItem(targetKey, target); } catch (_) { /* ignore */ }
+        storeSet(targetKey, target);
         fillChoices();
         project.value = created.name;
         if (targetSwitch) for (const b of targetSwitch.children) b.classList.toggle("primary", b.dataset.target === target);
@@ -1327,12 +1535,10 @@ async function viewNew() {
         createProjectButton.disabled = false;
       }
     } },
-    h("p", { class: "muted small" }, isMember()
-      ? "Saved in your household account. Use a lowercase project id; a public HTTPS git source is cloned into your own area."
-      : "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task."),
+    h("p", { class: "muted small" }, NEW_PROJECT_NOTE[isMember() ? "member" : "owner"]),
     h("label", {}, "Name"), newProjectName,
     h("label", {}, "Description"), newProjectDescription,
-    isMember() ? null : h("label", {}, "Runs on"), isMember() ? null : newProjectTarget,
+    isMember() ? [] : [h("label", {}, "Runs on"), newProjectTarget],
     h("label", {}, "Workspace"), newProjectSource, newProjectRepo,
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
@@ -1340,8 +1546,7 @@ async function viewNew() {
   model.addEventListener("change", () => { localModel = model.value; });
   const gpuHold = () => !!(gpu && (gpu.manual || gpu.state !== "clear"));
   const availableBackends = backends.filter((b) => b.available);
-  const defaultBackend = (gpuHold() && availableBackends.some((b) => b.name === "claude"))
-    ? "claude" : (availableBackends[0]?.name || "local");
+  const defaultBackend = pickDefaultBackend(availableBackends, gpuHold());
   const backend = h("select", {}, availableBackends.map((b) =>
     h("option", { value: b.name, selected: b.name === defaultBackend }, b.name === "local" ? "Local model" : b.name)));
   backend.value = defaultBackend;
@@ -1378,13 +1583,6 @@ async function viewNew() {
   showBackend();
   const prompt = h("textarea", { placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
   const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
-  const MODEL_STATE = {
-    ready: "✓ Model loaded",
-    sleeping: "Model is asleep; loading it now (about a minute)",
-    waking: "Model is loading (about a minute); you can start the task anyway",
-    unreachable: "Model server isn't answering",
-    paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → GPU)",
-  };
   const pollModel = async () => {
     if (!isMember()) {
       try { gpu = await api("/gpu"); } catch (_) { /* offline */ }
@@ -1392,13 +1590,7 @@ async function viewNew() {
     }
     if (backend.value !== "local") return;
     try {
-      const status = await api("/models/status");
-      const current = status.find((s) => s.name === model.value) || status[0];
-      if (current) {
-        const holdPaused = current.state === "paused" && gpuHold();
-        modelState.textContent = holdPaused ? "" : (MODEL_STATE[current.state] || current.state);
-        modelState.classList.toggle("dots", !holdPaused && (current.state === "waking" || current.state === "sleeping"));
-      }
+      paintModelState(modelState, await api("/models/status"), model.value, gpuHold());
     } catch (_) { /* offline: the form's own errors cover it */ }
   };
   warmModel(true);
@@ -1406,8 +1598,8 @@ async function viewNew() {
   const modelTimer = setInterval(pollModel, 3000);
   onLeave(() => clearInterval(modelTimer));
   const draftKey = "harness.draft";
-  try { prompt.value = localStorage.getItem(draftKey) || ""; } catch (_) { /* private mode */ }
-  prompt.addEventListener("input", () => { try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ } });
+  prompt.value = storeGet(draftKey) || "";
+  prompt.addEventListener("input", () => storeSet(draftKey, prompt.value));
 
   tplSelect.addEventListener("change", () => {
     const t = templates.find((x) => x.id === tplSelect.value);
@@ -1422,16 +1614,9 @@ async function viewNew() {
     syncSkillChecks();
   });
 
-  let enabledSkills = [];
-  try { enabledSkills = await api("/skills/enabled"); } catch (_) { enabledSkills = []; }
+  const enabledSkills = await api("/skills/enabled").catch(() => []);
   const skillInputs = [];
-  const skillBoxes = enabledSkills.map((sk) => {
-    const box = h("input", { type: "checkbox", class: "skill-opt", value: sk.slug });
-    skillInputs.push(box);
-    return h("label", { class: "row", style: "gap:8px;align-items:flex-start;margin:6px 0" }, box,
-      h("span", {}, h("strong", {}, sk.title || sk.slug),
-        h("div", { class: "muted small" }, sk.purpose || `v${sk.version} · ${sk.content_hash.slice(0, 12)}`)));
-  });
+  const skillBoxes = enabledSkills.map((sk) => skillOption(sk, skillInputs));
   const syncSkillChecks = () => {
     for (const box of skillInputs) {
       const sk = enabledSkills.find((s) => s.slug === box.value);
@@ -1446,61 +1631,51 @@ async function viewNew() {
       if (!prompt.value.trim()) return toast("Write a prompt first");
       if (backend.value === "local" && !(await confirmGpuQueue("This task"))) return;
       start.disabled = true;
-      try {
-        const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
-        const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
-          backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null,
-          skills: selectedSkills } });
-        try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
-        location.hash = `#/s/${s.id}`;
-      } catch (err) {
-        toast(err.message);
-        start.disabled = false;
-      }
+      const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
+      const started = await startSession({ prompt: prompt.value, project: project.value, backend: backend.value,
+        model: backend.value === "local" ? model.value : null, title: title.value || null, skills: selectedSkills }, draftKey);
+      if (!started) start.disabled = false;
     },
   },
   targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
   allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState, projectHint,
-  isMember() ? null : h("label", {}, "Backend"), isMember() ? null : backend, isMember() ? null : holdNotice, isMember() ? null : backendState,
+  isMember() ? [] : [h("label", {}, "Backend"), backend, holdNotice, backendState],
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
   skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },
     isMember() ? null : h("button", {
       class: "btn", type: "button",
-      onclick: async () => {
-        if (!prompt.value.trim()) return toast("Write a prompt first");
-        const name = window.prompt("Template name");
-        if (!name) return;
-        try {
-          await api("/templates", { method: "POST", body: { name, project: project.value, backend: backend.value,
-            model: backend.value === "local" ? model.value : "", prompt: prompt.value } });
-          toast("Template saved");
-          warmModel();
-route();
-        } catch (err) { toast(err.message); }
-      },
+      onclick: () => saveTemplate({ prompt: prompt.value, project: project.value, backend: backend.value,
+        model: backend.value === "local" ? model.value : "" }),
     }, "Save as template"),
     h("span", { class: "spacer" }), start));
   append($app, projectCreator, form);
 
-  if (allTemplates.length) {
-    append($app, h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),
-      allTemplates.map((t) => h("div", { class: "card" },
-        h("div", { class: "row" }, h("strong", {}, t.name), h("span", { class: "spacer" }),
-          h("button", {
-            class: "btn small bad",
-            onclick: async () => {
-              if (!confirm(`Delete template “${t.name}”?`)) return;
-              await api(`/templates/${t.id}`, { method: "DELETE" });
-              warmModel();
-route();
-            },
-          }, "Delete")),
-        h("div", { class: "preview" }, `${t.project} · ${t.prompt}`)))));
+  if (allTemplates.length) append($app, templateManager(allTemplates));
+}
+
+// Older servers answer PATCH with 405, so a rename retries once with PUT.
+async function putSessionTitle(session, title) {
+  const body = { title };
+  try {
+    return await api(`/sessions/${session.id}`, { method: "PATCH", body });
+  } catch (e) {
+    if (!/405|Method Not Allowed/i.test(e.message)) throw e;
+    return api(`/sessions/${session.id}`, { method: "PUT", body });
   }
+}
+
+async function commitSessionTitle(session, raw, isActive) {
+  const next = raw.replace(/\s+/g, " ").trim();
+  if (!next || next === session.title) return;
+  try {
+    const updated = await putSessionTitle(session, next);
+    session.title = updated.title;
+    if (isActive()) setHeader("agents", session.title || "Session");
+  } catch (e) { toast(e.message); }
 }
 
 function sessionTitle(session, isActive) {
@@ -1515,23 +1690,7 @@ function sessionTitle(session, isActive) {
     const finish = async (commit) => {
       if (done) return;
       done = true;
-      if (commit) {
-        const next = input.value.replace(/\s+/g, " ").trim();
-        if (next && next !== session.title) {
-          try {
-            const body = { title: next };
-            let updated;
-            try {
-              updated = await api(`/sessions/${session.id}`, { method: "PATCH", body });
-            } catch (e) {
-              if (!/405|Method Not Allowed/i.test(e.message)) throw e;
-              updated = await api(`/sessions/${session.id}`, { method: "PUT", body });
-            }
-            session.title = updated.title;
-            if (isActive()) setHeader("agents", session.title || "Session");
-          } catch (e) { toast(e.message); }
-        }
-      }
+      if (commit) await commitSessionTitle(session, input.value, isActive);
       label.textContent = session.title;
       if (input.isConnected) input.replaceWith(label);
       layoutBar();
@@ -1647,16 +1806,19 @@ async function viewSession(sid, tab, focusApproval) {
 
   const renderHead = () => {
     const limits = session.run?.rate_limits || {};
+    const limitName = String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h");
     const backendUsage = session.backend && session.backend !== "local" && limits.utilization !== undefined
-      ? ` · ${String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h")} ${Math.round(limits.utilization * 100)}%` : "";
+      ? ` · ${limitName} ${Math.round(limits.utilization * 100)}%` : "";
+    const onTarget = session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : "";
     fill(head, badge(session.status),
       session.queue_position > 0 ? h("span", { class: "muted" }, `#${session.queue_position} in GPU queue`) : null,
-      h("span", { class: "muted" }, `${session.project}${session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : ""} · ${session.backend || "local"}${backendUsage} · ${session.model}`));
+      h("span", { class: "muted" }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`));
     const pct = ctxLimit && ctxUsed ? Math.round((100 * ctxUsed) / ctxLimit) : null;
+    const ctxClass = `ctx${pct >= 55 ? " high" : ""}`;
     fill(usage,
       h("span", { class: "muted", title: "Cumulative tokens for this session (prompt tokens in, generated tokens out)" },
         `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`),
-      pct === null ? null : h("span", { class: `ctx${pct >= 55 ? " high" : ""}`, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up.` },
+      pct === null ? null : h("span", { class: ctxClass, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up.` },
         progressBar(pct / 100), `${pct}% context`));
   };
   renderHead();
@@ -1815,12 +1977,7 @@ async function viewSession(sid, tab, focusApproval) {
     let args = {};
     try { args = JSON.parse(fn.arguments || "{}"); } catch (_) { args = { raw: fn.arguments }; }
     if (fn.name === "web_fetch" && args.url) rememberFetch(call.id, args.url, "");
-    const summaryText = fn.name === "run_shell" ? args.command
-      : fn.name === "git_clone" ? args.url
-        : fn.name === "prometheus_query" ? args.query
-        : fn.name === "web_fetch" ? args.url
-        : args.service ? `${args.service}${args.since ? ` since ${args.since}` : ""}`
-        : args.path ? `${args.path}${args.start_line ? ` :${args.start_line}` : ""}` : fn.arguments;
+    const summaryText = toolSummaryText(fn, args);
     const state = h("span", { class: "state" }, "…");
     const body = h("div", { class: "body" }, h("pre", {}, JSON.stringify(args, null, 2)));
     const el = h("details", { class: "tool" },
@@ -1849,20 +2006,18 @@ async function viewSession(sid, tab, focusApproval) {
         h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
         h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
     }
-    const what = a.tool === "run_shell" || a.tool === "Bash" || a.tool === "exec_command"
-      ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
-      : a.tool === "git_clone" ? `git clone ${a.args.url}`
-        : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
+    const what = approvalWhat(a);
+    const reviewerReason = a.smart?.reason ? `: ${a.smart.reason}` : "";
     const rec = a.smart?.recommendation
       ? h("p", { class: "smart-rec" },
-          `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${a.smart.reason ? `: ${a.smart.reason}` : ""}`)
+          `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${reviewerReason}`)
       : null;
     // Memory library changes carry "summary\n\n<unified diff>"; file writes carry just the diff.
     const memory = a.tool === "memory_edit" || a.tool === "memory_write";
     const [summary, diff] = memory && a.detail.includes("\n\n") ? [a.detail.slice(0, a.detail.indexOf("\n\n")), a.detail.slice(a.detail.indexOf("\n\n") + 2)] : ["", a.detail || ""];
     const diffView = /^@@ /m.test(diff) ? h("div", { class: "diff approval-diff" }, diff.split("\n")
       .filter((line) => !/^(---|\+\+\+) /.test(line))
-      .map((line) => h("div", { class: line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "" }, line))) : null;
+      .map((line) => h("div", { class: approvalDiffClass(line) }, line))) : null;
     const card = h("div", { class: "approval", id: `approval-${a.id}` },
       h("h4", {}, `Approval needed: ${a.reason || a.tool}`),
       rec,
@@ -1925,7 +2080,8 @@ async function viewSession(sid, tab, focusApproval) {
       for (const call of d.tool_calls || []) pendingCalls.add(call.id);
       const wrap = h("div", { class: "ev" });
       if (d.reasoning) {
-        wrap.append(h("details", { class: "thinking" }, h("summary", {}, `Thought${took ? ` for ${took}` : ""} (${d.completion_tokens} tokens · ${d.gen_tps} tok/s)`),
+        const thought = took ? ` for ${took}` : "";
+        wrap.append(h("details", { class: "thinking" }, h("summary", {}, `Thought${thought} (${d.completion_tokens} tokens · ${d.gen_tps} tok/s)`),
           h("div", { class: "text" }, d.reasoning)));
       }
       if (d.content?.trim()) {
@@ -2041,7 +2197,7 @@ async function viewSession(sid, tab, focusApproval) {
         `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Actions → GPU to resume now)`)));
     },
     gpu_resumed: (e) => {
-      const text = `GPU free again after ${e.data.seconds < 90 ? `${e.data.seconds} s` : `${Math.round(e.data.seconds / 60)} min`}; reloading the model`;
+      const text = `GPU free again after ${fmtSpan(e.data.seconds)}; reloading the model`;
       if (gpuNote) fill(gpuNote, text);
       else add(h("p", { class: "note" }, text));
       gpuNote = null;
@@ -2051,7 +2207,7 @@ async function viewSession(sid, tab, focusApproval) {
         `Waiting for the ${TARGET_LABEL[e.data.target] || e.data.target}: it's offline or asleep. The task continues when it wakes`)));
     },
     target_online: (e) => {
-      const text = `${TARGET_LABEL[e.data.target] || e.data.target} is back after ${e.data.seconds < 90 ? `${e.data.seconds} s` : `${Math.round(e.data.seconds / 60)} min`}`;
+      const text = `${TARGET_LABEL[e.data.target] || e.data.target} is back after ${fmtSpan(e.data.seconds)}`;
       if (targetNote) fill(targetNote, text);
       else add(h("p", { class: "note" }, text));
       targetNote = null;
@@ -2160,7 +2316,7 @@ function reviewCard(s) {
   return h("section", { class: "card" },
     h("h3", {}, "Review"),
     h("div", { class: "meta" }, h("span", {}, `branch ${s.branch}`), s.base_branch ? h("span", {}, `from ${s.base_branch}`) : null,
-      s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, s.review) : null),
+      s.review ? reviewBadge(s.review, s.review) : null),
     s.review_detail ? h("p", { class: "muted small" }, s.review_detail) : null,
     busy ? h("p", { class: "muted small" }, "The agent is still working; review when the run ends.") : null,
     buttons.length ? h("div", { class: "row end", style: "margin-top:8px" }, buttons) : null);
@@ -2254,25 +2410,28 @@ function repoChanges(sid, repo, state, canComment, render) {
   };
   const lineRow = (f, ln) => {
     if (ln.kind === "hunk") return h("div", { class: "hunk" }, ln.text);
-    const sign = ln.kind === "add" ? "+" : ln.kind === "del" ? "-" : " ";
-    const side = ln.kind === "del" ? "old" : ln.kind === "add" ? "new" : sel?.path === f.name ? sel.side : "new";
+    const sign = { add: "+", del: "-" }[ln.kind] || " ";
+    let side = "new";
+    if (ln.kind === "del") side = "old";
+    else if (ln.kind !== "add" && sel?.path === f.name) side = sel.side;
     const num = side === "old" ? ln.old : ln.new;
     const picked = sel?.path === f.name && sel.side === side && num >= sel.start && num <= sel.end;
     const commented = mine.some((c) => c.path === f.name && c.side === side && num >= c.start_line && num <= c.end_line);
+    const removed = side === "old" ? "removed " : "";
     const tap = canComment ? {
-      role: "button", tabindex: "0", "aria-label": `Comment on ${side === "old" ? "removed " : ""}line ${num}`,
+      role: "button", tabindex: "0", "aria-label": `Comment on ${removed}line ${num}`,
       onclick: () => pick(f.name, side, num),
       onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(f.name, side, num); } },
     } : {};
-    return h("div", { class: `dl ${ln.kind}${picked ? " picked" : ""}${commented ? " commented" : ""}`, ...tap },
+    const rowClass = `dl ${ln.kind}${picked ? " picked" : ""}${commented ? " commented" : ""}`;
+    return h("div", { class: rowClass, ...tap },
       h("span", { class: "ln" }, ln.old ?? ""), h("span", { class: "ln" }, ln.new ?? ""), h("span", { class: "tx" }, `${sign}${ln.text}`));
   };
   const fileBody = (f) => {
     const parsed = parsedFiles.get(f.name);
     if (!parsed) {
       return f.lines.map((line) => h("div", {
-        class: line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add"
-          : line.startsWith("-") && !line.startsWith("---") ? "del" : "",
+        class: diffLineClass(line),
       }, line));
     }
     const out = [];
@@ -2314,7 +2473,7 @@ function repoChanges(sid, repo, state, canComment, render) {
     h("h3", {}, repo.path === "." ? "workspace" : repo.path),
     h("div", { class: "meta" }, h("span", {}, `branch ${repo.branch}`), repo.base ? h("span", {}, `since ${repo.base.slice(0, 8)}`) : null,
       h("span", {}, `${repo.files.length} changed file${repo.files.length === 1 ? "" : "s"}`)),
-    repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, `${repo.commits.length} new commit${repo.commits.length === 1 ? "" : "s"}`),
+    repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, pluralize(repo.commits.length, "new commit")),
       h("pre", { class: "small", style: "white-space:pre-wrap" }, repo.commits.join("\n"))) : null,
     drafts,
     files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 || (sel?.path === f.name) || undefined },
@@ -2342,13 +2501,13 @@ function splitDiff(diff) {
 function viewInfo(s) {
   const t = s.totals || {};
   const rows = [
-    ["Title", s.title], ["Session", s.id], ["Status", `${s.status}${s.stop_reason ? ` (${s.stop_reason})` : ""}`],
+    ["Title", s.title], ["Session", s.id], ["Status", s.stop_reason ? `${s.status} (${s.stop_reason})` : s.status],
     ["Project", s.project], ["Target", s.target], ["Backend", s.backend || "local"], ["Model", s.model],
     ["Created", new Date(s.created_at * 1000).toLocaleString()], ["Updated", new Date(s.updated_at * 1000).toLocaleString()],
     ["Model turns", t.turns || 0], ["Prompt tokens", t.prompt_tokens || 0], ["Completion tokens", t.completion_tokens || 0],
     ["Workspace", s.workspace_removed ? `${s.workspace} (removed)` : s.workspace],
   ];
-  if (s.branch) rows.push(["Branch", `${s.branch}${s.base_branch ? ` from ${s.base_branch}` : ""}`], ["Review", s.review || "pending"]);
+  if (s.branch) rows.push(["Branch", s.base_branch ? `${s.branch} from ${s.base_branch}` : s.branch], ["Review", s.review || "pending"]);
   const frozen = s.skills || [];
   if (frozen.length) {
     rows.push(["Skills", frozen.map((sk) => `${sk.slug} v${sk.version} (${(sk.content_hash || "").slice(0, 12)})`).join(", ")]);
@@ -2371,9 +2530,10 @@ function imageCard(img) {
   const ready = img.status === "done";
   const kind = img.operation && img.operation !== "generate" ? img.operation : "";
   const scale = Number(img.scale) > 1 ? `${img.scale}×` : "";
+  const placeholderContent = img.status === "failed" || img.status === "cancelled" ? img.status : h("span", { class: "dots" }, img.status);
   return h("a", { class: "card image-card", href: `#/images/${img.id}` },
     ready ? daemonImage(`/images/${img.id}.png`, { alt: img.prompt, loading: "lazy" })
-      : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" || img.status === "cancelled" ? img.status : h("span", { class: "dots" }, img.status)),
+      : h("div", { class: `image-placeholder ${img.status}` }, placeholderContent),
     kind ? h("span", { class: "image-kind" }, kind) : null,
     scale ? h("span", { class: "image-scale" }, scale) : null,
     h("div", { class: "preview small" }, img.prompt));
@@ -2390,7 +2550,10 @@ function updateImageStatusView(view, s) {
   const hasSteps = s.phase === "generating" && Number(p.max) > 0;
   const upscaling = s.phase === "generating" && p.stage === "upscaling";
   const editing = s.phase === "generating" && p.stage === "editing";
-  label.textContent = (upscaling ? "Upscaling" : editing ? "Editing" : text) + queued;
+  const upscaleName = upscaling ? "Upscaling" : null;
+  const editName = editing ? "Editing" : null;
+  const stageName = upscaleName || editName;
+  label.textContent = (stageName || text) + queued;
   label.classList.toggle("dots", busy);
   bar.hidden = !busy;
   detail.hidden = !hasSteps;
@@ -2399,7 +2562,7 @@ function updateImageStatusView(view, s) {
     if (hasSteps) {
       const fraction = Math.max(0, Math.min(1, Number(p.value || 0) / Number(p.max)));
       barFill.style.width = `${Math.max(2, fraction * 100).toFixed(1)}%`;
-      detail.textContent = `${upscaling ? "Upscaling" : editing ? "Editing" : "Sampling"} ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
+      detail.textContent = `${stageName || "Sampling"} ${Math.round(fraction * 100)}% · ${p.value || 0} / ${p.max} steps`;
     } else {
       barFill.style.width = "";
       detail.textContent = "";
@@ -2542,6 +2705,11 @@ async function viewImages() {
   const editHint = (!edit.available || !edit.enabled) && !isGuest()
     ? h("p", { class: "muted small" }, edit.setup || "Masked editing is an optional component.")
     : null;
+  const loadNote = "The language model is unloaded while images generate; running tasks pause for a few minutes. ";
+  const upscaleNote = loadNote + (upscaleInfo.available
+    ? "Upscaling is off unless you choose 2× or 4×."
+    : "Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable.");
+  const uploadControls = edit.available && edit.enabled ? [upload, uploadBtn] : [];
   append($app, 
     isGuest() ? h("p", { class: "muted small" }, "Demo access can view generated images, not start new ones.") : h("form", {
       onsubmit: async (e) => {
@@ -2567,13 +2735,10 @@ async function viewImages() {
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
     h("div", { class: "row" }, h("div", { style: "flex:1" }, h("label", {}, "Upscale"), upscale)),
-    h("p", { class: "muted small" }, upscaleInfo.available
-      ? "The language model is unloaded while images generate; running tasks pause for a few minutes. Upscaling is off unless you choose 2× or 4×."
-      : "The language model is unloaded while images generate; running tasks pause for a few minutes. Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable."),
+    h("p", { class: "muted small" }, upscaleNote),
     editHint,
     h("div", { class: "row image-generate-row", style: "margin-top:12px" },
-      (edit.available && edit.enabled) ? upload : null,
-      (edit.available && edit.enabled) ? uploadBtn : null,
+      uploadControls,
       h("span", { class: "spacer" }), go)),
     phase, grid);
   let timer = 0;
@@ -2581,10 +2746,66 @@ async function viewImages() {
     try {
       const d = render(await api("/images"));
       timer = setTimeout(tick, IMAGE_BUSY.has(d.status.phase) ? 400 : 4000);
-    } catch (_) { /* offline: keep polling */ timer = setTimeout(tick, 4000); }
+    } catch (err) {
+      console.debug("image list unavailable; retrying", err);
+      timer = setTimeout(tick, 4000);
+    }
   };
   timer = setTimeout(tick, IMAGE_BUSY.has(data.status.phase) ? 400 : 4000);
   onLeave(() => clearTimeout(timer));
+}
+
+function imageMetaParts(img, when) {
+  const meta = [`${img.model} · ${img.width}×${img.height}`];
+  if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
+  meta.push(`seed ${img.seed}`, img.source);
+  if (img.seconds) meta.push(`${Math.round(img.seconds)} s`);
+  if (img.lora) meta.push(`LoRA ${img.lora}`);
+  if (img.lora_revision) meta.push(img.lora_revision.slice(0, 8));
+  meta.push(when);
+  return meta;
+}
+
+function provenanceNote(img) {
+  const p = img.provenance;
+  if (!p || !(p.checkpoint_revision || p.steps)) return null;
+  return h("p", { class: "muted small" },
+    [p.mode || img.model, p.steps && `${p.steps} steps`,
+      p.sampler, p.scheduler, p.guidance != null && `cfg ${p.guidance}`,
+      p.checkpoint_revision && `ckpt ${String(p.checkpoint_revision).slice(0, 12)}`,
+      p.comfy_revision && `ComfyUI ${p.comfy_revision}`].filter(Boolean).join(" · "));
+}
+
+function imageActionRow(img, id, { editControl, canUpscale, startUpscale }) {
+  return h("div", { class: "row" },
+    !isGuest() && img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
+      class: "btn",
+      onclick: async () => {
+        try {
+          const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio, resolution: img.resolution } });
+          location.hash = `#/images/${again.id}`;
+        } catch (e) { toast(e.message); }
+      },
+    }, "Another one") : null,
+    editControl,
+    canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
+    canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
+    img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
+    !isGuest() && (img.status === "queued" || img.status === "running") ? h("button", {
+      class: "btn",
+      onclick: async () => {
+        if (!confirm("Cancel this image job?")) return;
+        try { await api(`/images/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
+      },
+    }, "Cancel") : null,
+    !isGuest() ? h("button", {
+      class: "btn danger",
+      onclick: async () => {
+        if (!confirm("Delete this image from the live gallery? Independent backups are not changed.")) return;
+        try { await api(`/images/${id}`, { method: "DELETE" }); go("#/images", true); } catch (e) { toast(e.message); }
+      },
+    }, "Delete") : null,
+    img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null);
 }
 
 async function viewImage(id) {
@@ -2597,13 +2818,7 @@ async function viewImage(id) {
     const editReady = !isGuest() && img.status === "done" && edit.enabled && edit.available;
     const canEdit = editReady && sizeOk;
     const editBlockedReason = img.editable_reason || "This source is too large to edit. Use the original or a non-upscaled image.";
-    const meta = [`${img.model} · ${img.width}×${img.height}`];
-    if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
-    meta.push(`seed ${img.seed}`, img.source);
-    if (img.seconds) meta.push(`${Math.round(img.seconds)} s`);
-    if (img.lora) meta.push(`LoRA ${img.lora}`);
-    if (img.lora_revision) meta.push(img.lora_revision.slice(0, 8));
-    meta.push(when);
+    const meta = imageMetaParts(img, when);
     const canUpscale = img.status === "done" && !isGuest() && !img.private && Number(img.scale || 1) === 1;
     const startUpscale = (choice) => async () => {
       try {
@@ -2612,54 +2827,28 @@ async function viewImage(id) {
         location.hash = `#/images/${next.id}`;
       } catch (e) { toast(e.message); }
     };
+    const noteClass = `note${img.status === "failed" || img.status === "cancelled" ? " bad" : ""}`;
+    const imageNote = () => {
+      if (img.status === "failed") return `Failed: ${img.error}`;
+      return img.status === "cancelled" ? "Cancelled" : imageStatusView(img.service);
+    };
+    let editControl = null;
+    if (canEdit) editControl = h("a", { class: "btn", href: `#/images/${id}/edit` }, "Edit");
+    else if (editReady) editControl = h("button", { class: "btn", type: "button", disabled: true, title: editBlockedReason }, "Edit");
     fill($app,
       img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
-        : h("p", { class: `note${img.status === "failed" || img.status === "cancelled" ? " bad" : ""}` },
-          img.status === "failed" ? `Failed: ${img.error}` : img.status === "cancelled" ? "Cancelled" : imageStatusView(img.service)),
+        : h("p", { class: noteClass }, imageNote()),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, meta.join(" · ")),
-        img.provenance && (img.provenance.checkpoint_revision || img.provenance.steps) ? h("p", { class: "muted small" },
-          [img.provenance.mode || img.model, img.provenance.steps && `${img.provenance.steps} steps`,
-           img.provenance.sampler, img.provenance.scheduler, img.provenance.guidance != null && `cfg ${img.provenance.guidance}`,
-           img.provenance.checkpoint_revision && `ckpt ${String(img.provenance.checkpoint_revision).slice(0, 12)}`,
-           img.provenance.comfy_revision && `ComfyUI ${img.provenance.comfy_revision}`].filter(Boolean).join(" · ")) : null,
+        provenanceNote(img),
         img.parent?.id ? h("p", { class: "muted small" }, "Derived from ",
           h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
         (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
           ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` },
             c.operation === "upscale" ? `${c.scale}×` : c.operation)]))) : null,
         !isGuest() && (!edit.enabled || !edit.available) ? h("p", { class: "muted small" }, edit.setup || "") : null,
-        h("div", { class: "row" },
-          isGuest() ? null : img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
-            class: "btn",
-            onclick: async () => {
-              try {
-                const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio, resolution: img.resolution } });
-                location.hash = `#/images/${again.id}`;
-              } catch (e) { toast(e.message); }
-            },
-          }, "Another one") : null,
-          canEdit ? h("a", { class: "btn", href: `#/images/${id}/edit` }, "Edit")
-            : editReady ? h("button", { class: "btn", type: "button", disabled: true, title: editBlockedReason }, "Edit") : null,
-          canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
-          canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
-          img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
-          !isGuest() && (img.status === "queued" || img.status === "running") ? h("button", {
-            class: "btn",
-            onclick: async () => {
-              if (!confirm("Cancel this image job?")) return;
-              try { await api(`/images/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
-            },
-          }, "Cancel") : null,
-          !isGuest() ? h("button", {
-            class: "btn danger",
-            onclick: async () => {
-              if (!confirm("Delete this image from the live gallery? Independent backups are not changed.")) return;
-              try { await api(`/images/${id}`, { method: "DELETE" }); go("#/images", true); } catch (e) { toast(e.message); }
-            },
-          }, "Delete") : null,
-          img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null)));
+        imageActionRow(img, id, { editControl, canUpscale, startUpscale })));
     return img;
   };
   let img = await load();
@@ -2833,7 +3022,10 @@ const fmtWhen = (ts) => new Date(ts * 1000).toLocaleString(undefined, { weekday:
 const whenText = (ts) => {
   if (!ts) return "—";
   const s = ts - Date.now() / 1000;
-  const rel = s < 0 ? "due" : s < 3600 ? `in ${Math.max(1, Math.round(s / 60))} min` : s < 86400 ? `in ${Math.round(s / 3600)} h` : `in ${Math.round(s / 86400)} d`;
+  let rel = `in ${Math.round(s / 86400)} d`;
+  if (s < 0) rel = "due";
+  else if (s < 3600) rel = `in ${Math.max(1, Math.round(s / 60))} min`;
+  else if (s < 86400) rel = `in ${Math.round(s / 3600)} h`;
   return `${fmtWhen(ts)} (${rel})`;
 };
 const cronLabel = (cron) => (CRON_PRESETS.find(([c]) => c === cron) || [null, cron])[1];
@@ -2848,12 +3040,13 @@ async function viewJobs() {
   }
   append($app, ...jobs.map((j) => {
     const last = j.recent[0];
+    const lastJobBadge = last?.job_status ? jobStatusBadge(last.job_status) : null;
     return h("a", { class: "card", href: `#/jobs/${j.id}` },
       h("h3", {}, `${j.enabled ? "" : "⏸ "}${j.name}`),
       h("div", { class: "meta" }, h("span", {}, cronLabel(j.cron)), h("span", {}, j.project),
         j.enabled ? h("span", {}, `next ${whenText(j.next_run_at)}`) : h("span", {}, "paused")),
       last ? h("div", { class: "meta", style: "margin-top:4px" }, h("span", {}, `last run ${ago(last.created_at)}`),
-        badge(last.status), last.job_status ? jobStatusBadge(last.job_status) : null) : null,
+        badge(last.status), lastJobBadge) : null,
       j.last_error ? h("div", { class: "preview bad" }, `Couldn't start: ${j.last_error}`) : null);
   }));
 }
@@ -2863,10 +3056,7 @@ async function viewJob(id) {
   setHeader("jobs", isNew ? "New job" : "Job", { page: true });
   const [projects, models, backends, job] = await Promise.all([
     api("/projects"), api("/models"), api("/backends?auth=skip"), isNew ? null : api(`/jobs/${id}`)]);
-  const j = job || {
-    name: "", prompt: "", cron: "0 8 * * *", backend: "local", model: "", notify: "low", enabled: true,
-    project: projects.some((p) => p.name === "homelab") ? "homelab" : "scratch",
-  };
+  const j = job || newJobDefaults(projects);
   const name = h("input", { type: "text", value: j.name, placeholder: "e.g. Morning homelab check" });
   const prompt = h("textarea", { placeholder: "e.g. Check that every homelab service is running and nothing restarted overnight. Look at the logs of anything that isn't healthy." });
   prompt.value = j.prompt;
@@ -2906,11 +3096,7 @@ async function viewJob(id) {
   const preview = () => {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(async () => {
-      try {
-        const r = await api(`/jobs/preview?cron=${encodeURIComponent(cron.value)}`);
-        cronNote.classList.toggle("bad", !r.ok);
-        cronNote.textContent = r.ok ? `Next: ${r.next.map(fmtWhen).join(" · ")}` : r.error;
-      } catch (_) { /* offline */ }
+      await previewCron(cron.value, cronNote);
     }, 250);
   };
   preset.addEventListener("change", () => { if (preset.value) { cron.value = preset.value; preview(); } else cron.focus(); });
@@ -2949,7 +3135,7 @@ async function viewJob(id) {
   h("label", {}, "Notify me"), notify,
   h("label", { class: "row", style: "font-weight:500" }, enabled, "Enabled"),
   h("div", { class: "row", style: "margin-top:18px" },
-    isGuest() ? null : !isNew ? h("button", {
+    !isGuest() && !isNew ? h("button", {
       class: "btn bad", type: "button",
       onclick: async () => {
         if (!confirm(`Delete the job “${j.name}”? Its past sessions stay.`)) return;
@@ -2957,7 +3143,7 @@ async function viewJob(id) {
       },
     }, "Delete") : null,
     h("span", { class: "spacer" }),
-    isGuest() ? null : !isNew ? h("button", {
+    !isGuest() && !isNew ? h("button", {
       class: "btn", type: "button",
       onclick: async () => {
         if (backend.value === "local" && !(await confirmGpuQueue("This job run"))) return;
@@ -2965,14 +3151,29 @@ async function viewJob(id) {
       },
     }, "Run now") : null,
     isGuest() ? null : save)));
-  if (job) {
-    append($app, h("h3", { style: "margin-top:28px" }, "Recent runs"),
-      job.last_skip ? h("p", { class: "muted small" }, `Last skipped: ${job.last_skip}`) : null,
-      job.last_error ? h("p", { class: "small bad" }, `Last start failed: ${job.last_error}`) : null,
-      job.recent.length ? job.recent.map((s) => h("a", { class: "card", href: `#/s/${s.id}` },
-        h("div", { class: "meta" }, badge(s.status), s.job_status ? jobStatusBadge(s.job_status) : null, h("span", {}, ago(s.created_at))),
-        s.answer ? h("div", { class: "preview" }, s.answer) : null)) : h("p", { class: "muted small" }, "No runs yet."));
-  }
+  if (job) append($app, ...recentRunsView(job));
+}
+
+const newJobDefaults = (projects) => ({
+  name: "", prompt: "", cron: "0 8 * * *", backend: "local", model: "", notify: "low", enabled: true,
+  project: projects.some((p) => p.name === "homelab") ? "homelab" : "scratch",
+});
+
+async function previewCron(cronValue, cronNote) {
+  try {
+    const r = await api(`/jobs/preview?cron=${encodeURIComponent(cronValue)}`);
+    cronNote.classList.toggle("bad", !r.ok);
+    cronNote.textContent = r.ok ? `Next: ${r.next.map(fmtWhen).join(" · ")}` : r.error;
+  } catch (_) { /* offline */ }
+}
+
+function recentRunsView(job) {
+  return [h("h3", { style: "margin-top:28px" }, "Recent runs"),
+    job.last_skip ? h("p", { class: "muted small" }, `Last skipped: ${job.last_skip}`) : null,
+    job.last_error ? h("p", { class: "small bad" }, `Last start failed: ${job.last_error}`) : null,
+    job.recent.length ? job.recent.map((s) => h("a", { class: "card", href: `#/s/${s.id}` },
+      h("div", { class: "meta" }, badge(s.status), s.job_status ? jobStatusBadge(s.job_status) : null, h("span", {}, ago(s.created_at))),
+      s.answer ? h("div", { class: "preview" }, s.answer) : null)) : h("p", { class: "muted small" }, "No runs yet.")];
 }
 
 // ---------- profile ----------
@@ -3040,7 +3241,10 @@ function readTextSize() {
   try {
     const id = localStorage.getItem("harness.textSize") || "m";
     return TEXT_SIZES[id] ? id : "m";
-  } catch (_) { /* storage unavailable: default size */ return "m"; }
+  } catch (err) {
+    console.debug("text size not readable from storage; using the default", err);
+    return "m";
+  }
 }
 function applyTextSize(id) {
   const size = TEXT_SIZES[id] ? id : readTextSize();
@@ -3050,13 +3254,29 @@ function applyTextSize(id) {
 }
 applyTextSize();
 
+// Copies text and says so; when the clipboard is unavailable (insecure context, permission denied) the
+// caller's fallback leaves the text selected so it can be copied by hand.
+async function copyToClipboard(text, selectFallback) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Copied");
+  } catch (err) {
+    console.debug("clipboard write failed", err);
+    selectFallback();
+  }
+}
+
 function copyBox(value) {
   const code = h("code", {}, value);
   const btn = h("button", {
     class: "btn small", type: "button",
     onclick: async () => {
-      try { await navigator.clipboard.writeText(value); toast("Copied"); }
-      catch (_) { /* clipboard unavailable: select the text instead */ const range = document.createRange(); range.selectNodeContents(code); getSelection().removeAllRanges(); getSelection().addRange(range); }
+      copyToClipboard(value, () => {
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+      });
     },
   }, "Copy");
   return h("div", { class: "copy-box", onclick: () => btn.click() }, code, btn);
@@ -3081,9 +3301,10 @@ function emojiPicker(profile, onPick) {
 function accountCard(me, profile) {
   const live = $conn.classList.contains("live");
   const usage = me.usage || {};
+  const identityNote = isMember() ? "Household member identity." : "Profile icon is owner-only during demo access.";
   return h("div", {},
     isGuest() || isMember() ? h("div", { class: "card" },
-      h("p", { class: "muted small" }, isMember() ? "Household member identity." : "Profile icon is owner-only during demo access."),
+      h("p", { class: "muted small" }, identityNote),
       h("p", { style: "font-size:2rem;margin:0" }, profile.emoji || "🙂"))
       : h("div", { class: "card" },
       h("p", { class: "muted small" }, "Shown at the top left of the app."),
@@ -3197,12 +3418,27 @@ async function viewActions(tab) {
       "aria-selected": id === selected ? "true" : "false",
       onclick: () => go(`#/actions/${id}`),
     }, label)));
-  const panel = selected === "gpu" ? h("div", { class: "card settings-list" }, gpuActionRow())
-    : selected === "accounts" ? await accountsCard()
-    : selected === "remote-control" ? remoteControlCard()
-    : diskCard();
+  let panel;
+  if (selected === "gpu") panel = h("div", { class: "card settings-list" }, gpuActionRow());
+  else if (selected === "accounts") panel = await accountsCard();
+  else panel = selected === "remote-control" ? remoteControlCard() : diskCard();
   append($app, tabs, panel);
 }
+
+// Each profile subpage builds its card from the account, the profile emoji and the optional third path part.
+const PROFILE_CARDS = {
+  account: (me, profile) => accountCard(me, profile),
+  appearance: () => appearanceCard(),
+  notifications: (me) => notificationsCard(me),
+  install: () => installCard(),
+  backends: () => backendsCard(),
+  "smart-approvals": () => smartApprovalsCard(),
+  daemon: () => daemonSettingsCard(),
+  memory: () => memoryCard(),
+  skills: (me, profile, extra) => skillsPage(extra),
+  apps: (me) => appsCard(me),
+  endpoint: (me) => endpointCard(me),
+};
 
 async function viewProfile(page, extra) {
   const titles = { account: "Account", ...PROFILE_PAGES };
@@ -3211,17 +3447,7 @@ async function viewProfile(page, extra) {
   setHeader("agents", titles[page] || "Profile", { page: true });
   if (page === "connection") return append($app, connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
-  if (page === "account") return append($app, accountCard(me, profile));
-  if (page === "appearance") return append($app, appearanceCard());
-  if (page === "notifications") return append($app, notificationsCard(me));
-  if (page === "install") return append($app, installCard());
-  if (page === "backends") return append($app, await backendsCard());
-  if (page === "smart-approvals") return append($app, await smartApprovalsCard());
-  if (page === "daemon") return append($app, await daemonSettingsCard());
-  if (page === "memory") return append($app, memoryCard());
-  if (page === "skills") return append($app, await skillsPage(extra));
-  if (page === "apps") return append($app, appsCard(me));
-  if (page === "endpoint") return append($app, endpointCard(me));
+  if (Object.hasOwn(PROFILE_CARDS, page)) return append($app, await PROFILE_CARDS[page](me, profile, extra));
   let hidden = new Set();
   if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
   else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
@@ -3287,7 +3513,7 @@ function connectionCard() {
       fill(minted,
         h("p", { class: "note" }, "Copy this token now; it is not shown again."), field,
         h("button", { class: "btn small", onclick: async () => {
-          try { await navigator.clipboard.writeText(key.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); }
+          copyToClipboard(key.key, () => field.select());
         } }, "Copy token"));
     } catch (e) { toast(e.message, 5000); }
   };
@@ -3309,6 +3535,7 @@ function connectionCard() {
       h("button", { class: "btn", onclick: mint }, "Create owner token"), minted));
 }
 
+const iconGlyph = (spec) => (spec.id === "profile" ? ($profileIcon.textContent || "🙂") : spec.emoji);
 const APP_ICONS = [
   { id: "default", label: "Default" },
   { id: "profile", label: "Profile icon" },
@@ -3382,7 +3609,7 @@ function appearanceCard() {
     },
       h("div", { class: "preview" }, spec.id === "default"
         ? h("img", { src: "/static/icon-180.png", alt: "" })
-        : (spec.id === "profile" ? ($profileIcon.textContent || "🙂") : spec.emoji)),
+        : iconGlyph(spec)),
       h("div", { class: "name" }, spec.label))));
   };
   paint();
@@ -3404,7 +3631,7 @@ function appearanceCard() {
       paint();
     });
     return h("label", {},
-      key === "bg" ? "Background" : key === "panel" ? "Panel" : "Accent",
+      { bg: "Background", panel: "Panel" }[key] || "Accent",
       h("div", { class: "hue-control" }, preview, input));
   }));
   return h("div", { class: "card" },
@@ -3446,7 +3673,8 @@ function backendUsage(b) {
   const limits = b.limits || {};
   const pct = limits.utilization === undefined ? null : Math.round(limits.utilization * 100);
   const period = String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h");
-  const sub = pct === null ? (b.logged_in ? "signed in" : "sign-in needed") : `${period} ${pct}% used`;
+  const signedIn = b.logged_in ? "signed in" : "sign-in needed";
+  const sub = pct === null ? signedIn : `${period} ${pct}% used`;
   const req = `${b.today.requests || 0} today · ${b.week.requests || 0} this week`;
   const cost = Number(b.today.cost_usd || 0) + Number(b.week.cost_usd || 0);
   const dollars = cost > 0 ? ` · $${Number(b.today.cost_usd || 0).toFixed(2)} today` : "";
@@ -3469,16 +3697,19 @@ async function smartApprovalsCard() {
   status.textContent = configured
     ? `${data.provider || "provider"} · ${data.model || "model"} · mode ${data.mode}`
     : "Off. The owner enables this in harness.yaml with a hosted API secret reference.";
+  const modeButtons = configured ? [
+    h("button", { class: "btn", onclick: () => setMode("shadow") }, "Shadow"),
+    h("button", { class: "btn", onclick: () => setMode("auto") }, "Auto"),
+  ] : [];
   const buttons = isGuest() ? h("p", { class: "muted small" }, "Demo access cannot change smart approvals.")
     : h("div", { class: "row", style: "margin-top:10px; gap:8px; flex-wrap:wrap" },
-        configured ? h("button", { class: "btn", onclick: () => setMode("shadow") }, "Shadow") : null,
-        configured ? h("button", { class: "btn", onclick: () => setMode("auto") }, "Auto") : null,
+        modeButtons,
         h("button", { class: "btn", onclick: () => setMode("off") }, "Off"));
   const stats = h("p", { class: "muted small" },
     `${data.attempts || 0} reviews · ${data.auto_approvals || 0} auto-approved · ${data.escalations || 0} escalated · `
     + `${data.latency_ms || 0} ms avg · $${Number(data.cost_usd || 0).toFixed(4)}`);
   const recent = (data.recent || []).slice(0, 12).map((row) => h("div", { class: "muted small" },
-    `${row.outcome} · ${row.recommendation}${row.escalate_reason ? ` (${row.escalate_reason})` : ""} · `
+    `${row.outcome} · ${row.recommendation}${escalateSuffix(row)} · `
     + `${row.provider}/${row.model}`));
   return h("div", {},
     h("div", { class: "card" },
@@ -3545,7 +3776,8 @@ async function backendsCard() {
     input.addEventListener("change", () => save(input.value.trim()));
     return [sel, input];
   };
-  const title = (b) => (b.name === "local" ? "Qwen (this PC)" : b.name === "claude" ? "Claude" : b.name === "codex" ? "Codex" : b.name === "cursor" ? "Cursor" : b.name);
+  const BACKEND_TITLES = { local: "Qwen (this PC)", claude: "Claude", codex: "Codex", cursor: "Cursor" };
+  const title = (b) => BACKEND_TITLES[b.name] || b.name;
   const usage = {};
   fill(body, rows.length ? rows.map((b) => {
     const line = h("p", { class: `small ${b.billing_warning ? "bad" : "muted"}` }, b.billing_warning || backendUsage(b));
@@ -3597,14 +3829,40 @@ function settingInput(spec, draft) {
   return input;
 }
 
+function settingValueText(spec) {
+  const configured = spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "";
+  const inherited = spec.inherited != null ? ` · inherited ${spec.inherited}` : "";
+  return `effective ${spec.effective == null ? "—" : spec.effective}${configured}${inherited}`;
+}
+
 function settingMeta(spec) {
   const bits = [];
-  bits.push(spec.apply === "live" ? "applies live" : spec.apply === "daemon_restart" ? "needs restart" : "file only");
+  bits.push({ live: "applies live", daemon_restart: "needs restart" }[spec.apply] || "file only");
   if (spec.source) bits.push(`source: ${spec.source}`);
   if (spec.pending != null && spec.apply === "daemon_restart") bits.push(`pending: ${spec.pending}`);
   if (spec.capped_by) bits.push(`capped by ${spec.capped_by}`);
   if (spec.file_only) bits.push(spec.guidance || "managed in local configuration");
   return bits.join(" · ");
+}
+
+const lastUpdateText = (update) => `${update.ok ? "succeeded" : "failed"}: ${update.message}`;
+
+function compatibilityText(compatibility) {
+  const { supported } = compatibility;
+  const range = supported ? ` · Server supports ${supported.min}–${supported.max}` : "";
+  return `${compatibility.state || "not reported"}${range}`;
+}
+
+function lastSeenText(runner) {
+  if (runner.last_seen_seconds === null) return "not connected since Agent Harness Server started";
+  return `last seen ${Math.round(runner.last_seen_seconds / 60)} min ago`;
+}
+
+function recoveryNote(recovery) {
+  if (recovery?.recovery === "overlay_quarantined") {
+    return ` · ${recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`;
+  }
+  return recovery?.recovery ? ` · recovered from ${recovery.reason || "failed generation"}` : "";
 }
 
 async function daemonSettingsCard() {
@@ -3616,10 +3874,9 @@ async function daemonSettingsCard() {
     `Revision ${view.revision}` +
     (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
     (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
-    (view.warning ? ` · ${view.warning}` :
-      view.recovery?.recovery === "overlay_quarantined"
-        ? ` · ${view.recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`
-        : (view.recovery?.recovery ? ` · recovered from ${view.recovery.reason || "failed generation"}` : "")));
+    (view.warning ? ` · ${view.warning}` : recoveryNote(view.recovery)));
+  const restartButton = view.restart_required ? h("button", { class: "btn", type: "button", onclick: () => confirmRestart(view.pending_revision || view.revision, status, errorBox) },
+    "Restart daemon") : null;
   const planBox = h("div", { class: "config-plan" });
   const errorBox = h("div");
   const groups = {};
@@ -3634,10 +3891,7 @@ async function daemonSettingsCard() {
         h("label", { class: "field-label" }, spec.label),
         h("p", { class: "muted small" }, spec.help),
         h("p", { class: "muted small config-meta" }, settingMeta(spec)),
-        spec.file_only ? null : h("p", { class: "muted small" },
-          `effective ${spec.effective == null ? "—" : spec.effective}` +
-          (spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "") +
-          (spec.inherited != null ? ` · inherited ${spec.inherited}` : ""))),
+        spec.file_only ? null : h("p", { class: "muted small" }, settingValueText(spec))),
       spec.file_only ? h("span", { class: "muted small" }, "local config") : settingInput(spec, draft)))));
 
   const apply = async ({ restart = false, rollback = false } = {}) => {
@@ -3647,22 +3901,11 @@ async function daemonSettingsCard() {
     for (const [key, value] of Object.entries(draft)) changes[key] = value;
     try {
       if (rollback) {
-        if (!window.confirm("Restore the previous confirmed server configuration?")) return;
-        const result = await api("/config/rollback", { method: "POST", body: { revision: view.revision, confirm: true } });
-        toast("Rolled back");
-        if (result.restart_required) {
-          await confirmRestart(result.pending_revision || result.revision, status, errorBox);
-        } else { location.hash = "#/profile/daemon"; location.reload(); }
+        await rollbackConfig(view.revision, status, errorBox);
         return;
       }
       const plan = await api("/config", { method: "PATCH", body: { revision: view.revision, dry_run: true, changes } });
-      append(planBox,
-        h("p", { class: "field-label" }, "Change plan"),
-        (plan.changes || []).length
-          ? h("ul", { class: "config-plan-list" }, plan.changes.map((c) =>
-            h("li", {}, `${c.key}: ${c.from} → ${c.action === "reset" ? "inherited" : c.to} (${c.apply})`)))
-          : h("p", { class: "muted small" }, "No changes."),
-      );
+      append(planBox, h("p", { class: "field-label" }, "Change plan"), configPlanList(plan));
       const enables = (plan.changes || []).filter((c) => c.to === true && String(c.key).endsWith(".enabled"));
       if (enables.length && !window.confirm(`Enable ${enables.map((c) => c.key).join(", ")}?`)) return;
       if (!(plan.changes || []).length) return;
@@ -3673,15 +3916,7 @@ async function daemonSettingsCard() {
         await confirmRestart(result.pending_revision || result.target_revision || result.revision, status, errorBox);
       } else { location.reload(); }
     } catch (e) {
-      if (e.code === "revision_conflict") {
-        append(errorBox, h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
-      } else if (e.keys) {
-        append(errorBox, h("p", { class: "note bad" }, e.message),
-          h("ul", {}, Object.entries(e.keys).map(([key, info]) =>
-            h("li", {}, `${key}: ${info.message || info.code}`))));
-      } else {
-        append(errorBox, h("p", { class: "note bad" }, e.message));
-      }
+      showConfigError(errorBox, e);
     }
   };
 
@@ -3694,8 +3929,34 @@ async function daemonSettingsCard() {
     isGuest() ? null : h("div", { class: "card config-actions" },
       h("button", { class: "btn", type: "button", onclick: () => apply() }, "Review and apply"),
       h("button", { class: "btn", type: "button", onclick: () => apply({ rollback: true }) }, "Roll back"),
-      view.restart_required ? h("button", { class: "btn", type: "button", onclick: () => confirmRestart(view.pending_revision || view.revision, status, errorBox) },
-        "Restart daemon") : null));
+      restartButton));
+}
+
+function configPlanList(plan) {
+  if (!(plan.changes || []).length) return h("p", { class: "muted small" }, "No changes.");
+  return h("ul", { class: "config-plan-list" }, plan.changes.map((c) =>
+    h("li", {}, `${c.key}: ${c.from} → ${c.action === "reset" ? "inherited" : c.to} (${c.apply})`)));
+}
+
+function showConfigError(errorBox, e) {
+  if (e.code === "revision_conflict") {
+    append(errorBox, h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
+  } else if (e.keys) {
+    append(errorBox, h("p", { class: "note bad" }, e.message),
+      h("ul", {}, Object.entries(e.keys).map(([key, info]) =>
+        h("li", {}, `${key}: ${info.message || info.code}`))));
+  } else {
+    append(errorBox, h("p", { class: "note bad" }, e.message));
+  }
+}
+
+async function rollbackConfig(revision, status, errorBox) {
+  if (!window.confirm("Restore the previous confirmed server configuration?")) return;
+  const result = await api("/config/rollback", { method: "POST", body: { revision, confirm: true } });
+  toast("Rolled back");
+  if (result.restart_required) {
+    await confirmRestart(result.pending_revision || result.revision, status, errorBox);
+  } else { location.hash = "#/profile/daemon"; location.reload(); }
 }
 
 async function confirmRestart(targetRevision, status, errorBox) {
@@ -3737,7 +3998,7 @@ async function confirmRestart(targetRevision, status, errorBox) {
 }
 
 function backupLine(b) {
-  if (!b || !b.enabled) return null;
+  if (!b?.enabled) return null;
   const failed = b.error && (b.error_at || 0) > (b.ok_at || 0);
   return h("p", { class: `small${failed ? " bad" : ""}` },
     b.ok_at ? `Backup ${ago(b.ok_at)} (${Math.max(1, Math.round(b.bytes / 2 ** 20))} MB) in ${b.dir}` : "No backup yet",
@@ -3745,10 +4006,10 @@ function backupLine(b) {
 }
 
 function imageArchiveBlock(a, reload) {
-  if (!a || !a.enabled) return null;
+  if (!a?.enabled) return null;
   const count = Number(a.archived || 0);
   const bytes = Number(a.bytes || 0);
-  const warning = a.free_space_warning || (a.errors ? `${a.errors} image archive error${a.errors === 1 ? "" : "s"}` : "");
+  const warning = a.free_space_warning || (a.errors ? pluralize(a.errors, "image archive error") : "");
   const summary = h("div", {},
     h("p", { class: `small${warning ? " bad" : ""}` },
       h("strong", {}, "Image archive"), " ",
@@ -3780,7 +4041,7 @@ function gpuText(g) {
   if (g.manual) {
     if (g.manual_remaining_seconds === null) return "Local models held until you turn this off";
     const left = g.manual_remaining_seconds;
-    return `Local models held for ${left >= 90 ? `${Math.ceil(left / 60)} min` : `${left} s`}`;
+    return `Local models held for ${fmtSpan(left, Math.ceil)}`;
   }
   if (g.state === "pausing") return `Pausing for ${why}: finishing the current model turn`;
   if (g.state === "paused") return `Paused for ${why}`;
@@ -3799,7 +4060,8 @@ function gpuActionRow() {
   const durationRow = h("label", { class: "action-subitem disabled" },
     h("span", {}, "Duration:"), duration);
   const act = async (action) => {
-    const body = action === "pause" ? { duration_seconds: duration.value ? Number(duration.value) : null } : undefined;
+    const seconds = duration.value ? Number(duration.value) : null;
+    const body = action === "pause" ? { duration_seconds: seconds } : undefined;
     try { render(await api(`/gpu/${action}`, { method: "POST", body })); } catch (e) { toast(e.message); }
     setTimeout(load, 1500);
   };
@@ -3817,7 +4079,8 @@ function gpuActionRow() {
     duration.disabled = isGuest() || !g.manual;
     durationRow.classList.toggle("disabled", duration.disabled);
     const automatic = !g.manual && g.state !== "clear" ? ` · ${gpuText(g)}` : "";
-    const using = now.length ? ` · ${now.join(", ")}${g.override ? " (ignored)" : ""}` : "";
+    const ignored = g.override ? " (ignored)" : "";
+    const using = now.length ? ` · ${now.join(", ")}${ignored}` : "";
     status.textContent = `${g.manual ? gpuText(g) : "Local models available"}${automatic}${using}`;
   };
   const load = async () => { try { render(await api("/gpu")); } catch (e) { status.textContent = e.message; status.classList.add("bad"); } };
@@ -3844,7 +4107,8 @@ function remoteControlCard() {
     load();
     try {
       const r = await api(`/remote-control/${encodeURIComponent(project)}${stop ? "/stop" : ""}`, { method: "POST" });
-      toast(stop ? `Stopped Remote Control for ${project}` : r.already_running ? "Already running" : "Remote Control is ready");
+      if (stop) toast(`Stopped Remote Control for ${project}`);
+      else toast(r.already_running ? "Already running" : "Remote Control is ready");
     } catch (e) { toast(e.message); }
     busy = "";
     load();
@@ -3855,25 +4119,41 @@ function remoteControlCard() {
     load();
     try {
       const r = await api(`/remote-control/${encodeURIComponent(project)}/trust`, { method: "POST" });
-      toast(r.already_trusted ? "This repository is already trusted" : r.already_open ? "The trust window is already open" : "Claude trust window opened on the tower", 5000);
+      let message = "Claude trust window opened on the tower";
+      if (r.already_trusted) message = "This repository is already trusted";
+      else if (r.already_open) message = "The trust window is already open";
+      toast(message, 5000);
     } catch (e) { toast(e.message); }
     busy = "";
     load();
   };
+  const rcButton = (p) => {
+    if (p.running) return h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop");
+    if (!p.trusted) {
+      return h("button", { class: "btn", disabled: !!busy || p.trust_prompt_open, onclick: () => trust(p.project) },
+        p.trust_prompt_open ? "Trust window open" : "Trust in Claude…");
+    }
+    return h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, false) }, "Start");
+  };
+  const rcActions = (p) => h("div", { class: "row" },
+    p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
+    rcButton(p));
   const row = (p) => {
+    const remoteControlState = (p) => {
+      if (p.running) {
+        const sessions = p.active_sessions ? ` · ${pluralize(p.active_sessions, "session")}` : "";
+        return `running${sessions} · started ${ago(p.started_at)}`;
+      }
+      if (!p.trusted) return p.trust_prompt_open ? "trust window open on the tower" : "needs one-time Claude workspace trust";
+      return "stopped";
+    };
     const state = busy === p.project ? h("span", { class: "dots" }, "working")
-      : p.running ? `running${p.active_sessions ? ` · ${p.active_sessions} session${p.active_sessions === 1 ? "" : "s"}` : ""} · started ${ago(p.started_at)}`
-      : !p.trusted && p.trust_prompt_open ? "trust window open on the tower"
-        : !p.trusted ? "needs one-time Claude workspace trust" : "stopped";
+      : remoteControlState(p);
     return h("div", { class: "rc-row" },
       h("p", {}, h("strong", {}, p.project), " ", h("span", { class: `muted small${!p.running && !p.trusted ? " bad" : ""}` }, state)),
       h("p", { class: "muted small" }, p.path),
       !p.trusted && p.trust_prompt_open ? h("p", { class: "note small" }, "On the tower, review the folder in Claude and accept its trust prompt. This page will notice automatically.") : null,
-      isGuest() ? h("p", { class: "muted small" }, "Demo access cannot start, stop, or trust Remote Control.") : h("div", { class: "row" },
-        p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
-        p.running ? h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop")
-          : !p.trusted ? h("button", { class: "btn", disabled: !!busy || p.trust_prompt_open, onclick: () => trust(p.project) }, p.trust_prompt_open ? "Trust window open" : "Trust in Claude…")
-            : h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, false) }, "Start")));
+      isGuest() ? h("p", { class: "muted small" }, "Demo access cannot start, stop, or trust Remote Control.") : rcActions(p));
   };
   const load = async () => {
     try {
@@ -3891,87 +4171,92 @@ function remoteControlCard() {
   return h("div", { class: "card" }, h("h3", {}, "Claude Remote Control"), body);
 }
 
+async function skillProposalView(pid) {
+  const p = await api(`/skills/proposals/${pid}`);
+  const findings = (p.static_findings || []).map((f) => h("li", {}, `${f.code}: ${f.message}`));
+  const review = p.review || {};
+  const examples = (p.examples || []).map((ex) => h("div", { class: "card" },
+    h("p", {}, ex.prompt), h("p", { class: "muted small" }, ex.expected || ex.expected_behavior || "")));
+  const refs = (p.references || []).map((r) => h("details", {}, h("summary", {}, r.path), h("pre", {}, r.content || "")));
+  const act = async (path, body, label) => {
+    if (label && !confirm(label)) return;
+    try {
+      await api(path, { method: "POST", body: body || {} });
+      toast("Done");
+      go("#/profile/skills", true);
+    } catch (e) { toast(e.message); }
+  };
+  return h("div", {},
+    h("div", { class: "card" },
+      h("h3", {}, p.title || p.slug),
+      h("p", { class: "muted small" }, `${p.slug} · ${p.status} · hash ${p.content_hash} · session ${p.source_session_id || "—"}`),
+      h("p", {}, p.purpose || ""),
+      p.activation_suggestion ? h("p", { class: "muted small" }, `Suggested when: ${p.activation_suggestion}`) : null,
+      p.diff ? h("pre", { class: "preview" }, p.diff) : null,
+      h("p", { class: "section-label" }, "SKILL.md"),
+      h("pre", {}, p.skill_md || ""),
+      refs.length ? h("p", { class: "section-label" }, "References") : null, ...refs,
+      h("p", { class: "section-label" }, "Examples"), ...examples,
+      h("p", { class: "section-label" }, "Static findings"),
+      findings.length ? h("ul", {}, findings) : h("p", { class: "muted small" }, "No static findings."),
+      h("p", { class: "section-label" }, "Model review"),
+      h("p", { class: "muted small" }, p.review_status || "not started"),
+      review.summary ? h("p", {}, review.summary) : null,
+      review.recommendation ? h("p", {}, `Recommendation: ${review.recommendation}`) : null,
+      review.error ? h("p", { class: "bad" }, review.error) : null,
+      h("div", { class: "row", style: "margin-top:18px;flex-wrap:wrap;gap:8px" },
+        h("button", { class: "btn primary", onclick: () => act(`/skills/proposals/${p.id}/install`, { content_hash: p.content_hash },
+          `Install hash ${p.content_hash.slice(0, 12)}? It stays disabled until you enable it.`) }, "Install"),
+        h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" }, "Reject this hash?") }, "Reject"),
+        h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/review`) }, "Run hosted review"),
+        h("button", { class: "btn bad", onclick: async () => {
+          if (!confirm("Delete this draft?")) return;
+          try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
+          catch (e) { toast(e.message); }
+        } }, "Delete draft"))));
+
+}
+
+function installedSkillCard(sk) {
+  const toggle = sk.enabled ? "disable" : "enable";
+  return h("div", { class: "card" },
+    h("h3", {}, `${sk.enabled ? "" : "⏸ "}${sk.title || sk.slug}`),
+    h("p", { class: "muted small" }, `${sk.slug} v${sk.version} · ${(sk.content_hash || "").slice(0, 12)}`),
+    h("p", {}, sk.purpose || ""),
+    sk.projects?.length ? h("p", { class: "muted small" }, `Projects: ${sk.projects.join(", ")}`) : h("p", { class: "muted small" }, "No project allowlist. Enable it and pick it on New task."),
+    h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
+      h("button", { class: "btn small", onclick: async () => {
+        try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+      } }, sk.enabled ? "Disable" : "Enable"),
+      h("button", { class: "btn small", onclick: async () => {
+        const raw = window.prompt("Project allowlist (comma-separated names)", (sk.projects || []).join(", "));
+        if (raw === null) return;
+        try {
+          await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
+          route();
+        } catch (e) { toast(e.message); }
+      } }, "Projects"),
+      h("button", { class: "btn small", onclick: async () => {
+        if (!confirm("Roll back to the previous version?")) return;
+        try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+      } }, "Rollback"),
+      h("button", { class: "btn small bad", onclick: async () => {
+        if (!confirm(`Uninstall ${sk.slug}? Later sessions will not receive it.`)) return;
+        try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+      } }, "Uninstall")));
+}
+
 async function skillsPage(pid) {
   const data = await api("/skills");
   if (!data.enabled) {
     return h("div", { class: "card" }, h("p", { class: "muted small" }, "Instruction skills are disabled. Ordinary sessions are unchanged."));
   }
-  if (pid) {
-    const p = await api(`/skills/proposals/${pid}`);
-    const findings = (p.static_findings || []).map((f) => h("li", {}, `${f.code}: ${f.message}`));
-    const review = p.review || {};
-    const examples = (p.examples || []).map((ex) => h("div", { class: "card" },
-      h("p", {}, ex.prompt), h("p", { class: "muted small" }, ex.expected || ex.expected_behavior || "")));
-    const refs = (p.references || []).map((r) => h("details", {}, h("summary", {}, r.path), h("pre", {}, r.content || "")));
-    const act = async (path, body, label) => {
-      if (label && !confirm(label)) return;
-      try {
-        await api(path, { method: "POST", body: body || {} });
-        toast("Done");
-        go("#/profile/skills", true);
-      } catch (e) { toast(e.message); }
-    };
-    return h("div", {},
-      h("div", { class: "card" },
-        h("h3", {}, p.title || p.slug),
-        h("p", { class: "muted small" }, `${p.slug} · ${p.status} · hash ${p.content_hash} · session ${p.source_session_id || "—"}`),
-        h("p", {}, p.purpose || ""),
-        p.activation_suggestion ? h("p", { class: "muted small" }, `Suggested when: ${p.activation_suggestion}`) : null,
-        p.diff ? h("pre", { class: "preview" }, p.diff) : null,
-        h("p", { class: "section-label" }, "SKILL.md"),
-        h("pre", {}, p.skill_md || ""),
-        refs.length ? h("p", { class: "section-label" }, "References") : null, ...refs,
-        h("p", { class: "section-label" }, "Examples"), ...examples,
-        h("p", { class: "section-label" }, "Static findings"),
-        findings.length ? h("ul", {}, findings) : h("p", { class: "muted small" }, "No static findings."),
-        h("p", { class: "section-label" }, "Model review"),
-        h("p", { class: "muted small" }, p.review_status || "not started"),
-        review.summary ? h("p", {}, review.summary) : null,
-        review.recommendation ? h("p", {}, `Recommendation: ${review.recommendation}`) : null,
-        review.error ? h("p", { class: "bad" }, review.error) : null,
-        h("div", { class: "row", style: "margin-top:18px;flex-wrap:wrap;gap:8px" },
-          h("button", { class: "btn primary", onclick: () => act(`/skills/proposals/${p.id}/install`, { content_hash: p.content_hash },
-            `Install hash ${p.content_hash.slice(0, 12)}? It stays disabled until you enable it.`) }, "Install"),
-          h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" }, "Reject this hash?") }, "Reject"),
-          h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/review`) }, "Run hosted review"),
-          h("button", { class: "btn bad", onclick: async () => {
-            if (!confirm("Delete this draft?")) return;
-            try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
-            catch (e) { toast(e.message); }
-          } }, "Delete draft"))));
-  }
+  if (pid) return skillProposalView(pid);
   const proposals = (data.proposals || []).map((p) => h("a", { class: "card", href: `#/profile/skills/${p.id}` },
     h("h3", {}, p.title || p.slug),
     h("div", { class: "meta" }, h("span", {}, p.status), h("span", {}, p.review_status || "no review"),
       h("span", {}, (p.content_hash || "").slice(0, 12)))));
-  const installed = (data.installed || []).map((sk) => {
-    const toggle = sk.enabled ? "disable" : "enable";
-    return h("div", { class: "card" },
-      h("h3", {}, `${sk.enabled ? "" : "⏸ "}${sk.title || sk.slug}`),
-      h("p", { class: "muted small" }, `${sk.slug} v${sk.version} · ${(sk.content_hash || "").slice(0, 12)}`),
-      h("p", {}, sk.purpose || ""),
-      sk.projects?.length ? h("p", { class: "muted small" }, `Projects: ${sk.projects.join(", ")}`) : h("p", { class: "muted small" }, "No project allowlist. Enable it and pick it on New task."),
-      h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
-        h("button", { class: "btn small", onclick: async () => {
-          try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
-        } }, sk.enabled ? "Disable" : "Enable"),
-        h("button", { class: "btn small", onclick: async () => {
-          const raw = window.prompt("Project allowlist (comma-separated names)", (sk.projects || []).join(", "));
-          if (raw === null) return;
-          try {
-            await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
-            route();
-          } catch (e) { toast(e.message); }
-        } }, "Projects"),
-        h("button", { class: "btn small", onclick: async () => {
-          if (!confirm("Roll back to the previous version?")) return;
-          try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
-        } }, "Rollback"),
-        h("button", { class: "btn small bad", onclick: async () => {
-          if (!confirm(`Uninstall ${sk.slug}? Later sessions will not receive it.`)) return;
-          try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
-        } }, "Uninstall")));
-  });
+  const installed = (data.installed || []).map(installedSkillCard);
   return h("div", {},
     h("p", { class: "muted small" }, "Agents can only stage drafts. You install an exact hash; new skills stay off until you enable them. Advisory model review never installs."),
     data.hosted_reviewer_configured ? h("p", { class: "muted small" }, "Hosted review is configured and spends that provider's quota only when you tap Run hosted review.") : h("p", { class: "muted small" }, "No hosted reviewer configured. Local Qwen review runs only when the GPU is idle."),
@@ -3998,14 +4283,17 @@ function memoryCard() {
         } catch (e) { toast(e.message); }
         save.disabled = !mem.writes;
       });
+      const memoryProfileAction = () => {
+        if (isGuest()) return h("p", { class: "muted small" }, "Demo access cannot edit the memory profile.");
+        return mem.writes ? save : h("p", { class: "muted small" }, "Enable memory_library.writes to edit from here.");
+      };
       fill(body,
         h("p", { class: "small" }, "A short purpose statement given to every new session: how agents should use this library. Keep personal biography in category files, not here."),
         h("p", { class: "small" }, `Agents can read ${mem.categories.join(", ")}. `,
           mem.writes ? "They can propose changes; every change asks you first." : "Read-only for agents."),
         editor,
         h("p", { class: "muted small" }, `${mem.profile_path || "profile"} · limit ${mem.profile_max_chars} characters`),
-        isGuest() ? h("p", { class: "muted small" }, "Demo access cannot edit the memory profile.")
-          : mem.writes ? save : h("p", { class: "muted small" }, "Enable memory_library.writes to edit from here."),
+        memoryProfileAction(),
         mem.last_commit?.head ? h("p", { class: "muted small" }, `Last saved change: ${mem.last_commit.summary} (${mem.last_commit.head}, ${ago(mem.last_commit.at)})`) : null,
         mem.refresh_error ? h("p", { class: "small bad" }, `Couldn't refresh the library: ${mem.refresh_error}`) : null);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
@@ -4039,7 +4327,7 @@ function endpointCard(me) {
                   const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
                   fill(form, h("p", { class: "small" }, `Key for ${k.name}. Copy it now; it isn't shown again.`), field,
                     h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: () => copyToClipboard(k.key, () => field.select()) }, "Copy"),
                       h("button", { class: "btn", onclick: load }, "Done")));
                 } catch (e) { toast(e.message); }
               },
@@ -4052,7 +4340,7 @@ function endpointCard(me) {
         h("p", { class: "small", style: "margin-bottom:0" }, "Anthropic-compatible"),
         copyBox(base),
         active.length ? h("ul", { class: "small" }, active.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.requests} request${k.requests === 1 ? "" : "s"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${pluralize(k.requests, "request")}${usedSuffix(k)} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
@@ -4119,7 +4407,7 @@ function appsCard(me) {
                   const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
                   fill(form, h("p", { class: "small" }, `Token for ${k.name}. Copy it now; it isn't shown again.`), field,
                     h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: () => copyToClipboard(k.key, () => field.select()) }, "Copy"),
                       h("button", { class: "btn", onclick: load }, "Done")));
                 } catch (e) { toast(e.message); }
               },
@@ -4146,7 +4434,7 @@ function appsCard(me) {
                 fill(form,
                   h("p", { class: "small" }, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`), field,
                   h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(p.code); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
+                    h("button", { class: "btn", onclick: () => copyToClipboard(p.code, () => field.select()) }, "Copy"),
                     h("button", { class: "btn", onclick: load }, "Done")));
               } catch (e) { toast(e.message); }
             } }, "Approve and create code")));
@@ -4169,7 +4457,7 @@ function appsCard(me) {
                 fill(form,
                   h("p", { class: "small" }, `Run this in Terminal on the Mac. The code expires in 10 minutes and works once.`), field,
                   h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(command); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy install command"),
+                    h("button", { class: "btn", onclick: () => copyToClipboard(command, () => field.select()) }, "Copy install command"),
                     h("button", { class: "btn", onclick: load }, "Done")));
               } catch (e) { toast(e.message); }
             } }, "Create install command")));
@@ -4178,7 +4466,7 @@ function appsCard(me) {
         h("p", { class: "small" }, "An Agent Harness App token lets a third-party integration start and follow sessions on Agent Harness Server. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${k.origins?.length ? ` · ${k.origins.join(", ")}` : ""}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${originsSuffix(k)}${usedSuffix(k)} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
@@ -4188,14 +4476,14 @@ function appsCard(me) {
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
         webConnections.length ? [h("p", { class: "section-label" }, "Web connections"),
           h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
-            h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+            h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
               if (!confirm(`Revoke “${k.name}”? That Agent Harness Web connection will stop working.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,
         cliConnections.length ? [h("p", { class: "section-label" }, "CLI connections"),
           h("ul", { class: "small" }, cliConnections.map((k) => h("li", {},
-            h("strong", {}, k.name), ` ${k.prefix}… · non-browser${k.last_used_at ? ` · used ${ago(k.last_used_at)}` : ""} `,
+            h("strong", {}, k.name), ` ${k.prefix}… · non-browser${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
               if (!confirm(`Revoke “${k.name}”? That Agent Harness CLI connection will stop working.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
@@ -4261,11 +4549,9 @@ function diskCard() {
           const extra = h("div", { class: "disk-facts" },
             fact("Runner", online
               ? `${r.info.version} · protocol ${r.info.protocol ?? "not reported"} · macOS ${r.info.macos}`
-              : (r.last_seen_seconds !== null
-                ? `last seen ${Math.round(r.last_seen_seconds / 60)} min ago`
-                : "not connected since Agent Harness Server started")),
-            fact("Compatibility", `${compatibility.state || "not reported"}${compatibility.supported ? ` · Server supports ${compatibility.supported.min}–${compatibility.supported.max}` : ""}`),
-            r.last_update ? fact("Last update", `${r.last_update.ok ? "succeeded" : "failed"}: ${r.last_update.message}`) : null,
+              : lastSeenText(r)),
+            fact("Compatibility", compatibilityText(compatibility)),
+            r.last_update ? fact("Last update", lastUpdateText(r.last_update)) : null,
             isGuest() ? null : h("button", {
               class: "btn", type: "button", disabled: !canUpdate,
               onclick: async (ev) => {
@@ -4372,28 +4658,38 @@ function blockingUpdate(meta, state) {
     h("p", { class: "muted small" }, `Web protocol ${WEB_PROTOCOL}; server supports ${meta.protocols?.admin?.min}–${meta.protocols?.admin?.max}.`)));
 }
 
+// Which side must update when the server's admin protocol range excludes this client (null = compatible).
+function protocolMismatch(range) {
+  if (!range) return null;
+  if (WEB_PROTOCOL < range.min) return "client_update_required";
+  return WEB_PROTOCOL > range.max ? "daemon_update_required" : null;
+}
+
+// Asks once per bundle whether to reload into the newer build; true when a reload was started.
+async function offerBundleUpdate(foreground) {
+  try { await (await navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
+  const promptKey = "harness.webUpdatePrompt";
+  if (sessionStorage.getItem(promptKey) === WEB_BUILD_ID || (foreground && hasUnsavedInput())) return false;
+  sessionStorage.setItem(promptKey, WEB_BUILD_ID);
+  if (!confirm("A newer Agent Harness Web bundle is available. Reload and update now?")) return false;
+  await reloadAndUpdate();
+  return true;
+}
+
 async function checkCompatibility({ foreground = false } = {}) {
   let meta;
   try { meta = await agentHarnessWeb.compatibility(); }
   catch (_) { return !protocolBlocked; } // stay on the update card if health fails after a skew
-  const range = meta.protocols?.admin;
-  if (range && (WEB_PROTOCOL < range.min || WEB_PROTOCOL > range.max)) {
-    blockingUpdate(meta, WEB_PROTOCOL < range.min ? "client_update_required" : "daemon_update_required");
+  const mismatch = protocolMismatch(meta.protocols?.admin);
+  if (mismatch) {
+    blockingUpdate(meta, mismatch);
     return false;
   }
   const wasBlocked = protocolBlocked;
   protocolBlocked = false;
   const available = meta.update_hint?.web?.build_id;
   if (available && available !== WEB_BUILD_ID) {
-    try { await (await navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
-    const promptKey = "harness.webUpdatePrompt";
-    if (sessionStorage.getItem(promptKey) !== WEB_BUILD_ID && (!foreground || !hasUnsavedInput())) {
-      sessionStorage.setItem(promptKey, WEB_BUILD_ID);
-      if (confirm("A newer Agent Harness Web bundle is available. Reload and update now?")) {
-        await reloadAndUpdate();
-        return false;
-      }
-    }
+    if (await offerBundleUpdate(foreground)) return false;
   } else {
     sessionStorage.removeItem(UPDATE_GUARD);
   }
