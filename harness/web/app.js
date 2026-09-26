@@ -1657,6 +1657,27 @@ async function viewNew() {
   if (allTemplates.length) append($app, templateManager(allTemplates));
 }
 
+// Older servers answer PATCH with 405, so a rename retries once with PUT.
+async function putSessionTitle(session, title) {
+  const body = { title };
+  try {
+    return await api(`/sessions/${session.id}`, { method: "PATCH", body });
+  } catch (e) {
+    if (!/405|Method Not Allowed/i.test(e.message)) throw e;
+    return api(`/sessions/${session.id}`, { method: "PUT", body });
+  }
+}
+
+async function commitSessionTitle(session, raw, isActive) {
+  const next = raw.replace(/\s+/g, " ").trim();
+  if (!next || next === session.title) return;
+  try {
+    const updated = await putSessionTitle(session, next);
+    session.title = updated.title;
+    if (isActive()) setHeader("agents", session.title || "Session");
+  } catch (e) { toast(e.message); }
+}
+
 function sessionTitle(session, isActive) {
   if (isGuest()) return h("h2", { class: "session-title" }, session.title);
   const label = h("button", { class: "session-title", type: "button", title: "Rename session" }, session.title);
@@ -1669,23 +1690,7 @@ function sessionTitle(session, isActive) {
     const finish = async (commit) => {
       if (done) return;
       done = true;
-      if (commit) {
-        const next = input.value.replace(/\s+/g, " ").trim();
-        if (next && next !== session.title) {
-          try {
-            const body = { title: next };
-            let updated;
-            try {
-              updated = await api(`/sessions/${session.id}`, { method: "PATCH", body });
-            } catch (e) {
-              if (!/405|Method Not Allowed/i.test(e.message)) throw e;
-              updated = await api(`/sessions/${session.id}`, { method: "PUT", body });
-            }
-            session.title = updated.title;
-            if (isActive()) setHeader("agents", session.title || "Session");
-          } catch (e) { toast(e.message); }
-        }
-      }
+      if (commit) await commitSessionTitle(session, input.value, isActive);
       label.textContent = session.title;
       if (input.isConnected) input.replaceWith(label);
       layoutBar();
