@@ -267,7 +267,7 @@ def workspace_png_name(filename: str) -> str:
     return name
 
 
-def schemas(cfg: ImagesConfig, available: list[str] | None = None) -> list[dict]:
+def schemas(available: list[str] | None = None) -> list[dict]:
     names = [name for name in MODELS if available is None or name in available]
     model_help = f"{', '.join(names[:-1])}, or {names[-1]}. Default fast."
     extras = []
@@ -529,7 +529,7 @@ class ImageService:
         self._edit_verify_backoff = 1.0
 
     def schemas(self) -> list[dict]:
-        return schemas(self.cfg, available=[name for name in MODELS if self.mode_available(name)])
+        return schemas(available=[name for name in MODELS if self.mode_available(name)])
 
     def mode_available(self, model: str) -> bool:
         if model not in MODELS:
@@ -1502,7 +1502,7 @@ class ImageService:
                 "edit": edit, "upscale": upscale_mod.status(self.cfg)}
 
     # agent tool
-    async def call(self, name: str, args: dict, workspace_root: Path | None = None, put_bytes=None) -> str:
+    async def call(self, _name: str, args: dict, workspace_root: Path | None = None, put_bytes=None) -> str:
         filename = workspace_png_name(args.get("filename") or "")
         target: Path | None = None
         if workspace_root is not None:
