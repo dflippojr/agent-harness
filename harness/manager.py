@@ -1056,11 +1056,11 @@ class Manager:
     @staticmethod
     def _failure(s: dict) -> dict | None:
         failure = (s.get("run") or {}).get("failure") or (s.get("run") or {}).get("provider_failure")
-        if s.get("status") != "failed" or failure:
+        if str(s.get("status")) != "failed" or failure:
             return failure
         reason = str(s.get("stop_reason") or "failed")
         prefix = reason.split(":", 1)[0]
-        fallback = "provider_error" if s.get("backend", "local") != "local" else "model_error"
+        fallback = "provider_error" if str(s.get("backend", "local")) != "local" else "model_error"
         code = {"sandbox_unavailable": "backend_unavailable", "workspace_error": "workspace_error",
                 "quota_exceeded": "resource_limit", "internal_error": "internal_error"}.get(prefix, fallback)
         return {"code": code, "provider": s.get("backend", "local"), "message": reason,
