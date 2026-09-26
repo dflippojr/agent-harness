@@ -581,7 +581,7 @@ function go(hash, replace = false) {
 }
 
 const isProfileRoute = (parts) => parts[0] === "profile" || parts[0] === "settings";
-const MEMBER_HIDDEN_PROFILE = ["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"];
+const MEMBER_HIDDEN_PROFILE = new Set(["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"]);
 
 // Where a guest or member who asked for a page they may not see should land instead (null = allowed).
 function blockedRedirect(parts) {
@@ -591,7 +591,7 @@ function blockedRedirect(parts) {
   if (guestBlocked) return parts[0] === "jobs" ? "#/jobs" : "#/profile";
   const memberBlocked = isMember() && (
     parts[0] === "jobs" || parts[0] === "images"
-    || (isProfileRoute(parts) && MEMBER_HIDDEN_PROFILE.includes(parts[1])));
+    || (isProfileRoute(parts) && MEMBER_HIDDEN_PROFILE.has(parts[1])));
   if (!memberBlocked) return null;
   return isProfileRoute(parts) ? "#/profile" : "#/agents";
 }
