@@ -2778,34 +2778,34 @@ function provenanceNote(img) {
 
 function imageActionRow(img, id, { editControl, canUpscale, startUpscale }) {
   return h("div", { class: "row" },
-      !isGuest() && img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
-        class: "btn",
-        onclick: async () => {
-          try {
-            const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio, resolution: img.resolution } });
-            location.hash = `#/images/${again.id}`;
-          } catch (e) { toast(e.message); }
-        },
-      }, "Another one") : null,
-      editControl,
-      canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
-      canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
-      img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
-      !isGuest() && (img.status === "queued" || img.status === "running") ? h("button", {
-        class: "btn",
-        onclick: async () => {
-          if (!confirm("Cancel this image job?")) return;
-          try { await api(`/images/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
-        },
-      }, "Cancel") : null,
-      !isGuest() ? h("button", {
-        class: "btn danger",
-        onclick: async () => {
-          if (!confirm("Delete this image from the live gallery? Independent backups are not changed.")) return;
-          try { await api(`/images/${id}`, { method: "DELETE" }); go("#/images", true); } catch (e) { toast(e.message); }
-        },
-      }, "Delete") : null,
-      img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null);
+    !isGuest() && img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
+      class: "btn",
+      onclick: async () => {
+        try {
+          const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio, resolution: img.resolution } });
+          location.hash = `#/images/${again.id}`;
+        } catch (e) { toast(e.message); }
+      },
+    }, "Another one") : null,
+    editControl,
+    canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
+    canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
+    img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
+    !isGuest() && (img.status === "queued" || img.status === "running") ? h("button", {
+      class: "btn",
+      onclick: async () => {
+        if (!confirm("Cancel this image job?")) return;
+        try { await api(`/images/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
+      },
+    }, "Cancel") : null,
+    !isGuest() ? h("button", {
+      class: "btn danger",
+      onclick: async () => {
+        if (!confirm("Delete this image from the live gallery? Independent backups are not changed.")) return;
+        try { await api(`/images/${id}`, { method: "DELETE" }); go("#/images", true); } catch (e) { toast(e.message); }
+      },
+    }, "Delete") : null,
+    img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null);
 }
 
 async function viewImage(id) {
@@ -3056,10 +3056,7 @@ async function viewJob(id) {
   setHeader("jobs", isNew ? "New job" : "Job", { page: true });
   const [projects, models, backends, job] = await Promise.all([
     api("/projects"), api("/models"), api("/backends?auth=skip"), isNew ? null : api(`/jobs/${id}`)]);
-  const j = job || {
-    name: "", prompt: "", cron: "0 8 * * *", backend: "local", model: "", notify: "low", enabled: true,
-    project: projects.some((p) => p.name === "homelab") ? "homelab" : "scratch",
-  };
+  const j = job || newJobDefaults(projects);
   const name = h("input", { type: "text", value: j.name, placeholder: "e.g. Morning homelab check" });
   const prompt = h("textarea", { placeholder: "e.g. Check that every homelab service is running and nothing restarted overnight. Look at the logs of anything that isn't healthy." });
   prompt.value = j.prompt;
@@ -3099,11 +3096,7 @@ async function viewJob(id) {
   const preview = () => {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(async () => {
-      try {
-        const r = await api(`/jobs/preview?cron=${encodeURIComponent(cron.value)}`);
-        cronNote.classList.toggle("bad", !r.ok);
-        cronNote.textContent = r.ok ? `Next: ${r.next.map(fmtWhen).join(" · ")}` : r.error;
-      } catch (_) { /* offline */ }
+      await previewCron(cron.value, cronNote);
     }, 250);
   };
   preset.addEventListener("change", () => { if (preset.value) { cron.value = preset.value; preview(); } else cron.focus(); });
@@ -3158,14 +3151,29 @@ async function viewJob(id) {
       },
     }, "Run now") : null,
     isGuest() ? null : save)));
-  if (job) {
-    append($app, h("h3", { style: "margin-top:28px" }, "Recent runs"),
-      job.last_skip ? h("p", { class: "muted small" }, `Last skipped: ${job.last_skip}`) : null,
-      job.last_error ? h("p", { class: "small bad" }, `Last start failed: ${job.last_error}`) : null,
-      job.recent.length ? job.recent.map((s) => h("a", { class: "card", href: `#/s/${s.id}` },
-        h("div", { class: "meta" }, badge(s.status), s.job_status ? jobStatusBadge(s.job_status) : null, h("span", {}, ago(s.created_at))),
-        s.answer ? h("div", { class: "preview" }, s.answer) : null)) : h("p", { class: "muted small" }, "No runs yet."));
-  }
+  if (job) append($app, ...recentRunsView(job));
+}
+
+const newJobDefaults = (projects) => ({
+  name: "", prompt: "", cron: "0 8 * * *", backend: "local", model: "", notify: "low", enabled: true,
+  project: projects.some((p) => p.name === "homelab") ? "homelab" : "scratch",
+});
+
+async function previewCron(cronValue, cronNote) {
+  try {
+    const r = await api(`/jobs/preview?cron=${encodeURIComponent(cronValue)}`);
+    cronNote.classList.toggle("bad", !r.ok);
+    cronNote.textContent = r.ok ? `Next: ${r.next.map(fmtWhen).join(" · ")}` : r.error;
+  } catch (_) { /* offline */ }
+}
+
+function recentRunsView(job) {
+  return [h("h3", { style: "margin-top:28px" }, "Recent runs"),
+    job.last_skip ? h("p", { class: "muted small" }, `Last skipped: ${job.last_skip}`) : null,
+    job.last_error ? h("p", { class: "small bad" }, `Last start failed: ${job.last_error}`) : null,
+    job.recent.length ? job.recent.map((s) => h("a", { class: "card", href: `#/s/${s.id}` },
+      h("div", { class: "meta" }, badge(s.status), s.job_status ? jobStatusBadge(s.job_status) : null, h("span", {}, ago(s.created_at))),
+      s.answer ? h("div", { class: "preview" }, s.answer) : null)) : h("p", { class: "muted small" }, "No runs yet.")];
 }
 
 // ---------- profile ----------
