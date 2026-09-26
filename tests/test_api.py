@@ -49,36 +49,50 @@ def test_web_app_and_guard(tmp_path):
         assert "<title>Agent Harness Web</title>" in client.get("/").text
         js = client.get("/static/app.js").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
-        assert "session-chrome" in js and "jump-top" in js and 'method: "PATCH"' in js
+        assert "session-chrome" in js
+        assert "jump-top" in js
+        assert 'method: "PATCH"' in js
         assert "session-title" in js
         assert "harness.theme" in js
-        assert "harness.textSize" in js and "TEXT_SIZES" in js and "applyTextSize" in js
+        assert "harness.textSize" in js
+        assert "TEXT_SIZES" in js
+        assert "applyTextSize" in js
         assert 'setHeader("agents", "New task", { page: true })' in js
-        assert "sessionJumpHidden" in js and "Math.min(160, 0.75 * vh)" in js
+        assert "sessionJumpHidden" in js
+        assert "Math.min(160, 0.75 * vh)" in js
         assert 'type: "color"' not in js
         assert "swatch split" in js
         assert "Scratch is a fresh empty folder" in js
-        assert '"＋ New project"' in js and 'api("/projects", { method: "POST"' in js
+        assert '"＋ New project"' in js
+        assert 'api("/projects", { method: "POST"' in js
         assert "Only tower projects with a local folder appear" in js
         assert 'id="guest-banner"' in client.get("/").text
         assert 'id="bar"' in client.get("/").text
         assert 'id="feature-nav"' in client.get("/").text
         assert "harness.textSize" in client.get("/").text
-        assert "paintGuestChrome" in js and "isGuest()" in js
+        assert "paintGuestChrome" in js
+        assert "isGuest()" in js
         css = client.get("/static/style.css").text
         assert "safe-area-inset-top, 0px) + 18px" in css
         assert "-webkit-transform: translate3d(0, 0, 0)" in css
-        assert "#bar.paint-refresh" in css and "#bar > *" in css
+        assert "#bar.paint-refresh" in css
+        assert "#bar > *" in css
         assert 'window.addEventListener("pageshow", repaintBar)' in js
         assert 'window.addEventListener("orientationchange", repaintBar)' in js
         assert "if (!document.hidden) repaintBar()" in js
-        assert ".session-chrome" in css and ".jump-top" in css
-        assert ".swatch.split" in css and ".hue-preview" in css
-        assert "#fab-host" in css and "width: 9.75rem" in css
+        assert ".session-chrome" in css
+        assert ".jump-top" in css
+        assert ".swatch.split" in css
+        assert ".hue-preview" in css
+        assert "#fab-host" in css
+        assert "width: 9.75rem" in css
         assert "#guest-banner" in css
-        assert "--text-scale" in css and "max(16px, 1rem)" in css
+        assert "--text-scale" in css
+        assert "max(16px, 1rem)" in css
         assert ".size-grid" in css
-        assert ".action-item" in css and ".action-subitem.disabled" in css and ".switch:checked" in css
+        assert ".action-item" in css
+        assert ".action-subitem.disabled" in css
+        assert ".switch:checked" in css
         assert "prefers-reduced-motion: reduce" in css
         assert ".image-status .progress.indeterminate > span" in css
         assert 'showFab("#/new", "+ New task")' in js
@@ -97,36 +111,49 @@ def test_web_app_and_guard(tmp_path):
         assert "not installed" in js
         assert "ops/images-models.ps1" in js
         assert "grid.dataset.keys" in js
-        assert 'upscaling ? "Upscaling"' in js and 'editing ? "Editing"' in js
-        assert "function maskEditor" in js and "viewImageEdit" in js
+        assert 'upscaling ? "Upscaling"' in js
+        assert 'editing ? "Editing"' in js
+        assert "function maskEditor" in js
+        assert "viewImageEdit" in js
         assert "canvas.width / r.width" in js
         assert "Independent backups are not changed" in js
-        assert ".mask-stage" in css and "touch-action: none" in css
-        assert '"Upscale 2×"' in js and '"Upscale 4×"' in js
+        assert ".mask-stage" in css
+        assert "touch-action: none" in css
+        assert '"Upscale 2×"' in js
+        assert '"Upscale 4×"' in js
         assert "upscale: upscale.value" in js
         assert 'href: "#/profile/account"' in js
-        assert "gpuActionRow()" in js and "function gpuCard()" not in js
-        assert 'h("span", {}, "Duration:")' in js and 'duration.disabled = isGuest() || !g.manual' in js
-        assert "function viewActions" in js and 'go(`#/actions/${parts[1]}`, true)' in js
+        assert "gpuActionRow()" in js
+        assert "function gpuCard()" not in js
+        assert 'h("span", {}, "Duration:")' in js
+        assert 'duration.disabled = isGuest() || !g.manual' in js
+        assert "function viewActions" in js
+        assert 'go(`#/actions/${parts[1]}`, true)' in js
         assert js.index('["gpu", "GPU"]') < js.index('["accounts", "Accounts"]')
         assert js.index('["accounts", "Accounts"]') < js.index('["remote-control", "Claude Remote Control"]')
         assert js.index('["remote-control", "Claude Remote Control"]') < js.index('["disk", "Disk"]')
         assert 'nav === "actions" && !isOwner()' in js
-        assert 'href: "#/profile/remote-control"' not in js and 'href: "#/profile/disk"' not in js
-        assert 'data-nav="actions"' in client.get("/").text and 'href="#/actions/gpu" data-nav="actions"' in client.get("/").text
+        assert 'href: "#/profile/remote-control"' not in js
+        assert 'href: "#/profile/disk"' not in js
+        assert 'data-nav="actions"' in client.get("/").text
+        assert 'href="#/actions/gpu" data-nav="actions"' in client.get("/").text
         profile_js = js.split("async function viewProfile")[1].split("function connectionCard")[0]
-        assert "gpuActionRow()" not in profile_js and "Claude Remote Control" not in profile_js
-        assert '"smart-approvals": "Smart approvals"' in js and "function smartApprovalsCard()" in js
+        assert "gpuActionRow()" not in profile_js
+        assert "Claude Remote Control" not in profile_js
+        assert '"smart-approvals": "Smart approvals"' in js
+        assert "function smartApprovalsCard()" in js
         assert 'skills: "Skills"' in js
         assert 'api("/skills/enabled")' in js
         assert "Install hash" in js
-        assert "confirmGpuQueue" in js and "gpu.manual" in js
+        assert "confirmGpuQueue" in js
+        assert "gpu.manual" in js
         assert "picker.hidden = !picker.hidden" not in js
         assert "if (holding)" in js
         assert 'id="fab-host"' in client.get("/").text
         assert client.get("/static/app.js").status_code == 200
         profile = client.get("/profile").json()
-        assert profile["emoji"] == "🙂" and "🚀" in profile["choices"]
+        assert profile["emoji"] == "🙂"
+        assert "🚀" in profile["choices"]
         assert client.put("/profile", json={"emoji": "🚀"}).json()["emoji"] == "🚀"
         assert client.get("/profile").json()["emoji"] == "🚀"
         assert client.put("/profile", json={"emoji": "nope"}).status_code == 400
@@ -138,7 +165,9 @@ def test_web_app_and_guard(tmp_path):
         # tailnet identity
         assert client.get("/sessions", headers={"Tailscale-User-Login": "intruder@example.com"}).status_code == 403
         me = client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()
-        assert me["login"] == LOGIN and me["role"] == "owner" and me["guest_until"] is None
+        assert me["login"] == LOGIN
+        assert me["role"] == "owner"
+        assert me["guest_until"] is None
         # cross-site browser POSTs are refused; same-origin and non-browser clients are fine
         body = {"prompt": "hello"}
         assert client.post("/sessions", json=body, headers={"Origin": "https://evil.example"}).status_code == 403
@@ -160,7 +189,8 @@ def test_owner_created_project_overlay_roundtrip(tmp_path):
     saved = config_mod.add_project(cfg, config_mod.Project(
         name="My-Repo", description="  Reviewable work  ", target="tower",
         repo="https://example.test/owner/repo.git", owner_id="owner"))
-    assert saved.name == "my-repo" and saved.managed
+    assert saved.name == "my-repo"
+    assert saved.managed
     assert cfg.projects["my-repo"].repo.endswith("repo.git")
     assert (config_dir / "projects.yaml").read_text(encoding="utf-8") == public_projects
     assert "my-repo" in (data_dir / "projects.yaml").read_text(encoding="utf-8")
@@ -229,7 +259,8 @@ def test_approval_notification_and_token_buttons(tmp_path):
         sid = client.post("/sessions", json={"prompt": "write a file", "project": "guarded"}).json()["id"]
         note = wait_for(lambda: next((p for p in sent if p.get("actions")), None))
         approval = m.db.pending_approvals(sid)[0]
-        assert note["title"].startswith("Approve?") and note["sequence_id"] == approval["id"]
+        assert note["title"].startswith("Approve?")
+        assert note["sequence_id"] == approval["id"]
         assert note["click"] == f"{PUBLIC}/#/s/{sid}/approval/{approval['id']}"
         approve_url = note["actions"][0]["url"]
         assert approve_url == f"{PUBLIC}/a/{approval['token']}/approve"
@@ -246,7 +277,8 @@ def test_approval_notification_and_token_buttons(tmp_path):
                                           and "Approved" in p["title"]), None))
         assert "a.txt" in replaced["message"]
         done = wait_for(lambda: next((p for p in sent if p["title"].startswith("Done")), None))
-        assert done["message"] == "all done" and done["click"].endswith(f"/#/s/{sid}")
+        assert done["message"] == "all done"
+        assert done["click"].endswith(f"/#/s/{sid}")
 
 
 def test_templates_rerun_and_changes(tmp_path):
@@ -268,11 +300,13 @@ def test_templates_rerun_and_changes(tmp_path):
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         wait_for(lambda: m.db.get_session(s["id"])["status"] == "done")
         changes = client.get(f"/sessions/{s['id']}/changes").json()["repos"][0]
-        assert changes["path"] == "repo" and "+hello" in changes["diff"]
+        assert changes["path"] == "repo"
+        assert "+hello" in changes["diff"]
         assert {"path": "new.txt", "status": "??"} in changes["files"]
 
         again = client.post(f"/sessions/{s['id']}/rerun").json()
-        assert again["id"] != s["id"] and again["title"] == s["title"]
+        assert again["id"] != s["id"]
+        assert again["title"] == s["title"]
         assert m.original_prompt(again["id"]) == "make a file"
 
 
@@ -304,7 +338,8 @@ def test_sleeping_model_is_announced_and_warmed(tmp_path):
         types = [e["type"] for e in m.db.events(sid)]
         assert types.index("model_waking") < types.index("model_ready") < types.index("assistant")
         note = wait_for(lambda: next((p for p in sent if p["title"].startswith("Waking the model")), None))
-        assert note["priority"] == 2 and note["click"].endswith(f"/#/s/{sid}")
+        assert note["priority"] == 2
+        assert note["click"].endswith(f"/#/s/{sid}")
         assert "model ready after" in client.get(f"/sessions/{sid}/transcript").text
 
 
@@ -318,7 +353,8 @@ def test_guest_demo_access(tmp_path):
     future = (now + timedelta(hours=2)).isoformat()
     past = (now - timedelta(hours=1)).isoformat()
     until = parse_guest_until(future)
-    assert until is not None and until > now
+    assert until is not None
+    assert until > now
 
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     guest = "buddy@example.com"
@@ -327,21 +363,25 @@ def test_guest_demo_access(tmp_path):
     oh = {"Tailscale-User-Login": LOGIN}
 
     ident = resolve_access(m.cfg, guest)
-    assert ident.allowed and ident.role == "guest"
+    assert ident.allowed
+    assert ident.role == "guest"
     assert guest_forbidden(ident, "GET", "/sessions") is None
     assert guest_forbidden(ident, "POST", "/sessions") == "demo access is read-only"
     assert guest_forbidden(ident, "GET", "/keys") == "demo access cannot view owner credentials"
     assert guest_forbidden(ident, "GET", "/api/admin/v1") == "demo access cannot use the owner API"
     assert guest_forbidden(ident, "POST", "/runners/macbook/poll") is None
     owner = resolve_access(m.cfg, LOGIN)
-    assert owner.role == "owner" and owner.allowed
+    assert owner.role == "owner"
+    assert owner.allowed
     assert resolve_access(m.cfg, None).role == "owner"
     assert resolve_access(m.cfg, "intruder@example.com").allowed is False
 
     with client:
         me = client.get("/me", headers=gh).json()
-        assert me["role"] == "guest" and me["login"] == guest
-        assert me["name"] == "Buddy" and me["notify"]["topic"] == ""
+        assert me["role"] == "guest"
+        assert me["login"] == guest
+        assert me["name"] == "Buddy"
+        assert me["notify"]["topic"] == ""
         assert me["guest_until"]
         assert client.get("/projects", headers=gh).json() == []
         assert client.get("/sessions", headers=gh).json() == []
@@ -354,7 +394,8 @@ def test_guest_demo_access(tmp_path):
         assert client.get("/api/admin/v1", headers=gh).status_code == 403
         assert "owner API" in client.get("/api/admin/v1/sessions", headers=gh).json()["detail"]
         denied = client.post("/sessions", json={"prompt": "hello"}, headers=gh)
-        assert denied.status_code == 403 and "read-only" in denied.json()["detail"]
+        assert denied.status_code == 403
+        assert "read-only" in denied.json()["detail"]
         assert client.put("/profile", json={"emoji": "🚀"}, headers=gh).status_code == 403
         assert client.post("/models/warm", headers=gh).status_code == 403
         created = client.post("/sessions", json={"prompt": "hello"}, headers=oh)
@@ -372,7 +413,8 @@ def test_guest_demo_access(tmp_path):
 
         m.cfg.guests = [GuestAccess(login=guest, until=past)]
         expired = client.get("/sessions", headers=gh)
-        assert expired.status_code == 403 and "expired" in expired.json()["detail"]
+        assert expired.status_code == 403
+        assert "expired" in expired.json()["detail"]
 
         m.cfg.guests = [GuestAccess(login=guest, until="not-a-date")]
         assert client.get("/sessions", headers=gh).status_code == 403
@@ -388,5 +430,7 @@ def test_guest_demo_access(tmp_path):
 
         from harness.config import _load_guests
         loaded = _load_guests([guest, {"login": "other@example.com", "until": future}])
-        assert loaded[0].login == guest and loaded[0].until == ""
-        assert loaded[1].login == "other@example.com" and loaded[1].until == future
+        assert loaded[0].login == guest
+        assert loaded[0].until == ""
+        assert loaded[1].login == "other@example.com"
+        assert loaded[1].until == future
