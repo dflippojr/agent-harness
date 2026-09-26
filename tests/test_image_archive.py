@@ -63,7 +63,9 @@ def test_archive_success_metadata_idempotency_and_interrupted_partial(tmp_path):
         "sha256": hashlib.sha256(PNG).hexdigest(),
     }
     row = m.db.get_image("abc123")
-    assert row["archived_at"] and row["archive_bytes"] == len(PNG) and row["sha256"] == first["sha256"]
+    assert row["archived_at"]
+    assert row["archive_bytes"] == len(PNG)
+    assert row["sha256"] == first["sha256"]
     png_mtime, metadata_mtime, archived_at = png.stat().st_mtime_ns, sidecar.stat().st_mtime_ns, row["archived_at"]
     assert m.image_archive.archive(row)["sha256"] == first["sha256"]
     assert (png.stat().st_mtime_ns, sidecar.stat().st_mtime_ns, m.db.get_image("abc123")["archived_at"]) == (
@@ -72,8 +74,10 @@ def test_archive_success_metadata_idempotency_and_interrupted_partial(tmp_path):
     png.unlink()
     png.with_name(png.name + ".partial").write_bytes(b"interrupted")
     report = m.image_archive.reconcile()
-    assert report["archived"] == 1 and report["missing"] == report["errors"] == 0
-    assert png.read_bytes() == PNG and not png.with_name(png.name + ".partial").exists()
+    assert report["archived"] == 1
+    assert report["missing"] == report["errors"] == 0
+    assert png.read_bytes() == PNG
+    assert not png.with_name(png.name + ".partial").exists()
 
 
 def test_reconcile_repairs_corruption_and_reports_hash_mismatch_and_missing_source(tmp_path):
@@ -93,7 +97,9 @@ def test_reconcile_repairs_corruption_and_reports_hash_mismatch_and_missing_sour
 
     report = m.image_archive.reconcile()
     assert png.read_bytes() == PNG
-    assert report["archived"] == 1 and report["missing"] == 2 and report["errors"] == 2
+    assert report["archived"] == 1
+    assert report["missing"] == 2
+    assert report["errors"] == 2
     assert "SHA-256" in m.db.get_image("second")["archive_error"]
     assert "missing" in m.db.get_image("third")["archive_error"]
     assert any("second" in warning for warning in report["warnings"])
@@ -117,7 +123,8 @@ def test_unwritable_and_low_space_are_actionable_without_breaking_snapshot(tmp_p
     m.image_archive.root = tmp_path / "not-writable"
     monkeypatch.setattr(Path, "mkdir", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("access denied")))
     report = m.image_archive.reconcile()
-    assert report["errors"] == 1 and any("not writable" in warning for warning in report["warnings"])
+    assert report["errors"] == 1
+    assert any("not writable" in warning for warning in report["warnings"])
     m.image_archive.root = original_root
 
 
@@ -130,13 +137,16 @@ def test_retention_requires_preview_and_never_deletes_live_gallery(tmp_path):
     m.image_archive.archive(recent)
     old_source = m.image_archive.source(old)
     preview = m.image_archive.retention_preview(now=1000 + 31 * 86400)
-    assert preview["count"] == 1 and preview["bytes"] == len(PNG) and preview["confirmation"]
+    assert preview["count"] == 1
+    assert preview["bytes"] == len(PNG)
+    assert preview["confirmation"]
     with pytest.raises(ImageArchiveError, match="preview"):
         m.image_archive.apply_retention("wrong", now=1000 + 31 * 86400)
     applied = m.image_archive.apply_retention(preview["confirmation"], now=1000 + 31 * 86400)
     assert applied == {"removed": 1, "bytes": len(PNG), "errors": []}
     assert old_source.is_file()
-    assert not m.image_archive.paths(old)[0].exists() and m.image_archive.paths(recent)[0].exists()
+    assert not m.image_archive.paths(old)[0].exists()
+    assert m.image_archive.paths(recent)[0].exists()
     assert m.db.get_image("old")["archive_deleted_at"] is not None
     # Reconciliation honors an explicit retention deletion instead of silently restoring it.
     assert m.image_archive.reconcile()["archived"] == 1
@@ -164,7 +174,8 @@ def test_archive_health_metrics_authorization_and_disabled_modules(tmp_path):
 
     with TestClient(create_app(m)) as client:
         usage = client.get("/maintenance").json()["image_archive"]
-        assert usage["archived"] == 1 and usage["path"].endswith("images")
+        assert usage["archived"] == 1
+        assert usage["path"].endswith("images")
         assert client.post("/maintenance/image-archive/retention/preview",
                            headers={"Tailscale-User-Login": "guest@example.test"}).status_code == 403
         app_key = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["images"]}).json()["key"]
@@ -199,7 +210,9 @@ def test_generated_image_is_archived_before_done(tmp_path):
         await m.start(maintenance=False)
         submitted = m.images.submit("archive me")
         done = await m.images.wait(submitted["id"])
-        assert done["status"] == "done" and done["archived_at"] and done["sha256"]
+        assert done["status"] == "done"
+        assert done["archived_at"]
+        assert done["sha256"]
         assert m.image_archive.paths(done)[0].read_bytes().startswith(b"\x89PNG")
         await m.stop()
     asyncio.run(run())
