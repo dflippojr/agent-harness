@@ -34,6 +34,8 @@ from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from . import compat
 
+NO_SUCH_SESSION = "no session matches that id"
+
 log = logging.getLogger("harness.apps")
 
 API_VERSION = "1.13"
@@ -478,10 +480,10 @@ def _owned_session(request: Request, key: dict, ref: str) -> dict:
         s = m.get(ref, user_id=user_id, kind="agent")
     except HarnessError as e:
         if e.status in (400, 404):
-            raise HarnessError(404, "no session matches that id") from e
+            raise HarnessError(404, NO_SUCH_SESSION) from e
         raise
     if s.get("owner_id", "owner") != user_id or (s.get("kind") or "agent") != "agent":
-        raise HarnessError(404, "no session matches that id")
+        raise HarnessError(404, NO_SUCH_SESSION)
     return s
 
 
@@ -492,7 +494,7 @@ def visible_session(request: Request, key: dict, ref: str) -> dict:
         return s
     if (not owner_key(key) and s.get("app_id") != key["id"]
             and SESSIONS_ALL not in key["scope_set"]):
-        raise HarnessError(404, "no session matches that id")
+        raise HarnessError(404, NO_SUCH_SESSION)
     return s
 
 
@@ -502,7 +504,7 @@ def own_session(request: Request, key: dict, ref: str) -> dict:
     if key.get("kind") == "member":
         return s
     if not owner_key(key) and s.get("app_id") != key["id"]:
-        raise HarnessError(404, "no session matches that id")
+        raise HarnessError(404, NO_SUCH_SESSION)
     return s
 
 
