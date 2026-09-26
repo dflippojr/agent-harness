@@ -1066,7 +1066,7 @@ async function viewChat(id) {
     editorToggle,
     h("button", { class: "btn small", type: "button", onclick: async () => {
       const title = prompt("Rename chat", session.title);
-      if (!title || !title.trim()) return;
+      if (!title?.trim()) return;
       try { session = await api(`/chats/${id}`, { method: "PATCH", body: { title } }); setHeader("chat", session.title); }
       catch (e) { toast(e.message); }
     } }, "Rename"),
@@ -1320,7 +1320,10 @@ async function confirmGpuQueue(label) {
     if (!gpu.manual) return true;
     const remaining = holdRemainingText(gpu.manual_remaining_seconds);
     return confirm(`GPU hold is on ${remaining}. ${label} can be queued, but nothing will be sent to the local model until the hold ends. Queue it?`);
-  } catch (_) { /* hold unreadable: don't block queueing */ return true; }
+  } catch (err) {
+    console.debug("GPU hold unreadable; not blocking the queue", err);
+    return true;
+  }
 }
 
 async function viewNew() {
@@ -1336,7 +1339,7 @@ async function viewNew() {
   let target = "tower";
   try { target = localStorage.getItem(targetKey) || "tower"; } catch (_) { /* private mode */ }
   if (!targets.includes(target)) target = targets[0] || "tower";
-  const projectTarget = (name) => (projects.find((p) => p.name === name) || {}).target || "tower";
+  const projectTarget = (name) => projects.find((p) => p.name === name)?.target || "tower";
   let templates = [];
   const tplSelect = h("select", {});
   const project = h("select", {});
@@ -2684,7 +2687,10 @@ async function viewImages() {
     try {
       const d = render(await api("/images"));
       timer = setTimeout(tick, IMAGE_BUSY.has(d.status.phase) ? 400 : 4000);
-    } catch (_) { /* offline: keep polling */ timer = setTimeout(tick, 4000); }
+    } catch (err) {
+      console.debug("image list unavailable; retrying", err);
+      timer = setTimeout(tick, 4000);
+    }
   };
   timer = setTimeout(tick, IMAGE_BUSY.has(data.status.phase) ? 400 : 4000);
   onLeave(() => clearTimeout(timer));
@@ -3153,7 +3159,10 @@ function readTextSize() {
   try {
     const id = localStorage.getItem("harness.textSize") || "m";
     return TEXT_SIZES[id] ? id : "m";
-  } catch (_) { /* storage unavailable: default size */ return "m"; }
+  } catch (err) {
+    console.debug("text size not readable from storage; using the default", err);
+    return "m";
+  }
 }
 function applyTextSize(id) {
   const size = TEXT_SIZES[id] ? id : readTextSize();
@@ -3163,13 +3172,29 @@ function applyTextSize(id) {
 }
 applyTextSize();
 
+// Copies text and says so; when the clipboard is unavailable (insecure context, permission denied) the
+// caller's fallback leaves the text selected so it can be copied by hand.
+async function copyToClipboard(text, selectFallback) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Copied");
+  } catch (err) {
+    console.debug("clipboard write failed", err);
+    selectFallback();
+  }
+}
+
 function copyBox(value) {
   const code = h("code", {}, value);
   const btn = h("button", {
     class: "btn small", type: "button",
     onclick: async () => {
-      try { await navigator.clipboard.writeText(value); toast("Copied"); }
-      catch (_) { /* clipboard unavailable: select the text instead */ const range = document.createRange(); range.selectNodeContents(code); getSelection().removeAllRanges(); getSelection().addRange(range); }
+      copyToClipboard(value, () => {
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+      });
     },
   }, "Copy");
   return h("div", { class: "copy-box", onclick: () => btn.click() }, code, btn);
@@ -3401,7 +3426,7 @@ function connectionCard() {
       fill(minted,
         h("p", { class: "note" }, "Copy this token now; it is not shown again."), field,
         h("button", { class: "btn small", onclick: async () => {
-          try { await navigator.clipboard.writeText(key.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); }
+          copyToClipboard(key.key, () => field.select());
         } }, "Copy token"));
     } catch (e) { toast(e.message, 5000); }
   };
@@ -3878,7 +3903,7 @@ async function confirmRestart(targetRevision, status, errorBox) {
 }
 
 function backupLine(b) {
-  if (!b || !b.enabled) return null;
+  if (!b?.enabled) return null;
   const failed = b.error && (b.error_at || 0) > (b.ok_at || 0);
   return h("p", { class: `small${failed ? " bad" : ""}` },
     b.ok_at ? `Backup ${ago(b.ok_at)} (${Math.max(1, Math.round(b.bytes / 2 ** 20))} MB) in ${b.dir}` : "No backup yet",
@@ -3886,7 +3911,7 @@ function backupLine(b) {
 }
 
 function imageArchiveBlock(a, reload) {
-  if (!a || !a.enabled) return null;
+  if (!a?.enabled) return null;
   const count = Number(a.archived || 0);
   const bytes = Number(a.bytes || 0);
   const warning = a.free_space_warning || (a.errors ? pluralize(a.errors, "image archive error") : "");
@@ -4202,7 +4227,7 @@ function endpointCard(me) {
                   const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
                   fill(form, h("p", { class: "small" }, `Key for ${k.name}. Copy it now; it isn't shown again.`), field,
                     h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: () => copyToClipboard(k.key, () => field.select()) }, "Copy"),
                       h("button", { class: "btn", onclick: load }, "Done")));
                 } catch (e) { toast(e.message); }
               },
@@ -4282,7 +4307,7 @@ function appsCard(me) {
                   const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
                   fill(form, h("p", { class: "small" }, `Token for ${k.name}. Copy it now; it isn't shown again.`), field,
                     h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(k.key); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
+                      h("button", { class: "btn", onclick: () => copyToClipboard(k.key, () => field.select()) }, "Copy"),
                       h("button", { class: "btn", onclick: load }, "Done")));
                 } catch (e) { toast(e.message); }
               },
@@ -4309,7 +4334,7 @@ function appsCard(me) {
                 fill(form,
                   h("p", { class: "small" }, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`), field,
                   h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(p.code); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy"),
+                    h("button", { class: "btn", onclick: () => copyToClipboard(p.code, () => field.select()) }, "Copy"),
                     h("button", { class: "btn", onclick: load }, "Done")));
               } catch (e) { toast(e.message); }
             } }, "Approve and create code")));
@@ -4332,7 +4357,7 @@ function appsCard(me) {
                 fill(form,
                   h("p", { class: "small" }, `Run this in Terminal on the Mac. The code expires in 10 minutes and works once.`), field,
                   h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: async () => { try { await navigator.clipboard.writeText(command); toast("Copied"); } catch (_) { /* clipboard unavailable: select the text instead */ field.select(); } } }, "Copy install command"),
+                    h("button", { class: "btn", onclick: () => copyToClipboard(command, () => field.select()) }, "Copy install command"),
                     h("button", { class: "btn", onclick: load }, "Done")));
               } catch (e) { toast(e.message); }
             } }, "Create install command")));
