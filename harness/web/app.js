@@ -4171,87 +4171,92 @@ function remoteControlCard() {
   return h("div", { class: "card" }, h("h3", {}, "Claude Remote Control"), body);
 }
 
+async function skillProposalView(pid) {
+  const p = await api(`/skills/proposals/${pid}`);
+  const findings = (p.static_findings || []).map((f) => h("li", {}, `${f.code}: ${f.message}`));
+  const review = p.review || {};
+  const examples = (p.examples || []).map((ex) => h("div", { class: "card" },
+    h("p", {}, ex.prompt), h("p", { class: "muted small" }, ex.expected || ex.expected_behavior || "")));
+  const refs = (p.references || []).map((r) => h("details", {}, h("summary", {}, r.path), h("pre", {}, r.content || "")));
+  const act = async (path, body, label) => {
+    if (label && !confirm(label)) return;
+    try {
+      await api(path, { method: "POST", body: body || {} });
+      toast("Done");
+      go("#/profile/skills", true);
+    } catch (e) { toast(e.message); }
+  };
+  return h("div", {},
+    h("div", { class: "card" },
+      h("h3", {}, p.title || p.slug),
+      h("p", { class: "muted small" }, `${p.slug} · ${p.status} · hash ${p.content_hash} · session ${p.source_session_id || "—"}`),
+      h("p", {}, p.purpose || ""),
+      p.activation_suggestion ? h("p", { class: "muted small" }, `Suggested when: ${p.activation_suggestion}`) : null,
+      p.diff ? h("pre", { class: "preview" }, p.diff) : null,
+      h("p", { class: "section-label" }, "SKILL.md"),
+      h("pre", {}, p.skill_md || ""),
+      refs.length ? h("p", { class: "section-label" }, "References") : null, ...refs,
+      h("p", { class: "section-label" }, "Examples"), ...examples,
+      h("p", { class: "section-label" }, "Static findings"),
+      findings.length ? h("ul", {}, findings) : h("p", { class: "muted small" }, "No static findings."),
+      h("p", { class: "section-label" }, "Model review"),
+      h("p", { class: "muted small" }, p.review_status || "not started"),
+      review.summary ? h("p", {}, review.summary) : null,
+      review.recommendation ? h("p", {}, `Recommendation: ${review.recommendation}`) : null,
+      review.error ? h("p", { class: "bad" }, review.error) : null,
+      h("div", { class: "row", style: "margin-top:18px;flex-wrap:wrap;gap:8px" },
+        h("button", { class: "btn primary", onclick: () => act(`/skills/proposals/${p.id}/install`, { content_hash: p.content_hash },
+          `Install hash ${p.content_hash.slice(0, 12)}? It stays disabled until you enable it.`) }, "Install"),
+        h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" }, "Reject this hash?") }, "Reject"),
+        h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/review`) }, "Run hosted review"),
+        h("button", { class: "btn bad", onclick: async () => {
+          if (!confirm("Delete this draft?")) return;
+          try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
+          catch (e) { toast(e.message); }
+        } }, "Delete draft"))));
+
+}
+
+function installedSkillCard(sk) {
+  const toggle = sk.enabled ? "disable" : "enable";
+  return h("div", { class: "card" },
+    h("h3", {}, `${sk.enabled ? "" : "⏸ "}${sk.title || sk.slug}`),
+    h("p", { class: "muted small" }, `${sk.slug} v${sk.version} · ${(sk.content_hash || "").slice(0, 12)}`),
+    h("p", {}, sk.purpose || ""),
+    sk.projects?.length ? h("p", { class: "muted small" }, `Projects: ${sk.projects.join(", ")}`) : h("p", { class: "muted small" }, "No project allowlist. Enable it and pick it on New task."),
+    h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
+      h("button", { class: "btn small", onclick: async () => {
+        try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+      } }, sk.enabled ? "Disable" : "Enable"),
+      h("button", { class: "btn small", onclick: async () => {
+        const raw = window.prompt("Project allowlist (comma-separated names)", (sk.projects || []).join(", "));
+        if (raw === null) return;
+        try {
+          await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
+          route();
+        } catch (e) { toast(e.message); }
+      } }, "Projects"),
+      h("button", { class: "btn small", onclick: async () => {
+        if (!confirm("Roll back to the previous version?")) return;
+        try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+      } }, "Rollback"),
+      h("button", { class: "btn small bad", onclick: async () => {
+        if (!confirm(`Uninstall ${sk.slug}? Later sessions will not receive it.`)) return;
+        try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+      } }, "Uninstall")));
+}
+
 async function skillsPage(pid) {
   const data = await api("/skills");
   if (!data.enabled) {
     return h("div", { class: "card" }, h("p", { class: "muted small" }, "Instruction skills are disabled. Ordinary sessions are unchanged."));
   }
-  if (pid) {
-    const p = await api(`/skills/proposals/${pid}`);
-    const findings = (p.static_findings || []).map((f) => h("li", {}, `${f.code}: ${f.message}`));
-    const review = p.review || {};
-    const examples = (p.examples || []).map((ex) => h("div", { class: "card" },
-      h("p", {}, ex.prompt), h("p", { class: "muted small" }, ex.expected || ex.expected_behavior || "")));
-    const refs = (p.references || []).map((r) => h("details", {}, h("summary", {}, r.path), h("pre", {}, r.content || "")));
-    const act = async (path, body, label) => {
-      if (label && !confirm(label)) return;
-      try {
-        await api(path, { method: "POST", body: body || {} });
-        toast("Done");
-        go("#/profile/skills", true);
-      } catch (e) { toast(e.message); }
-    };
-    return h("div", {},
-      h("div", { class: "card" },
-        h("h3", {}, p.title || p.slug),
-        h("p", { class: "muted small" }, `${p.slug} · ${p.status} · hash ${p.content_hash} · session ${p.source_session_id || "—"}`),
-        h("p", {}, p.purpose || ""),
-        p.activation_suggestion ? h("p", { class: "muted small" }, `Suggested when: ${p.activation_suggestion}`) : null,
-        p.diff ? h("pre", { class: "preview" }, p.diff) : null,
-        h("p", { class: "section-label" }, "SKILL.md"),
-        h("pre", {}, p.skill_md || ""),
-        refs.length ? h("p", { class: "section-label" }, "References") : null, ...refs,
-        h("p", { class: "section-label" }, "Examples"), ...examples,
-        h("p", { class: "section-label" }, "Static findings"),
-        findings.length ? h("ul", {}, findings) : h("p", { class: "muted small" }, "No static findings."),
-        h("p", { class: "section-label" }, "Model review"),
-        h("p", { class: "muted small" }, p.review_status || "not started"),
-        review.summary ? h("p", {}, review.summary) : null,
-        review.recommendation ? h("p", {}, `Recommendation: ${review.recommendation}`) : null,
-        review.error ? h("p", { class: "bad" }, review.error) : null,
-        h("div", { class: "row", style: "margin-top:18px;flex-wrap:wrap;gap:8px" },
-          h("button", { class: "btn primary", onclick: () => act(`/skills/proposals/${p.id}/install`, { content_hash: p.content_hash },
-            `Install hash ${p.content_hash.slice(0, 12)}? It stays disabled until you enable it.`) }, "Install"),
-          h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" }, "Reject this hash?") }, "Reject"),
-          h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/review`) }, "Run hosted review"),
-          h("button", { class: "btn bad", onclick: async () => {
-            if (!confirm("Delete this draft?")) return;
-            try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
-            catch (e) { toast(e.message); }
-          } }, "Delete draft"))));
-  }
+  if (pid) return skillProposalView(pid);
   const proposals = (data.proposals || []).map((p) => h("a", { class: "card", href: `#/profile/skills/${p.id}` },
     h("h3", {}, p.title || p.slug),
     h("div", { class: "meta" }, h("span", {}, p.status), h("span", {}, p.review_status || "no review"),
       h("span", {}, (p.content_hash || "").slice(0, 12)))));
-  const installed = (data.installed || []).map((sk) => {
-    const toggle = sk.enabled ? "disable" : "enable";
-    return h("div", { class: "card" },
-      h("h3", {}, `${sk.enabled ? "" : "⏸ "}${sk.title || sk.slug}`),
-      h("p", { class: "muted small" }, `${sk.slug} v${sk.version} · ${(sk.content_hash || "").slice(0, 12)}`),
-      h("p", {}, sk.purpose || ""),
-      sk.projects?.length ? h("p", { class: "muted small" }, `Projects: ${sk.projects.join(", ")}`) : h("p", { class: "muted small" }, "No project allowlist. Enable it and pick it on New task."),
-      h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
-        h("button", { class: "btn small", onclick: async () => {
-          try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
-        } }, sk.enabled ? "Disable" : "Enable"),
-        h("button", { class: "btn small", onclick: async () => {
-          const raw = window.prompt("Project allowlist (comma-separated names)", (sk.projects || []).join(", "));
-          if (raw === null) return;
-          try {
-            await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
-            route();
-          } catch (e) { toast(e.message); }
-        } }, "Projects"),
-        h("button", { class: "btn small", onclick: async () => {
-          if (!confirm("Roll back to the previous version?")) return;
-          try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
-        } }, "Rollback"),
-        h("button", { class: "btn small bad", onclick: async () => {
-          if (!confirm(`Uninstall ${sk.slug}? Later sessions will not receive it.`)) return;
-          try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
-        } }, "Uninstall")));
-  });
+  const installed = (data.installed || []).map(installedSkillCard);
   return h("div", {},
     h("p", { class: "muted small" }, "Agents can only stage drafts. You install an exact hash; new skills stay off until you enable them. Advisory model review never installs."),
     data.hosted_reviewer_configured ? h("p", { class: "muted small" }, "Hosted review is configured and spends that provider's quota only when you tap Run hosted review.") : h("p", { class: "muted small" }, "No hosted reviewer configured. Local Qwen review runs only when the GPU is idle."),
