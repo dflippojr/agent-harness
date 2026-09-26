@@ -628,6 +628,27 @@ async def backends(request: Request):
                                        for name in m.cfg.backends]))
 
 
+def _member_me(m, key: dict, ident) -> dict:
+    from .storage import account_usage_bytes, quota_message
+    account = m.db.account_by_id(key["user_id"])
+    used = account_usage_bytes(m.cfg, key["user_id"]) if account else 0
+    limit = int(account["disk_quota_bytes"]) if account else 0
+    return {
+        "role": "member", "user_id": key["user_id"], "login": ident.login if ident else None,
+        "name": key.get("name") or "",
+        "public_url": m.cfg.public_url,
+        "capabilities": {
+            "admin": False, "local_sessions": True, "hosted_backends": False, "images": False,
+            "jobs": False, "runners": False, "accounts": False,
+        },
+        "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
+                  "disk_note": quota_message(used, limit) if limit else "",
+                  "running": m.db.count_sessions(key["user_id"], "running"),
+                  "queued": m.db.count_sessions(key["user_id"], "queued"),
+                  "account_hint": key["user_id"][2:10] if key["user_id"].startswith("u-") else key["user_id"][:8]},
+    }
+
+
 @route_table.get("/api/v1/me")
 async def api_me(request: Request):
     """Authenticated principal. Unauthenticated callers receive 401 rather than a project list."""
@@ -635,24 +656,7 @@ async def api_me(request: Request):
     m = mgr(request)
     ident = getattr(request.state, "access", None)
     if key.get("kind") == "member":
-        from .storage import account_usage_bytes, quota_message
-        account = m.db.account_by_id(key["user_id"])
-        used = account_usage_bytes(m.cfg, key["user_id"]) if account else 0
-        limit = int(account["disk_quota_bytes"]) if account else 0
-        return {
-            "role": "member", "user_id": key["user_id"], "login": ident.login if ident else None,
-            "name": key.get("name") or "",
-            "public_url": m.cfg.public_url,
-            "capabilities": {
-                "admin": False, "local_sessions": True, "hosted_backends": False, "images": False,
-                "jobs": False, "runners": False, "accounts": False,
-            },
-            "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
-                      "disk_note": quota_message(used, limit) if limit else "",
-                      "running": m.db.count_sessions(key["user_id"], "running"),
-                      "queued": m.db.count_sessions(key["user_id"], "queued"),
-                      "account_hint": key["user_id"][2:10] if key["user_id"].startswith("u-") else key["user_id"][:8]},
-        }
+        return _member_me(m, key, ident)
     return {"role": "owner" if owner_key(key) else key.get("kind"), "user_id": "owner",
             "login": ident.login if ident else None, "name": key.get("name") or "",
             "public_url": m.cfg.public_url,
@@ -765,6 +769,14 @@ async def api_queue(request: Request):
     return out
 
 
+def _global_event_visible(e: dict, session: dict | None, user_id: str, key: dict, global_types) -> bool:
+    if not (e["type"] in global_types and session and session.get("owner_id", "owner") == user_id
+            and (session.get("kind") or "agent") == "agent"):
+        return False
+    return not (key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"]
+                and session.get("app_id") != key["id"])
+
+
 @route_table.get("/api/v1/events")
 async def api_events(request: Request):
     from .api import GLOBAL_TYPES, sse
@@ -787,12 +799,7 @@ async def api_events(request: Request):
                         return
                     yield ": keepalive\n\n"
                     continue
-                session = m.db.get_session(e["session_id"])
-                if (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == user_id
-                        and (session.get("kind") or "agent") == "agent"):
-                    if key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"] \
-                            and session.get("app_id") != key["id"]:
-                        continue
+                if _global_event_visible(e, m.db.get_session(e["session_id"]), user_id, key, GLOBAL_TYPES):
                     # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
                     yield sse({**e, "seq": None})
         finally:
@@ -1008,25 +1015,28 @@ async def event_ticket(ref: str, request: Request):
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
+def _ticket_key(request: Request, m, ref: str, ticket: str) -> dict:
+    """The API key behind a single-session stream ticket, or 401/403."""
+    raw_origin = request.headers.get("origin", "")
+    try:
+        origin = normalize_origin(raw_origin)
+    except ValueError:
+        origin = ""
+    key = m.db.stream_ticket_key(ticket, ref, origin)
+    if key is None:
+        raise HarnessError(401, "invalid or expired stream ticket")
+    key["scope_set"] = set((key.get("scopes") or "").split())
+    if (not owner_key(key) and "sessions" not in key["scope_set"]
+            and SESSIONS_ALL not in key["scope_set"]):
+        raise HarnessError(403, "this token lacks the 'sessions' scope")
+    return key
+
+
 @route_table.get("/api/v1/sessions/{ref}/events")
 async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
     m = mgr(request)
-    raw_origin = request.headers.get("origin", "")
     ticket = request.query_params.get("ticket", "")
-    if ticket:
-        try:
-            origin = normalize_origin(raw_origin)
-        except ValueError:
-            origin = ""
-        key = m.db.stream_ticket_key(ticket, ref, origin)
-        if key is None:
-            raise HarnessError(401, "invalid or expired stream ticket")
-        key["scope_set"] = set((key.get("scopes") or "").split())
-        if (not owner_key(key) and "sessions" not in key["scope_set"]
-                and SESSIONS_ALL not in key["scope_set"]):
-            raise HarnessError(403, "this token lacks the 'sessions' scope")
-    else:
-        key = auth(request, "sessions")
+    key = _ticket_key(request, m, ref, ticket) if ticket else auth(request, "sessions")
     s = visible_session(request, key, ref)
     sid = s["id"]
     owner = s.get("owner_id") or "owner"
