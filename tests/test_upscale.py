@@ -42,7 +42,8 @@ def test_plan_tiles_cover_and_overlap():
     tiles = upscale_mod.plan_tiles(600, 400, tile=256, overlap=32)
     assert tiles[0] == upscale_mod.Tile(0, 0, 256, 256)
     xs, ys = {t.x for t in tiles}, {t.y for t in tiles}
-    assert 0 in xs and 0 in ys
+    assert 0 in xs
+    assert 0 in ys
     assert max(t.x + t.w for t in tiles) == 600
     assert max(t.y + t.h for t in tiles) == 400
     # neighboring tiles overlap
@@ -58,7 +59,9 @@ def test_tiled_scale_matches_full_nearest_and_alpha_helper():
     rgb = rgb_png(16, 12)
     merged = upscale_mod.preserve_alpha(src, rgb)
     out = Image.open(io.BytesIO(merged))
-    assert out.size == (16, 12) and out.mode == "RGBA" and out.getchannel("A").getextrema()[0] > 0
+    assert out.size == (16, 12)
+    assert out.mode == "RGBA"
+    assert out.getchannel("A").getextrema()[0] > 0
     unchanged = upscale_mod.preserve_alpha(rgb_png(8, 6), rgb)
     assert Image.open(io.BytesIO(unchanged)).mode in ("RGB", "RGBA")
 
@@ -74,7 +77,8 @@ def test_missing_weights_and_hashes(tmp_path):
     from harness.config import ImagesConfig
     cfg = ImagesConfig(enabled=True, comfy_dir=str(tmp_path / "comfy"), upscale_dir=str(tmp_path / "w"))
     missing = upscale_mod.missing_weights(cfg)
-    assert len(missing) == 2 and "RealESRGAN_x2plus.pth" in missing[0]
+    assert len(missing) == 2
+    assert "RealESRGAN_x2plus.pth" in missing[0]
     assert "Image generation still works" in upscale_mod.remediation(cfg)
     (tmp_path / "w").mkdir()
     spec = upscale_mod.MODELS[2]
@@ -82,7 +86,9 @@ def test_missing_weights_and_hashes(tmp_path):
     hashed = upscale_mod.missing_weights(cfg, verify_hash=True)
     assert any("sha256" in item for item in hashed)
     status = upscale_mod.status(cfg)
-    assert status["default"] == "none" and status["available"] is False and status["max_pixels"] == 36_000_000
+    assert status["default"] == "none"
+    assert status["available"] is False
+    assert status["max_pixels"] == 36_000_000
 
 
 def test_generate_does_not_upscale_by_default(tmp_path):
@@ -90,7 +96,8 @@ def test_generate_does_not_upscale_by_default(tmp_path):
         m, _, state = image_manager(tmp_path, weights=True)
         await m.start(maintenance=False)
         job = await m.images.wait(m.images.submit("a red cube")["id"])
-        assert job["status"] == "done" and job["requested_upscale"] == "none"
+        assert job["status"] == "done"
+        assert job["requested_upscale"] == "none"
         assert m.db.image_children(job["id"]) == []
         assert all(not any(n.get("class_type") == "ImageUpscaleWithModel" for n in g.values()) for g in state["graphs"])
         listing = m.images.status()
@@ -115,11 +122,13 @@ def test_gallery_upscale_preserves_source_and_dimensions(tmp_path):
         child = await m.images.wait(child["id"])
         assert child["status"] == "done"
         assert (child["width"], child["height"]) == (96, 64)
-        assert child["parent_id"] == parent["id"] and child["operation"] == "upscale"
+        assert child["parent_id"] == parent["id"]
+        assert child["operation"] == "upscale"
         assert child["upscale_model"] == "RealESRGAN_x2plus"
         assert m.images.path(parent).read_bytes() == real
         out = Image.open(m.images.path(child))
-        assert out.size == (96, 64) and out.mode == "RGBA"
+        assert out.size == (96, 64)
+        assert out.mode == "RGBA"
         assert any(n.get("class_type") == "ImageUpscaleWithModel" for g in state["graphs"] for n in g.values())
         again = m.images.submit_upscale(parent["id"], "2x")
         assert again["id"] == child["id"]
@@ -133,11 +142,13 @@ def test_generate_plus_upscale_holds_gpu_once(tmp_path):
         await m.start(maintenance=False)
         job = m.images.submit("a bicycle", upscale="2x")
         gen = await m.images.wait(job["id"])
-        assert gen["status"] == "done" and gen["requested_upscale"] == "2x"
+        assert gen["status"] == "done"
+        assert gen["requested_upscale"] == "2x"
         child = m.db.find_image_upscale(gen["id"], "2x")
         assert child is not None
         child = await m.images.wait(child["id"])
-        assert child["status"] == "done" and child["width"] == gen["width"] * 2
+        assert child["status"] == "done"
+        assert child["width"] == gen["width"] * 2
         assert [n.get("class_type") for g in state["graphs"] for n in g.values()
                 if n.get("class_type") in ("KSampler", "ImageUpscaleWithModel")] == ["KSampler", "ImageUpscaleWithModel"]
         for _ in range(200):
@@ -157,7 +168,8 @@ def test_failed_phone_generate_with_upscale_notifies(tmp_path):
         await m.start(maintenance=False)
         job = m.images.submit("broken", source="phone", upscale="2x")
         failed = await m.images.wait(job["id"])
-        assert failed["status"] == "failed" and "out of memory" in failed["error"]
+        assert failed["status"] == "failed"
+        assert "out of memory" in failed["error"]
         assert notifications == [failed]
         assert m.db.image_children(job["id"]) == []
         await m.stop()
@@ -189,9 +201,11 @@ def test_dimension_cap_and_oom_failure(tmp_path):
         m.db.update_image(parent["id"], width=48, height=32)
         m.images.path(parent).write_bytes(rgb_png(48, 32))
         child = await m.images.wait(m.images.submit_upscale(parent["id"], "2x")["id"])
-        assert child["status"] == "failed" and "out of memory" in child["error"]
+        assert child["status"] == "failed"
+        assert "out of memory" in child["error"]
         retried = m.images.submit_upscale(parent["id"], "2x")
-        assert retried["id"] == child["id"] and retried["status"] == "queued"
+        assert retried["id"] == child["id"]
+        assert retried["status"] == "queued"
         await m.stop()
     asyncio.run(body())
 
@@ -211,7 +225,8 @@ def test_upscale_api_authorization_and_app_default(tmp_path):
                 break
             time.sleep(0.02)
         detail = client.get(f"/images/{job['id']}").json()
-        assert detail["requested_upscale"] == "none" and detail["children"] == []
+        assert detail["requested_upscale"] == "none"
+        assert detail["children"] == []
         assert client.post("/images", json={"prompt": "x", "upscale": "8x"}).status_code == 400
         gh = {"Tailscale-User-Login": guest}
         assert client.post(f"/images/{job['id']}/upscale", json={"upscale": "2x"}, headers=gh).status_code == 403
@@ -247,7 +262,8 @@ def test_agent_generate_image_upscale_saves_derived(tmp_path):
         s = m.create("make an icon")
         await wait_status(m, s["id"], "done", timeout=20)
         result = events(m, s["id"], "tool_result")[0]
-        assert result["ok"] and "upscaled 2x" in result["output"]
+        assert result["ok"]
+        assert "upscaled 2x" in result["output"]
         saved = Image.open(tmp_path / "data" / "workspaces" / s["id"] / "assets" / "icon.png")
         jobs = m.db.list_images()
         gen = next(j for j in jobs if j["operation"] == "generate")
