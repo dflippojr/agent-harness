@@ -130,8 +130,10 @@ def test_flux_fast_graph_is_four_step_distilled():
     graph = workflow("flux-fast", "a red cube", 1024, 1024, 42, "harness/abc",
                      encoder_name="qwen_3_4b_flux2.safetensors")
     assert graph["9"]["inputs"]["filename_prefix"] == "harness/abc"
-    assert graph["62"]["class_type"] == "Flux2Scheduler" and graph["62"]["inputs"]["steps"] == 4
-    assert graph["62"]["inputs"]["width"] == 1024 and graph["62"]["inputs"]["height"] == 1024
+    assert graph["62"]["class_type"] == "Flux2Scheduler"
+    assert graph["62"]["inputs"]["steps"] == 4
+    assert graph["62"]["inputs"]["width"] == 1024
+    assert graph["62"]["inputs"]["height"] == 1024
     assert graph["61"]["inputs"]["sampler_name"] == "euler"
     assert graph["63"]["inputs"]["cfg"] == 1.0
     assert graph["69"]["inputs"]["noise_seed"] == 42
@@ -163,7 +165,8 @@ def test_capability_missing_corrupt_shared_and_missing_nodes(tmp_path):
     manifest = tiny_manifest("http://unused", payloads)
     plant_comfy(Path(cfg.comfy_dir))
     missing = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for())
-    assert missing["available"] is False and "missing" in missing["unavailable_reason"]
+    assert missing["available"] is False
+    assert "missing" in missing["unavailable_reason"]
     assert "install flux-fast" in missing["remediation"]
     assert doctor_warning(missing)
 
@@ -179,14 +182,18 @@ def test_capability_missing_corrupt_shared_and_missing_nodes(tmp_path):
 
     plant_asset(root / "text_encoders" / "qwen_3_4b.safetensors", payloads["encoder"])
     shared = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for())
-    assert shared["available"] and shared["encoder_shared"] and shared["encoder_name"] == "qwen_3_4b.safetensors"
+    assert shared["available"]
+    assert shared["encoder_shared"]
+    assert shared["encoder_name"] == "qwen_3_4b.safetensors"
 
     nodes = [n for n in load_manifest()["required_nodes"] if n != "Flux2Scheduler"]
     plant_comfy(Path(cfg.comfy_dir), nodes=nodes)
     missing_node = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for(nodes))
-    assert missing_node["available"] is False and "Flux2Scheduler" in missing_node["unavailable_reason"]
+    assert missing_node["available"] is False
+    assert "Flux2Scheduler" in missing_node["unavailable_reason"]
     ready = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for())
-    assert ready["available"] and doctor_warning(ready) is None
+    assert ready["available"]
+    assert doctor_warning(ready) is None
 
 
 def _count_sha256(monkeypatch):
@@ -266,7 +273,8 @@ def test_repeated_inspect_and_status_do_not_rehash_unchanged_files(tmp_path, mon
     ckpt.write_bytes(b"XXXX-data")
     os.utime(ckpt, ns=(time.time_ns(), time.time_ns()))
     broken = inspect_flux_fast(cfg, manifest=manifest, object_info=object_info_for())
-    assert broken["available"] is False and "corrupt" in broken["unavailable_reason"]
+    assert broken["available"] is False
+    assert "corrupt" in broken["unavailable_reason"]
     assert calls["n"] > hashed
     listing = m.images.status()
     flux = listing["modes"]["flux-fast"]
@@ -315,7 +323,8 @@ def test_install_hash_failure_space_shared_and_idempotent_remove(tmp_path):
         assert shared.read_bytes() == payloads["encoder"]
         assert not (Path(cfg.models_dir) / "diffusion_models" / "flux-2-klein-4b-fp8.safetensors").exists()
         second = remove_flux_fast(cfg, manifest=manifest)
-        assert shared.exists() and second["recovered_bytes"] == 0
+        assert shared.exists()
+        assert second["recovered_bytes"] == 0
         assert any("shared" in s["reason"] for s in first["skipped"])
     finally:
         stop_fixture(server)
@@ -388,7 +397,8 @@ def test_remove_flux_fast_deletes_alt_encoder_part_but_not_shared_part(tmp_path)
     shared = root / "text_encoders" / "qwen_3_4b.safetensors"
     assert shared.read_bytes() == b"z-image-original"
     assert shared_part.read_bytes() == b"z-image-resume"
-    assert not alt.exists() and not alt_part.exists()
+    assert not alt.exists()
+    assert not alt_part.exists()
     assert any(str(shared_part) == s["path"] or s["path"].endswith("qwen_3_4b.safetensors.part")
                for s in out["skipped"])
 
@@ -542,19 +552,23 @@ def test_http_and_tool_select_flux_fast_without_fallback(tmp_path):
     with TestClient(create_app(m)) as client:
         listing = client.get("/images").json()["status"]
         flux = listing["modes"]["flux-fast"]
-        assert flux["available"] is False and flux["label"].startswith("FLUX.2 klein 4B")
+        assert flux["available"] is False
+        assert flux["label"].startswith("FLUX.2 klein 4B")
         assert client.post("/images", json={"prompt": "a cat", "model": "flux-fast"}).status_code == 400
         enable_flux(m, tmp_path, payloads, manifest)
         r = client.post("/images", json={"prompt": "a cat", "model": "flux-fast", "resolution": "high"})
-        assert r.status_code == 400 and "does not support" in r.json()["detail"]
+        assert r.status_code == 400
+        assert "does not support" in r.json()["detail"]
         job = client.post("/images", json={"prompt": "a cat", "model": "flux-fast"}).json()
         for _ in range(200):
             if client.get(f"/images/{job['id']}").json()["status"] == "done":
                 break
             time.sleep(0.02)
         done = client.get(f"/images/{job['id']}").json()
-        assert done["status"] == "done" and done["model"] == "flux-fast"
-        assert done["provenance"]["steps"] == 4 and done["provenance"]["scheduler"] == "Flux2Scheduler"
+        assert done["status"] == "done"
+        assert done["model"] == "flux-fast"
+        assert done["provenance"]["steps"] == 4
+        assert done["provenance"]["scheduler"] == "Flux2Scheduler"
         graph = state["graphs"][-1]
         assert graph["62"]["inputs"]["steps"] == 4
         assert graph["70"]["inputs"]["unet_name"] == "flux-2-klein-4b-fp8.safetensors"
@@ -627,7 +641,8 @@ def test_api_root_and_health_stay_responsive_during_cold_flux_hash(tmp_path, mon
         health = client.get("/health")
         root_json = client.get("/api/v1").json()
         elapsed = time.monotonic() - started
-        assert health.status_code == 200 and health.json()["ok"] is True
+        assert health.status_code == 200
+        assert health.json()["ok"] is True
         release.set()
         # Generous on purpose: loaded runners took ~1 s here, a blocked loop takes >= 5 s.
         assert elapsed < 2.5
@@ -663,7 +678,8 @@ def test_flux_status_hashes_files_installed_while_daemon_running(tmp_path):
             if flux["available"]:
                 break
             await asyncio.sleep(0.05)
-        assert flux is not None and flux["available"] is True
+        assert flux is not None
+        assert flux["available"] is True
         await m.stop()
     asyncio.run(body())
 
@@ -709,7 +725,8 @@ def test_flux_warmup_error_surfaces_then_recovers(tmp_path, monkeypatch):
         if recovered["available"]:
             break
         time.sleep(0.05)
-    assert recovered is not None and recovered["available"] is True
+    assert recovered is not None
+    assert recovered["available"] is True
 
 
 def test_quality_fast_and_flux_fast_share_one_gpu_batch(tmp_path):
@@ -726,7 +743,8 @@ def test_quality_fast_and_flux_fast_share_one_gpu_batch(tmp_path):
         m.images._lora_available = True
         assert list(m.images.status()["modes"]) == ["fast", "quality", "quality-fast", "flux-fast"]
         model_help = m.images.schemas()[0]["function"]["parameters"]["properties"]["model"]["description"]
-        assert "quality-fast" in model_help and "flux-fast" in model_help
+        assert "quality-fast" in model_help
+        assert "flux-fast" in model_help
 
         quality = m.images.submit("fast poster", model="quality-fast", seed=11)
         flux = m.images.submit("fast illustration", model="flux-fast", seed=12)
@@ -753,7 +771,8 @@ def test_old_image_rows_remain_readable(tmp_path):
         "INSERT INTO images (id, source, prompt, model, aspect_ratio, width, height, seed, status, created_at) "
         "VALUES ('oldimg', 'phone', 'a lamp', 'fast', '1:1', 1024, 1024, 1, 'done', 1)")
     row = db.get_image("oldimg")
-    assert row["model"] == "fast" and row["provenance"] == {}
+    assert row["model"] == "fast"
+    assert row["provenance"] == {}
     db.close()
 
 
@@ -771,7 +790,8 @@ def test_staged_comfyui_validation_and_rollback(tmp_path):
     for extra in ("ModelSamplingAuraFlow", "EmptySD3LatentImage", "KSampler"):
         info.setdefault(extra, {})
     checked = validate_comfyui(cfg, object_info=info, root=staged)
-    assert checked["ok"] and checked["graphs"]["ok"]
+    assert checked["ok"]
+    assert checked["graphs"]["ok"]
     missing = validate_comfyui(cfg, object_info={"UNETLoader": {}}, root=staged)
     assert not missing["ok"]
 
@@ -800,7 +820,9 @@ def test_staged_comfyui_validation_and_rollback(tmp_path):
     graphs = preflight_graphs(info)
     assert graphs["ok"]
     bad = preflight_graphs({"UNETLoader": {}})
-    assert not bad["ok"] and "fast" in bad["missing"] and "flux-fast" in bad["missing"]
+    assert not bad["ok"]
+    assert "fast" in bad["missing"]
+    assert "flux-fast" in bad["missing"]
 
 
 # --- queue / GPU handoff ---
@@ -875,7 +897,8 @@ def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
         deliver_interrupt.set()
         cancelled = await asyncio.wait_for(cancelling, timeout=2)
         completed = await asyncio.wait_for(m.images.wait(second["id"]), timeout=2)
-        assert cancelled["status"] == "failed" and cancelled["error"] == "cancelled"
+        assert cancelled["status"] == "failed"
+        assert cancelled["error"] == "cancelled"
         assert completed["status"] == "done"
         assert state["interrupted"] == ["p1"]
         assert state["prompts"] == ["p1", "p2"]
@@ -921,13 +944,15 @@ def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
         await m.start(maintenance=False)
         timed = m.images.submit("slow")
         timed = await m.images.wait(timed["id"])
-        assert timed["status"] == "failed" and "timed out" in timed["error"]
+        assert timed["status"] == "failed"
+        assert "timed out" in timed["error"]
         for _ in range(100):
             if m.images.phase == "idle":
                 break
             await asyncio.sleep(0.02)
         assert server.calls[-2:] == ["stop", "start"] or server.calls == ["stop", "start"]
-        assert m.images.phase == "idle" and not m.images.gpu_taken
+        assert m.images.phase == "idle"
+        assert not m.images.gpu_taken
         await m.stop()
 
         m, server, _ = image_manager(tmp_path / "c")
@@ -940,7 +965,8 @@ def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
             await asyncio.sleep(0.01)
         await m.images.cancel(job["id"])
         done = await m.images.wait(job["id"])
-        assert done["status"] == "failed" and "cancelled" in done["error"]
+        assert done["status"] == "failed"
+        assert "cancelled" in done["error"]
         for _ in range(100):
             if m.images.phase == "idle":
                 break
@@ -952,7 +978,8 @@ def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
         await m.start(maintenance=False)
         bad = m.images.submit("nope")
         bad = await m.images.wait(bad["id"])
-        assert bad["status"] == "failed" and "CUDA" in bad["error"]
+        assert bad["status"] == "failed"
+        assert "CUDA" in bad["error"]
         for _ in range(100):
             if m.images.phase == "idle":
                 break
@@ -985,13 +1012,15 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
         await m.images.cancel(job["id"])
         await m.images._run_batch(job["id"])
         assert server.calls == []
-        assert m.images.phase == "idle" and not m.images.gpu_taken
+        assert m.images.phase == "idle"
+        assert not m.images.gpu_taken
 
         m, server, _ = image_manager(tmp_path / "q")
         job = m.images.submit("never run")
         assert job["status"] == "queued"
         cancelled = await m.images.cancel(job["id"])
-        assert cancelled["status"] == "failed" and "cancelled" in cancelled["error"]
+        assert cancelled["status"] == "failed"
+        assert "cancelled" in cancelled["error"]
         await m.start(maintenance=False)
         done = await m.images.wait(job["id"])
         assert done["status"] == "failed"
@@ -1000,7 +1029,8 @@ def test_cancel_queued_job_does_not_boot_comfy_or_unload_llm(tmp_path):
                 break
             await asyncio.sleep(0.02)
         assert server.calls == []
-        assert not m.images.gpu_taken and m.images.phase == "idle"
+        assert not m.images.gpu_taken
+        assert m.images.phase == "idle"
         await m.stop()
 
         m, server, _ = image_manager(tmp_path / "mix")
@@ -1082,7 +1112,8 @@ def test_cancel_during_exclusive_gate_wait_does_not_boot_comfy(tmp_path):
         assert server.calls == []
         assert comfy_starts == []
         assert gate.releases == 1
-        assert m.images.phase == "idle" and not m.images.gpu_taken
+        assert m.images.phase == "idle"
+        assert not m.images.gpu_taken
     asyncio.run(body())
 
 
@@ -1092,7 +1123,8 @@ def test_manifest_pins_public_apache_artifacts():
     ckpt = m["assets"]["checkpoint"]
     assert ckpt["revision"] == "5b4408e59397a4a37ccb46afe426d8ed86379441"
     assert ckpt["bytes"] == 4070624520
-    assert m["steps"] == 4 and m["guidance"] == 1.0
+    assert m["steps"] == 4
+    assert m["guidance"] == 1.0
     assert m["comfyui"]["pinned_portable"]["tag"] == "v0.36.0"
     assert "latest" not in m["comfyui"]["pinned_portable"]["url"]
     assert RESERVE_BYTES == 5 * 1024 ** 3
