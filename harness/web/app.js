@@ -4658,28 +4658,38 @@ function blockingUpdate(meta, state) {
     h("p", { class: "muted small" }, `Web protocol ${WEB_PROTOCOL}; server supports ${meta.protocols?.admin?.min}–${meta.protocols?.admin?.max}.`)));
 }
 
+// Which side must update when the server's admin protocol range excludes this client (null = compatible).
+function protocolMismatch(range) {
+  if (!range) return null;
+  if (WEB_PROTOCOL < range.min) return "client_update_required";
+  return WEB_PROTOCOL > range.max ? "daemon_update_required" : null;
+}
+
+// Asks once per bundle whether to reload into the newer build; true when a reload was started.
+async function offerBundleUpdate(foreground) {
+  try { await (await navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
+  const promptKey = "harness.webUpdatePrompt";
+  if (sessionStorage.getItem(promptKey) === WEB_BUILD_ID || (foreground && hasUnsavedInput())) return false;
+  sessionStorage.setItem(promptKey, WEB_BUILD_ID);
+  if (!confirm("A newer Agent Harness Web bundle is available. Reload and update now?")) return false;
+  await reloadAndUpdate();
+  return true;
+}
+
 async function checkCompatibility({ foreground = false } = {}) {
   let meta;
   try { meta = await agentHarnessWeb.compatibility(); }
   catch (_) { return !protocolBlocked; } // stay on the update card if health fails after a skew
-  const range = meta.protocols?.admin;
-  if (range && (WEB_PROTOCOL < range.min || WEB_PROTOCOL > range.max)) {
-    blockingUpdate(meta, WEB_PROTOCOL < range.min ? "client_update_required" : "daemon_update_required");
+  const mismatch = protocolMismatch(meta.protocols?.admin);
+  if (mismatch) {
+    blockingUpdate(meta, mismatch);
     return false;
   }
   const wasBlocked = protocolBlocked;
   protocolBlocked = false;
   const available = meta.update_hint?.web?.build_id;
   if (available && available !== WEB_BUILD_ID) {
-    try { await (await navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
-    const promptKey = "harness.webUpdatePrompt";
-    if (sessionStorage.getItem(promptKey) !== WEB_BUILD_ID && (!foreground || !hasUnsavedInput())) {
-      sessionStorage.setItem(promptKey, WEB_BUILD_ID);
-      if (confirm("A newer Agent Harness Web bundle is available. Reload and update now?")) {
-        await reloadAndUpdate();
-        return false;
-      }
-    }
+    if (await offerBundleUpdate(foreground)) return false;
   } else {
     sessionStorage.removeItem(UPDATE_GUARD);
   }
