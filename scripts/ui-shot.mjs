@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"; // fixed install path, no PATH lookup
+const EDGE = String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`; // fixed install path, no PATH lookup
 const [outDir, ...shots] = process.argv.slice(2);
 mkdirSync(outDir, { recursive: true });
 const port = 9333;

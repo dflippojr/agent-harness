@@ -293,8 +293,8 @@ function linkQuotes(html, answer, pages) {
 // Small, safe Markdown subset: everything is escaped first, then a few constructs are re-enabled.
 // A fenced block in a language the snippet runner supports is marked so Chat can add its Run button.
 const MD_BLOCK_MARK = "\u0000";   // brackets a fenced-block placeholder; escaped input never contains it as text we render
-const MD_BLOCK_LINE = new RegExp(`^${MD_BLOCK_MARK}\\d+${MD_BLOCK_MARK}$`);
-const MD_BLOCK_REF = new RegExp(`${MD_BLOCK_MARK}(\\d+)${MD_BLOCK_MARK}`, "g");
+const MD_BLOCK_LINE = new RegExp(String.raw`^${MD_BLOCK_MARK}\d+${MD_BLOCK_MARK}$`);
+const MD_BLOCK_REF = new RegExp(String.raw`${MD_BLOCK_MARK}(\d+)${MD_BLOCK_MARK}`, "g");
 const MD_TABLE_ROW = /^\s*\|.*\|\s*$/;
 const MD_LIST_ITEM = /^\s*([-*]|\d+\.) /;
 
@@ -372,10 +372,11 @@ function md(src, pages) {
   });
   const out = [];
   const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
+  let i = 0;
+  while (i < lines.length) {
     const [html, last] = mdBlock(lines, i);
     out.push(html);
-    i = last;
+    i = last + 1;
   }
   return linkQuotes(out.join("\n").replace(MD_BLOCK_REF, (_, n) => blocks[Number(n)]), src, pages);
 }
