@@ -321,27 +321,33 @@ def _watch_event(e: dict, sid: str, args, state: dict) -> int | None:
     return None
 
 
+def _consume_stream(sid: str, args, state: dict) -> tuple[int | None, bool]:
+    """Read one connection. Returns (exit code, True if the stream was left to ask about an approval)."""
+    for e in iter_sse(sid, state["after"]):
+        if e["seq"] is not None:
+            state["after"] = e["seq"]
+        code = _watch_event(e, sid, args, state)
+        if code is not None:
+            return code, False
+        if _wants_prompt(state["prompt_for"], e["type"], args):
+            if _approval_pending(sid, state["prompt_for"]):
+                return None, True  # leave the stream to ask, then reconnect from `after`
+            state["prompt_for"] = None
+    return None, False
+
+
 def watch(sid: str, args, after: int = 0) -> int:
     state = {"streamed": {"content": False, "reasoning": False}, "position": None, "last_content": "",
-             "prompt_for": None}
+             "prompt_for": None, "after": after}
     while True:
         state["prompt_for"] = None
-        for e in iter_sse(sid, after):
-            if e["seq"] is not None:
-                after = e["seq"]
-            code = _watch_event(e, sid, args, state)
-            if code is not None:
-                return code
-            if e["type"] in ("delta", "queue", "compacting"):
-                continue
-            if _wants_prompt(state["prompt_for"], e["type"], args):
-                if _approval_pending(sid, state["prompt_for"]):
-                    break  # leave the stream to ask, then reconnect from `after`
-                state["prompt_for"] = None
+        code, ask = _consume_stream(sid, args, state)
+        if code is not None:
+            return code
+        if ask:
+            _decide_approval(sid, state["prompt_for"])
         else:
             time.sleep(2)  # stream ended or dropped; reconnect
-            continue
-        _decide_approval(sid, state["prompt_for"])
 
 
 def _build_parser() -> argparse.ArgumentParser:
