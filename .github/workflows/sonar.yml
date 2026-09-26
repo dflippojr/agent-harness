@@ -61,27 +61,18 @@ jobs:
         run: Write-Host "NUMBER_OF_PROCESSORS=$env:NUMBER_OF_PROCESSORS"
 
       - name: Run tests with coverage
-        # Hang diagnostics (intermittent hosted-runner stalls on #228): -v keeps the last finished test per worker in
-        # the log, the watchdog dumps every python process's stacks if pytest is still running after 20 minutes,
-        # and the step timeout turns a silent multi-hour hang into a failure.
+        # A hung test fails the step after 40 minutes with its log saved, and faulthandler prints the stack of any
+        # test that runs longer than 5 minutes (that is how the Python 3.12 subprocess hang on #228 was found).
         timeout-minutes: 40
         env:
           GIT_AUTHOR_NAME: github-actions[bot]
           GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
-        run: |
-          python -m pip install --quiet py-spy
-          @'
-          Start-Sleep -Seconds 1200
-          Write-Host '::warning::pytest still running after 20 minutes; stack dump follows'
-          Get-Process python -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ('--- python pid ' + $_.Id); py-spy dump --pid $_.Id 2>&1 | Write-Host }
-          '@ | Set-Content -Path $env:RUNNER_TEMP\hang-watchdog.ps1
-          $watchdog = Start-Process -FilePath pwsh -ArgumentList '-NoProfile','-File',"$env:RUNNER_TEMP\hang-watchdog.ps1" -NoNewWindow -PassThru
-          python -m pytest tests -v -n 4 --dist loadfile -o faulthandler_timeout=300 --cov=harness --cov=sdk --cov=scripts --cov=macrunner --cov-report=xml:coverage.xml --cov-report=term
-          $code = $LASTEXITCODE
-          Stop-Process -Id $watchdog.Id -Force -ErrorAction SilentlyContinue
-          exit $code
+        run: >
+          python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
+          --cov=harness --cov=sdk --cov=scripts --cov=macrunner
+          --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Scan with SonarCloud
         uses: SonarSource/sonarqube-scan-action@v8
