@@ -204,7 +204,7 @@ def _iter_sse(sid: str, after: int):
                 data = []
 
 
-def _print_delta(d: dict, streamed: dict) -> None:
+def _print_delta(d: dict, args, streamed: dict) -> None:
     """One streamed token, opening the `assistant:` line and the dim reasoning block as needed."""
     if not any(streamed.values()):
         print(f"{CYAN}assistant:{RESET} ", end="")
@@ -281,17 +281,6 @@ def _decide_approval(sid: str, approval_id: str) -> None:
         print(f"{DIM}left pending; approve later with: approve {sid} {approval_id}{RESET}")
 
 
-def _note_queue(d: dict, position):
-    """Print a queue-position change and return the new position."""
-    if d["position"] != position and d["position"] > 0:
-        print(f"{DIM}queued: position {d['position']}{RESET}")
-    return d["position"]
-
-
-def _approval_pending(sid: str, approval_id: str) -> bool:
-    return approval_id in {a["id"] for a in api("GET", f"/sessions/{sid}/approvals")}
-
-
 def watch(sid: str, args, after: int = 0) -> int:
     streamed = {"content": False, "reasoning": False}
     position = None
@@ -304,10 +293,12 @@ def watch(sid: str, args, after: int = 0) -> int:
                 after = e["seq"]
             if t == "delta":
                 if d["kind"] != "reasoning" or args.reasoning:
-                    _print_delta(d, streamed)
+                    _print_delta(d, args, streamed)
                 continue
             if t == "queue":
-                position = _note_queue(d, position)
+                if d["position"] != position and d["position"] > 0:
+                    print(f"{DIM}queued: position {d['position']}{RESET}")
+                position = d["position"]
                 continue
             if t == "compacting":
                 print(f"{DIM}compacting {d['messages']} messages...{RESET}")
@@ -319,7 +310,8 @@ def watch(sid: str, args, after: int = 0) -> int:
                 prompt_for = d["id"]
             elif t == "approval_decided":
                 print(f"{YELLOW}approval {d['id']} {d['status']}{RESET}")
-                prompt_for = None if prompt_for == d["id"] else prompt_for
+                if prompt_for == d["id"]:
+                    prompt_for = None
             elif t == "status":
                 code = _terminal_exit(d, sid, last_content)
                 if code is not None:
@@ -327,91 +319,14 @@ def watch(sid: str, args, after: int = 0) -> int:
             else:
                 _print_event(t, d, args)
             if prompt_for and t in ("approval_requested", "status") and sys.stdin.isatty() and not args.no_prompt:
-                if _approval_pending(sid, prompt_for):
+                pending = {a["id"] for a in api("GET", f"/sessions/{sid}/approvals")}
+                if prompt_for in pending:
                     break  # leave the stream to ask, then reconnect from `after`
                 prompt_for = None
         else:
             time.sleep(2)  # stream ended or dropped; reconnect
             continue
         _decide_approval(sid, prompt_for)
-
-
-def _cmd_version() -> int:
-    print(f"Agent Harness CLI {MAC_CLIENT_VERSION} (admin protocol {CLIENT_PROTOCOLS['cli']})")
-    try:
-        remote = server_version()
-    except RuntimeError as exc:
-        print(str(exc))
-        return 1
-    supported = remote.get("protocols", {}).get("admin", {})
-    protocol = CLIENT_PROTOCOLS["cli"]
-    if protocol < supported.get("min", protocol):
-        state = "client update required"
-    elif protocol > supported.get("max", protocol):
-        state = "Server update required"
-    else:
-        state = "compatible"
-    print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
-    print(f"compatibility: {state} (Server supports admin protocol "
-          f"{supported.get('min', '?')}–{supported.get('max', '?')})")
-    return 0
-
-
-def _cmd_runner(args) -> int:
-    if args.runner_cmd == "restart":
-        launchctl("kickstart", "-k", check=True)
-        print("runner restarted")
-        return 0
-    if args.runner_cmd == "logs":
-        return _show_runner_logs(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow)
-    local = launchctl("print")
-    config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
-    remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
-    print(f"launchd: {'loaded' if local.returncode == 0 else 'not loaded'}")
-    print("daemon: " + (json.dumps(remote, indent=2) if remote else "runner not configured on daemon"))
-    return 0
-
-
-def _session_cmd(args) -> int:
-    if args.cmd == "new":
-        s = api("POST", "/sessions", json={"prompt": args.prompt, "project": args.project,
-                                           "backend": args.backend, "model": args.model, "title": args.title})
-        print(f"session {s['id']} ({s['project']}, {s['model']})")
-        return 0 if args.detach else watch(s["id"], args)
-    if args.cmd == "watch":
-        return watch(api("GET", f"/sessions/{args.session}")["id"], args)
-    if args.cmd == "list":
-        for s in api("GET", "/sessions"):
-            when = time.strftime("%m-%d %H:%M", time.localtime(s["created_at"]))
-            print(f"{s['id']}  {when}  {s['status']:<16} {s['project']:<10} {s['title']}")
-        return 0
-    if args.cmd == "show":
-        print(json.dumps(api("GET", f"/sessions/{args.session}"), indent=2))
-        return 0
-    if args.cmd == "transcript":
-        print(api("GET", f"/sessions/{args.session}/transcript"))
-        return 0
-    if args.cmd == "cancel":
-        print(api("POST", f"/sessions/{args.session}/cancel")["status"])
-        return 0
-    if args.cmd == "send":
-        before = api("GET", f"/sessions/{args.session}")
-        s = api("POST", f"/sessions/{args.session}/messages", json={"content": args.message})
-        print(f"sent; session is {s['status']}")
-        if args.watch:
-            args.reasoning = args.full = args.no_prompt = False
-            return watch(s["id"], args, after=before["last_event_seq"])
-        return 0
-    if args.cmd in ("approve", "deny"):
-        a = api("POST", f"/sessions/{args.session}/approvals/{args.approval}",
-                json={"decision": args.cmd, "note": args.note})
-        print(f"{a['id']} {a['status']}")
-        return 0
-    if args.cmd == "queue":
-        for q in api("GET", "/queue"):
-            print(f"{q['position']}  {q['session_id']}")
-        return 0
-    return 1
 
 
 def main() -> int:
@@ -478,7 +393,20 @@ def main() -> int:
         print(f"paired {paired['runner']['name']} with {paired['server']}")
         return 0
     if args.cmd == "version":
-        return _cmd_version()
+        print(f"Agent Harness CLI {MAC_CLIENT_VERSION} (admin protocol {CLIENT_PROTOCOLS['cli']})")
+        try:
+            remote = server_version()
+        except RuntimeError as exc:
+            print(str(exc))
+            return 1
+        supported = remote.get("protocols", {}).get("admin", {})
+        protocol = CLIENT_PROTOCOLS["cli"]
+        state = ("client update required" if protocol < supported.get("min", protocol) else
+                 "Server update required" if protocol > supported.get("max", protocol) else "compatible")
+        print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
+        print(f"compatibility: {state} (Server supports admin protocol "
+              f"{supported.get('min', '?')}–{supported.get('max', '?')})")
+        return 0
     if args.cmd == "update":
         try:
             result = apply_update(BASE)
@@ -495,9 +423,58 @@ def main() -> int:
         print(f"allowed project root {root}")
         return 0
     if args.cmd == "runner":
-        return _cmd_runner(args)
+        if args.runner_cmd == "restart":
+            launchctl("kickstart", "-k", check=True)
+            print("runner restarted")
+            return 0
+        if args.runner_cmd == "logs":
+            return _show_runner_logs(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow)
+        local = launchctl("print")
+        config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
+        remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
+        print(f"launchd: {'loaded' if local.returncode == 0 else 'not loaded'}")
+        print("daemon: " + (json.dumps(remote, indent=2) if remote else "runner not configured on daemon"))
+        return 0
 
-    return _session_cmd(args)
+    if args.cmd == "new":
+        s = api("POST", "/sessions", json={"prompt": args.prompt, "project": args.project,
+                                           "backend": args.backend, "model": args.model, "title": args.title})
+        print(f"session {s['id']} ({s['project']}, {s['model']})")
+        return 0 if args.detach else watch(s["id"], args)
+    if args.cmd == "watch":
+        return watch(api("GET", f"/sessions/{args.session}")["id"], args)
+    if args.cmd == "list":
+        for s in api("GET", "/sessions"):
+            when = time.strftime("%m-%d %H:%M", time.localtime(s["created_at"]))
+            print(f"{s['id']}  {when}  {s['status']:<16} {s['project']:<10} {s['title']}")
+        return 0
+    if args.cmd == "show":
+        print(json.dumps(api("GET", f"/sessions/{args.session}"), indent=2))
+        return 0
+    if args.cmd == "transcript":
+        print(api("GET", f"/sessions/{args.session}/transcript"))
+        return 0
+    if args.cmd == "cancel":
+        print(api("POST", f"/sessions/{args.session}/cancel")["status"])
+        return 0
+    if args.cmd == "send":
+        before = api("GET", f"/sessions/{args.session}")
+        s = api("POST", f"/sessions/{args.session}/messages", json={"content": args.message})
+        print(f"sent; session is {s['status']}")
+        if args.watch:
+            args.reasoning = args.full = args.no_prompt = False
+            return watch(s["id"], args, after=before["last_event_seq"])
+        return 0
+    if args.cmd in ("approve", "deny"):
+        a = api("POST", f"/sessions/{args.session}/approvals/{args.approval}",
+                json={"decision": args.cmd, "note": args.note})
+        print(f"{a['id']} {a['status']}")
+        return 0
+    if args.cmd == "queue":
+        for q in api("GET", "/queue"):
+            print(f"{q['position']}  {q['session_id']}")
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
