@@ -93,8 +93,10 @@ def test_fetch_extracts_pages_and_strips_images():
 
     async def body():
         first = await web.web_fetch("https://example.com/big")
-        assert first.startswith("[Untrusted web content") and "# Queue notes" in first
-        assert "call web_fetch with start=" in first and "tail marker" not in first
+        assert first.startswith("[Untrusted web content")
+        assert "# Queue notes" in first
+        assert "call web_fetch with start=" in first
+        assert "tail marker" not in first
         start = int(first.rsplit("start=", 1)[1].split(" ")[0])
         pages, text = 1, first
         while "call web_fetch with start=" in text and pages < 20:
@@ -102,9 +104,12 @@ def test_fetch_extracts_pages_and_strips_images():
             pages += 1
             if "start=" in text.rsplit("\n", 1)[-1]:
                 start = int(text.rsplit("start=", 1)[1].split(" ")[0])
-        assert "tail marker" in text and pages > 2
+        assert "tail marker" in text
+        assert pages > 2
         found = await web.web_fetch("https://example.com/big", find="tail marker|queue number 259")
-        assert "2 matches" in found and "tail marker" in found and len(found) < 3000
+        assert "2 matches" in found
+        assert "tail marker" in found
+        assert len(found) < 3000
         assert "No matches" in await web.web_fetch("https://example.com/big", find="nothing-like-this")
         assert "[IMAGE: logo] hello" in await web.web_fetch("https://example.com/small")
         with pytest.raises(ToolError, match="couldn't open the PDF"):  # a broken PDF (real ones: test_phase7)
@@ -132,7 +137,9 @@ def test_search_formats_dedupes_and_caches():
 
     async def body():
         out = await web.web_search("gpu queue", limit=5)
-        assert out.index("1. A") < out.index("2. B") and "A again" not in out and "first hit" in out
+        assert out.index("1. A") < out.index("2. B")
+        assert "A again" not in out
+        assert "first hit" in out
         await web.web_search("gpu queue", limit=5)
         assert calls == ["gpu queue"]
     asyncio.run(body())
@@ -152,7 +159,8 @@ def test_web_tools_reach_sessions_and_projects_can_opt_out(tmp_path):
         s = m.create("search")
         await wait_status(m, s["id"], "done")
         result = events(m, s["id"], "tool_result")[0]
-        assert result["ok"] and "https://x.example/" in result["output"]
+        assert result["ok"]
+        assert "https://x.example/" in result["output"]
         assert "web_fetch" in m.db.get_session(s["id"])["context"][0]["content"]
         offline = m.create("no web", project="offline")
         assert "web_fetch" not in m.db.get_session(offline["id"])["context"][0]["content"]
@@ -195,21 +203,25 @@ def test_endpoint_auth_models_and_passthrough(tmp_path):
         assert client.post("/v1/chat/completions", json={"model": "x"}).status_code == 401
         created = client.post("/keys", json={"name": "macbook-zed"}).json()
         key = created["key"]
-        assert key.startswith("hk-") and "key" not in client.get("/keys").json()[0]
+        assert key.startswith("hk-")
+        assert "key" not in client.get("/keys").json()[0]
         auth = {"Authorization": f"Bearer {key}"}
 
         models = client.get("/v1/models", headers=auth).json()
-        assert models["data"][0]["id"] == "fake" and models["data"][0]["type"] == "model"
+        assert models["data"][0]["id"] == "fake"
+        assert models["data"][0]["type"] == "model"
         assert client.get("/v1/capabilities", headers=auth).json()["features"]["tool_calls"] is True
 
         r = client.post("/v1/chat/completions", headers=auth, json={"model": "gpt-4o", "messages": []})
-        assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "hello"
+        assert r.status_code == 200
+        assert r.json()["choices"][0]["message"]["content"] == "hello"
         assert json.loads(seen[-1][1])["model"] == "fake"  # unknown names go to the default model
 
         with client.stream("POST", "/v1/messages", headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
                            json={"model": "claude-sonnet-5", "stream": True, "messages": []}) as s:
             text = b"".join(s.iter_bytes())
-        assert b"message_delta" in text and seen[-1][0] == "/v1/messages"
+        assert b"message_delta" in text
+        assert seen[-1][0] == "/v1/messages"
 
         rows = m.db.conn.execute("SELECT route, model, stream, status, prompt_tokens, completion_tokens "
                                  "FROM endpoint_requests ORDER BY id").fetchall()
@@ -239,7 +251,8 @@ def test_endpoint_refuses_while_gpu_guard_paused(tmp_path):
         key = client.post("/keys", json={"name": "script"}).json()["key"]
         m.guard = Paused()
         r = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json={"messages": []})
-        assert r.status_code == 503 and r.headers["retry-after"] == "180"
+        assert r.status_code == 503
+        assert r.headers["retry-after"] == "180"
         assert client.post("/v1/messages/count_tokens", headers={"x-api-key": key}, json={}).status_code == 200
         m.guard = None
 
@@ -335,7 +348,8 @@ def test_inference_gate_queued_endpoint_refused_when_exclusive():
 
         await exclusive.release()
         slot = await gate.endpoint_request()
-        assert gate.endpoint_active == 1 and not gate.exclusive
+        assert gate.endpoint_active == 1
+        assert not gate.exclusive
         await slot.release()
     asyncio.run(body())
 
@@ -352,7 +366,8 @@ def test_inference_gate_cancellation_and_exclusive_rejection_counters():
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiting
-        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+        assert gate.endpoint_waiting == 0
+        assert gate.endpoint_active == 0
 
         queued = asyncio.create_task(gate.endpoint_request())
         await _wait_until(lambda: gate.endpoint_waiting == 1)
@@ -366,19 +381,22 @@ def test_inference_gate_cancellation_and_exclusive_rejection_counters():
             await extra
         with pytest.raises(asyncio.CancelledError):
             await queued
-        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+        assert gate.endpoint_waiting == 0
+        assert gate.endpoint_active == 0
         await busy.release()
 
         exclusive = await gate.acquire_exclusive()
         with pytest.raises(GpuExclusive):
             await gate.endpoint_request()
-        assert gate.endpoint_waiting == 0 and gate.endpoint_active == 0
+        assert gate.endpoint_waiting == 0
+        assert gate.endpoint_active == 0
         agent = asyncio.create_task(gate.agent_turn())
         await _wait_until(lambda: bool(gate._agent_waiting_since))
         agent.cancel()
         with pytest.raises(asyncio.CancelledError):
             await agent
-        assert not gate._agent_waiting_since and gate.agent_active == 0
+        assert not gate._agent_waiting_since
+        assert gate.agent_active == 0
         await exclusive.release()
         assert not gate.exclusive
 
@@ -386,7 +404,8 @@ def test_inference_gate_cancellation_and_exclusive_rejection_counters():
         await slot.release()
         turn = await gate.agent_turn()
         await turn.release()
-        assert gate.endpoint_active == 0 and gate.agent_active == 0
+        assert gate.endpoint_active == 0
+        assert gate.agent_active == 0
     asyncio.run(body())
 
 
@@ -502,8 +521,10 @@ def test_image_batch_takes_gpu_and_gives_it_back(tmp_path):
         done = [await m.images.wait(j["id"]) for j in (a, b, c)]
         assert [j["status"] for j in done] == ["done", "failed", "done"]
         assert "CUDA out of memory" in done[1]["error"]
-        assert (done[0]["width"], done[0]["height"]) == (1344, 768) and (done[2]["width"], done[2]["height"]) == (864, 1152)
-        assert done[1]["resolution"] == "high" and done[2]["resolution"] == "standard"
+        assert (done[0]["width"], done[0]["height"]) == (1344, 768)
+        assert (done[2]["width"], done[2]["height"]) == (864, 1152)
+        assert done[1]["resolution"] == "high"
+        assert done[2]["resolution"] == "standard"
         assert m.images.path(done[0]).read_bytes() == PNG
         steps = [next(n["inputs"]["steps"] for n in g.values() if n["class_type"] == "KSampler") for g in state["graphs"]]
         assert steps == [8, 50, 50]  # fast = Z-Image-Turbo, quality = Qwen-Image-2512
@@ -513,7 +534,8 @@ def test_image_batch_takes_gpu_and_gives_it_back(tmp_path):
                 break
             await asyncio.sleep(0.02)
         assert server.calls == ["stop", "start"]  # one hand-over for the whole batch
-        assert not m.runner.gate.exclusive and await m.warmer.state(m.cfg.models["fake"]) != "paused"
+        assert not m.runner.gate.exclusive
+        assert await m.warmer.state(m.cfg.models["fake"]) != "paused"
         slot = await m.runner.gate.endpoint_request()
         await slot.release()
         await m.stop()
@@ -530,10 +552,12 @@ def test_agent_generate_image_tool_saves_into_workspace(tmp_path):
         s = m.create("make an icon")
         await wait_status(m, s["id"], "done", timeout=20)
         result = events(m, s["id"], "tool_result")[0]
-        assert result["ok"] and "assets/icon.png" in result["output"]
+        assert result["ok"]
+        assert "assets/icon.png" in result["output"]
         assert (tmp_path / "data" / "workspaces" / s["id"] / "assets" / "icon.png").read_bytes() == PNG
         job = m.db.list_images()[0]
-        assert job["source"] == "agent" and job["session_id"] == s["id"]
+        assert job["source"] == "agent"
+        assert job["session_id"] == s["id"]
         bad = await m.runner.images.call("generate_image", {"prompt": "x", "filename": "../../escape.png"},
                                          workspace_root=tmp_path / "data" / "workspaces" / s["id"])
         await m.stop()
@@ -558,9 +582,12 @@ def test_images_api_and_generate_image_for_tower_and_mac(tmp_path):
                 break
             time.sleep(0.02)
         r = client.get(f"/images/{job['id']}.png")
-        assert r.status_code == 200 and r.content == PNG and r.headers["content-type"] == "image/png"
+        assert r.status_code == 200
+        assert r.content == PNG
+        assert r.headers["content-type"] == "image/png"
         listing = client.get("/images").json()
-        assert listing["images"][0]["id"] == job["id"] and "fast" in listing["status"]["models"]
+        assert listing["images"][0]["id"] == job["id"]
+        assert "fast" in listing["status"]["models"]
         assert "quality-fast" in listing["status"]["models"]
         assert listing["status"]["modes"]["quality"]["available"] is True
         assert listing["status"]["modes"]["quality-fast"]["available"] is False
@@ -583,11 +610,16 @@ def test_quality_fast_graph_uses_official_lightning_settings():
     q_sampler = next(node["inputs"] for node in quality.values() if node["class_type"] == "KSampler")
     l_sampler = next(node["inputs"] for node in lightning.values() if node["class_type"] == "KSampler")
     t_sampler = next(node["inputs"] for node in turbo.values() if node["class_type"] == "KSampler")
-    assert q_sampler["steps"] == 50 and q_sampler["cfg"] == 4 and q_sampler["sampler_name"] == "euler"
+    assert q_sampler["steps"] == 50
+    assert q_sampler["cfg"] == 4
+    assert q_sampler["sampler_name"] == "euler"
     assert "LoraLoaderModelOnly" not in {node["class_type"] for node in quality.values()}
     assert quality["222"]["inputs"] == {"model": ["226", 0], "shift": 3.1}
-    assert l_sampler["steps"] == 4 and l_sampler["cfg"] == 1
-    assert l_sampler["sampler_name"] == "euler" and l_sampler["scheduler"] == "simple" and l_sampler["denoise"] == 1
+    assert l_sampler["steps"] == 4
+    assert l_sampler["cfg"] == 1
+    assert l_sampler["sampler_name"] == "euler"
+    assert l_sampler["scheduler"] == "simple"
+    assert l_sampler["denoise"] == 1
     lora = next(node["inputs"] for node in lightning.values() if node["class_type"] == "LoraLoaderModelOnly")
     assert lora == {"model": ["226", 0], "lora_name": LIGHTNING_LORA["filename"], "strength_model": 1}
     assert lightning["222"]["inputs"] == {"model": ["221", 0], "shift": 3.1}
@@ -600,7 +632,8 @@ def test_quality_fast_graph_uses_official_lightning_settings():
 def test_missing_lightning_lora_disables_only_quality_fast(tmp_path):
     m, _, _ = image_manager(tmp_path)
     status = m.images.status()
-    assert status["modes"]["fast"]["available"] and status["modes"]["quality"]["available"]
+    assert status["modes"]["fast"]["available"]
+    assert status["modes"]["quality"]["available"]
     assert status["modes"]["quality-fast"]["available"] is False
     assert status["modes"]["quality-fast"]["optional"] is True
     assert "will not fall back" in status["modes"]["quality-fast"]["setup"]
@@ -621,12 +654,15 @@ def test_quality_fast_job_records_lora_and_shares_the_gpu_batch(tmp_path):
         b = m.images.submit("poster text", model="quality-fast", seed=7)
         done = [await m.images.wait(job["id"]) for job in (a, b)]
         assert [job["status"] for job in done] == ["done", "done"]
-        assert done[0]["lora"] == "" and done[0]["base_model"] == "qwen_image_2512_fp8_e4m3fn.safetensors"
+        assert done[0]["lora"] == ""
+        assert done[0]["base_model"] == "qwen_image_2512_fp8_e4m3fn.safetensors"
         assert done[1]["model"] == "quality-fast"
         assert done[1]["lora"] == LIGHTNING_LORA["filename"]
         assert done[1]["lora_revision"] == LIGHTNING_LORA["revision"]
         assert done[1]["lora_sha256"] == LIGHTNING_LORA["sha256"]
-        assert done[1]["seed"] == 7 and done[1]["width"] == 1328 and done[1]["bytes"] == len(PNG)
+        assert done[1]["seed"] == 7
+        assert done[1]["width"] == 1328
+        assert done[1]["bytes"] == len(PNG)
         steps = [next(node["inputs"]["steps"] for node in graph.values() if node["class_type"] == "KSampler")
                  for graph in state["graphs"]]
         assert steps == [50, 4]
@@ -659,7 +695,8 @@ def test_lightning_lora_status_uses_extra_paths_and_rejects_wrong_size(tmp_path)
     found = lightning_lora_path(cfg)
     assert found == alt / LIGHTNING_LORA["filename"]
     status = lightning_lora_status(cfg)
-    assert status["available"] is False and status["reason"] == "size"
+    assert status["available"] is False
+    assert status["reason"] == "size"
     assert str(LIGHTNING_LORA["bytes"]) in status["setup"]
     assert verify_lightning_lora(found)
 
@@ -731,7 +768,8 @@ def test_image_warmup_holds_gpu_until_cooldown(tmp_path):
             if m.images.phase == "warm":
                 break
             await asyncio.sleep(0.01)
-        assert m.images.phase == "warm" and m.images.gpu_taken
+        assert m.images.phase == "warm"
+        assert m.images.gpu_taken
         assert server.calls == ["stop"]
         assert m.images.status()["phase"] == "warm"
         m.images.cooldown()
@@ -739,7 +777,8 @@ def test_image_warmup_holds_gpu_until_cooldown(tmp_path):
             if m.images.phase == "idle":
                 break
             await asyncio.sleep(0.02)
-        assert m.images.phase == "idle" and not m.images.gpu_taken
+        assert m.images.phase == "idle"
+        assert not m.images.gpu_taken
         assert server.calls == ["stop", "start"]
         await m.stop()
     asyncio.run(body())
@@ -830,7 +869,9 @@ def test_comfy_progress_event_sets_value_and_max(tmp_path):
     assert m.images.progress == {}
     m.images.apply_comfy_progress("abc", time.time() - 2, {"type": "progress", "data": {"value": 3, "max": 8}})
     progress = m.images.status()["progress"]
-    assert progress["value"] == 3 and progress["max"] == 8 and progress["job"] == "abc"
+    assert progress["value"] == 3
+    assert progress["max"] == 8
+    assert progress["job"] == "abc"
 
 
 def test_images_warmup_api(tmp_path):
@@ -880,11 +921,13 @@ def test_agent_generate_image_saves_into_mac_workspace(tmp_path):
         s = m.create("make an icon", project="mac-scratch")
         await wait_status(m, s["id"], "done", timeout=20)
         result = events(m, s["id"], "tool_result")[0]
-        assert result["ok"] and "assets/icon.png" in result["output"]
+        assert result["ok"]
+        assert "assets/icon.png" in result["output"]
         assert (tmp_path / "mac-workspaces" / s["id"] / "assets" / "icon.png").read_bytes() == PNG
         assert not (tmp_path / "data" / "workspaces").exists() or not any((tmp_path / "data" / "workspaces").rglob("*.png"))
         job = m.db.list_images()[0]
-        assert job["source"] == "agent" and job["session_id"] == s["id"]
+        assert job["source"] == "agent"
+        assert job["session_id"] == s["id"]
         assert "put_file" in runner.seen_ops
         await runner.stop()
         await m.stop()
@@ -916,13 +959,15 @@ def test_app_session_with_context_and_app_tool(tmp_path):
     client, m = app_client(tmp_path, steps)
     with client:
         app_key = client.post("/keys", json={"name": "shop-bot", "kind": "app", "scopes": ["sessions"]}).json()
-        assert app_key["key"].startswith("ha-") and app_key["scopes"] == "sessions"
+        assert app_key["key"].startswith("ha-")
+        assert app_key["scopes"] == "sessions"
         auth = {"Authorization": f"Bearer {app_key['key']}"}
         assert client.get("/api/v1").json()["features"]["app_tools"] is True
 
         bad = client.post("/api/v1/sessions", headers=auth, json={"prompt": "x", "tools": [
             {"name": "run_shell", "description": "clash"}]})
-        assert bad.status_code == 400 and "already taken" in bad.json()["detail"]
+        assert bad.status_code == 400
+        assert "already taken" in bad.json()["detail"]
 
         s = client.post("/api/v1/sessions", headers=auth, json={
             "prompt": "When does order A-17 ship?", "metadata": {"ticket": 991},
@@ -931,12 +976,15 @@ def test_app_session_with_context_and_app_tool(tmp_path):
                        "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}},
                                       "required": ["order_id"]}}]}).json()
         sid = s["id"]
-        assert s["app_tools"] == ["lookup_order"] and s["metadata"] == {"ticket": 991}
+        assert s["app_tools"] == ["lookup_order"]
+        assert s["metadata"] == {"ticket": 991}
         system = m.db.get_session(sid)["context"][0]["content"]
-        assert 'Context from the app "shop-bot"' in system and "Dana, premium plan" in system
+        assert 'Context from the app "shop-bot"' in system
+        assert "Dana, premium plan" in system
 
         pending = wait_for(lambda: client.get(f"/api/v1/sessions/{sid}/tool_calls", headers=auth).json())
-        assert pending[0]["name"] == "lookup_order" and pending[0]["args"] == {"order_id": "A-17"}
+        assert pending[0]["name"] == "lookup_order"
+        assert pending[0]["args"] == {"order_id": "A-17"}
         wait_for(lambda: client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["status"] == "waiting_app", 15)
         assert m.scheduler.holder is None  # the GPU slot is free while the app works
         r = client.post(f"/api/v1/sessions/{sid}/tool_calls/{pending[0]['call_id']}", headers=auth,
@@ -951,7 +999,8 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         assert tool_msg["content"] == "ships Friday"
 
         text = client.get(f"/api/v1/sessions/{sid}/events?follow=false", headers=auth).text
-        assert "event: app_tool_call" in text and "event: app_tool_result" in text
+        assert "event: app_tool_call" in text
+        assert "event: app_tool_result" in text
 
         # context mid-session, delivered as its own event
         client.post(f"/api/v1/sessions/{sid}/context", headers=auth,
@@ -1073,7 +1122,8 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
                            json={"output": "nope"}).status_code == 404
         owner_tool = client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(owner),
                                  json={"output": "nope"})
-        assert owner_tool.status_code == 403 and "only the app that registered" in owner_tool.json()["detail"]
+        assert owner_tool.status_code == 403
+        assert "only the app that registered" in owner_tool.json()["detail"]
         assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(a),
                            json={"output": "yes"}).status_code == 200
 
@@ -1090,7 +1140,8 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
                            json={"decision": "approve", "note": "mine"}).status_code == 200
         decided = client.post(f"/api/v1/sessions/{owner_sid}/approvals/appr-o", headers=H(owner),
                               json={"decision": "deny", "note": "owner"})
-        assert decided.status_code == 200 and decided.json()["status"] == "denied"
+        assert decided.status_code == 200
+        assert decided.json()["status"] == "denied"
 
         bundled = client.post(f"/api/v1/sessions/{owner_sid}/messages", json={"content": "from bundled"})
         assert bundled.status_code == 200
@@ -1102,8 +1153,12 @@ def test_setup_config_writes_a_loadable_config(tmp_path, capsys):
             "--port", "8200", "--pause-flag", str(tmp_path / "paused")]
     assert setup_config.main(args) == 0
     cfg = config.load(tmp_path / "cfg")
-    assert cfg.default_model == "gpt-oss-20b" and cfg.port == 8200 and cfg.endpoint.enabled and not cfg.web.enabled
-    assert cfg.models["gpt-oss-20b"].context_tokens == 32768 and list(cfg.projects) == ["scratch"]
+    assert cfg.default_model == "gpt-oss-20b"
+    assert cfg.port == 8200
+    assert cfg.endpoint.enabled
+    assert not cfg.web.enabled
+    assert cfg.models["gpt-oss-20b"].context_tokens == 32768
+    assert list(cfg.projects) == ["scratch"]
     (tmp_path / "cfg" / "projects.yaml").write_text("projects:\n  mine: {}\n")
     setup_config.main(args)  # keeps edited files unless --force
     assert "mine" in config.load(tmp_path / "cfg").projects
@@ -1147,5 +1202,7 @@ def test_setup_config_refuses_unusable_directories(tmp_path, capsys):
             setup_config.main(setup_argv(tmp_path, config_dir, data_dir))
         assert exit_.value.code == 2
     err = capsys.readouterr().err
-    assert "--config-dir must be a directory path" in err and "--data-dir" in err and "is not a directory" in err
+    assert "--config-dir must be a directory path" in err
+    assert "--data-dir" in err
+    assert "is not a directory" in err
     assert not (tmp_path / "cfg" / "harness.yaml").exists()
