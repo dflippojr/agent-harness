@@ -76,16 +76,8 @@ async def _apply_choice(choice: dict, out: Completion, calls: dict[int, dict],
         out.finish_reason = choice["finish_reason"]
 
 
-async def chat(
-    model: ModelConfig,
-    messages: list[dict],
-    tools: list[dict] | None = None,
-    on_delta: DeltaCallback | None = None,
-    max_tokens: int | None = None,
-    extra: dict | None = None,
-    timeout: float = 1800,
-    on_progress: ProgressCallback | None = None,
-) -> Completion:
+def _payload(model: ModelConfig, messages: list[dict], tools: list[dict] | None, max_tokens: int | None,
+             extra: dict | None, on_progress: ProgressCallback | None) -> dict:
     payload = {
         "model": model.name,
         "messages": messages,
@@ -100,7 +92,20 @@ async def chat(
         payload["tool_choice"] = "auto"
     if on_progress:
         payload["return_progress"] = True  # llama-server streams prompt_progress chunks while reading the prompt
+    return payload
 
+
+async def chat(
+    model: ModelConfig,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    on_delta: DeltaCallback | None = None,
+    max_tokens: int | None = None,
+    extra: dict | None = None,
+    timeout: float = 1800,
+    on_progress: ProgressCallback | None = None,
+) -> Completion:
+    payload = _payload(model, messages, tools, max_tokens, extra, on_progress)
     out = Completion()
     calls: dict[int, dict] = {}
     # Cold model loads take up to a minute and long prompts ~70 s, so only the connect timeout is short.

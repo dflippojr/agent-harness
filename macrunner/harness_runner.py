@@ -232,7 +232,7 @@ class Executor:
             raise OpError(f"git clone failed (exit {out['code']}): {out['output'][-2000:].strip()}", "tool")
         return f"cloned {url} into {files.rel(target)}"
 
-    def op_update_client(self, p: dict):
+    def op_update_client(self, _p: dict):
         if not self.server:
             raise OpError("runner has no configured server for updates")
         try:

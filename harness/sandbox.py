@@ -58,7 +58,7 @@ async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = Non
         return await asyncio.to_thread(_run_blocking, args, input_, timeout, env, started, cancelled)
     except asyncio.CancelledError:
         cancelled.set()
-        for proc in list(started):
+        for proc in started.copy():
             proc.kill()
         raise
 

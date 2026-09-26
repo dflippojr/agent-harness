@@ -171,7 +171,7 @@ class _Budget:
 def _pump(pipe, buf: bytearray, budget: _Budget) -> None:
     try:
         while chunk := pipe.read1(65536):
-            buf += chunk[:budget.take(len(chunk))]
+            buf.extend(chunk[:budget.take(len(chunk))])
     except (OSError, ValueError):
         pass
 

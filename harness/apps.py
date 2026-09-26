@@ -46,7 +46,8 @@ SCOPES = {
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
     "remote_control": "start and stop Claude Code Remote Control servers in project folders",
 }
-TOOL_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{2,48}$")
+NO_SUCH_IMAGE = "no such image"
+TOOL_NAME = re.compile(r"^[a-zA-Z]\w{2,48}$", re.ASCII)
 MAX_CONTEXT_CHARS = 60_000
 MAX_TOOLS = 16
 DEFAULT_TOOL_TIMEOUT = 600
@@ -327,6 +328,16 @@ def context_text(app_name: str, blocks: list[dict]) -> str:
             + "\n\n".join(parts))
 
 
+def _tool_parameters(t: AppTool) -> dict:
+    params = t.parameters or {"type": "object", "properties": {}}
+    if params.get("type") != "object" or not isinstance(params.get("properties", {}), dict):
+        raise ValueError(f"tool {t.name}: parameters must be a JSON Schema object")
+    for key, prop in params.get("properties", {}).items():
+        if not isinstance(prop, dict):
+            raise ValueError(f"tool {t.name}: property {key} must be an object")
+    return params
+
+
 def validate_tools(tools: list[AppTool], reserved: set[str]) -> list[dict]:
     if len(tools) > MAX_TOOLS:
         raise ValueError(f"at most {MAX_TOOLS} tools")
@@ -336,12 +347,7 @@ def validate_tools(tools: list[AppTool], reserved: set[str]) -> list[dict]:
             raise ValueError(f"tool name {t.name!r} must match {TOOL_NAME.pattern}")
         if t.name in reserved or t.name in seen:
             raise ValueError(f"tool name {t.name!r} is already taken")
-        params = t.parameters or {"type": "object", "properties": {}}
-        if params.get("type") != "object" or not isinstance(params.get("properties", {}), dict):
-            raise ValueError(f"tool {t.name}: parameters must be a JSON Schema object")
-        for key, prop in params.get("properties", {}).items():
-            if not isinstance(prop, dict):
-                raise ValueError(f"tool {t.name}: property {key} must be an object")
+        params = _tool_parameters(t)
         seen.add(t.name)
         out.append({"name": t.name, "description": t.description, "parameters": params,
                     "timeout_seconds": max(10, min(int(t.timeout_seconds), 3600))})
@@ -415,34 +421,29 @@ class AppToolBroker:
 route_table = RouteTable()
 
 
-def auth(request: Request, scope: str) -> dict:
-    m = mgr(request)
-    header = request.headers.get("authorization", "")
-    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-    key = m.db.api_key_by_secret(token)
-    if key is None:
-        # Bundled Agent Harness Web has the Server's same-origin Tailscale/localhost owner identity.
-        # Cross-origin Web connections need an origin-bound owner token; never promote an App origin.
-        ident = getattr(request.state, "access", None)
-        raw_origin = request.headers.get("origin", "")
-        try:
-            same_origin = not raw_origin or normalize_origin(raw_origin) in daemon_origins(m.cfg)
-        except ValueError:
-            same_origin = False
-        if not token and ident is not None and ident.allowed and same_origin:
-            if ident.role == "owner":
-                return {"id": "", "name": "Agent Harness Web", "kind": "owner", "scopes": "admin",
-                        "scope_set": {"admin"}, "origins": [], "bundled": True, "user_id": "owner"}
-            if ident.role == "member":
-                return {"id": ident.user_id, "name": ident.display_name or "Member", "kind": "member",
-                        "scopes": "sessions approvals", "scope_set": {"sessions", "approvals"},
-                        "origins": [], "bundled": True, "user_id": ident.user_id}
-            raise HarnessError(401, "missing or invalid app token")
+def _bundled_identity(request: Request, m, token: str) -> dict:
+    """The same-origin Web owner/member identity for a request without a valid app token, or 401."""
+    # Bundled Agent Harness Web has the Server's same-origin Tailscale/localhost owner identity.
+    # Cross-origin Web connections need an origin-bound owner token; never promote an App origin.
+    ident = getattr(request.state, "access", None)
+    raw_origin = request.headers.get("origin", "")
+    try:
+        same_origin = not raw_origin or normalize_origin(raw_origin) in daemon_origins(m.cfg)
+    except ValueError:
+        same_origin = False
+    if not token and ident is not None and ident.allowed and same_origin:
+        if ident.role == "owner":
+            return {"id": "", "name": "Agent Harness Web", "kind": "owner", "scopes": "admin",
+                    "scope_set": {"admin"}, "origins": [], "bundled": True, "user_id": "owner"}
+        if ident.role == "member":
+            return {"id": ident.user_id, "name": ident.display_name or "Member", "kind": "member",
+                    "scopes": "sessions approvals", "scope_set": {"sessions", "approvals"},
+                    "origins": [], "bundled": True, "user_id": ident.user_id}
         raise HarnessError(401, "missing or invalid app token")
-    scopes = set((key.get("scopes") or "").split())
-    if (not owner_key(key) and scope not in scopes
-            and not (scope == "sessions" and SESSIONS_ALL in scopes and request.method == "GET")):
-        raise HarnessError(403, f"this token lacks the {scope!r} scope")
+    raise HarnessError(401, "missing or invalid app token")
+
+
+def _check_token_origin(request: Request, m, key: dict) -> None:
     raw_origin = request.headers.get("origin", "")
     if raw_origin:
         try:
@@ -451,6 +452,20 @@ def auth(request: Request, scope: str) -> dict:
             raise HarnessError(403, str(e))
         if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
             raise HarnessError(403, "this app token is not approved for this origin")
+
+
+def auth(request: Request, scope: str) -> dict:
+    m = mgr(request)
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    key = m.db.api_key_by_secret(token)
+    if key is None:
+        return _bundled_identity(request, m, token)
+    scopes = set((key.get("scopes") or "").split())
+    if (not owner_key(key) and scope not in scopes
+            and not (scope == "sessions" and SESSIONS_ALL in scopes and request.method == "GET")):
+        raise HarnessError(403, f"this token lacks the {scope!r} scope")
+    _check_token_origin(request, m, key)
     key["scope_set"] = scopes
     return key
 
@@ -613,6 +628,27 @@ async def backends(request: Request):
                                        for name in m.cfg.backends]))
 
 
+def _member_me(m, key: dict, ident) -> dict:
+    from .storage import account_usage_bytes, quota_message
+    account = m.db.account_by_id(key["user_id"])
+    used = account_usage_bytes(m.cfg, key["user_id"]) if account else 0
+    limit = int(account["disk_quota_bytes"]) if account else 0
+    return {
+        "role": "member", "user_id": key["user_id"], "login": ident.login if ident else None,
+        "name": key.get("name") or "",
+        "public_url": m.cfg.public_url,
+        "capabilities": {
+            "admin": False, "local_sessions": True, "hosted_backends": False, "images": False,
+            "jobs": False, "runners": False, "accounts": False,
+        },
+        "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
+                  "disk_note": quota_message(used, limit) if limit else "",
+                  "running": m.db.count_sessions(key["user_id"], "running"),
+                  "queued": m.db.count_sessions(key["user_id"], "queued"),
+                  "account_hint": key["user_id"][2:10] if key["user_id"].startswith("u-") else key["user_id"][:8]},
+    }
+
+
 @route_table.get("/api/v1/me")
 async def api_me(request: Request):
     """Authenticated principal. Unauthenticated callers receive 401 rather than a project list."""
@@ -620,24 +656,7 @@ async def api_me(request: Request):
     m = mgr(request)
     ident = getattr(request.state, "access", None)
     if key.get("kind") == "member":
-        from .storage import account_usage_bytes, quota_message
-        account = m.db.account_by_id(key["user_id"])
-        used = account_usage_bytes(m.cfg, key["user_id"]) if account else 0
-        limit = int(account["disk_quota_bytes"]) if account else 0
-        return {
-            "role": "member", "user_id": key["user_id"], "login": ident.login if ident else None,
-            "name": key.get("name") or "",
-            "public_url": m.cfg.public_url,
-            "capabilities": {
-                "admin": False, "local_sessions": True, "hosted_backends": False, "images": False,
-                "jobs": False, "runners": False, "accounts": False,
-            },
-            "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
-                      "disk_note": quota_message(used, limit) if limit else "",
-                      "running": m.db.count_sessions(key["user_id"], "running"),
-                      "queued": m.db.count_sessions(key["user_id"], "queued"),
-                      "account_hint": key["user_id"][2:10] if key["user_id"].startswith("u-") else key["user_id"][:8]},
-        }
+        return _member_me(m, key, ident)
     return {"role": "owner" if owner_key(key) else key.get("kind"), "user_id": "owner",
             "login": ident.login if ident else None, "name": key.get("name") or "",
             "public_url": m.cfg.public_url,
@@ -750,6 +769,14 @@ async def api_queue(request: Request):
     return out
 
 
+def _global_event_visible(e: dict, session: dict | None, user_id: str, key: dict, global_types) -> bool:
+    if not (e["type"] in global_types and session and session.get("owner_id", "owner") == user_id
+            and (session.get("kind") or "agent") == "agent"):
+        return False
+    return not (key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"]
+                and session.get("app_id") != key["id"])
+
+
 @route_table.get("/api/v1/events")
 async def api_events(request: Request):
     from .api import GLOBAL_TYPES, sse
@@ -772,12 +799,7 @@ async def api_events(request: Request):
                         return
                     yield ": keepalive\n\n"
                     continue
-                session = m.db.get_session(e["session_id"])
-                if (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == user_id
-                        and (session.get("kind") or "agent") == "agent"):
-                    if key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"] \
-                            and session.get("app_id") != key["id"]:
-                        continue
+                if _global_event_visible(e, m.db.get_session(e["session_id"]), user_id, key, GLOBAL_TYPES):
                     # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
                     yield sse({**e, "seq": None})
         finally:
@@ -993,25 +1015,28 @@ async def event_ticket(ref: str, request: Request):
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
+def _ticket_key(request: Request, m, ref: str, ticket: str) -> dict:
+    """The API key behind a single-session stream ticket, or 401/403."""
+    raw_origin = request.headers.get("origin", "")
+    try:
+        origin = normalize_origin(raw_origin)
+    except ValueError:
+        origin = ""
+    key = m.db.stream_ticket_key(ticket, ref, origin)
+    if key is None:
+        raise HarnessError(401, "invalid or expired stream ticket")
+    key["scope_set"] = set((key.get("scopes") or "").split())
+    if (not owner_key(key) and "sessions" not in key["scope_set"]
+            and SESSIONS_ALL not in key["scope_set"]):
+        raise HarnessError(403, "this token lacks the 'sessions' scope")
+    return key
+
+
 @route_table.get("/api/v1/sessions/{ref}/events")
 async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
     m = mgr(request)
-    raw_origin = request.headers.get("origin", "")
     ticket = request.query_params.get("ticket", "")
-    if ticket:
-        try:
-            origin = normalize_origin(raw_origin)
-        except ValueError:
-            origin = ""
-        key = m.db.stream_ticket_key(ticket, ref, origin)
-        if key is None:
-            raise HarnessError(401, "invalid or expired stream ticket")
-        key["scope_set"] = set((key.get("scopes") or "").split())
-        if (not owner_key(key) and "sessions" not in key["scope_set"]
-                and SESSIONS_ALL not in key["scope_set"]):
-            raise HarnessError(403, "this token lacks the 'sessions' scope")
-    else:
-        key = auth(request, "sessions")
+    key = _ticket_key(request, m, ref, ticket) if ticket else auth(request, "sessions")
     s = visible_session(request, key, ref)
     sid = s["id"]
     owner = s.get("owner_id") or "owner"
@@ -1077,7 +1102,7 @@ async def app_image_upscale(iid: str, body: AppImageUpscaleRequest, request: Req
     from . import image_edit
     parent = m.db.get_image(iid.removesuffix(".png"))
     if parent is None or image_edit.is_private(parent):
-        raise HarnessError(404, "no such image")
+        raise HarnessError(404, NO_SUCH_IMAGE)
     try:
         job = m.images.submit_upscale(parent["id"], body.upscale,
                                       source=f"app:{key['name']}"[:40])
@@ -1127,10 +1152,10 @@ async def app_image_status(iid: str, request: Request):
     auth(request, "images")
     job = m.db.get_image(iid.removesuffix(".png")) if m.images else None
     if job is None:
-        raise HarnessError(404, "no such image")
+        raise HarnessError(404, NO_SUCH_IMAGE)
     from . import image_edit
     if image_edit.is_private(job):
-        raise HarnessError(404, "no such image")
+        raise HarnessError(404, NO_SUCH_IMAGE)
     if iid.endswith(".png"):
         if job["status"] != "done":
             raise HarnessError(404, "image not ready")

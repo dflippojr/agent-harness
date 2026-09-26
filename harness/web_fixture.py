@@ -75,7 +75,7 @@ class Fixture:
             self.manifest["pages"][normalize_url(url)] = {"redirect": final}
 
     # replay
-    async def resolve(self, host: str, port: int) -> list[str]:  # noqa: ARG002 - WebTools resolver signature
+    async def resolve(self, _host: str, _port: int) -> list[str]:  # underscore names: WebTools resolver signature
         return [FIXTURE_IP]
 
     def search(self, query: str) -> dict:

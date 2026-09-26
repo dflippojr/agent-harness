@@ -153,7 +153,7 @@ def summary_request(messages: list[dict], start: int, end: int, max_chars: int) 
     ]
 
 
-def apply_summary(messages: list[dict], start: int, end: int, summary: str, notes: str = "") -> list[dict]:
+def apply_summary(messages: list[dict], _start: int, end: int, summary: str, notes: str = "") -> list[dict]:
     head = [m for m in messages[:_head_len(messages)] if not (m.get("content") or "").startswith(SUMMARY_TAG)]
     text = f"{SUMMARY_TAG} Earlier work in this session, condensed:\n\n{summary.strip()}"
     if notes.strip():
