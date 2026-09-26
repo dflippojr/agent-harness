@@ -3425,6 +3425,21 @@ async function viewActions(tab) {
   append($app, tabs, panel);
 }
 
+// Each profile subpage builds its card from the account, the profile emoji and the optional third path part.
+const PROFILE_CARDS = {
+  account: (me, profile) => accountCard(me, profile),
+  appearance: () => appearanceCard(),
+  notifications: (me) => notificationsCard(me),
+  install: () => installCard(),
+  backends: () => backendsCard(),
+  "smart-approvals": () => smartApprovalsCard(),
+  daemon: () => daemonSettingsCard(),
+  memory: () => memoryCard(),
+  skills: (me, profile, extra) => skillsPage(extra),
+  apps: (me) => appsCard(me),
+  endpoint: (me) => endpointCard(me),
+};
+
 async function viewProfile(page, extra) {
   const titles = { account: "Account", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
@@ -3432,17 +3447,7 @@ async function viewProfile(page, extra) {
   setHeader("agents", titles[page] || "Profile", { page: true });
   if (page === "connection") return append($app, connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
-  if (page === "account") return append($app, accountCard(me, profile));
-  if (page === "appearance") return append($app, appearanceCard());
-  if (page === "notifications") return append($app, notificationsCard(me));
-  if (page === "install") return append($app, installCard());
-  if (page === "backends") return append($app, await backendsCard());
-  if (page === "smart-approvals") return append($app, await smartApprovalsCard());
-  if (page === "daemon") return append($app, await daemonSettingsCard());
-  if (page === "memory") return append($app, memoryCard());
-  if (page === "skills") return append($app, await skillsPage(extra));
-  if (page === "apps") return append($app, appsCard(me));
-  if (page === "endpoint") return append($app, endpointCard(me));
+  if (Object.hasOwn(PROFILE_CARDS, page)) return append($app, await PROFILE_CARDS[page](me, profile, extra));
   let hidden = new Set();
   if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
   else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
