@@ -3901,22 +3901,11 @@ async function daemonSettingsCard() {
     for (const [key, value] of Object.entries(draft)) changes[key] = value;
     try {
       if (rollback) {
-        if (!window.confirm("Restore the previous confirmed server configuration?")) return;
-        const result = await api("/config/rollback", { method: "POST", body: { revision: view.revision, confirm: true } });
-        toast("Rolled back");
-        if (result.restart_required) {
-          await confirmRestart(result.pending_revision || result.revision, status, errorBox);
-        } else { location.hash = "#/profile/daemon"; location.reload(); }
+        await rollbackConfig(view.revision, status, errorBox);
         return;
       }
       const plan = await api("/config", { method: "PATCH", body: { revision: view.revision, dry_run: true, changes } });
-      append(planBox,
-        h("p", { class: "field-label" }, "Change plan"),
-        (plan.changes || []).length
-          ? h("ul", { class: "config-plan-list" }, plan.changes.map((c) =>
-            h("li", {}, `${c.key}: ${c.from} → ${c.action === "reset" ? "inherited" : c.to} (${c.apply})`)))
-          : h("p", { class: "muted small" }, "No changes."),
-      );
+      append(planBox, h("p", { class: "field-label" }, "Change plan"), configPlanList(plan));
       const enables = (plan.changes || []).filter((c) => c.to === true && String(c.key).endsWith(".enabled"));
       if (enables.length && !window.confirm(`Enable ${enables.map((c) => c.key).join(", ")}?`)) return;
       if (!(plan.changes || []).length) return;
@@ -3927,15 +3916,7 @@ async function daemonSettingsCard() {
         await confirmRestart(result.pending_revision || result.target_revision || result.revision, status, errorBox);
       } else { location.reload(); }
     } catch (e) {
-      if (e.code === "revision_conflict") {
-        append(errorBox, h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
-      } else if (e.keys) {
-        append(errorBox, h("p", { class: "note bad" }, e.message),
-          h("ul", {}, Object.entries(e.keys).map(([key, info]) =>
-            h("li", {}, `${key}: ${info.message || info.code}`))));
-      } else {
-        append(errorBox, h("p", { class: "note bad" }, e.message));
-      }
+      showConfigError(errorBox, e);
     }
   };
 
@@ -3949,6 +3930,33 @@ async function daemonSettingsCard() {
       h("button", { class: "btn", type: "button", onclick: () => apply() }, "Review and apply"),
       h("button", { class: "btn", type: "button", onclick: () => apply({ rollback: true }) }, "Roll back"),
       restartButton));
+}
+
+function configPlanList(plan) {
+  if (!(plan.changes || []).length) return h("p", { class: "muted small" }, "No changes.");
+  return h("ul", { class: "config-plan-list" }, plan.changes.map((c) =>
+    h("li", {}, `${c.key}: ${c.from} → ${c.action === "reset" ? "inherited" : c.to} (${c.apply})`)));
+}
+
+function showConfigError(errorBox, e) {
+  if (e.code === "revision_conflict") {
+    append(errorBox, h("p", { class: "note bad" }, "This page is stale. Reload to edit the current revision."));
+  } else if (e.keys) {
+    append(errorBox, h("p", { class: "note bad" }, e.message),
+      h("ul", {}, Object.entries(e.keys).map(([key, info]) =>
+        h("li", {}, `${key}: ${info.message || info.code}`))));
+  } else {
+    append(errorBox, h("p", { class: "note bad" }, e.message));
+  }
+}
+
+async function rollbackConfig(revision, status, errorBox) {
+  if (!window.confirm("Restore the previous confirmed server configuration?")) return;
+  const result = await api("/config/rollback", { method: "POST", body: { revision, confirm: true } });
+  toast("Rolled back");
+  if (result.restart_required) {
+    await confirmRestart(result.pending_revision || result.revision, status, errorBox);
+  } else { location.hash = "#/profile/daemon"; location.reload(); }
 }
 
 async function confirmRestart(targetRevision, status, errorBox) {
