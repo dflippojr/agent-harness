@@ -1410,7 +1410,8 @@ def test_embedding_exactly_at_cap_keeps_everything(tmp_path):
 def test_embedding_over_cap_names_omitted_files_and_sizes(tmp_path):
     facts = _embedding_facts(tmp_path, [("a.py", 1000), ("b.py", 1000), ("c.py", 1000)], 2300)
     assert facts["omitted"] == ["c.py"]
-    assert facts["files"] == 2 and facts["total"] == 3
+    assert facts["files"] == 2
+    assert facts["total"] == 3
     assert facts["embeddedBytes"] <= 2300 < facts["totalBytes"]
     assert facts["line"].startswith("PARTIAL REVIEW: reviewed 2 of 3 files (")
     assert "KB of diff). Not reviewed: c.py" in facts["line"]
@@ -1419,7 +1420,8 @@ def test_embedding_over_cap_names_omitted_files_and_sizes(tmp_path):
 def test_embedding_single_file_larger_than_cap_is_omitted(tmp_path):
     facts = _embedding_facts(tmp_path, [("huge.py", 5000)], 1000)
     assert facts["omitted"] == ["huge.py"]
-    assert facts["files"] == 0 and facts["total"] == 1
+    assert facts["files"] == 0
+    assert facts["total"] == 1
     assert "reviewed 0 of 1 files" in facts["line"]
     assert "Not reviewed: huge.py" in facts["line"]
 
