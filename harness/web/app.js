@@ -2550,9 +2550,9 @@ function updateImageStatusView(view, s) {
   const hasSteps = s.phase === "generating" && Number(p.max) > 0;
   const upscaling = s.phase === "generating" && p.stage === "upscaling";
   const editing = s.phase === "generating" && p.stage === "editing";
-  let stageName = null;
-  if (upscaling) stageName = "Upscaling";
-  else if (editing) stageName = "Editing";
+  const upscaleName = upscaling ? "Upscaling" : null;
+  const editName = editing ? "Editing" : null;
+  const stageName = upscaleName || editName;
   label.textContent = (stageName || text) + queued;
   label.classList.toggle("dots", busy);
   bar.hidden = !busy;
