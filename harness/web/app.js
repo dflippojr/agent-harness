@@ -299,6 +299,8 @@ function diffLineClass(line) {
   return line.startsWith("-") && !line.startsWith("---") ? "del" : "";
 }
 
+const reviewBadge = (review, label) => h("span", { class: `badge ${review === "discarded" ? "cancelled" : "done"}` }, label);
+
 function ago(ts) {
   const s = Math.max(0, Date.now() / 1000 - ts);
   if (s < 60) return "just now";
@@ -1199,9 +1201,9 @@ async function viewList() {
         h("h3", {}, s.title),
         h("div", { class: "meta" },
           badge(s.status),
-          pending ? h("span", { class: "badge waiting_approval" }, `${pending} approval${pending > 1 ? "s" : ""}`) : null,
+          pending ? h("span", { class: "badge waiting_approval" }, pluralize(pending, "approval")) : null,
           s.queue_position > 0 ? h("span", {}, `#${s.queue_position} in queue`) : null,
-          s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, REVIEW_LABEL[s.review] || s.review) : null,
+          s.review ? reviewBadge(s.review, REVIEW_LABEL[s.review] || s.review) : null,
           s.job_status ? jobStatusBadge(s.job_status) : null,
           s.target !== "tower" ? h("span", {}, `💻 ${TARGET_LABEL[s.target] || s.target}`) : null,
           h("span", {}, s.project), h("span", {}, ago(s.updated_at))),
@@ -1302,6 +1304,8 @@ async function viewList() {
 // "45 s" under 90 seconds, otherwise whole minutes.
 const fmtSpan = (seconds, toMinutes = Math.round) => (seconds >= 90 ? `${toMinutes(seconds / 60)} min` : `${seconds} s`);
 const pluralize = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const escalateSuffix = (row) => (row.escalate_reason ? ` (${row.escalate_reason})` : "");
+const originsSuffix = (k) => (k.origins?.length ? ` · ${k.origins.join(", ")}` : "");
 const usedSuffix = (k) => (k.last_used_at ? ` · used ${ago(k.last_used_at)}` : "");
 
 function holdRemainingText(seconds) {
@@ -1748,10 +1752,11 @@ async function viewSession(sid, tab, focusApproval) {
       session.queue_position > 0 ? h("span", { class: "muted" }, `#${session.queue_position} in GPU queue`) : null,
       h("span", { class: "muted" }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`));
     const pct = ctxLimit && ctxUsed ? Math.round((100 * ctxUsed) / ctxLimit) : null;
+    const ctxClass = `ctx${pct >= 55 ? " high" : ""}`;
     fill(usage,
       h("span", { class: "muted", title: "Cumulative tokens for this session (prompt tokens in, generated tokens out)" },
         `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`),
-      pct === null ? null : h("span", { class: `ctx${pct >= 55 ? " high" : ""}`, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up.` },
+      pct === null ? null : h("span", { class: ctxClass, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up.` },
         progressBar(pct / 100), `${pct}% context`));
   };
   renderHead();
@@ -2249,7 +2254,7 @@ function reviewCard(s) {
   return h("section", { class: "card" },
     h("h3", {}, "Review"),
     h("div", { class: "meta" }, h("span", {}, `branch ${s.branch}`), s.base_branch ? h("span", {}, `from ${s.base_branch}`) : null,
-      s.review ? h("span", { class: `badge ${s.review === "discarded" ? "cancelled" : "done"}` }, s.review) : null),
+      s.review ? reviewBadge(s.review, s.review) : null),
     s.review_detail ? h("p", { class: "muted small" }, s.review_detail) : null,
     busy ? h("p", { class: "muted small" }, "The agent is still working; review when the run ends.") : null,
     buttons.length ? h("div", { class: "row end", style: "margin-top:8px" }, buttons) : null);
@@ -2350,12 +2355,14 @@ function repoChanges(sid, repo, state, canComment, render) {
     const num = side === "old" ? ln.old : ln.new;
     const picked = sel?.path === f.name && sel.side === side && num >= sel.start && num <= sel.end;
     const commented = mine.some((c) => c.path === f.name && c.side === side && num >= c.start_line && num <= c.end_line);
+    const removed = side === "old" ? "removed " : "";
     const tap = canComment ? {
-      role: "button", tabindex: "0", "aria-label": `Comment on ${side === "old" ? "removed " : ""}line ${num}`,
+      role: "button", tabindex: "0", "aria-label": `Comment on ${removed}line ${num}`,
       onclick: () => pick(f.name, side, num),
       onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(f.name, side, num); } },
     } : {};
-    return h("div", { class: `dl ${ln.kind}${picked ? " picked" : ""}${commented ? " commented" : ""}`, ...tap },
+    const rowClass = `dl ${ln.kind}${picked ? " picked" : ""}${commented ? " commented" : ""}`;
+    return h("div", { class: rowClass, ...tap },
       h("span", { class: "ln" }, ln.old ?? ""), h("span", { class: "ln" }, ln.new ?? ""), h("span", { class: "tx" }, `${sign}${ln.text}`));
   };
   const fileBody = (f) => {
@@ -2404,7 +2411,7 @@ function repoChanges(sid, repo, state, canComment, render) {
     h("h3", {}, repo.path === "." ? "workspace" : repo.path),
     h("div", { class: "meta" }, h("span", {}, `branch ${repo.branch}`), repo.base ? h("span", {}, `since ${repo.base.slice(0, 8)}`) : null,
       h("span", {}, `${repo.files.length} changed file${repo.files.length === 1 ? "" : "s"}`)),
-    repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, `${repo.commits.length} new commit${repo.commits.length === 1 ? "" : "s"}`),
+    repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, pluralize(repo.commits.length, "new commit")),
       h("pre", { class: "small", style: "white-space:pre-wrap" }, repo.commits.join("\n"))) : null,
     drafts,
     files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 || (sel?.path === f.name) || undefined },
@@ -2461,9 +2468,10 @@ function imageCard(img) {
   const ready = img.status === "done";
   const kind = img.operation && img.operation !== "generate" ? img.operation : "";
   const scale = Number(img.scale) > 1 ? `${img.scale}×` : "";
+  const placeholderContent = img.status === "failed" || img.status === "cancelled" ? img.status : h("span", { class: "dots" }, img.status);
   return h("a", { class: "card image-card", href: `#/images/${img.id}` },
     ready ? daemonImage(`/images/${img.id}.png`, { alt: img.prompt, loading: "lazy" })
-      : h("div", { class: `image-placeholder ${img.status}` }, img.status === "failed" || img.status === "cancelled" ? img.status : h("span", { class: "dots" }, img.status)),
+      : h("div", { class: `image-placeholder ${img.status}` }, placeholderContent),
     kind ? h("span", { class: "image-kind" }, kind) : null,
     scale ? h("span", { class: "image-scale" }, scale) : null,
     h("div", { class: "preview small" }, img.prompt));
@@ -2635,6 +2643,11 @@ async function viewImages() {
   const editHint = (!edit.available || !edit.enabled) && !isGuest()
     ? h("p", { class: "muted small" }, edit.setup || "Masked editing is an optional component.")
     : null;
+  const loadNote = "The language model is unloaded while images generate; running tasks pause for a few minutes. ";
+  const upscaleNote = loadNote + (upscaleInfo.available
+    ? "Upscaling is off unless you choose 2× or 4×."
+    : "Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable.");
+  const uploadControls = edit.available && edit.enabled ? [upload, uploadBtn] : [];
   append($app, 
     isGuest() ? h("p", { class: "muted small" }, "Demo access can view generated images, not start new ones.") : h("form", {
       onsubmit: async (e) => {
@@ -2660,13 +2673,10 @@ async function viewImages() {
     h("div", { class: "resolution-group" }, h("div", { class: "field-label" }, "Resolution"),
       h("div", { class: "resolution-options" }, resolutionInputs.map((choice) => choice.label))),
     h("div", { class: "row" }, h("div", { style: "flex:1" }, h("label", {}, "Upscale"), upscale)),
-    h("p", { class: "muted small" }, upscaleInfo.available
-      ? "The language model is unloaded while images generate; running tasks pause for a few minutes. Upscaling is off unless you choose 2× or 4×."
-      : "The language model is unloaded while images generate; running tasks pause for a few minutes. Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable."),
+    h("p", { class: "muted small" }, upscaleNote),
     editHint,
     h("div", { class: "row image-generate-row", style: "margin-top:12px" },
-      (edit.available && edit.enabled) ? upload : null,
-      (edit.available && edit.enabled) ? uploadBtn : null,
+      uploadControls,
       h("span", { class: "spacer" }), go)),
     phase, grid);
   let timer = 0;
@@ -2705,7 +2715,7 @@ async function viewImage(id) {
         location.hash = `#/images/${next.id}`;
       } catch (e) { toast(e.message); }
     };
-    const endedBad = img.status === "failed" || img.status === "cancelled";
+    const noteClass = `note${img.status === "failed" || img.status === "cancelled" ? " bad" : ""}`;
     const imageNote = () => {
       if (img.status === "failed") return `Failed: ${img.error}`;
       return img.status === "cancelled" ? "Cancelled" : imageStatusView(img.service);
@@ -2715,7 +2725,7 @@ async function viewImage(id) {
     else if (editReady) editControl = h("button", { class: "btn", type: "button", disabled: true, title: editBlockedReason }, "Edit");
     fill($app,
       img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
-        : h("p", { class: `note${endedBad ? " bad" : ""}` }, imageNote()),
+        : h("p", { class: noteClass }, imageNote()),
       h("div", { class: "card" },
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, meta.join(" · ")),
@@ -2950,12 +2960,13 @@ async function viewJobs() {
   }
   append($app, ...jobs.map((j) => {
     const last = j.recent[0];
+    const lastJobBadge = last?.job_status ? jobStatusBadge(last.job_status) : null;
     return h("a", { class: "card", href: `#/jobs/${j.id}` },
       h("h3", {}, `${j.enabled ? "" : "⏸ "}${j.name}`),
       h("div", { class: "meta" }, h("span", {}, cronLabel(j.cron)), h("span", {}, j.project),
         j.enabled ? h("span", {}, `next ${whenText(j.next_run_at)}`) : h("span", {}, "paused")),
       last ? h("div", { class: "meta", style: "margin-top:4px" }, h("span", {}, `last run ${ago(last.created_at)}`),
-        badge(last.status), last.job_status ? jobStatusBadge(last.job_status) : null) : null,
+        badge(last.status), lastJobBadge) : null,
       j.last_error ? h("div", { class: "preview bad" }, `Couldn't start: ${j.last_error}`) : null);
   }));
 }
@@ -3183,9 +3194,10 @@ function emojiPicker(profile, onPick) {
 function accountCard(me, profile) {
   const live = $conn.classList.contains("live");
   const usage = me.usage || {};
+  const identityNote = isMember() ? "Household member identity." : "Profile icon is owner-only during demo access.";
   return h("div", {},
     isGuest() || isMember() ? h("div", { class: "card" },
-      h("p", { class: "muted small" }, isMember() ? "Household member identity." : "Profile icon is owner-only during demo access."),
+      h("p", { class: "muted small" }, identityNote),
       h("p", { style: "font-size:2rem;margin:0" }, profile.emoji || "🙂"))
       : h("div", { class: "card" },
       h("p", { class: "muted small" }, "Shown at the top left of the app."),
@@ -3573,16 +3585,19 @@ async function smartApprovalsCard() {
   status.textContent = configured
     ? `${data.provider || "provider"} · ${data.model || "model"} · mode ${data.mode}`
     : "Off. The owner enables this in harness.yaml with a hosted API secret reference.";
+  const modeButtons = configured ? [
+    h("button", { class: "btn", onclick: () => setMode("shadow") }, "Shadow"),
+    h("button", { class: "btn", onclick: () => setMode("auto") }, "Auto"),
+  ] : [];
   const buttons = isGuest() ? h("p", { class: "muted small" }, "Demo access cannot change smart approvals.")
     : h("div", { class: "row", style: "margin-top:10px; gap:8px; flex-wrap:wrap" },
-        configured ? h("button", { class: "btn", onclick: () => setMode("shadow") }, "Shadow") : null,
-        configured ? h("button", { class: "btn", onclick: () => setMode("auto") }, "Auto") : null,
+        modeButtons,
         h("button", { class: "btn", onclick: () => setMode("off") }, "Off"));
   const stats = h("p", { class: "muted small" },
     `${data.attempts || 0} reviews · ${data.auto_approvals || 0} auto-approved · ${data.escalations || 0} escalated · `
     + `${data.latency_ms || 0} ms avg · $${Number(data.cost_usd || 0).toFixed(4)}`);
   const recent = (data.recent || []).slice(0, 12).map((row) => h("div", { class: "muted small" },
-    `${row.outcome} · ${row.recommendation}${row.escalate_reason ? " (" + row.escalate_reason + ")" : ""} · `
+    `${row.outcome} · ${row.recommendation}${escalateSuffix(row)} · `
     + `${row.provider}/${row.model}`));
   return h("div", {},
     h("div", { class: "card" },
@@ -3702,6 +3717,12 @@ function settingInput(spec, draft) {
   return input;
 }
 
+function settingValueText(spec) {
+  const configured = spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "";
+  const inherited = spec.inherited != null ? ` · inherited ${spec.inherited}` : "";
+  return `effective ${spec.effective == null ? "—" : spec.effective}${configured}${inherited}`;
+}
+
 function settingMeta(spec) {
   const bits = [];
   bits.push({ live: "applies live", daemon_restart: "needs restart" }[spec.apply] || "file only");
@@ -3710,6 +3731,14 @@ function settingMeta(spec) {
   if (spec.capped_by) bits.push(`capped by ${spec.capped_by}`);
   if (spec.file_only) bits.push(spec.guidance || "managed in local configuration");
   return bits.join(" · ");
+}
+
+const lastUpdateText = (update) => `${update.ok ? "succeeded" : "failed"}: ${update.message}`;
+
+function compatibilityText(compatibility) {
+  const { supported } = compatibility;
+  const range = supported ? ` · Server supports ${supported.min}–${supported.max}` : "";
+  return `${compatibility.state || "not reported"}${range}`;
 }
 
 function lastSeenText(runner) {
@@ -3734,6 +3763,8 @@ async function daemonSettingsCard() {
     (view.pending_revision ? ` · pending ${view.pending_revision}` : "") +
     (view.supervised_restart ? " · supervised restart supported" : " · unsupervised (restart is manual)") +
     (view.warning ? ` · ${view.warning}` : recoveryNote(view.recovery)));
+  const restartButton = view.restart_required ? h("button", { class: "btn", type: "button", onclick: () => confirmRestart(view.pending_revision || view.revision, status, errorBox) },
+    "Restart daemon") : null;
   const planBox = h("div", { class: "config-plan" });
   const errorBox = h("div");
   const groups = {};
@@ -3748,10 +3779,7 @@ async function daemonSettingsCard() {
         h("label", { class: "field-label" }, spec.label),
         h("p", { class: "muted small" }, spec.help),
         h("p", { class: "muted small config-meta" }, settingMeta(spec)),
-        spec.file_only ? null : h("p", { class: "muted small" },
-          `effective ${spec.effective == null ? "—" : spec.effective}` +
-          (spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "") +
-          (spec.inherited != null ? ` · inherited ${spec.inherited}` : ""))),
+        spec.file_only ? null : h("p", { class: "muted small" }, settingValueText(spec))),
       spec.file_only ? h("span", { class: "muted small" }, "local config") : settingInput(spec, draft)))));
 
   const apply = async ({ restart = false, rollback = false } = {}) => {
@@ -3808,8 +3836,7 @@ async function daemonSettingsCard() {
     isGuest() ? null : h("div", { class: "card config-actions" },
       h("button", { class: "btn", type: "button", onclick: () => apply() }, "Review and apply"),
       h("button", { class: "btn", type: "button", onclick: () => apply({ rollback: true }) }, "Roll back"),
-      view.restart_required ? h("button", { class: "btn", type: "button", onclick: () => confirmRestart(view.pending_revision || view.revision, status, errorBox) },
-        "Restart daemon") : null));
+      restartButton));
 }
 
 async function confirmRestart(targetRevision, status, errorBox) {
@@ -3862,7 +3889,7 @@ function imageArchiveBlock(a, reload) {
   if (!a || !a.enabled) return null;
   const count = Number(a.archived || 0);
   const bytes = Number(a.bytes || 0);
-  const warning = a.free_space_warning || (a.errors ? `${a.errors} image archive error${a.errors === 1 ? "" : "s"}` : "");
+  const warning = a.free_space_warning || (a.errors ? pluralize(a.errors, "image archive error") : "");
   const summary = h("div", {},
     h("p", { class: `small${warning ? " bad" : ""}` },
       h("strong", {}, "Image archive"), " ",
@@ -3913,7 +3940,8 @@ function gpuActionRow() {
   const durationRow = h("label", { class: "action-subitem disabled" },
     h("span", {}, "Duration:"), duration);
   const act = async (action) => {
-    const body = action === "pause" ? { duration_seconds: duration.value ? Number(duration.value) : null } : undefined;
+    const seconds = duration.value ? Number(duration.value) : null;
+    const body = action === "pause" ? { duration_seconds: seconds } : undefined;
     try { render(await api(`/gpu/${action}`, { method: "POST", body })); } catch (e) { toast(e.message); }
     setTimeout(load, 1500);
   };
@@ -3931,7 +3959,8 @@ function gpuActionRow() {
     duration.disabled = isGuest() || !g.manual;
     durationRow.classList.toggle("disabled", duration.disabled);
     const automatic = !g.manual && g.state !== "clear" ? ` · ${gpuText(g)}` : "";
-    const using = now.length ? ` · ${now.join(", ")}${g.override ? " (ignored)" : ""}` : "";
+    const ignored = g.override ? " (ignored)" : "";
+    const using = now.length ? ` · ${now.join(", ")}${ignored}` : "";
     status.textContent = `${g.manual ? gpuText(g) : "Local models available"}${automatic}${using}`;
   };
   const load = async () => { try { render(await api("/gpu")); } catch (e) { status.textContent = e.message; status.classList.add("bad"); } };
@@ -3986,6 +4015,9 @@ function remoteControlCard() {
     }
     return h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, false) }, "Start");
   };
+  const rcActions = (p) => h("div", { class: "row" },
+    p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
+    rcButton(p));
   const row = (p) => {
     const remoteControlState = (p) => {
       if (p.running) {
@@ -4001,9 +4033,7 @@ function remoteControlCard() {
       h("p", {}, h("strong", {}, p.project), " ", h("span", { class: `muted small${!p.running && !p.trusted ? " bad" : ""}` }, state)),
       h("p", { class: "muted small" }, p.path),
       !p.trusted && p.trust_prompt_open ? h("p", { class: "note small" }, "On the tower, review the folder in Claude and accept its trust prompt. This page will notice automatically.") : null,
-      isGuest() ? h("p", { class: "muted small" }, "Demo access cannot start, stop, or trust Remote Control.") : h("div", { class: "row" },
-        p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
-        rcButton(p)));
+      isGuest() ? h("p", { class: "muted small" }, "Demo access cannot start, stop, or trust Remote Control.") : rcActions(p));
   };
   const load = async () => {
     try {
@@ -4311,7 +4341,7 @@ function appsCard(me) {
         h("p", { class: "small" }, "An Agent Harness App token lets a third-party integration start and follow sessions on Agent Harness Server. It is shown once and can be revoked later."),
         h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
         apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${k.origins?.length ? " · " + k.origins.join(", ") : ""}${usedSuffix(k)} `,
+          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${originsSuffix(k)}${usedSuffix(k)} `,
           h("button", {
             class: "btn small bad",
             onclick: async () => {
@@ -4395,8 +4425,8 @@ function diskCard() {
             fact("Runner", online
               ? `${r.info.version} · protocol ${r.info.protocol ?? "not reported"} · macOS ${r.info.macos}`
               : lastSeenText(r)),
-            fact("Compatibility", `${compatibility.state || "not reported"}${compatibility.supported ? " · Server supports " + compatibility.supported.min + "–" + compatibility.supported.max : ""}`),
-            r.last_update ? fact("Last update", `${r.last_update.ok ? "succeeded" : "failed"}: ${r.last_update.message}`) : null,
+            fact("Compatibility", compatibilityText(compatibility)),
+            r.last_update ? fact("Last update", lastUpdateText(r.last_update)) : null,
             isGuest() ? null : h("button", {
               class: "btn", type: "button", disabled: !canUpdate,
               onclick: async (ev) => {
