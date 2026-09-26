@@ -20,7 +20,10 @@ def test_image_model_filter_and_queue_generation():
     assert "function installedImageModeEntries" in app
     assert "Queue Generation" in app
     assert "classList.toggle(\"queued\"" in app
-    assert ".btn.queued" in css and "var(--queued)" in css
-    assert ".image-grid" in css and "margin-top: 20px" in css
-    assert "@media (max-width: 640px)" in css and "margin-top: 24px" in css
+    assert ".btn.queued" in css
+    assert "var(--queued)" in css
+    assert ".image-grid" in css
+    assert "margin-top: 20px" in css
+    assert "@media (max-width: 640px)" in css
+    assert "margin-top: 24px" in css
     assert "ops/images-models.ps1" in app

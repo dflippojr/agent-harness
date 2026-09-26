@@ -116,15 +116,18 @@ def test_split_keeps_tool_results_with_their_call():
         msgs.append({"role": "assistant", "content": "", "tool_calls": [call("read_file", i, path="x")]})
         msgs.append({"role": "tool", "tool_call_id": f"c{i}-read_file", "content": "x" * 1000})
     start, end = compaction.split_for_summary(msgs, keep_chars=2500)
-    assert start == 2 and msgs[end]["role"] == "assistant"
+    assert start == 2
+    assert msgs[end]["role"] == "assistant"
     new = compaction.apply_summary(msgs, start, end, "notes")
-    assert new[0]["content"] == "sys" and new[1]["content"] == "task"
+    assert new[0]["content"] == "sys"
+    assert new[1]["content"] == "task"
     assert new[2]["content"].startswith(compaction.SUMMARY_TAG)
     # The newest turn's results are never summarized, even when they alone exceed the budget.
     start3, end3 = compaction.split_for_summary(msgs, keep_chars=10)
     assert end3 == len(msgs) - 2
     elided, _ = compaction.elide(msgs, keep_last=0, max_chars=10)
-    assert elided[-1]["content"] == msgs[-1]["content"] and elided[-3]["content"] != msgs[-3]["content"]
+    assert elided[-1]["content"] == msgs[-1]["content"]
+    assert elided[-3]["content"] != msgs[-3]["content"]
     # A second summary folds the first one in instead of stacking.
     start2, end2 = compaction.split_for_summary(new, keep_chars=1200)
     again = compaction.apply_summary(new, start2, end2, "notes2")
@@ -156,7 +159,8 @@ def test_scheduler_fifo():
         await asyncio.sleep(0.01)
         s.release("a")
         await asyncio.gather(*tasks, return_exceptions=True)
-        assert order == ["b", "d"] and s.holder is None
+        assert order == ["b", "d"]
+        assert s.holder is None
     asyncio.run(body())
 
 
@@ -174,12 +178,15 @@ def test_basic_run_writes_file_and_finishes(tmp_path):
         s = m.create("write hello")
         s = await wait_status(m, s["id"], "done")
         await asyncio.gather(*m.tasks.values())  # transcript is written as the run wraps up
-        assert s["answer"] == "Wrote hello.txt." and s["stop_reason"] == "final_message"
+        assert s["answer"] == "Wrote hello.txt."
+        assert s["stop_reason"] == "final_message"
         assert (Path(s["workspace"]) / "hello.txt").read_text() == "hi\n"
         results = events(m, s["id"], "tool_result")
-        assert [r["ok"] for r in results] == [True, True] and "1\thi" in results[1]["output"]
+        assert [r["ok"] for r in results] == [True, True]
+        assert "1\thi" in results[1]["output"]
         text = (m.cfg.transcripts_dir / f"{s['id']}.md").read_text(encoding="utf-8")
-        assert "Wrote hello.txt." in text and "write_file" in text
+        assert "Wrote hello.txt." in text
+        assert "write_file" in text
         await m.stop()
     asyncio.run(body())
 
@@ -198,7 +205,8 @@ def test_approval_survives_restart(tmp_path):
         s = m.create("write secret", project="guarded")
         await wait_status(m, s["id"], "waiting_approval")
         pending = m.db.pending_approvals(s["id"])
-        assert len(pending) == 1 and "+x" in pending[0]["detail"]
+        assert len(pending) == 1
+        assert "+x" in pending[0]["detail"]
         assert m.scheduler.holder is None  # the GPU is free while waiting
         await m.stop()
         m.db.close()
@@ -233,7 +241,8 @@ def test_denied_call_is_reported_to_model(tmp_path):
         await wait_status(m, s["id"], "waiting_approval")
         m.decide(s["id"], None, approve=False, note="not now")
         s = await wait_status(m, s["id"], "done")
-        assert "denied" in s["answer"] and "not now" in s["answer"]
+        assert "denied" in s["answer"]
+        assert "not now" in s["answer"]
         assert not (Path(s["workspace"]) / "a.txt").exists()
         await m.stop()
     asyncio.run(body())
@@ -286,8 +295,11 @@ def test_retries_invalid_calls_and_bad_args(tmp_path):
         s = m.create("go")
         s = await wait_status(m, s["id"], "done")
         outputs = [r["output"] for r in events(m, s["id"], "tool_result")]
-        assert "not a valid JSON" in outputs[0] and "unknown argument" in outputs[1] and "unknown tool" in outputs[2]
-        assert s["run"]["invalid_tool_calls"] == 4 and events(m, s["id"], "llm_retry")
+        assert "not a valid JSON" in outputs[0]
+        assert "unknown argument" in outputs[1]
+        assert "unknown tool" in outputs[2]
+        assert s["run"]["invalid_tool_calls"] == 4
+        assert events(m, s["id"], "llm_retry")
         await m.stop()
     asyncio.run(body())
 
@@ -303,7 +315,8 @@ def test_cancel_and_follow_up_message(tmp_path):
         s = m.create("x", project="guarded")
         await wait_status(m, s["id"], "waiting_approval")
         s = await m.cancel(s["id"])
-        assert s["status"] == "cancelled" and s["context"][-1]["content"].startswith("Not run")
+        assert s["status"] == "cancelled"
+        assert s["context"][-1]["content"].startswith("Not run")
         assert m.db.pending_approvals(s["id"]) == []
         await m.send(s["id"], "never mind, just say hi")
         s = await wait_status(m, s["id"], "done")
@@ -321,14 +334,16 @@ def test_budget_and_finish_tool(tmp_path):
         m = Manager(cfg, chat=script)
         await m.start()
         s = await wait_status(m, m.create("loop forever")["id"], "done")
-        assert s["stop_reason"] == "budget_turns" and s["run"]["turns"] == 2
+        assert s["stop_reason"] == "budget_turns"
+        assert s["run"]["turns"] == 2
         await m.stop()
 
         m = Manager(make_cfg(tmp_path / "b"), chat=Script([
             Completion(tool_calls=[call("finish", 0, answer="42"), call("list_files", 1)])]))
         await m.start()
         s = await wait_status(m, m.create("answer")["id"], "done")
-        assert s["answer"] == "42" and s["stop_reason"] == "finished"
+        assert s["answer"] == "42"
+        assert s["stop_reason"] == "finished"
         assert s["context"][-1]["content"].startswith("Not run")
         await m.stop()
     asyncio.run(body())
@@ -360,10 +375,13 @@ def test_compaction_summarizes_long_context(tmp_path):
         comp = events(m, s["id"], "compaction")
         assert any(c["tier"] == "summary" for c in comp)
         started = events(m, s["id"], "compaction_started")
-        assert started and started[0]["messages"] > 0 and started[0]["context_tokens"] == 8000
+        assert started
+        assert started[0]["messages"] > 0
+        assert started[0]["context_tokens"] == 8000
         summarized = [c for c in comp if c["tier"] == "summary"][-1]
         # summaries count toward the session's cumulative tokens (the fake summarizer reports 100 in / 10 out)
-        assert summarized["prompt_tokens"] == 100 and summarized["totals"]["completion_tokens"] >= 10
+        assert summarized["prompt_tokens"] == 100
+        assert summarized["totals"]["completion_tokens"] >= 10
         assert m.summary(m.db.get_session(s["id"]))["context_limit"] == 8000
         assert any((x.get("content") or "").startswith(compaction.SUMMARY_TAG) for x in s["context"])
         assert s["context"][1]["content"] == "long task"
@@ -407,7 +425,8 @@ def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
         s = await wait_status(m, s["id"], "done", "failed", timeout=120)
         outputs = [r["output"] for r in events(m, s["id"], "tool_result")]
         assert outputs[0].startswith("cloned")
-        assert "hi" in outputs[1] and outputs[1].rstrip().endswith("1")
+        assert "hi" in outputs[1]
+        assert outputs[1].rstrip().endswith("1")
         assert "no-dns" in outputs[2]
         assert "online" in outputs[3]
         await asyncio.gather(*m.tasks.values())  # "done" is committed before the container is stopped

@@ -50,7 +50,9 @@ def test_owner_approved_pairing_is_one_time_and_cors_is_exact(tmp_path):
         approved = approved.json()
         assert approved["code"].startswith("hp-")
         listed = client.get("/pairing-codes").json()[0]
-        assert "code" not in listed and "hash" not in listed and listed["origin"] == ORIGIN
+        assert "code" not in listed
+        assert "hash" not in listed
+        assert listed["origin"] == ORIGIN
         stored_hash = m.db.conn.execute(
             "SELECT hash FROM pairing_codes WHERE id = ?", (approved["id"],)).fetchone()[0]
         assert stored_hash != approved["code"]
@@ -73,7 +75,8 @@ def test_owner_approved_pairing_is_one_time_and_cors_is_exact(tmp_path):
                                json={"code": approved["code"]})
         assert redeemed.status_code == 201
         token, app = redeemed.json()["token"], redeemed.json()["app"]
-        assert token.startswith("ha-") and app["origins"] == [ORIGIN]
+        assert token.startswith("ha-")
+        assert app["origins"] == [ORIGIN]
         assert redeemed.headers["cache-control"] == "no-store"
         # The code stops authorizing CORS as soon as it is spent.
         assert client.post("/api/v1/pair", headers={"Origin": ORIGIN},
@@ -119,21 +122,24 @@ def test_stream_tickets_resume_expire_and_follow_key_revocation(tmp_path):
         assert bare.status_code == 401
 
         minted = client.post(f"/api/v1/sessions/{sid}/events/ticket", headers=headers)
-        assert minted.status_code == 201 and minted.json()["ticket"].startswith("hs-")
+        assert minted.status_code == 201
+        assert minted.json()["ticket"].startswith("hs-")
         stored_ticket_hash = m.db.conn.execute("SELECT hash FROM stream_tickets").fetchone()[0]
         assert stored_ticket_hash != minted.json()["ticket"]
         assert minted.headers["cache-control"] == "no-store"
         ticket_url = minted.json()["events_url"] + "&follow=false"
         assert token not in ticket_url
         streamed = client.get(ticket_url, headers={"Origin": ORIGIN})
-        assert streamed.status_code == 200 and "event: status" in streamed.text
+        assert streamed.status_code == 200
+        assert "event: status" in streamed.text
         assert streamed.headers["access-control-allow-origin"] == ORIGIN
         assert streamed.headers["referrer-policy"] == "no-referrer"
 
         # EventSource reconnects can reuse the ticket briefly and resume from Last-Event-ID.
         seq = max(e["seq"] for e in m.db.events(sid))
         resumed = client.get(ticket_url, headers={"Origin": ORIGIN, "Last-Event-ID": str(seq)})
-        assert resumed.status_code == 200 and "id: " not in resumed.text
+        assert resumed.status_code == 200
+        assert "id: " not in resumed.text
         assert client.get(ticket_url, headers={"Origin": OTHER}).status_code == 401
 
         # After a long iOS suspension the client mints a fresh ticket, retaining its last sequence separately.

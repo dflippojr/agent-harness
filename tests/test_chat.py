@@ -85,7 +85,9 @@ def test_chat_is_separate_from_agent_sessions(tmp_path):
         assert opts["default_backend"] == "local"
         assert opts["backends"][0]["models"] == ["fake"]
         chat = client.post("/chats", json={"prompt": "What is a monad?\nBe brief."}).json()
-        assert chat["kind"] == "chat" and chat["title"] == "What is a monad?" and chat["project"] == "scratch"
+        assert chat["kind"] == "chat"
+        assert chat["title"] == "What is a monad?"
+        assert chat["project"] == "scratch"
         wait_for(lambda: client.get(f"/chats/{chat['id']}").json()["status"] == "done")
         agent = client.post("/sessions", json={"prompt": "agent task"}).json()
         assert [c["id"] for c in client.get("/chats").json()] == [chat["id"]]
@@ -109,7 +111,8 @@ def test_chat_denies_agent_tools_without_approval_cards(tmp_path):
         s = m.db.get_session(chat["id"])
         names = {t["function"]["name"] for t in Runner.tool_schemas(m.runner, s, None)}
         assert names <= {"web_search", "web_fetch"}
-        assert "plain chat" in s["context"][0]["content"] and "cannot run it" in s["context"][0]["content"]
+        assert "plain chat" in s["context"][0]["content"]
+        assert "cannot run it" in s["context"][0]["content"]
 
 
 def test_chat_owner_only(tmp_path):
@@ -134,12 +137,18 @@ def test_web_shell_has_chat_home_and_drawer(tmp_path):
         css = client.get("/static/style.css").text
     order = [html.index(f'data-nav="{n}"') for n in ("chat", "agents", "jobs", "images", "actions")]
     assert order == sorted(order)
-    assert ">Tasks</a>" in html and 'id="menu-btn"' in html and 'aria-label="Open navigation menu"' in html
+    assert ">Tasks</a>" in html
+    assert 'id="menu-btn"' in html
+    assert 'aria-label="Open navigation menu"' in html
     assert html.index('id="drawer-profile"') > html.index('id="drawer-chats"')
     assert 'go(canChat() ? "#/chat" : "#/agents", true)' in js
-    assert 'parts[0] === "chat"' in js and 'event.key === "Escape"' in js and "visualViewport" in js
+    assert 'parts[0] === "chat"' in js
+    assert 'event.key === "Escape"' in js
+    assert "visualViewport" in js
     assert "`/chats/${encodeURIComponent(id)}/events?after=${lastSeq}`" in js
-    assert "safe-area-inset-bottom" in css and "#nav-drawer" in css and ".chat-welcome" in css
+    assert "safe-area-inset-bottom" in css
+    assert "#nav-drawer" in css
+    assert ".chat-welcome" in css
 
 
 def test_household_member_cannot_use_chat():
@@ -193,7 +202,8 @@ def test_http_agent_surfaces_reject_chat_ids_and_search(tmp_path):
     with client:
         chat = client.post("/chats", json={"prompt": f"private {CHAT_MARKER} notes"}).json()
         agent = client.post("/sessions", json={"prompt": f"task {AGENT_MARKER} work"}).json()
-        assert chat["kind"] == "chat" and agent["kind"] == "agent"
+        assert chat["kind"] == "chat"
+        assert agent["kind"] == "agent"
         wait_for(lambda: client.get(f"/chats/{chat['id']}").json()["status"] in ("done", "queued", "running", "failed"))
         hits = client.get("/search", params={"q": CHAT_MARKER}).json()
         assert hits["results"] == []
@@ -219,7 +229,8 @@ def test_http_agent_surfaces_reject_chat_ids_and_search(tmp_path):
         # Agent APIs stay backward compatible, and chats keep their own event stream.
         assert client.get(f"/sessions/{agent['id']}").json()["id"] == agent["id"]
         replay = client.get(f"/chats/{chat['id']}/events", params={"follow": False})
-        assert replay.status_code == 200 and CHAT_MARKER in replay.text
+        assert replay.status_code == 200
+        assert CHAT_MARKER in replay.text
         assert chat["id"] not in [s["id"] for s in client.get("/queue").json()]
 
 
@@ -240,8 +251,10 @@ def test_chat_options_lists_ready_remote_backends(tmp_path, monkeypatch):
     assert opts["default_backend"] == "claude"
     assert [b["name"] for b in opts["backends"]] == ["claude"]
     claude = opts["backends"][0]
-    assert claude["models"] == ["opus", "sonnet"] and claude["efforts"] == ["low", "medium", "high"]
-    assert claude["effort"] == "" and claude["limits"] == {}
+    assert claude["models"] == ["opus", "sonnet"]
+    assert claude["efforts"] == ["low", "medium", "high"]
+    assert claude["effort"] == ""
+    assert claude["limits"] == {}
 
 
 def test_chat_options_default_falls_back_when_local_unavailable(tmp_path, monkeypatch):
@@ -285,7 +298,8 @@ def test_chat_create_is_owner_only_and_uses_chat_toolkit(tmp_path):
         assert err.value.status == 403
         chat = client.post("/chats", json={"prompt": "hi"}).json()
         s = m.db.get_session(chat["id"])
-        assert isinstance(m.runner.policy(s), ChatPolicy) and ChatPolicy().fingerprint() == "chat-allowlist"
+        assert isinstance(m.runner.policy(s), ChatPolicy)
+        assert ChatPolicy().fingerprint() == "chat-allowlist"
         assert m.runner.daemon_toolkits(s) == ([m.runner.web] if m.runner.web is not None else [])
         m.runner.web, web = None, m.runner.web
         assert m.runner.daemon_toolkits(s) == []
@@ -329,7 +343,9 @@ def test_session_list_stream_hides_chats_and_run_payloads(tmp_path, path):
             return chunk
 
         chunk = asyncio.run(first_event())
-    assert "run_finished" in chunk and '"ok": true' in chunk and chat["id"] not in chunk
+    assert "run_finished" in chunk
+    assert '"ok": true' in chunk
+    assert chat["id"] not in chunk
     assert ("secret" in chunk) == (path == "/api/v1/events")  # only the bundled list stream strips run payloads
 
 

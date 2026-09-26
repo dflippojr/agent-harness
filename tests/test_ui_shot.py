@@ -14,6 +14,7 @@ def test_ui_shot_spawns_edge_by_absolute_native_path():
     assert re.findall(r"\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync)\(\s*([^,)]+)", text) == ["EDGE"]
     literal = re.search(r'^const EDGE = "((?:[^"\\]|\\.)*)";', text, re.M).group(1)
     path = re.sub(r"\\(.)", r"\1", literal)  # undo the JS string escapes
-    assert ntpath.splitdrive(path)[0] and ntpath.isabs(path)
+    assert ntpath.splitdrive(path)[0]
+    assert ntpath.isabs(path)
     assert path == ntpath.normpath(path)  # native separators, no relative parts
     assert ntpath.basename(path).lower() == "msedge.exe"

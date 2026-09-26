@@ -21,7 +21,8 @@ def test_service_profile_is_hosted_only_and_discovers_capabilities(tmp_path, mon
     assert setup_config.main(setup_args(tmp_path, "--profile", "service")) == 0
     cfg = config.load(tmp_path / "cfg")
     assert cfg.profile == "service"
-    assert cfg.models == {} and cfg.default_model == ""
+    assert cfg.models == {}
+    assert cfg.default_model == ""
     assert not any(vars(cfg.modules).values())
     assert sorted(cfg.backends) == ["claude", "codex", "cursor"]
     assert all(backend.enabled for backend in cfg.backends.values())
@@ -41,16 +42,20 @@ def test_service_profile_is_hosted_only_and_discovers_capabilities(tmp_path, mon
         assert client.get("/models/status").json() == []
         assert client.post("/models/warm").status_code == 400
         rejected = client.post("/sessions", json={"prompt": "local is off"})
-        assert rejected.status_code == 400 and "local model is disabled" in rejected.json()["detail"]
+        assert rejected.status_code == 400
+        assert "local model is disabled" in rejected.json()["detail"]
 
 
 def test_service_module_opt_in_and_local_dependency(tmp_path):
     setup_config.main(setup_args(tmp_path, "--profile", "service", "--enable-module", "jobs",
                                  "--enable-module", "endpoint"))
     cfg = config.load(tmp_path / "cfg")
-    assert cfg.modules.jobs and cfg.jobs.enabled
-    assert cfg.modules.endpoint and cfg.endpoint.enabled
-    assert cfg.modules.local_model and cfg.default_model == "gpt-oss-20b"
+    assert cfg.modules.jobs
+    assert cfg.jobs.enabled
+    assert cfg.modules.endpoint
+    assert cfg.endpoint.enabled
+    assert cfg.modules.local_model
+    assert cfg.default_model == "gpt-oss-20b"
     assert not cfg.modules.images
 
 
@@ -68,7 +73,8 @@ def test_switching_existing_full_install_preserves_configuration(tmp_path):
     setup_config.main(args + ["--profile", "service"])
     assert harness_path.read_text(encoding="utf-8") == before
     cfg = config.load(tmp_path / "cfg")
-    assert cfg.profile == "service" and not cfg.modules.local_model
+    assert cfg.profile == "service"
+    assert not cfg.modules.local_model
     assert cfg.backends["codex"].api_key_file == "D:/private/codex.key"
     assert cfg.backends["codex"].model == "custom-codex"
     assert cfg.provider_secret_files == {"invoice-app": "D:/private/invoice-app.key"}
@@ -76,7 +82,8 @@ def test_switching_existing_full_install_preserves_configuration(tmp_path):
 
     setup_config.main(args)
     restored = config.load(tmp_path / "cfg")
-    assert restored.profile == "full" and restored.modules.local_model
+    assert restored.profile == "full"
+    assert restored.modules.local_model
     assert restored.default_model == "gpt-oss-20b"
 
 

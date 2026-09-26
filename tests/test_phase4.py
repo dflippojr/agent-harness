@@ -139,16 +139,20 @@ def test_mac_session_edits_runs_saves_and_merges(tmp_path):
         runner = FakeRunner(m.hub, executor(tmp_path, [projects_dir])).start()
         await m.start(maintenance=False)
         s = m.create("bump the value", project="mac")
-        assert s["target"] == "macbook" and s["workspace"].startswith("macbook:")
-        assert "MacBook" in s["context"][0]["content"] and "separate clone" in s["context"][0]["content"]
+        assert s["target"] == "macbook"
+        assert s["workspace"].startswith("macbook:")
+        assert "MacBook" in s["context"][0]["content"]
+        assert "separate clone" in s["context"][0]["content"]
         s = await settle(m, s["id"])
         sid = s["id"]
         assert s["status"] == "done", s["stop_reason"]
         results = events(m, sid, "tool_result")
-        assert "exit code 0" in results[1]["output"] and "from-mac" in results[1]["output"]
+        assert "exit code 0" in results[1]["output"]
+        assert "from-mac" in results[1]["output"]
         assert "app.py:1: VALUE = 2" in results[2]["output"]
         saved = events(m, sid, "branch_saved")[-1]
-        assert saved["auto_commit"] and saved["published"]
+        assert saved["auto_commit"]
+        assert saved["published"]
         assert sh(src, "show", f"agent/{sid}:app.py") == "VALUE = 2"
         assert (src / "app.py").read_text() == "VALUE = 1\n"  # the user's checkout is untouched
         ws = tmp_path / "mac-workspaces" / sid
@@ -158,7 +162,8 @@ def test_mac_session_edits_runs_saves_and_merges(tmp_path):
         assert m.summary(s)["target_online"] is True
 
         s = await m.review(sid, "merge")
-        assert s["review"] == "merged" and (src / "app.py").read_text() == "VALUE = 2\n"
+        assert s["review"] == "merged"
+        assert (src / "app.py").read_text() == "VALUE = 2\n"
         await runner.stop()
         await m.stop()
     asyncio.run(body())
@@ -178,14 +183,16 @@ def test_waits_for_offline_mac_then_resumes(tmp_path):
         assert m.scheduler.holder is None  # waiting doesn't hold the GPU
         waiting = [e for e in m.db.events(s["id"]) if e["type"] == "target_waiting"]
         note = Notifier(cfg, m.db).build(waiting[0])
-        assert note["title"].startswith("Waiting for the macbook") and note["sequence_id"] == f"target-{s['id']}"
+        assert note["title"].startswith("Waiting for the macbook")
+        assert note["sequence_id"] == f"target-{s['id']}"
         with pytest.raises(HarnessError) as e:
             await m.changes(s["id"])
         assert e.value.status == 503
 
         runner = FakeRunner(m.hub, executor(tmp_path, [tmp_path])).start()
         s = await settle(m, s["id"])
-        assert s["status"] == "done" and s["answer"] == "ok"
+        assert s["status"] == "done"
+        assert s["answer"] == "ok"
         assert events(m, s["id"], "target_online")
         assert "exit code 0\nhi" in events(m, s["id"], "tool_result")[0]["output"]
         await runner.stop()
@@ -271,11 +278,15 @@ def test_runner_endpoints_need_the_token(tmp_path):
         assert client.post("/runners/nope/poll", json=body,
                            headers={"Authorization": "Bearer s3cret-token"}).status_code == 404
         ok = client.post("/runners/macbook/poll", json=body, headers={"Authorization": "Bearer s3cret-token"})
-        assert ok.status_code == 200 and ok.json() == {"requests": [], "keep_awake": False}
+        assert ok.status_code == 200
+        assert ok.json() == {"requests": [], "keep_awake": False}
         status = client.get("/runners").json()
-        assert status[0]["name"] == "macbook" and status[0]["online"] and status[0]["info"]["free_gb"] == 42
+        assert status[0]["name"] == "macbook"
+        assert status[0]["online"]
+        assert status[0]["info"]["free_gb"] == 42
         projects = {p["name"]: p["target"] for p in client.get("/projects").json()}
-        assert projects["mac"] == "macbook" and projects["scratch"] == "tower"
+        assert projects["mac"] == "macbook"
+        assert projects["scratch"] == "tower"
 
 
 def test_refused_runner_log_line_cannot_be_forged(tmp_path, caplog):
@@ -316,7 +327,8 @@ def test_executor_shell_timeout_and_absolute_workspace_paths(tmp_path):
     ex = executor(tmp_path, [tmp_path])
     sid = "0123456789"
     out = ex.handle("r1", "shell", {"session": sid, "command": "sleep 5", "timeout": 1})
-    assert out["code"] == 124 and "timed out" in out["output"]
+    assert out["code"] == 124
+    assert "timed out" in out["output"]
     ws = ex.workspace(sid)
     ex.handle("r2", "file", {"session": sid, "name": "write_file",
                              "args": {"path": f"{ws}/sub/a.txt", "content": "x"}, "context_tokens": 1000})
@@ -348,15 +360,19 @@ def test_executor_gives_each_session_a_private_tmpdir(tmp_path, monkeypatch):
     for sid in (a, a, b):
         assert ex.handle("r", "shell", {"session": sid, "command": "true"})["code"] == 0
     first, again, other = (Path(env["TMPDIR"]) for env in envs)
-    assert first == again and first != other
+    assert first == again
+    assert first != other
     for private in (first, other):
-        assert private.is_dir() and private.parent.parent == shared
+        assert private.is_dir()
+        assert private.parent.parent == shared
         if os.name == "posix":
             assert stat.S_IMODE(private.stat().st_mode) == 0o700
     assert ex.handle("r", "cleanup_workspace", {"session": a}) == {"removed": True}
-    assert not first.exists() and other.is_dir()
+    assert not first.exists()
+    assert other.is_dir()
     ex.handle("r", "shell", {"session": a, "command": "true"})
-    assert Path(envs[-1]["TMPDIR"]).is_dir() and Path(envs[-1]["TMPDIR"]) == first
+    assert Path(envs[-1]["TMPDIR"]).is_dir()
+    assert Path(envs[-1]["TMPDIR"]) == first
 
 
 def test_session_tmpdir_survives_runner_restart(tmp_path, monkeypatch):
@@ -366,7 +382,8 @@ def test_session_tmpdir_survives_runner_restart(tmp_path, monkeypatch):
     first = executor(tmp_path, [tmp_path]).tmpdir(sid)
     (first / "scratch").write_text("x")
     restarted = executor(tmp_path, [tmp_path])
-    assert restarted.tmpdir(sid) == first and (first / "scratch").exists()
+    assert restarted.tmpdir(sid) == first
+    assert (first / "scratch").exists()
     assert restarted.handle("r", "cleanup_workspace", {"session": sid}) == {"removed": True}
     assert not first.exists()
     again = executor(tmp_path, [tmp_path]).tmpdir(sid)

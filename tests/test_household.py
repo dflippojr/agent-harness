@@ -62,7 +62,8 @@ def test_open_owner_legacy_only_without_members(tmp_path):
     db = Database(cfg.db_path)
     assert open_owner_mode(cfg, db.member_count())
     ident = resolve_human(cfg, "anyone@example.com", db)
-    assert ident.kind == "owner" and ident.allowed
+    assert ident.kind == "owner"
+    assert ident.allowed
     db.close()
 
     cfg.allowed_logins = [OWNER]
@@ -102,7 +103,8 @@ def test_migration_keeps_owner_paths_and_user_id(tmp_path):
         assert "users" not in ws.parts
         assert client.get("/projects", headers=H(OWNER)).json()
         names = [p["name"] for p in client.get("/projects", headers=H(OWNER)).json()]
-        assert "scratch" in names and "lab" in names
+        assert "scratch" in names
+        assert "lab" in names
 
 
 def test_identity_precedence_and_single_role(tmp_path):
@@ -110,11 +112,15 @@ def test_identity_precedence_and_single_role(tmp_path):
     client, m = household(tmp_path, guests=guests)
     with client:
         alice = create_member(client, ALICE, "Alice")
-        assert alice["user_id"].startswith("u-") and alice["user_id"] != OWNER_USER_ID
-        assert alice["login"] == ALICE and alice["enabled"] is True
+        assert alice["user_id"].startswith("u-")
+        assert alice["user_id"] != OWNER_USER_ID
+        assert alice["login"] == ALICE
+        assert alice["enabled"] is True
         assert alice["disk_quota_bytes"] == DEFAULT_DISK_QUOTA_BYTES
-        assert alice["max_running"] == 1 and alice["max_queued"] == 2
-        assert "prompt" not in alice and "repo" not in str(alice)
+        assert alice["max_running"] == 1
+        assert alice["max_queued"] == 2
+        assert "prompt" not in alice
+        assert "repo" not in str(alice)
 
         assert client.post(f"{PREFIX}/accounts", json={"login": OWNER, "display_name": "Nope"},
                            headers=H(OWNER)).status_code == 400
@@ -128,23 +134,30 @@ def test_identity_precedence_and_single_role(tmp_path):
         guest = resolve_access(m.cfg, GUEST, m.db)
         unknown = resolve_access(m.cfg, "stranger@example.com", m.db)
         local = resolve_access(m.cfg, None, m.db)
-        assert owner.kind == "owner" and owner.user_id == OWNER_USER_ID
-        assert member.kind == "member" and member.user_id == alice["user_id"] and member.bundled
-        assert guest.kind == "guest" and guest.allowed
+        assert owner.kind == "owner"
+        assert owner.user_id == OWNER_USER_ID
+        assert member.kind == "member"
+        assert member.user_id == alice["user_id"]
+        assert member.bundled
+        assert guest.kind == "guest"
+        assert guest.allowed
         assert not unknown.allowed
         assert local.kind == "owner"
 
         renamed = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
                                json={"display_name": "Alicia"}, headers=H(OWNER)).json()
-        assert renamed["display_name"] == "Alicia" and renamed["user_id"] == alice["user_id"]
+        assert renamed["display_name"] == "Alicia"
+        assert renamed["user_id"] == alice["user_id"]
         rebound = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
                                json={"login": "alice2@example.com"}, headers=H(OWNER)).json()
-        assert rebound["login"] == "alice2@example.com" and rebound["user_id"] == alice["user_id"]
+        assert rebound["login"] == "alice2@example.com"
+        assert rebound["user_id"] == alice["user_id"]
         assert m.stream_epoch.get(alice["user_id"], 0) >= 1
         old = client.get("/me", headers=H(ALICE))
         assert old.status_code == 403
         me = client.get("/me", headers=H("alice2@example.com")).json()
-        assert me["role"] == "member" and me["user_id"] == alice["user_id"]
+        assert me["role"] == "member"
+        assert me["user_id"] == alice["user_id"]
 
 
 def test_discovery_hides_project_names(tmp_path):
@@ -198,18 +211,23 @@ def test_two_member_adversarial_matrix(tmp_path):
         alice_events = client.get(f"/api/v1/sessions/{alice_s['id']}/events",
                                   params={"follow": False}, headers=ah)
         assert alice_events.status_code == 200
-        assert "mango" in alice_events.text and "papaya" not in alice_events.text
+        assert "mango" in alice_events.text
+        assert "papaya" not in alice_events.text
         alice_t = client.get(f"/api/v1/sessions/{alice_s['id']}/transcript", headers=ah)
-        assert alice_t.status_code == 200 and "mango" in alice_t.text and "papaya" not in alice_t.text
+        assert alice_t.status_code == 200
+        assert "mango" in alice_t.text
+        assert "papaya" not in alice_t.text
 
         alice_list = client.get("/api/v1/sessions", headers=ah).json()
         assert [s["id"] for s in alice_list] == [alice_s["id"]]
         owner_list = client.get("/sessions", headers=H(OWNER)).json()
         assert all(s["id"] != alice_s["id"] and s["id"] != bob_s["id"] for s in owner_list)
-        assert "mango" not in str(owner_list) and "papaya" not in str(owner_list)
+        assert "mango" not in str(owner_list)
+        assert "papaya" not in str(owner_list)
 
         q = client.get("/api/v1/search", params={"q": "mango"}, headers=ah).json()
-        assert q["results"] and all(r["id"] == alice_s["id"] for r in q["results"])
+        assert q["results"]
+        assert all(r["id"] == alice_s["id"] for r in q["results"])
         assert client.get("/api/v1/search", params={"q": "papaya"}, headers=ah).json()["results"] == []
         owner_search = client.get("/search", params={"q": "mango"}, headers=H(OWNER)).json()
         assert owner_search["results"] == []
@@ -217,7 +235,8 @@ def test_two_member_adversarial_matrix(tmp_path):
         alice_projects = client.get("/api/v1/projects", headers=ah).json()
         assert {p["name"] for p in alice_projects} == {"scratch"}
         created = client.post("/api/v1/projects", json={"name": "notes"}, headers=ah).json()
-        assert created["name"] == "notes" and created["target"] == "tower"
+        assert created["name"] == "notes"
+        assert created["target"] == "tower"
         assert client.post("/api/v1/projects", json={"name": "notes"}, headers=bh).json()["name"] == "notes"
         owner_names = {p["name"] for p in client.get("/projects", headers=H(OWNER)).json()}
         assert "notes" not in owner_names
@@ -227,7 +246,8 @@ def test_two_member_adversarial_matrix(tmp_path):
         assert all(item["session_id"] == alice_s["id"] for item in queue)
 
         me = client.get("/api/v1/me", headers=ah).json()
-        assert me["role"] == "member" and me["user_id"] == alice["user_id"]
+        assert me["role"] == "member"
+        assert me["user_id"] == alice["user_id"]
         assert me["capabilities"]["admin"] is False
         assert "secret" not in str(me)
 
@@ -249,7 +269,8 @@ def test_two_member_adversarial_matrix(tmp_path):
         bearer = {"Authorization": f"Bearer {app['key']}"}
         listed = client.get("/api/v1/sessions", headers=bearer).json()
         ids = {s["id"] for s in listed}
-        assert alice_s["id"] not in ids and bob_s["id"] not in ids
+        assert alice_s["id"] not in ids
+        assert bob_s["id"] not in ids
         same_404(client.get(f"/api/v1/sessions/{alice_s['id']}", headers=bearer))
         missing = client.get("/api/v1/sessions/nosuchidxx", headers=bearer)
         same_404(missing)
@@ -267,9 +288,12 @@ def test_two_member_adversarial_matrix(tmp_path):
         from harness.search import SessionSearch
         found = SessionSearch(m.db).session_search("zebra", _session=extra[0]["id"])
         assert "No earlier sessions match" in found
-        assert owner_s["id"] not in found and bob_s["id"] not in found
+        assert owner_s["id"] not in found
+        assert bob_s["id"] not in found
         own = SessionSearch(m.db).session_search("mango", _session=extra[0]["id"])
-        assert alice_s["id"] in own and bob_s["id"] not in own and owner_s["id"] not in own
+        assert alice_s["id"] in own
+        assert bob_s["id"] not in own
+        assert owner_s["id"] not in own
 
 
 def test_member_cannot_use_hosted_or_owner_modules(tmp_path):
@@ -290,7 +314,8 @@ def test_member_cannot_use_hosted_or_owner_modules(tmp_path):
         for banned in ("homelab_services", "restart_service", "memory_search", "memory_read", "memory_write",
                        "generate_image", "remote_control_status"):
             assert banned not in names, banned
-        assert "run_shell" in names and "session_search" in names
+        assert "run_shell" in names
+        assert "session_search" in names
 
 
 def test_member_clone_allows_only_public_https(tmp_path):
@@ -507,7 +532,8 @@ def test_quota_and_concurrency_and_disable(tmp_path):
         assert rws.exists()
         audit = client.get(f"{PREFIX}/accounts/audit", headers=H(OWNER)).json()
         actions = {a["action"] for a in audit}
-        assert "disable" in actions and "create" in actions
+        assert "disable" in actions
+        assert "create" in actions
         assert all("prompt" not in (a.get("detail") or "") for a in audit)
 
 
@@ -695,9 +721,11 @@ def test_scheduler_ineligible_waiters_do_not_block_eligible(tmp_path):
         blocked = asyncio.create_task(s.acquire("blocked"))
         await asyncio.sleep(0)
         s.release("running-member")
-        assert s.holder is None and not blocked.done()
+        assert s.holder is None
+        assert not blocked.done()
         await asyncio.wait_for(s.acquire("owner"), timeout=1)
-        assert s.holder == "owner" and not blocked.done()
+        assert s.holder == "owner"
+        assert not blocked.done()
         s.release("owner")
         assert s.holder is None
         eligible["blocked"] = True
@@ -792,7 +820,8 @@ def test_guest_stays_non_durable(tmp_path):
     client, m = household(tmp_path, guests=guests)
     with client:
         me = client.get("/me", headers=H(GUEST)).json()
-        assert me["role"] == "guest" and me["user_id"] is None
+        assert me["role"] == "guest"
+        assert me["user_id"] is None
         assert client.post("/sessions", json={"prompt": "x"}, headers=H(GUEST)).status_code == 403
         assert m.db.member_count() == 0
         assert client.post("/api/v1/projects", json={"name": "g"}, headers=H(GUEST)).status_code in (401, 403)
@@ -937,6 +966,7 @@ def test_member_approval_cannot_grant_owner_only_tool(tmp_path):
     assert m.db.decide_approval("a-fake01", "approved", "")
     ws = m.runner.workspace(row)
     out = asyncio.run(m.runner._authorize(row, {"id": "c1"}, "homelab_services", {}, ws))
-    assert out and "cannot use that tool" in out
+    assert out
+    assert "cannot use that tool" in out
     names = {t["function"]["name"] for t in m.runner.tool_schemas(row, ws)}
     assert "homelab_services" not in names
