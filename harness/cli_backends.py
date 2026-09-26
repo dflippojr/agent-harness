@@ -390,7 +390,7 @@ class CodexSession:
             self._approval_methods[str(event.get("id"))] = str(event["method"])
         return event
 
-    async def respond_permission(self, request_id, behavior: str, args: dict, message: str = "") -> None:
+    async def respond_permission(self, request_id, behavior: str, _args: dict, _message: str = "") -> None:
         # App-server's stable approval response is deliberately narrower than
         # Claude's: notes remain in the harness transcript, while Codex gets the
         # accept/decline decision.
@@ -500,7 +500,7 @@ class CursorSession:
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
 
-    async def _spawn(self, prompt: str) -> None:
+    def _spawn(self, prompt: str) -> None:
         loop = asyncio.get_running_loop()
         self._events = asyncio.Queue()
         self._stderr = []
@@ -534,7 +534,7 @@ class CursorSession:
 
     async def initialize(self, prompt: str) -> None:
         first_prompt = prompt if self.backend_session_id else f"{self.system_prompt}\n\nUser task:\n{prompt}"
-        await self._spawn(first_prompt)
+        self._spawn(first_prompt)
 
     def user_message(self, content: str) -> dict:
         return {"type": "cursor_followup", "content": content}
@@ -555,7 +555,7 @@ class CursorSession:
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
         prompt = "Messages received while the prior turn was running:\n\n" + "\n\n".join(prompts)
-        await self._spawn(prompt)
+        self._spawn(prompt)
 
     def combined_result(self, result: dict) -> dict:
         raw = result.get("usage") if isinstance(result.get("usage"), dict) else {}
