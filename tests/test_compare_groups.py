@@ -107,7 +107,8 @@ def test_failed_later_member_discards_the_earlier_ones(tmp_path):
     (s,) = m.db.list_sessions()
     s = m.db.get_session(s["id"])
     assert discarded == [(s["id"], "discard")]
-    assert s["status"] == "cancelled" and s["compare_group"] == ""
+    assert s["status"] == "cancelled"
+    assert s["compare_group"] == ""
 
 
 def test_rollback_covers_non_harness_errors_and_failed_discard(tmp_path):
@@ -129,7 +130,9 @@ def test_rollback_covers_non_harness_errors_and_failed_discard(tmp_path):
         run(coro)
     (s,) = m.db.list_sessions()
     s = m.db.get_session(s["id"])
-    assert s["review"] == "discarded" and s["workspace_removed"] and s["compare_group"] == ""
+    assert s["review"] == "discarded"
+    assert s["workspace_removed"]
+    assert s["compare_group"] == ""
 
 
 def test_pick_retry_skips_merged_winner_and_reports_discard_failures(tmp_path):
@@ -148,7 +151,8 @@ def test_pick_retry_skips_merged_winner_and_reports_discard_failures(tmp_path):
     coro = m.compare_pick(view["group"], a, "merge", True)
     with pytest.raises(HarnessError) as e:
         run(coro)
-    assert b in str(e.value) and m.db.get_session(a)["review"] == "merged"
+    assert b in str(e.value)
+    assert m.db.get_session(a)["review"] == "merged"
     fail["on"] = False
     out = run(m.compare_pick(view["group"], a, "merge", True))
     assert calls == [(a, "merge"), (b, "discard"), (b, "discard")]
@@ -175,7 +179,8 @@ def test_pick_that_does_not_complete_discards_nobody(tmp_path, action):
         run(coro)
     assert calls == [(a, action)]
     if action == "merge":
-        assert "did not complete" in str(e.value) and "conflict" in str(e.value)
+        assert "did not complete" in str(e.value)
+        assert "conflict" in str(e.value)
     assert m.db.get_session(b)["review"] != "discarded"
 
 
@@ -238,7 +243,9 @@ def test_rollback_falls_back_when_discard_fails_for_a_checked_out_member(tmp_pat
         run(coro)
     (s,) = m.db.list_sessions()
     s = m.db.get_session(s["id"])
-    assert s["status"] == "cancelled" and s["review"] == "discarded" and s["workspace_removed"]
+    assert s["status"] == "cancelled"
+    assert s["review"] == "discarded"
+    assert s["workspace_removed"]
     assert s["compare_group"] == ""
 
     # and a failing cleanup still ungroups the member instead of aborting the rollback
@@ -273,9 +280,12 @@ def test_group_discard_reports_a_member_that_cannot_be_stopped(tmp_path):
     coro = m.compare_discard(view["group"])
     with pytest.raises(HarnessError) as e:
         run(coro)
-    assert a in str(e.value) and "stuck" in str(e.value) and b not in str(e.value)
+    assert a in str(e.value)
+    assert "stuck" in str(e.value)
+    assert b not in str(e.value)
     # the one that could not be stopped is left alone and retryable; the other was still discarded
-    assert m.db.get_session(a)["status"] == "queued" and m.db.get_session(a)["review"] == ""
+    assert m.db.get_session(a)["status"] == "queued"
+    assert m.db.get_session(a)["review"] == ""
     assert m.db.get_session(b)["review"] == "discarded"
     m.cancel = real_cancel
     out = run(m.compare_discard(view["group"]))
@@ -365,9 +375,13 @@ def assert_gone(src, m, *sids):
     """Each member was stopped and fully discarded: nothing active, no branch, no workspace, nothing to resume."""
     for sid in sids:
         s = m.db.get_session(sid)
-        assert s["status"] not in ACTIVE and s["review"] == "discarded" and s["workspace_removed"], sid
-        assert not Path(s["workspace"]).exists() and sh(src, "branch", "--list", s["branch"]) == "", sid
-    assert m.db.sessions_with_status(*ACTIVE) == [] and m.scheduler.holder is None
+        assert s["status"] not in ACTIVE, sid
+        assert s["review"] == "discarded", sid
+        assert s["workspace_removed"], sid
+        assert not Path(s["workspace"]).exists(), sid
+        assert sh(src, "branch", "--list", s["branch"]) == "", sid
+    assert m.db.sessions_with_status(*ACTIVE) == []
+    assert m.scheduler.holder is None
     assert not m.runner.user_cancelled
 
 
@@ -411,7 +425,8 @@ def test_member_that_finishes_before_the_cancel_lands_is_still_discarded(tmp_pat
 
         m.cancel = cancel_after_it_finished
         out = await m.compare_pick(group, a, "merge", True)
-        assert cancelled and [r["review"] for r in out["members"]] == ["merged", "discarded", "discarded"]
+        assert cancelled
+        assert [r["review"] for r in out["members"]] == ["merged", "discarded", "discarded"]
         assert_gone(src, m, b, c)
         await m.stop()
     asyncio.run(body())
@@ -424,7 +439,8 @@ def test_pick_of_a_running_winner_cancels_and_discards_nobody(tmp_path, monkeypa
         running = next(s for s in (b, c) if m.db.get_session(s)["status"] == "running")
         with pytest.raises(HarnessError) as e:
             await m.compare_pick(group, running, "merge", True)
-        assert e.value.status == 409 and "still working" in str(e.value)
+        assert e.value.status == 409
+        assert "still working" in str(e.value)
         assert [m.db.get_session(s)["status"] for s in (a, b, c)] == before
         assert [m.db.get_session(s)["review"] for s in (a, b, c)] == ["", "", ""]
         assert (src / "app.py").read_text() == "VALUE = 1\n"
@@ -445,8 +461,10 @@ def test_discard_retry_after_a_failure_finishes_the_group(tmp_path, monkeypatch)
         m.review = flaky
         with pytest.raises(HarnessError) as e:
             await m.compare_pick(group, a, "merge", True)
-        assert b in str(e.value) and m.db.get_session(a)["review"] == "merged"
-        assert m.db.get_session(b)["status"] == "cancelled" and m.db.get_session(c)["review"] == "discarded"
+        assert b in str(e.value)
+        assert m.db.get_session(a)["review"] == "merged"
+        assert m.db.get_session(b)["status"] == "cancelled"
+        assert m.db.get_session(c)["review"] == "discarded"
         assert not m.db.get_session(b)["workspace_removed"]
         fail["on"] = False
         await m.compare_pick(group, a, "merge", True)
@@ -463,7 +481,8 @@ def test_group_discard_before_members_are_checked_out(tmp_path):
     assert [(r["status"], r["review"]) for r in out["members"]] == [("cancelled", "discarded")] * 2
     for r in out["members"]:
         s = m.db.get_session(r["id"])
-        assert s["workspace_removed"] and not Path(s["workspace"]).exists()
+        assert s["workspace_removed"]
+        assert not Path(s["workspace"]).exists()
 
 
 def release_on_cancel(m, gate):
@@ -495,7 +514,8 @@ def test_rollback_stops_members_that_never_ran_and_leaves_none_resumable(tmp_pat
                 await m.create_compare("bump", bad, "repo")
             assert e.value.status == 400
             ids = [r["id"] for r in m.db.list_sessions()]
-            assert len(ids) == 2 and {m.db.get_session(s)["compare_group"] for s in ids} == {""}
+            assert len(ids) == 2
+            assert {m.db.get_session(s)["compare_group"] for s in ids} == {""}
             assert_gone(src, m, *ids)
         finally:
             projects.prepare = real_prepare
@@ -543,7 +563,9 @@ def test_concurrent_picks_and_discards_on_one_group_run_one_at_a_time(tmp_path, 
         assert isinstance(first, dict), first
         assert [r["review"] for r in first["members"]] == ["merged", "discarded", "discarded"]
         for e in rest:
-            assert isinstance(e, HarnessError) and e.status == 409 and e.code == "compare_busy", e
+            assert isinstance(e, HarnessError), e
+            assert e.status == 409, e
+            assert e.code == "compare_busy", e
         assert (src / "app.py").read_text() == "VALUE = 2\n"
         assert_gone(src, m, b, c)
         # the guard is released when the pick ends; a later discard keeps the merged winner
@@ -581,7 +603,8 @@ def test_ride_out_survives_repeated_cancels_then_reraises():
         await asyncio.sleep(0)
         waiter.cancel()  # a second cancel while still waiting
         await asyncio.sleep(0)
-        assert not waiter.done() and not task.done()
+        assert not waiter.done()
+        assert not task.done()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await waiter
