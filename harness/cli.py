@@ -216,14 +216,6 @@ def _print_delta(d: dict, streamed: dict) -> None:
     print(d["text"], end="", flush=True)
 
 
-def _compatibility(protocol: int, supported: dict) -> str:
-    if protocol < supported.get("min", protocol):
-        return "client update required"
-    if protocol > supported.get("max", protocol):
-        return "Server update required"
-    return "compatible"
-
-
 def _print_assistant(d: dict, streamed: dict) -> str:
     """The finished turn, its tool calls and token counts. Returns the content for the answer comparison."""
     if any(streamed.values()):
@@ -352,10 +344,7 @@ def watch(sid: str, args, after: int = 0) -> int:
         _decide_approval(sid, state["prompt_for"])
 
 
-def main() -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    os.system("")  # enable ANSI colors in the Windows console
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="harness", description="agent-harness client")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -405,98 +394,145 @@ def main() -> int:
     logs = runner.add_parser("logs")
     logs.add_argument("--follow", action="store_true")
     logs.add_argument("--lines", type=int, default=80)
+    return parser
+
+
+def _cmd_pair(args) -> int:
+    paired = pair_native(args.server, args.code, args.config, args.runner_config)
+    print(f"paired {paired['runner']['name']} with {paired['server']}")
+    return 0
+
+
+def _compatibility(protocol: int, supported: dict) -> str:
+    if protocol < supported.get("min", protocol):
+        return "client update required"
+    if protocol > supported.get("max", protocol):
+        return "Server update required"
+    return "compatible"
+
+
+def _cmd_version(args) -> int:
+    print(f"Agent Harness CLI {MAC_CLIENT_VERSION} (admin protocol {CLIENT_PROTOCOLS['cli']})")
+    try:
+        remote = server_version()
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    supported = remote.get("protocols", {}).get("admin", {})
+    state = _compatibility(CLIENT_PROTOCOLS["cli"], supported)
+    print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
+    print(f"compatibility: {state} (Server supports admin protocol "
+          f"{supported.get('min', '?')}–{supported.get('max', '?')})")
+    return 0
+
+
+def _cmd_update(args) -> int:
+    try:
+        result = apply_update(BASE)
+    except RuntimeError as exc:
+        sys.exit(str(exc))
+    print(f"updated Agent Harness for Mac to {result['version']}")
+    return 0
+
+
+def _cmd_projects(args) -> int:
+    try:
+        root = add_project_root(args.path, args.runner_config)
+        launchctl("kickstart", "-k", check=True)
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        sys.exit(f"could not add project: {exc}")
+    print(f"allowed project root {root}")
+    return 0
+
+
+def _cmd_runner(args) -> int:
+    if args.runner_cmd == "restart":
+        launchctl("kickstart", "-k", check=True)
+        print("runner restarted")
+        return 0
+    if args.runner_cmd == "logs":
+        return _show_runner_logs(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow)
+    local = launchctl("print")
+    config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
+    remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
+    print(f"launchd: {'loaded' if local.returncode == 0 else 'not loaded'}")
+    print("daemon: " + (json.dumps(remote, indent=2) if remote else "runner not configured on daemon"))
+    return 0
+
+
+def _cmd_new(args) -> int:
+    s = api("POST", "/sessions", json={"prompt": args.prompt, "project": args.project,
+                                       "backend": args.backend, "model": args.model, "title": args.title})
+    print(f"session {s['id']} ({s['project']}, {s['model']})")
+    return 0 if args.detach else watch(s["id"], args)
+
+
+def _cmd_watch(args) -> int:
+    return watch(api("GET", f"/sessions/{args.session}")["id"], args)
+
+
+def _cmd_list(args) -> int:
+    for s in api("GET", "/sessions"):
+        when = time.strftime("%m-%d %H:%M", time.localtime(s["created_at"]))
+        print(f"{s['id']}  {when}  {s['status']:<16} {s['project']:<10} {s['title']}")
+    return 0
+
+
+def _cmd_show(args) -> int:
+    print(json.dumps(api("GET", f"/sessions/{args.session}"), indent=2))
+    return 0
+
+
+def _cmd_transcript(args) -> int:
+    print(api("GET", f"/sessions/{args.session}/transcript"))
+    return 0
+
+
+def _cmd_cancel(args) -> int:
+    print(api("POST", f"/sessions/{args.session}/cancel")["status"])
+    return 0
+
+
+def _cmd_send(args) -> int:
+    before = api("GET", f"/sessions/{args.session}")
+    s = api("POST", f"/sessions/{args.session}/messages", json={"content": args.message})
+    print(f"sent; session is {s['status']}")
+    if args.watch:
+        args.reasoning = args.full = args.no_prompt = False
+        return watch(s["id"], args, after=before["last_event_seq"])
+    return 0
+
+
+def _cmd_decide(args) -> int:
+    a = api("POST", f"/sessions/{args.session}/approvals/{args.approval}",
+            json={"decision": args.cmd, "note": args.note})
+    print(f"{a['id']} {a['status']}")
+    return 0
+
+
+def _cmd_queue(args) -> int:
+    for q in api("GET", "/queue"):
+        print(f"{q['position']}  {q['session_id']}")
+    return 0
+
+
+_COMMANDS = {"pair": _cmd_pair, "version": _cmd_version, "update": _cmd_update, "projects": _cmd_projects,
+             "runner": _cmd_runner, "new": _cmd_new, "watch": _cmd_watch, "list": _cmd_list, "show": _cmd_show,
+             "transcript": _cmd_transcript, "cancel": _cmd_cancel, "send": _cmd_send, "approve": _cmd_decide,
+             "deny": _cmd_decide, "queue": _cmd_queue}
+
+
+def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    os.system("")  # enable ANSI colors in the Windows console
+    parser = _build_parser()
     args = parser.parse_args()
     args.config = _harness_file(parser, "--config", args.config)
     if getattr(args, "runner_config", None) is not None:
         args.runner_config = _harness_file(parser, "--runner-config", args.runner_config)
     configure(args.config)
-
-    if args.cmd == "pair":
-        paired = pair_native(args.server, args.code, args.config, args.runner_config)
-        print(f"paired {paired['runner']['name']} with {paired['server']}")
-        return 0
-    if args.cmd == "version":
-        print(f"Agent Harness CLI {MAC_CLIENT_VERSION} (admin protocol {CLIENT_PROTOCOLS['cli']})")
-        try:
-            remote = server_version()
-        except RuntimeError as exc:
-            print(str(exc))
-            return 1
-        supported = remote.get("protocols", {}).get("admin", {})
-        protocol = CLIENT_PROTOCOLS["cli"]
-        state = _compatibility(protocol, supported)
-        print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
-        print(f"compatibility: {state} (Server supports admin protocol "
-              f"{supported.get('min', '?')}–{supported.get('max', '?')})")
-        return 0
-    if args.cmd == "update":
-        try:
-            result = apply_update(BASE)
-        except RuntimeError as exc:
-            sys.exit(str(exc))
-        print(f"updated Agent Harness for Mac to {result['version']}")
-        return 0
-    if args.cmd == "projects":
-        try:
-            root = add_project_root(args.path, args.runner_config)
-            launchctl("kickstart", "-k", check=True)
-        except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-            sys.exit(f"could not add project: {exc}")
-        print(f"allowed project root {root}")
-        return 0
-    if args.cmd == "runner":
-        if args.runner_cmd == "restart":
-            launchctl("kickstart", "-k", check=True)
-            print("runner restarted")
-            return 0
-        if args.runner_cmd == "logs":
-            return _show_runner_logs(HARNESS_HOME / "logs" / "runner.log", args.lines, args.follow)
-        local = launchctl("print")
-        config = json.loads(DEFAULT_RUNNER_CONFIG.read_text(encoding="utf-8"))
-        remote = next((row for row in api("GET", "/runners") if row["name"] == config.get("name")), None)
-        print(f"launchd: {'loaded' if local.returncode == 0 else 'not loaded'}")
-        print("daemon: " + (json.dumps(remote, indent=2) if remote else "runner not configured on daemon"))
-        return 0
-
-    if args.cmd == "new":
-        s = api("POST", "/sessions", json={"prompt": args.prompt, "project": args.project,
-                                           "backend": args.backend, "model": args.model, "title": args.title})
-        print(f"session {s['id']} ({s['project']}, {s['model']})")
-        return 0 if args.detach else watch(s["id"], args)
-    if args.cmd == "watch":
-        return watch(api("GET", f"/sessions/{args.session}")["id"], args)
-    if args.cmd == "list":
-        for s in api("GET", "/sessions"):
-            when = time.strftime("%m-%d %H:%M", time.localtime(s["created_at"]))
-            print(f"{s['id']}  {when}  {s['status']:<16} {s['project']:<10} {s['title']}")
-        return 0
-    if args.cmd == "show":
-        print(json.dumps(api("GET", f"/sessions/{args.session}"), indent=2))
-        return 0
-    if args.cmd == "transcript":
-        print(api("GET", f"/sessions/{args.session}/transcript"))
-        return 0
-    if args.cmd == "cancel":
-        print(api("POST", f"/sessions/{args.session}/cancel")["status"])
-        return 0
-    if args.cmd == "send":
-        before = api("GET", f"/sessions/{args.session}")
-        s = api("POST", f"/sessions/{args.session}/messages", json={"content": args.message})
-        print(f"sent; session is {s['status']}")
-        if args.watch:
-            args.reasoning = args.full = args.no_prompt = False
-            return watch(s["id"], args, after=before["last_event_seq"])
-        return 0
-    if args.cmd in ("approve", "deny"):
-        a = api("POST", f"/sessions/{args.session}/approvals/{args.approval}",
-                json={"decision": args.cmd, "note": args.note})
-        print(f"{a['id']} {a['status']}")
-        return 0
-    if args.cmd == "queue":
-        for q in api("GET", "/queue"):
-            print(f"{q['position']}  {q['session_id']}")
-        return 0
-    return 1
+    return _COMMANDS[args.cmd](args)
 
 
 if __name__ == "__main__":
