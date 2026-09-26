@@ -46,13 +46,19 @@ const fmtElapsed = (ms) => {
   const s = Math.max(0, Math.floor(ms / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 };
-const fmtTokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : `${n || 0}`);
+const fmtTokens = (n) => {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+  return `${n || 0}`;
+};
 // llama-server's prompt progress counts the cached prefix as processed; the bar covers only the part being read.
 const readFraction = (d) => (d.total > d.cached ? (d.processed - d.cached) / (d.total - d.cached) : null);
-const readingText = (what, d) => `${what} ${fmtTokens(Math.max(0, d.processed - d.cached))} of ${fmtTokens(d.total - d.cached)} new tokens${d.cached ? ` (${fmtTokens(d.cached)} cached)` : ""}`;
+const readingText = (what, d) => {
+  const cached = d.cached ? ` (${fmtTokens(d.cached)} cached)` : "";
+  return `${what} ${fmtTokens(Math.max(0, d.processed - d.cached))} of ${fmtTokens(d.total - d.cached)} new tokens${cached}`;
+};
 const progressBar = (fraction) => h("div", { class: `progress${fraction === null ? " indeterminate" : ""}` },
   h("span", { style: fraction === null ? "" : `width:${Math.max(2, Math.min(100, fraction * 100)).toFixed(1)}%` }));
-
 let cleanup = [];
 const onLeave = (fn) => cleanup.push(fn);
 let protocolBlocked = false;
@@ -102,17 +108,21 @@ async function loadProfileIcon() {
 }
 
 // ---------- utilities ----------
+const isEmptyChild = (c) => c === null || c === undefined || c === false;
+function setAttr(el, k, v) {
+  if (k === "class") el.className = v;
+  else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+  else if (k === "html") el.innerHTML = v;
+  else el.setAttribute(k, v === true ? "" : v);
+}
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === undefined || v === null || v === false) continue;
-    if (k === "class") el.className = v;
-    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (k === "html") el.innerHTML = v;
-    else el.setAttribute(k, v === true ? "" : v);
+    setAttr(el, k, v);
   }
   for (const c of children.flat()) {
-    if (c === null || c === undefined || c === false) continue;
+    if (isEmptyChild(c)) continue;
     el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
   return el;
@@ -507,14 +517,69 @@ const hashParts = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boo
 const isTopLevel = (parts) => parts.length === 0 || parts[0] === "chat" || parts[0] === "actions"
   || (parts.length === 1 && (parts[0] === "agents" || parts[0] === "jobs" || parts[0] === "images"));
 
+const normalizeHash = (hash) => {
+  if (!hash || hash === "#" || hash === "#/") return "#/";
+  return hash.startsWith("#") ? hash : `#/${hash}`;
+};
+
 function go(hash, replace = false) {
   if (protocolBlocked) return;
-  const url = !hash || hash === "#" || hash === "#/" ? "#/" : (hash.startsWith("#") ? hash : `#/${hash}`);
+  const url = normalizeHash(hash);
   const cur = location.hash || "#/";
   const same = url === cur || (url === "#/" && (cur === "" || cur === "#" || cur === "#/"));
   if (same) return;
   if (replace) location.replace(url);
   else location.hash = url;
+}
+
+const isProfileRoute = (parts) => parts[0] === "profile" || parts[0] === "settings";
+const MEMBER_HIDDEN_PROFILE = ["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"];
+
+// Where a guest or member who asked for a page they may not see should land instead (null = allowed).
+function blockedRedirect(parts) {
+  const guestBlocked = isGuest() && (
+    parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
+    || (isProfileRoute(parts) && ["notifications", "apps", "endpoint"].includes(parts[1])));
+  if (guestBlocked) return parts[0] === "jobs" ? "#/jobs" : "#/profile";
+  const memberBlocked = isMember() && (
+    parts[0] === "jobs" || parts[0] === "images"
+    || (isProfileRoute(parts) && MEMBER_HIDDEN_PROFILE.includes(parts[1])));
+  if (!memberBlocked) return null;
+  return isProfileRoute(parts) ? "#/profile" : "#/agents";
+}
+
+async function routeImages(parts) {
+  if (parts[1] && !validId(parts[1])) go("#/images", true);
+  else if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
+  else if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
+  else if (parts[1]) await viewImage(parts[1]);
+  else await viewImages();
+}
+
+async function routeProfile(parts) {
+  // Bookmarks from when these lived under Profile. Non-owners never land on Actions.
+  if (!["accounts", "disk", "remote-control"].includes(parts[1])) {
+    await viewProfile(parts[1], parts[2]);
+  } else if (!isOwner()) go("#/profile", true);
+  else go(`#/actions/${parts[1]}`, true);
+}
+
+async function routeActions(parts) {
+  if (!isOwner()) go(isMember() ? "#/agents" : "#/profile", true);
+  else await viewActions(parts[1]);
+}
+
+async function routeView(parts) {
+  if (parts.length === 0) go(canChat() ? "#/chat" : "#/agents", true);
+  else if (parts[0] === "chat") await viewChat(parts[1]);
+  else if (parts[0] === "agents") await viewList();
+  else if (parts[0] === "new") await viewNew();
+  else if (parts[0] === "actions") await routeActions(parts);
+  else if (isProfileRoute(parts)) await routeProfile(parts);
+  else if (parts[0] === "images") await routeImages(parts);
+  else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
+  else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
+  else go("#/", true);
 }
 
 async function route() {
@@ -538,43 +603,10 @@ async function route() {
   route.onImages = images;
   $back.hidden = isTopLevel(parts);
   $menu.hidden = !$back.hidden;
-  const guestBlocked = isGuest() && (
-    parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
-    || ((parts[0] === "profile" || parts[0] === "settings")
-      && ["notifications", "apps", "endpoint"].includes(parts[1])));
-  const memberBlocked = isMember() && (
-    parts[0] === "jobs" || parts[0] === "images"
-    || ((parts[0] === "profile" || parts[0] === "settings")
-      && ["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"].includes(parts[1])));
-  if (guestBlocked) { go(parts[0] === "jobs" ? "#/jobs" : "#/profile", true); return; }
-  if (memberBlocked) { go(parts[0] === "profile" || parts[0] === "settings" ? "#/profile" : "#/agents", true); return; }
+  const redirect = blockedRedirect(parts);
+  if (redirect) { go(redirect, true); return; }
   try {
-    if (parts.length === 0) go(canChat() ? "#/chat" : "#/agents", true);
-    else if (parts[0] === "chat") await viewChat(parts[1]);
-    else if (parts[0] === "agents") await viewList();
-    else if (parts[0] === "new") await viewNew();
-    else if (parts[0] === "actions") {
-      if (!isOwner()) { go(isMember() ? "#/agents" : "#/profile", true); return; }
-      await viewActions(parts[1]);
-    }
-    else if (parts[0] === "profile" || parts[0] === "settings") {
-      // Bookmarks from when these lived under Profile. Non-owners never land on Actions.
-      if (["accounts", "disk", "remote-control"].includes(parts[1])) {
-        if (!isOwner()) { go("#/profile", true); return; }
-        go(`#/actions/${parts[1]}`, true);
-        return;
-      } else await viewProfile(parts[1], parts[2]);
-    }
-    else if (parts[0] === "images") {
-      if (parts[1] && !validId(parts[1])) go("#/images", true);
-      else if (parts[1] && parts[2] === "edit") await viewImageEdit(parts[1]);
-      else if (parts[1] && parts[2] === "full") await viewImageFull(parts[1]);
-      else if (parts[1]) await viewImage(parts[1]);
-      else await viewImages();
-    }
-    else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
-    else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
-    else go("#/", true);
+    await routeView(parts);
   } catch (e) {
     append($app, h("p", { class: "note bad" }, e.message),
       h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings"));
@@ -588,10 +620,10 @@ $back.addEventListener("click", () => {
   if (parts[0] === "s" && parts[2] === "approval") go(`#/s/${parts[1]}`, true);
   else history.back();
 });
+const FEATURE_ROUTES = { jobs: "#/jobs", images: "#/images", chat: "#/chat" };
 $feature.addEventListener("change", () => {
   if (protocolBlocked) return;
-  go($feature.value === "jobs" ? "#/jobs" : $feature.value === "images" ? "#/images"
-    : $feature.value === "chat" ? "#/chat" : "#/agents", true);
+  go(FEATURE_ROUTES[$feature.value] || "#/agents", true);
 });
 window.addEventListener("hashchange", route);
 
