@@ -84,7 +84,8 @@ def test_finish_tool_quote_is_flagged_after_second_try(tmp_path):
         s = await wait_status(m, s["id"], "done")
         await asyncio.gather(*m.tasks.values())
         results = events(m, s["id"], "tool_result")
-        assert results[0]["ok"] is False and "Not finished yet" in results[0]["output"]
+        assert results[0]["ok"] is False
+        assert "Not finished yet" in results[0]["output"]
         assert results[1]["ok"] is True
         assert len(events(m, s["id"], "quote_check")) == 1
         assert events(m, s["id"], "ungrounded_quotes")[0]["quotes"] == [made_up]
@@ -105,7 +106,8 @@ def test_quote_check_can_be_turned_off(tmp_path):
         s = m.create("anything")
         s = await wait_status(m, s["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        assert events(m, s["id"], "quote_check") == [] and events(m, s["id"], "ungrounded_quotes") == []
+        assert events(m, s["id"], "quote_check") == []
+        assert events(m, s["id"], "ungrounded_quotes") == []
         await m.stop()
     asyncio.run(body())
 
@@ -119,9 +121,11 @@ def test_github_sources_urls():
         "readme": "https://api.github.com/repos/searxng/searxng/readme",
         "contents": "https://api.github.com/repos/searxng/searxng/contents"}
     tree = github_sources("https://github.com/o/r/tree/main/tools/server")
-    assert tree["path"] == "tools/server" and tree["urls"]["contents"].endswith("/contents/tools/server?ref=main")
+    assert tree["path"] == "tools/server"
+    assert tree["urls"]["contents"].endswith("/contents/tools/server?ref=main")
     blob = github_sources("https://github.com/o/r.git/blob/v1.2/src/app.py")
-    assert blob["kind"] == "file" and blob["urls"]["raw"] == "https://raw.githubusercontent.com/o/r/v1.2/src/app.py"
+    assert blob["kind"] == "file"
+    assert blob["urls"]["raw"] == "https://raw.githubusercontent.com/o/r/v1.2/src/app.py"
     for other in ("https://github.com/o", "https://github.com/topics/python", "https://github.com/o/r/issues/5",
                   "https://gitlab.com/o/r", "https://example.com/o/r"):
         assert github_sources(other) is None
@@ -154,7 +158,9 @@ def test_github_repo_page_uses_api():
     handler, seen = _github_handler()
     web = WebTools(WebConfig(enabled=True), resolver=resolver({}), transport=httpx.MockTransport(handler))
     out = asyncio.run(web.web_fetch("https://github.com/o/r"))
-    assert "License: MIT License (MIT)" in out and "Install with pip." in out and "src/  setup.py" in out
+    assert "License: MIT License (MIT)" in out
+    assert "Install with pip." in out
+    assert "src/  setup.py" in out
     assert "A demo tool." in out and "github.com/o/r" not in seen  # the HTML page wasn't needed
 
 
@@ -162,7 +168,8 @@ def test_github_falls_back_to_html_when_api_fails():
     handler, seen = _github_handler(meta_status=403)  # e.g. the unauthenticated API rate limit
     web = WebTools(WebConfig(enabled=True), resolver=resolver({}), transport=httpx.MockTransport(handler))
     out = asyncio.run(web.web_fetch("https://github.com/o/r"))
-    assert "HTML page." in out and "github.com/o/r" in seen
+    assert "HTML page." in out
+    assert "github.com/o/r" in seen
 
 
 # web app: a syntax error in app.js blanks the whole phone app, and nothing else would catch it
@@ -199,7 +206,8 @@ FAKE_LOG = ("· Connecting · repo · HEAD\n\x1b[1A\x1b[J· Connected · repo ·
 def test_parse_log():
     info = parse_log(FAKE_LOG)
     assert info["pairing_url"] == "https://claude.ai/code?environment=env_01XyZ"
-    assert info["session_urls"] == ["https://claude.ai/code/session_01AbC"] and info["active_sessions"] == 1
+    assert info["session_urls"] == ["https://claude.ai/code/session_01AbC"]
+    assert info["active_sessions"] == 1
     assert parse_log("Error: Workspace not trusted. Please run `claude` in X first")["error"].startswith("Error: Workspace")
 
 
@@ -246,10 +254,14 @@ def test_remote_control_launch_status_stop(tmp_path):
     async def body():
         assert rc.eligible() == ["repo"]  # scratch has no folder, remote is a URL
         view = await rc.launch("repo", started_by="test")
-        assert view["running"] and view["pairing_url"].endswith("env_01XyZ") and view["active_sessions"] == 1
-        assert notes and notes[0]["click"] == view["pairing_url"]
+        assert view["running"]
+        assert view["pairing_url"].endswith("env_01XyZ")
+        assert view["active_sessions"] == 1
+        assert notes
+        assert notes[0]["click"] == view["pairing_url"]
         again = await rc.launch("repo")
-        assert again["already_running"] and again["pid"] == view["pid"]
+        assert again["already_running"]
+        assert again["pid"] == view["pid"]
         # a new RemoteControl (the daemon restarted) still finds and stops it
         fresh = RemoteControl(rc.cfg, rc.rc, claude_json=rc.claude_json)
         assert fresh.status()[0]["running"]
@@ -295,7 +307,9 @@ def test_remote_control_stop_ignores_vanished_processes(tmp_path, monkeypatch):
         assert result == {"project": "repo", "running": False}
 
     asyncio.run(body())
-    assert waited and waited[0][1] == STOP_TIMEOUT and len(waited[0][0]) == 2
+    assert waited
+    assert waited[0][1] == STOP_TIMEOUT
+    assert len(waited[0][0]) == 2
     assert rc._load()["repo"].get("stopped_at")
 
 
@@ -355,20 +369,23 @@ def test_remote_control_opens_trust_prompt_in_exact_folder(tmp_path, monkeypatch
     monkeypatch.setattr(rc_module.shutil, "which", lambda name: "C:\\Windows\\powershell.exe" if name == "powershell.exe" else None)
 
     view = rc.open_trust_prompt("repo")
-    assert view["trust_prompt_open"] and not view["trusted"]
+    assert view["trust_prompt_open"]
+    assert not view["trusted"]
     command, options = calls[0]
     assert command[:4] == ["C:\\Windows\\powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
     assert options["cwd"] == str(repo)
     assert options["env"]["HARNESS_CLAUDE_PATH"] == _sys.executable
     assert options["env"]["HARNESS_CLAUDE_TRUST_PROJECT"] == "repo"
     assert str(repo) not in command[-1]  # paths are passed without shell interpolation
-    assert rc.open_trust_prompt("repo")["already_open"] and len(calls) == 1
+    assert rc.open_trust_prompt("repo")["already_open"]
+    assert len(calls) == 1
 
     process.returncode = 0
     assert not rc.status()[0]["trust_prompt_open"]
     rc.claude_json.write_text(_json.dumps({"projects": {
         str(repo).replace("\\", "/"): {"hasTrustDialogAccepted": True}}}), encoding="utf-8")
-    assert rc.open_trust_prompt("repo")["already_trusted"] and len(calls) == 1
+    assert rc.open_trust_prompt("repo")["already_trusted"]
+    assert len(calls) == 1
 
 
 def test_remote_control_trust_web_endpoint(tmp_path, monkeypatch):
@@ -596,10 +613,13 @@ def test_claude_cli_allow_maps_events_usage_and_limits(tmp_path):
         await m.start()
         s = await wait_status(m, m.create("read it", backend="claude")["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        assert s["backend"] == "claude" and s["model"] == "claude-opus-5"
-        assert s["answer"] == "allow" and s["run"]["backend_session_id"] == "claude-session-1"
+        assert s["backend"] == "claude"
+        assert s["model"] == "claude-opus-5"
+        assert s["answer"] == "allow"
+        assert s["run"]["backend_session_id"] == "claude-session-1"
         assert s["run"]["rate_limits"]["utilization"] == 0.8
-        assert s["run"]["tool_calls"] == 1 and s["run"]["tool_errors"] == 0
+        assert s["run"]["tool_calls"] == 1
+        assert s["run"]["tool_errors"] == 0
         assert s["totals"] == {"turns": 2, "prompt_tokens": 15, "completion_tokens": 4,
                                 "total_cost_usd": 0.42}
         assistant = events(m, s["id"], "assistant")[0]
@@ -609,7 +629,8 @@ def test_claude_cli_allow_maps_events_usage_and_limits(tmp_path):
         assert events(m, s["id"], "tool_result")[0]["output"] == "allow"
         assert events(m, s["id"], "rate_limit")[0]["rateLimitType"] == "seven_day"
         sent = state.read_text(encoding="utf-8")
-        assert '"subtype": "initialize"' in sent and '"behavior": "allow"' in sent
+        assert '"subtype": "initialize"' in sent
+        assert '"behavior": "allow"' in sent
         assert made[0]["system_prompt"] == s["context"][0]["content"]
         assert made[0]["model"] == "claude-opus-5"
         await m.stop()
@@ -623,7 +644,8 @@ def test_claude_cli_ask_approve_and_deny(tmp_path):
         sid = m.create("run it", backend="claude")["id"]
         await wait_status(m, sid, "waiting_approval")
         pending = m.db.pending_approvals(sid)
-        assert len(pending) == 1 and pending[0]["tool"] == "Bash"
+        assert len(pending) == 1
+        assert pending[0]["tool"] == "Bash"
         m.decide(sid, pending[0]["id"], approve=approve, note=note)
         s = await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
@@ -644,7 +666,8 @@ def test_claude_cli_inbox_message(tmp_path):
         await wait_status(m, sid, "running")
         await m.send(sid, "the follow-up")
         s = await wait_status(m, sid, "done")
-        assert s["answer"] == "the follow-up" and s["inbox"] == []
+        assert s["answer"] == "the follow-up"
+        assert s["inbox"] == []
         records = [json.loads(line[3:]) for line in (tmp_path / "fake-state.jsonl").read_text().splitlines()]
         assert all(item.get("session_id", "") == "" for item in records if item.get("type") == "user")
         await m.stop()
@@ -662,7 +685,8 @@ def test_claude_cli_completed_session_followup_sends_latest_message(tmp_path):
         s = await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
         assert s["answer"] == "the later follow-up"
-        assert len(made) == 2 and made[1]["backend_session_id"] == "claude-session-1"
+        assert len(made) == 2
+        assert made[1]["backend_session_id"] == "claude-session-1"
         users = [json.loads(line[3:]) for line in state.read_text().splitlines()
                  if json.loads(line[3:]).get("type") == "user"]
         assert [item["message"]["content"] for item in users] == ["the original prompt", "the later follow-up"]
@@ -711,13 +735,15 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await asyncio.gather(*m.tasks.values())
         await wait_cli_gone(m, sid)
         s = m.db.get_session(sid)
-        assert s["status"] == "cancelled" and s["stop_reason"] == "cancelled"
+        assert s["status"] == "cancelled"
+        assert s["stop_reason"] == "cancelled"
         assert recorded == [sid]
         assert s["run"].get("failure") is None
         assert m.summary(s).get("failure") is None
         assert events(m, sid, "error") == []
         finished = events(m, sid, "run_finished")
-        assert len(finished) == 1 and finished[0]["status"] == "cancelled"
+        assert len(finished) == 1
+        assert finished[0]["status"] == "cancelled"
         assert finished[0]["stop_reason"] == "cancelled"
         titles = _notification_titles(m, sid)
         assert not any("failed" in title.lower() for title in titles)
@@ -741,12 +767,14 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await asyncio.gather(*m.tasks.values())
         await wait_cli_gone(m, sid)
         s = m.db.get_session(sid)
-        assert s["status"] == "failed" and recorded == []
+        assert s["status"] == "failed"
+        assert recorded == []
         assert s["stop_reason"].startswith("provider_unavailable") or s["stop_reason"].startswith("provider_error")
         assert s["run"].get("failure")
         assert events(m, sid, "error") == [s["run"]["failure"]]
         finished = events(m, sid, "run_finished")
-        assert finished and finished[-1]["status"] == "failed"
+        assert finished
+        assert finished[-1]["status"] == "failed"
         assert m.summary(s).get("failure") == s["run"]["failure"]
         results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
         assert results == {}
@@ -761,7 +789,8 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await wait_status(m, sid, "running")
         s = await m.cancel(sid)
         await wait_cli_gone(m, sid)
-        assert s["status"] == "cancelled" and recorded == [sid]
+        assert s["status"] == "cancelled"
+        assert recorded == [sid]
         m.runner.user_cancelled.add(sid)
         assert await m.runner._take_pending_cancel(sid) is False
         assert recorded == [sid]
@@ -788,7 +817,9 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         sid = m.create("the original prompt", backend="claude")["id"]
         s = await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
-        assert s["status"] == "done" and s["stop_reason"] == "final_message" and recorded == []
+        assert s["status"] == "done"
+        assert s["stop_reason"] == "final_message"
+        assert recorded == []
         m.runner.user_cancelled.add(sid)
         assert await m.runner._take_pending_cancel(sid) is False
         assert recorded == []
@@ -812,12 +843,14 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await asyncio.gather(*m.tasks.values())
         await wait_cli_gone(m, sid)
         s = m.db.get_session(sid)
-        assert s["status"] == "cancelled" and s["stop_reason"] == "cancelled"
+        assert s["status"] == "cancelled"
+        assert s["stop_reason"] == "cancelled"
         assert recorded == [sid]
         assert s["run"].get("failure") is None
         assert events(m, sid, "error") == []
         finished = events(m, sid, "run_finished")
-        assert len(finished) == 1 and finished[0]["status"] == "cancelled"
+        assert len(finished) == 1
+        assert finished[0]["status"] == "cancelled"
         await m.stop()
 
     async def generic_exception_without_cancel_still_fails():
@@ -836,12 +869,14 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await asyncio.gather(*m.tasks.values())
         await wait_cli_gone(m, sid)
         s = m.db.get_session(sid)
-        assert s["status"] == "failed" and recorded == []
+        assert s["status"] == "failed"
+        assert recorded == []
         assert s["stop_reason"].startswith("internal_error")
         assert s["run"].get("failure", {}).get("code") == "internal_error"
         assert events(m, sid, "error")
         finished = events(m, sid, "run_finished")
-        assert finished and finished[-1]["status"] == "failed"
+        assert finished
+        assert finished[-1]["status"] == "failed"
         await m.stop()
 
     asyncio.run(pending_cancel_then_cli_dies())
@@ -860,7 +895,8 @@ def test_claude_backend_semaphore_limits_live_processes(tmp_path):
         second = m.create("second", backend="claude")["id"]
         await wait_status(m, first, "running")
         await asyncio.sleep(0.1)
-        assert len(made) == 1 and m.get(second)["status"] == "queued"
+        assert len(made) == 1
+        assert m.get(second)["status"] == "queued"
         await m.cancel(first)
         await wait_status(m, second, "running")
         assert len(made) == 2
@@ -893,7 +929,8 @@ def test_claude_cli_restart_resumes_and_keeps_pending_approval(tmp_path):
         s = await wait_status(m2, sid, "done")
         assert s["answer"] == "allow"
         approvals = m2.db.approvals(sid)
-        assert len(approvals) == 1 and approvals[0]["tool_call_id"] == "tool-1"
+        assert len(approvals) == 1
+        assert approvals[0]["tool_call_id"] == "tool-1"
         sent = state.read_text(encoding="utf-8")
         assert "The harness restarted; continue the task." in sent
         await m2.stop()
@@ -922,11 +959,13 @@ def test_web_and_app_session_apis_accept_backend(tmp_path):
     m, _, _ = _claude_manager(tmp_path, "allow")
     with TestClient(create_app(m)) as client:
         own = client.post("/sessions", json={"prompt": "web", "backend": "claude"})
-        assert own.status_code == 201 and own.json()["backend"] == "claude"
+        assert own.status_code == 201
+        assert own.json()["backend"] == "claude"
         token = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()["key"]
         app = client.post("/api/v1/sessions", headers={"Authorization": f"Bearer {token}"},
                           json={"prompt": "app", "backend": "claude"})
-        assert app.status_code == 201 and app.json()["backend"] == "claude"
+        assert app.status_code == 201
+        assert app.json()["backend"] == "claude"
 
 
 def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
@@ -949,7 +988,8 @@ def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
         await m.stop()
         with TestClient(create_app(m)) as client:
             public = client.get("/backends").json()[1]
-            assert public["logged_in"] and public["model"] == "claude-opus-5"
+            assert public["logged_in"]
+            assert public["model"] == "claude-opus-5"
             assert public["today"]["requests"] == 1
             token = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()["key"]
             headers = {"Authorization": f"Bearer {token}"}
@@ -968,11 +1008,13 @@ def test_backend_prefs_persist_model_and_effort(tmp_path, monkeypatch):
     with TestClient(create_app(m)) as client:
         listed = {row["name"]: row for row in client.get("/backends").json()}
         assert listed["local"]["model"] == cfg.default_model
-        assert listed["claude"]["model"] == "claude-opus-5" and listed["claude"]["effort"] == "high"
+        assert listed["claude"]["model"] == "claude-opus-5"
+        assert listed["claude"]["effort"] == "high"
         updated = client.put("/backends/claude", json={"model": "claude-sonnet-4", "effort": "low"})
         assert updated.status_code == 200
         again = {row["name"]: row for row in client.get("/backends").json()}
-        assert again["claude"]["model"] == "claude-sonnet-4" and again["claude"]["effort"] == "low"
+        assert again["claude"]["model"] == "claude-sonnet-4"
+        assert again["claude"]["effort"] == "low"
         assert [m["id"] for m in listed["claude"]["popular_models"]] == [
             "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
         from harness.backend_state import POPULAR_MODELS
@@ -999,9 +1041,11 @@ def test_backends_skip_auth_skips_docker_login_probe(tmp_path, monkeypatch):
     with TestClient(create_app(m)) as client:
         skip = {row["name"]: row for row in client.get("/backends", params={"auth": "skip"}).json()}
         assert calls == []
-        assert skip["claude"]["model"] == "claude-opus-5" and skip["claude"]["logged_in"] is False
+        assert skip["claude"]["model"] == "claude-opus-5"
+        assert skip["claude"]["logged_in"] is False
         listed = {row["name"]: row for row in client.get("/backends").json()}
-        assert calls == ["claude"] and listed["claude"]["logged_in"] is True
+        assert calls == ["claude"]
+        assert listed["claude"]["logged_in"] is True
 
 
 def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
@@ -1035,8 +1079,10 @@ def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
         await m.start()
         sid = m.create("fall back", backend="claude")["id"]
         s = await wait_status(m, sid, "done")
-        assert len(made) == 2 and made[1]["api_key"] == "api-secret"
-        assert events(m, sid, "backend_fallback") and events(m, sid, "billing_warning")
+        assert len(made) == 2
+        assert made[1]["api_key"] == "api-secret"
+        assert events(m, sid, "backend_fallback")
+        assert events(m, sid, "billing_warning")
         rows = m.db.conn.execute("SELECT billing, credential_source FROM usage WHERE session_id = ?", (sid,)).fetchall()
         assert [tuple(row) for row in rows] == [("api_key", "user_file")]
         await m.stop()
@@ -1180,15 +1226,18 @@ def test_codex_file_approval_auto_allows_and_maps_events(tmp_path):
         await m.start()
         s = await wait_status(m, m.create("edit it", backend="codex")["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        assert s["answer"] == "accept" and s["run"]["backend_session_id"] == "codex-thread-1"
+        assert s["answer"] == "accept"
+        assert s["run"]["backend_session_id"] == "codex-thread-1"
         assert s["run"]["rate_limits"]["utilization"] == 0.28
         assert s["run"]["rate_limits"]["rateLimitType"] == "seven_day"
         assert s["totals"] == {"turns": 1, "prompt_tokens": 12, "completion_tokens": 4,
                                 "total_cost_usd": 0.0}
         assert events(m, s["id"], "tool_result")[0]["name"] == "apply_patch"
         sent = state.read_text(encoding="utf-8")
-        assert '"method": "thread/start"' in sent and '"decision": "accept"' in sent
-        assert '"sandbox": "workspace-write"' in sent and '"effort": "high"' in sent
+        assert '"method": "thread/start"' in sent
+        assert '"decision": "accept"' in sent
+        assert '"sandbox": "workspace-write"' in sent
+        assert '"effort": "high"' in sent
         assert '"approvalPolicy": "on-request"' in sent
         assert made[0]["model"] == "gpt-5.6-sol"
         await m.stop()
@@ -1202,7 +1251,8 @@ def test_codex_command_approval_and_restart_recovery(tmp_path):
         sid = m1.create("test it", backend="codex")["id"]
         await wait_status(m1, sid, "waiting_approval")
         pending = m1.db.pending_approvals(sid)
-        assert len(pending) == 1 and pending[0]["tool"] == "exec_command"
+        assert len(pending) == 1
+        assert pending[0]["tool"] == "exec_command"
         aid = pending[0]["id"]
         await m1.stop()
         m1.db.close()
@@ -1219,7 +1269,8 @@ def test_codex_command_approval_and_restart_recovery(tmp_path):
         assert m2.db.pending_approvals(sid)[0]["id"] == aid
         m2.decide(sid, aid, approve=True)
         s = await wait_status(m2, sid, "done")
-        assert s["answer"] == "accept" and len(m2.db.approvals(sid)) == 1
+        assert s["answer"] == "accept"
+        assert len(m2.db.approvals(sid)) == 1
         sent = state.read_text(encoding="utf-8")
         assert '"method": "thread/resume"' in sent
         assert "The harness restarted; continue the task." in sent
@@ -1251,7 +1302,8 @@ def test_codex_inbox_cancel_and_policy(tmp_path):
         await wait_status(m, sid, "running")
         await m.send(sid, "follow up")
         s = await wait_status(m, sid, "done")
-        assert s["answer"] == "follow up" and s["inbox"] == []
+        assert s["answer"] == "follow up"
+        assert s["inbox"] == []
         await m.stop()
 
     async def cancel():
@@ -1360,7 +1412,10 @@ def test_cursor_docker_command_is_sandboxed_forced_and_resumable(tmp_path):
         command.index("seccomp=unconfined") - 1:command.index("seccomp=unconfined") + 1]
     assert ["--security-opt", "apparmor=unconfined"] == command[
         command.index("apparmor=unconfined") - 1:command.index("apparmor=unconfined") + 1]
-    assert "--force" in command and "--trust" in command and "--auto-review" not in command and "--yolo" not in command
+    assert "--force" in command
+    assert "--trust" in command
+    assert "--auto-review" not in command
+    assert "--yolo" not in command
     assert command[-1] == "do it"
     keyed = CursorSession(session_id="keyed", workspace=tmp_path, backend=backend, sandbox=SandboxConfig(),
                           system_prompt="system", api_key="secret-value").command("task")
@@ -1374,13 +1429,17 @@ def test_cursor_maps_stream_events_and_usage(tmp_path):
         await m.start()
         s = await wait_status(m, m.create("inspect it", backend="cursor")["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        assert s["answer"] == "cursor done" and s["run"]["backend_session_id"] == "cursor-session-1"
-        assert s["run"]["tool_calls"] == 1 and s["run"]["tool_errors"] == 0
+        assert s["answer"] == "cursor done"
+        assert s["run"]["backend_session_id"] == "cursor-session-1"
+        assert s["run"]["tool_calls"] == 1
+        assert s["run"]["tool_errors"] == 0
         assert s["totals"] == {"turns": 1, "prompt_tokens": 5, "completion_tokens": 2,
                                 "total_cost_usd": 0.0}
         assert events(m, s["id"], "assistant")[-1]["content"] == "cursor done"
         tool = events(m, s["id"], "tool_result")[0]
-        assert tool["name"] == "readToolCall" and tool["ok"] and "demo" in tool["output"]
+        assert tool["name"] == "readToolCall"
+        assert tool["ok"]
+        assert "demo" in tool["output"]
         assert "User task:\\ninspect it" in state.read_text(encoding="utf-8")
         assert made[0]["model"] == "cursor-grok-4.6-high"
         assert m.db.approvals(s["id"]) == []
@@ -1397,10 +1456,13 @@ def test_cursor_queues_live_inbox_as_resumed_turn(tmp_path):
         await m.send(sid, "follow up")
         s = await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
-        assert s["answer"] == "followup received" and s["inbox"] == []
-        assert s["totals"]["turns"] == 2 and s["totals"]["prompt_tokens"] == 10
+        assert s["answer"] == "followup received"
+        assert s["inbox"] == []
+        assert s["totals"]["turns"] == 2
+        assert s["totals"]["prompt_tokens"] == 10
         records = [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines()]
-        assert len(records) == 2 and records[1]["resumed"]
+        assert len(records) == 2
+        assert records[1]["resumed"]
         assert records[1]["argv"][-3:-1] == ["--resume", "cursor-session-1"]
         await m.stop()
     asyncio.run(body())
@@ -1434,9 +1496,11 @@ def test_cursor_cancel_and_restart_recovery(tmp_path):
         await m2.start()
         s = await wait_status(m2, sid, "done")
         await asyncio.gather(*m2.tasks.values())
-        assert s["answer"] == "cursor done" and made[0]["backend_session_id"] == "cursor-session-1"
+        assert s["answer"] == "cursor done"
+        assert made[0]["backend_session_id"] == "cursor-session-1"
         records = [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines()]
-        assert records[-1]["resumed"] and "harness restarted" in records[-1]["prompt"].lower()
+        assert records[-1]["resumed"]
+        assert "harness restarted" in records[-1]["prompt"].lower()
         await m2.stop()
 
     asyncio.run(cancel())
