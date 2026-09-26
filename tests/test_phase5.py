@@ -48,13 +48,15 @@ def test_scheduler_pause_holds_grants_and_front_requeue():
         await asyncio.sleep(0)
         s.release("a")
         await asyncio.sleep(0)
-        assert s.holder is None and not waiter_b.done()
+        assert s.holder is None
+        assert not waiter_b.done()
         waiter_a = asyncio.create_task(s.acquire("a", front=True))
         await asyncio.sleep(0)
         assert s.positions() == {"a": 1, "b": 2}
         s.set_paused(False)
         await asyncio.wait_for(waiter_a, 1)
-        assert s.holder == "a" and not waiter_b.done()
+        assert s.holder == "a"
+        assert not waiter_b.done()
         s.release("a")
         await asyncio.wait_for(waiter_b, 1)
     asyncio.run(body())
@@ -128,20 +130,27 @@ def test_guard_waits_for_turn_then_stops_and_resumes_after_quiet_period():
         assert guard.state == CLEAR
         detect.signals = [GAME]
         await guard.check()
-        assert guard.state == PAUSING and scheduler.paused and control.stops == 0  # the turn is still running
+        assert guard.state == PAUSING
+        assert scheduler.paused
+        assert control.stops == 0  # the turn is still running
         busy["v"] = False
         await guard.check()
-        assert guard.state == PAUSED and control.stops == 1 and control.flag
+        assert guard.state == PAUSED
+        assert control.stops == 1
+        assert control.flag
         detect.signals = []
         await guard.check()
         assert guard.state == PAUSED  # not clear for long enough yet
         await asyncio.sleep(0.25)
         control.health = False
         await guard.check()
-        assert guard.state == RESUMING and not control.flag and scheduler.paused
+        assert guard.state == RESUMING
+        assert not control.flag
+        assert scheduler.paused
         control.health = True
         await guard.check()
-        assert guard.state == CLEAR and not scheduler.paused
+        assert guard.state == CLEAR
+        assert not scheduler.paused
         assert [k for k, _ in log] == ["pause", "resume"]
     asyncio.run(body())
 
@@ -153,12 +162,15 @@ def test_guard_drain_timeout_and_short_trigger():
         await guard.check()
         detect.signals = []
         await guard.check()  # the game closed before the turn finished: no stop at all
-        assert guard.state == CLEAR and control.stops == 0 and not scheduler.paused
+        assert guard.state == CLEAR
+        assert control.stops == 0
+        assert not scheduler.paused
         detect.signals = [GAME]
         await guard.check()
         await asyncio.sleep(0.15)
         await guard.check()
-        assert guard.state == PAUSED and control.stops == 1  # the turn outlasted the drain timeout
+        assert guard.state == PAUSED
+        assert control.stops == 1  # the turn outlasted the drain timeout
     asyncio.run(body())
 
 
@@ -167,7 +179,8 @@ def test_guard_manual_pause_and_override_until_triggers_change():
         guard, detect, control, scheduler, log = make_guard(resume_after_seconds=999)
         guard.pause()
         await guard.check()
-        assert guard.state == PAUSED and guard.reasons[0]["kind"] == "manual"
+        assert guard.state == PAUSED
+        assert guard.reasons[0]["kind"] == "manual"
         guard.resume()
         await guard.check()
         await guard.check()
@@ -192,16 +205,22 @@ def test_guard_timed_manual_hold_expires_like_resume():
     async def body():
         guard, _, control, scheduler, log = make_guard(resume_after_seconds=999)
         guard.pause(duration_seconds=1)
-        assert guard.state == PAUSING and scheduler.paused
+        assert guard.state == PAUSING
+        assert scheduler.paused
         await guard.check()
         status = guard.status()
-        assert status["manual"] and 0 <= status["manual_remaining_seconds"] <= 1
-        assert guard.state == PAUSED and scheduler.paused
+        assert status["manual"]
+        assert 0 <= status["manual_remaining_seconds"] <= 1
+        assert guard.state == PAUSED
+        assert scheduler.paused
         guard.manual_until = 0
         await guard.check()
         await guard.check()
-        assert guard.state == CLEAR and not guard.manual and not scheduler.paused
-        assert control.starts == 1 and [kind for kind, _ in log] == ["pause", "resume"]
+        assert guard.state == CLEAR
+        assert not guard.manual
+        assert not scheduler.paused
+        assert control.starts == 1
+        assert [kind for kind, _ in log] == ["pause", "resume"]
     asyncio.run(body())
 
 
@@ -211,11 +230,16 @@ def test_manual_hold_release_and_expiry_preserve_automatic_guard():
         detect.signals = [GAME]
         guard.pause()
         await guard.check()
-        assert guard.state == PAUSED and guard.manual
+        assert guard.state == PAUSED
+        assert guard.manual
         guard.resume(override_signals=False)
         await guard.check()
-        assert guard.state == PAUSED and not guard.manual and guard.override is None
-        assert guard.reasons == [GAME] and scheduler.paused and control.starts == 0
+        assert guard.state == PAUSED
+        assert not guard.manual
+        assert guard.override is None
+        assert guard.reasons == [GAME]
+        assert scheduler.paused
+        assert control.starts == 0
 
     async def expiry_body():
         guard, detect, control, scheduler, _ = make_guard(resume_after_seconds=999)
@@ -224,8 +248,12 @@ def test_manual_hold_release_and_expiry_preserve_automatic_guard():
         detect.signals = [GAME]
         guard.manual_until = 0
         await guard.check()
-        assert guard.state == PAUSED and not guard.manual and guard.override is None
-        assert guard.reasons == [GAME] and scheduler.paused and control.starts == 0
+        assert guard.state == PAUSED
+        assert not guard.manual
+        assert guard.override is None
+        assert guard.reasons == [GAME]
+        assert scheduler.paused
+        assert control.starts == 0
 
     asyncio.run(release_body())
     asyncio.run(expiry_body())
@@ -241,11 +269,14 @@ def test_guard_does_not_restart_model_during_image_exclusive():
         busy["value"] = True
         guard.resume()
         await guard.check()
-        assert guard.state == PAUSED and control.starts == 0 and scheduler.paused
+        assert guard.state == PAUSED
+        assert control.starts == 0
+        assert scheduler.paused
         busy["value"] = False
         await guard.check()
         await guard.check()
-        assert guard.state == CLEAR and control.starts == 1
+        assert guard.state == CLEAR
+        assert control.starts == 1
     asyncio.run(body())
 
 
@@ -267,11 +298,14 @@ def test_gpu_hold_api_accepts_optional_duration(tmp_path):
     m.guard.resume = record_resume
     with TestClient(create_app(m)) as client:
         held = client.post("/gpu/pause", json={"duration_seconds": 1800}).json()
-        assert held["manual"] and 1790 <= held["manual_remaining_seconds"] <= 1800
-        assert held["manual_duration_seconds"] == 1800 and held["state"] == "pausing"
+        assert held["manual"]
+        assert 1790 <= held["manual_remaining_seconds"] <= 1800
+        assert held["manual_duration_seconds"] == 1800
+        assert held["state"] == "pausing"
         assert client.post("/gpu/pause", json={"duration_seconds": 0}).status_code == 400
         resumed = client.post("/gpu/resume").json()
-        assert not resumed["manual"] and resumed["manual_until"] is None
+        assert not resumed["manual"]
+        assert resumed["manual_until"] is None
         assert resume_calls[-1] is False
         client.post("/gpu/resume")
         assert resume_calls[-1] is True
@@ -284,16 +318,21 @@ def test_manual_hold_persists_across_daemon_restart_indefinite(tmp_path):
                          detect=detect, control=control, data_dir=tmp_path)
         guard.pause()
         await guard.check()
-        assert guard.state == PAUSED and guard.manual and control.flag
+        assert guard.state == PAUSED
+        assert guard.manual
+        assert control.flag
 
         scheduler2 = GpuScheduler()
         guard2 = GpuGuard(GpuGuardConfig(enabled=True, resume_after_seconds=999), None, scheduler2, lambda: False,
                           detect=FakeDetect(), control=control, data_dir=tmp_path)
         guard2.start()
         try:
-            assert guard2.manual and guard2.manual_until is None
+            assert guard2.manual
+            assert guard2.manual_until is None
             await asyncio.sleep(0.05)
-            assert guard2.state == PAUSED and scheduler2.paused and control.starts == 0
+            assert guard2.state == PAUSED
+            assert scheduler2.paused
+            assert control.starts == 0
         finally:
             await guard2.stop()
     asyncio.run(body())
@@ -313,10 +352,13 @@ def test_manual_hold_persists_across_daemon_restart_timed(tmp_path):
                           detect=FakeDetect(), control=control, data_dir=tmp_path)
         guard2.start()
         try:
-            assert guard2.manual and guard2.manual_duration_seconds == 1800
-            assert guard2.manual_until is not None and 0 < guard2.manual_until - time.time() <= 1800
+            assert guard2.manual
+            assert guard2.manual_duration_seconds == 1800
+            assert guard2.manual_until is not None
+            assert 0 < guard2.manual_until - time.time() <= 1800
             status = guard2.status()
-            assert status["manual"] and 0 < status["manual_remaining_seconds"] <= 1800
+            assert status["manual"]
+            assert 0 < status["manual_remaining_seconds"] <= 1800
         finally:
             await guard2.stop()
     asyncio.run(body())
@@ -342,7 +384,9 @@ def test_expired_timed_hold_resumes_normally_on_restart(tmp_path):
                 if guard2.state == CLEAR:
                     break
                 await asyncio.sleep(0.02)
-            assert guard2.state == CLEAR and not control.flag and not scheduler2.paused
+            assert guard2.state == CLEAR
+            assert not control.flag
+            assert not scheduler2.paused
         finally:
             await guard2.stop()
     asyncio.run(body())
@@ -383,7 +427,8 @@ def test_corrupt_or_empty_state_file_ignored_on_start(tmp_path):
                          detect=FakeDetect(), control=FakeControl(), data_dir=tmp_path)
         guard.start()
         try:
-            assert not guard.manual and guard.state == CLEAR
+            assert not guard.manual
+            assert guard.state == CLEAR
         finally:
             await guard.stop()
     asyncio.run(body("not json"))
@@ -403,7 +448,9 @@ def test_guard_startup_with_leftover_flag_resumes_when_clear():
             if guard.state == CLEAR:
                 break
             await asyncio.sleep(0.02)
-        assert guard.state == CLEAR and not control.flag and not scheduler.paused
+        assert guard.state == CLEAR
+        assert not control.flag
+        assert not scheduler.paused
         await guard.stop()
     asyncio.run(body())
 
@@ -458,11 +505,13 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
         gate.set()
         await wait_status(m, sid, "done")  # the turn in flight finishes
         await m.guard.check()
-        assert m.guard.state == PAUSED and control.stops == 1
+        assert m.guard.state == PAUSED
+        assert control.stops == 1
         assert events(m, sid, "gpu_paused")[0]["reason"] == "Hades.exe"
         note = next(m.notifier.build(e) for e in m.db.events(sid) if e["type"] == "gpu_paused")
         assert note["title"].startswith("Paused for the GPU")
-        assert "Actions → GPU" in note["message"] and "Settings" not in note["message"]
+        assert "Actions → GPU" in note["message"]
+        assert "Settings" not in note["message"]
 
         # a follow-up while paused waits in the queue, then runs once the GPU is clear
         await m.send(sid, "again")
@@ -506,7 +555,8 @@ def test_metrics_and_backup(tmp_path):
         old.mkdir(parents=True)
         result = await m.maintenance.backup()
         dest = tmp_path / "backups" / result["path"].replace("\\", "/").rsplit("/", 1)[-1]
-        assert not old.exists() and result["removed"] == ["2020-01-01"]
+        assert not old.exists()
+        assert result["removed"] == ["2020-01-01"]
         with sqlite3.connect(dest / "harness.sqlite3") as conn:
             assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
         assert zipfile.ZipFile(dest / "transcripts.zip").namelist()
@@ -537,7 +587,9 @@ def test_memory_library_only_exposes_allowed_categories(tmp_path):
     lib._refreshed = 1e18  # skip git
 
     index = lib.memory_index()
-    assert "categories/work/memory.md — Work" in index and "health" not in index and "Index" not in index
+    assert "categories/work/memory.md — Work" in index
+    assert "health" not in index
+    assert "Index" not in index
     assert lib.memory_search("python").splitlines() == ["categories/work/memory.md:3: - Prefers Python"]
     assert "Qwen default" in lib.memory_read("categories/project-ideas/capsules/harness.md")
     for bad in ("categories/health/memory.md", "00-index.md", "memory-capsules/cross.md",
@@ -568,7 +620,8 @@ def test_memory_tools_reach_sessions_and_rebuild_asks(tmp_path):
         s = m.create("which editor?")
         await wait_status(m, s["id"], "done")
         result = events(m, s["id"], "tool_result")[0]
-        assert result["ok"] and "Helix" in result["output"]
+        assert result["ok"]
+        assert "Helix" in result["output"]
         assert "memory_index" in m.db.get_session(s["id"])["context"][0]["content"]
         await m.stop()
     asyncio.run(body())

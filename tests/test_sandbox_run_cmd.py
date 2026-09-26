@@ -45,7 +45,9 @@ def test_run_cmd_returns_output_and_passes_input():
     code, out, err = asyncio.run(sandbox.run_cmd(
         [sys.executable, "-c", "import sys; print(sys.stdin.read().upper()); print('warn', file=sys.stderr)"],
         input_="abc"))
-    assert code == 0 and out.strip() == "ABC" and err.strip() == "warn"
+    assert code == 0
+    assert out.strip() == "ABC"
+    assert err.strip() == "warn"
 
 
 def test_run_cmd_reports_a_timeout_with_the_output_so_far():

@@ -151,7 +151,8 @@ def test_include_path_cannot_restore_fsmonitor(tmp_path):
     raw = sh(repo, "status", "--porcelain")
     assert has_marker(raw.stderr)
     result = git(repo, "status", "--porcelain", check=False)
-    assert result.code == 0 and "app.py" in result.out
+    assert result.code == 0
+    assert "app.py" in result.out
     assert not has_marker(result.out + result.err)
 
 

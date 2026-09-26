@@ -259,7 +259,8 @@ def test_sandbox_argv_is_isolated(tmp_path):
     validator.write_text("print(1)\n", encoding="utf-8")
     argv = sandbox_command("agent-harness-sandbox:py312", proposal, validator)
     assert sandbox_command_is_isolated(argv) == []
-    assert "--network" in argv and "none" in argv
+    assert "--network" in argv
+    assert "none" in argv
     assert "--read-only" in argv
     assert argv[argv.index("--workdir") + 1] == SANDBOX_WORK
     assert argv[argv.index("--workdir") + 1] not in ("/tmp", "/var/tmp")
@@ -339,7 +340,8 @@ def test_proposal_does_not_install_or_enable(tmp_path):
         "purpose": "Keep git commit messages conventional and short.",
         "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
     }, session))
-    assert "staged" in out and "nothing was enabled" in out.lower()
+    assert "staged" in out
+    assert "nothing was enabled" in out.lower()
     assert store.list_enabled() == []
     assert store.db.list_skill_installed() == []
     assert not any(store.installed_dir.glob("*/*")) or not any(
@@ -465,11 +467,13 @@ def test_proposal_lifecycle_interleavings(tmp_path, steps, want):
     latest = store.db.skill_proposal(pid)
     proposals = store.db.list_skill_proposals()
     if "error" in want:
-        assert error and want["error"] in error.lower()
+        assert error
+        assert want["error"] in error.lower()
     else:
         assert error is None, error
     if "status" in want:
-        assert latest is not None and latest["status"] == want["status"]
+        assert latest is not None
+        assert latest["status"] == want["status"]
     if "hash_rejected" in want:
         assert store.db.skill_hash_rejected(content_hash) is want["hash_rejected"]
     if "installed" in want:
@@ -477,7 +481,8 @@ def test_proposal_lifecycle_interleavings(tmp_path, steps, want):
         assert (live is not None) is want["installed"]
         if want["installed"]:
             assert live["current_hash"] == content_hash
-            assert latest is not None and latest["status"] == "installed"
+            assert latest is not None
+            assert latest["status"] == "installed"
     if "proposals" in want:
         assert len(proposals) == want["proposals"]
     if "message" in want:
@@ -531,7 +536,8 @@ def test_reject_during_review_stays_rejected_and_reopenable(tmp_path):
         latest = db.skill_proposal(row["id"])
         assert latest["status"] == "rejected"
         assert db.skill_hash_rejected(row["content_hash"])
-        assert latest.get("review") and latest["review"].get("recommendation") == "approve"
+        assert latest.get("review")
+        assert latest["review"].get("recommendation") == "approve"
         with pytest.raises(SkillError, match="rejected"):
             store.install(row["id"], row["content_hash"])
         store.reopen(row["id"])
@@ -654,7 +660,8 @@ def test_enable_allowlist_rollback_uninstall(tmp_path):
     v2 = [p for p in store.db.list_skill_proposals() if p["status"] != "installed"][0]
     store.install(v2["id"], v2["content_hash"])
     inst = store.db.skill_installed("commit-style")
-    assert inst["current_version"] == 2 and not inst["enabled"]
+    assert inst["current_version"] == 2
+    assert not inst["enabled"]
     store.set_enabled("commit-style", True)
     store.set_allowlist("commit-style", ["scratch"], ["scratch", "guarded"])
     frozen = store.resolve_for_session("scratch", None, {"owner_id": "owner", "app_id": "", "job_id": ""})
@@ -870,7 +877,8 @@ def test_propose_skill_tool_on_owner_session_only(tmp_path):
         names = [t["function"]["name"] for t in m.runner.tool_schemas(m.db.get_session(s["id"]), m.runner.workspace(m.db.get_session(s["id"])))]
         assert "propose_skill" in names
         proposals = m.db.list_skill_proposals()
-        assert proposals and proposals[0]["slug"] == "commit-style"
+        assert proposals
+        assert proposals[0]["slug"] == "commit-style"
         assert m.db.list_skill_installed() == []
         app = m.create("app work", app={"id": "app1", "name": "invoice"})
         app_names = [t["function"]["name"] for t in m.runner.tool_schemas(app, m.runner.workspace(app))]
@@ -1084,7 +1092,8 @@ def test_gpu_preempt_keeps_review_loop_alive(tmp_path):
             if jobs and jobs[0]["status"] == "queued" and "preempted by real GPU work" in (jobs[0].get("error") or ""):
                 break
             await asyncio.sleep(0.05)
-        assert reviewer._task is not None and not reviewer._task.done()
+        assert reviewer._task is not None
+        assert not reviewer._task.done()
         job = db.list_skill_review_jobs()[0]
         assert job["status"] == "queued"
         assert "preempted by real GPU work" in job["error"]
@@ -1202,7 +1211,8 @@ def test_hosted_review_ignores_gpu_busy(tmp_path):
         while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] != "done":
             await asyncio.sleep(0.05)
         assert db.list_skill_review_jobs()[0]["status"] == "done"
-        assert reviewer._task is not None and not reviewer._task.done()
+        assert reviewer._task is not None
+        assert not reviewer._task.done()
         await reviewer.stop()
 
     asyncio.run(body())

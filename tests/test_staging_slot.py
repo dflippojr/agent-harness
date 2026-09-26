@@ -231,7 +231,8 @@ def test_one_slot_is_replaced_rather_than_a_second_slot_added():
     assert len(deploys) == 2  # exactly one reset path and one deploy path, mutually exclusive
     conditions = [step.get("if", "") for step in WORKFLOW["jobs"]["stage"]["steps"] if "deploy-staging.ps1" in
                   step.get("run", "")]
-    assert "reset_only == 'true'" in conditions[0] and "reset_only != 'true'" in conditions[1]
+    assert "reset_only == 'true'" in conditions[0]
+    assert "reset_only != 'true'" in conditions[1]
 
 
 # --- path, name, and tag guards ---------------------------------------------------------------------------------
@@ -251,7 +252,8 @@ def test_every_staging_entry_point_asserts_it_is_not_production():
     for script in (DEPLOY, RESET, SUPERVISOR):
         assert "Assert-StagingTarget" in script
     for script in (DEPLOY, RESTART):
-        assert "Assert-StagingTask" in script and "Assert-StagingPort" in script
+        assert "Assert-StagingTask" in script
+        assert "Assert-StagingPort" in script
 
 
 def test_copy_item_passes_destination_on_the_same_line():
@@ -282,7 +284,8 @@ def test_staging_never_touches_production_docker_tags_or_the_production_route():
     serve_staging = (ROOT / "ops" / "tailscale" / "serve-staging.ps1").read_text(encoding="utf-8")
     assert "--https=8444 http://127.0.0.1:8101" in serve_staging
     serve_code = code_only(serve_staging)
-    assert "--https=443" not in serve_code and "8100" not in serve_code
+    assert "--https=443" not in serve_code
+    assert "8100" not in serve_code
     assert serve_code.count("$ts serve") == 2  # the staging mapping and a status print, nothing else
 
 
@@ -293,7 +296,8 @@ def test_stop_matchers_of_production_and_staging_are_disjoint():
     staging_matcher = RESTART.split("function Get-StagingDaemonProcesses", 1)[1].split("}", 1)[0]
     assert "harness-staging" in staging_matcher
     # Staging stop is the staging task and the staging port only, never "any python on 8100".
-    assert "$StagingTaskName" in RESTART and "AgentHarness-Daemon'" not in RESTART
+    assert "$StagingTaskName" in RESTART
+    assert "AgentHarness-Daemon'" not in RESTART
     assert f"127.0.0.1:$StagingPort/health" in RESTART
 
 
@@ -332,7 +336,8 @@ def test_candidate_yaml_alone_cannot_switch_a_forced_off_module_back_on(tmp_path
     assert cfg.profile == "full"
     assert not any(cfg.module_effective(name) for name in config.MODULE_NAMES)
     assert [name for name, backend in cfg.backends.items() if backend.enabled] == []
-    assert cfg.port == 8101 and cfg.host == "127.0.0.1"
+    assert cfg.port == 8101
+    assert cfg.host == "127.0.0.1"
     assert cfg.capabilities()["hosted_backends"] == []
 
 
@@ -387,11 +392,13 @@ def test_staging_token_is_minted_in_staging_only_and_rotates(tmp_path):
     data_dir, token_file = tmp_path / "harness-staging", tmp_path / "harness-staging" / "owner-token.txt"
     first_prefix = mint(data_dir, token_file)
     first = token_file.read_text(encoding="utf-8").strip()
-    assert first.startswith("ho-") and first.startswith(first_prefix)
+    assert first.startswith("ho-")
+    assert first.startswith(first_prefix)
 
     second_prefix = mint(data_dir, token_file)
     second = token_file.read_text(encoding="utf-8").strip()
-    assert second != first and second_prefix != first_prefix
+    assert second != first
+    assert second_prefix != first_prefix
 
     from harness.db import Database
 
@@ -453,7 +460,8 @@ def test_reset_preserves_exactly_the_overlay_logs_and_virtual_environment():
     preserved = RESET.split("$StagingPreservedEntries = @(", 1)[1].split(")", 1)[0]
     assert sorted(entry.strip().strip("'") for entry in preserved.split(",")) == [
         "harness.local.yaml", "logs", "venv"]
-    assert "Remove-Item" in RESET and "docker rmi" not in RESET
+    assert "Remove-Item" in RESET
+    assert "docker rmi" not in RESET
     assert "seed" in RESET.lower()  # the documented no-seed promise stays next to the code
 
 
@@ -510,8 +518,10 @@ def test_deploy_dry_run_plans_stop_clean_checkout_overlay_start(tmp_path):
         f"[staging] checkout at {SHA}", "[staging] dependencies installed",
         "[staging] overlay applied", "[staging] daemon started and healthy", f"Staged {SHA}")]
     assert order == sorted(order)
-    assert "profile.yaml" in plan and "harness.local.yaml" in plan
-    assert "127.0.0.1:8101" in plan and "tailnet :8444" in plan
+    assert "profile.yaml" in plan
+    assert "harness.local.yaml" in plan
+    assert "127.0.0.1:8101" in plan
+    assert "tailnet :8444" in plan
     assert "docker" not in plan.lower()
 
 
@@ -538,7 +548,8 @@ def test_deploy_reset_stops_the_slot_and_deploys_nothing(tmp_path):
     result = run_deploy(tmp_path, "-Reset")
     assert result.returncode == 0, output(result)
     assert "[staging] reset complete" in result.stdout
-    assert "checkout at" not in result.stdout and "daemon started" not in result.stdout
+    assert "checkout at" not in result.stdout
+    assert "daemon started" not in result.stdout
     assert "Production checkout" in result.stdout
 
 
@@ -571,7 +582,8 @@ def test_report_names_the_running_commit_and_the_staging_url(tmp_path):
          "-StagingDataDir", str(data_root)],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=False)
     assert result.returncode == 0, output(result)
-    assert SHA in result.stdout and "https://tower.example-tailnet.ts.net:8444/" in result.stdout
+    assert SHA in result.stdout
+    assert "https://tower.example-tailnet.ts.net:8444/" in result.stdout
     assert OTHER_SHA in result.stdout  # a moved head is reported, not chased
     assert "8100" in summary.read_text(encoding="utf-8")
 

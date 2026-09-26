@@ -60,12 +60,17 @@ def test_deleted_range_round_trips_and_stale_is_flagged():
     fresh = _comment()
     assert rc.current_quote(fresh, repos) == (False, ["bye", "now"])
     msg = rc.format_message([fresh], repos)
-    assert "gone.txt, line 1-2 in the removed (old) lines" in msg and "> bye" in msg and "STALE" not in msg
+    assert "gone.txt, line 1-2 in the removed (old) lines" in msg
+    assert "> bye" in msg
+    assert "STALE" not in msg
     stale = _comment(path="a.txt", side="new", start_line=2, end_line=3, quoted=["two", "three"])
     is_stale, now = rc.current_quote(stale, repos)
-    assert is_stale and now == ["TWO", "THREE"]
+    assert is_stale
+    assert now == ["TWO", "THREE"]
     msg = rc.format_message([stale], repos)
-    assert "STALE" in msg and "> TWO" in msg and "> two" not in msg
+    assert "STALE" in msg
+    assert "> TWO" in msg
+    assert "> two" not in msg
     assert rc.current_quote(_comment(path="missing.txt"), repos)[0]
 
 
@@ -95,7 +100,9 @@ def test_draft_survives_restart_and_sends_one_followup(tmp_path):
         assert sent.status_code == 200
         wait_for(lambda: m.db.get_session(s["id"])["status"] == "done")
         msgs = [e["data"]["content"] for e in m.db.events(s["id"]) if e["type"] == "user_message"]
-        assert len(msgs) == 2 and "new.txt, line 1-2 in the new lines" in msgs[1] and "greet better" in msgs[1]
+        assert len(msgs) == 2
+        assert "new.txt, line 1-2 in the new lines" in msgs[1]
+        assert "greet better" in msgs[1]
         assert client.get(url).json() == []
         assert client.post(url + "/send").status_code == 400
         assert client.delete(f"{url}/rc-nope").status_code == 404

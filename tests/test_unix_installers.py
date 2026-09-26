@@ -122,7 +122,8 @@ def test_installers_share_images_models_dir_with_daemon_and_doctor():
 
     ps1 = (ROOT / "install/install.ps1").read_text(encoding="utf-8")
     sh = (ROOT / "install/install.sh").read_text(encoding="utf-8")
-    assert "--images-models-dir" in ps1 and "--images-models-dir" in sh
+    assert "--images-models-dir" in ps1
+    assert "--images-models-dir" in sh
     assert "DefaultImagesModelsDir = 'C:\\AI\\comfy-models'" in ps1
     assert "Join-Path $InstallDir 'comfy-models'" in ps1
     assert 'default_images_models_dir="C:/AI/comfy-models"' in sh
@@ -130,7 +131,8 @@ def test_installers_share_images_models_dir_with_daemon_and_doctor():
     assert "$modelsRoot 'diffusion_models\\qwen_image_edit_fp8_e4m3fn.safetensors'" in ps1
     assert 'edit_dest="$models_root/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"' in sh
     # Other installer-fetched artifacts (GGUF under $InstallDir/models, Docker images) do not use images.models_dir.
-    assert "qwen_image_edit" in ps1 and "qwen_image_edit" in sh
+    assert "qwen_image_edit" in ps1
+    assert "qwen_image_edit" in sh
 
 
 def test_unix_hosted_provider_login_matches_isolation_contract():

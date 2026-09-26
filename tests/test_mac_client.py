@@ -38,19 +38,24 @@ def test_owner_pairs_native_client_and_runner_once_without_storing_runner_secret
         approved = client.post("/runner-pairing-codes", json={"name": "Dana's Mac", "runner": "macbook"})
         assert approved.status_code == 201
         code = approved.json()["code"]
-        assert code.startswith("hrp-") and approved.headers["cache-control"] == "no-store"
+        assert code.startswith("hrp-")
+        assert approved.headers["cache-control"] == "no-store"
 
         listed = client.get("/api/admin/v1/runner-pairing-codes").json()[0]
-        assert listed["runner"] == "macbook" and "code" not in listed and "hash" not in listed
+        assert listed["runner"] == "macbook"
+        assert "code" not in listed
+        assert "hash" not in listed
         runner_token = (tmp_path / "secrets" / "runner.token").read_text(encoding="utf-8").strip()
         stored = manager.db.conn.execute(
             "SELECT hash FROM runner_pairing_codes WHERE id = ?", (approved.json()["id"],)).fetchone()[0]
-        assert stored != code and runner_token not in str(listed)
+        assert stored != code
+        assert runner_token not in str(listed)
 
         assert client.post("/api/v1/runner-pair", headers={"Origin": "https://evil.example"},
                            json={"code": code}).status_code == 403
         paired = client.post("/api/v1/runner-pair", json={"code": code})
-        assert paired.status_code == 201 and paired.headers["cache-control"] == "no-store"
+        assert paired.status_code == 201
+        assert paired.headers["cache-control"] == "no-store"
         body = paired.json()
         assert body["server"] == manager.cfg.public_url
         assert body["owner_token"].startswith("ho-")
@@ -61,7 +66,8 @@ def test_owner_pairs_native_client_and_runner_once_without_storing_runner_secret
         assert client.post("/api/v1/runner-pair", json={"code": code}).status_code == 400
         assert runner_token not in json.dumps(client.get("/runner-pairing-codes").json())
         durable = b"".join(path.read_bytes() for path in manager.cfg.db_path.parent.glob(manager.cfg.db_path.name + "*"))
-        assert runner_token.encode() not in durable and body["owner_token"].encode() not in durable
+        assert runner_token.encode() not in durable
+        assert body["owner_token"].encode() not in durable
 
         expired = client.post("/runner-pairing-codes", json={"name": "Late", "runner": "macbook"}).json()
         manager.db.conn.execute("UPDATE runner_pairing_codes SET expires_at = 0 WHERE id = ?", (expired["id"],))
@@ -85,13 +91,15 @@ def test_mac_package_is_version_matched_and_contains_no_credentials(tmp_path):
         installer = client.get("/mac-client/install.sh")
         package = client.get("/mac-client/package.tar.gz")
     assert installer.status_code == package.status_code == 200
-    assert "python3 -m venv" in installer.text and ".local/bin/harness" in installer.text
+    assert "python3 -m venv" in installer.text
+    assert ".local/bin/harness" in installer.text
     with tarfile.open(fileobj=io.BytesIO(package.content), mode="r:gz") as archive:
         names = set(archive.getnames())
         contents = b"".join(archive.extractfile(name).read() for name in names)
     assert {"app/harness_runner.py", "app/sandbox.sb", "client/harness_cli.py", "client/harness_client.py",
             "dev.agent-harness.runner.plist"} <= names
-    assert b"runner.token" not in contents and b"ho-" not in contents
+    assert b"runner.token" not in contents
+    assert b"ho-" not in contents
 
 
 def test_cli_pairing_project_roots_and_launchd_commands(tmp_path, monkeypatch):
@@ -155,10 +163,15 @@ def test_paired_cli_uses_owner_api_and_bearer_token(tmp_path, monkeypatch):
 
 def test_mac_install_script_supports_pairing_and_legacy_update():
     script = (Path(__file__).parent.parent / "macrunner" / "install.sh").read_text(encoding="utf-8")
-    assert "--server" in script and "--code" in script and "/api/v1/runner-pair" not in script
-    assert "package.tar.gz" in script and "pip install" in script and "launchctl bootstrap" in script
+    assert "--server" in script
+    assert "--code" in script
+    assert "/api/v1/runner-pair" not in script
+    assert "package.tar.gz" in script
+    assert "pip install" in script
+    assert "launchctl bootstrap" in script
     assert "agent_harness_client.pth" in script
-    assert "harness_update.py" in script and "harness_compat.py" in script
+    assert "harness_update.py" in script
+    assert "harness_compat.py" in script
 
 
 def harness_home(tmp_path, monkeypatch):
@@ -193,7 +206,9 @@ def test_cli_config_paths_must_stay_under_the_harness_home(tmp_path, monkeypatch
         with pytest.raises(SystemExit) as exit_:
             cli.main()
         assert exit_.value.code == 2
-    assert posted == [] and not outside.exists() and not (tmp_path / "home" / "runner.json").exists()
+    assert posted == []
+    assert not outside.exists()
+    assert not (tmp_path / "home" / "runner.json").exists()
     assert "must be a file under" in capsys.readouterr().err
 
     monkeypatch.setattr(cli.sys, "argv", ["harness", "--config", str(home / "client" / "config.json"), "pair",

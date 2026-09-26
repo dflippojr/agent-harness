@@ -45,7 +45,8 @@ def test_owner_assigns_opaque_refs_and_apps_only_see_their_policy(tmp_path, monk
         assert one.status_code == two.status_code == 201
         owner_rows = client.get("/api/admin/v1/provider-credentials").json()
         assert {row["secret_ref"] for row in owner_rows} == {"billing-one", "billing-two"}
-        assert "app-one-plaintext-secret" not in str(owner_rows) and str(first) not in str(owner_rows)
+        assert "app-one-plaintext-secret" not in str(owner_rows)
+        assert str(first) not in str(owner_rows)
 
         h1, h2 = ({"Authorization": f"Bearer {app['key']}"} for app in (app1, app2))
         backends1 = {row["name"]: row for row in client.get("/api/v1/backends", headers=h1).json()}
@@ -54,11 +55,15 @@ def test_owner_assigns_opaque_refs_and_apps_only_see_their_policy(tmp_path, monk
         status2 = backends2["claude"]["provider_policy"]
         assert status1 == {"managed": True, "allowed": True, "policy": "api_key",
                            "models": ["claude-opus-5"], "credential_source": "app_file", "available": True}
-        assert status2["policy"] == "subscription_then_api_key" and status2["models"] == ["claude-sonnet-5"]
-        assert "secret_ref" not in status1 and "billing-two" not in str(status1)
-        assert backends1["claude"]["logged_in"] and backends1["claude"]["api_key_available"]
+        assert status2["policy"] == "subscription_then_api_key"
+        assert status2["models"] == ["claude-sonnet-5"]
+        assert "secret_ref" not in status1
+        assert "billing-two" not in str(status1)
+        assert backends1["claude"]["logged_in"]
+        assert backends1["claude"]["api_key_available"]
         assert backends1["claude"]["limits"] == {}  # never another assignment's cached provider limits
-        assert not backends1["codex"]["available"] and not backends1["codex"]["api_key_available"]
+        assert not backends1["codex"]["available"]
+        assert not backends1["codex"]["api_key_available"]
 
         assert client.post("/api/v1/sessions", headers=h1,
                            json={"prompt": "x", "backend": "codex"}).status_code == 403
@@ -74,7 +79,8 @@ def test_owner_assigns_opaque_refs_and_apps_only_see_their_policy(tmp_path, monk
         # Revocation locks future provider use without exposing or affecting another app's assignment.
         assert client.delete(f"/api/admin/v1/provider-credentials/{two.json()['id']}").status_code == 204
         revoked = {row["name"]: row for row in client.get("/api/v1/backends", headers=h2).json()}["claude"]
-        assert not revoked["available"] and revoked["provider_policy"]["managed"]
+        assert not revoked["available"]
+        assert revoked["provider_policy"]["managed"]
         assert revoked["provider_policy"]["allowed"] is False
         assert client.post("/api/v1/sessions", headers=h2,
                            json={"prompt": "x", "backend": "claude", "model": "claude-sonnet-5"}).status_code == 403
@@ -86,8 +92,10 @@ def test_owner_assigns_opaque_refs_and_apps_only_see_their_policy(tmp_path, monk
     assert tuple(stored) == ("billing-one", '["claude-opus-5"]')
     # Scan the main DB and its WAL: neither plaintext nor owner-local file paths may be durable.
     durable = b"".join(path.read_bytes() for path in manager.cfg.db_path.parent.glob(manager.cfg.db_path.name + "*"))
-    assert b"app-one-plaintext-secret" not in durable and str(first).encode() not in durable
-    assert b"app-two-plaintext-secret" not in durable and str(second).encode() not in durable
+    assert b"app-one-plaintext-secret" not in durable
+    assert str(first).encode() not in durable
+    assert b"app-two-plaintext-secret" not in durable
+    assert str(second).encode() not in durable
 
 
 def test_revoked_default_backend_drops_its_model_and_falls_back_to_local(tmp_path):
@@ -146,7 +154,8 @@ def test_app_file_key_is_used_and_usage_is_attributed_without_storing_it(tmp_pat
         await manager.stop()
         manager.db.close()
         raw = manager.cfg.db_path.read_bytes()
-        assert b"isolated-app-secret" not in raw and str(secret_file).encode() not in raw
+        assert b"isolated-app-secret" not in raw
+        assert str(secret_file).encode() not in raw
     asyncio.run(body())
 
 
@@ -190,7 +199,9 @@ def test_app_subscription_limit_falls_back_only_to_its_assigned_key(tmp_path):
         await manager.start()
         sid = manager.create("fall back", backend="claude", app=app)["id"]
         session = await wait_status(manager, sid, "done")
-        assert len(made) == 2 and made[0]["api_key"] == "" and made[1]["api_key"] == "per-app-fallback"
+        assert len(made) == 2
+        assert made[0]["api_key"] == ""
+        assert made[1]["api_key"] == "per-app-fallback"
         assert session["run"]["billing_mode"] == "api_key"
         assert session["run"]["credential_source"] == "app_file"
         row = manager.db.conn.execute(

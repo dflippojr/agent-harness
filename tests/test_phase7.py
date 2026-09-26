@@ -65,17 +65,21 @@ def test_search_ranks_groups_and_falls_back(tmp_path):
         ("tool_result", {"name": "container_logs", "ok": True, "output": "ntfy exited with code 137 (OOM)"}),
     ])
     found = search(db, "stale grafana")
-    assert [r["id"] for r in found["results"]] == ["aaa1"] and found["mode"] == "all"
+    assert [r["id"] for r in found["results"]] == ["aaa1"]
+    assert found["mode"] == "all"
     assert "\x02" in found["results"][0]["passages"][0]["text"]
     # nothing has every word: fall back to any word, stopwords dropped
     loose = search(db, "how did we fix the ntfy OOM last time")
-    assert loose["mode"] == "any" and loose["results"][0]["id"] == "bbb2"
+    assert loose["mode"] == "any"
+    assert loose["results"][0]["id"] == "bbb2"
     assert search(db, "restart", project="plex-webhook")["results"] == []
     assert [r["id"] for r in search(db, "restart")["results"]] == ["bbb2"]
     assert search(db, '"target was renamed"')["results"][0]["id"] == "aaa1"  # phrase
     assert search(db, "ntfy", exclude="bbb2")["results"] == []
     text = compact_transcript(db, "aaa1")
-    assert "## User" in text and "call prometheus_query" in text and "renamed" in text
+    assert "## User" in text
+    assert "call prometheus_query" in text
+    assert "renamed" in text
 
 
 def test_index_backfills_existing_events_once(tmp_path):
@@ -118,9 +122,11 @@ def test_agent_tools_find_earlier_sessions_but_not_their_own(tmp_path):
         second = m.create("what was wrong with invoice totals last time?")
         await wait_status(m, second["id"], "done")
         results = events(m, second["id"], "tool_result")
-        assert results[0]["ok"] and first["id"] in results[0]["output"]
+        assert results[0]["ok"]
+        assert first["id"] in results[0]["output"]
         assert second["id"] not in results[0]["output"].split("Read one")[0]
-        assert results[1]["ok"] and "off-by-one" in results[1]["output"]
+        assert results[1]["ok"]
+        assert "off-by-one" in results[1]["output"]
         assert "session_search" in m.db.get_session(second["id"])["context"][0]["content"]
 
         hidden = m.create("x", project="private")
@@ -143,7 +149,8 @@ def test_search_api(tmp_path):
                 break
             time.sleep(0.02)
         data = client.get("/search", params={"q": "grafana refresh"}).json()
-        assert data["results"][0]["id"] == sid and data["results"][0]["passages"]
+        assert data["results"][0]["id"] == sid
+        assert data["results"][0]["passages"]
         assert json.dumps(data)  # serializable
         m.cfg.search.enabled = False
         assert client.get("/search", params={"q": "x"}).status_code == 400
@@ -222,19 +229,24 @@ def test_memory_edit_needs_approval_then_commits_and_pushes(tmp_path):
         await wait_status(m, s["id"], "waiting_approval")
         approval = m.db.pending_approvals(s["id"])[0]
         assert approval["reason"] == "changes your memory library"
-        assert approval["detail"].startswith("Note Sunday league play\n\n") and "+- Started league play" in approval["detail"]
+        assert approval["detail"].startswith("Note Sunday league play\n\n")
+        assert "+- Started league play" in approval["detail"]
         assert "Sunday" not in remote_file(tmp_path, bare, "categories/sport/memory.md")[0]  # nothing before approval
         m.decide(s["id"], approval["id"], approve=True)
         await wait_status(m, s["id"], "done", timeout=30)
         results = events(m, s["id"], "tool_result")
-        assert results[0]["ok"] and "pushed" in results[0]["output"]
+        assert results[0]["ok"]
+        assert "pushed" in results[0]["output"]
         # sensitive category and oversize profile: refused without asking the user
-        assert not results[1]["ok"] and "categories/health/memory.md isn't a" in results[1]["output"]
-        assert not results[2]["ok"] and "limit is 300" in results[2]["output"]
+        assert not results[1]["ok"]
+        assert "categories/health/memory.md isn't a" in results[1]["output"]
+        assert not results[2]["ok"]
+        assert "limit is 300" in results[2]["output"]
         assert len(m.db.approvals(s["id"])) == 1
         text, message = remote_file(tmp_path, bare, "categories/sport/memory.md")
         assert "Started league play on Sundays." in text
-        assert message.startswith("Note Sunday league play") and s["id"] in message
+        assert message.startswith("Note Sunday league play")
+        assert s["id"] in message
         await m.stop()
     asyncio.run(body())
 
@@ -255,7 +267,8 @@ def test_memory_write_denied_or_stale_is_not_saved(tmp_path):
 
     async def body():
         detail, warning = await lib.preview("memory_write", args)
-        assert warning == "" and "+- Innova bag" in detail
+        assert warning == ""
+        assert "+- Innova bag" in detail
         with pytest.raises(Exception, match="wasn't approved"):
             await lib.call("memory_write", args, session={"id": "s1"}, call_id="c1")
         lib.db.rows["c1"] = {"status": "denied", "detail": detail}
@@ -296,7 +309,8 @@ def test_profile_frozen_per_session_and_not_given_to_apps(tmp_path):
         await m.runner.memory.refresh(force=True)
         first = m.create("remember my GitHub account")
         system = m.db.get_session(first["id"])["context"][0]["content"]
-        assert "User profile (agent-profile.md" in system and "Prefers short answers." in system
+        assert "User profile (agent-profile.md" in system
+        assert "Prefers short answers." in system
         assert "personal GitHub" not in system
         await wait_status(m, first["id"], "waiting_approval")
         m.decide(first["id"], None, approve=True)
@@ -320,7 +334,9 @@ def test_memory_api(tmp_path):
     m = Manager(cfg, chat=Script([Completion(content="hi")]))
     with TestClient(create_app(m)) as client:
         data = wait_until(lambda: (lambda d: d if d.get("profile") else None)(client.get("/memory").json()))
-        assert data["enabled"] and data["writes"] and "Prefers short answers." in data["profile"]
+        assert data["enabled"]
+        assert data["writes"]
+        assert "Prefers short answers." in data["profile"]
         assert data["profile_max_chars"] == 300
         saved = client.put("/memory/profile", json={"content": "# Agent profile\nUse the library for project facts.\n",
                                                     "summary": "Purpose-only profile"})
@@ -388,7 +404,8 @@ def test_parse_status():
     from harness.jobs import summary
     report = "## Services\n| name | state |\n|---|---|\n| ntfy | up |\n\nAll 6 services are running with 0 restarts.\n\nSTATUS: OK"
     assert summary(report) == "All 6 services are running with 0 restarts."
-    assert summary("x" * 500).endswith("…") and len(summary("x" * 500)) == 300
+    assert summary("x" * 500).endswith("…")
+    assert len(summary("x" * 500)) == 300
 
 
 def test_status_line_edges_and_linear_scan():
@@ -431,22 +448,26 @@ def test_due_job_runs_once_skips_overlap_and_records_status(tmp_path):
         started = m.jobs.tick(now)
         assert len(started) == 1
         s = m.db.get_session(started[0])
-        assert s["job_id"] == job["id"] and s["title"].startswith("⏰ Morning check")
+        assert s["job_id"] == job["id"]
+        assert s["title"].startswith("⏰ Morning check")
         assert "STATUS: OK" in s["context"][1]["content"]
         after = m.db.get_job(job["id"])
-        assert after["last_session_id"] == s["id"] and after["next_run_at"] > now
+        assert after["last_session_id"] == s["id"]
+        assert after["next_run_at"] > now
         assert m.jobs.tick(now) == []  # not due again
         done = await wait_status(m, s["id"], "done")
         assert done["job_status"] == "ok"
         finished = events(m, s["id"], "run_finished")[0]
-        assert finished["job_status"] == "ok" and finished["job_id"] == job["id"]
+        assert finished["job_status"] == "ok"
+        assert finished["job_id"] == job["id"]
 
         # overlap: a due job whose last run is still active skips the slot
         m.db.update_job(job["id"], next_run_at=time.time() - 1)
         m.db.update_session(s["id"], status="running")
         assert m.jobs.tick(time.time()) == []
         skipped = m.db.get_job(job["id"])
-        assert "still going" in skipped["last_skip"] and skipped["next_run_at"] > time.time()
+        assert "still going" in skipped["last_skip"]
+        assert skipped["next_run_at"] > time.time()
         m.db.update_session(s["id"], status="done")
         await m.stop()
     asyncio.run(body())
@@ -488,9 +509,12 @@ def test_job_notifications_quiet_unless_attention(tmp_path):
                                  "job_status": "ok", "job_reason": "", **data}})
 
     assert build(quiet) is None
-    assert build(low)["priority"] == 2 and build(loud)["priority"] == 3
+    assert build(low)["priority"] == 2
+    assert build(loud)["priority"] == 3
     attention = build(quiet, job_status="attention", job_reason="ntfy is down")
-    assert attention["priority"] == 4 and attention["title"] == "Needs attention: quiet" and attention["message"] == "ntfy is down"
+    assert attention["priority"] == 4
+    assert attention["title"] == "Needs attention: quiet"
+    assert attention["message"] == "ntfy is down"
     assert build(quiet, job_status="")["title"].startswith("Done (no status line)")
     assert build(quiet, status="failed", stop_reason="internal_error")["priority"] == 4
     assert build(quiet, status="cancelled") is None
@@ -510,7 +534,8 @@ def test_jobs_api(tmp_path):
         assert client.post("/jobs", json={"name": "x", "prompt": "y", "cron": "0 8 * * *", "project": "nope"}).status_code == 400
         job = client.post("/jobs", json={"name": "Disk check", "prompt": "check disk", "cron": "0 8 * * *",
                                          "notify": "attention"}).json()
-        assert job["enabled"] is True and job["next_run_at"] > time.time()
+        assert job["enabled"] is True
+        assert job["next_run_at"] > time.time()
         s = client.post(f"/jobs/{job['id']}/run").json()
         assert client.post(f"/jobs/{job['id']}/run").status_code in (201, 409)
         wait_until(lambda: client.get(f"/sessions/{s['id']}").json()["status"] == "done")
@@ -522,7 +547,8 @@ def test_jobs_api(tmp_path):
         assert any(x.get("job_status") == "attention" for x in listed)
         updated = client.put(f"/jobs/{job['id']}", json={"name": "Disk check", "prompt": "check disk",
                                                          "cron": "0 9 * * 1-5", "enabled": False}).json()
-        assert updated["cron"] == "0 9 * * 1-5" and updated["enabled"] is False
+        assert updated["cron"] == "0 9 * * 1-5"
+        assert updated["enabled"] is False
         assert client.delete(f"/jobs/{job['id']}").status_code == 204
         assert client.get(f"/jobs/{job['id']}").status_code == 404
 
@@ -606,14 +632,19 @@ def test_fetch_reads_pdf_and_docx(tmp_path):
 
     async def body():
         text = await web.web_fetch("https://example.com/paper")
-        assert "--- page 1 of 2 ---" in text and "8 attention heads" in text and "d_model is 512" in text
+        assert "--- page 1 of 2 ---" in text
+        assert "8 attention heads" in text
+        assert "d_model is 512" in text
         found = await web.web_fetch("https://example.com/paper", find="d_model")
         assert "page 2 of 2" in found
         assert "8 attention heads" in await web.web_fetch("https://example.com/octet")
         with pytest.raises(ToolError, match="no text layer"):
             await web.web_fetch("https://example.com/scan")
         doc = await web.web_fetch("https://example.com/schedule.docx")
-        assert "# Rink schedule" in doc and "# Open skate" in doc and "Sundays 10:00" in doc and "Sun | 10:00" in doc
+        assert "# Rink schedule" in doc
+        assert "# Open skate" in doc
+        assert "Sundays 10:00" in doc
+        assert "Sun | 10:00" in doc
         with pytest.raises(ToolError, match="only HTML, text, PDF"):
             await web.web_fetch("https://example.com/logo.png")
     asyncio.run(body())
@@ -637,7 +668,8 @@ def test_fixture_records_and_replays_without_network(tmp_path):
         raise AssertionError(f"network used: {request.url}")
 
     web = WebTools(WebConfig(enabled=True, fixture_dir=str(root)))
-    assert web.transport is not None and web.fixture is not None
+    assert web.transport is not None
+    assert web.fixture is not None
 
     async def body():
         out = await web.web_search("llama.cpp server sleep idle")   # not recorded verbatim: closest query
@@ -646,7 +678,8 @@ def test_fixture_records_and_replays_without_network(tmp_path):
         page = await web.web_fetch("https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md")
         assert "/metrics don't wake" in page
         pdf = await web.web_fetch("https://arxiv.org/pdf/1706.03762")  # redirect recorded
-        assert "final URL: https://arxiv.org/pdf/1706.03762v7" in pdf and "h = 8" in pdf
+        assert "final URL: https://arxiv.org/pdf/1706.03762v7" in pdf
+        assert "h = 8" in pdf
         with pytest.raises(ToolError, match="HTTP 404"):
             await web.web_fetch("https://example.org/not-recorded")
     asyncio.run(body())
@@ -668,12 +701,16 @@ def test_fixture_recorder_only_asks_the_local_searxng(tmp_path, monkeypatch, cap
     for url in ("http://169.254.169.254/latest", "https://searx.example.com", "file:///etc/passwd",
                 "http://user:pw@127.0.0.1:8888", "http://127.0.0.1:8888/?engines=x", "http://127.0.0.1.example.com",
                 "http://127.0.0.1:99999"):
+        recording = web_fixture.record(tmp_path / "fx", ["q"], [], 0, url)
         with pytest.raises(ValueError, match="SearXNG URL"):
-            asyncio.run(web_fixture.record(tmp_path / "fx", ["q"], [], 0, url))
+            asyncio.run(recording)
+    argv = ["record", str(tmp_path / "fx"), "--query", "q", "--searxng-url", "http://10.0.0.5:8888"]
     with pytest.raises(SystemExit) as exit_:
-        web_fixture.main(["record", str(tmp_path / "fx"), "--query", "q", "--searxng-url", "http://10.0.0.5:8888"])
-    assert exit_.value.code == 2 and "must be http(s) on 127.0.0.1" in capsys.readouterr().err
-    assert seen == [] and not (tmp_path / "fx").exists()
+        web_fixture.main(argv)
+    assert exit_.value.code == 2
+    assert "must be http(s) on 127.0.0.1" in capsys.readouterr().err
+    assert seen == []
+    assert not (tmp_path / "fx").exists()
 
     assert web_fixture.searxng_search_url("http://localhost:8888/searx/") == "http://localhost:8888/searx/search"
     assert web_fixture.searxng_search_url("http://[::1]:8888") == "http://[::1]:8888/search"

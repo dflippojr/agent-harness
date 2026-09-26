@@ -138,12 +138,14 @@ def test_design_covers_every_current_app_scope_and_modules():
     design = DESIGN.read_text(encoding="utf-8")
     for scope in SCOPES:
         assert f"`{scope}`" in design
-    assert "`admin`" in design and "prohibited" in design.lower()
+    assert "`admin`" in design
+    assert "prohibited" in design.lower()
     for module in MODULE_NAMES:
         assert f"`{module}`" in design
     for backend in ("local", "claude", "codex", "cursor"):
         assert backend in design
-    assert "GET /api/v1" in design and "/api/admin/v1" in design
+    assert "GET /api/v1" in design
+    assert "/api/admin/v1" in design
     assert "normalize_origin" in design
     assert "provider_policy" in design
     assert "manifest_schema_version" in design

@@ -61,9 +61,12 @@ def test_app_tokens_cannot_use_admin_api(tmp_path):
         # Legacy pre-#91 display names remain valid owner credentials.
         owner = client.post("/keys", json={"name": "control-center", "kind": OWNER_KIND,
                                            "scopes": [ADMIN_SCOPE]}).json()
-        assert app["kind"] == "app" and app["key"].startswith("ha-")
-        assert device["kind"] == "device" and device["key"].startswith("hk-")
-        assert owner["kind"] == OWNER_KIND and owner["key"].startswith("ho-")
+        assert app["kind"] == "app"
+        assert app["key"].startswith("ha-")
+        assert device["kind"] == "device"
+        assert device["key"].startswith("hk-")
+        assert owner["kind"] == OWNER_KIND
+        assert owner["key"].startswith("ho-")
         assert owner["scopes"] == ADMIN_SCOPE
 
         assert client.post("/keys", json={"name": "nope", "kind": "app",
@@ -93,7 +96,8 @@ def test_app_tokens_cannot_use_admin_api(tmp_path):
         assert client.get(f"{PREFIX}/sessions/{sid}", headers=bearer(owner["key"])).json()["id"] == sid
         minted = client.post(f"{PREFIX}/keys", headers=bearer(owner["key"]),
                              json={"name": "another-owner", "kind": OWNER_KIND, "scopes": [ADMIN_SCOPE]})
-        assert minted.status_code == 201 and minted.json()["kind"] == OWNER_KIND
+        assert minted.status_code == 201
+        assert minted.json()["kind"] == OWNER_KIND
 
         # App tokens still work on the public app contract.
         app_session = client.post("/api/v1/sessions", headers=bearer(app["key"]), json={"prompt": "app work"})
@@ -109,7 +113,8 @@ def test_admin_owner_operations_match_unversioned_catalog(tmp_path):
             assert PREFIX + path in catalog, path
         assert PREFIX + "/runners/{name}/poll" not in catalog
         openapi = client.get("/openapi.json").json()["paths"]
-        assert "/sessions" in openapi and PREFIX + "/sessions" not in openapi
+        assert "/sessions" in openapi
+        assert PREFIX + "/sessions" not in openapi
         assert PREFIX in openapi
         assert "/a/{token}/{decision}" in openapi
         assert PREFIX + "/a/{token}/{decision}" not in openapi

@@ -62,7 +62,8 @@ def test_registry_specs_are_explicit_and_reject_unknown_keys(tmp_path):
         assert entry["key"] == spec.key
         assert entry["scope"] in ("app", "admin")
         assert entry["apply"] in ("live", "daemon_restart", "installer_only")
-        assert callable(spec.getter) and callable(spec.setter)
+        assert callable(spec.getter)
+        assert callable(spec.setter)
         if spec.apply_mode != "installer_only":
             spec.getter(cfg)
     with pytest.raises(KeyError):
@@ -71,7 +72,8 @@ def test_registry_specs_are_explicit_and_reject_unknown_keys(tmp_path):
     with pytest.raises(ValueError):
         parse_value(max_turns, "80")
     hidden = registry.get("backup.dir")
-    assert hidden.apply_mode == "installer_only" and looks_hidden(hidden.key, hidden)
+    assert hidden.apply_mode == "installer_only"
+    assert looks_hidden(hidden.key, hidden)
     assert schema_entry(hidden, cfg)["guidance"] == "managed in local configuration"
 
 
@@ -86,7 +88,8 @@ def test_image_edit_settings_are_explicit_and_install_gated(tmp_path):
     cfg.images.edit_enabled = True
     for key in keys:
         entry = schema_entry(registry.get(key), cfg)
-        assert entry["available"] is True and entry["modules"] == ["image_edit"]
+        assert entry["available"] is True
+        assert entry["modules"] == ["image_edit"]
     registry.get("images.max_upload_bytes").setter(cfg, 8 * 2**20)
     registry.get("images.max_pixels").setter(cfg, 12_000_000)
     registry.get("images.edit_enabled").setter(cfg, False)
@@ -106,14 +109,17 @@ def test_compaction_and_feature_enable_cross_field_validation(tmp_path):
         assert bad.json()["error"]["code"] == "validation_error"
         assert "compaction.summarize_at" in bad.json()["error"]["keys"]
         unknown = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"nope.secret": "x"}})
-        assert unknown.status_code == 400 and unknown.json()["error"]["keys"]["nope.secret"]["code"] == "unknown_key"
+        assert unknown.status_code == 400
+        assert unknown.json()["error"]["keys"]["nope.secret"]["code"] == "unknown_key"
         file_only = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"backup.dir": "C:/x"}})
         assert file_only.status_code == 400
         assert file_only.json()["error"]["keys"]["backup.dir"]["code"] == "installer_only"
         listed = client.get("/api/admin/v1/config").json()
         backup = next(item for item in listed["settings"] if item["key"] == "backup.dir")
-        assert backup["configured"] is None and backup["effective"] is None
-        assert "D:" not in json.dumps(listed) and "Agents" not in json.dumps(listed)
+        assert backup["configured"] is None
+        assert backup["effective"] is None
+        assert "D:" not in json.dumps(listed)
+        assert "Agents" not in json.dumps(listed)
 
 
 def test_live_patch_reset_and_stale_revision(tmp_path):
@@ -122,13 +128,15 @@ def test_live_patch_reset_and_stale_revision(tmp_path):
         schema = client.get("/api/admin/v1/config/schema").json()
         assert schema["schema_version"] == 1
         keys = {item["key"] for item in schema["settings"]}
-        assert "sessions.max_turns" in keys and "modules.web" in keys
+        assert "sessions.max_turns" in keys
+        assert "modules.web" in keys
         view = client.get("/api/admin/v1/config")
         assert view.headers["etag"] == '"0"'
         plan = client.patch("/api/admin/v1/config", json={
             "revision": 0, "dry_run": True, "changes": {"sessions.max_turns": 40},
         }).json()
-        assert plan["dry_run"] is True and plan["changes"][0]["to"] == 40
+        assert plan["dry_run"] is True
+        assert plan["changes"][0]["to"] == 40
         assert manager.cfg.max_turns == 80
         saved = client.patch("/api/admin/v1/config", json={
             "revision": 0, "changes": {"sessions.max_turns": 40},
@@ -137,7 +145,8 @@ def test_live_patch_reset_and_stale_revision(tmp_path):
         assert saved.json()["revision"] == 1
         assert manager.cfg.max_turns == 40
         stale = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"sessions.max_turns": 50}})
-        assert stale.status_code == 409 and stale.json()["error"]["code"] == "revision_conflict"
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "revision_conflict"
         reset = client.patch("/api/admin/v1/config", json={"revision": 1, "reset": ["sessions.max_turns"]})
         assert reset.status_code == 200
         assert manager.cfg.max_turns == 80
@@ -154,7 +163,8 @@ def test_reset_live_compaction_key_revalidates_inherited_thresholds(tmp_path):
             "changes": {"compaction.elide_at": 0.20, "compaction.summarize_at": 0.50},
         })
         assert saved.status_code == 200, saved.text
-        assert manager.cfg.elide_at == 0.20 and manager.cfg.summarize_at == 0.50
+        assert manager.cfg.elide_at == 0.20
+        assert manager.cfg.summarize_at == 0.50
         # Inherited elide_at is 0.55; leaving summarize_at=0.50 would violate elide < summarize.
         reset_elide = client.patch("/api/admin/v1/config", json={
             "revision": saved.json()["revision"], "reset": ["compaction.elide_at"],
@@ -162,7 +172,8 @@ def test_reset_live_compaction_key_revalidates_inherited_thresholds(tmp_path):
         assert reset_elide.status_code == 400, reset_elide.text
         assert reset_elide.json()["error"]["code"] == "validation_error"
         assert "compaction.summarize_at" in reset_elide.json()["error"]["keys"]
-        assert manager.cfg.elide_at == 0.20 and manager.cfg.summarize_at == 0.50
+        assert manager.cfg.elide_at == 0.20
+        assert manager.cfg.summarize_at == 0.50
         assert "compaction.elide_at" in manager.settings.store.read_active().values
 
         # Symmetric: overlay elide_at=0.80 with inherited summarize_at=0.65 is also invalid.
@@ -176,14 +187,16 @@ def test_reset_live_compaction_key_revalidates_inherited_thresholds(tmp_path):
         })
         assert reset_summarize.status_code == 400, reset_summarize.text
         assert "compaction.summarize_at" in reset_summarize.json()["error"]["keys"]
-        assert manager.cfg.elide_at == 0.80 and manager.cfg.summarize_at == 0.90
+        assert manager.cfg.elide_at == 0.80
+        assert manager.cfg.summarize_at == 0.90
 
         # Resetting the overlay sibling that restores a valid pair still works.
         ok = client.patch("/api/admin/v1/config", json={
             "revision": high.json()["revision"], "reset": ["compaction.elide_at"],
         })
         assert ok.status_code == 200, ok.text
-        assert manager.cfg.elide_at == 0.55 and manager.cfg.summarize_at == 0.90
+        assert manager.cfg.elide_at == 0.55
+        assert manager.cfg.summarize_at == 0.90
 
 
 def test_rollback_restores_immediately_previous_generation(tmp_path):
@@ -265,7 +278,9 @@ def test_app_caps_and_admin_auth_boundaries(tmp_path):
         })
         assert over.status_code == 200
         turns = next(item for item in over.json()["settings"] if item["key"] == "app.sessions.max_turns")
-        assert turns["configured"] == 400 and turns["effective"] == 80 and turns["capped_by"] == "sessions.max_turns"
+        assert turns["configured"] == 400
+        assert turns["effective"] == 80
+        assert turns["capped_by"] == "sessions.max_turns"
         # cannot write host settings, modules, installer-only, other apps
         assert client.patch("/api/v1/config", headers=h, json={
             "revision": 2, "changes": {"sessions.max_turns": 1},
@@ -336,13 +351,15 @@ def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
         assert created.status_code == 201, created.text
         s = manager.db.get_session(created.json()["id"])
         prompt = s["context"][0]["content"]
-        assert "Web access" not in prompt and "Homelab access" not in prompt
+        assert "Web access" not in prompt
+        assert "Homelab access" not in prompt
         assert "User context:" not in prompt
         assert "Past work:" in prompt
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert kit_tools == {"session_search", "session_read"}
         ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
-        assert "restart_service" not in ws_tools and "homelab_services" not in ws_tools
+        assert "restart_service" not in ws_tools
+        assert "homelab_services" not in ws_tools
 
         empty = client.patch("/api/v1/config", headers=h, json={
             "revision": patched.json()["revision"], "changes": {"app.capabilities": []},
@@ -413,7 +430,8 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert kit_tools == {"session_search", "session_read"}
         ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
-        assert "restart_service" not in ws_tools and "homelab_services" not in ws_tools
+        assert "restart_service" not in ws_tools
+        assert "homelab_services" not in ws_tools
 
         deadline = time.time() + 10
         while time.time() < deadline and manager.db.get_session(sid)["status"] in ACTIVE:
@@ -474,7 +492,8 @@ def test_never_patched_app_keeps_inherited_tools_and_notifications(tmp_path):
             "session_id": s["id"], "type": "run_finished",
             "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},
         })
-        assert note is not None and "Done" in note["title"]
+        assert note is not None
+        assert "Done" in note["title"]
 
 
 def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
@@ -511,7 +530,8 @@ def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
             "session_id": sid, "type": "run_finished",
             "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},
         })
-        assert note is not None and "Done" in note["title"]
+        assert note is not None
+        assert "Done" in note["title"]
 
 
 def test_active_app_follows_live_config_patch(tmp_path):
@@ -641,7 +661,8 @@ def test_load_then_manager_applies_unconfirmed_candidate_once(tmp_path):
     assert manager.settings.store.read_status().get("recovery") != "lkg_restore"
     assert not manager.settings.store.quarantine_path.is_file()
     active = manager.settings.store.read_active()
-    assert active is not None and active.values.get("search.enabled") is False
+    assert active is not None
+    assert active.values.get("search.enabled") is False
     assert active.confirmed is False
 
 
@@ -751,11 +772,15 @@ def test_web_settings_render_plan_and_phone_layout(tmp_path):
     text = app_js.read_text(encoding="utf-8")
     style = css.read_text(encoding="utf-8")
     assert "daemonSettingsCard" in text
-    assert "dry_run" in text and "revision_conflict" in text
-    assert "confirmRestart" in text and "lkg_restore" in text
+    assert "dry_run" in text
+    assert "revision_conflict" in text
+    assert "confirmRestart" in text
+    assert "lkg_restore" in text
     assert "overlay_quarantined" in text
-    assert "Enable " in text and "Roll back" in text
-    assert "config-row" in style and "max-width: 420px" in style
+    assert "Enable " in text
+    assert "Roll back" in text
+    assert "config-row" in style
+    assert "max-width: 420px" in style
     client, _ = _client(tmp_path)
     with client:
         js = client.get("/static/app.js").text
@@ -767,7 +792,8 @@ def test_failed_overlay_does_not_leave_keys_absent_from_lkg(tmp_path):
     """_apply_values must not commit a partial overlay. A bad backends.local.model plus
     sessions.max_turns must not leave max_turns applied after LKG restore/unlink."""
     cfg = make_cfg(tmp_path)
-    assert cfg.max_turns == 80 and cfg.default_model == "fake"
+    assert cfg.max_turns == 80
+    assert cfg.default_model == "fake"
     store = ManagedStore(cfg.data_dir)
     store.write_lkg(Envelope(revision=1, confirmed=True, values={}))
     store.write_active(Envelope(
@@ -909,7 +935,8 @@ def _assert_image_edit_surfaces(manager, *, on: bool, installed: bool, yaml_enab
     assert manager.cfg.images.edit_enabled is (on if installed else inherited_enabled)
     assert module_effective(manager.cfg, "image_edit") is on
     assert manager.cfg.capabilities()["modules"]["image_edit"] is on
-    assert manager.images is not None and manager.images.edit_enabled is on
+    assert manager.images is not None
+    assert manager.images.edit_enabled is on
     manager.db.insert_image({
         "id": "aaaaaaaaaaaa", "session_id": "", "source": "phone", "prompt": "seed", "model": "fast",
         "aspect_ratio": "1:1", "resolution": "standard", "width": 64, "height": 64, "seed": 1,
@@ -975,10 +1002,12 @@ def test_crash_after_restart_patch_does_not_drop_confirmed_key(tmp_path):
     assert cfg.web.enabled is False
     SettingsService(cfg).patch_admin({"web.enabled": True}, 1)
     active = store.read_active()
-    assert active is not None and active.confirmed is True
+    assert active is not None
+    assert active.confirmed is True
     assert active.values.get("web.enabled") is False
     pending = store.read_pending()
-    assert pending is not None and pending.values.get("web.enabled") is True
+    assert pending is not None
+    assert pending.values.get("web.enabled") is True
     # Process dies before POST /config/restart. Next boot applies confirmed active.
     reloaded = _boot(cfg_dir)
     assert reloaded.cfg.web.enabled is False
@@ -1045,7 +1074,8 @@ def test_live_patch_does_not_rewrite_pending_restart_candidate(tmp_path, monkeyp
     service = SettingsService(cfg)
     service.patch_admin({"web.enabled": True}, 1)
     pending = store.read_pending()
-    assert pending is not None and pending.values.get("web.enabled") is True
+    assert pending is not None
+    assert pending.values.get("web.enabled") is True
     service.patch_admin({"sessions.max_turns": 40}, store.read_active().revision)
     pending = store.read_pending()
     assert pending is not None, "live PATCH dropped the pending restart candidate"
@@ -1067,7 +1097,8 @@ def test_rollback_clears_pending_only_restart_key(tmp_path, monkeypatch):
     service = SettingsService(load(cfg_dir))
     service.patch_admin({"web.enabled": True}, service.admin_view()["revision"])
     pending = service.store.read_pending()
-    assert pending is not None and pending.values.get("web.enabled") is True
+    assert pending is not None
+    assert pending.values.get("web.enabled") is True
     assert "web.enabled" not in (service.store.read_active().values if service.store.read_active() else {})
     assert service.admin_view()["restart_required"] is True
     service.rollback(service.admin_view()["revision"])

@@ -62,7 +62,8 @@ def test_sdk_sends_provider_and_surfaces_usage_limits_billing_and_errors():
         assert sdk.pending_approvals("s1") == []
         with pytest.raises(HarnessError) as exc:
             sdk.session("absent")
-        assert exc.value.code == "not_found" and not exc.value.retryable
+        assert exc.value.code == "not_found"
+        assert not exc.value.retryable
     finally:
         sdk.close()
 
@@ -95,12 +96,14 @@ def test_sdk_pair_binds_the_returned_client_to_the_approved_origin(monkeypatch):
             return None
 
         def post(self, path, json):
-            assert path == "/api/v1/pair" and json == {"code": "pair-code-123"}
+            assert path == "/api/v1/pair"
+            assert json == {"code": "pair-code-123"}
             return httpx.Response(201, json={"token": "ha-paired", "app": {"name": "browser"},
                                              "api_version": "1.5"})
 
     monkeypatch.setattr(sdk_module.httpx, "Client", FakeClient)
     paired = Harness.pair("https://daemon.example/", "pair-code-123", "https://app.example")
-    assert paired.token == "ha-paired" and paired.origin == "https://app.example"
+    assert paired.token == "ha-paired"
+    assert paired.origin == "https://app.example"
     assert made[0].headers == {"Origin": "https://app.example"}
     assert made[1].headers == {"Authorization": "Bearer ha-paired", "Origin": "https://app.example"}

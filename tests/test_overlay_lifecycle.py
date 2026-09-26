@@ -374,7 +374,9 @@ def _assert_invariants(tmp_path, svc: SettingsService, model: OverlayModel, last
         if lkg is None:
             assert active is None, history
         else:
-            assert active is not None and active.confirmed and not active.unconfirmed, history
+            assert active is not None, history
+            assert active.confirmed, history
+            assert not active.unconfirmed, history
             assert active.values == lkg.values, history
         assert svc.store.read_status().get("recovery") == "lkg_restore", history
     if boot_result == "overlay_quarantined":
@@ -461,7 +463,8 @@ def test_next_overlay_rollback_clears_pending_only_restart_key():
         _mode,
     )
     assert new.pending is None
-    assert new.active is not None and "web.enabled" not in new.active.values
+    assert new.active is not None
+    assert "web.enabled" not in new.active.values
 
 
 def _payload_for(kind: str, rng: random.Random, models=BASE_MODELS) -> dict | None:

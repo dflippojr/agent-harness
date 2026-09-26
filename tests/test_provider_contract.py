@@ -57,7 +57,8 @@ def test_same_app_lifecycle_contract_across_providers(tmp_path, backend):
         })
         assert created.status_code == 201
         first = wait_session(client, headers, created.json()["id"])
-        assert first["backend"] == backend and first["failure"] is None
+        assert first["backend"] == backend
+        assert first["failure"] is None
         assert first["app_tools"] == ["lookup_contract"]
         assert first["metadata"] == {"scenario": "provider-contract"}
         assert {"turns", "prompt_tokens", "completion_tokens", "total_cost_usd"} <= set(first["totals"])
@@ -65,9 +66,11 @@ def test_same_app_lifecycle_contract_across_providers(tmp_path, backend):
         # Incremental context starts another run through the same adapter.
         sent = client.post(f"/api/v1/sessions/{first['id']}/context", headers=headers,
                            json={"context": [{"title": "Incremental", "content": "beta"}]})
-        assert sent.status_code == 200 and sent.json()["status"] in ("queued", "running")
+        assert sent.status_code == 200
+        assert sent.json()["status"] in ("queued", "running")
         final = wait_session(client, headers, first["id"], newer_than=first["updated_at"])
-        assert final["status"] == "done" and final["answer"]
+        assert final["status"] == "done"
+        assert final["answer"]
 
         # Tool results and approvals use the same durable broker contract regardless of the model adapter.
         manager.db.insert_app_tool_call(first["id"], "app-call-1", "lookup_contract", {"key": "x"})
@@ -78,10 +81,12 @@ def test_same_app_lifecycle_contract_across_providers(tmp_path, backend):
                                     "tool": "run_shell", "args": {"command": "echo ok"},
                                     "reason": "contract", "detail": "same approval shape"})
         pending = client.get(f"/api/v1/sessions/{first['id']}/approvals", headers=headers).json()
-        assert pending[0]["id"] == "a-contract" and "token" not in pending[0]
+        assert pending[0]["id"] == "a-contract"
+        assert "token" not in pending[0]
         decided = client.post(f"/api/v1/sessions/{first['id']}/approvals/a-contract", headers=headers,
                               json={"decision": "approve", "note": "contract"})
-        assert decided.status_code == 200 and decided.json()["status"] == "approved"
+        assert decided.status_code == 200
+        assert decided.json()["status"] == "approved"
 
         events = parse_sse(client.get(f"/api/v1/sessions/{first['id']}/events?follow=false",
                                       headers=headers).text)
@@ -91,7 +96,8 @@ def test_same_app_lifecycle_contract_across_providers(tmp_path, backend):
         pivot = persisted[len(persisted) // 2]["seq"]
         replay = parse_sse(client.get(
             f"/api/v1/sessions/{first['id']}/events?follow=false&after={pivot}", headers=headers).text)
-        assert replay and all(event.get("seq") is None or event["seq"] > pivot for event in replay)
+        assert replay
+        assert all(event.get("seq") is None or event["seq"] > pivot for event in replay)
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "cursor"])
@@ -105,7 +111,8 @@ def test_provider_failures_have_one_normalized_shape(tmp_path, backend):
         "subtype": "failed", "is_error": True, "result": "provider rejected the turn", "usage": {},
     })
     public = manager.summary(manager.get(session["id"]))
-    assert public["status"] == "failed" and public["stop_reason"] == "provider_error"
+    assert public["status"] == "failed"
+    assert public["stop_reason"] == "provider_error"
     assert public["failure"] == {"code": "provider_error", "provider": backend,
                                  "message": "provider rejected the turn", "retryable": True}
     error = [event for event in manager.db.events(session["id"]) if event["type"] == "error"][-1]
