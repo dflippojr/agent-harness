@@ -38,6 +38,15 @@ def _hunk_line(cur: dict, raw: str, old: int, new: int) -> tuple[int, int]:
     return old, new
 
 
+def _open_hunk(cur: dict, raw: str, old: int, new: int) -> tuple[bool, int, int]:
+    """Record a `@@` header line; returns (in_hunk, old, new) with the counters reset when it parses."""
+    m = HUNK.match(raw)
+    if m:
+        old, new = int(m.group(1)), int(m.group(2))
+    cur["lines"].append({"kind": "hunk", "old": None, "new": None, "text": raw})
+    return bool(m), old, new
+
+
 def parse_diff(diff: str) -> list[dict]:
     """Unified diff -> [{name, lines: [{kind, old, new, text}]}]. kind: hunk | add | del | ctx.
 
@@ -59,11 +68,7 @@ def parse_diff(diff: str) -> list[dict]:
             if name:
                 cur["name"] = name
         elif raw.startswith("@@"):
-            m = HUNK.match(raw)
-            in_hunk = bool(m)
-            if m:
-                old, new = int(m.group(1)), int(m.group(2))
-            cur["lines"].append({"kind": "hunk", "old": None, "new": None, "text": raw})
+            in_hunk, old, new = _open_hunk(cur, raw, old, new)
         elif in_hunk:
             old, new = _hunk_line(cur, raw, old, new)
         # "\ No newline at end of file", headers, and the trailing blank line carry no content
