@@ -135,6 +135,32 @@ const eq = (label, got, want) => {
   eq("backend none", pickDefaultBackend([], true), "local");
 }
 
+{
+  // showSecretOnce (hoisted from four nested callbacks): shows the secret once, Copy copies it, Done reloads.
+  const calls = [];
+  let focused = 0;
+  const h = (tag, attrs = {}, ...kids) => ({ tag, attrs, kids, select: () => { focused++; } });
+  const fill = (form, ...kids) => calls.push(["fill", form, kids]);
+  const copyToClipboard = (text, after) => { calls.push(["copy", text]); after(); };
+  const { showSecretOnce } = load(["showSecretOnce"], { h, fill, copyToClipboard });
+  let reloaded = 0;
+  const form = {};
+  showSecretOnce(form, () => { reloaded++; }, "Intro text", "sekret", "Copy install command");
+  const [, gotForm, [intro, field, row]] = calls[0];
+  eq("secret form", gotForm, form);
+  eq("secret intro", intro.kids, ["Intro text"]);
+  eq("secret field", [field.attrs.readonly, field.attrs.value], [true, "sekret"]);
+  eq("secret labels", row.kids.map((b) => b.kids[0]), ["Copy install command", "Done"]);
+  let selected = 0;
+  field.attrs.onclick({ target: { select: () => { selected++; } } });
+  eq("field click selects", selected, 1);
+  row.kids[0].attrs.onclick();
+  eq("copy", calls[1], ["copy", "sekret"]);
+  eq("copy reselects field", focused, 1);
+  row.kids[1].attrs.onclick();
+  eq("done reloads", reloaded, 1);
+}
+
 if (failures.length) {
   console.error(failures.join("\n"));
   process.exit(1);

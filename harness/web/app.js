@@ -4301,6 +4301,15 @@ function memoryCard() {
   return h("div", { class: "card" }, body);
 }
 
+// Shows a secret exactly once, with a Copy button and a Done button that reloads the card.
+function showSecretOnce(form, load, intro, secret, copyLabel) {
+  const field = h("input", { type: "text", readonly: true, value: secret, onclick: (e) => e.target.select() });
+  fill(form, h("p", { class: "small" }, intro), field,
+    h("div", { class: "row", style: "margin-top:8px" },
+      h("button", { class: "btn", onclick: () => copyToClipboard(secret, () => field.select()) }, copyLabel),
+      h("button", { class: "btn", onclick: load }, "Done")));
+}
+
 function endpointCard(me) {
   const base = me.public_url || location.origin;
   const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
@@ -4324,11 +4333,7 @@ function endpointCard(me) {
                 if (!name.value.trim()) return toast("Name the key");
                 try {
                   const k = await api("/keys", { method: "POST", body: { name: name.value } });
-                  const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
-                  fill(form, h("p", { class: "small" }, `Key for ${k.name}. Copy it now; it isn't shown again.`), field,
-                    h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: () => copyToClipboard(k.key, () => field.select()) }, "Copy"),
-                      h("button", { class: "btn", onclick: load }, "Done")));
+                  showSecretOnce(form, load, `Key for ${k.name}. Copy it now; it isn't shown again.`, k.key, "Copy");
                 } catch (e) { toast(e.message); }
               },
             }, "Create")));
@@ -4404,11 +4409,7 @@ function appsCard(me) {
                 if (!name.value.trim() || !scopes.length) return toast("Name the app and allow at least one thing");
                 try {
                   const k = await api("/keys", { method: "POST", body: { name: name.value, kind: "app", scopes } });
-                  const field = h("input", { type: "text", readonly: true, value: k.key, onclick: (e) => e.target.select() });
-                  fill(form, h("p", { class: "small" }, `Token for ${k.name}. Copy it now; it isn't shown again.`), field,
-                    h("div", { class: "row", style: "margin-top:8px" },
-                      h("button", { class: "btn", onclick: () => copyToClipboard(k.key, () => field.select()) }, "Copy"),
-                      h("button", { class: "btn", onclick: load }, "Done")));
+                  showSecretOnce(form, load, `Token for ${k.name}. Copy it now; it isn't shown again.`, k.key, "Copy");
                 } catch (e) { toast(e.message); }
               },
             }, "Create")));
@@ -4430,12 +4431,7 @@ function appsCard(me) {
               if (!name.value.trim() || !origin.value.trim() || !scopes.length) return toast("Name the app, enter its origin, and allow at least one thing");
               try {
                 const p = await api("/pairing-codes", { method: "POST", body: { name: name.value, origin: origin.value, scopes } });
-                const field = h("input", { type: "text", readonly: true, value: p.code, onclick: (e) => e.target.select() });
-                fill(form,
-                  h("p", { class: "small" }, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`), field,
-                  h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: () => copyToClipboard(p.code, () => field.select()) }, "Copy"),
-                    h("button", { class: "btn", onclick: load }, "Done")));
+                showSecretOnce(form, load, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`, p.code, "Copy");
               } catch (e) { toast(e.message); }
             } }, "Approve and create code")));
       };
@@ -4453,12 +4449,7 @@ function appsCard(me) {
               try {
                 const p = await api("/runner-pairing-codes", { method: "POST", body: { name: name.value, runner: runner.value } });
                 const command = `curl -fsSL ${base}/mac-client/install.sh | bash -s -- --server ${base} --code ${p.code}`;
-                const field = h("input", { type: "text", readonly: true, value: command, onclick: (e) => e.target.select() });
-                fill(form,
-                  h("p", { class: "small" }, `Run this in Terminal on the Mac. The code expires in 10 minutes and works once.`), field,
-                  h("div", { class: "row", style: "margin-top:8px" },
-                    h("button", { class: "btn", onclick: () => copyToClipboard(command, () => field.select()) }, "Copy install command"),
-                    h("button", { class: "btn", onclick: load }, "Done")));
+                showSecretOnce(form, load, "Run this in Terminal on the Mac. The code expires in 10 minutes and works once.", command, "Copy install command");
               } catch (e) { toast(e.message); }
             } }, "Create install command")));
       };
