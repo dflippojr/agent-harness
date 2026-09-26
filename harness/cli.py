@@ -204,7 +204,7 @@ def _iter_sse(sid: str, after: int):
                 data = []
 
 
-def _print_delta(d: dict, args, streamed: dict) -> None:
+def _print_delta(d: dict, streamed: dict) -> None:
     """One streamed token, opening the `assistant:` line and the dim reasoning block as needed."""
     if not any(streamed.values()):
         print(f"{CYAN}assistant:{RESET} ", end="")
@@ -214,6 +214,14 @@ def _print_delta(d: dict, args, streamed: dict) -> None:
         print(RESET + "\n", end="")
     streamed[d["kind"]] = True
     print(d["text"], end="", flush=True)
+
+
+def _compatibility(protocol: int, supported: dict) -> str:
+    if protocol < supported.get("min", protocol):
+        return "client update required"
+    if protocol > supported.get("max", protocol):
+        return "Server update required"
+    return "compatible"
 
 
 def _print_assistant(d: dict, streamed: dict) -> str:
@@ -293,7 +301,7 @@ def watch(sid: str, args, after: int = 0) -> int:
                 after = e["seq"]
             if t == "delta":
                 if d["kind"] != "reasoning" or args.reasoning:
-                    _print_delta(d, args, streamed)
+                    _print_delta(d, streamed)
                 continue
             if t == "queue":
                 if d["position"] != position and d["position"] > 0:
@@ -401,8 +409,7 @@ def main() -> int:
             return 1
         supported = remote.get("protocols", {}).get("admin", {})
         protocol = CLIENT_PROTOCOLS["cli"]
-        state = ("client update required" if protocol < supported.get("min", protocol) else
-                 "Server update required" if protocol > supported.get("max", protocol) else "compatible")
+        state = _compatibility(protocol, supported)
         print(f"Agent Harness Server {remote.get('release', 'unknown')} build {remote.get('build_id', 'unknown')}")
         print(f"compatibility: {state} (Server supports admin protocol "
               f"{supported.get('min', '?')}–{supported.get('max', '?')})")
