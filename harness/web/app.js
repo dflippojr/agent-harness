@@ -1372,13 +1372,83 @@ function storeRemove(key) {
   try { localStorage.removeItem(key); } catch (_) { /* private mode: nothing to remove */ }
 }
 
+function skillOption(sk, inputs) {
+  const box = h("input", { type: "checkbox", class: "skill-opt", value: sk.slug });
+  inputs.push(box);
+  return h("label", { class: "row", style: "gap:8px;align-items:flex-start;margin:6px 0" }, box,
+    h("span", {}, h("strong", {}, sk.title || sk.slug),
+      h("div", { class: "muted small" }, sk.purpose || `v${sk.version} · ${sk.content_hash.slice(0, 12)}`)));
+}
+
+// Resolves true when the session was created (and the page moved on), false when the form should stay usable.
+async function startSession(fields, draftKey) {
+  try {
+    const s = await api("/sessions", { method: "POST", body: fields });
+    storeRemove(draftKey);
+    location.hash = `#/s/${s.id}`;
+    return true;
+  } catch (err) {
+    toast(err.message);
+    return false;
+  }
+}
+
+async function saveTemplate({ prompt, project, backend, model }) {
+  if (!prompt.trim()) return toast("Write a prompt first");
+  const name = window.prompt("Template name");
+  if (!name) return;
+  try {
+    await api("/templates", { method: "POST", body: { name, project, backend, model, prompt } });
+    toast("Template saved");
+    warmModel();
+    route();
+  } catch (err) { toast(err.message); }
+}
+
+function templateManager(templates) {
+  return h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),
+    templates.map((t) => h("div", { class: "card" },
+      h("div", { class: "row" }, h("strong", {}, t.name), h("span", { class: "spacer" }),
+        h("button", {
+          class: "btn small bad",
+          onclick: async () => {
+            if (!confirm(`Delete template “${t.name}”?`)) return;
+            await api(`/templates/${t.id}`, { method: "DELETE" });
+            warmModel();
+            route();
+          },
+        }, "Delete")),
+      h("div", { class: "preview" }, `${t.project} · ${t.prompt}`))));
+}
+
+const NEW_PROJECT_NOTE = {
+  member: "Saved in your household account. Use a lowercase project id; a public HTTPS git source is cloned into your own area.",
+  owner: "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task.",
+};
+
+const repoPlaceholder = () => (isMember() ? "https://github.com/org/repo" : String.raw`D:\Projects\example or https://…`);
+
+// Members get a fixed "tower" value; the owner picks which machine the new project lives on.
+function projectTargetInput(targets, target) {
+  if (isMember()) return h("input", { type: "hidden", value: "tower" });
+  const select = h("select", {}, targets.map((name) => h("option", { value: name },
+    name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
+  select.value = target;
+  return select;
+}
+
+function loadNewTaskData() {
+  const member = isMember();
+  return Promise.all([
+    api("/projects"), api("/models"),
+    member ? Promise.resolve([]) : api("/templates").catch(() => []),
+    member ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip"),
+    member ? Promise.resolve(null) : api("/gpu").catch(() => null)]);
+}
+
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
-  let [projects, models, allTemplates, backends, gpu] = await Promise.all([
-    api("/projects"), api("/models"),
-    isMember() ? Promise.resolve([]) : api("/templates").catch(() => []),
-    isMember() ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip"),
-    isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null)]);
+  let [projects, models, allTemplates, backends, gpu] = await loadNewTaskData();
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
   const targetKey = "harness.target";
@@ -1429,14 +1499,11 @@ async function viewNew() {
   const newProjectName = h("input", { type: "text", placeholder: "my-project", maxlength: "64", required: true,
     pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
   const newProjectDescription = h("input", { type: "text", placeholder: "Optional description", maxlength: "240" });
-  const newProjectTarget = isMember() ? h("input", { type: "hidden", value: "tower" }) : h("select", {}, targets.map((name) => h("option", { value: name },
-    name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
-  if (!isMember()) newProjectTarget.value = target;
+  const newProjectTarget = projectTargetInput(targets, target);
   const newProjectSource = h("select", {},
     h("option", { value: "empty" }, "Empty workspace"),
     h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"));
-  const newProjectRepo = h("input", { type: "text",
-    placeholder: isMember() ? "https://github.com/org/repo" : String.raw`D:\Projects\example or https://…`, hidden: true });
+  const newProjectRepo = h("input", { type: "text", placeholder: repoPlaceholder(), hidden: true });
   newProjectSource.addEventListener("change", () => {
     newProjectRepo.hidden = newProjectSource.value !== "repo";
     newProjectRepo.required = newProjectSource.value === "repo";
@@ -1468,12 +1535,10 @@ async function viewNew() {
         createProjectButton.disabled = false;
       }
     } },
-    h("p", { class: "muted small" }, isMember()
-      ? "Saved in your household account. Use a lowercase project id; a public HTTPS git source is cloned into your own area."
-      : "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task."),
+    h("p", { class: "muted small" }, NEW_PROJECT_NOTE[isMember() ? "member" : "owner"]),
     h("label", {}, "Name"), newProjectName,
     h("label", {}, "Description"), newProjectDescription,
-    isMember() ? null : h("label", {}, "Runs on"), isMember() ? null : newProjectTarget,
+    isMember() ? [] : [h("label", {}, "Runs on"), newProjectTarget],
     h("label", {}, "Workspace"), newProjectSource, newProjectRepo,
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
@@ -1549,16 +1614,9 @@ async function viewNew() {
     syncSkillChecks();
   });
 
-  let enabledSkills = [];
-  try { enabledSkills = await api("/skills/enabled"); } catch (_) { enabledSkills = []; }
+  const enabledSkills = await api("/skills/enabled").catch(() => []);
   const skillInputs = [];
-  const skillBoxes = enabledSkills.map((sk) => {
-    const box = h("input", { type: "checkbox", class: "skill-opt", value: sk.slug });
-    skillInputs.push(box);
-    return h("label", { class: "row", style: "gap:8px;align-items:flex-start;margin:6px 0" }, box,
-      h("span", {}, h("strong", {}, sk.title || sk.slug),
-        h("div", { class: "muted small" }, sk.purpose || `v${sk.version} · ${sk.content_hash.slice(0, 12)}`)));
-  });
+  const skillBoxes = enabledSkills.map((sk) => skillOption(sk, skillInputs));
   const syncSkillChecks = () => {
     for (const box of skillInputs) {
       const sk = enabledSkills.find((s) => s.slug === box.value);
@@ -1573,61 +1631,30 @@ async function viewNew() {
       if (!prompt.value.trim()) return toast("Write a prompt first");
       if (backend.value === "local" && !(await confirmGpuQueue("This task"))) return;
       start.disabled = true;
-      try {
-        const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
-        const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
-          backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null,
-          skills: selectedSkills } });
-        storeRemove(draftKey);
-        location.hash = `#/s/${s.id}`;
-      } catch (err) {
-        toast(err.message);
-        start.disabled = false;
-      }
+      const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
+      const started = await startSession({ prompt: prompt.value, project: project.value, backend: backend.value,
+        model: backend.value === "local" ? model.value : null, title: title.value || null, skills: selectedSkills }, draftKey);
+      if (!started) start.disabled = false;
     },
   },
   targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
   allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState, projectHint,
-  isMember() ? null : h("label", {}, "Backend"), isMember() ? null : backend, isMember() ? null : holdNotice, isMember() ? null : backendState,
+  isMember() ? [] : [h("label", {}, "Backend"), backend, holdNotice, backendState],
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
   skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },
     isMember() ? null : h("button", {
       class: "btn", type: "button",
-      onclick: async () => {
-        if (!prompt.value.trim()) return toast("Write a prompt first");
-        const name = window.prompt("Template name");
-        if (!name) return;
-        try {
-          await api("/templates", { method: "POST", body: { name, project: project.value, backend: backend.value,
-            model: backend.value === "local" ? model.value : "", prompt: prompt.value } });
-          toast("Template saved");
-          warmModel();
-route();
-        } catch (err) { toast(err.message); }
-      },
+      onclick: () => saveTemplate({ prompt: prompt.value, project: project.value, backend: backend.value,
+        model: backend.value === "local" ? model.value : "" }),
     }, "Save as template"),
     h("span", { class: "spacer" }), start));
   append($app, projectCreator, form);
 
-  if (allTemplates.length) {
-    append($app, h("details", { style: "margin-top:28px" }, h("summary", { class: "muted" }, "Manage templates"),
-      allTemplates.map((t) => h("div", { class: "card" },
-        h("div", { class: "row" }, h("strong", {}, t.name), h("span", { class: "spacer" }),
-          h("button", {
-            class: "btn small bad",
-            onclick: async () => {
-              if (!confirm(`Delete template “${t.name}”?`)) return;
-              await api(`/templates/${t.id}`, { method: "DELETE" });
-              warmModel();
-route();
-            },
-          }, "Delete")),
-        h("div", { class: "preview" }, `${t.project} · ${t.prompt}`)))));
-  }
+  if (allTemplates.length) append($app, templateManager(allTemplates));
 }
 
 function sessionTitle(session, isActive) {
