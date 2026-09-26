@@ -823,6 +823,27 @@ function addRunControls(root, run) {
 }
 
 // Every value here is source or program output: untrusted, so it only ever becomes text nodes.
+const snippetStopped = (code) => code === null || code === undefined;
+const snippetBlock = (label, text, cls) => [h("p", { class: "snippet-label" }, label), h("pre", { class: `snippet-out ${cls}` }, text)];
+
+function snippetCompileParts(compile) {
+  const code = compile.exit_code;
+  let title = `Compile failed (exit ${code})`;
+  if (code === 0) title = "Compiled";
+  else if (snippetStopped(code)) title = "Compile stopped";
+  if (compile.output) return snippetBlock(`${title} · compiler diagnostics`, compile.output, "compile");
+  return [h("p", { class: "snippet-label" }, title)];
+}
+
+function snippetRunParts(run) {
+  const code = run.exit_code;
+  const parts = [h("p", { class: "snippet-label" }, snippetStopped(code) ? "Program stopped" : `Exit status ${code}`)];
+  if (run.stdout) parts.push(...snippetBlock("stdout", run.stdout, "stdout"));
+  if (run.stderr) parts.push(...snippetBlock("stderr", run.stderr, "stderr"));
+  if (!run.stdout && !run.stderr) parts.push(h("p", { class: "muted small" }, "No output."));
+  return parts;
+}
+
 function snippetResultParts(r) {
   const tc = r.toolchain || {};
   const meta = [tc.version, tc.image, r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)} s` : ""];
@@ -831,23 +852,8 @@ function snippetResultParts(r) {
   const reasons = (r.reasons || []).map((x) => SNIPPET_REASON[x] || x);
   if (reasons.length) parts.push(h("p", { class: "bad small" }, `Reason: ${reasons.join("; ")}`));
   if (r.truncated) parts.push(h("p", { class: "bad small" }, "Output was truncated at the 1 MiB limit."));
-  const block = (label, text, cls) => [h("p", { class: "snippet-label" }, label), h("pre", { class: `snippet-out ${cls}` }, text)];
-  const stopped = (code) => code === null || code === undefined;
-  if (r.compile) {
-    const code = r.compile.exit_code;
-    let title = `Compile failed (exit ${code})`;
-    if (code === 0) title = "Compiled";
-    else if (stopped(code)) title = "Compile stopped";
-    if (r.compile.output) parts.push(...block(`${title} · compiler diagnostics`, r.compile.output, "compile"));
-    else parts.push(h("p", { class: "snippet-label" }, title));
-  }
-  if (r.run) {
-    const code = r.run.exit_code;
-    parts.push(h("p", { class: "snippet-label" }, stopped(code) ? "Program stopped" : `Exit status ${code}`));
-    if (r.run.stdout) parts.push(...block("stdout", r.run.stdout, "stdout"));
-    if (r.run.stderr) parts.push(...block("stderr", r.run.stderr, "stderr"));
-    if (!r.run.stdout && !r.run.stderr) parts.push(h("p", { class: "muted small" }, "No output."));
-  }
+  if (r.compile) parts.push(...snippetCompileParts(r.compile));
+  if (r.run) parts.push(...snippetRunParts(r.run));
   return parts;
 }
 
@@ -1326,6 +1332,46 @@ async function confirmGpuQueue(label) {
   }
 }
 
+const MODEL_STATE = {
+  ready: "✓ Model loaded",
+  sleeping: "Model is asleep; loading it now (about a minute)",
+  waking: "Model is loading (about a minute); you can start the task anyway",
+  unreachable: "Model server isn't answering",
+  paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → GPU)",
+};
+
+function paintModelState(modelState, statuses, modelName, holdActive) {
+  const current = statuses.find((s) => s.name === modelName) || statuses[0];
+  if (!current) return;
+  const holdPaused = current.state === "paused" && holdActive;
+  modelState.textContent = holdPaused ? "" : (MODEL_STATE[current.state] || current.state);
+  modelState.classList.toggle("dots", !holdPaused && (current.state === "waking" || current.state === "sleeping"));
+}
+
+function runnerStateText(targetName, runner) {
+  const label = TARGET_LABEL[targetName] || targetName;
+  if (!runner?.online) return `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
+  const free = runner.info.free_gb !== undefined ? `, ${runner.info.free_gb} GB free` : "";
+  return `Runs on the ${label} (online${free})`;
+}
+
+// With the GPU held, prefer a hosted backend so the task is not stuck behind the hold.
+function pickDefaultBackend(available, holdActive) {
+  if (holdActive && available.some((b) => b.name === "claude")) return "claude";
+  return available[0]?.name || "local";
+}
+
+// localStorage can be unavailable (private mode), so a failed read or write just means "not remembered".
+function storeGet(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+function storeSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) { /* private mode: not remembered */ }
+}
+function storeRemove(key) {
+  try { localStorage.removeItem(key); } catch (_) { /* private mode: nothing to remove */ }
+}
+
 async function viewNew() {
   setHeader("agents", "New task", { page: true });
   let [projects, models, allTemplates, backends, gpu] = await Promise.all([
@@ -1336,8 +1382,7 @@ async function viewNew() {
   // Where the task runs: the tower or a runner (the MacBook). Projects and templates for other machines are hidden.
   const targets = [...new Set(projects.map((p) => p.target))];
   const targetKey = "harness.target";
-  let target = "tower";
-  try { target = localStorage.getItem(targetKey) || "tower"; } catch (_) { /* private mode */ }
+  let target = storeGet(targetKey) || "tower";
   if (!targets.includes(target)) target = targets[0] || "tower";
   const projectTarget = (name) => projects.find((p) => p.name === name)?.target || "tower";
   let templates = [];
@@ -1355,7 +1400,7 @@ async function viewNew() {
     type: "button", class: `btn small${name === target ? " primary" : ""}`, "data-target": name,
     onclick: (ev) => {
       target = name;
-      try { localStorage.setItem(targetKey, name); } catch (_) { /* ignore */ }
+      storeSet(targetKey, name);
       newProjectTarget.value = target;
       for (const b of ev.currentTarget.parentNode.children) b.classList.toggle("primary", b === ev.currentTarget);
       fillChoices();
@@ -1369,11 +1414,7 @@ async function viewNew() {
     if (!p || p.target === "tower") { targetState.textContent = ""; return; }
     try {
       const r = (await api("/runners")).find((x) => x.name === p.target);
-      const label = TARGET_LABEL[p.target] || p.target;
-      const free = r?.online && r.info.free_gb !== undefined ? `, ${r.info.free_gb} GB free` : "";
-      targetState.textContent = r?.online
-        ? `Runs on the ${label} (online${free})`
-        : `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
+      targetState.textContent = runnerStateText(p.target, r);
     } catch (_) { /* offline */ }
   };
   const projectHint = h("div", { class: "muted small", style: "margin-top:6px" });
@@ -1412,7 +1453,7 @@ async function viewNew() {
         } });
         projects.push(created);
         target = created.target;
-        try { localStorage.setItem(targetKey, target); } catch (_) { /* ignore */ }
+        storeSet(targetKey, target);
         fillChoices();
         project.value = created.name;
         if (targetSwitch) for (const b of targetSwitch.children) b.classList.toggle("primary", b.dataset.target === target);
@@ -1440,8 +1481,7 @@ async function viewNew() {
   model.addEventListener("change", () => { localModel = model.value; });
   const gpuHold = () => !!(gpu && (gpu.manual || gpu.state !== "clear"));
   const availableBackends = backends.filter((b) => b.available);
-  const defaultBackend = (gpuHold() && availableBackends.some((b) => b.name === "claude"))
-    ? "claude" : (availableBackends[0]?.name || "local");
+  const defaultBackend = pickDefaultBackend(availableBackends, gpuHold());
   const backend = h("select", {}, availableBackends.map((b) =>
     h("option", { value: b.name, selected: b.name === defaultBackend }, b.name === "local" ? "Local model" : b.name)));
   backend.value = defaultBackend;
@@ -1478,13 +1518,6 @@ async function viewNew() {
   showBackend();
   const prompt = h("textarea", { placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
   const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
-  const MODEL_STATE = {
-    ready: "✓ Model loaded",
-    sleeping: "Model is asleep; loading it now (about a minute)",
-    waking: "Model is loading (about a minute); you can start the task anyway",
-    unreachable: "Model server isn't answering",
-    paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → GPU)",
-  };
   const pollModel = async () => {
     if (!isMember()) {
       try { gpu = await api("/gpu"); } catch (_) { /* offline */ }
@@ -1492,13 +1525,7 @@ async function viewNew() {
     }
     if (backend.value !== "local") return;
     try {
-      const status = await api("/models/status");
-      const current = status.find((s) => s.name === model.value) || status[0];
-      if (current) {
-        const holdPaused = current.state === "paused" && gpuHold();
-        modelState.textContent = holdPaused ? "" : (MODEL_STATE[current.state] || current.state);
-        modelState.classList.toggle("dots", !holdPaused && (current.state === "waking" || current.state === "sleeping"));
-      }
+      paintModelState(modelState, await api("/models/status"), model.value, gpuHold());
     } catch (_) { /* offline: the form's own errors cover it */ }
   };
   warmModel(true);
@@ -1506,8 +1533,8 @@ async function viewNew() {
   const modelTimer = setInterval(pollModel, 3000);
   onLeave(() => clearInterval(modelTimer));
   const draftKey = "harness.draft";
-  try { prompt.value = localStorage.getItem(draftKey) || ""; } catch (_) { /* private mode */ }
-  prompt.addEventListener("input", () => { try { localStorage.setItem(draftKey, prompt.value); } catch (_) { /* ignore */ } });
+  prompt.value = storeGet(draftKey) || "";
+  prompt.addEventListener("input", () => storeSet(draftKey, prompt.value));
 
   tplSelect.addEventListener("change", () => {
     const t = templates.find((x) => x.id === tplSelect.value);
@@ -1551,7 +1578,7 @@ async function viewNew() {
         const s = await api("/sessions", { method: "POST", body: { prompt: prompt.value, project: project.value,
           backend: backend.value, model: backend.value === "local" ? model.value : null, title: title.value || null,
           skills: selectedSkills } });
-        try { localStorage.removeItem(draftKey); } catch (_) { /* ignore */ }
+        storeRemove(draftKey);
         location.hash = `#/s/${s.id}`;
       } catch (err) {
         toast(err.message);
