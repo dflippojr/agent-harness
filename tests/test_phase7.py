@@ -701,10 +701,12 @@ def test_fixture_recorder_only_asks_the_local_searxng(tmp_path, monkeypatch, cap
     for url in ("http://169.254.169.254/latest", "https://searx.example.com", "file:///etc/passwd",
                 "http://user:pw@127.0.0.1:8888", "http://127.0.0.1:8888/?engines=x", "http://127.0.0.1.example.com",
                 "http://127.0.0.1:99999"):
+        recording = web_fixture.record(tmp_path / "fx", ["q"], [], 0, url)
         with pytest.raises(ValueError, match="SearXNG URL"):
-            asyncio.run(web_fixture.record(tmp_path / "fx", ["q"], [], 0, url))
+            asyncio.run(recording)
+    argv = ["record", str(tmp_path / "fx"), "--query", "q", "--searxng-url", "http://10.0.0.5:8888"]
     with pytest.raises(SystemExit) as exit_:
-        web_fixture.main(["record", str(tmp_path / "fx"), "--query", "q", "--searxng-url", "http://10.0.0.5:8888"])
+        web_fixture.main(argv)
     assert exit_.value.code == 2
     assert "must be http(s) on 127.0.0.1" in capsys.readouterr().err
     assert seen == []

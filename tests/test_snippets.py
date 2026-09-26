@@ -604,7 +604,8 @@ def test_live_memory_pids_and_temp_limits():
     assert int(pids["run"]["stdout"]) < snippets.PIDS
     tmp = run_live("python", "try:\n    with open('/sandbox/big', 'wb') as f:\n        for _ in range(300): "
                              "f.write(b'x' * 1024 * 1024)\nexcept OSError as e: print(e.errno)")
-    assert "temp_storage_limit" in tmp["reasons"] and tmp["run"]["stdout"].strip() == "28"  # ENOSPC
+    assert "temp_storage_limit" in tmp["reasons"]
+    assert tmp["run"]["stdout"].strip() == "28"  # ENOSPC
 
 
 @live("python")

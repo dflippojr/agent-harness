@@ -232,7 +232,8 @@ def test_endpoint_auth_models_and_passthrough(tmp_path):
 
         assert client.delete(f"/keys/{created['id']}").status_code == 204
         r = client.post("/v1/messages", headers={"x-api-key": key}, json={"model": "x", "messages": []})
-        assert r.status_code == 401 and r.json()["type"] == "error"  # Anthropic error shape
+        assert r.status_code == 401
+        assert r.json()["type"] == "error"  # Anthropic error shape
 
 
 def test_endpoint_refuses_while_gpu_guard_paused(tmp_path):
@@ -286,7 +287,8 @@ def test_inference_gate_endpoint_first_with_fairness():
             await gate.endpoint_request()
         await agent.release()
         await asyncio.wait_for(asyncio.gather(e1, e2, a2), 10)
-        assert order[:2] == ["e1", "e2"] and order[-1] == "agent"  # endpoint requests jumped the waiting agent
+        assert order[:2] == ["e1", "e2"]
+        assert order[-1] == "agent"  # endpoint requests jumped the waiting agent
 
         # fairness: an agent call that has waited fair_seconds goes before newly arriving endpoint requests
         order.clear()
@@ -1188,8 +1190,9 @@ def test_setup_config_writes_stay_in_the_config_dir(tmp_path):
         (cfg_dir / "harness.yaml").symlink_to(outside)
     except OSError:
         return  # this account can't create symlinks; the hard-link case above still ran
+    argv = setup_argv(tmp_path, cfg_dir) + ["--force"]
     with pytest.raises(SystemExit) as exit_:
-        setup_config.main(setup_argv(tmp_path, cfg_dir) + ["--force"])
+        setup_config.main(argv)
     assert exit_.value.code == 2
     assert outside.read_text(encoding="utf-8") == "keep: true\n"
 
@@ -1198,8 +1201,9 @@ def test_setup_config_refuses_unusable_directories(tmp_path, capsys):
     from harness import setup_config
     for config_dir, data_dir in ((f"{tmp_path}/cfg\nx", None), (tmp_path / "cfg", tmp_path / "not-a-dir")):
         (tmp_path / "not-a-dir").write_text("", encoding="utf-8")
+        argv = setup_argv(tmp_path, config_dir, data_dir)
         with pytest.raises(SystemExit) as exit_:
-            setup_config.main(setup_argv(tmp_path, config_dir, data_dir))
+            setup_config.main(argv)
         assert exit_.value.code == 2
     err = capsys.readouterr().err
     assert "--config-dir must be a directory path" in err

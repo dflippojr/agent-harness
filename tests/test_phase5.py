@@ -130,7 +130,9 @@ def test_guard_waits_for_turn_then_stops_and_resumes_after_quiet_period():
         assert guard.state == CLEAR
         detect.signals = [GAME]
         await guard.check()
-        assert guard.state == PAUSING and scheduler.paused and control.stops == 0  # the turn is still running
+        assert guard.state == PAUSING
+        assert scheduler.paused
+        assert control.stops == 0  # the turn is still running
         busy["v"] = False
         await guard.check()
         assert guard.state == PAUSED
@@ -167,7 +169,8 @@ def test_guard_drain_timeout_and_short_trigger():
         await guard.check()
         await asyncio.sleep(0.15)
         await guard.check()
-        assert guard.state == PAUSED and control.stops == 1  # the turn outlasted the drain timeout
+        assert guard.state == PAUSED
+        assert control.stops == 1  # the turn outlasted the drain timeout
     asyncio.run(body())
 
 

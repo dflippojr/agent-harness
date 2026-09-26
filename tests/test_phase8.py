@@ -27,7 +27,8 @@ PAGE = "SearXNG is free software released under the GNU Affero General Public Li
 
 def test_ungrounded_quotes_matching():
     sources = [PAGE, "d f f = 2048 and the model uses **six layers** in the encoder stack"]
-    assert ungrounded_quotes('It says "released under the GNU Affero General Public License".', sources) == []
+    reply = 'It says "released under the GNU Affero General Public License".'
+    assert ungrounded_quotes(reply, sources) == []
     # spacing, case and Markdown inside the quote don't matter; ellipses need every part
     assert ungrounded_quotes('"the model uses six layers in the encoder stack"', sources) == []
     assert ungrounded_quotes('"SearXNG is free software … General Public License, version 3"', sources) == []
@@ -161,7 +162,8 @@ def test_github_repo_page_uses_api():
     assert "License: MIT License (MIT)" in out
     assert "Install with pip." in out
     assert "src/  setup.py" in out
-    assert "A demo tool." in out and "github.com/o/r" not in seen  # the HTML page wasn't needed
+    assert "A demo tool." in out
+    assert "github.com/o/r" not in seen  # the HTML page wasn't needed
 
 
 def test_github_falls_back_to_html_when_api_fails():
