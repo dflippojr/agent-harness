@@ -2755,6 +2755,59 @@ async function viewImages() {
   onLeave(() => clearTimeout(timer));
 }
 
+function imageMetaParts(img, when) {
+  const meta = [`${img.model} · ${img.width}×${img.height}`];
+  if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
+  meta.push(`seed ${img.seed}`, img.source);
+  if (img.seconds) meta.push(`${Math.round(img.seconds)} s`);
+  if (img.lora) meta.push(`LoRA ${img.lora}`);
+  if (img.lora_revision) meta.push(img.lora_revision.slice(0, 8));
+  meta.push(when);
+  return meta;
+}
+
+function provenanceNote(img) {
+  const p = img.provenance;
+  if (!p || !(p.checkpoint_revision || p.steps)) return null;
+  return h("p", { class: "muted small" },
+    [p.mode || img.model, p.steps && `${p.steps} steps`,
+      p.sampler, p.scheduler, p.guidance != null && `cfg ${p.guidance}`,
+      p.checkpoint_revision && `ckpt ${String(p.checkpoint_revision).slice(0, 12)}`,
+      p.comfy_revision && `ComfyUI ${p.comfy_revision}`].filter(Boolean).join(" · "));
+}
+
+function imageActionRow(img, id, { editControl, canUpscale, startUpscale }) {
+  return h("div", { class: "row" },
+      !isGuest() && img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
+        class: "btn",
+        onclick: async () => {
+          try {
+            const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio, resolution: img.resolution } });
+            location.hash = `#/images/${again.id}`;
+          } catch (e) { toast(e.message); }
+        },
+      }, "Another one") : null,
+      editControl,
+      canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
+      canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
+      img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
+      !isGuest() && (img.status === "queued" || img.status === "running") ? h("button", {
+        class: "btn",
+        onclick: async () => {
+          if (!confirm("Cancel this image job?")) return;
+          try { await api(`/images/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
+        },
+      }, "Cancel") : null,
+      !isGuest() ? h("button", {
+        class: "btn danger",
+        onclick: async () => {
+          if (!confirm("Delete this image from the live gallery? Independent backups are not changed.")) return;
+          try { await api(`/images/${id}`, { method: "DELETE" }); go("#/images", true); } catch (e) { toast(e.message); }
+        },
+      }, "Delete") : null,
+      img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null);
+}
+
 async function viewImage(id) {
   setHeader("images", "Image", { page: true });
   const load = async () => {
@@ -2765,13 +2818,7 @@ async function viewImage(id) {
     const editReady = !isGuest() && img.status === "done" && edit.enabled && edit.available;
     const canEdit = editReady && sizeOk;
     const editBlockedReason = img.editable_reason || "This source is too large to edit. Use the original or a non-upscaled image.";
-    const meta = [`${img.model} · ${img.width}×${img.height}`];
-    if (Number(img.scale) > 1) meta.push(`${img.scale}× ${img.upscale_model || "Real-ESRGAN"}`);
-    meta.push(`seed ${img.seed}`, img.source);
-    if (img.seconds) meta.push(`${Math.round(img.seconds)} s`);
-    if (img.lora) meta.push(`LoRA ${img.lora}`);
-    if (img.lora_revision) meta.push(img.lora_revision.slice(0, 8));
-    meta.push(when);
+    const meta = imageMetaParts(img, when);
     const canUpscale = img.status === "done" && !isGuest() && !img.private && Number(img.scale || 1) === 1;
     const startUpscale = (choice) => async () => {
       try {
@@ -2794,46 +2841,14 @@ async function viewImage(id) {
       h("div", { class: "card" },
         h("p", {}, img.prompt),
         h("p", { class: "muted small" }, meta.join(" · ")),
-        img.provenance && (img.provenance.checkpoint_revision || img.provenance.steps) ? h("p", { class: "muted small" },
-          [img.provenance.mode || img.model, img.provenance.steps && `${img.provenance.steps} steps`,
-           img.provenance.sampler, img.provenance.scheduler, img.provenance.guidance != null && `cfg ${img.provenance.guidance}`,
-           img.provenance.checkpoint_revision && `ckpt ${String(img.provenance.checkpoint_revision).slice(0, 12)}`,
-           img.provenance.comfy_revision && `ComfyUI ${img.provenance.comfy_revision}`].filter(Boolean).join(" · ")) : null,
+        provenanceNote(img),
         img.parent?.id ? h("p", { class: "muted small" }, "Derived from ",
           h("a", { href: `#/images/${img.parent.id}` }, `${img.parent.width}×${img.parent.height}`)) : null,
         (img.children || []).length ? h("p", { class: "muted small" }, "Derived: ",
           ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` },
             c.operation === "upscale" ? `${c.scale}×` : c.operation)]))) : null,
         !isGuest() && (!edit.enabled || !edit.available) ? h("p", { class: "muted small" }, edit.setup || "") : null,
-        h("div", { class: "row" },
-          !isGuest() && img.status === "done" && (img.operation || "generate") === "generate" ? h("button", {
-            class: "btn",
-            onclick: async () => {
-              try {
-                const again = await api("/images", { method: "POST", body: { prompt: img.prompt, model: img.model, aspect_ratio: img.aspect_ratio, resolution: img.resolution } });
-                location.hash = `#/images/${again.id}`;
-              } catch (e) { toast(e.message); }
-            },
-          }, "Another one") : null,
-          editControl,
-          canUpscale ? h("button", { class: "btn", onclick: startUpscale("2x") }, "Upscale 2×") : null,
-          canUpscale ? h("button", { class: "btn", onclick: startUpscale("4x") }, "Upscale 4×") : null,
-          img.status === "done" ? h("button", { class: "btn", onclick: () => downloadDaemonFile(`/images/${id}.png`, `${id}.png`) }, "Download") : null,
-          !isGuest() && (img.status === "queued" || img.status === "running") ? h("button", {
-            class: "btn",
-            onclick: async () => {
-              if (!confirm("Cancel this image job?")) return;
-              try { await api(`/images/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
-            },
-          }, "Cancel") : null,
-          !isGuest() ? h("button", {
-            class: "btn danger",
-            onclick: async () => {
-              if (!confirm("Delete this image from the live gallery? Independent backups are not changed.")) return;
-              try { await api(`/images/${id}`, { method: "DELETE" }); go("#/images", true); } catch (e) { toast(e.message); }
-            },
-          }, "Delete") : null,
-          img.session_id ? h("a", { class: "btn", href: `#/s/${img.session_id}` }, "Open session") : null)));
+        imageActionRow(img, id, { editControl, canUpscale, startUpscale })));
     return img;
   };
   let img = await load();
