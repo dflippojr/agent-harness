@@ -34,6 +34,12 @@ const STATUS_LABEL = {
   done: "done", failed: "failed", cancelled: "cancelled",
 };
 const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };
+// The home machine sorts first, everything else alphabetically.
+function compareTargets(a, b) {
+  if (a === "tower") return -1;
+  if (b === "tower") return 1;
+  return a.localeCompare(b);
+}
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
@@ -252,6 +258,39 @@ async function downloadDaemonFile(path, filename) {
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (e) { toast(e.message); }
+}
+
+// One-line summary of a tool call for its collapsed row.
+function toolSummaryText(fn, args) {
+  if (fn.name === "run_shell") return args.command;
+  if (fn.name === "git_clone" || fn.name === "web_fetch") return args.url;
+  if (fn.name === "prometheus_query") return args.query;
+  if (args.service) {
+    const since = args.since ? ` since ${args.since}` : "";
+    return `${args.service}${since}`;
+  }
+  if (args.path) {
+    const line = args.start_line ? ` :${args.start_line}` : "";
+    return `${args.path}${line}`;
+  }
+  return fn.arguments;
+}
+
+// What an approval card asks the owner to allow.
+function approvalWhat(a) {
+  if (a.tool === "run_shell" || a.tool === "Bash" || a.tool === "exec_command") {
+    const network = a.args.network ? "🌐 network · " : "";
+    return `${network}$ ${a.args.command}`;
+  }
+  if (a.tool === "git_clone") return `git clone ${a.args.url}`;
+  if (a.tool === "restart_service") return `restart ${a.args.service}`;
+  return JSON.stringify(a.args, null, 2);
+}
+
+function approvalDiffClass(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+")) return "add";
+  return line.startsWith("-") ? "del" : "";
 }
 
 function ago(ts) {
@@ -787,7 +826,9 @@ function snippetResultParts(r) {
   const stopped = (code) => code === null || code === undefined;
   if (r.compile) {
     const code = r.compile.exit_code;
-    const title = code === 0 ? "Compiled" : stopped(code) ? "Compile stopped" : `Compile failed (exit ${code})`;
+    let title = `Compile failed (exit ${code})`;
+    if (code === 0) title = "Compiled";
+    else if (stopped(code)) title = "Compile stopped";
     if (r.compile.output) parts.push(...block(`${title} · compiler diagnostics`, r.compile.output, "compile"));
     else parts.push(h("p", { class: "snippet-label" }, title));
   }
@@ -888,8 +929,8 @@ function chatComposer(options, session) {
     }
     const wanted = keyOf(choice.backend, choice.model);
     const fallback = backends.find((b) => b.name === options.default_backend) || backends[0];
-    modelSelect.value = [...modelSelect.options].some((o) => o.value === wanted) ? wanted
-      : fallback ? keyOf(fallback.name, fallback.model || fallback.models[0]) : "";
+    if ([...modelSelect.options].some((o) => o.value === wanted)) modelSelect.value = wanted;
+    else modelSelect.value = fallback ? keyOf(fallback.name, fallback.model || fallback.models[0]) : "";
   }
   const selected = () => {
     const [backend, ...rest] = (modelSelect.value || "").split("|");
@@ -1145,7 +1186,8 @@ async function viewList() {
     list.dataset.keys = keys;
     fill(list, visible.map((s) => {
       const pending = (s.pending_approvals || []).length;
-      return h("a", { class: "card", href: `#/s/${s.id}${pending ? `/approval/${s.pending_approvals[0].id}` : ""}` },
+      const approvalPath = pending ? `/approval/${s.pending_approvals[0].id}` : "";
+      return h("a", { class: "card", href: `#/s/${s.id}${approvalPath}` },
         h("h3", {}, s.title),
         h("div", { class: "meta" },
           badge(s.status),
@@ -1202,7 +1244,7 @@ async function viewList() {
       api("/sessions"), api("/queue"), isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
     sessions = freshSessions;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
-      .sort((a, b) => (a === "tower" ? -1 : b === "tower" ? 1 : a.localeCompare(b)));
+      .sort(compareTargets);
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     fill(queueNote,
@@ -1249,13 +1291,18 @@ async function viewList() {
 }
 
 // ---------- new task ----------
+function holdRemainingText(seconds) {
+  if (seconds === null) return "until you turn it off";
+  const span = seconds >= 90 ? `${Math.ceil(seconds / 60)} min` : `${seconds} s`;
+  return `for about ${span}`;
+}
+
 async function confirmGpuQueue(label) {
   if (isMember()) return true;
   try {
     const gpu = await api("/gpu");
     if (!gpu.manual) return true;
-    const remaining = gpu.manual_remaining_seconds === null ? "until you turn it off"
-      : `for about ${gpu.manual_remaining_seconds >= 90 ? `${Math.ceil(gpu.manual_remaining_seconds / 60)} min` : `${gpu.manual_remaining_seconds} s`}`;
+    const remaining = holdRemainingText(gpu.manual_remaining_seconds);
     return confirm(`GPU hold is on ${remaining}. ${label} can be queued, but nothing will be sent to the local model until the hold ends. Queue it?`);
   } catch (_) { /* hold unreadable: don't block queueing */ return true; }
 }
@@ -1304,8 +1351,9 @@ async function viewNew() {
     try {
       const r = (await api("/runners")).find((x) => x.name === p.target);
       const label = TARGET_LABEL[p.target] || p.target;
+      const free = r?.online && r.info.free_gb !== undefined ? `, ${r.info.free_gb} GB free` : "";
       targetState.textContent = r?.online
-        ? `Runs on the ${label} (online${r.info.free_gb !== undefined ? `, ${r.info.free_gb} GB free` : ""})`
+        ? `Runs on the ${label} (online${free})`
         : `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
     } catch (_) { /* offline */ }
   };
@@ -1680,11 +1728,13 @@ async function viewSession(sid, tab, focusApproval) {
 
   const renderHead = () => {
     const limits = session.run?.rate_limits || {};
+    const limitName = String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h");
     const backendUsage = session.backend && session.backend !== "local" && limits.utilization !== undefined
-      ? ` · ${String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h")} ${Math.round(limits.utilization * 100)}%` : "";
+      ? ` · ${limitName} ${Math.round(limits.utilization * 100)}%` : "";
+    const onTarget = session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : "";
     fill(head, badge(session.status),
       session.queue_position > 0 ? h("span", { class: "muted" }, `#${session.queue_position} in GPU queue`) : null,
-      h("span", { class: "muted" }, `${session.project}${session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : ""} · ${session.backend || "local"}${backendUsage} · ${session.model}`));
+      h("span", { class: "muted" }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`));
     const pct = ctxLimit && ctxUsed ? Math.round((100 * ctxUsed) / ctxLimit) : null;
     fill(usage,
       h("span", { class: "muted", title: "Cumulative tokens for this session (prompt tokens in, generated tokens out)" },
@@ -1848,12 +1898,7 @@ async function viewSession(sid, tab, focusApproval) {
     let args = {};
     try { args = JSON.parse(fn.arguments || "{}"); } catch (_) { args = { raw: fn.arguments }; }
     if (fn.name === "web_fetch" && args.url) rememberFetch(call.id, args.url, "");
-    const summaryText = fn.name === "run_shell" ? args.command
-      : fn.name === "git_clone" ? args.url
-        : fn.name === "prometheus_query" ? args.query
-        : fn.name === "web_fetch" ? args.url
-        : args.service ? `${args.service}${args.since ? ` since ${args.since}` : ""}`
-        : args.path ? `${args.path}${args.start_line ? ` :${args.start_line}` : ""}` : fn.arguments;
+    const summaryText = toolSummaryText(fn, args);
     const state = h("span", { class: "state" }, "…");
     const body = h("div", { class: "body" }, h("pre", {}, JSON.stringify(args, null, 2)));
     const el = h("details", { class: "tool" },
@@ -1882,20 +1927,18 @@ async function viewSession(sid, tab, focusApproval) {
         h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
         h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
     }
-    const what = a.tool === "run_shell" || a.tool === "Bash" || a.tool === "exec_command"
-      ? `${a.args.network ? "🌐 network · " : ""}$ ${a.args.command}`
-      : a.tool === "git_clone" ? `git clone ${a.args.url}`
-        : a.tool === "restart_service" ? `restart ${a.args.service}` : JSON.stringify(a.args, null, 2);
+    const what = approvalWhat(a);
+    const reviewerReason = a.smart?.reason ? `: ${a.smart.reason}` : "";
     const rec = a.smart?.recommendation
       ? h("p", { class: "smart-rec" },
-          `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${a.smart.reason ? `: ${a.smart.reason}` : ""}`)
+          `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${reviewerReason}`)
       : null;
     // Memory library changes carry "summary\n\n<unified diff>"; file writes carry just the diff.
     const memory = a.tool === "memory_edit" || a.tool === "memory_write";
     const [summary, diff] = memory && a.detail.includes("\n\n") ? [a.detail.slice(0, a.detail.indexOf("\n\n")), a.detail.slice(a.detail.indexOf("\n\n") + 2)] : ["", a.detail || ""];
     const diffView = /^@@ /m.test(diff) ? h("div", { class: "diff approval-diff" }, diff.split("\n")
       .filter((line) => !/^(---|\+\+\+) /.test(line))
-      .map((line) => h("div", { class: line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "" }, line))) : null;
+      .map((line) => h("div", { class: approvalDiffClass(line) }, line))) : null;
     const card = h("div", { class: "approval", id: `approval-${a.id}` },
       h("h4", {}, `Approval needed: ${a.reason || a.tool}`),
       rec,
