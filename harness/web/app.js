@@ -373,11 +373,52 @@ function replaceFences(text, onBlock) {
   return out + text.slice(pos);
 }
 
-const mdInline = (s) => s
+// table[i] = nearest index >= i where stop(char) is true, or -1 if none remains. Built once per mdLinks() call so
+// every "[" can look up its own bounds in O(1) instead of rescanning the tail of the string.
+function nextStopTable(s, stop) {
+  const table = new Array(s.length + 1);
+  table[s.length] = -1;
+  for (let i = s.length - 1; i >= 0; i--) table[i] = stop(s[i]) ? i : table[i + 1];
+  return table;
+}
+
+// Tries to match a link starting at s[open] === "[", using the same bounds as the regex this replaced: the label
+// runs to the first "]" or newline, the url needs an http(s) prefix and runs to the first ")" or whitespace.
+function mdLinkAt(s, open, closeBracket, closeParen) {
+  const labelStart = open + 1;
+  const bracket = closeBracket[labelStart];
+  if (bracket < 0 || bracket === labelStart || s[bracket] !== "]" || s[bracket + 1] !== "(") return null;
+  const protoStart = bracket + 2;
+  const proto = s.startsWith("https://", protoStart) ? "https://" : s.startsWith("http://", protoStart) ? "http://" : null;
+  if (!proto) return null;
+  const urlStart = protoStart + proto.length;
+  const paren = closeParen[urlStart];
+  if (paren < 0 || paren === urlStart || s[paren] !== ")") return null;
+  return { html: `<a href="${s.slice(protoStart, paren)}" target="_blank" rel="noopener">${s.slice(labelStart, bracket)}</a>`, end: paren + 1 };
+}
+
+// Replaces markdown links in one linear pass instead of the backtracking regex this replaced (S8786), which was
+// quadratic both on nested-bracket labels and on a run of "[x](http://" with no closing ")" (#239).
+function mdLinks(s) {
+  if (!s.includes("[")) return s;
+  const closeBracket = nextStopTable(s, (c) => c === "]" || c === "\n");
+  const closeParen = nextStopTable(s, (c) => c === ")" || /\s/.test(c));
+  let out = "";
+  let pos = 0;
+  for (let open = s.indexOf("[", pos); open >= 0; open = s.indexOf("[", pos)) {
+    out += s.slice(pos, open);
+    const link = mdLinkAt(s, open, closeBracket, closeParen);
+    if (!link) { out += "["; pos = open + 1; continue; }
+    out += link.html;
+    pos = link.end;
+  }
+  return out + s.slice(pos);
+}
+
+const mdInline = (s) => mdLinks(s
   .replace(/`([^`\n]+)`/g, "<code>$1</code>")
   .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-  .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-  .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>"));
 
 // Each block reader returns [html, index of the last line it used].
 function mdHeading(line, i) {
