@@ -159,16 +159,13 @@ def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
     watcher = threading.Thread(target=_watch_size, args=(proc, dest, max_bytes, over), daemon=True)
     if max_bytes is not None:
         watcher.start()
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _stop_clone(proc)
-        stdout, stderr = proc.communicate()
-        _discard(dest, remove_on_fail)
-        raise GitError("clone timed out") from None
+    stdout, stderr, timed_out = _wait_for_clone(proc, over, timeout)
     if max_bytes is not None:
         watcher.join(timeout=2)
         _stop_clone(proc)
+    if timed_out:
+        _discard(dest, remove_on_fail)
+        raise GitError("clone timed out") from None
     result = GitResult(proc.returncode or 0, stdout or "", stderr or "")
     size = dir_size(dest) if dest.exists() else 0
     if over.is_set() or (max_bytes is not None and size > max_bytes):
@@ -192,6 +189,46 @@ def _stop_clone(proc: subprocess.Popen) -> None:
         proc.kill()
     except OSError:
         pass
+
+
+_DRAIN_GRACE_SECONDS = 5  # after stopping the process, give its pipes this long to see EOF before giving up (#243)
+
+
+def _wait_for_clone(proc: subprocess.Popen, over: threading.Event, timeout: int) -> tuple[str, str, bool]:
+    """Wait for `proc` to finish, polling in short slices so a quota kill (`over`) ends the wait right away
+    instead of only after the full `timeout`.
+
+    Never wait on the pipes without a bound. A killed process is not guaranteed to close them: git can spawn a
+    helper (for example `git-upload-pack`, seen for a local clone) that inherits the pipe handle, and stopping
+    only the parent leaves that handle open, so `communicate()` never sees EOF and blocks forever (#243) --
+    this hit a real CI run, not just this function's own timeout path, because the original code's post-kill
+    `communicate()` had no timeout at all.
+
+    Returns (stdout, stderr, timed_out). `timed_out` reflects only a real timeout (the full budget elapsed
+    with `over` never set); a quota kill returns `timed_out=False` so the caller's existing `over.is_set()`
+    check still reports it as a quota, not a timeout, even when the drain below comes back empty.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _finish_after_stop(proc, timed_out=True)
+        if over.is_set():
+            return _finish_after_stop(proc, timed_out=False)
+        try:
+            stdout, stderr = proc.communicate(timeout=min(remaining, 0.2))
+            return stdout, stderr, False
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _finish_after_stop(proc: subprocess.Popen, *, timed_out: bool) -> tuple[str, str, bool]:
+    _stop_clone(proc)
+    try:
+        stdout, stderr = proc.communicate(timeout=_DRAIN_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        stdout, stderr = "", ""
+    return stdout, stderr, timed_out
 
 
 def _watch_size(proc: subprocess.Popen, dest: Path, max_bytes: int, over: threading.Event) -> None:
