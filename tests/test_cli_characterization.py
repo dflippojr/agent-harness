@@ -96,7 +96,10 @@ def test_main_list_show_transcript_cancel_queue(home, monkeypatch, calls, capsys
     calls.responses[("GET", "/queue")] = [{"position": 1, "session_id": "s9"}]
     assert run_main(monkeypatch, "list") == 0
     out = capsys.readouterr().out
-    assert out.startswith("s1  ") and "done" in out and "scratch" in out and out.rstrip().endswith("hello")
+    assert out.startswith("s1  ")
+    assert "done" in out
+    assert "scratch" in out
+    assert out.rstrip().endswith("hello")
     assert run_main(monkeypatch, "show", "s1") == 0
     assert json.loads(capsys.readouterr().out) == {"id": "s1"}
     assert run_main(monkeypatch, "transcript", "s1") == 0
@@ -216,7 +219,8 @@ def test_main_version_unreachable_and_unknown_fields(home, monkeypatch, capsys):
     monkeypatch.setattr(cli, "server_version", lambda: {})
     run_main(monkeypatch, "version")
     out = capsys.readouterr().out
-    assert "Server unknown build unknown" in out and "protocol ?–?" in out
+    assert "Server unknown build unknown" in out
+    assert "protocol ?–?" in out
 
 
 def test_server_version_wraps_http_errors(monkeypatch):
@@ -515,16 +519,22 @@ def test_watch_queue_compaction_and_print_only_events(calls, stream, capsys):
         ev("status", 13, status="done")])
     assert cli.watch("s1", args_ns()) == 0
     out = plain(capsys.readouterr().out)
-    assert out.count("queued: position") == 2 and "queued: position 2" in out and "queued: position 1" in out
+    assert out.count("queued: position") == 2
+    assert "queued: position 2" in out
+    assert "queued: position 1" in out
     assert "compacting 12 messages..." in out
     assert "user: hello" in out
-    assert "policy deny: nope" in out and "policy allow" not in out
+    assert "policy deny: nope" in out
+    assert "policy allow" not in out
     assert "← run (1.5s)\n    l1\n    l2" in out
-    assert "← bad (2s)" in out and "    L11\n    ... (8 more lines)" in out
+    assert "← bad (2s)" in out
+    assert "    L11\n    ... (8 more lines)" in out
     assert "context compacted (t1): ~100 → ~50 tokens" in out
-    assert "error: oops" in out and "llm_retry: again" in out
+    assert "error: oops" in out
+    assert "llm_retry: again" in out
     assert "model is asleep; waking it (about 30 s)..." in out
-    assert "model ready after 12 s" in out and "daemon restarted; session resumed" in out
+    assert "model ready after 12 s" in out
+    assert "daemon restarted; session resumed" in out
 
 
 def test_watch_full_output_not_truncated(calls, stream, capsys):
@@ -533,7 +543,8 @@ def test_watch_full_output_not_truncated(calls, stream, capsys):
                           ev("status", 2, status="done")])
     cli.watch("s1", args_ns(full=True))
     out = capsys.readouterr().out
-    assert "more lines" not in out and "    29" in out
+    assert "more lines" not in out
+    assert "    29" in out
 
 
 def test_watch_approval_flow_non_interactive(calls, stream, capsys):
@@ -545,7 +556,9 @@ def test_watch_approval_flow_non_interactive(calls, stream, capsys):
         ev("status", 4, status="done")])
     assert cli.watch("s1", args_ns(no_prompt=True)) == 0
     out = plain(capsys.readouterr().out)
-    assert "approval needed [a1]: run — risky" in out and '"x": 1' in out and "    why\n    now" in out
+    assert "approval needed [a1]: run — risky" in out
+    assert '"x": 1' in out
+    assert "    why\n    now" in out
     assert "approval a1 approved" in out
     assert not any(c[1].endswith("/approvals") for c in calls)
 
@@ -598,4 +611,5 @@ def test_watch_sleeps_and_reconnects_when_stream_ends(monkeypatch, calls, stream
     stream.script.append([ev("delta", 4, kind="content", text="x")])
     stream.script.append([ev("status", 5, status="done")])
     assert cli.watch("s1", args_ns()) == 0
-    assert sleeps == [2] and stream == [0, 4]
+    assert sleeps == [2]
+    assert stream == [0, 4]

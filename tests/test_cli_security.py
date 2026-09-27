@@ -54,7 +54,8 @@ def test_config_flags_reject_dotdot_and_absolute_escapes(home, tmp_path, monkeyp
         argv = ["--config", str(value), "queue"] if flag == "--config" else [
             "pair", "https://t.example", "c", "--runner-config", str(value)]
         refuse(monkeypatch, capsys, *argv)
-    assert not (tmp_path / "abs.json").exists() and not (home.parent / "x.json").exists()
+    assert not (tmp_path / "abs.json").exists()
+    assert not (home.parent / "x.json").exists()
 
 
 def test_config_flags_reject_the_home_directory_itself(home, monkeypatch, capsys):
@@ -84,7 +85,9 @@ def test_validation_runs_before_any_network_or_write(home, tmp_path, monkeypatch
     monkeypatch.setattr(cli.httpx, "post", lambda *a, **k: posted.append(a))
     outside = tmp_path / "out.json"
     refuse(monkeypatch, capsys, "pair", "s", "c", "--runner-config", str(outside))
-    assert posted == [] and not outside.exists() and not home.exists()
+    assert posted == []
+    assert not outside.exists()
+    assert not home.exists()
 
 
 def test_credentials_are_created_fresh_and_private_before_any_token_is_written(tmp_path, monkeypatch):
@@ -103,7 +106,9 @@ def test_credentials_are_created_fresh_and_private_before_any_token_is_written(t
     assert len(opened) == 1
     path, flags, mode = opened[0]
     assert path.endswith("config.json.new")
-    assert flags & os.O_EXCL and flags & os.O_CREAT and mode == 0o600
+    assert flags & os.O_EXCL
+    assert flags & os.O_CREAT
+    assert mode == 0o600
     assert sizes == [0]
     assert json.loads(target.read_text(encoding="utf-8")) == {"token": "ho-secret"}
     if os.name == "posix":
