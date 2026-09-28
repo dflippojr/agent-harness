@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import asyncio
 
+from fastapi.testclient import TestClient
+
 from harness import compaction, efficiency
-from harness.efficiency import CORRELATION_K, canonical_args, compose, session_payload, turn_increments
+from harness.admin import PREFIX
+from harness.api import create_app
+from harness.efficiency import canonical_args, compose, session_payload, turn_increments
 from harness.llm import Completion, _apply_chunk
+from harness.manager import Manager
+from harness.metrics import render
+from test_daemon import Script, call, events, make_cfg, wait_status
 
 
 def _ev(type_, seq, **data):
@@ -269,3 +276,117 @@ def test_apply_chunk_cache_from_first_progress_only():
         await _apply_chunk({"prompt_progress": {"processed": 50, "total": 100}}, out, {}, None, None)
         assert out.cache_tokens is None  # omitted cache is -1, never the processed fallback
     asyncio.run(body())
+
+
+def test_native_loop_records_retries_output_chars_and_prometheus(tmp_path):
+    big = "z" * 25000
+    script = Script([
+        Completion(tool_calls=[call("write_file", 0, path="big.txt", content=big)],
+                   prompt_tokens=80, completion_tokens=5),
+        Completion(tool_calls=[call("read_file", 1, path="nope.txt")], prompt_tokens=90, completion_tokens=5),
+        Completion(tool_calls=[call("read_file", 2, path="nope.txt")], prompt_tokens=100, completion_tokens=5),
+        Completion(tool_calls=[call("read_file", 3, path="big.txt")], prompt_tokens=110, completion_tokens=5),
+        Completion(content="done", prompt_tokens=120, completion_tokens=4),
+    ])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        s = await wait_status(m, m.create("try")["id"], "done")
+        results = events(m, s["id"], "tool_result")
+        assert all("output_chars" in row for row in results)
+        read_ok = next(row for row in results if row["name"] == "read_file" and row["ok"])
+        assert read_ok["output_chars"] > 20000
+        assert len(read_ok["output"]) < read_ok["output_chars"]
+        rows = events(m, s["id"], "turn_metrics")
+        assert len(rows) == 5
+        assert sum(row["dead_end_retries"] for row in rows) == 1
+        assert rows[0]["cache_tokens"] == 0
+        assert rows[0]["recomputed_tokens"] == 80
+        assert rows[0]["composition"]["system_state"] is not None
+        assert sum(rows[0]["composition"].values()) == 80
+        text = render(m)
+        assert "harness_dead_end_retries_total 1" in text
+        assert 'harness_compaction_correlated_retries_total{tier="elide"} 0' in text
+        assert 'harness_compaction_correlated_retries_total{tier="summary"} 0' in text
+        assert 'harness_compaction_correlated_retries_total{tier="round_reset"} 0' in text
+        assert "harness_prompt_cache_tokens_total{kind=\"cached\"} 0" in text
+        assert "harness_prompt_cache_tokens_total{kind=\"recomputed\"}" in text
+        payload = session_payload(s["id"], m.db.events(s["id"]))
+        assert payload["aggregate"]["dead_end_retries"] == 1
+        assert payload["aggregate"]["largest_tool_output_chars"] >= read_ok["output_chars"]
+        await m.stop()
+        return s["id"], m
+
+    sid, m = asyncio.run(body())
+    with TestClient(create_app(m)) as client:
+        body = client.get(f"{PREFIX}/sessions/{sid}/metrics").json()
+        assert body["session_id"] == sid
+        assert body["aggregate"]["dead_end_retries"] == 1
+        assert body["turns"][0]["composition"]["system_state"] is not None
+        assert client.get(f"{PREFIX}/sessions/nosuchidxx/metrics").status_code == 404
+        app = client.post("/keys", json={"name": "shop", "kind": "app",
+                                         "scopes": ["sessions", "sessions:all"]}).json()
+        refused = client.get(f"{PREFIX}/sessions/{sid}/metrics",
+                             headers={"Authorization": f"Bearer {app['key']}"})
+        assert refused.status_code == 403
+
+
+def test_elide_correlates_retry_and_mask_does_not(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.elide_at = 0
+    cfg.summarize_at = 99
+    cfg.reset_at = 99
+    script = Script([
+        Completion(tool_calls=[call("read_file", 0, path="gone.txt")], prompt_tokens=40, completion_tokens=3),
+        Completion(tool_calls=[call("read_file", 1, path="gone.txt")], prompt_tokens=50, completion_tokens=3),
+        Completion(content="done", prompt_tokens=60, completion_tokens=2),
+    ])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        await m.start()
+        s = await wait_status(m, m.create("retry after elide")["id"], "done")
+        rows = events(m, s["id"], "turn_metrics")
+        assert any(c["tier"] == "elide" for c in events(m, s["id"], "compaction"))
+        assert sum(row["dead_end_retries"] for row in rows) == 1
+        assert sum(row["compaction_correlated_retries"]["elide"] for row in rows) == 1
+        text = render(m)
+        assert 'harness_compaction_correlated_retries_total{tier="elide"} 1' in text
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_metrics_survive_manager_restart(tmp_path):
+    from harness.db import Database
+    cfg = make_cfg(tmp_path)
+    script = Script([
+        Completion(tool_calls=[call("read_file", 0, path="gone.txt")], prompt_tokens=40, completion_tokens=3),
+        Completion(tool_calls=[call("read_file", 1, path="gone.txt")], prompt_tokens=50, completion_tokens=3),
+        Completion(content="done", prompt_tokens=60, completion_tokens=2),
+    ])
+
+    async def first():
+        db = Database(cfg.db_path)
+        m = Manager(cfg, db=db, chat=script)
+        await m.start()
+        s = await wait_status(m, m.create("persist")["id"], "done")
+        sid = s["id"]
+        await m.stop()
+        return sid, db
+
+    async def second(sid, db):
+        m = Manager(cfg, db=db, chat=script)
+        await m.start()
+        assert "harness_dead_end_retries_total 1" in render(m)
+        payload = session_payload(sid, db.events(sid))
+        assert payload["aggregate"]["dead_end_retries"] == 1
+        await m.stop()
+
+    sid, db = asyncio.run(first())
+    asyncio.run(second(sid, db))
+
+
+def test_admin_catalog_lists_session_metrics():
+    from harness.admin import ADMIN_PATHS
+    assert "/sessions/{ref}/metrics" in ADMIN_PATHS

@@ -47,6 +47,29 @@ def _core_metrics(m: Manager, out: _Out, db) -> dict:
         round_resets = db.conn.execute(
             "SELECT COUNT(*) FROM events WHERE type = 'compaction' AND json_extract(data, '$.tier') = 'round_reset'"
         ).fetchone()[0]
+        dead_end = db.conn.execute(
+            "SELECT COALESCE(SUM(json_extract(data, '$.dead_end_retries')), 0) FROM events "
+            "WHERE type = 'turn_metrics' AND json_extract(data, '$.dead_end_retries') IS NOT NULL"
+        ).fetchone()[0]
+        correlated = {
+            "elide": db.conn.execute(
+                "SELECT COALESCE(SUM(json_extract(data, '$.compaction_correlated_retries.elide')), 0) "
+                "FROM events WHERE type = 'turn_metrics' "
+                "AND json_extract(data, '$.compaction_correlated_retries') IS NOT NULL").fetchone()[0],
+            "summary": db.conn.execute(
+                "SELECT COALESCE(SUM(json_extract(data, '$.compaction_correlated_retries.summary')), 0) "
+                "FROM events WHERE type = 'turn_metrics' "
+                "AND json_extract(data, '$.compaction_correlated_retries') IS NOT NULL").fetchone()[0],
+            "round_reset": db.conn.execute(
+                "SELECT COALESCE(SUM(json_extract(data, '$.compaction_correlated_retries.round_reset')), 0) "
+                "FROM events WHERE type = 'turn_metrics' "
+                "AND json_extract(data, '$.compaction_correlated_retries') IS NOT NULL").fetchone()[0],
+        }
+        cache_row = db.conn.execute(
+            "SELECT COALESCE(SUM(json_extract(data, '$.cache_tokens')), 0), "
+            "COALESCE(SUM(json_extract(data, '$.recomputed_tokens')), 0) FROM events "
+            "WHERE type = 'turn_metrics' AND json_extract(data, '$.cache_tokens') IS NOT NULL"
+        ).fetchone()
         approvals = db.conn.execute(
             "SELECT status, COUNT(*), COALESCE(SUM(decided_at - created_at), 0) FROM approvals GROUP BY status"
         ).fetchall()
@@ -84,6 +107,15 @@ def _core_metrics(m: Manager, out: _Out, db) -> dict:
     out.metric("harness_round_resets_total", "counter",
                "Context round resets from compaction events with tier round_reset.",
                [({}, round_resets)])
+    out.metric("harness_dead_end_retries_total", "counter",
+               "Native-loop tool calls that repeated a prior failure with the same arguments.",
+               [({}, dead_end)])
+    out.metric("harness_compaction_correlated_retries_total", "counter",
+               "Dead-end retries within 5 model turns after elide, summary, or round_reset. Unit: retries.",
+               [({"tier": tier}, correlated[tier]) for tier in ("elide", "summary", "round_reset")])
+    out.metric("harness_prompt_cache_tokens_total", "counter",
+               "llama-server prompt tokens served from cache versus recomputed (native loop only). Unit: tokens.",
+               [({"kind": "cached"}, cache_row[0]), ({"kind": "recomputed"}, cache_row[1])])
     out.metric("harness_approvals_total", "counter", "Approval requests by outcome.",
                [({"status": st}, n) for st, n, _ in approvals])
     out.metric("harness_approval_wait_seconds_total", "counter", "Time approvals waited for a decision.",

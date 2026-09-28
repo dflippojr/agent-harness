@@ -175,7 +175,7 @@ Details and verification: `docs/phase5-results.md`.
   Steam Big Picture window) or a Plex hardware transcode runs, the queue pauses after the current model turn and
   llama-server is stopped (pause flag `C:\AI\llama-server.paused`, honored by `ops/llama-server/run-qwen.ps1`). It
   reloads after 3 min clear. Actions → GPU pauses or resumes by hand. API: `GET /gpu`, `POST /gpu/{pause|resume}`.
-- Metrics: `GET /metrics`, scraped as Prometheus job `agent_harness`; Grafana dashboard "Agent Harness".
+- Metrics: `GET /metrics`, scraped as Prometheus job `agent_harness`; Grafana dashboard "Agent Harness". Context-efficiency counters and the owner session route are documented in [`docs/admin-api.md`](docs/admin-api.md#context-efficiency-metrics).
 - Backups (`backup:`): nightly dated database/transcript snapshots, 14 days; `POST /maintenance/backup`. Generated
   PNGs are verified into the separate `images/YYYY/MM` archive once, with JSON metadata. Image retention defaults to
   indefinite (`image_archive_keep_days: 0`) and deletion requires an owner preview and apply action.

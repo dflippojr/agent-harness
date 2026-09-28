@@ -48,7 +48,7 @@ same; only the prefix and the owner credential check are new.
 | --- | --- |
 | Identity | `/me`, `/profile` |
 | Household accounts | `/accounts`, `/accounts/{user_id}`, `/accounts/audit` |
-| Sessions | `/sessions`, `/sessions/{ref}`, messages, cancel, rerun, approvals, transcript, events |
+| Sessions | `/sessions`, `/sessions/{ref}`, messages, cancel, rerun, approvals, transcript, events, **metrics** |
 | Review | `/sessions/{ref}/changes`, `/sessions/{ref}/review/{action}` (`merge` \| `push` \| `discard`) Line comments: `GET/POST /sessions/{ref}/review-comments`, `DELETE .../{comment_id}`, `POST .../send` (one follow-up; owner and members in their own sessions, never app tokens; the same paths under `/api/v1`) |
 | Search | `/search`, `/events`, `/queue` |
 | Projects and jobs | `/projects`, `/templates`, `/jobs` |
@@ -164,6 +164,67 @@ The Mac redeems the code at `POST /api/v1/runner-pair`. That one response contai
 the selected runner's existing token. It is marked `Cache-Control: no-store`. The code is stored only as a hash, the
 runner token stays in its configured owner file and never enters SQLite, and neither token is printed by the CLI.
 
+## Context-efficiency metrics
+
+Owner-only. `GET /api/admin/v1/sessions/{ref}/metrics` (`require_owner`; 404 `no session matches that id` for an
+unknown agent session, same as the other session routes) returns per-turn rows plus a session aggregate. The rows
+come from persisted `turn_metrics` events, kept as long as the session's events.
+
+```json
+{
+  "session_id": "s-…",
+  "turns": [
+    {
+      "turn": 1,
+      "prompt_tokens": 1200,
+      "completion_tokens": 80,
+      "composition": {
+        "system_state": 200,
+        "tool_outputs": 400,
+        "file_contents": 500,
+        "reasoning_other": 100
+      },
+      "estimated": false,
+      "cache_tokens": 800,
+      "recomputed_tokens": 400
+    }
+  ],
+  "aggregate": {
+    "dead_end_retries": 2,
+    "compaction_correlated_retries": {"elide": 1, "summary": 0, "round_reset": 0},
+    "largest_tool_output_chars": 48000,
+    "largest_tool_output_by_tool": {"read_file": 48000, "run_shell": 1200}
+  }
+}
+```
+
+Nulls: Claude, Codex and Cursor sessions report null composition, cache, recomputed, and retry fields (native loop
+only). Older sessions without `turn_metrics` / `output_chars` also report null rather than a guess. `estimated` is
+true when the server omitted `prompt_tokens` and the four buckets are unscaled char estimates; when `prompt_tokens`
+is present the buckets are scaled to sum to it. Codex/Claude cache fields are deliberately unused. Delegate calls
+are ignored until #157.
+
+`tool_result.output_chars` is Unicode code points of the result before the 20,000-character event truncation.
+Failed outputs count. `largest_tool_output_by_tool` is session-API only (never a Prometheus label).
+
+### Prometheus (`GET /metrics`)
+
+Counters, bounded labels, no session id or tool name. Aggregates sum precomputed `turn_metrics` fields (sessions
+without those fields contribute nothing). `harness_round_resets_total` is unchanged and is not duplicated here.
+
+| Metric | Type | Unit | Labels | PromQL |
+| --- | --- | --- | --- | --- |
+| `harness_dead_end_retries_total` | counter | retries | none | `sum(harness_dead_end_retries_total)` |
+| `harness_compaction_correlated_retries_total` | counter | retries | `tier=elide\|summary\|round_reset` | `sum by (tier) (harness_compaction_correlated_retries_total)` |
+| `harness_prompt_cache_tokens_total` | counter | tokens | `kind=cached\|recomputed` | `sum by (kind) (harness_prompt_cache_tokens_total)` |
+
+Cache series stay 0 until a native llama-server session records `cache_tokens` (first prompt-progress chunk of the
+generate call; `-1` maps to null; the UI `processed` fallback is not used). Hosted backends never increment them.
+
+Compaction correlation counts a repeat of a pre-compaction failure in the 5 model turns after `elide`, `summary`,
+or `round_reset`. `mask` is a size/composition signal only. The generate immediately after compaction is turn 1;
+a matching repeat at turn 5 counts and at turn 6 does not.
+
 ## Configuration registry
 
 Owner operational settings live on `/api/admin/v1/config` (schema, GET, validate, PATCH, rollback,
@@ -174,6 +235,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.14 | 2026-09-28 | Owner session context-efficiency metrics and Prometheus retry/cache counters |
 | 1.12 | 2026-09-19 | Owner masked inpainting: upload, edit, cancel, and delete |
 | 1.11 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |
 | 1.10 | 2026-09-19 | Smart-approval effective mode: last writer among PUT and Settings; `off` is truly off |
