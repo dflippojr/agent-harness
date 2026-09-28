@@ -53,6 +53,37 @@ def test_github_routes_are_owner_only(tmp_path):
                            headers={"Tailscale-User-Login": "intruder@example.com"}).status_code == 403
 
 
+def test_github_routes_serve_owner_and_build_prompt(tmp_path, monkeypatch):
+    from harness import github_tasks
+    from harness.config import Project
+    client, m, _ = make_client(tmp_path, [Completion(content="hi")])
+    m.cfg.projects["ghp"] = Project(name="ghp", repo="https://github.com/o/r")
+    m.cfg.projects["remote"] = Project(name="remote", repo="https://github.com/o/r", target="macbook")
+    seen = {}
+    monkeypatch.setattr(github_tasks, "list_items", lambda cfg, repo, page, q: {"items": [], "repo": repo, "page": page, "q": q})
+    issue = {"kind": "issue", "number": 5, "title": "T", "author": "a", "labels": [], "body": "b",
+             "comments": [], "base_branch": ""}
+    pr = {**issue, "kind": "pr", "base_branch": "feat/x"}
+    sources = {5: issue, 6: pr}
+    monkeypatch.setattr(github_tasks, "item", lambda cfg, repo, number: sources[number])
+    monkeypatch.setattr(m, "create", lambda prompt, **kw: seen.update(prompt=prompt, **kw) or {"id": "s1"})
+    monkeypatch.setattr(m, "summary", lambda s: s)
+    oh = {"Tailscale-User-Login": LOGIN}
+    with client:
+        listed = client.get("/github/projects/ghp/items?page=2&q=bug", headers=oh).json()
+        assert (listed["repo"], listed["page"], listed["q"]) == ("o/r", 2, "bug")
+        assert client.get("/github/projects/ghp/items/5", headers=oh).json()["number"] == 5
+        made = client.post("/github/sessions", json={"prompt": "x", "project": "ghp", "number": 6}, headers=oh)
+        assert made.status_code == 201
+        assert seen["app_metadata"] == {"github_base_branch": "feat/x"}
+        assert "EXTERNAL CONTENT" in seen["prompt"] and seen["title"] == "T"
+        # A PR on a remote runner project is refused; an issue is fine.
+        bad = client.post("/github/sessions", json={"prompt": "x", "project": "remote", "number": 6}, headers=oh)
+        assert bad.status_code == 400
+        ok = client.post("/github/sessions", json={"prompt": "x", "project": "remote", "number": 5}, headers=oh)
+        assert ok.status_code == 201
+
+
 def test_web_app_and_guard(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     with client:
