@@ -111,6 +111,8 @@ def test_reset_at_and_state_max_chars_fallback():
     assert _reset_at(0.7, 0.55, 0.90) == 0.7
     assert _reset_at(0.60) == 0.60
     assert _reset_at(True) == 0.60
+    assert _reset_at(float("nan")) == 0.60
+    assert _reset_at(float("nan"), 0.55, 0.90) == 0.60
     assert _reset_at(0.60, 0.4, 0.6) == 0.5
     assert _state_max_chars("nope") == 8000
     assert _state_max_chars(100) == 8000

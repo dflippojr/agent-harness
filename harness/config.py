@@ -785,7 +785,7 @@ def _reset_at(value, elide: float = 0.55, summarize: float = 0.65) -> float:
             parsed = float(value)
         except (TypeError, ValueError, OverflowError):
             parsed = default
-        if parsed != parsed or not 0.15 <= parsed <= 0.95:
+        if not 0.15 <= parsed <= 0.95:
             parsed = default
     if elide < parsed < summarize:
         return parsed
