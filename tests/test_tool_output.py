@@ -85,3 +85,45 @@ def test_tool_output_loaded_from_yaml(tmp_path):
     again = config.load(cfg_dir, tmp_path / "data")
     assert again.tool_output.read_file_lines == 400
     assert again.tool_output.search_matches == 12
+
+
+def test_read_file_default_page_is_400_and_max_lines_clamps(tmp_path):
+    from harness.fileops import FileOps
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "big.txt").write_text("\n".join(f"L{i}" for i in range(1, 901)), encoding="utf-8")
+    files = FileOps(ws, 8000)
+    text = files.read_file("big.txt")
+    assert text.startswith("1\tL1")
+    assert "400\tL400" in text
+    assert "401\tL401" not in text
+    assert "... (900 lines total; continue with start_line=401)" in text
+    raised = files.read_file("big.txt", max_lines=2000)
+    assert "900\tL900" in raised
+    assert "continue with" not in raised
+    clamped = files.read_file("big.txt", max_lines=9999)
+    assert clamped.count("\n") <= 2000  # read_lines_max default
+    page2 = files.read_file("big.txt", start_line=401)
+    assert page2.startswith("401\tL401")
+    assert "continue with start_line=801" in page2
+
+
+def test_search_offset_reports_at_least_n_without_scanning_total(tmp_path):
+    from harness.fileops import FileOps
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.txt").write_text("\n".join(f"hit {i}" for i in range(250)), encoding="utf-8")
+    files = FileOps(ws, 8000, search_matches=100, search_matches_max=500)
+    first = files.search("hit")
+    assert first.startswith("a.txt:1: hit 0")
+    assert "... (showing matches 1-100 of at least 100; continue with offset=100)" in first
+    assert "hit 100" not in first.split("...")[0]
+    page2 = files.search("hit", offset=100)
+    assert "showing matches 101-200 of at least 200" in page2
+    assert "continue with offset=200" in page2
+    last = files.search("hit", offset=200)
+    assert "hit 249" in last
+    assert "showing matches" not in last  # finished without hitting the cap
+    raised = files.search("hit", max_matches=500)
+    assert "hit 249" in raised
+    assert files.search("hit", offset=999) == "no matches"

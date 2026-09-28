@@ -41,7 +41,7 @@ sys.path.insert(0, str(APP_DIR))
 from harness import projects  # noqa: E402
 from harness.changes import workspace_changes  # noqa: E402
 from harness.compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION  # noqa: E402
-from harness.fileops import FILE_TOOLS, FileOps, ToolError, dir_size, resolve_path  # noqa: E402
+from harness.fileops import FILE_TOOLS, FileOps, ToolError, cap_command_output, dir_size, resolve_path  # noqa: E402
 from harness.updater import apply_update, schedule_launchd_handoff  # noqa: E402
 
 VERSION = MAC_CLIENT_VERSION
@@ -186,7 +186,11 @@ class Executor:
         if p["name"] not in FILE_TOOLS:
             raise OpError(f"not a file tool: {p['name']}")
         ws = self.workspace(p["session"], create=True)
-        files = FileOps(ws, int(p.get("context_tokens") or 65536), prefixes=(str(ws), WORKSPACE))
+        files = FileOps(ws, int(p.get("context_tokens") or 65536), prefixes=(str(ws), WORKSPACE),
+                        read_lines=int(p.get("read_lines") or 400),
+                        read_lines_max=int(p.get("read_lines_max") or 2000),
+                        search_matches=int(p.get("search_matches") or 100),
+                        search_matches_max=int(p.get("search_matches_max") or 500))
         return getattr(files, p["name"])(**p["args"])
 
     def op_preview(self, p: dict):
@@ -275,8 +279,7 @@ class Executor:
                 self.proc_sessions.pop(rid, None)
         reader.join(timeout=10)
         output = b"".join(chunks).decode("utf-8", errors="replace")
-        if len(output) > OUTPUT_CAP:
-            output = output[:OUTPUT_CAP // 2] + "\n... [output cut] ...\n" + output[-OUTPUT_CAP // 2:]
+        output = cap_command_output(output, OUTPUT_CAP)
         code = proc.returncode
         if timed_out:
             code = 124

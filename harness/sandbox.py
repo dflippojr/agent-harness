@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 
 from .config import SandboxConfig
+from .fileops import cap_command_output
 
 
 class SandboxUnavailable(Exception):
@@ -135,7 +136,7 @@ class Sandbox:
                 if network:
                     await asyncio.shield(run_cmd(
                         ["docker", "network", "disconnect", "-f", self.cfg.egress_network, self.name], timeout=30))
-        output = out + (("\n" + err) if err else "")
+        output = cap_command_output(out + (("\n" + err) if err else ""))
         if code == 124:
             output += f"\n[command timed out after {timeout}s]"
         return code, output
