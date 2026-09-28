@@ -139,6 +139,20 @@ compaction:
   keep_recent: 0.20    # fraction of context kept verbatim after a summary
   state_max_chars: 8000  # cap on serialized update_state object
 
+# Bounds on managed-runner tool results (tower and macbook). Hosted Claude/Codex/Cursor sessions never see these.
+# Omitted or invalid values fall back to these defaults. The agent may raise a limit per call with max_lines,
+# max_matches, or max_chars, clamped to the matching *_max. These replace FileOps.read_lines, the hard-coded
+# 200 search matches, and Workspace.output_chars. read_chars stays as a second cap on read_file; the runner's
+# per-turn max_chars budget stays as an additional ceiling.
+tool_output:
+  read_file_lines: 400
+  read_file_lines_max: 2000
+  search_matches: 100
+  search_matches_max: 500
+  run_shell_chars: 20000
+  run_shell_chars_max: 100000
+  verify_summary_chars: 4000
+
 # GPU contention guard (harness/gpu_guard.py). While a game runs (Steam/Epic/GOG/Xbox library folders, or Sunshine's
 # Steam Big Picture app) or Plex hardware-transcodes, the queue pauses after the current model turn, llama-server is
 # stopped, and it's restarted once the GPU has been clear for resume_after_seconds. Desktop streaming alone is fine.

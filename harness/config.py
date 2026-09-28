@@ -299,6 +299,27 @@ class ModulesConfig:
 
 
 @dataclass
+class ToolOutputConfig:
+    """Per-call tool result bounds. The agent may raise a limit up to the matching *_max."""
+    read_file_lines: int = 400
+    read_file_lines_max: int = 2000
+    search_matches: int = 100
+    search_matches_max: int = 500
+    run_shell_chars: int = 20000
+    run_shell_chars_max: int = 100000
+    verify_summary_chars: int = 4000
+
+
+@dataclass
+class VerifyCheck:
+    """One owner-configured check for the verify tool. Commands are trusted (no run_shell policy)."""
+    name: str
+    command: str
+    timeout: int = 120
+    parser: str = ""  # pytest | generic | empty (infer from the command)
+
+
+@dataclass
 class Project:
     name: str
     description: str = ""
@@ -316,6 +337,8 @@ class Project:
     session_search: bool = True  # give sessions session_search / session_read (when search is enabled)
     owner_id: str = "owner"     # stable v1 Agent Harness Web owner scope
     managed: bool = False        # loaded from data_dir/projects.yaml rather than checked-in config
+    tool_output: dict = field(default_factory=dict)  # optional overlay on Config.tool_output
+    verify: list = field(default_factory=list)       # list[VerifyCheck]; empty → verify returns an error
 
 
 @dataclass
@@ -374,6 +397,7 @@ class Config:
     reset_at: float = 0.60
     mask_min_chars: int = 2000
     state_max_chars: int = 8000
+    tool_output: ToolOutputConfig = field(default_factory=ToolOutputConfig)
 
     @property
     def db_path(self) -> Path:
@@ -433,6 +457,8 @@ def _project_from_spec(name: str, spec: dict | None, *, owner_id: str = "owner",
         session_search=bool(spec.get("session_search", True)),
         owner_id=str(spec.get("owner_id") or owner_id),
         managed=managed,
+        tool_output=spec.get("tool_output") if isinstance(spec.get("tool_output"), dict) else {},
+        verify=_verify_checks(spec.get("verify")),
     )
 
 
@@ -756,6 +782,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                            float(compaction.get("summarize_at", 0.65))),
         mask_min_chars=_mask_min_chars(compaction.get("mask_min_chars", 2000)),
         state_max_chars=_state_max_chars(compaction.get("state_max_chars", 8000)),
+        tool_output=_tool_output(raw.get("tool_output")),
     )
     _validate_loaded(cfg)
     from .settings_keys import build_registry
@@ -763,6 +790,84 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     cfg._inherited = {spec.key: spec.getter(cfg) for spec in registry.writable_admin()}
     _apply_managed_overlay(cfg)
     return cfg
+
+
+TOOL_OUTPUT_DEFAULTS = ToolOutputConfig()
+_TOOL_OUTPUT_BOUNDS = {
+    "read_file_lines": (1, 100_000),
+    "read_file_lines_max": (1, 100_000),
+    "search_matches": (1, 100_000),
+    "search_matches_max": (1, 100_000),
+    "run_shell_chars": (1, 1_000_000),
+    "run_shell_chars_max": (1, 1_000_000),
+    "verify_summary_chars": (1, 100_000),
+}
+
+
+def _bounded_int(value, default: int, lo: int, hi: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return parsed if lo <= parsed <= hi else default
+
+
+def _tool_output(raw) -> ToolOutputConfig:
+    spec = raw if isinstance(raw, dict) else {}
+    values = {}
+    for key, (lo, hi) in _TOOL_OUTPUT_BOUNDS.items():
+        values[key] = _bounded_int(spec.get(key, getattr(TOOL_OUTPUT_DEFAULTS, key)),
+                                   getattr(TOOL_OUTPUT_DEFAULTS, key), lo, hi)
+    if values["read_file_lines"] > values["read_file_lines_max"]:
+        values["read_file_lines"] = values["read_file_lines_max"]
+    if values["search_matches"] > values["search_matches_max"]:
+        values["search_matches"] = values["search_matches_max"]
+    if values["run_shell_chars"] > values["run_shell_chars_max"]:
+        values["run_shell_chars"] = values["run_shell_chars_max"]
+    return ToolOutputConfig(**values)
+
+
+def resolve_tool_output(cfg: Config, project: Project | None = None) -> ToolOutputConfig:
+    """Global tool_output, overlaid by a project's tool_output: block when present."""
+    if project is None or not project.tool_output:
+        return cfg.tool_output
+    merged = {**cfg.tool_output.__dict__, **project.tool_output}
+    return _tool_output(merged)
+
+
+def clamp_tool_limit(requested, default: int, maximum: int) -> int:
+    """Per-call raise: omitted/invalid → default; otherwise clamp to 1..maximum."""
+    if requested is None or isinstance(requested, bool):
+        return default
+    try:
+        parsed = int(requested)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(1, min(parsed, maximum))
+
+
+def _verify_checks(value) -> list[VerifyCheck]:
+    if not isinstance(value, list):
+        return []
+    checks: list[VerifyCheck] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        command = str(item.get("command") or "").strip()
+        if not name or not command:
+            continue
+        parser = str(item.get("parser") or "").strip().lower()
+        if parser not in ("", "pytest", "generic"):
+            parser = ""
+        checks.append(VerifyCheck(
+            name=name, command=command,
+            timeout=clamp_tool_limit(item.get("timeout"), 120, 1800),
+            parser=parser,
+        ))
+    return checks
 
 
 def _mask_min_chars(value) -> int:
