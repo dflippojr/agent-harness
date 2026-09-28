@@ -36,6 +36,26 @@ def test_bundled_web_dogfoods_app_api_without_becoming_an_app(tmp_path):
         assert client.get(f"/api/v1/sessions/{sid}/events?follow=false").status_code == 200
 
 
+def test_session_event_replay_order_and_last_event_id(tmp_path):
+    client, manager = make_client(tmp_path)
+    manager._spawn = lambda *_a, **_k: None
+    with client:
+        sid = client.post("/api/v1/sessions", json={"prompt": "stream"}).json()["id"]
+        first = manager.db.insert_event(sid, "characterization_first", {"n": 1})
+        second = manager.db.insert_event(sid, "characterization_second", {"n": 2})
+
+        replay = client.get(f"/api/v1/sessions/{sid}/events?after={first['seq'] - 1}&follow=false")
+        resumed = client.get(f"/api/v1/sessions/{sid}/events?after=0&follow=false",
+                             headers={"Last-Event-ID": str(first["seq"])})
+
+    assert replay.status_code == 200
+    assert replay.text.index("characterization_first") < replay.text.index("characterization_second")
+    assert '"n": 1' in replay.text
+    assert '"n": 2' in replay.text
+    assert "characterization_first" not in resumed.text
+    assert "characterization_second" in resumed.text
+
+
 def test_independent_web_owner_token_cors_and_stream_ticket(tmp_path):
     client, manager = make_client(tmp_path)
     with client:
