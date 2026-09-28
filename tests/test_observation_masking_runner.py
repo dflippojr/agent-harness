@@ -138,3 +138,149 @@ def test_read_artifact_tool_ranges_missing_and_other_session(tmp_path):
             assert not ok and out.startswith("Error:"), bad
         await m.stop()
     asyncio.run(body())
+
+
+# read_artifact must get every guarantee an ordinary tool result gets between _resolve_calls and the context.
+
+def _ctx_text(m: Manager, sid: str, call_id: str) -> str:
+    return next(x["content"] for x in m.db.get_session(sid)["context"] if x.get("tool_call_id") == call_id)
+
+
+def _result_event(m: Manager, sid: str, call_id: str) -> dict:
+    return next(e["data"] for e in m.db.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == call_id)
+
+
+def test_parallel_read_artifact_calls_share_the_turn_budget(tmp_path):
+    async def body():
+        # 5,000-token window x 3 chars/token x 0.35 = 5,250 characters for the whole turn.
+        m = Manager(make_cfg(tmp_path, context_tokens=5000), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        digest = _digest(BIG)
+        m.db.put_artifact(sid, digest, BIG)
+        calls = [call("read_artifact", i, artifact_id=digest) for i in range(1, 4)]
+        assert await m.runner._resolve_calls(s, calls) is False
+        first, second, third = (_ctx_text(m, sid, c["id"]) for c in calls)
+        assert first.startswith(BIG[:5250]) and "output cut at 5250 characters" in first
+        assert len(first) < 5250 + 300
+        # The later calls see what the earlier ones used, so they fall to the 2,000-character floor.
+        for later in (second, third):
+            assert later.startswith(BIG[:2000]) and "output cut at 2000 characters" in later
+            assert len(later) < 2000 + 300
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_read_artifact_output_counts_as_used_and_refreshes_the_turn(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        digest = _digest(BIG)
+        m.db.put_artifact(sid, digest, BIG)
+        c = call("read_artifact", 1, artifact_id=digest, start=0, end=100)
+        assert await m.runner._resolve_call(s, c, [], {}, 10**9) == (None, 100)
+        c = call("read_artifact", 2, artifact_id="f" * 64)  # errors are counted too, like any tool's
+        done, used = await m.runner._resolve_call(m.db.get_session(sid), c, [], {}, 10**9)
+        assert (done, used) == (None, len("Error: artifact not found"))
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_read_artifact_full_chunk_is_recorded_whole_and_event_is_capped(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        digest = _digest(BIG)
+        m.db.put_artifact(sid, digest, BIG)
+        c = call("read_artifact", 1, artifact_id=digest)
+        await m.runner._resolve_calls(s, [c])
+        text = _ctx_text(m, sid, c["id"])
+        assert text.startswith(BIG[:20000]) and "[truncated; request a smaller range" in text
+        event = _result_event(m, sid, c["id"])
+        assert event["ok"] is True and len(event["output"]) <= 20000 + 100  # events keep a bounded copy
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_read_artifact_goes_through_policy_and_emits_tool_call(tmp_path):
+    from harness.policy import Policy
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        digest = _digest(BIG)
+        m.db.put_artifact(sid, digest, BIG)
+        allowed = call("read_artifact", 1, artifact_id=digest, start=0, end=5)
+        await m.runner._resolve_calls(s, [allowed])
+        decision = next(e["data"] for e in m.db.events(sid) if e["type"] == "tool_call" and e["data"]["id"] == allowed["id"])
+        assert decision["name"] == "read_artifact" and decision["decision"] == "allow"
+        assert _ctx_text(m, sid, allowed["id"]) == BIG[:5]
+
+        m.runner.policy = lambda _s: Policy([{"tool": "read_artifact", "action": "deny", "reason": "not today"}])
+        denied = call("read_artifact", 2, artifact_id=digest, start=0, end=5)
+        await m.runner._resolve_calls(m.db.get_session(sid), [denied])
+        assert "blocked by policy (not today)" in _ctx_text(m, sid, denied["id"])
+        assert _result_event(m, sid, denied["id"])["ok"] is False
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_read_artifact_bad_arguments_count_as_invalid_tool_calls(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        before = m.db.get_session(sid)["run"].get("invalid_tool_calls", 0)
+        bad = [call("read_artifact", 1), call("read_artifact", 2, artifact_id="f" * 64, extra=1),
+               call("read_artifact", 3, artifact_id="f" * 64, start="abc")]
+        await m.runner._resolve_calls(s, bad)
+        for c in bad:
+            assert _ctx_text(m, sid, c["id"]).startswith("Error: bad arguments for read_artifact:")
+        assert m.db.get_session(sid)["run"]["invalid_tool_calls"] == before + 3
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_read_artifact_is_only_available_where_it_is_offered(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        digest = _digest("abc")
+        m.db.put_artifact(sid, digest, "abc")
+        m.db.update_session(sid, kind="chat")  # chat sessions are not offered the tool, so they cannot call it
+        c = call("read_artifact", 1, artifact_id=digest)
+        await m.runner._resolve_calls(m.db.get_session(sid), [c])
+        assert "unknown tool 'read_artifact'" in _ctx_text(m, sid, c["id"])
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_read_artifact_result_is_grounded_and_never_masked_again(tmp_path):
+    from harness import grounding
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        digest = _digest(BIG)
+        m.db.put_artifact(sid, digest, BIG)
+        c = call("read_artifact", 1, artifact_id=digest, start=100, end=9100)  # 9,000 chars: over the mask threshold
+        m.db.update_session(sid, context=m.db.get_session(sid)["context"]
+                            + [{"role": "assistant", "content": None, "tool_calls": [c]}])
+        await m.runner._resolve_calls(m.db.get_session(sid), [c])
+        recovered = _ctx_text(m, sid, c["id"])
+        assert recovered == BIG[100:9100]
+        assert _result_event(m, sid, c["id"])["artifact_id"] is None  # no artifact of its own, so no receipt loop
+        assert any(recovered in src for src in grounding.session_sources(
+            m.db.get_session(sid)["context"], m.db.events(sid)))
+
+        _finish_turn(m, sid)
+        await m.runner._maybe_compact(m.db.get_session(sid))
+        assert _ctx_text(m, sid, c["id"]) == recovered  # still verbatim after a later turn
+        assert not any(e["type"] == "compaction" and e["data"].get("tier") == "mask" for e in m.db.events(sid))
+        await m.stop()
+    asyncio.run(body())

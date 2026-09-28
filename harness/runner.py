@@ -1307,29 +1307,6 @@ class Runner:
 
         if name == "finish":
             return self._finish_call(s, call, args, rest), None
-        if name == "read_artifact":
-            try:
-                artifact_id = args["artifact_id"]
-                start = args.get("start", 0)
-                end = args.get("end")
-                if (not isinstance(artifact_id, str) or len(artifact_id) != 64
-                        or any(c not in "0123456789abcdef" for c in artifact_id)
-                        or isinstance(start, bool) or not isinstance(start, int) or start < 0
-                        or (end is not None and (isinstance(end, bool) or not isinstance(end, int) or end < start))):
-                    raise ValueError("invalid artifact range or id")
-                recovered = self.db.read_artifact(sid, artifact_id, start, end)
-                if recovered is None:
-                    output = "Error: artifact not found"
-                    ok = False
-                else:
-                    output, truncated = recovered
-                    ok = True
-                    if truncated:
-                        output += "\n[truncated; request a smaller range to continue]"
-                self._record_result(sid, call, name, output, ok=ok)
-            except (KeyError, ValueError) as e:
-                self._record_result(sid, call, name, f"Error: {e}", ok=False)
-            return None, None
         if name == "update_notes" and isinstance(args.get("notes"), str):
             with self.db.tx():
                 self.db.update_session(sid, run={**self.db.get_session(sid)["run"], "notes": args["notes"]})
@@ -1566,7 +1543,9 @@ class Runner:
         ok = True
         try:
             kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
-            if self.app_tools is not None and name in self.app_tools.names(s):
+            if name == "read_artifact":
+                output = self._read_artifact(sid, args)
+            elif self.app_tools is not None and name in self.app_tools.names(s):
                 def waiting() -> None:  # the app works on it: give the GPU to other sessions meanwhile
                     self.scheduler.release(sid)
                     self.set_status(sid, "waiting_app")
@@ -1586,13 +1565,29 @@ class Runner:
         except (ToolError, OSError, UnicodeError) as e:
             ok = False
             output = f"Error: {e}"
-        artifact_content = output if ok and len(output) >= self.cfg.mask_min_chars else None
+        # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
+        artifact_content = (output if ok and name != "read_artifact" and len(output) >= self.cfg.mask_min_chars
+                            else None)
         if len(output) > max_chars:
             output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
         self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content)
         return output
+
+    def _read_artifact(self, sid: str, args: dict) -> str:
+        """The model-facing read of a masked result: characters [start, end) of this session's artifact."""
+        artifact_id = args["artifact_id"]
+        start = args.get("start", 0)
+        end = args.get("end")
+        if (len(artifact_id) != 64 or any(c not in "0123456789abcdef" for c in artifact_id) or start < 0
+                or (end is not None and end < start)):
+            raise ToolError("invalid artifact range or id")
+        recovered = self.db.read_artifact(sid, artifact_id, start, end)
+        if recovered is None:
+            raise ToolError("artifact not found")
+        output, truncated = recovered
+        return output + "\n[truncated; request a smaller range to continue]" if truncated else output
 
     async def _call_images(self, sid: str, s: dict, ws: Workspace, kit, name: str, args: dict) -> str:
         put_bytes = None
