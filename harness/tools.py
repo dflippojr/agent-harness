@@ -154,8 +154,10 @@ def shell_result(code: int, output: str, network: bool, output_chars: int | None
 def bound_shell_text(text: str, limit: int, artifact_id: str) -> str:
     if len(text) <= limit:
         return text
-    return truncate_middle(text, limit) + "\n" + ARTIFACT_FOOTER.format(
-        total=len(text), artifact_id=artifact_id)
+    footer = ARTIFACT_FOOTER.format(total=len(text), artifact_id=artifact_id)
+    if "capture capped at" in text:
+        footer = footer.replace("characters total;", "characters total (capture capped);")
+    return truncate_middle(text, limit) + "\n" + footer
 
 
 class Workspace:

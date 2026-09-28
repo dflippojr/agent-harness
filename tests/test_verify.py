@@ -7,7 +7,7 @@ import hashlib
 import json
 
 from harness.config import Project, VerifyCheck
-from harness.fileops import ToolError, cap_command_output
+from harness.fileops import ToolError, cap_command_output, CappedStream, CAPTURE_CAPPED_NOTE, OUTPUT_CAP
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.tools import bound_shell_text, shell_result, tool_schemas
@@ -235,6 +235,34 @@ def test_cap_command_output_matches_one_million():
     assert len(capped) < 1_100_000
     assert capped.startswith("z" * 100) and capped.endswith("z" * 100)
     assert "... [output cut] ..." in capped
+    stream = CappedStream()
+    for i in range(0, len(huge), 70_000):
+        stream.feed(huge[i:i + 70_000])
+    assert stream.capped and stream.text() == capped
+    assert CAPTURE_CAPPED_NOTE in stream.get()
+    under = CappedStream()
+    under.feed("ok")
+    assert not under.capped and under.get() == "ok"
+
+
+def test_capture_cap_is_reported_in_artifact_truncation_and_footer():
+    stream = CappedStream()
+    stream.feed("A" * (OUTPUT_CAP + 50_000))
+    captured = stream.get()
+    assert CAPTURE_CAPPED_NOTE in captured
+    text = shell_result(0, captured, False)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    bounded = bound_shell_text(text, 20000, digest)
+    assert CAPTURE_CAPPED_NOTE in text  # stored artifact content
+    assert CAPTURE_CAPPED_NOTE in bounded  # visible in the middle-truncated tail
+    assert f"characters total (capture capped); recover with read_artifact(artifact_id={digest}" in bounded
+    noisy = "\n".join(f"error {i}: {i}" for i in range(400)) + "\n" + CAPTURE_CAPPED_NOTE
+    noisy_items = [{**it, "check": "lint", "count": 1} for it in parse_generic(noisy)]
+    noisy_rendered = render_verify({"ok": False, "checks": [{"name": "lint", "code": 1, "timed_out": False}],
+                                    "failures": noisy_items})
+    footer = bound_rendered(noisy_rendered, 4000, noisy).rpartition("\n")[2]
+    assert "characters total (capture capped);" in footer
+    assert hashlib.sha256(noisy.encode("utf-8")).hexdigest() in footer
 
 
 def test_verify_is_in_managed_schemas_and_search_mentions_at_least():

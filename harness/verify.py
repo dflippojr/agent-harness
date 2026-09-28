@@ -197,6 +197,8 @@ def bound_rendered(text: str, limit: int, raw_log: str) -> str:
     if len(text) <= limit:
         return text
     footer = ARTIFACT_FOOTER.format(total=len(raw_log), artifact_id=digest)
+    if "capture capped at" in raw_log:
+        footer = footer.replace("characters total;", "characters total (capture capped);")
     return text[:limit] + "\n" + footer
 
 

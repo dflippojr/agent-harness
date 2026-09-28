@@ -13,6 +13,7 @@ from pathlib import Path
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 MAX_PUT_BYTES = 32 * 1024 * 1024  # binary files the daemon may send to a runner (ComfyUI PNGs are much smaller)
 OUTPUT_CAP = 1_000_000  # characters of command output kept in the sandbox / Mac runner
+CAPTURE_CAPPED_NOTE = f"[capture capped at {OUTPUT_CAP} characters per stream]"
 
 
 class ToolError(Exception):
@@ -32,6 +33,66 @@ def cap_command_output(text: str, limit: int = OUTPUT_CAP) -> str:
         return text
     half = limit // 2
     return f"{text[:half]}\n... [output cut] ...\n{text[-half:]}"
+
+
+class CappedStream:
+    """Keep at most `limit` characters (head + tail) while still draining the pipe."""
+
+    def __init__(self, limit: int = OUTPUT_CAP):
+        self.limit = limit
+        self.half = limit // 2
+        self.total = 0
+        self.capped = False
+        self._buf: list[str] = []
+        self._buf_len = 0
+        self._head: str | None = None
+        self._tail: list[str] = []
+        self._tail_len = 0
+
+    def feed(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self.total += len(chunk)
+        if not self.capped:
+            self._buf.append(chunk)
+            self._buf_len += len(chunk)
+            if self._buf_len > self.limit:
+                self.capped = True
+                joined = "".join(self._buf)
+                self._head = joined[:self.half]
+                tail = joined[-self.half:]
+                self._tail = [tail]
+                self._tail_len = len(tail)
+                self._buf = []
+                self._buf_len = 0
+            return
+        self._tail.append(chunk)
+        self._tail_len += len(chunk)
+        extra = self._tail_len - self.half
+        while extra > 0 and self._tail:
+            first = self._tail[0]
+            if len(first) <= extra:
+                self._tail.pop(0)
+                self._tail_len -= len(first)
+                extra -= len(first)
+            else:
+                self._tail[0] = first[extra:]
+                self._tail_len -= extra
+                extra = 0
+
+    def text(self) -> str:
+        if not self.capped:
+            return "".join(self._buf)
+        tail = "".join(self._tail)
+        if len(tail) > self.half:
+            tail = tail[-self.half:]
+        return f"{self._head}\n... [output cut] ...\n{tail}"
+
+    def get(self) -> str:
+        body = self.text()
+        if not self.capped:
+            return body
+        return f"{body}\n{CAPTURE_CAPPED_NOTE}"
 
 
 def resolve_path(p: Path) -> Path:

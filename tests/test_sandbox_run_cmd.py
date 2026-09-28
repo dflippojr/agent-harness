@@ -58,6 +58,33 @@ def test_run_cmd_reports_a_timeout_with_the_output_so_far():
     assert "[timed out after 1s]" in err
 
 
+def test_run_cmd_caps_each_stream_at_one_million_characters():
+    from harness.fileops import CAPTURE_CAPPED_NOTE, OUTPUT_CAP
+    code, out, err = asyncio.run(sandbox.run_cmd(
+        [sys.executable, "-c",
+         "import sys; sys.stdout.write('A'*2_000_000); sys.stderr.write('B'*2_000_000)"],
+        timeout=30))
+    assert code == 0
+    assert len(out) < OUTPUT_CAP + 200
+    assert len(err) < OUTPUT_CAP + 200
+    assert out.startswith("A" * 100) and "A" * 100 in out[-300:]
+    assert err.startswith("B" * 100) and "B" * 100 in err[-300:]
+    assert "... [output cut] ..." in out and "... [output cut] ..." in err
+    assert CAPTURE_CAPPED_NOTE in out and CAPTURE_CAPPED_NOTE in err
+
+
+def test_run_cmd_timeout_stays_124_when_output_exceeds_the_cap():
+    from harness.fileops import CAPTURE_CAPPED_NOTE
+    code, out, err = asyncio.run(sandbox.run_cmd(
+        [sys.executable, "-c",
+         "import sys, time; sys.stdout.write('A'*2_000_000); sys.stdout.flush(); time.sleep(60)"],
+        timeout=2))
+    assert code == 124
+    assert CAPTURE_CAPPED_NOTE in out
+    assert "[timed out after 2s]" in err
+    assert len(out) < 1_200_000
+
+
 def test_cancelling_a_running_command_kills_the_process(spawned):
     async def scenario():
         task = asyncio.ensure_future(sandbox.run_cmd(SLEEPER))
