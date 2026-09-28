@@ -95,6 +95,27 @@ def test_normalize_message_strips_timings_pids_and_hex():
     assert "<time>" in a and "pid=<pid>" in a and "<hex>" in a
 
 
+def test_parsers_stay_linear_on_long_adversarial_lines():
+    import time
+    spaces = " " * 100_000
+    digits = "9" * 100_000
+    log = (f"FAILED{spaces}tests/test_a.py::test_a - boom\n"
+           f"ERROR{spaces}tests/test_b.py::test_b\n"
+           f"FAILED {digits}::test_c\n")
+    message = f"crash pid{spaces}4321 after 1.23s at 0xabc"
+    t0 = time.perf_counter()
+    parsed = parse_pytest(log)
+    norm = normalize_message(message)
+    normalize_message("x pid" + spaces)  # ReDoS shape: pid + spaces, no digits
+    normalize_message("pid" + spaces + "=" + spaces)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.25, f"linear parsers took {elapsed:.3f}s on 100k-char lines"
+    assert [p["nodeid"] for p in parsed] == [
+        "tests/test_a.py::test_a", "tests/test_b.py::test_b", f"{digits}::test_c"]
+    assert parsed[0]["message"] == "boom" and parsed[1]["kind"] == "error"
+    assert "pid=<pid>" in norm
+
+
 def test_infer_parser_from_command_and_explicit_field():
     assert infer_parser(VerifyCheck("t", "pytest --tb=short -ra", parser="")) == "pytest"
     assert infer_parser(VerifyCheck("t", "python -m pytest -q", parser="")) == "pytest"

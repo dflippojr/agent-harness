@@ -14,12 +14,10 @@ from collections import OrderedDict
 from .fileops import ToolError
 
 PYTEST_CMD = re.compile(r"\bpytest\b")
-PYTEST_SUMMARY = re.compile(r"^(FAILED|ERROR)\s+(\S+?)(?:\s+-\s+(.*))?$", re.M)
 PYTEST_LOCATION = re.compile(r"^(\S+?):(\d+):\s+in\s+(\S+)", re.M)
 GENERIC_LINE = re.compile(r"(?i)(error|fail)")
 # Timings ("1.23s", "45ms"), PIDs, and hex addresses must not split otherwise-identical failures.
 TIME_RE = re.compile(r"\b\d+\.\d+s\b|\b\d+\s*ms\b", re.I)
-PID_RE = re.compile(r"(?i)\bpid\s*[=:]?\s*\d+\b")
 HEX_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
 
 ARTIFACT_FOOTER = ("... (output truncated; {total} characters total; "
@@ -42,17 +40,88 @@ def infer_parser(check) -> str:
     return "pytest" if PYTEST_CMD.search(getattr(check, "command", "") or "") else "generic"
 
 
+def _is_word(ch: str) -> bool:
+    return ch == "_" or ch.isalnum()
+
+
+def _replace_pids(text: str) -> str:
+    """Replace ``pid[=:] digits`` with ``pid=<pid>`` in one left-to-right pass (no backtracking)."""
+    n = len(text)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        if ((text[i] == "p" or text[i] == "P")
+                and i + 2 < n
+                and (text[i + 1] == "i" or text[i + 1] == "I")
+                and (text[i + 2] == "d" or text[i + 2] == "D")
+                and (i == 0 or not _is_word(text[i - 1]))):
+            j = i + 3
+            while j < n and text[j].isspace():
+                j += 1
+            if j < n and text[j] in "=:":
+                j += 1
+            while j < n and text[j].isspace():
+                j += 1
+            k = j
+            while k < n and text[k].isdigit():
+                k += 1
+            if k > j and (k == n or not _is_word(text[k])):
+                out.append("pid=<pid>")
+                i = k
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _parse_pytest_summary_line(line: str) -> tuple[str, str, str] | None:
+    """Parse a short-summary ``FAILED``/``ERROR`` line. Linear in the line length."""
+    if line.startswith("FAILED"):
+        kind, start = "failed", 6
+    elif line.startswith("ERROR"):
+        kind, start = "error", 5
+    else:
+        return None
+    if start >= len(line) or not line[start].isspace():
+        return None
+    i = start
+    while i < len(line) and line[i].isspace():
+        i += 1
+    if i >= len(line):
+        return None
+    j = i
+    while j < len(line) and not line[j].isspace():
+        j += 1
+    nodeid = line[i:j]
+    if j == len(line):
+        return kind, nodeid, ""
+    k = j
+    while k < len(line) and line[k].isspace():
+        k += 1
+    if k >= len(line) or line[k] != "-":
+        return None
+    k += 1
+    if k >= len(line) or not line[k].isspace():
+        return None
+    while k < len(line) and line[k].isspace():
+        k += 1
+    return kind, nodeid, line[k:].strip()
+
+
 def normalize_message(message: str) -> str:
     text = TIME_RE.sub("<time>", message)
-    text = PID_RE.sub("pid=<pid>", text)
+    text = _replace_pids(text)
     return HEX_RE.sub("<hex>", text)
 
 
 def parse_pytest(log: str) -> list[dict]:
     locations = [(m.group(1), int(m.group(2)), m.group(3)) for m in PYTEST_LOCATION.finditer(log)]
     found: list[dict] = []
-    for m in PYTEST_SUMMARY.finditer(log):
-        kind, nodeid, message = m.group(1).lower(), m.group(2), (m.group(3) or "").strip()
+    for raw in log.splitlines():
+        parsed = _parse_pytest_summary_line(raw)
+        if parsed is None:
+            continue
+        kind, nodeid, message = parsed
         path = nodeid.split("::", 1)[0]
         test = nodeid.rsplit("::", 1)[-1] if "::" in nodeid else ""
         line = None
