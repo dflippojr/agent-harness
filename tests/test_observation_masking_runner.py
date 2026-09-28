@@ -219,7 +219,9 @@ def test_read_artifact_goes_through_policy_and_emits_tool_call(tmp_path):
         assert decision["name"] == "read_artifact" and decision["decision"] == "allow"
         assert _ctx_text(m, sid, allowed["id"]) == BIG[:5]
 
-        m.runner.policy = lambda _s: Policy([{"tool": "read_artifact", "action": "deny", "reason": "not today"}])
+        # A rule aimed at this artifact leaves the tool offered, so the call itself is refused.
+        m.runner.policy = lambda _s: Policy([{"tool": "read_artifact", "action": "deny", "reason": "not today",
+                                              "args": {"artifact_id": f"^{digest}$"}}])
         denied = call("read_artifact", 2, artifact_id=digest, start=0, end=5)
         await m.runner._resolve_calls(m.db.get_session(sid), [denied])
         assert "blocked by policy (not today)" in _ctx_text(m, sid, denied["id"])
@@ -282,5 +284,138 @@ def test_read_artifact_result_is_grounded_and_never_masked_again(tmp_path):
         await m.runner._maybe_compact(m.db.get_session(sid))
         assert _ctx_text(m, sid, c["id"]) == recovered  # still verbatim after a later turn
         assert not any(e["type"] == "compaction" and e["data"].get("tier") == "mask" for e in m.db.events(sid))
+        await m.stop()
+    asyncio.run(body())
+
+
+# Masking is only allowed where read_artifact is offered AND runnable: one predicate, Runner.artifact_tool_available.
+PAGE = "<html>" + "lorem ipsum dolor " * 400 + "</html>"  # a fetched page well over the mask threshold
+
+
+class _FakeWeb:
+    tool_names = {"web_fetch"}
+
+    def schemas(self):
+        return [{"type": "function", "function": {
+            "name": "web_fetch", "description": "fetch",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}}]
+
+    async def call(self, name, args):
+        return PAGE if args["url"] == "big" else "ok"
+
+
+def _assert_nothing_masked(m: Manager, sid: str, call_id: str) -> None:
+    context = m.db.get_session(sid)["context"]
+    assert not any(str(x.get("content") or "").startswith(compaction.RECEIPT_PREFIX) for x in context)
+    assert not any("read_artifact" in str(x.get("content") or "") for x in context if x["role"] != "system")
+    assert _ctx_text(m, sid, call_id) == PAGE
+    assert _result_event(m, sid, call_id)["artifact_id"] is None
+    assert not [e for e in events(m, sid, "compaction") if e["tier"] == "mask"]
+    assert m.db.full_artifact(sid, _digest(PAGE)) is None
+
+
+def test_chat_session_fetching_a_long_page_is_never_masked(tmp_path):
+    async def body():
+        steps = [Completion(tool_calls=[call("web_fetch", 1, url="big")]),
+                 Completion(tool_calls=[call("web_fetch", 2, url="small")]),
+                 Completion(content="done")]
+        script = Script(steps)
+        m = Manager(make_cfg(tmp_path), chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        sid = m.create("read the page", kind="chat")["id"]
+        await wait_status(m, sid, "done")
+        _assert_nothing_masked(m, sid, "c1-web_fetch")
+        for request in script.requests:  # the model was never shown a tool to follow a receipt with
+            assert all("read_artifact" not in str(x.get("content") or "") for x in request if x["role"] == "tool")
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_agent_session_still_masks_the_same_fetch(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        assert m.runner.artifact_tool_available(s)
+        assert "read_artifact" in {t["function"]["name"] for t in m.runner.tool_schemas(s, m.runner.workspace(s))}
+        call_id = _seed_result(m, sid, 1, PAGE, name="web_fetch")
+        _finish_turn(m, sid)
+        await m.runner._maybe_compact(m.db.get_session(sid))
+        assert _ctx_text(m, sid, call_id).startswith(compaction.RECEIPT_PREFIX)
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_denied_by_project_policy_removes_the_tool_and_disables_masking(tmp_path):
+    async def body():
+        rules = [{"tool": "read_artifact", "action": "deny", "reason": "no recovery here"}]
+        m = Manager(make_cfg(tmp_path, rules=rules), chat=Script([Completion(content="done")]))
+        await m.start()
+        sid = m.create("task", project="guarded")["id"]
+        s = await wait_status(m, sid, "done")
+        assert not m.runner.artifact_tool_available(s)
+        assert "read_artifact" not in {t["function"]["name"] for t in m.runner.tool_schemas(s, m.runner.workspace(s))}
+        # A stale call (e.g. a model that remembers the tool) can neither run nor read stored artifacts.
+        m.db.put_artifact(sid, _digest(PAGE), PAGE)
+        stale = call("read_artifact", 9, artifact_id=_digest(PAGE))
+        await m.runner._resolve_calls(s, [stale])
+        assert "unknown tool 'read_artifact'" in _ctx_text(m, sid, stale["id"])
+        await m.runner._execute(sid, call("read_artifact", 8, artifact_id=_digest(PAGE)), "read_artifact",
+                                {"artifact_id": _digest(PAGE)}, m.runner.workspace(s))
+        assert _ctx_text(m, sid, "c8-read_artifact") == "Error: unknown tool 'read_artifact'"
+
+        call_id = _seed_result(m, sid, 1, PAGE, name="web_fetch")
+        _finish_turn(m, sid)
+        await m.runner._maybe_compact(m.db.get_session(sid))
+        assert _ctx_text(m, sid, call_id) == PAGE
+        assert not [e for e in events(m, sid, "compaction") if e["tier"] == "mask"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_policy_change_after_masking_stops_further_masking(tmp_path):
+    """A session resumed after the project's rules changed to deny the tool masks nothing more."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        first = _seed_result(m, sid, 1, PAGE, name="web_fetch")
+        _finish_turn(m, sid)
+        await m.runner._maybe_compact(m.db.get_session(sid))
+        assert _ctx_text(m, sid, first).startswith(compaction.RECEIPT_PREFIX)
+
+        from harness.policy import Policy
+        m.runner.policy = lambda _s: Policy([{"tool": "read_artifact", "action": "deny"}])
+        second = _seed_result(m, sid, 2, PAGE + "x", name="web_fetch")
+        _finish_turn(m, sid)
+        await m.runner._maybe_compact(m.db.get_session(sid))
+        assert _ctx_text(m, sid, second) == PAGE + "x"
+        assert len([e for e in events(m, sid, "compaction") if e["tier"] == "mask"]) == 1
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_hosted_backend_sessions_never_reach_masking(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        s = await _session(m)
+        sid = s["id"]
+        assert m.runner.artifact_tool_available(s)
+        for hosted in ("claude", "codex", "cursor"):
+            assert not m.runner.artifact_tool_available({**s, "backend": hosted})
+        # Hosted CLIs run through _run_cli, whose loop is not _loop, so _maybe_compact is not on their path.
+        calls = []
+
+        async def fake_cli(sid_, recovered=False):
+            calls.append(sid_)
+        m.runner._run_cli = fake_cli
+
+        async def forbidden(_s):
+            raise AssertionError("_maybe_compact must not run for a hosted backend")
+        m.runner._maybe_compact = forbidden
+        m.db.update_session(sid, backend="claude")
+        await m.runner.run(sid)
+        assert calls == [sid]
         await m.stop()
     asyncio.run(body())

@@ -25,7 +25,7 @@ from .config import Config
 from .db import Database
 from .homelab import Homelab
 from .principal import OWNER_USER_ID, session_user_id
-from .policy import ALLOW, ASK, ChatPolicy, Policy
+from .policy import ALLOW, ASK, DENY, ChatPolicy, Policy
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
@@ -65,6 +65,15 @@ ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_ap
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
 QUOTA_CHECK_SECONDS = 30
+READ_ARTIFACT_SCHEMA = {"type": "function", "function": {
+    "name": "read_artifact",
+    "description": "Recover up to 20,000 characters from a previously masked tool result.",
+    "parameters": {"type": "object", "properties": {
+        "artifact_id": {"type": "string", "description": "SHA-256 hash from the receipt."},
+        "start": {"type": "integer", "description": "Inclusive zero-based character offset; default 0."},
+        "end": {"type": "integer", "description": "Exclusive zero-based character offset; default artifact end."},
+    }, "required": ["artifact_id"]},
+}}
 PROGRESS_MIN_TOKENS = 4000   # show prompt-reading progress only when this much of the prompt isn't cached
 
 
@@ -231,19 +240,19 @@ class Runner:
             return {}
         return self.settings.app_defaults_for_session(s)
 
+    def artifact_tool_available(self, s: dict) -> bool:
+        """Whether this session can call read_artifact. The one source of truth for offering the tool, running it,
+        storing artifacts and masking results: a receipt may only point at a tool the model can actually use."""
+        if s.get("kind") == "chat" or s.get("backend", "local") != "local":
+            return False
+        return self.policy(s).decide("read_artifact", {"artifact_id": "0" * 64}).action != DENY
+
     def tool_schemas(self, s: dict, ws) -> list[dict]:
         if s.get("kind") == "chat":
             return self.web.schemas() if self.web is not None else []
         schemas = ws.schemas()
-        schemas = schemas + [{"type": "function", "function": {
-            "name": "read_artifact",
-            "description": "Recover up to 20,000 characters from a previously masked tool result.",
-            "parameters": {"type": "object", "properties": {
-                "artifact_id": {"type": "string", "description": "SHA-256 hash from the receipt."},
-                "start": {"type": "integer", "description": "Inclusive zero-based character offset; default 0."},
-                "end": {"type": "integer", "description": "Exclusive zero-based character offset; default artifact end."},
-            }, "required": ["artifact_id"]},
-        }}]
+        if self.artifact_tool_available(s):
+            schemas = schemas + [READ_ARTIFACT_SCHEMA]
         for kit in self.daemon_toolkits(s):
             schemas = schemas + kit.schemas()
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
@@ -1544,6 +1553,8 @@ class Runner:
         try:
             kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
             if name == "read_artifact":
+                if not self.artifact_tool_available(s):
+                    raise ToolError("unknown tool 'read_artifact'")
                 output = self._read_artifact(sid, args)
             elif self.app_tools is not None and name in self.app_tools.names(s):
                 def waiting() -> None:  # the app works on it: give the GPU to other sessions meanwhile
@@ -1567,7 +1578,7 @@ class Runner:
             output = f"Error: {e}"
         # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
         artifact_content = (output if ok and name != "read_artifact" and len(output) >= self.cfg.mask_min_chars
-                            else None)
+                            and self.artifact_tool_available(s) else None)
         if len(output) > max_chars:
             output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
@@ -1650,19 +1661,9 @@ class Runner:
         # Tool schemas are part of every prompt but not of the context list.
         overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
-        events = self.db.events(sid)
-        outcomes = {e["data"].get("id"): e["data"] for e in events if e["type"] == "tool_result"}
-        full_outputs = {}
-        masked = {m.get("tool_call_id") for m in s["context"]
-                  if m.get("role") == "tool" and (m.get("content") or "").startswith(compaction.RECEIPT_PREFIX)}
-        for call_id, outcome in outcomes.items():
-            artifact_id = outcome.get("artifact_id")
-            if artifact_id and call_id not in masked:
-                recovered = self.db.full_artifact(sid, artifact_id)
-                if recovered is not None:
-                    full_outputs[call_id] = recovered
-        context, artifacts, masked_chars = compaction.mask_used_results(
-            s["context"], outcomes, self.cfg.mask_min_chars, full_outputs)
+        context, artifacts, masked_chars = s["context"], {}, 0
+        if self.artifact_tool_available(s):  # a receipt tells the model to call read_artifact
+            context, artifacts, masked_chars = self._mask_used_results(s)
         if artifacts:
             with self.db.tx():
                 for digest, content in artifacts.items():
@@ -1686,6 +1687,21 @@ class Runner:
             self.db.update_session(sid, context=context)
             self.bus.emit(sid, "compaction", data)
         return self.db.get_session(sid)
+
+    def _mask_used_results(self, s: dict) -> tuple[list, dict, int]:
+        """Replace this session's used, oversized tool results with receipts (see compaction.mask_used_results)."""
+        sid = s["id"]
+        outcomes = {e["data"].get("id"): e["data"] for e in self.db.events(sid) if e["type"] == "tool_result"}
+        full_outputs = {}
+        masked = {m.get("tool_call_id") for m in s["context"]
+                  if m.get("role") == "tool" and (m.get("content") or "").startswith(compaction.RECEIPT_PREFIX)}
+        for call_id, outcome in outcomes.items():
+            artifact_id = outcome.get("artifact_id")
+            if artifact_id and call_id not in masked:
+                recovered = self.db.full_artifact(sid, artifact_id)
+                if recovered is not None:
+                    full_outputs[call_id] = recovered
+        return compaction.mask_used_results(s["context"], outcomes, self.cfg.mask_min_chars, full_outputs)
 
     async def _summarize_context(self, s: dict, context: list, split: tuple[int, int], data: dict, before: int,
                                  cpt: float, overhead: int) -> list:
