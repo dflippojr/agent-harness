@@ -1,6 +1,7 @@
 import hashlib
 
 from harness import compaction
+from harness.config import _mask_min_chars
 from harness.db import Database
 
 
@@ -54,6 +55,17 @@ def test_failures_and_unknown_legacy_outcomes_stay_verbatim():
         unchanged, artifacts, _ = compaction.mask_used_results(messages, outcomes, 2000)
         assert unchanged[1]["content"] == "x" * 2000
         assert not artifacts
+    diagnostic = _turn(content="Error: successful diagnostic output" + "x" * 2000)
+    masked, artifacts, _ = compaction.mask_used_results(diagnostic, {"c1": {"ok": True}}, 2000)
+    assert masked[1]["content"].startswith("[Observation receipt]")
+    assert artifacts
+
+
+def test_mask_threshold_config_fallback():
+    assert _mask_min_chars(None) == 2000
+    assert _mask_min_chars("invalid") == 2000
+    assert _mask_min_chars(0) == 2000
+    assert _mask_min_chars(3500) == 3500
 
 
 def test_mask_receipt_uses_full_output_when_context_result_was_capped():
@@ -83,4 +95,6 @@ def test_artifact_full_text_ranges_hash_and_resume(tmp_path):
     assert not truncated
     assert hashlib.sha256((first + rest).encode("utf-8")).hexdigest() == digest
     assert db.read_artifact("other-session", digest) is None
+    db.delete_session("session-a")
+    assert db.read_artifact("session-a", digest) is None
     db.close()
