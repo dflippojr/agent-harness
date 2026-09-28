@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
 from harness.api import create_app
 from harness.llm import Completion
@@ -54,6 +55,139 @@ def test_session_event_replay_order_and_last_event_id(tmp_path):
     assert '"n": 2' in replay.text
     assert "characterization_first" not in resumed.text
     assert "characterization_second" in resumed.text
+
+
+def test_session_event_live_replay_deduplicates_and_closes(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from harness.apps import _session_events_stream
+
+    client, manager = make_client(tmp_path)
+    manager._spawn = lambda *_a, **_k: None
+    with client:
+        sid = client.post("/api/v1/sessions", json={"prompt": "stream"}).json()["id"]
+        historical = manager.db.insert_event(sid, "historical", {"n": 1})
+
+        async def disconnected():
+            return False
+
+        request = SimpleNamespace(is_disconnected=disconnected)
+
+        async def consume():
+            stream = _session_events_stream(request, manager, sid, "owner", historical["seq"] - 1, True)
+            assert await stream.__anext__() == ": connected\n\n"
+            assert "historical" in await stream.__anext__()
+            subscription = next(iter(manager.bus._subs[sid]))
+            subscription.queue.put_nowait({"seq": historical["seq"], "type": "duplicate"})
+            manager.bus.ephemeral(sid, "token_delta", {"text": "live"})
+            manager.bus.emit(sid, "live_event", {"n": 2})
+            ephemeral = await stream.__anext__()
+            live = await stream.__anext__()
+            assert "token_delta" in ephemeral
+            assert "live_event" in live
+            manager.stream_epoch["owner"] = 1
+            with pytest.raises(StopAsyncIteration):
+                await stream.__anext__()
+            assert not manager.bus._subs[sid]
+
+        asyncio.run(consume())
+
+
+def test_global_event_stream_timeout_sends_keepalive_and_closes(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from harness import apps
+    from harness.apps import _global_events_stream
+    from harness.api import GLOBAL_TYPES
+
+    client, manager = make_client(tmp_path)
+    with client:
+        async def disconnected():
+            return False
+
+        request = SimpleNamespace(is_disconnected=disconnected)
+        key = {"kind": "owner", "scope_set": set()}
+
+        async def timeout_then_disconnect(awaitable, timeout):
+            if hasattr(awaitable, "close"):
+                awaitable.close()
+            manager.stream_epoch["owner"] = 1
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr(apps.asyncio, "wait_for", timeout_then_disconnect)
+
+        async def consume():
+            stream = _global_events_stream(request, manager, "owner", key, 0, GLOBAL_TYPES)
+            assert await stream.__anext__() == ": connected\n\n"
+            assert await stream.__anext__() == ": keepalive\n\n"
+            with pytest.raises(StopAsyncIteration):
+                await stream.__anext__()
+            assert not manager.bus._subs["*"]
+
+            manager.stream_epoch["owner"] = 0
+
+            async def now_disconnected():
+                return True
+
+            stream = _global_events_stream(SimpleNamespace(is_disconnected=now_disconnected), manager,
+                                           "owner", key, 0, GLOBAL_TYPES)
+            assert await stream.__anext__() == ": connected\n\n"
+            with pytest.raises(StopAsyncIteration):
+                await stream.__anext__()
+            assert not manager.bus._subs["*"]
+
+        asyncio.run(consume())
+
+
+def test_session_event_stream_timeout_sends_keepalive_and_closes(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from harness import apps
+    from harness.apps import _session_events_stream
+
+    client, manager = make_client(tmp_path)
+    manager._spawn = lambda *_a, **_k: None
+    with client:
+        sid = client.post("/api/v1/sessions", json={"prompt": "stream"}).json()["id"]
+        manager.stream_epoch["owner"] = 0
+
+        async def disconnected():
+            return False
+
+        request = SimpleNamespace(is_disconnected=disconnected)
+
+        async def timeout_and_reconnect_epoch(awaitable, timeout):
+            if hasattr(awaitable, "close"):
+                awaitable.close()
+            manager.stream_epoch["owner"] = 1
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr(apps.asyncio, "wait_for", timeout_and_reconnect_epoch)
+
+        async def consume():
+            stream = _session_events_stream(request, manager, sid, "owner", 10**9, True)
+            assert await stream.__anext__() == ": connected\n\n"
+            assert await stream.__anext__() == ": keepalive\n\n"
+            with pytest.raises(StopAsyncIteration):
+                await stream.__anext__()
+            assert not manager.bus._subs[sid]
+
+            manager.stream_epoch["owner"] = 0
+
+            async def now_disconnected():
+                return True
+
+            stream = _session_events_stream(SimpleNamespace(is_disconnected=now_disconnected), manager,
+                                            sid, "owner", 10**9, True)
+            assert await stream.__anext__() == ": connected\n\n"
+            with pytest.raises(StopAsyncIteration):
+                await stream.__anext__()
+            assert not manager.bus._subs[sid]
+
+        asyncio.run(consume())
 
 
 def test_independent_web_owner_token_cors_and_stream_ticket(tmp_path):
