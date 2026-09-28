@@ -1699,9 +1699,21 @@ class Runner:
             self._record_result(sid, call, "reset_round",
                                 "Error: reset_round takes no arguments.", ok=False)
             return
-        run = {**self.db.get_session(sid)["run"], "pending_round_reset": True}
+        s = self.db.get_session(sid)
+        if not self.has_valid_saved_state(s):
+            self._bump(sid, "invalid_tool_calls")
+            self._record_result(sid, call, "reset_round",
+                                "Error: call update_state first so a valid saved state exists before reset_round.",
+                                ok=False)
+            return
+        run = {**s["run"], "pending_round_reset": True}
         self.db.update_session(sid, run=run)
         self._record_result(sid, call, "reset_round", "Round reset scheduled.", ok=True)
+
+    @staticmethod
+    def has_valid_saved_state(s: dict) -> bool:
+        """True when this session's run carries schema-valid state from a successful update_state."""
+        return agent_state.is_valid_state((s.get("run") or {}).get("state"))
 
     def _snapshot_git_baseline(self, sid: str) -> None:
         s = self.db.get_session(sid)
@@ -1764,11 +1776,16 @@ class Runner:
                 if masked_chars > 0:
                     self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
                                                        "characters_saved": masked_chars})
-            s = self.db.get_session(sid)
+        s = self.db.get_session(sid)
         explicit = bool(s["run"].get("pending_round_reset"))
-        valid = agent_state.is_valid_state(s["run"].get("state"))
-        if explicit or (before >= self.cfg.reset_at * n and valid):
+        valid = self.has_valid_saved_state(s)
+        if (explicit or before >= self.cfg.reset_at * n) and valid:
             return self._round_reset(s, context, before, cpt, overhead)
+        if explicit:
+            run = {**s["run"]}
+            run.pop("pending_round_reset", None)
+            self.db.update_session(sid, run=run)
+            s = self.db.get_session(sid)
         if before < self.cfg.elide_at * n:
             return s
         context, _ = compaction.elide(context)

@@ -15,7 +15,7 @@ from harness.config import Project, _reset_at, _state_max_chars
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.metrics import render as render_metrics
-from harness.runner import new_run
+from harness.runner import Runner, new_run
 from harness.state import (
     git_porcelain, inject_payload, is_dead_end_retry, is_valid_state, paths_since, validate_state,
 )
@@ -348,5 +348,90 @@ def test_threshold_with_state_resets_without_elide(tmp_path):
         assert "round_reset" in tiers
         assert "elide" not in tiers
         assert "summary" not in tiers
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_has_valid_saved_state_predicate():
+    assert not Runner.has_valid_saved_state({"run": {}})
+    assert not Runner.has_valid_saved_state({"run": {"state": None}})
+    assert not Runner.has_valid_saved_state({"run": {"state": {"plan": "no goal"}}})
+    assert Runner.has_valid_saved_state({"run": {"state": validate_state({"goal": "g"}, 8000)}})
+
+
+def test_reset_round_without_state_is_tool_error(tmp_path):
+    steps = iter([
+        Completion(tool_calls=[call("reset_round")]),
+        Completion(tool_calls=[call("finish", 1, answer="stopped")]),
+    ])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([lambda _msgs: next(steps)]))
+        await m.start()
+        s = await wait_status(m, m.create("reset with nothing saved")["id"], "done")
+        await asyncio.gather(*m.tasks.values())
+        s = m.db.get_session(s["id"])
+        resets = [item for item in events(m, s["id"], "tool_result") if item["name"] == "reset_round"]
+        assert len(resets) == 1
+        assert resets[0]["ok"] is False
+        assert "update_state" in resets[0]["output"]
+        assert "pending_round_reset" not in s["run"]
+        assert not any(item["tier"] == "round_reset" for item in events(m, s["id"], "compaction"))
+        assert "harness_round_resets_total 0" in render_metrics(m)
+        with pytest.raises(AssertionError, match="no tagged state"):
+            _state_from_context(s["context"])
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_reset_round_after_rejected_state_is_tool_error(tmp_path):
+    steps = iter([
+        Completion(tool_calls=[call("update_state", 0, plan="no goal"), call("reset_round", 1)]),
+        Completion(tool_calls=[call("finish", 2, answer="stopped")]),
+    ])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([lambda _msgs: next(steps)]))
+        await m.start()
+        s = await wait_status(m, m.create("reject then reset")["id"], "done")
+        await asyncio.gather(*m.tasks.values())
+        s = m.db.get_session(s["id"])
+        results = events(m, s["id"], "tool_result")
+        update = [item for item in results if item["name"] == "update_state"]
+        reset = [item for item in results if item["name"] == "reset_round"]
+        assert update and update[0]["ok"] is False
+        assert reset and reset[0]["ok"] is False
+        assert "update_state" in reset[0]["output"]
+        assert s["run"].get("state") is None or "state" not in s["run"]
+        assert "pending_round_reset" not in s["run"]
+        assert not any(item["tier"] == "round_reset" for item in events(m, s["id"], "compaction"))
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_scheduled_reset_skipped_if_state_cleared(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path, context_tokens=2000), chat=Script([Completion(content="done")]))
+        await m.start()
+        s = await wait_status(m, m.create("task")["id"], "done")
+        sid = s["id"]
+        run = {**m.db.get_session(sid)["run"], "pending_round_reset": True, "chars_per_token": 3.0}
+        run.pop("state", None)
+        padded = s["context"] + [
+            {"role": "assistant", "content": "x" * 4000, "tool_calls": [call("read_file", 9, path="a")]},
+            {"role": "tool", "tool_call_id": "c9-read_file", "content": "y" * 4000},
+            {"role": "assistant", "content": "used it"},
+        ]
+        m.db.update_session(sid, context=padded, run=run)
+        before = len(m.db.events(sid))
+        await m.runner._maybe_compact(m.db.get_session(sid))
+        s = m.db.get_session(sid)
+        tiers = [e["data"]["tier"] for e in m.db.events(sid)[before:] if e["type"] == "compaction"]
+        assert "round_reset" not in tiers
+        assert any(tier in ("elide", "summary") for tier in tiers)
+        assert "pending_round_reset" not in s["run"]
+        assert "harness_round_resets_total 0" in render_metrics(m)
+        with pytest.raises(AssertionError, match="no tagged state"):
+            _state_from_context(s["context"])
         await m.stop()
     asyncio.run(body())

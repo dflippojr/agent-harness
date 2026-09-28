@@ -63,3 +63,20 @@ This payload does **not** include `tokens_before`, `tokens_after`, or
 `summarized_messages`. Those fields belong to the `elide` and `summary` tiers.
 The web UI, CLI, and Markdown transcript render a mask event as a one-line
 note using `tokens_saved` only.
+
+## Round reset
+
+After masking, compaction may **reset** the conversation instead of eliding or
+summarizing. That happens for an explicit `reset_round` tool call, or when
+estimated tokens reach `compaction.reset_at` of the context window. Both paths
+use the same check: a valid saved state must exist (`update_state` succeeded
+and the run still holds that object). The check runs at the moment the reset
+would apply, so a scheduled reset is skipped if state was cleared in between.
+
+`reset_round` without a valid saved state returns a tool error telling the
+model to call `update_state` first and does not schedule a reset. A threshold
+trigger with no valid state falls through to ordinary elide/summary and does
+not increment round-reset accounting. A successful reset keeps the pinned
+head, injects the tagged state (including derived `files_modified`), a fixed
+next-step message, and the latest tool-call exchange.
+

@@ -76,8 +76,9 @@ def tool_schemas(read_lines: int, target: str = "tower") -> list[dict]:
             "next_step": {"type": "string"},
             "notes": {"type": "string"},
         }, ["goal"]),
-        _fn("reset_round", "Clear older conversation and continue from saved state plus this turn. Call "
-                           "update_state first so goal, plan, errors, and next_step survive. No arguments.", {}),
+        _fn("reset_round", "Clear older conversation and continue from saved state plus this turn. "
+                           "Requires a valid saved state from update_state; without one this call returns an "
+                           "error and does not schedule a reset. No arguments.", {}),
         _fn("update_notes", "Deprecated alias: set only the notes field of saved state and leave every other "
                             "field unchanged.", {
             "notes": {"type": "string"},
