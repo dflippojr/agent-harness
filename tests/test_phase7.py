@@ -389,11 +389,16 @@ def test_cron_next(expr, after, expected):
     assert Cron(expr).next_after(ts(*after)) == ts(*expected)
 
 
-@pytest.mark.parametrize("bad", ["61 * * * *", "* * *", "0 8 * * funday", "5-1 * * * *", "*/0 * * * *", "0 0 31 2 *"])
-def test_cron_rejects(bad):
+@pytest.mark.parametrize("bad", ["61 * * * *", "* * *", "0 8 * * funday", "5-1 * * * *", "*/0 * * * *"])
+def test_cron_rejects_invalid_expressions(bad):
+    with pytest.raises(CronError):
+        Cron(bad)
+
+
+def test_cron_rejects_impossible_calendar_date():
     after = ts(2026, 1, 1, 0, 0)
     with pytest.raises(CronError):
-        Cron(bad).next_after(after)
+        Cron("0 0 31 2 *").next_after(after)
 
 
 def test_parse_status():
