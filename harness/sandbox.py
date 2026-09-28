@@ -21,6 +21,17 @@ class SandboxUnavailable(Exception):
     """Docker isn't reachable or the container can't be started."""
 
 
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+    _CancelIoEx = ctypes.WinDLL("kernel32", use_last_error=True).CancelIoEx
+    _CancelIoEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _CancelIoEx.restype = ctypes.c_int
+else:
+    msvcrt = None
+    _CancelIoEx = None
+
+
 def _spawn(args: list[str], has_input: bool, env: dict | None) -> subprocess.Popen:
     return subprocess.Popen(
         args, stdin=subprocess.PIPE if has_input else subprocess.DEVNULL,
@@ -40,6 +51,37 @@ def _pump_stream(stream, cap: CappedStream) -> None:
         pass
 
 
+def _read_end(stream) -> tuple[int | None, int | None]:
+    """Return (fd, native handle) captured before a pump blocks in read()."""
+    if stream is None:
+        return None, None
+    try:
+        fd = stream.fileno()
+    except (OSError, ValueError):
+        return None, None
+    handle = None
+    if msvcrt is not None:
+        try:
+            handle = msvcrt.get_osfhandle(fd)
+        except OSError:
+            handle = None
+    return fd, handle
+
+
+def _unblock_read(fd: int | None, handle: int | None) -> None:
+    """Wake a pump blocked in read() when a grandchild still holds the write end.
+
+    On Windows CloseHandle/os.close wait for pending I/O, so CancelIoEx first.
+    """
+    if _CancelIoEx is not None and handle is not None:
+        _CancelIoEx(handle, None)
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict | None,
                   started: list, cancelled: threading.Event) -> tuple[int, str, str]:
     """Spawn, wait and kill in one worker thread. The process is published in `started` the moment it exists, and
@@ -54,6 +96,8 @@ def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict
     if cancelled.is_set():
         proc.kill()
     out_cap, err_cap = CappedStream(), CappedStream()
+    out_fd, out_handle = _read_end(proc.stdout)
+    err_fd, err_handle = _read_end(proc.stderr)
     pumps = [
         threading.Thread(target=_pump_stream, args=(proc.stdout, out_cap), daemon=True),
         threading.Thread(target=_pump_stream, args=(proc.stderr, err_cap), daemon=True),
@@ -79,7 +123,13 @@ def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict
         except subprocess.TimeoutExpired:
             pass
     for t in pumps:
-        t.join(timeout=10)
+        t.join(timeout=1)
+    if any(t.is_alive() for t in pumps):
+        _unblock_read(out_fd, out_handle)
+        _unblock_read(err_fd, err_handle)
+        for t in pumps:
+            t.join(timeout=10)
+        proc.stdout = proc.stderr = None
     out, err = out_cap.get(), err_cap.get()
     if timed_out:
         return 124, out, err + f"\n[timed out after {timeout:.0f}s]"
