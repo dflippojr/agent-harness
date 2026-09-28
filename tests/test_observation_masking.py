@@ -56,6 +56,16 @@ def test_failures_and_unknown_legacy_outcomes_stay_verbatim():
         assert not artifacts
 
 
+def test_mask_receipt_uses_full_output_when_context_result_was_capped():
+    full = "z" * 25000
+    messages = _turn(content=full[:2000])
+    masked, artifacts, _ = compaction.mask_used_results(
+        messages, {"c1": {"ok": True}}, 2000, {"c1": full})
+    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()
+    assert f"characters={len(full)}" in masked[1]["content"]
+    assert digest in artifacts and artifacts[digest] == full
+
+
 def test_artifact_full_text_ranges_hash_and_resume(tmp_path):
     text = "😀" * 22001
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()

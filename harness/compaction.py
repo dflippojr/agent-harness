@@ -65,7 +65,8 @@ def last_turn_start(messages: list[dict]) -> int:
     return len(messages)
 
 
-def mask_used_results(messages: list[dict], outcomes: dict, minimum: int) -> tuple[list[dict], dict[str, str], int]:
+def mask_used_results(messages: list[dict], outcomes: dict, minimum: int,
+                      full_outputs: dict[str, str] | None = None) -> tuple[list[dict], dict[str, str], int]:
     """Replace old successful tool results with receipts and return (context, artifacts, chars_saved)."""
     out = copy.deepcopy(messages)
     call_info = {}
@@ -83,7 +84,7 @@ def mask_used_results(messages: list[dict], outcomes: dict, minimum: int) -> tup
         call_id = message.get("tool_call_id")
         outcome = outcomes.get(call_id, {})
         name, args = call_info.get(call_id, (outcome.get("name", ""), "{}"))
-        content = message.get("content") or ""
+        content = (full_outputs or {}).get(call_id, message.get("content") or "")
         if (outcome.get("ok") is not True or name == "read_artifact" or len(content) < minimum):
             continue
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -92,7 +93,7 @@ def mask_used_results(messages: list[dict], outcomes: dict, minimum: int) -> tup
         receipt = (f"[Observation receipt] tool={name} arguments={rendered_args} "
                    f"characters={len(content)} sha256={digest} "
                    f"Recover with read_artifact(artifact_id={digest}, start, end).")
-        saved += len(content) - len(receipt)
+        saved += len(message.get("content") or "") - len(receipt)
         message["content"] = receipt
     return out, artifacts, saved
 

@@ -8,6 +8,7 @@ approval, or a tool call that was interrupted mid-run).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import contextlib
 import json
 import logging
@@ -1585,10 +1586,12 @@ class Runner:
         except (ToolError, OSError, UnicodeError) as e:
             ok = False
             output = f"Error: {e}"
+        artifact_content = output if ok and len(output) >= self.cfg.mask_min_chars else None
         if len(output) > max_chars:
             output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
-        self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started)
+        self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
+                            artifact_content=artifact_content)
         return output
 
     async def _call_images(self, sid: str, s: dict, ws: Workspace, kit, name: str, args: dict) -> str:
@@ -1606,7 +1609,8 @@ class Runner:
         run[counter] = run.get(counter, 0) + 1
         self.db.update_session(sid, run=run)
 
-    def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0) -> None:
+    def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
+                       artifact_content: str | None = None) -> None:
         with self.db.tx():
             s = self.db.get_session(sid)
             run = s["run"]
@@ -1616,9 +1620,13 @@ class Runner:
             if (run.get("executing") or {}).get("id") == call["id"]:
                 run["executing"] = None
             context = s["context"] + [{"role": "tool", "tool_call_id": call["id"], "content": output}]
+            artifact_id = None
+            if artifact_content is not None:
+                artifact_id = hashlib.sha256(artifact_content.encode("utf-8")).hexdigest()
+                self.db.put_artifact(sid, artifact_id, artifact_content)
             self.db.update_session(sid, context=context, run=run)
             self.bus.emit(sid, "tool_result", {"id": call["id"], "name": name, "ok": ok,
-                                               "seconds": round(seconds, 2),
+                                               "artifact_id": artifact_id, "seconds": round(seconds, 2),
                                                "output": truncate_middle(output, 20000)})
 
     def _progress_reporter(self, sid: str, event: str, base: dict):
@@ -1649,8 +1657,15 @@ class Runner:
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
         events = self.db.events(sid)
         outcomes = {e["data"].get("id"): e["data"] for e in events if e["type"] == "tool_result"}
+        full_outputs = {}
+        for call_id, outcome in outcomes.items():
+            artifact_id = outcome.get("artifact_id")
+            if artifact_id:
+                recovered = self.db.read_artifact(sid, artifact_id)
+                if recovered is not None:
+                    full_outputs[call_id] = recovered[0]
         context, artifacts, masked_chars = compaction.mask_used_results(
-            s["context"], outcomes, self.cfg.mask_min_chars)
+            s["context"], outcomes, self.cfg.mask_min_chars, full_outputs)
         if artifacts:
             with self.db.tx():
                 for digest, content in artifacts.items():
