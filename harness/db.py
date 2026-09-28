@@ -579,6 +579,13 @@ class Database:
         requested_end = row["total"] if end is None else min(end, row["total"])
         return row["content"], requested_end > start + len(row["content"])
 
+    def full_artifact(self, sid: str, hash_: str) -> str | None:
+        """The whole stored string, uncapped. Only for the daemon's own masking; the model-facing read is bounded."""
+        with self.lock:
+            row = self.conn.execute("SELECT content FROM artifacts WHERE session_id = ? AND hash = ?",
+                                    (sid, hash_)).fetchone()
+        return row["content"] if row else None
+
     # draft review comments
     def add_review_comment(self, sid: str, c: dict) -> dict:
         row = {"id": "rc-" + secrets.token_hex(5), "session_id": sid, "created_at": time.time(), **c}

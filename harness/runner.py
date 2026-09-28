@@ -1658,12 +1658,14 @@ class Runner:
         events = self.db.events(sid)
         outcomes = {e["data"].get("id"): e["data"] for e in events if e["type"] == "tool_result"}
         full_outputs = {}
+        masked = {m.get("tool_call_id") for m in s["context"]
+                  if m.get("role") == "tool" and (m.get("content") or "").startswith(compaction.RECEIPT_PREFIX)}
         for call_id, outcome in outcomes.items():
             artifact_id = outcome.get("artifact_id")
-            if artifact_id:
-                recovered = self.db.read_artifact(sid, artifact_id)
+            if artifact_id and call_id not in masked:
+                recovered = self.db.full_artifact(sid, artifact_id)
                 if recovered is not None:
-                    full_outputs[call_id] = recovered[0]
+                    full_outputs[call_id] = recovered
         context, artifacts, masked_chars = compaction.mask_used_results(
             s["context"], outcomes, self.cfg.mask_min_chars, full_outputs)
         if artifacts:
@@ -1671,8 +1673,9 @@ class Runner:
                 for digest, content in artifacts.items():
                     self.db.put_artifact(sid, digest, content)
                 self.db.update_session(sid, context=context)
-                self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": max(0, int(masked_chars / cpt)),
-                                                   "characters_saved": masked_chars})
+                if masked_chars > 0:
+                    self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
+                                                       "characters_saved": masked_chars})
             s = self.db.get_session(sid)
         if before < self.cfg.elide_at * n:
             return s
