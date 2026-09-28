@@ -26,11 +26,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .config import RunnerConfig
+from .config import RunnerConfig, ToolOutputConfig
 from .compat import runner_compatibility
 from .compat import PROTOCOLS
 from .fileops import FILE_TOOLS, MAX_PUT_BYTES, ToolError
 from .tools import shell_result, tool_schemas
+from .verify import ToolOutput, run_verify
 
 log = logging.getLogger("harness.remote")
 
@@ -261,16 +262,30 @@ class RemoteWorkspace:
 
     homelab = None
 
-    def __init__(self, hub: RunnerHub, target: str, sid: str, context_tokens: int):
+    def __init__(self, hub: RunnerHub, target: str, sid: str, context_tokens: int,
+                 tool_output: ToolOutputConfig | None = None, verify_checks: list | None = None):
         self.hub = hub
         self.target = target
         self.sid = sid
         self.context_tokens = context_tokens
-        self.read_lines = 2000
-        self.output_chars = max(8000, int(context_tokens * 0.08 * 3.5))
+        self.tool_output = tool_output or ToolOutputConfig()
+        self.verify_checks = list(verify_checks or [])
+        self.read_lines = self.tool_output.read_file_lines
+        self.output_chars = self.tool_output.run_shell_chars
 
     def schemas(self) -> list[dict]:
-        return tool_schemas(self.read_lines, target=self.target)
+        limits = self.tool_output
+        return tool_schemas(self.read_lines, target=self.target, search_matches=limits.search_matches,
+                            read_file_lines_max=limits.read_file_lines_max,
+                            search_matches_max=limits.search_matches_max,
+                            run_shell_chars=limits.run_shell_chars,
+                            run_shell_chars_max=limits.run_shell_chars_max)
+
+    def _file_params(self, name: str, args: dict) -> dict:
+        limits = self.tool_output
+        return {"name": name, "args": args, "context_tokens": self.context_tokens,
+                "read_lines": limits.read_file_lines, "read_lines_max": limits.read_file_lines_max,
+                "search_matches": limits.search_matches, "search_matches_max": limits.search_matches_max}
 
     async def _call(self, op: str, params: dict, timeout: float = TOOL_TIMEOUT_SECONDS):
         try:
@@ -282,16 +297,25 @@ class RemoteWorkspace:
 
     async def call(self, name: str, args: dict) -> str:
         if name in FILE_TOOLS:
-            return await self._call("file", {"name": name, "args": args, "context_tokens": self.context_tokens})
+            return await self._call("file", self._file_params(name, args))
         if name == "run_shell":
             timeout = max(1, min(int(args.get("timeout", 120)), 1800))
             network = bool(args.get("network", False))
             out = await self._call("shell", {"command": args["command"], "timeout": timeout, "network": network},
                                    timeout=timeout + 90)
-            return shell_result(out["code"], out["output"], network, self.output_chars)
+            return shell_result(out["code"], out["output"], network)
+        if name == "verify":
+            return await self.verify()
         if name == "git_clone":
             return await self._call("git_clone", args, timeout=700)
         raise ToolError(f"{name} isn't available on the {self.target}")
+
+    async def verify(self) -> ToolOutput:
+        async def exec_cmd(command: str, timeout: int):
+            out = await self._call("shell", {"command": command, "timeout": timeout, "network": False},
+                                   timeout=timeout + 90)
+            return out["code"], out["output"]
+        return await run_verify(self.verify_checks, exec_cmd, self.tool_output.verify_summary_chars)
 
     async def put_file(self, path: str, data: bytes) -> str:
         """Copy bytes generated on the tower into this session's runner workspace."""

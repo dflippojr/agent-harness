@@ -11,6 +11,8 @@ from pathlib import Path
 from .fileops import (FILE_TOOLS, SKIP_DIRS, FileOps, ToolError, dir_size, normalize_path, resolve_path,  # noqa: F401
                       truncate_middle)
 from .sandbox import Sandbox, run_cmd
+from .config import ToolOutputConfig
+from .verify import ARTIFACT_FOOTER, ToolOutput, run_verify
 
 SHELL_DESCRIPTIONS = {
     "tower": ("Run a shell command in the Linux sandbox at /workspace and return exit code and output. "
@@ -29,10 +31,13 @@ def _fn(name: str, description: str, properties: dict, required: list[str] | Non
     }}
 
 
-def tool_schemas(read_lines: int, target: str = "tower") -> list[dict]:
+def tool_schemas(read_lines: int, target: str = "tower", *, search_matches: int = 100,
+                 read_file_lines_max: int = 2000, search_matches_max: int = 500,
+                 run_shell_chars: int = 20000, run_shell_chars_max: int = 100000,
+                 include_verify: bool = True) -> list[dict]:
     clone = ("Clone a git repository into the workspace. url is an https URL, or local:<name> for a repository "
              "hosted on this machine." if target == "tower" else "Clone a git repository (https URL) into the workspace.")
-    return [
+    schemas = [
         _fn("list_files", "List files and directories under a workspace path.", {
             "path": {"type": "string", "description": "Directory relative to the workspace root. Default '.'"},
             "max_depth": {"type": "integer", "description": "Levels to descend. Default 2."},
@@ -42,10 +47,17 @@ def tool_schemas(read_lines: int, target: str = "tower") -> list[dict]:
             "path": {"type": "string"},
             "start_line": {"type": "integer", "description": "1-based first line. Default 1."},
             "end_line": {"type": "integer", "description": "1-based last line, inclusive."},
+            "max_lines": {"type": "integer",
+                          "description": f"Lines to return this call. Default {read_lines}, max {read_file_lines_max}."},
         }, ["path"]),
-        _fn("search", "Search file contents for a regular expression. Returns up to 200 'path:line: text' matches.", {
+        _fn("search", f"Search file contents for a regular expression. Returns up to {search_matches} "
+                      "'path:line: text' matches starting at offset (0-based match index). Stopping reports "
+                      "at least N matches rather than scanning for an exact total; continue with offset from the footer.", {
             "pattern": {"type": "string"},
             "path": {"type": "string", "description": "File or directory to search. Default '.'"},
+            "offset": {"type": "integer", "description": "0-based match index to start from. Default 0."},
+            "max_matches": {"type": "integer",
+                            "description": f"Matches to return this call. Default {search_matches}, max {search_matches_max}."},
         }, ["pattern"]),
         _fn("write_file", "Create or overwrite a file. Parent directories are created.", {
             "path": {"type": "string"}, "content": {"type": "string"},
@@ -57,6 +69,8 @@ def tool_schemas(read_lines: int, target: str = "tower") -> list[dict]:
             "command": {"type": "string"},
             "timeout": {"type": "integer", "description": "Seconds. Default 120, max 1800."},
             "network": {"type": "boolean", "description": "Allow internet access for this command. Default false."},
+            "max_chars": {"type": "integer",
+                          "description": f"Characters of output to return. Default {run_shell_chars}, max {run_shell_chars_max}."},
         }, ["command"]),
         _fn("git_clone", clone, {
             "url": {"type": "string"},
@@ -87,6 +101,16 @@ def tool_schemas(read_lines: int, target: str = "tower") -> list[dict]:
             "answer": {"type": "string"},
         }, ["answer"]),
     ]
+    if include_verify:
+        schemas.insert(-5, _fn(
+            "verify",
+            "Run every project check configured in YAML (no arguments) and return a bounded failure summary. "
+            "Commands are owner-trusted and run serially with no network. Pytest parsing needs --tb=short -ra; "
+            "other checkers use a generic error/fail scrape. Truncated output is recovered with read_artifact "
+            "on the raw log, not by rerunning.",
+            {},
+        ))
+    return schemas
 
 
 def validate_args(schema: dict, args: dict) -> dict:
@@ -118,12 +142,22 @@ def _coerce_arg(key: str, kind: str | None, value):
     return value
 
 
-def shell_result(code: int, output: str, network: bool, output_chars: int) -> str:
-    text = f"exit code {code}\n{truncate_middle(output, output_chars)}"
+def shell_result(code: int, output: str, network: bool, output_chars: int | None = None) -> str:
+    """Format exit code and output. Truncation happens after the full string is stored as an artifact."""
+    text = f"exit code {code}\n{output}"
     if code != 0 and not network and re.search(r"Temporary failure in name resolution|Could not resolve host|"
                                                r"Network is unreachable|nodename nor servname", output):
         text += "\n[hint: the sandbox has no network; rerun with network: true to request access]"
     return text
+
+
+def bound_shell_text(text: str, limit: int, artifact_id: str) -> str:
+    if len(text) <= limit:
+        return text
+    footer = ARTIFACT_FOOTER.format(total=len(text), artifact_id=artifact_id)
+    if "capture capped at" in text:
+        footer = footer.replace("characters total;", "characters total (capture capped);")
+    return truncate_middle(text, limit) + "\n" + footer
 
 
 class Workspace:
@@ -132,8 +166,14 @@ class Workspace:
     target = "tower"
 
     def __init__(self, root: Path, sandbox: Sandbox, repos_dir: Path, context_tokens: int, homelab=None,
-                 public_clone_only: bool = False, clone_max_bytes: int | None = None):
-        self.files = FileOps(root, context_tokens)
+                 public_clone_only: bool = False, clone_max_bytes: int | None = None,
+                 tool_output: ToolOutputConfig | None = None, verify_checks: list | None = None):
+        self.tool_output = tool_output or ToolOutputConfig()
+        self.verify_checks = list(verify_checks or [])
+        self.files = FileOps(root, context_tokens, read_lines=self.tool_output.read_file_lines,
+                             read_lines_max=self.tool_output.read_file_lines_max,
+                             search_matches=self.tool_output.search_matches,
+                             search_matches_max=self.tool_output.search_matches_max)
         self.root = self.files.root
         self.sandbox = sandbox
         self.repos_dir = repos_dir
@@ -141,7 +181,7 @@ class Workspace:
         self.public_clone_only = public_clone_only
         self.clone_max_bytes = clone_max_bytes
         self.read_lines = self.files.read_lines
-        self.output_chars = max(8000, int(context_tokens * 0.08 * 3.5))
+        self.output_chars = self.tool_output.run_shell_chars
 
     def resolve(self, path: str | None) -> Path:
         return self.files.resolve(path)
@@ -156,9 +196,9 @@ class Workspace:
         return await asyncio.to_thread(dir_size, self.root)
 
     # sandbox tools (async)
-    async def run_shell(self, command: str, timeout: int = 120, network: bool = False) -> str:
+    async def run_shell(self, command: str, timeout: int = 120, network: bool = False, max_chars=None) -> str:
         code, output = await self.sandbox.exec(command, timeout=max(1, min(int(timeout), 1800)), network=network)
-        return shell_result(code, output, network, self.output_chars)
+        return shell_result(code, output, network)
 
     def _clone_source(self, url: str) -> tuple[str, Path | None, str]:
         """(url to clone, local repository to clone from or None, default destination) for a git_clone url."""
@@ -219,11 +259,23 @@ class Workspace:
         if self.homelab is not None:
             from .homelab import schemas
             extra = schemas(self.homelab.cfg)
-        return tool_schemas(self.read_lines) + extra
+        limits = self.tool_output
+        return tool_schemas(self.read_lines, search_matches=limits.search_matches,
+                            read_file_lines_max=limits.read_file_lines_max,
+                            search_matches_max=limits.search_matches_max,
+                            run_shell_chars=limits.run_shell_chars,
+                            run_shell_chars_max=limits.run_shell_chars_max) + extra
+
+    async def verify(self) -> ToolOutput:
+        async def exec_cmd(command: str, timeout: int):
+            return await self.sandbox.exec(command, timeout=timeout, network=False)
+        return await run_verify(self.verify_checks, exec_cmd, self.tool_output.verify_summary_chars)
 
     async def call(self, name: str, args: dict) -> str:
         if self.homelab is not None and name in self.homelab.tool_names:
             return await self.homelab.call(name, args)
+        if name == "verify":
+            return await self.verify()
         if name in ("run_shell", "git_clone"):
             return await getattr(self, name)(**args)
         return await asyncio.to_thread(getattr(self.files, name), **args)

@@ -12,6 +12,8 @@ from pathlib import Path
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 MAX_PUT_BYTES = 32 * 1024 * 1024  # binary files the daemon may send to a runner (ComfyUI PNGs are much smaller)
+OUTPUT_CAP = 1_000_000  # characters of command output kept in the sandbox / Mac runner
+CAPTURE_CAPPED_NOTE = f"[capture capped at {OUTPUT_CAP} characters per stream]"
 
 
 class ToolError(Exception):
@@ -23,6 +25,74 @@ def truncate_middle(text: str, limit: int) -> str:
         return text
     half = limit // 2
     return f"{text[:half]}\n... [{len(text) - limit} characters truncated] ...\n{text[-half:]}"
+
+
+def cap_command_output(text: str, limit: int = OUTPUT_CAP) -> str:
+    """Hard capture ceiling so a runaway command cannot exhaust memory."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}\n... [output cut] ...\n{text[-half:]}"
+
+
+class CappedStream:
+    """Keep at most `limit` characters (head + tail) while still draining the pipe."""
+
+    def __init__(self, limit: int = OUTPUT_CAP):
+        self.limit = limit
+        self.half = limit // 2
+        self.total = 0
+        self.capped = False
+        self._buf: list[str] = []
+        self._buf_len = 0
+        self._head: str | None = None
+        self._tail: list[str] = []
+        self._tail_len = 0
+
+    def feed(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self.total += len(chunk)
+        if not self.capped:
+            self._buf.append(chunk)
+            self._buf_len += len(chunk)
+            if self._buf_len > self.limit:
+                self.capped = True
+                joined = "".join(self._buf)
+                self._head = joined[:self.half]
+                tail = joined[-self.half:]
+                self._tail = [tail]
+                self._tail_len = len(tail)
+                self._buf = []
+                self._buf_len = 0
+            return
+        self._tail.append(chunk)
+        self._tail_len += len(chunk)
+        extra = self._tail_len - self.half
+        while extra > 0 and self._tail:
+            first = self._tail[0]
+            if len(first) <= extra:
+                self._tail.pop(0)
+                self._tail_len -= len(first)
+                extra -= len(first)
+            else:
+                self._tail[0] = first[extra:]
+                self._tail_len -= extra
+                extra = 0
+
+    def text(self) -> str:
+        if not self.capped:
+            return "".join(self._buf)
+        tail = "".join(self._tail)
+        if len(tail) > self.half:
+            tail = tail[-self.half:]
+        return f"{self._head}\n... [output cut] ...\n{tail}"
+
+    def get(self) -> str:
+        body = self.text()
+        if not self.capped:
+            return body
+        return f"{body}\n{CAPTURE_CAPPED_NOTE}"
 
 
 def resolve_path(p: Path) -> Path:
@@ -88,12 +158,35 @@ def dir_size(path: Path) -> int:
 
 
 class FileOps:
-    def __init__(self, root: Path, context_tokens: int, prefixes: tuple[str, ...] = ("/workspace",)):
+    def __init__(self, root: Path, context_tokens: int, prefixes: tuple[str, ...] = ("/workspace",),
+                 read_lines: int = 400, read_lines_max: int = 2000,
+                 search_matches: int = 100, search_matches_max: int = 500):
         self.root = resolve_path(root)
         self.prefixes = prefixes
+        self.read_lines = read_lines
+        self.read_lines_max = read_lines_max
+        self.search_matches = search_matches
+        self.search_matches_max = search_matches_max
         # Size reads to the context window: short pages made Qwen answer from page 1 in Phase 0.
-        self.read_lines = 2000
         self.read_chars = max(8000, int(context_tokens * 0.25 * 3.5))
+
+    def _page_lines(self, max_lines=None) -> int:
+        if max_lines is None:
+            return max(1, self.read_lines)
+        try:
+            requested = int(max_lines)
+        except (TypeError, ValueError):
+            return max(1, self.read_lines)
+        return max(1, min(requested, self.read_lines_max))
+
+    def _match_limit(self, max_matches=None) -> int:
+        if max_matches is None:
+            return max(1, self.search_matches)
+        try:
+            requested = int(max_matches)
+        except (TypeError, ValueError):
+            return max(1, self.search_matches)
+        return max(1, min(requested, self.search_matches_max))
 
     def resolve(self, path: str | None) -> Path:
         rel = normalize_path(path, self.prefixes)
@@ -129,13 +222,14 @@ class FileOps:
         suffix = "\n... (listing truncated at 500 entries)" if len(entries) >= 500 else ""
         return "\n".join(entries) + suffix if entries else "(empty directory)"
 
-    def read_file(self, path: str, start_line: int = 1, end_line: int | None = None) -> str:
+    def read_file(self, path: str, start_line: int = 1, end_line: int | None = None, max_lines=None) -> str:
         p = self.resolve(path)
         if not p.is_file():
             raise ToolError(f"no such file: {path}")
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(1, start_line)
-        end = min(len(lines), end_line or len(lines), start + self.read_lines - 1)
+        page = self._page_lines(max_lines)
+        end = min(len(lines), end_line or len(lines), start + page - 1)
         body, shown_end = [], start - 1
         size = 0
         for n in range(start, end + 1):
@@ -160,25 +254,47 @@ class FileOps:
                     found.append(p)
         return found
 
-    def search(self, pattern: str, path: str = ".") -> str:
+    def search(self, pattern: str, path: str = ".", offset: int = 0, max_matches=None) -> str:
         try:
             regex = re.compile(pattern)
         except re.error:
             regex = re.compile(re.escape(pattern))
+        try:
+            skip = max(0, int(offset))
+        except (TypeError, ValueError):
+            skip = 0
+        limit = self._match_limit(max_matches)
         base = self.resolve(path)
         files = [base] if base.is_file() else self._walk_files(base)
         matches: list[str] = []
+        seen = 0
+        stopped = False
         for f in files:
             try:
                 text = f.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
             for n, line in enumerate(text.splitlines(), 1):
-                if regex.search(line):
-                    matches.append(f"{self.rel(f)}:{n}: {line[:300]}")
-                    if len(matches) >= 200:
-                        return "\n".join(matches) + "\n... (stopped at 200 matches)"
-        return "\n".join(matches) or "no matches"
+                if not regex.search(line):
+                    continue
+                if seen < skip:
+                    seen += 1
+                    continue
+                matches.append(f"{self.rel(f)}:{n}: {line[:300]}")
+                seen += 1
+                if len(matches) >= limit:
+                    stopped = True
+                    break
+            if stopped:
+                break
+        if not matches:
+            return "no matches"
+        text = "\n".join(matches)
+        if stopped:
+            start = skip + 1
+            end = skip + len(matches)
+            text += f"\n... (showing matches {start}-{end} of at least {end}; continue with offset={end})"
+        return text
 
     def write_file(self, path: str, content: str) -> str:
         p = self.resolve(path)

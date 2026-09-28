@@ -10,6 +10,12 @@
 # target:      tower (default) or a runner from harness.yaml `runners`, e.g. macbook. For a runner, repo is a path on
 #              that machine and must be under one of the runner's repo_roots; homelab tools aren't available.
 #
+# tool_output: optional overlay on the global tool_output: block in harness.yaml.
+# verify:      list of {name, command, timeout, parser?} checks for the verify tool. parser is pytest or
+#              generic; omitted means pytest iff the command matches \bpytest\b. Commands are owner-trusted
+#              and should include the flags the parser is tested on (pytest: --tb=short -ra). A project
+#              with no verify: list (including web-created projects) gets a "no configured checks" error.
+#
 # Policy rules are checked in order, project rules first, then the built-in defaults (harness/policy.py).
 # The first matching rule wins. Rule fields:
 #   tool:    tool name, list of names, or "*"

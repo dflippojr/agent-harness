@@ -21,7 +21,7 @@ from . import compaction, efficiency, grounding, llm, projects, state as agent_s
 from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
-from .config import Config
+from .config import Config, resolve_tool_output, clamp_tool_limit
 from .db import Database
 from .homelab import Homelab
 from .principal import OWNER_USER_ID, session_user_id
@@ -32,7 +32,8 @@ from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
-from .tools import ToolError, Workspace, truncate_middle, validate_args
+from .tools import ToolError, Workspace, bound_shell_text, truncate_middle, validate_args
+from .verify import ToolOutput, bound_rendered, render_verify
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
 
 log = logging.getLogger("harness.runner")
@@ -139,6 +140,15 @@ class _DeltaStream:
             self.flush()
 
 
+def _without_unstored_artifact(output: str, digest: str) -> str:
+    """Strip a read_artifact pointer if the matching artifact was never stored."""
+    if not digest or digest not in output:
+        return output
+    recover = f"recover with read_artifact(artifact_id={digest}, start=0, end=20000)"
+    output = output.replace(recover, "recovery unavailable; raw output was not saved")
+    return output.replace(digest, "")
+
+
 class Runner:
     def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat,
                  warmer: ModelWarmer | None = None, hub: RunnerHub | None = None):
@@ -192,9 +202,12 @@ class Runner:
 
     def workspace(self, s: dict) -> Workspace | RemoteWorkspace:
         model = self.cfg.models[s["model"]]
-        if s["target"] != "tower":
-            return RemoteWorkspace(self.hub, s["target"], s["id"], model.context_tokens)
         project = self.project_for(s)
+        limits = resolve_tool_output(self.cfg, project)
+        checks = list(project.verify) if project else []
+        if s["target"] != "tower":
+            return RemoteWorkspace(self.hub, s["target"], s["id"], model.context_tokens,
+                                   tool_output=limits, verify_checks=checks)
         defaults = self._app_defaults_for_session(s)
         from . import storage
         user_id = session_user_id(s)
@@ -204,7 +217,8 @@ class Runner:
         repos = storage.repos_dir(self.cfg, user_id)
         budget = self._member_clone_budget(user_id) if member else None
         return Workspace(Path(s["workspace"]), self.sandbox(s), repos, model.context_tokens, homelab,
-                         public_clone_only=member, clone_max_bytes=budget)
+                         public_clone_only=member, clone_max_bytes=budget,
+                         tool_output=limits, verify_checks=checks)
 
     def daemon_toolkits(self, s: dict) -> list:
         """Tools that run in the daemon for every target (memory library, web, session search), as enabled for the
@@ -1624,9 +1638,40 @@ class Runner:
         except (ToolError, OSError, UnicodeError) as e:
             ok = False
             output = f"Error: {e}"
+        extra = {}
+        artifact_content = None
+        if isinstance(output, ToolOutput):
+            extra = dict(output.extra)
+            artifact_content = output.artifact_content
+            output = output.text
+        # Store the untruncated shell string, then middle-truncate the model-facing text.
+        # run_shell and verify share this artifact_tool_available gate: a recover-with-read_artifact
+        # footer is only valid when the session can actually call that tool. Keep the branches in sync.
+        if ok and name == "run_shell":
+            limits = resolve_tool_output(self.cfg, self.project_for(s))
+            cap = clamp_tool_limit(args.get("max_chars"), limits.run_shell_chars, limits.run_shell_chars_max)
+            if len(output) > cap:
+                artifact_content = output
+                if self.artifact_tool_available(s):
+                    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
+                    output = bound_shell_text(output, cap, digest)
+                else:
+                    output = truncate_middle(output, cap)
+        elif ok and name == "verify" and extra.get("verify") is not None:
+            limits = resolve_tool_output(self.cfg, self.project_for(s))
+            cap = limits.verify_summary_chars
+            rendered = render_verify(extra["verify"])
+            raw = artifact_content or ""
+            if self.artifact_tool_available(s):
+                output = bound_rendered(rendered, cap, raw)
+            else:
+                output = bound_rendered(rendered, cap, raw, artifact_available=False)
         # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
-        artifact_content = (output if ok and name != "read_artifact" and len(output) >= self.cfg.mask_min_chars
-                            and self.artifact_tool_available(s) else None)
+        if artifact_content is None:
+            artifact_content = (output if ok and name != "read_artifact" and len(output) >= self.cfg.mask_min_chars
+                                and self.artifact_tool_available(s) else None)
+        elif not self.artifact_tool_available(s):
+            artifact_content = None
         if ok and name in ("write_file", "edit_file"):
             path = str(args.get("path") or "").replace("\\", "/")
             if path:
@@ -1640,7 +1685,7 @@ class Runner:
             output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
         self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
-                            artifact_content=artifact_content, output_chars=output_chars)
+                            artifact_content=artifact_content, extra=extra, output_chars=output_chars)
         return output
 
     def _read_artifact(self, sid: str, args: dict) -> str:
@@ -1673,7 +1718,8 @@ class Runner:
         self.db.update_session(sid, run=run)
 
     def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
-                       artifact_content: str | None = None, output_chars: int | None = None) -> None:
+                       artifact_content: str | None = None, extra: dict | None = None,
+                       output_chars: int | None = None) -> None:
         with self.db.tx():
             s = self.db.get_session(sid)
             run = s["run"]
@@ -1686,12 +1732,20 @@ class Runner:
             artifact_id = None
             if artifact_content is not None:
                 artifact_id = hashlib.sha256(artifact_content.encode("utf-8")).hexdigest()
-                self.db.put_artifact(sid, artifact_id, artifact_content)
+                try:
+                    self.db.put_artifact(sid, artifact_id, artifact_content)
+                except Exception:
+                    output = _without_unstored_artifact(output, artifact_id)
+                    context[-1]["content"] = output
+                    artifact_id = None
+            payload = {"id": call["id"], "name": name, "ok": ok, "artifact_id": artifact_id,
+                       "seconds": round(seconds, 2),
+                       "output_chars": len(output) if output_chars is None else output_chars,
+                       "output": truncate_middle(output, 20000)}
+            if extra:
+                payload.update(extra)
             self.db.update_session(sid, context=context, run=run)
-            self.bus.emit(sid, "tool_result", {"id": call["id"], "name": name, "ok": ok,
-                                               "artifact_id": artifact_id, "seconds": round(seconds, 2),
-                                               "output_chars": len(output) if output_chars is None else output_chars,
-                                               "output": truncate_middle(output, 20000)})
+            self.bus.emit(sid, "tool_result", payload)
 
     def _progress_reporter(self, sid: str, event: str, base: dict):
         """on_progress callback that sends throttled ephemeral progress events for long prompts."""
