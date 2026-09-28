@@ -157,3 +157,28 @@ def test_artifact_cap_scoping_and_ranges(tmp_path):
     assert db.read_artifact("s1", digest) is None
     assert db.read_artifact("s2", digest) is not None
     db.close()
+
+
+def test_artifact_with_embedded_nuls_round_trips(tmp_path):
+    db = Database(tmp_path / "nul.db")
+    text = "\0start" + "a" * 100 + "\0mid" + "b" * 30000 + "end\0"
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    db.put_artifact("s1", digest, text)
+    assert db.full_artifact("s1", digest) == text
+    got, truncated = db.read_artifact("s1", digest, 0, 50)
+    assert (got, truncated) == (text[:50], False)
+    assert db.read_artifact("s1", digest, 103, 110) == (text[103:110], False)  # spans the middle NUL
+    assert db.read_artifact("s1", digest, len(text) - 6) == (text[-6:], False)  # ends in NUL
+    chunks, pos = [], 0
+    while True:
+        chunk, more = db.read_artifact("s1", digest, pos)
+        chunks.append(chunk)
+        pos += len(chunk)
+        if not more:
+            break
+    assert len(chunks[0]) == 20000 and len(chunks) == 2
+    recovered = "".join(chunks)
+    assert recovered == text
+    assert hashlib.sha256(recovered.encode("utf-8")).hexdigest() == digest
+    db.delete_session("s1")
+    assert db.read_artifact("s1", digest) is None

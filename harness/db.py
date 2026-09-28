@@ -569,15 +569,13 @@ class Database:
 
     def read_artifact(self, sid: str, hash_: str, start: int = 0, end: int | None = None) -> tuple[str, bool] | None:
         """Read a bounded character range from a session's full artifact string."""
-        with self.lock:
-            row = self.conn.execute(
-                "SELECT substr(content, ?, ?) AS content, length(content) AS total "
-                "FROM artifacts WHERE session_id = ? AND hash = ?",
-                (start + 1, 20000 if end is None else min(end - start, 20000), sid, hash_)).fetchone()
-        if not row:
+        # Slice in Python: SQLite length()/substr() stop at the first embedded NUL.
+        text = self.full_artifact(sid, hash_)
+        if text is None:
             return None
-        requested_end = row["total"] if end is None else min(end, row["total"])
-        return row["content"], requested_end > start + len(row["content"])
+        stop = len(text) if end is None else min(end, len(text))
+        chunk = text[start:min(stop, start + 20000)]
+        return chunk, stop > start + len(chunk)
 
     def full_artifact(self, sid: str, hash_: str) -> str | None:
         """The whole stored string, uncapped. Only for the daemon's own masking; the model-facing read is bounded."""
