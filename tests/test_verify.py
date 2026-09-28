@@ -97,19 +97,40 @@ def test_normalize_message_strips_timings_pids_and_hex():
 
 def test_parsers_stay_linear_on_long_adversarial_lines():
     import time
-    spaces = " " * 100_000
-    digits = "9" * 100_000
-    log = (f"FAILED{spaces}tests/test_a.py::test_a - boom\n"
-           f"ERROR{spaces}tests/test_b.py::test_b\n"
-           f"FAILED {digits}::test_c\n")
-    message = f"crash pid{spaces}4321 after 1.23s at 0xabc"
-    t0 = time.perf_counter()
-    parsed = parse_pytest(log)
-    norm = normalize_message(message)
-    normalize_message("x pid" + spaces)  # ReDoS shape: pid + spaces, no digits
-    normalize_message("pid" + spaces + "=" + spaces)
-    elapsed = time.perf_counter() - t0
-    assert elapsed < 0.25, f"linear parsers took {elapsed:.3f}s on 100k-char lines"
+
+    def _log(n: int) -> str:
+        spaces, digits = " " * n, "9" * n
+        return (f"FAILED{spaces}tests/test_a.py::test_a - boom\n"
+                f"ERROR{spaces}tests/test_b.py::test_b\n"
+                f"FAILED {digits}::test_c\n")
+
+    def _normalize_shapes(n: int) -> None:
+        spaces = " " * n
+        normalize_message(f"crash pid{spaces}4321 after 1.23s at 0xabc")
+        normalize_message("x pid" + spaces)  # ReDoS shape: pid + spaces, no digits
+        normalize_message("pid" + spaces + "=" + spaces)
+
+    def _timed(fn) -> float:
+        t0 = time.perf_counter()
+        fn()
+        return max(time.perf_counter() - t0, 1e-3)
+
+    small, large = 2_000, 200_000
+    parsed = parse_pytest(_log(large))
+    norm = normalize_message(f"crash pid{' ' * large}4321 after 1.23s at 0xabc")
+    for name, fn in (
+        ("parse_pytest", lambda n: parse_pytest(_log(n))),
+        ("parse_generic", lambda n: parse_generic(_log(n))),
+        ("normalize_message", _normalize_shapes),
+    ):
+        small_time = _timed(lambda fn=fn: fn(small))
+        large_time = _timed(lambda fn=fn: fn(large))
+        budget = small_time * (large / small) * 20
+        assert large_time < budget, (
+            f"{name} looks super-linear: {small_time:.4f}s at {small} chars vs "
+            f"{large_time:.4f}s at {large} chars (budget {budget:.4f}s)"
+        )
+    digits = "9" * large
     assert [p["nodeid"] for p in parsed] == [
         "tests/test_a.py::test_a", "tests/test_b.py::test_b", f"{digits}::test_c"]
     assert parsed[0]["message"] == "boom" and parsed[1]["kind"] == "error"
