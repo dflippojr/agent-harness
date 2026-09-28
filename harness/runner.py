@@ -1438,6 +1438,10 @@ class Runner:
             self.db.update_session(s["id"], run={**run, "origin_refreshed": True})
 
     async def _first_prepare(self, s: dict, project, ws: Path, remote: bool, member: bool) -> dict:
+        github_branch = (s.get("app_metadata") or {}).get("github_base_branch") or ""
+        if github_branch:
+            from dataclasses import replace
+            project = replace(project, base_branch=github_branch)
         if remote:
             return await self.hub.call(s["target"], "prepare", {"session": s["id"], "repo": project.repo,
                                                                 "base_branch": project.base_branch}, timeout=900)

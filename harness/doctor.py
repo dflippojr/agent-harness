@@ -78,6 +78,20 @@ def check_data_dir(r: Report, cfg) -> None:
         r.fail("Data directory", str(e))
 
 
+def check_github_token(r: Report, cfg) -> None:
+    """Never print the token or its path."""
+    if not cfg.github.token_file:
+        r.ok("GitHub task token", "not configured")
+        return
+    from .github_tasks import token
+    try:
+        token(cfg)
+    except Exception:
+        r.warn("GitHub task token", "configured but unreadable or insecure")
+    else:
+        r.ok("GitHub task token", "configured and readable")
+
+
 def check_provider_containers(r: Report, cfg) -> None:
     """Provider CLI images and their egress proxies; service profile only."""
     for image in sorted({backend.image for backend in cfg.backends.values() if backend.enabled}):
@@ -319,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
 
     check_gpu(r, cfg)
     check_data_dir(r, cfg)
+    check_github_token(r, cfg)
     check_docker(r, cfg)
     check_model_server(r, cfg)
     check_daemon(r, cfg)

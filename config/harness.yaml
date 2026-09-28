@@ -22,6 +22,10 @@ guests: []
 # assigns a name through /api/admin/v1/provider-credentials. File paths stay in local config, plaintext stays in the
 # file, and neither is stored in SQLite or returned by an API. Restrict each file to the daemon's OS account.
 provider_secret_files: {}
+# To enable New task > From issue / PR, set github.token_file in harness.local.yaml.
+# The file must live under data_dir and contain a read-only fine-grained GitHub token.
+# github:
+#   token_file: D:/Agents/harness/secrets/github-readonly.token
 # provider_secret_files:
 #   invoice-automation: D:/Agents/harness/secrets/invoice-automation.key
 
