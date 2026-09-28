@@ -28,6 +28,8 @@ class Completion:
     completion_tokens: int = 0
     prompt_tps: float = 0.0
     gen_tps: float = 0.0
+    cache_tokens: int | None = None
+    _saw_prompt_progress: bool = field(default=False, repr=False, compare=False)
 
 
 DeltaCallback = Callable[[str, str], Awaitable[None]]  # (kind: "content" | "reasoning", text)
@@ -39,9 +41,15 @@ ProgressCallback = Callable[[int, int, int], Awaitable[None]]
 async def _apply_chunk(chunk: dict, out: Completion, calls: dict[int, dict],
                        on_delta: DeltaCallback | None, on_progress: ProgressCallback | None) -> None:
     progress = chunk.get("prompt_progress")
-    if progress and on_progress:
-        await on_progress(int(progress.get("processed", 0)), int(progress.get("total", 0)),
-                          int(progress.get("cache", -1)))
+    if progress:
+        # First chunk only. -1 means the server omitted cache; never fall back to processed.
+        if not out._saw_prompt_progress:
+            out._saw_prompt_progress = True
+            cache = int(progress.get("cache", -1))
+            out.cache_tokens = None if cache < 0 else cache
+        if on_progress:
+            await on_progress(int(progress.get("processed", 0)), int(progress.get("total", 0)),
+                              int(progress.get("cache", -1)))
     if chunk.get("usage"):
         out.prompt_tokens = chunk["usage"].get("prompt_tokens", 0)
         out.completion_tokens = chunk["usage"].get("completion_tokens", 0)

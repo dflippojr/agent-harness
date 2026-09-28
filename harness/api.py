@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from . import access as access_mod
 from . import compat
 from . import config as config_mod
+from . import efficiency
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
 
@@ -1409,6 +1410,17 @@ async def cancel(ref: str, request: Request):
 async def get_transcript(ref: str, request: Request):
     m, sid, _ = owned_session(request, ref)
     return transcript.render(m.db, sid)
+
+
+@api_router.get("/sessions/{ref}/metrics")
+async def session_metrics(ref: str, request: Request):
+    """Owner-only per-turn context-efficiency metrics for one agent session (#159)."""
+    m = require_owner(request)
+    sid = m.resolve_id(ref, kind="agent")
+    session = m.db.get_session(sid)
+    if session is None:
+        raise HarnessError(404, "no session matches that id")
+    return efficiency.session_payload(sid, m.db.events(sid))
 
 
 # scheduled jobs (jobs.py)
