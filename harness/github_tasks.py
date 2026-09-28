@@ -129,7 +129,7 @@ def item(cfg, repo: str, number: int) -> dict:
         pull = _get(cfg, repo, f"pulls/{number}")
         head, base = pull.get("head") or {}, pull.get("base") or {}
         head_repo, base_repo = (head.get("repo") or {}).get("full_name"), (base.get("repo") or {}).get("full_name")
-        if not head_repo or head_repo.lower() != base_repo.lower() or head_repo.lower() != repo.lower():
+        if not head_repo or not base_repo or head_repo.lower() != base_repo.lower() or head_repo.lower() != repo.lower():
             raise HarnessError(400, "Fork PRs cannot start tasks")
         ref = head.get("ref") or ""
         if not ref or not re.fullmatch(r"[A-Za-z0-9_./-]+", ref) or ".." in ref:
@@ -151,6 +151,9 @@ def item(cfg, repo: str, number: int) -> dict:
         result["comments"] = [{"path": clean(c.get("path"), 300), "line": c["line"],
                                "author": clean((c.get("user") or {}).get("login"), 100),
                                "body": clean(c.get("body"), 1000)} for c in comments]
+    # Bound the entire selected item's serialized external text before returning it to the browser.
+    while len(prompt(result)) > 24000 and result["comments"]:
+        result["comments"].pop()
     return result
 
 

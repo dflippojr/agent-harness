@@ -1642,7 +1642,8 @@ async function viewNew() {
           const item = await api(`/github/projects/${encodeURIComponent(project.value)}/items/${x.number}`);
           selectedGitHub = item;
           title.value = item.title;
-          prompt.value = `GitHub ${item.kind.toUpperCase()} #${item.number}: ${item.title}\n\n${item.body}`;
+          prompt.value = `GitHub ${item.kind.toUpperCase()} #${item.number}: ${item.title}\n\n${item.body}` +
+            item.comments.map((c) => `\n\nReview comment at ${c.path}:${c.line} by ${c.author}:\n${c.body}`).join("");
           prompt.readOnly = true;
           githubState.textContent = `Selected ${item.kind} #${item.number}${item.base_branch ? `; starting from ${item.base_branch}` : ""}. GitHub content is re-fetched when you start.`;
         } catch (err) { githubState.textContent = err.message; }

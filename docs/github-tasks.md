@@ -1,0 +1,9 @@
+# GitHub issue and PR tasks
+
+Set `github.token_file` in `harness.local.yaml` to an owner-managed file beneath `data_dir` containing a fine-grained GitHub token. Grant it **Issues: read** and **Pull requests: read** only, for the repositories you want to use. On POSIX, set mode `0600`; on Windows, restrict the file's ACL to the daemon account. `python -m harness.doctor` reports only whether the file is configured and readable.
+
+Configure a project's `repo` as `https://github.com/<owner>/<repo>` or the same URL with `.git`. Other hosts and local paths do not offer GitHub items. The token is used only by the daemon for GET requests to `api.github.com`; it is never sent to the agent or returned by the API. The owner can browse every configured repository that this token grants, so select token repositories accordingly. Members cannot use this source until their own GitHub authentication is implemented.
+
+In **New task**, choose **From issue / PR**, browse 30 open items per page, search the current page, then select an item. GitHub text is shown as external content and is fetched again when the task starts. PR tasks use the same-repository head branch for that session only. Fork PRs are refused. The project's saved base branch is unchanged. GitHub rate-limit fallback can show a clearly marked cached page; an invalid token, a permission error, or a missing repository never returns cached content.
+
+Issue bodies, labels, authors, titles, and PR line comments are untrusted. The prompt frames them as external content, strips control and bidirectional formatting characters, neutralizes its closing marker, and caps title, body, each comment, and total text. This framing reduces prompt-injection risk but cannot eliminate it. GitHub write operations are outside this feature; branch pushes continue through the existing Review action.

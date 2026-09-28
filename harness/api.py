@@ -1165,7 +1165,7 @@ async def create_github_session(body: CreateGitHubSession, request: Request):
     from . import github_tasks
     m, spec, repo = _github_project(request, body.project)
     source = await asyncio.to_thread(github_tasks.item, m.cfg, repo, body.number)
-    if source["kind"] == "pr" and spec.target != "tower":
+    if source["kind"] == "pr" and (spec.target != "tower" or body.target not in (None, "tower")):
         # Remote runners use their own configured repository and cannot prove it matches this URL.
         raise HarnessError(400, "PR branch tasks require a tower project")
     prompt = github_tasks.prompt(source)

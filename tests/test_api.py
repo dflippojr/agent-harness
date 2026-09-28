@@ -43,6 +43,16 @@ def wait_for(fn, timeout=30.0):
     raise AssertionError("condition not met in time")
 
 
+def test_github_routes_are_owner_only(tmp_path):
+    client, _, _ = make_client(tmp_path, [Completion(content="hi")])
+    with client:
+        path = "/github/projects/scratch/items"
+        assert client.get(path, headers={"Tailscale-User-Login": LOGIN}).status_code == 400
+        assert client.get(path, headers={"Tailscale-User-Login": "intruder@example.com"}).status_code == 403
+        assert client.post("/github/sessions", json={"prompt": "x", "project": "scratch", "number": 1},
+                           headers={"Tailscale-User-Login": "intruder@example.com"}).status_code == 403
+
+
 def test_web_app_and_guard(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     with client:
