@@ -241,7 +241,11 @@ def _print_event(t: str, d: dict, args) -> None:
         print(f"  {color}← {d['name']}{RESET} {DIM}({d['seconds']}s){RESET}")
         print(DIM + indent(d["output"], None if args.full else 12) + RESET)
     elif t == "compaction":
-        print(f"{DIM}context compacted ({d['tier']}): ~{d['tokens_before']} → ~{d['tokens_after']} tokens{RESET}")
+        if d.get("tier") == "mask":
+            saved = int(d.get("tokens_saved") or 0)
+            print(f"{DIM}Replaced old tool outputs with recoverable receipts (~{saved} tokens saved){RESET}")
+        else:
+            print(f"{DIM}context compacted ({d['tier']}): ~{d['tokens_before']} → ~{d['tokens_after']} tokens{RESET}")
     elif t in ("error", "llm_retry"):
         print(f"{RED}{t}: {d.get('message') or d.get('error')}{RESET}")
     elif t == "model_waking":
