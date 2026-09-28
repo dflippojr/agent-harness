@@ -392,7 +392,7 @@ class SkillStore:
         return bool(self.cfg.enabled)
 
     # --- agent tool ---
-    async def call(self, name: str, args: dict, session: dict | None = None, call_id: str = "") -> str:
+    async def call(self, name: str, args: dict, session: dict | None = None, **_kwargs) -> str:
         if name != "propose_skill":
             raise ToolError(f"unknown skill tool {name}")
         return await self.propose_from_tool(args, session or {})

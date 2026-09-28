@@ -350,6 +350,6 @@ class SessionSearch:
                 if end < len(text) else "")
         return head + text[start:end] + foot
 
-    async def call(self, name: str, args: dict, session: dict | None = None, call_id: str = "") -> str:
+    async def call(self, name: str, args: dict, session: dict | None = None, **_kwargs) -> str:
         payload = {**args, "_session": (session or {}).get("id", "")}
         return await asyncio.to_thread(getattr(self, name), **payload)
