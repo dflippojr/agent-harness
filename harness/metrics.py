@@ -44,6 +44,9 @@ def _core_metrics(m: Manager, out: _Out, db) -> dict:
         kinds = dict(db.conn.execute(
             "SELECT type, COUNT(*) FROM events WHERE type IN ('error', 'llm_retry', 'compaction', 'gpu_paused', "
             "'model_waking') GROUP BY type").fetchall())
+        round_resets = db.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE type = 'compaction' AND json_extract(data, '$.tier') = 'round_reset'"
+        ).fetchone()[0]
         approvals = db.conn.execute(
             "SELECT status, COUNT(*), COALESCE(SUM(decided_at - created_at), 0) FROM approvals GROUP BY status"
         ).fetchall()
@@ -78,6 +81,9 @@ def _core_metrics(m: Manager, out: _Out, db) -> dict:
     out.metric("harness_events_total", "counter", "Errors, model-call retries, compactions, GPU pauses, and wakes.",
                [({"type": t}, kinds.get(t, 0)) for t in ("error", "llm_retry", "compaction", "gpu_paused",
                                                           "model_waking")])
+    out.metric("harness_round_resets_total", "counter",
+               "Context round resets from compaction events with tier round_reset.",
+               [({}, round_resets)])
     out.metric("harness_approvals_total", "counter", "Approval requests by outcome.",
                [({"status": st}, n) for st, n, _ in approvals])
     out.metric("harness_approval_wait_seconds_total", "counter", "Time approvals waited for a decision.",

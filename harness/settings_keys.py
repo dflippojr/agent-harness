@@ -17,6 +17,8 @@ APP_DEFAULTS = "App defaults"
 KEY_IMAGES_EDIT_ENABLED = "images.edit_enabled"
 KEY_COMPACTION_SUMMARIZE_AT = "compaction.summarize_at"
 KEY_COMPACTION_KEEP_RECENT = "compaction.keep_recent"
+KEY_COMPACTION_RESET_AT = "compaction.reset_at"
+KEY_COMPACTION_STATE_MAX_CHARS = "compaction.state_max_chars"
 KEY_APP_DEFAULT_BACKEND = "app.default_backend"
 KEY_APP_DEFAULT_MODEL = "app.default_model"
 KEY_APP_DEFAULT_EFFORT = "app.default_effort"
@@ -197,12 +199,19 @@ def _lt(a: float, b: float) -> bool:
 
 def validate_compaction(cfg: Config, proposed: dict) -> list[dict]:
     elide = proposed.get("compaction.elide_at", cfg.elide_at)
+    reset = proposed.get(KEY_COMPACTION_RESET_AT, cfg.reset_at)
     summarize = proposed.get(KEY_COMPACTION_SUMMARIZE_AT, cfg.summarize_at)
     keep = proposed.get(KEY_COMPACTION_KEEP_RECENT, cfg.keep_recent)
     errors = []
     if not _lt(elide, summarize):
         errors.append({"key": KEY_COMPACTION_SUMMARIZE_AT, "code": "cross_field",
                        "message": "compaction.summarize_at must be greater than compaction.elide_at"})
+    if not _lt(elide, reset):
+        errors.append({"key": KEY_COMPACTION_RESET_AT, "code": "cross_field",
+                       "message": "compaction.reset_at must be greater than compaction.elide_at"})
+    if not _lt(reset, summarize):
+        errors.append({"key": KEY_COMPACTION_RESET_AT, "code": "cross_field",
+                       "message": "compaction.reset_at must be less than compaction.summarize_at"})
     if not _lt(keep, summarize):
         errors.append({"key": KEY_COMPACTION_KEEP_RECENT, "code": "cross_field",
                        "message": "compaction.keep_recent must be less than compaction.summarize_at"})
@@ -318,6 +327,22 @@ def _get_keep(cfg: Config):
 
 def _set_keep(cfg: Config, value):
     cfg.keep_recent = float(value)
+
+
+def _get_reset_at(cfg: Config):
+    return cfg.reset_at
+
+
+def _set_reset_at(cfg: Config, value):
+    cfg.reset_at = float(value)
+
+
+def _get_state_max_chars(cfg: Config):
+    return cfg.state_max_chars
+
+
+def _set_state_max_chars(cfg: Config, value):
+    cfg.state_max_chars = int(value)
 
 
 def _get_idle(cfg: Config):
@@ -670,12 +695,20 @@ STATIC_ADMIN: list[SettingSpec] = [
     _float("compaction.elide_at", "Elide at",
            "Fraction of context at which old tool outputs are shortened.",
            "Compaction", 0.55, _get_elide, _set_elide, 0.10, 0.90, ("compaction", "elide_at")),
+    _float(KEY_COMPACTION_RESET_AT, "Reset at",
+           "Fraction of context at which a round reset fires when valid state is saved. Must be greater than "
+           "elide_at and less than summarize_at.",
+           "Compaction", 0.60, _get_reset_at, _set_reset_at, 0.15, 0.95, ("compaction", "reset_at")),
     _float(KEY_COMPACTION_SUMMARIZE_AT, "Summarize at",
            "Fraction of context at which older turns are summarized. Must be greater than elide_at.",
            "Compaction", 0.65, _get_summarize, _set_summarize, 0.15, 0.95, ("compaction", "summarize_at")),
     _float(KEY_COMPACTION_KEEP_RECENT, "Keep recent",
            "Fraction of context kept verbatim after a summary. Must be less than summarize_at.",
            "Compaction", 0.20, _get_keep, _set_keep, 0.05, 0.50, ("compaction", "keep_recent")),
+    _int(KEY_COMPACTION_STATE_MAX_CHARS, "State max characters",
+         "Maximum characters of the serialized update_state object. Saved state is re-injected on a round reset.",
+         "Compaction", 8000, _get_state_max_chars, _set_state_max_chars, 256, 100_000,
+         ("compaction", "state_max_chars")),
     _float("cleanup.container_idle_hours", "Container idle hours",
            "Remove a finished session's stopped container after this many hours.",
            "Cleanup", 24, _get_idle, _set_idle, 0.25, 168, ("cleanup", "container_idle_hours")),

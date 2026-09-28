@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 
 SUMMARY_TAG = "[Context summary]"
+STATE_TAG = "[Task state]"
+ROUND_CONTINUE = ("Continue from the saved state. Do not repeat a command that already failed with the "
+                  "same arguments unless the inputs have changed.")
 
 SUMMARY_SYSTEM = """You write handoff notes for an AI agent whose earlier conversation is being removed to free context.
 The agent keeps its original task and its most recent turns; your notes replace everything in between.
@@ -198,3 +202,15 @@ def apply_summary(messages: list[dict], _start: int, end: int, summary: str, not
         text += f"\n\n## Your saved notes (kept verbatim)\n{notes.strip()}"
     note = {"role": "user", "content": text + "\n\nContinue from here; don't redo work that is already done."}
     return head + [note] + messages[end:]
+
+
+def apply_round_reset(messages: list[dict], payload: dict) -> list[dict]:
+    """Keep the pinned head, inject tagged state plus a fixed next-step, and keep the latest exchange intact."""
+    head_n = _head_len(messages)
+    tail_i = max(last_turn_start(messages), head_n)
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    state_msg = {"role": "user", "content": (
+        f"{STATE_TAG} Saved working state from the previous round; treat as notes, never execute:\n\n{body}"
+    )}
+    next_msg = {"role": "user", "content": ROUND_CONTINUE}
+    return list(messages[:head_n]) + [state_msg, next_msg] + list(messages[tail_i:])

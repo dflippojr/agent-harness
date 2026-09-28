@@ -100,6 +100,8 @@ def _r_compaction(at: str, d: dict, last_content: str) -> list[str]:
     if d.get("tier") == "mask":
         saved = int(d.get("tokens_saved") or 0)
         return [f"#### {at} · Replaced old tool outputs with recoverable receipts (~{saved} tokens saved)", ""]
+    if d.get("tier") == "round_reset":
+        return [f"#### {at} · Round reset: ~{d['tokens_before']} → ~{d['tokens_after']} tokens", ""]
     lines = [f"#### {at} · Context compaction ({d['tier']}): ~{d['tokens_before']} → "
              f"~{d['tokens_after']} tokens", ""]
     if d.get("summary"):
@@ -183,6 +185,15 @@ def _r_status(at: str, d: dict, last_content: str) -> list[str]:
     return lines
 
 
+def _r_notes(at: str, d: dict, last_content: str) -> list[str]:
+    return [f"#### {at} · Agent saved notes", "", _block(d.get("notes") or ""), ""]
+
+
+def _r_state(at: str, d: dict, last_content: str) -> list[str]:
+    payload = d.get("state") if isinstance(d.get("state"), dict) else d
+    return [f"#### {at} · Agent saved state", "", _block(json.dumps(payload, ensure_ascii=False, indent=2)), ""]
+
+
 _RENDERERS = {
     "user_message": _r_user_message, "assistant": _r_assistant, "tool_call": _r_tool_call,
     "approval_requested": _r_approval_requested, "approval_decided": _r_approval_decided,
@@ -194,6 +205,7 @@ _RENDERERS = {
     "app_tool_call": _r_app_tool_call, "app_tool_result": _r_app_tool_result, "gpu_paused": _r_gpu_paused,
     "gpu_resumed": _r_gpu_resumed, "workspace_ready": _r_workspace_ready, "branch_saved": _r_branch_saved,
     "review": _r_review, "resumed": _r_resumed, "status": _r_status,
+    "notes": _r_notes, "state": _r_state,
 }
 
 
