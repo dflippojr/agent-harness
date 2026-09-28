@@ -63,9 +63,23 @@ def tool_schemas(read_lines: int, target: str = "tower") -> list[dict]:
             "dest": {"type": "string", "description": "Target directory in the workspace. Default: the repo name."},
             "branch": {"type": "string"},
         }, ["url"]),
-        _fn("update_notes", "Replace your saved notes for this task. During long tasks older conversation may be "
-                            "condensed, but saved notes are always kept verbatim: record intermediate results and "
-                            "progress here.", {
+        _fn("update_state", "Replace your saved task state with this object (full replacement). Required: goal. "
+                            "Optional: plan, errors (failed command + args + message), next_step, notes. Unknown "
+                            "fields are rejected. During long tasks the conversation may be condensed or reset; "
+                            "saved state is re-injected. Call reset_round to start a new round from this state. "
+                            "Do not send files_modified; the harness derives that at reset.", {
+            "goal": {"type": "string"},
+            "plan": {"type": "string"},
+            "errors": {"type": "array", "items": {"type": "object", "properties": {
+                "command": {"type": "string"}, "args": {}, "message": {"type": "string"},
+            }}},
+            "next_step": {"type": "string"},
+            "notes": {"type": "string"},
+        }, ["goal"]),
+        _fn("reset_round", "Clear older conversation and continue from saved state plus this turn. Call "
+                           "update_state first so goal, plan, errors, and next_step survive. No arguments.", {}),
+        _fn("update_notes", "Deprecated alias: set only the notes field of saved state and leave every other "
+                            "field unchanged.", {
             "notes": {"type": "string"},
         }, ["notes"]),
         _fn("finish", "End the task and report the final answer or a summary of the work.", {

@@ -371,7 +371,9 @@ class Config:
     elide_at: float = 0.55
     summarize_at: float = 0.65
     keep_recent: float = 0.20
+    reset_at: float = 0.60
     mask_min_chars: int = 2000
+    state_max_chars: int = 8000
 
     @property
     def db_path(self) -> Path:
@@ -749,7 +751,11 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         elide_at=float(compaction.get("elide_at", 0.55)),
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),
+        reset_at=_reset_at(compaction.get("reset_at", 0.60),
+                           float(compaction.get("elide_at", 0.55)),
+                           float(compaction.get("summarize_at", 0.65))),
         mask_min_chars=_mask_min_chars(compaction.get("mask_min_chars", 2000)),
+        state_max_chars=_state_max_chars(compaction.get("state_max_chars", 8000)),
     )
     _validate_loaded(cfg)
     from .settings_keys import build_registry
@@ -767,6 +773,36 @@ def _mask_min_chars(value) -> int:
     except (TypeError, ValueError, OverflowError):
         return 2000
     return parsed if 1 <= parsed <= 10_000_000 else 2000
+
+
+def _reset_at(value, elide: float = 0.55, summarize: float = 0.65) -> float:
+    """Bounds 0.15–0.95; omitted/invalid use 0.60. If that is not strictly between elide and summarize, use the midpoint."""
+    default = 0.60
+    if isinstance(value, bool):
+        parsed = default
+    else:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            parsed = default
+        if parsed != parsed or not 0.15 <= parsed <= 0.95:
+            parsed = default
+    if elide < parsed < summarize:
+        return parsed
+    mid = (float(elide) + float(summarize)) / 2
+    if 0.15 <= mid <= 0.95 and elide < mid < summarize:
+        return mid
+    return default
+
+
+def _state_max_chars(value) -> int:
+    if isinstance(value, bool):
+        return 8000
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 8000
+    return parsed if 256 <= parsed <= 100_000 else 8000
 
 
 def _validate_loaded(cfg: Config) -> None:

@@ -160,7 +160,8 @@ def test_reset_live_compaction_key_revalidates_inherited_thresholds(tmp_path):
     with client:
         saved = client.patch("/api/admin/v1/config", json={
             "revision": 0,
-            "changes": {"compaction.elide_at": 0.20, "compaction.summarize_at": 0.50},
+            "changes": {"compaction.elide_at": 0.20, "compaction.reset_at": 0.35,
+                        "compaction.summarize_at": 0.50},
         })
         assert saved.status_code == 200, saved.text
         assert manager.cfg.elide_at == 0.20
@@ -179,7 +180,8 @@ def test_reset_live_compaction_key_revalidates_inherited_thresholds(tmp_path):
         # Symmetric: overlay elide_at=0.80 with inherited summarize_at=0.65 is also invalid.
         high = client.patch("/api/admin/v1/config", json={
             "revision": saved.json()["revision"],
-            "changes": {"compaction.elide_at": 0.80, "compaction.summarize_at": 0.90},
+            "changes": {"compaction.elide_at": 0.80, "compaction.reset_at": 0.85,
+                        "compaction.summarize_at": 0.90},
         })
         assert high.status_code == 200, high.text
         reset_summarize = client.patch("/api/admin/v1/config", json={
@@ -1197,7 +1199,8 @@ def test_boot_never_fails_when_active_and_lkg_share_removed_yaml_value(tmp_path)
     assert "YAML" in (view.get("warning") or recovery.get("reason") or "")
 
 
-@pytest.mark.parametrize("key", ["compaction.elide_at", "compaction.summarize_at", "compaction.keep_recent"])
+@pytest.mark.parametrize("key", ["compaction.elide_at", "compaction.summarize_at", "compaction.keep_recent",
+                                 "compaction.reset_at"])
 def test_nan_compaction_thresholds_fail_the_cross_field_check(tmp_path, key):
     from harness.settings_keys import validate_compaction
     cfg = make_cfg(tmp_path)

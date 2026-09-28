@@ -43,7 +43,7 @@ function compareTargets(a, b) {
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
-  "run_finished", "queue", "notes", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
+  "run_finished", "queue", "notes", "state", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
   "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "app_context", "app_tool_call", "app_tool_result",
   "quote_check", "ungrounded_quotes",
 ];
@@ -2253,7 +2253,9 @@ async function viewSession(sid, tab, focusApproval) {
       if (d.totals) totals = d.totals;
       if (d.tokens_after) ctxUsed = d.tokens_after;
       renderHead();
-      const text = d.tier === "summary"
+      const text = d.tier === "round_reset"
+        ? `Round reset: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens`
+        : d.tier === "summary"
         ? `Context condensed: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens (${d.summarized_messages} messages summarized)`
         : `Trimmed old tool output: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens`;
       if (compactNote) {
@@ -2270,6 +2272,7 @@ async function viewSession(sid, tab, focusApproval) {
       }
     },
     notes: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Agent saved notes"), h("div", { class: "text" }, e.data.notes))),
+    state: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Agent saved state"), h("pre", { class: "text" }, JSON.stringify(e.data.state || e.data, null, 2)))),
     error: (e) => add(h("p", { class: "note bad" }, e.data.message)),
     quote_check: (e) => add(h("details", { class: "thinking ev" },
       h("summary", {}, `Asked the agent to fix ${e.data.quotes.length} quote${e.data.quotes.length === 1 ? "" : "s"} not found in anything it read`),

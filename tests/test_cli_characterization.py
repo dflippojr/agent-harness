@@ -513,6 +513,7 @@ def test_watch_queue_compaction_and_print_only_events(calls, stream, capsys):
         ev("tool_result", 4, ok=True, name="run", seconds=1.5, output="l1\nl2"),
         ev("tool_result", 5, ok=False, name="bad", seconds=2, output="\n".join(f"L{i}" for i in range(20))),
         ev("compaction", 6, tier="t1", tokens_before=100, tokens_after=50),
+        ev("compaction", 61, tier="round_reset", tokens_before=200, tokens_after=40),
         ev("error", 7, message="oops"), ev("llm_retry", 8, error="again"),
         ev("model_waking", 9, expected_seconds=30), ev("model_ready", 10, seconds=12),
         ev("resumed", 11), ev("unknown", 12),
@@ -530,6 +531,7 @@ def test_watch_queue_compaction_and_print_only_events(calls, stream, capsys):
     assert "← bad (2s)" in out
     assert "    L11\n    ... (8 more lines)" in out
     assert "context compacted (t1): ~100 → ~50 tokens" in out
+    assert "round reset: ~200 → ~40 tokens" in out
     assert "error: oops" in out
     assert "llm_retry: again" in out
     assert "model is asleep; waking it (about 30 s)..." in out

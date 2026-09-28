@@ -134,8 +134,10 @@ budgets:
 compaction:
   mask_min_chars: 2000  # replace used successful tool results with recoverable receipts
   elide_at: 0.55       # fraction of context_tokens: shorten old tool outputs
+  reset_at: 0.60       # fraction of context_tokens: round-reset when valid state is saved
   summarize_at: 0.65   # still above this after eliding: summarize older turns
   keep_recent: 0.20    # fraction of context kept verbatim after a summary
+  state_max_chars: 8000  # cap on serialized update_state object
 
 # GPU contention guard (harness/gpu_guard.py). While a game runs (Steam/Epic/GOG/Xbox library folders, or Sunshine's
 # Steam Big Picture app) or Plex hardware-transcodes, the queue pauses after the current model turn, llama-server is

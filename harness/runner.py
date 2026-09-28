@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import compaction, grounding, llm, projects
+from . import compaction, grounding, llm, projects, state as agent_state
 from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
@@ -46,7 +46,7 @@ SYSTEM_PROMPT = """You are a software agent working in a project workspace on th
 You act only through the provided tools. File paths are relative to the workspace root (/workspace in the sandbox).
 Shell commands run in a Linux container with Python 3.12, pytest, and git, and no network access. Commands that need the network (package installs, downloads) must set network: true; the user approves those, and may also be asked to approve pushes and deletions. If the user denies an action, don't retry it: find another way or explain what you need.
 
-Work methodically: look around before editing, prefer `search` over reading large files in full, and verify changes by running the relevant command or tests. On long tasks older conversation may be condensed, so keep intermediate results and progress in `update_notes`.
+Work methodically: look around before editing, prefer `search` over reading large files in full, and verify changes by running the relevant command or tests. On long tasks older conversation may be condensed or reset, so keep structured progress in `update_state` (goal, plan, errors, next_step, notes) and call `reset_round` to start a fresh round from that state.
 When the task is complete, reply with your final answer (or call `finish`). Don't answer until the work is done and verified. The user often reads answers on a phone, so lead with the result."""
 
 REPO_PROMPT = """Project repository: `{repo_name}` is checked out at /workspace on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
@@ -54,7 +54,7 @@ REPO_PROMPT = """Project repository: `{repo_name}` is checked out at /workspace 
 MAC_SYSTEM_PROMPT = """You are a software agent working in a project workspace on the user's MacBook (macOS, Apple silicon). You run on the user's home server and act only through the provided tools, which run on the MacBook.
 File paths are relative to the workspace root, which is {workspace} on the Mac; shell commands start there. They run natively with bash, using the Mac's own toolchains (git, Homebrew's python3, Swift, Java; use `which` before assuming anything else is installed). They run in a sandbox: writes are limited to the workspace, temp directories and build caches, personal folders and credentials are unreadable, and there is no network access. Commands that need the network (package installs, downloads) must set network: true; the user approves those, and may also be asked to approve pushes and deletions. If the user denies an action, don't retry it: find another way or explain what you need. The MacBook can go to sleep; if a tool call takes a while to start, it's waiting for the Mac to wake.
 
-Work methodically: look around before editing, prefer `search` over reading large files in full, and verify changes by running the relevant command or tests. On long tasks older conversation may be condensed, so keep intermediate results and progress in `update_notes`.
+Work methodically: look around before editing, prefer `search` over reading large files in full, and verify changes by running the relevant command or tests. On long tasks older conversation may be condensed or reset, so keep structured progress in `update_state` (goal, plan, errors, next_step, notes) and call `reset_round` to start a fresh round from that state.
 When the task is complete, reply with your final answer (or call `finish`). Don't answer until the work is done and verified. The user often reads answers on a phone, so lead with the result."""
 
 MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the workspace (a separate clone of the user's repository, so their own checkout is never touched) on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches, don't change git config, and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
@@ -81,7 +81,7 @@ def new_run(carry: dict | None = None) -> dict:
     """Counters for one run. Notes and the token calibration belong to the session, so they carry over."""
     run = {"turns": 0, "tool_calls": 0, "invalid_tool_calls": 0, "tool_errors": 0, "prompt_tokens": 0,
            "completion_tokens": 0, "idle": 0, "executing": None, "started_at": time.time()}
-    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits"):
+    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits", "state"):
         if carry and key in carry:
             run[key] = carry[key]
     return run
@@ -490,6 +490,7 @@ class Runner:
         await self._wait_for_target(sid)
         s = self.db.get_session(sid)
         await self._prepare_repo(s)
+        self._snapshot_git_baseline(sid)
         if s["status"] != "waiting_approval":  # _resolve_calls waits without holding the GPU
             await self._acquire(sid)
         await self._loop(sid)
@@ -1317,11 +1318,11 @@ class Runner:
         if name == "finish":
             return self._finish_call(s, call, args, rest), None
         if name == "update_notes" and isinstance(args.get("notes"), str):
-            with self.db.tx():
-                self.db.update_session(sid, run={**self.db.get_session(sid)["run"], "notes": args["notes"]})
-                self.bus.emit(sid, "notes", {"notes": args["notes"]})
-            self._record_result(sid, call, name, f"Notes saved ({len(args['notes'])} characters).", ok=True)
-            return None, None
+            return self._update_notes_call(sid, call, args), None
+        if name == "update_state":
+            return self._update_state_call(sid, call, args), None
+        if name == "reset_round":
+            return self._reset_round_call(sid, call, args), None
 
         ws = self.workspace(s)
         schemas = {t["function"]["name"]: t for t in self.tool_schemas(s, ws)}
@@ -1583,6 +1584,14 @@ class Runner:
         # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
         artifact_content = (output if ok and name != "read_artifact" and len(output) >= self.cfg.mask_min_chars
                             and self.artifact_tool_available(s) else None)
+        if ok and name in ("write_file", "edit_file"):
+            path = str(args.get("path") or "").replace("\\", "/")
+            if path:
+                run = self.db.get_session(sid)["run"]
+                touched = list(run.get("files_touched") or [])
+                if path not in touched:
+                    run["files_touched"] = (touched + [path])[:agent_state.FILES_MODIFIED_MAX]
+                    self.db.update_session(sid, run=run)
         if len(output) > max_chars:
             output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
@@ -1656,6 +1665,81 @@ class Runner:
                                             "cached": state["first"]})
         return report
 
+    def _update_notes_call(self, sid: str, call: dict, args: dict) -> None:
+        """Deprecated alias: set notes only and preserve every other state field."""
+        notes = args["notes"]
+        with self.db.tx():
+            run = {**self.db.get_session(sid)["run"], "notes": notes}
+            if isinstance(run.get("state"), dict):
+                run["state"] = {**run["state"], "notes": notes}
+                self.bus.emit(sid, "state", {"state": run["state"]})
+            self.db.update_session(sid, run=run)
+            self.bus.emit(sid, "notes", {"notes": notes})
+        self._record_result(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).", ok=True)
+
+    def _update_state_call(self, sid: str, call: dict, args: dict) -> None:
+        try:
+            payload = agent_state.validate_state(args, self.cfg.state_max_chars)
+        except ToolError as e:
+            self._bump(sid, "invalid_tool_calls")
+            self._record_result(sid, call, "update_state", f"Error: {e}", ok=False)
+            return
+        with self.db.tx():
+            run = {**self.db.get_session(sid)["run"], "state": payload, "notes": payload["notes"]}
+            self.db.update_session(sid, run=run)
+            self.bus.emit(sid, "state", {"state": payload})
+            if payload["notes"]:
+                self.bus.emit(sid, "notes", {"notes": payload["notes"]})
+        self._record_result(sid, call, "update_state",
+                            f"State saved ({len(agent_state.dump_state(payload))} characters).", ok=True)
+
+    def _reset_round_call(self, sid: str, call: dict, args: dict) -> None:
+        if args:
+            self._bump(sid, "invalid_tool_calls")
+            self._record_result(sid, call, "reset_round",
+                                "Error: reset_round takes no arguments.", ok=False)
+            return
+        run = {**self.db.get_session(sid)["run"], "pending_round_reset": True}
+        self.db.update_session(sid, run=run)
+        self._record_result(sid, call, "reset_round", "Round reset scheduled.", ok=True)
+
+    def _snapshot_git_baseline(self, sid: str) -> None:
+        s = self.db.get_session(sid)
+        if s.get("kind") == "chat" or s.get("target") != "tower" or s.get("workspace_removed"):
+            return
+        run = s["run"]
+        if "git_baseline" in run:
+            return
+        run["git_baseline"] = agent_state.git_porcelain(Path(s["workspace"]))
+        self.db.update_session(sid, run=run)
+
+    def _files_modified(self, s: dict) -> list[str]:
+        """Git worktree diff since run start on tower agent sessions; otherwise write/edit paths."""
+        touched = list(s["run"].get("files_touched") or [])[:agent_state.FILES_MODIFIED_MAX]
+        if s.get("kind") == "chat" or s.get("target") != "tower" or s.get("backend", "local") != "local":
+            return touched
+        if s.get("workspace_removed"):
+            return touched
+        current = agent_state.git_porcelain(Path(s["workspace"]))
+        if current is None:
+            return touched
+        return agent_state.paths_since(s["run"].get("git_baseline"), current)
+
+    def _round_reset(self, s: dict, context: list, before: int, cpt: float, overhead: int) -> dict:
+        sid = s["id"]
+        model = self.cfg.models[s["model"]]
+        payload = agent_state.inject_payload(s["run"].get("state"), self._files_modified(s),
+                                             self.cfg.state_max_chars)
+        new_context = compaction.apply_round_reset(context, payload)
+        after = compaction.estimate_tokens(new_context, cpt) + overhead
+        run = {**self.db.get_session(sid)["run"]}
+        run.pop("pending_round_reset", None)
+        with self.db.tx():
+            self.db.update_session(sid, context=new_context, run=run)
+            self.bus.emit(sid, "compaction", {"tier": "round_reset", "tokens_before": before,
+                                              "tokens_after": after, "context_tokens": model.context_tokens})
+        return self.db.get_session(sid)
+
     # compaction
     async def _maybe_compact(self, s: dict) -> dict:
         sid = s["id"]
@@ -1677,6 +1761,10 @@ class Runner:
                     self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
                                                        "characters_saved": masked_chars})
             s = self.db.get_session(sid)
+        explicit = bool(s["run"].get("pending_round_reset"))
+        valid = agent_state.is_valid_state(s["run"].get("state"))
+        if explicit or (before >= self.cfg.reset_at * n and valid):
+            return self._round_reset(s, context, before, cpt, overhead)
         if before < self.cfg.elide_at * n:
             return s
         context, _ = compaction.elide(context)
