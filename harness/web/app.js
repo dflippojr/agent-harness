@@ -1422,9 +1422,9 @@ function skillOption(sk, inputs) {
 }
 
 // Resolves true when the session was created (and the page moved on), false when the form should stay usable.
-async function startSession(fields, draftKey) {
+async function startSession(fields, draftKey, endpoint = "/sessions") {
   try {
-    const s = await api("/sessions", { method: "POST", body: fields });
+    const s = await api(endpoint, { method: "POST", body: fields });
     storeRemove(draftKey);
     location.hash = `#/s/${s.id}`;
     return true;
@@ -1624,6 +1624,62 @@ async function viewNew() {
   showBackend();
   const prompt = h("textarea", { placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
   const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
+  let selectedGitHub = null;
+  const githubState = h("p", { class: "muted small" });
+  const githubList = h("div", {});
+  const githubSearch = h("input", { type: "search", placeholder: "Search loaded page" });
+  const githubPage = h("span", { class: "muted small" });
+  let githubPageNumber = 1;
+  let githubRows = [];
+  let githubMore = false;
+  const showGitHubRows = () => {
+    const q = githubSearch.value.toLowerCase();
+    const rows = githubRows.filter((x) => x.title.toLowerCase().includes(q) || String(x.number).includes(q));
+    fill(githubList, rows.length ? rows.map((x) => h("button", {
+      type: "button", class: "btn small", style: "display:block;margin:6px 0;text-align:left",
+      onclick: async () => {
+        try {
+          const item = await api(`/github/projects/${encodeURIComponent(project.value)}/items/${x.number}`);
+          selectedGitHub = item;
+          title.value = item.title;
+          prompt.value = `GitHub ${item.kind.toUpperCase()} #${item.number}: ${item.title}\n\n${item.body}`;
+          prompt.readOnly = true;
+          githubState.textContent = `Selected ${item.kind} #${item.number}${item.base_branch ? `; starting from ${item.base_branch}` : ""}. GitHub content is re-fetched when you start.`;
+        } catch (err) { githubState.textContent = err.message; }
+      },
+    }, `#${x.number} ${x.title} · ${x.author} · ${x.labels.join(", ")}`)) : h("p", { class: "muted small" }, "No open items on this page."));
+    githubPage.textContent = `Page ${githubPageNumber}${githubMore ? " · more available" : ""}`;
+  };
+  const loadGitHub = async () => {
+    githubState.textContent = "Loading GitHub items…";
+    fill(githubList);
+    try {
+      const result = await api(`/github/projects/${encodeURIComponent(project.value)}/items?page=${githubPageNumber}`);
+      githubRows = result.items;
+      githubMore = result.has_more;
+      githubState.textContent = result.stale ? result.notice : "Open issues and PRs · read only";
+      showGitHubRows();
+    } catch (err) { githubState.textContent = err.message; githubRows = []; githubMore = false; }
+  };
+  const githubPicker = isOwner() ? h("details", { class: "card" },
+    h("summary", {}, "From issue / PR"),
+    h("p", { class: "muted small" }, "Select a GitHub item from this project. Search filters the current page."),
+    githubSearch,
+    h("div", { class: "row" },
+      h("button", { type: "button", class: "btn small", onclick: () => { githubPageNumber = Math.max(1, githubPageNumber - 1); loadGitHub(); } }, "Previous"),
+      githubPage,
+      h("button", { type: "button", class: "btn small", onclick: () => { if (githubMore) { githubPageNumber++; loadGitHub(); } } }, "Next")),
+    githubState, githubList,
+    h("button", { type: "button", class: "btn small", onclick: () => {
+      selectedGitHub = null; prompt.readOnly = false; prompt.value = "";
+      githubState.textContent = "Selection cleared";
+    } }, "Clear selection")) : null;
+  githubSearch.addEventListener("input", showGitHubRows);
+  if (githubPicker) githubPicker.addEventListener("toggle", () => { if (githubPicker.open) loadGitHub(); });
+  project.addEventListener("change", () => {
+    selectedGitHub = null; prompt.readOnly = false; githubPageNumber = 1;
+    if (githubPicker?.open) loadGitHub();
+  });
   const pollModel = async () => {
     if (!isMember()) {
       try { gpu = await api("/gpu"); } catch (_) { /* offline */ }
@@ -1674,12 +1730,15 @@ async function viewNew() {
       start.disabled = true;
       const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
       const started = await startSession({ prompt: prompt.value, project: project.value, backend: backend.value,
-        model: backend.value === "local" ? model.value : null, title: title.value || null, skills: selectedSkills }, draftKey);
+        model: backend.value === "local" ? model.value : null, title: title.value || null, skills: selectedSkills,
+        ...(selectedGitHub ? { number: selectedGitHub.number } : {}) }, draftKey,
+        selectedGitHub ? "/github/sessions" : "/sessions");
       if (!started) start.disabled = false;
     },
   },
   targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
   allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
+  githubPicker,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState, projectHint,
   isMember() ? [] : [h("label", {}, "Backend"), backend, holdNotice, backendState],

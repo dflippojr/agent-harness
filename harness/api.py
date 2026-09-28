@@ -43,6 +43,10 @@ class CreateSession(BaseModel):
     skills: list[str] | None = None
 
 
+class CreateGitHubSession(CreateSession):
+    number: int
+
+
 class CompareChoice(BaseModel):
     backend: str = "local"
     model: str | None = None
@@ -1129,6 +1133,45 @@ async def create_session(body: CreateSession, request: Request):
     m = mgr(request)
     s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
                  model=body.model, title=body.title, owner_id=owner_id(request), skills=body.skills)
+    return m.summary(s)
+
+
+def _github_project(request: Request, project: str):
+    from . import catalog, github_tasks
+    m = require_owner(request)
+    spec = catalog.get_project(m.cfg, m.db, owner_id(request), project)
+    repo = github_tasks.repository(spec.repo) if spec else None
+    if not repo:
+        raise HarnessError(400, "This project has no supported GitHub repository URL")
+    return m, spec, repo
+
+
+@api_router.get("/github/projects/{project}/items")
+async def github_items(request: Request, project: str, page: int = 1, q: str = ""):
+    from . import github_tasks
+    m, _, repo = _github_project(request, project)
+    return await asyncio.to_thread(github_tasks.list_items, m.cfg, repo, page, q)
+
+
+@api_router.get("/github/projects/{project}/items/{number}")
+async def github_item(request: Request, project: str, number: int):
+    from . import github_tasks
+    m, _, repo = _github_project(request, project)
+    return await asyncio.to_thread(github_tasks.item, m.cfg, repo, number)
+
+
+@api_router.post("/github/sessions", status_code=201)
+async def create_github_session(body: CreateGitHubSession, request: Request):
+    from . import github_tasks
+    m, spec, repo = _github_project(request, body.project)
+    source = await asyncio.to_thread(github_tasks.item, m.cfg, repo, body.number)
+    if source["kind"] == "pr" and spec.target != "tower":
+        # Remote runners use their own configured repository and cannot prove it matches this URL.
+        raise HarnessError(400, "PR branch tasks require a tower project")
+    prompt = github_tasks.prompt(source)
+    s = m.create(prompt, project=body.project, target=body.target, backend=body.backend,
+                 model=body.model, title=source["title"], owner_id=owner_id(request),
+                 skills=body.skills, app_metadata={"github_base_branch": source["base_branch"]})
     return m.summary(s)
 
 

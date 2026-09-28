@@ -190,6 +190,12 @@ class WebConfig:
 
 
 @dataclass
+class GitHubConfig:
+    """Owner-only, read-only GitHub task source. Token path must be under data_dir."""
+    token_file: str = ""
+
+
+@dataclass
 class RemoteControlConfig:
     """`remote_control` in harness.yaml."""
     enabled: bool = False
@@ -352,6 +358,7 @@ class Config:
     backup: BackupConfig = field(default_factory=BackupConfig)
     memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    github: GitHubConfig = field(default_factory=GitHubConfig)
     endpoint: EndpointConfig = field(default_factory=EndpointConfig)
     images: ImagesConfig = field(default_factory=ImagesConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
@@ -728,6 +735,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         backup=backup,
         memory_library=memory_library,
         web=web,
+        github=GitHubConfig(**(raw.get("github") or {})),
         endpoint=endpoint,
         images=images,
         search=search,

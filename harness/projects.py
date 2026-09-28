@@ -322,6 +322,8 @@ def prepare(project: Project, workspace: Path, sid: str, shared: bool = False) -
     if result.code != 0:
         for child in workspace.iterdir():  # so a retry starts from an empty workspace
             shutil.rmtree(child, ignore_errors=True) if child.is_dir() else child.unlink(missing_ok=True)
+        if project.base_branch and "Remote branch" in result.text and "not found" in result.text:
+            raise GitError(f"base branch {project.base_branch} was deleted or is inaccessible")
         raise GitError(f"could not clone {src}: {result.text[-1500:]}")
     base_branch = git(workspace, "rev-parse", "--abbrev-ref", "HEAD").out.strip()
     base_commit = git(workspace, "rev-parse", "HEAD").out.strip()
