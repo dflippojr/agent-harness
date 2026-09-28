@@ -140,6 +140,15 @@ class _DeltaStream:
             self.flush()
 
 
+def _without_unstored_artifact(output: str, digest: str) -> str:
+    """Strip a read_artifact pointer if the matching artifact was never stored."""
+    if not digest or digest not in output:
+        return output
+    recover = f"recover with read_artifact(artifact_id={digest}, start=0, end=20000)"
+    output = output.replace(recover, "recovery unavailable; raw output was not saved")
+    return output.replace(digest, "")
+
+
 class Runner:
     def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat,
                  warmer: ModelWarmer | None = None, hub: RunnerHub | None = None):
@@ -1715,11 +1724,9 @@ class Runner:
                 try:
                     self.db.put_artifact(sid, artifact_id, artifact_content)
                 except Exception:
+                    output = _without_unstored_artifact(output, artifact_id)
+                    context[-1]["content"] = output
                     artifact_id = None
-                    if name == "verify":
-                        note = "\n[raw log was not saved]"
-                        output += note
-                        context[-1]["content"] = output
             payload = {"id": call["id"], "name": name, "ok": ok, "artifact_id": artifact_id,
                        "seconds": round(seconds, 2),
                        "output_chars": len(output) if output_chars is None else output_chars,

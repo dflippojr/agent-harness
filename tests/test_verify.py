@@ -374,3 +374,46 @@ def test_verify_without_project_checks_returns_error(tmp_path):
         assert "no configured checks" in out
         await m.stop()
     asyncio.run(body())
+
+
+def test_run_shell_put_artifact_failure_does_not_point_at_unstored_id(tmp_path):
+    full = "shell-body-" + ("N" * 25000)
+    stored = f"exit code 0\n{full}"
+    digest = hashlib.sha256(stored.encode("utf-8")).hexdigest()
+    script = Script([
+        Completion(tool_calls=[call("run_shell", 0, command="echo big")]),
+        Completion(content="done"),
+    ])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        orig_put = m.db.put_artifact
+
+        def boom(sid, hash_, content):
+            if hash_ == digest:
+                raise OSError("disk full")
+            return orig_put(sid, hash_, content)
+
+        m.db.put_artifact = boom
+        orig = m.runner.workspace
+
+        def wrapped(s):
+            ws = orig(s)
+
+            async def fake_exec(command, timeout=120, network=False):
+                return 0, full
+            ws.sandbox.exec = fake_exec
+            return ws
+
+        m.runner.workspace = wrapped
+        await m.start()
+        s = await wait_status(m, m.create("check")["id"], "done")
+        ctx = "\n".join(msg.get("content") or "" for msg in m.db.get_session(s["id"])["context"])
+        assert digest not in ctx
+        assert "recovery unavailable" in ctx
+        ev = events(m, s["id"], "tool_result")[0]
+        assert ev["artifact_id"] is None
+        assert digest not in (ev.get("output") or "")
+        assert m.db.full_artifact(s["id"], digest) is None
+        await m.stop()
+    asyncio.run(body())
