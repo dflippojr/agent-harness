@@ -128,6 +128,7 @@ budgets:
   max_completion_tokens: 200000
 
 compaction:
+  mask_min_chars: 2000  # replace used successful tool results with recoverable receipts
   elide_at: 0.55       # fraction of context_tokens: shorten old tool outputs
   summarize_at: 0.65   # still above this after eliding: summarize older turns
   keep_recent: 0.20    # fraction of context kept verbatim after a summary

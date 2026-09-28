@@ -364,6 +364,7 @@ class Config:
     elide_at: float = 0.55
     summarize_at: float = 0.65
     keep_recent: float = 0.20
+    mask_min_chars: int = 2000
 
     @property
     def db_path(self) -> Path:
@@ -740,6 +741,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         elide_at=float(compaction.get("elide_at", 0.55)),
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),
+        mask_min_chars=_mask_min_chars(compaction.get("mask_min_chars", 2000)),
     )
     _validate_loaded(cfg)
     from .settings_keys import build_registry
@@ -747,6 +749,16 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     cfg._inherited = {spec.key: spec.getter(cfg) for spec in registry.writable_admin()}
     _apply_managed_overlay(cfg)
     return cfg
+
+
+def _mask_min_chars(value) -> int:
+    if isinstance(value, bool):
+        return 2000
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 2000
+    return parsed if 1 <= parsed <= 10_000_000 else 2000
 
 
 def _validate_loaded(cfg: Config) -> None:

@@ -234,6 +234,15 @@ class Runner:
         if s.get("kind") == "chat":
             return self.web.schemas() if self.web is not None else []
         schemas = ws.schemas()
+        schemas = schemas + [{"type": "function", "function": {
+            "name": "read_artifact",
+            "description": "Recover up to 20,000 characters from a previously masked tool result.",
+            "parameters": {"type": "object", "properties": {
+                "artifact_id": {"type": "string", "description": "SHA-256 hash from the receipt."},
+                "start": {"type": "integer", "description": "Inclusive zero-based character offset; default 0."},
+                "end": {"type": "integer", "description": "Exclusive zero-based character offset; default artifact end."},
+            }, "required": ["artifact_id"]},
+        }}]
         for kit in self.daemon_toolkits(s):
             schemas = schemas + kit.schemas()
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
@@ -1297,6 +1306,29 @@ class Runner:
 
         if name == "finish":
             return self._finish_call(s, call, args, rest), None
+        if name == "read_artifact":
+            try:
+                artifact_id = args["artifact_id"]
+                start = args.get("start", 0)
+                end = args.get("end")
+                if (not isinstance(artifact_id, str) or len(artifact_id) != 64
+                        or any(c not in "0123456789abcdef" for c in artifact_id)
+                        or isinstance(start, bool) or not isinstance(start, int) or start < 0
+                        or (end is not None and (isinstance(end, bool) or not isinstance(end, int) or end < start))):
+                    raise ValueError("invalid artifact range or id")
+                recovered = self.db.read_artifact(sid, artifact_id, start, end)
+                if recovered is None:
+                    output = "Error: artifact not found"
+                    ok = False
+                else:
+                    output, truncated = recovered
+                    ok = True
+                    if truncated:
+                        output += "\n[truncated; request a smaller range to continue]"
+                self._record_result(sid, call, name, output, ok=ok)
+            except (KeyError, ValueError) as e:
+                self._record_result(sid, call, name, f"Error: {e}", ok=False)
+            return None, None
         if name == "update_notes" and isinstance(args.get("notes"), str):
             with self.db.tx():
                 self.db.update_session(sid, run={**self.db.get_session(sid)["run"], "notes": args["notes"]})
@@ -1615,9 +1647,21 @@ class Runner:
         # Tool schemas are part of every prompt but not of the context list.
         overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
+        events = self.db.events(sid)
+        outcomes = {e["data"].get("id"): e["data"] for e in events if e["type"] == "tool_result"}
+        context, artifacts, masked_chars = compaction.mask_used_results(
+            s["context"], outcomes, self.cfg.mask_min_chars)
+        if artifacts:
+            with self.db.tx():
+                for digest, content in artifacts.items():
+                    self.db.put_artifact(sid, digest, content)
+                self.db.update_session(sid, context=context)
+                self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": max(0, int(masked_chars / cpt)),
+                                                   "characters_saved": masked_chars})
+            s = self.db.get_session(sid)
         if before < self.cfg.elide_at * n:
             return s
-        context, _ = compaction.elide(s["context"])
+        context, _ = compaction.elide(context)
         after = compaction.estimate_tokens(context, cpt) + overhead
         data = {"tier": "elide", "tokens_before": before, "tokens_after": after}
         if after >= self.cfg.summarize_at * n:
