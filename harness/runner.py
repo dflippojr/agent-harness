@@ -33,7 +33,7 @@ from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
 from .tools import ToolError, Workspace, bound_shell_text, truncate_middle, validate_args
-from .verify import ToolOutput
+from .verify import ToolOutput, bound_rendered, render_verify
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
 
 log = logging.getLogger("harness.runner")
@@ -1645,6 +1645,8 @@ class Runner:
             artifact_content = output.artifact_content
             output = output.text
         # Store the untruncated shell string, then middle-truncate the model-facing text.
+        # run_shell and verify share this artifact_tool_available gate: a recover-with-read_artifact
+        # footer is only valid when the session can actually call that tool. Keep the branches in sync.
         if ok and name == "run_shell":
             limits = resolve_tool_output(self.cfg, self.project_for(s))
             cap = clamp_tool_limit(args.get("max_chars"), limits.run_shell_chars, limits.run_shell_chars_max)
@@ -1655,6 +1657,15 @@ class Runner:
                     output = bound_shell_text(output, cap, digest)
                 else:
                     output = truncate_middle(output, cap)
+        elif ok and name == "verify" and extra.get("verify") is not None:
+            limits = resolve_tool_output(self.cfg, self.project_for(s))
+            cap = limits.verify_summary_chars
+            rendered = render_verify(extra["verify"])
+            raw = artifact_content or ""
+            if self.artifact_tool_available(s):
+                output = bound_rendered(rendered, cap, raw)
+            else:
+                output = bound_rendered(rendered, cap, raw, artifact_available=False)
         # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
         if artifact_content is None:
             artifact_content = (output if ok and name != "read_artifact" and len(output) >= self.cfg.mask_min_chars

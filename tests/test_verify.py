@@ -88,6 +88,20 @@ def test_generic_20mb_log_summary_stays_at_4000_chars():
     assert "the next page" not in noisy_capped.lower()
 
 
+def test_bound_rendered_omits_read_artifact_when_unavailable():
+    noisy = "\n".join(f"error {i}: {i}" for i in range(400))
+    noisy_items = [{**it, "check": "lint", "count": 1} for it in parse_generic(noisy)]
+    noisy_rendered = render_verify({"ok": False, "checks": [{"name": "lint", "code": 1, "timed_out": False}],
+                                    "failures": noisy_items})
+    assert len(noisy_rendered) > 4000
+    capped = bound_rendered(noisy_rendered, 4000, noisy, artifact_available=False)
+    assert "read_artifact" not in capped
+    assert len(capped) <= 4000
+    offered = bound_rendered(noisy_rendered, 4000, noisy)
+    assert "recover with read_artifact" in offered
+    assert hashlib.sha256(noisy.encode("utf-8")).hexdigest() in offered
+
+
 def test_normalize_message_strips_timings_pids_and_hex():
     a = normalize_message("boom after 1.23s pid=4321 at 0x7fff1234")
     b = normalize_message("boom after 9.00s pid=1 at 0xABCDEF")
@@ -415,5 +429,53 @@ def test_run_shell_put_artifact_failure_does_not_point_at_unstored_id(tmp_path):
         assert ev["artifact_id"] is None
         assert digest not in (ev.get("output") or "")
         assert m.db.full_artifact(s["id"], digest) is None
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_verify_footer_follows_artifact_tool_availability(tmp_path):
+    """A recover-with-read_artifact footer is only valid when the session can call that tool."""
+    noisy = "\n".join(f"error {i}: boom {i}" for i in range(80))
+    check = VerifyCheck("lint", "ruff check .")
+    overlay = {"verify_summary_chars": 200}
+    cfg = make_cfg(tmp_path, rules=[{"tool": "read_artifact", "action": "deny", "reason": "no recovery"}])
+    cfg.projects["scratch"] = Project(name="scratch", verify=[check], tool_output=overlay)
+    cfg.projects["guarded"] = Project(
+        name="guarded",
+        rules=[{"tool": "read_artifact", "action": "deny", "reason": "no recovery"}],
+        verify=[check],
+        tool_output=overlay,
+    )
+    script = Script([
+        Completion(tool_calls=[call("verify", 0)]),
+        Completion(content="done"),
+    ])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        orig = m.runner.workspace
+
+        def wrapped(s):
+            ws = orig(s)
+
+            async def fake_exec(command, timeout=120, network=False):
+                return 1, noisy
+            ws.sandbox.exec = fake_exec
+            return ws
+
+        m.runner.workspace = wrapped
+        await m.start()
+        offered = await wait_status(m, m.create("with artifact", project="scratch")["id"], "done")
+        denied = await wait_status(m, m.create("no artifact", project="guarded")["id"], "done")
+        offered_out = events(m, offered["id"], "tool_result")[0]["output"]
+        denied_out = events(m, denied["id"], "tool_result")[0]["output"]
+        digest = hashlib.sha256(f"=== lint (exit 1) ===\n{noisy}".encode("utf-8")).hexdigest()
+        assert "recover with read_artifact" in offered_out
+        assert digest in offered_out
+        assert m.runner.artifact_tool_available(m.db.get_session(offered["id"]))
+        assert not m.runner.artifact_tool_available(m.db.get_session(denied["id"]))
+        assert "read_artifact" not in denied_out
+        assert len(denied_out) <= 200
+        assert events(m, denied["id"], "tool_result")[0]["artifact_id"] is None
         await m.stop()
     asyncio.run(body())

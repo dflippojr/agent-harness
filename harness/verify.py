@@ -192,10 +192,14 @@ def render_verify(payload: dict) -> str:
     return "\n".join(lines)
 
 
-def bound_rendered(text: str, limit: int, raw_log: str) -> str:
-    digest = hashlib.sha256(raw_log.encode("utf-8")).hexdigest()
+def bound_rendered(text: str, limit: int, raw_log: str, *, artifact_available: bool = True) -> str:
+    """Prefix-truncate a verify summary. A recover-with-read_artifact footer is only valid when
+    the session can call that tool; runner._execute uses the same gate as run_shell."""
     if len(text) <= limit:
         return text
+    if not artifact_available:
+        return text[:limit]
+    digest = hashlib.sha256(raw_log.encode("utf-8")).hexdigest()
     footer = ARTIFACT_FOOTER.format(total=len(raw_log), artifact_id=digest)
     if "capture capped at" in raw_log:
         footer = footer.replace("characters total;", "characters total (capture capped);")
