@@ -11,6 +11,7 @@ Compaction only runs before a model call, never after a final answer, so answers
 from __future__ import annotations
 
 import copy
+import hashlib
 
 SUMMARY_TAG = "[Context summary]"
 
@@ -62,6 +63,43 @@ def last_turn_start(messages: list[dict]) -> int:
         if messages[i]["role"] == "assistant":
             return i
     return len(messages)
+
+
+RECEIPT_PREFIX = "[Observation receipt]"
+
+
+def mask_used_results(messages: list[dict], outcomes: dict, minimum: int,
+                      full_outputs: dict[str, str] | None = None) -> tuple[list[dict], dict[str, str], int]:
+    """Replace old successful tool results with receipts and return (context, artifacts, chars_saved)."""
+    out = copy.deepcopy(messages)
+    call_info = {}
+    for message in out:
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                call_info[call.get("id")] = (fn.get("name", ""), fn.get("arguments", "{}"))
+    artifacts: dict[str, str] = {}
+    saved = 0
+    cutoff = last_turn_start(out)
+    for i, message in enumerate(out):
+        if i >= cutoff or message.get("role") != "tool":
+            continue
+        call_id = message.get("tool_call_id")
+        outcome = outcomes.get(call_id, {})
+        name, args = call_info.get(call_id, (outcome.get("name", ""), "{}"))
+        content = (full_outputs or {}).get(call_id, message.get("content") or "")
+        if (outcome.get("ok") is not True or name == "read_artifact" or len(content) < minimum
+                or (message.get("content") or "").startswith(RECEIPT_PREFIX)):  # already masked on an earlier turn
+            continue
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        rendered_args = str(args).replace("\n", " ")[:200]
+        receipt = (f"{RECEIPT_PREFIX} tool={name} arguments={rendered_args} "
+                   f"characters={len(content)} sha256={digest} "
+                   f"Recover with read_artifact(artifact_id={digest}, start, end).")
+        artifacts[digest] = content
+        saved += len(message.get("content") or "") - len(receipt)
+        message["content"] = receipt
+    return out, artifacts, saved
 
 
 def elide(messages: list[dict], keep_last: int = 6, max_chars: int = 1500) -> tuple[list[dict], int]:

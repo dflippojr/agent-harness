@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS events (
     data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_session ON events(session_id, seq);
+CREATE TABLE IF NOT EXISTS artifacts (
+    session_id TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    content TEXT NOT NULL,
+    PRIMARY KEY (session_id, hash)
+);
 CREATE TABLE IF NOT EXISTS approvals (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -551,10 +557,32 @@ class Database:
 
     def delete_session(self, sid: str) -> None:
         with self.tx():
-            for table in ("events", "approvals", "review_comments"):
+            for table in ("events", "approvals", "review_comments", "artifacts"):
                 self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM search_index WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+
+    def put_artifact(self, sid: str, hash_: str, content: str) -> None:
+        with self.lock:
+            self.conn.execute("INSERT OR IGNORE INTO artifacts (session_id, hash, content) VALUES (?, ?, ?)",
+                              (sid, hash_, content))
+
+    def read_artifact(self, sid: str, hash_: str, start: int = 0, end: int | None = None) -> tuple[str, bool] | None:
+        """Read a bounded character range from a session's full artifact string."""
+        # Slice in Python: SQLite length()/substr() stop at the first embedded NUL.
+        text = self.full_artifact(sid, hash_)
+        if text is None:
+            return None
+        stop = len(text) if end is None else min(end, len(text))
+        chunk = text[start:min(stop, start + 20000)]
+        return chunk, stop > start + len(chunk)
+
+    def full_artifact(self, sid: str, hash_: str) -> str | None:
+        """The whole stored string, uncapped. Only for the daemon's own masking; the model-facing read is bounded."""
+        with self.lock:
+            row = self.conn.execute("SELECT content FROM artifacts WHERE session_id = ? AND hash = ?",
+                                    (sid, hash_)).fetchone()
+        return row["content"] if row else None
 
     # draft review comments
     def add_review_comment(self, sid: str, c: dict) -> dict:
