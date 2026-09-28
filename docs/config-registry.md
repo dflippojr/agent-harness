@@ -118,7 +118,7 @@ budget are not increased):
 | `compaction.keep_recent` | 0.05–0.50; must be `< summarize_at` |
 | `compaction.state_max_chars` | 256–100_000; cap on the serialized `update_state` object |
 
-Round-reset `files_modified` is derived from `git status --porcelain` against a snapshot taken at run start, on tower agent sessions only. Chat sessions, hosted CLI backends, and non-tower targets (Mac or other remote workspaces) do not use git for that list; they fall back to paths from `write_file` / `edit_file` if a reset happens at all. Reset quality depends on the model writing useful state before a threshold trigger; an automatic reset with empty state is not a dead-end record and falls through to ordinary compaction. Saved state is re-injected as a tagged, size-capped user message and is never executed.
+Round-reset `files_modified` is derived at reset on tower agent sessions: the union of `git diff --name-status` from the run-start HEAD to current HEAD, plus staged, unstaged, and untracked paths (including deleted and renamed). Files already dirty at run start are included only if their content changed. Chat sessions, hosted CLI backends, and non-tower targets (Mac or other remote workspaces) do not use git for that list; they fall back to paths from `write_file` / `edit_file` if a reset happens at all. Reset quality depends on the model writing useful state before a threshold trigger; an automatic reset with empty state is not a dead-end record and falls through to ordinary compaction. Saved state is re-injected as a tagged, size-capped user message and is never executed.
 | `cleanup.container_idle_hours` | 0.25–168 |
 | `cleanup.workspace_retention_days` | 1–365 |
 | `cleanup.workspace_quota_mb` | 50–100_000 |

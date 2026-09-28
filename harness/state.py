@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -109,6 +110,13 @@ def porcelain_paths(line: str) -> list[str]:
     return [_posix(path)]
 
 
+def name_status_paths(line: str) -> list[str]:
+    parts = line.strip().split("\t")
+    if len(parts) < 2:
+        return []
+    return [_posix(part) for part in parts[1:] if part]
+
+
 def _posix(path: str) -> str:
     return path.replace("\\", "/").strip().strip('"')
 
@@ -129,16 +137,103 @@ def paths_since(baseline: list[str] | None, current: list[str]) -> list[str]:
 
 def git_porcelain(root: Path) -> list[str] | None:
     """`git status --porcelain` lines at the workspace root, or None if this is not a usable git repo."""
+    return _git_lines(root, "status", "--porcelain=v1", "--untracked-files=all")
+
+
+def _git_lines(root: Path, *args: str) -> list[str] | None:
     try:
         if not (root / ".git").exists():
             return None
         from .projects import git
-        result = git(root, "status", "--porcelain=v1", "--untracked-files=all", check=False, timeout=30)
+        result = git(root, *args, check=False, timeout=30)
     except (OSError, TypeError, ValueError):
         return None
     if result.code != 0:
         return None
-    return [line.replace("\\", "/") for line in result.out.splitlines() if line.strip()]
+    return [line.replace("\\", "/") for line in result.out.strip("\n").splitlines() if line.strip()]
+
+
+def _rev_parse_head(root: Path) -> str | None:
+    lines = _git_lines(root, "rev-parse", "HEAD")
+    if not lines:
+        return None
+    sha = lines[0].strip()
+    return sha or None
+
+
+def _file_digest(root: Path, rel: str) -> str | None:
+    path = root / rel
+    try:
+        if not path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def snapshot_git_baseline(root: Path) -> dict | None:
+    """HEAD at run start plus content hashes of paths already dirty in the worktree."""
+    porcelain = git_porcelain(root)
+    if porcelain is None:
+        return None
+    dirty: dict[str, str | None] = {}
+    for line in porcelain:
+        for path in porcelain_paths(line):
+            if path and path not in dirty:
+                dirty[path] = _file_digest(root, path)
+    return {"head": _rev_parse_head(root), "dirty": dirty}
+
+
+def _committed_name_status(root: Path, head: str | None) -> list[str] | None:
+    if head:
+        return _git_lines(root, "diff", "--name-status", "-M", f"{head}..HEAD")
+    if _rev_parse_head(root) is None:
+        return []
+    try:
+        from .projects import git
+        empty = git(root, "hash-object", "-t", "tree", "--stdin", check=False, timeout=30, input_="")
+    except (OSError, TypeError, ValueError):
+        return None
+    if empty.code != 0 or not empty.out.strip():
+        return None
+    return _git_lines(root, "diff", "--name-status", "-M", f"{empty.out.strip()}..HEAD")
+
+
+def files_modified_since(root: Path, baseline: dict | None) -> list[str] | None:
+    """Committed, staged, unstaged, and untracked paths since the run-start baseline, or None if git fails."""
+    porcelain = git_porcelain(root)
+    if porcelain is None:
+        return None
+    committed = _committed_name_status(root, (baseline or {}).get("head"))
+    if committed is None:
+        return None
+    dirty = dict((baseline or {}).get("dirty") or {})
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(path: str) -> bool:
+        path = _posix(path)
+        if not path or path in seen:
+            return len(out) >= FILES_MODIFIED_MAX
+        if path in dirty and _file_digest(root, path) == dirty[path]:
+            return len(out) >= FILES_MODIFIED_MAX
+        seen.add(path)
+        out.append(path)
+        return len(out) >= FILES_MODIFIED_MAX
+
+    for line in committed:
+        for path in name_status_paths(line):
+            if add(path):
+                return out
+    for line in porcelain:
+        for path in porcelain_paths(line):
+            if add(path):
+                return out
+    return out
 
 
 def inject_payload(saved: dict | None, files_modified: list[str], max_chars: int) -> dict:

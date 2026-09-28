@@ -1710,20 +1710,24 @@ class Runner:
         run = s["run"]
         if "git_baseline" in run:
             return
-        run["git_baseline"] = agent_state.git_porcelain(Path(s["workspace"]))
+        snapshot = agent_state.snapshot_git_baseline(Path(s["workspace"]))
+        if snapshot is None:
+            return
+        run["git_baseline"] = snapshot
         self.db.update_session(sid, run=run)
 
     def _files_modified(self, s: dict) -> list[str]:
-        """Git worktree diff since run start on tower agent sessions; otherwise write/edit paths."""
+        """Git changes since the run-start HEAD on tower agent sessions; otherwise write/edit paths."""
         touched = list(s["run"].get("files_touched") or [])[:agent_state.FILES_MODIFIED_MAX]
         if s.get("kind") == "chat" or s.get("target") != "tower" or s.get("backend", "local") != "local":
             return touched
         if s.get("workspace_removed"):
             return touched
-        current = agent_state.git_porcelain(Path(s["workspace"]))
-        if current is None:
+        baseline = s["run"].get("git_baseline")
+        if not isinstance(baseline, dict):
             return touched
-        return agent_state.paths_since(s["run"].get("git_baseline"), current)
+        paths = agent_state.files_modified_since(Path(s["workspace"]), baseline)
+        return touched if paths is None else paths
 
     def _round_reset(self, s: dict, context: list, before: int, cpt: float, overhead: int) -> dict:
         sid = s["id"]

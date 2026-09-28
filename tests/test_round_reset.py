@@ -6,11 +6,12 @@ import asyncio
 import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from harness import compaction
-from harness.config import _reset_at, _state_max_chars
+from harness.config import Project, _reset_at, _state_max_chars
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.metrics import render as render_metrics
@@ -242,6 +243,54 @@ def test_explicit_reset_keeps_dead_end_and_files_and_grounding(tmp_path):
         assert "Round reset:" in text
         assert "Agent saved state" in text
         await m.stop()
+    asyncio.run(body())
+
+
+def test_reset_lists_files_after_commit(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+    (src / "README").write_text("init\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "README"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+                   check=True, capture_output=True)
+    cfg = make_cfg(tmp_path)
+    cfg.projects["repo"] = Project(name="repo", repo=str(src))
+    box: dict = {}
+
+    def commit_then_reset(_msgs):
+        ws = Path(box["m"].db.get_session(box["id"])["workspace"])
+        subprocess.run(["git", "-C", str(ws), "add", "a.py", "b.py"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(ws), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "work"],
+                       check=True, capture_output=True)
+        return Completion(tool_calls=[call("reset_round")])
+
+    steps = iter([
+        Completion(tool_calls=[call("write_file", 0, path="a.py", content="a\n"),
+                               call("write_file", 1, path="b.py", content="b\n")]),
+        Completion(tool_calls=[call("update_state", 2, goal="ship files")]),
+        commit_then_reset,
+        Completion(tool_calls=[call("finish", 3, answer="done")]),
+    ])
+
+    def next_step(msgs):
+        step = next(steps)
+        return step(msgs) if callable(step) else step
+
+    async def body():
+        m = Manager(cfg, chat=Script([next_step]))
+        box["m"] = m
+        await m.start()
+        s = m.create("edit and commit", project="repo")
+        box["id"] = s["id"]
+        s = await wait_status(m, s["id"], "done")
+        await asyncio.gather(*m.tasks.values())
+        payload = _state_from_context(m.db.get_session(s["id"])["context"])
+        assert "a.py" in payload["files_modified"]
+        assert "b.py" in payload["files_modified"]
+        await m.stop()
+
     asyncio.run(body())
 
 
