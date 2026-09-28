@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import time
 import unicodedata
@@ -70,7 +71,12 @@ def _get(cfg, repo: str, path: str, params: dict | None = None):
     if response.status_code == 404:
         raise HarnessError(404, "GitHub item or repository is unavailable to this token")
     if response.status_code in (403, 429):
-        limited = response.status_code == 429 or response.headers.get("x-ratelimit-remaining") == "0"
+        try:
+            message = str(response.json().get("message") or "").lower()
+        except (ValueError, AttributeError):
+            message = ""
+        limited = (response.status_code == 429 or response.headers.get("x-ratelimit-remaining") == "0"
+                   or "rate limit" in message or "rate-limit" in message)
         raise HarnessError(429 if limited else 403,
                            "GitHub rate limit reached" if limited else "GitHub repository permission denied")
     if response.status_code != 200:
@@ -152,7 +158,7 @@ def item(cfg, repo: str, number: int) -> dict:
                                "author": clean((c.get("user") or {}).get("login"), 100),
                                "body": clean(c.get("body"), 1000)} for c in comments]
     # Bound the entire selected item's serialized external text before returning it to the browser.
-    while len(prompt(result)) > 24000 and result["comments"]:
+    while (len(prompt(result)) > 24000 or len(json.dumps(result, ensure_ascii=False)) > 24000) and result["comments"]:
         result["comments"].pop()
     return result
 

@@ -84,3 +84,21 @@ def test_pr_fork_refused_and_comments_sorted(cfg, monkeypatch):
     result = gh.item(cfg, "a/b", 3)
     assert result["base_branch"] == "feature/x"
     assert [c["body"] for c in result["comments"]] == ["early", "late"]
+
+
+def test_secondary_rate_limit_and_permission_are_distinct(cfg, monkeypatch):
+    gh._CACHE.clear()
+    def limited(request):
+        return httpx.Response(403, json={"message": "You have exceeded a secondary rate limit"})
+    transport(monkeypatch, limited)
+    with pytest.raises(HarnessError) as err:
+        gh.list_items(cfg, "a/b")
+    assert err.value.status == 429
+
+    monkeypatch.undo()
+    def denied(request):
+        return httpx.Response(403, json={"message": "Resource not accessible by integration"})
+    transport(monkeypatch, denied)
+    with pytest.raises(HarnessError) as err:
+        gh.list_items(cfg, "a/b")
+    assert err.value.status == 403
