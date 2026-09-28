@@ -133,6 +133,79 @@ def test_timeout_is_detected_by_exit_124_not_substring():
     assert "timeout in its output" in result.artifact_content
 
 
+def test_passing_generic_check_with_error_like_text_has_no_failures():
+    async def exec_cmd(command, timeout):
+        return 0, "Found 0 errors.\nAll checks passed!\n"
+    result = asyncio.run(run_verify([VerifyCheck("lint", "ruff check .")], exec_cmd, 4000))
+    payload = result.extra["verify"]
+    assert payload["ok"] is True
+    assert payload["failures"] == []
+    assert result.text == "verify: all checks passed (1 checks)"
+    assert "LOG" not in result.text and "[lint] ERROR" not in result.text
+    assert "Found 0 errors" not in result.text
+    assert "All checks passed!" not in result.text
+
+
+def test_passing_pytest_run_has_no_failures():
+    log = (
+        "============================= test session starts ==============================\n"
+        "============================== 3 passed in 0.12s ===============================\n"
+    )
+    async def exec_cmd(command, timeout):
+        return 0, log
+    result = asyncio.run(run_verify(
+        [VerifyCheck("tests", "pytest --tb=short -ra", parser="pytest")], exec_cmd, 4000))
+    payload = result.extra["verify"]
+    assert payload["ok"] is True
+    assert payload["failures"] == []
+    assert result.text == "verify: all checks passed (1 checks)"
+    assert "passed in" not in result.text
+
+
+def test_failing_generic_check_keeps_error_lines():
+    async def exec_cmd(command, timeout):
+        return 1, "ok\nerror: nope\nFAILED something\n"
+    result = asyncio.run(run_verify([VerifyCheck("lint", "ruff check .")], exec_cmd, 4000))
+    payload = result.extra["verify"]
+    assert payload["ok"] is False
+    assert [f["message"] for f in payload["failures"]] == ["error: nope", "FAILED something"]
+    assert "[lint] ERROR" in result.text
+    assert "all checks passed" not in result.text.lower()
+
+
+def test_timeout_with_empty_output_is_still_a_failure():
+    async def exec_cmd(command, timeout):
+        return 124, ""
+    result = asyncio.run(run_verify([VerifyCheck("slow", "sleep 9", timeout=2)], exec_cmd, 4000))
+    payload = result.extra["verify"]
+    assert payload["ok"] is False
+    assert payload["checks"][0]["timed_out"] is True
+    assert payload["failures"]
+    assert "TIMED OUT" in result.text
+
+
+def test_mixed_passing_and_failing_checks_only_parse_failures():
+    async def exec_cmd(command, timeout):
+        if "ruff" in command:
+            return 0, "All checks passed!\nFound 0 errors.\n"
+        if "pytest" in command:
+            return 1, _pytest_log([("tests/test_a.py", 3, "test_a", "assert False", 1)])
+        return 0, "ok"
+    result = asyncio.run(run_verify([
+        VerifyCheck("lint", "ruff check ."),
+        VerifyCheck("tests", "pytest --tb=short -ra", parser="pytest"),
+    ], exec_cmd, 4000))
+    payload = result.extra["verify"]
+    assert payload["ok"] is False
+    assert all(f["check"] == "tests" for f in payload["failures"])
+    assert any("assert False" in (f.get("message") or "") or "failed" in (f.get("kind") or "")
+               for f in payload["failures"])
+    assert "All checks passed" not in result.text
+    assert "Found 0 errors" not in result.text
+    assert "[lint]" not in result.text
+    assert "test_a" in result.text
+
+
 def test_no_configured_checks_errors():
     async def exec_cmd(command, timeout):
         raise AssertionError("must not run")

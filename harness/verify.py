@@ -216,10 +216,11 @@ async def run_verify(checks: list, exec_cmd, summary_chars: int) -> ToolOutput:
                "parser": infer_parser(check)}
         check_rows.append(row)
         parser = row["parser"]
-        parsed = parse_pytest(output) if parser == "pytest" else parse_generic(output)
-        if timed_out and not parsed:
-            parsed = [{"kind": "error", "file": "", "line": None, "message": f"timed out after {timeout}s"}]
-        failures.extend(_dedup(check.name, parsed))
+        if timed_out or code != 0:
+            parsed = parse_pytest(output) if parser == "pytest" else parse_generic(output)
+            if timed_out and not parsed:
+                parsed = [{"kind": "error", "file": "", "line": None, "message": f"timed out after {timeout}s"}]
+            failures.extend(_dedup(check.name, parsed))
     raw_log = "\n\n".join(logs)
     ok = all(row["code"] == 0 and not row["timed_out"] for row in check_rows)
     payload = {"ok": ok, "checks": check_rows, "failures": failures}
