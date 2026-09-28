@@ -779,36 +779,37 @@ def _global_event_visible(e: dict, session: dict | None, user_id: str, key: dict
                 and session.get("app_id") != key["id"])
 
 
+async def _global_events_stream(request: Request, m, user_id: str, key: dict, epoch: int, global_types):
+    from .api import sse
+    sub = m.bus.subscribe("*")
+    try:
+        yield ": connected\n\n"
+        while True:
+            if m.stream_epoch.get(user_id, 0) != epoch:
+                return
+            try:
+                e = await asyncio.wait_for(sub.queue.get(), timeout=15)
+            except asyncio.TimeoutError:
+                if await request.is_disconnected():
+                    return
+                yield ": keepalive\n\n"
+                continue
+            if _global_event_visible(e, m.db.get_session(e["session_id"]), user_id, key, global_types):
+                # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
+                yield sse({**e, "seq": None})
+    finally:
+        m.bus.unsubscribe("*", sub)
+
+
 @route_table.get("/api/v1/events")
 async def api_events(request: Request):
-    from .api import GLOBAL_TYPES, sse
+    from .api import GLOBAL_TYPES
     m = mgr(request)
     key = auth(request, "sessions")
     user_id = key["user_id"] if key.get("kind") == "member" else "owner"
     epoch = m.stream_epoch.get(user_id, 0)
-
-    async def stream():
-        sub = m.bus.subscribe("*")
-        try:
-            yield ": connected\n\n"
-            while True:
-                if m.stream_epoch.get(user_id, 0) != epoch:
-                    return
-                try:
-                    e = await asyncio.wait_for(sub.queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    if await request.is_disconnected():
-                        return
-                    yield ": keepalive\n\n"
-                    continue
-                if _global_event_visible(e, m.db.get_session(e["session_id"]), user_id, key, GLOBAL_TYPES):
-                    # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
-                    yield sse({**e, "seq": None})
-        finally:
-            m.bus.unsubscribe("*", sub)
-
-    from fastapi.responses import StreamingResponse
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    return StreamingResponse(_global_events_stream(request, m, user_id, key, epoch, GLOBAL_TYPES),
+                             media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1034,6 +1035,37 @@ def _ticket_key(request: Request, m, ref: str, ticket: str) -> dict:
     return key
 
 
+async def _session_events_stream(request: Request, m, sid: str, owner: str, after: int, follow: bool):
+    from .api import sse
+    sub = m.bus.subscribe(sid)
+    last = after
+    epoch = m.stream_epoch.get(owner, 0)
+    try:
+        yield ": connected\n\n"
+        for e in m.db.events(sid, after):
+            last = e["seq"]
+            yield sse(e)
+        if not follow:
+            return
+        while True:
+            if m.stream_epoch.get(owner, 0) != epoch:
+                return
+            try:
+                e = await asyncio.wait_for(sub.queue.get(), timeout=15)
+            except asyncio.TimeoutError:
+                if await request.is_disconnected():
+                    return
+                yield ": keepalive\n\n"
+                continue
+            if e["seq"] is not None:
+                if e["seq"] <= last:
+                    continue
+                last = e["seq"]
+            yield sse(e)
+    finally:
+        m.bus.unsubscribe(sid, sub)
+
+
 @route_table.get("/api/v1/sessions/{ref}/events")
 async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
     m = mgr(request)
@@ -1045,36 +1077,8 @@ async def events(ref: str, request: Request, after: int = 0, follow: bool = True
     if request.headers.get("last-event-id", "").isdigit():
         after = max(after, int(request.headers["last-event-id"]))
 
-    async def stream():
-        sub = m.bus.subscribe(sid)
-        last = after
-        epoch = m.stream_epoch.get(owner, 0)
-        try:
-            yield ": connected\n\n"
-            for e in m.db.events(sid, after):
-                last = e["seq"]
-                yield sse(e)
-            if not follow:
-                return
-            while True:
-                if m.stream_epoch.get(owner, 0) != epoch:
-                    return
-                try:
-                    e = await asyncio.wait_for(sub.queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    if await request.is_disconnected():
-                        return
-                    yield ": keepalive\n\n"
-                    continue
-                if e["seq"] is not None:
-                    if e["seq"] <= last:
-                        continue
-                    last = e["seq"]
-                yield sse(e)
-        finally:
-            m.bus.unsubscribe(sid, sub)
-
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    return StreamingResponse(_session_events_stream(request, m, sid, owner, after, follow),
+                             media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "Referrer-Policy": "no-referrer"})
 

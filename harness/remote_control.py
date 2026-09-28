@@ -330,7 +330,7 @@ class RemoteControl:
             }, "required": ["project", "reason"]},
         }}]
 
-    async def call(self, name: str, args: dict, session: dict | None = None, call_id: str = "") -> str:
+    async def call(self, name: str, args: dict, session: dict | None = None, **_kwargs) -> str:
         if name != "open_claude_remote_control":
             raise ToolError(f"unknown tool {name}")
         who = f"session {session['id']}" if session else "agent"

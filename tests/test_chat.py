@@ -337,16 +337,21 @@ def test_session_list_stream_hides_chats_and_run_payloads(tmp_path, path):
             body = (await endpoint(request)).body_iterator
             assert await body.__anext__() == ": connected\n\n"
             m.bus.emit(chat["id"], "status", {"status": "done"})
-            m.bus.emit(agent["id"], "run_finished", {"run": {"secret": 1}, "ok": True})
-            chunk = await asyncio.wait_for(body.__anext__(), 5)
+            m.bus.emit(agent["id"], "status", {"status": "running"})
+            m.bus.emit(agent["id"], "run_finished", {"run": {"secret": 1}, "ok": True, "status": "done"})
+            first = await asyncio.wait_for(body.__anext__(), 5)
+            second = await asyncio.wait_for(body.__anext__(), 5)
             await body.aclose()
-            return chunk
+            return first, second
 
-        chunk = asyncio.run(first_event())
-    assert "run_finished" in chunk
-    assert '"ok": true' in chunk
-    assert chat["id"] not in chunk
-    assert ("secret" in chunk) == (path == "/api/v1/events")  # only the bundled list stream strips run payloads
+        first, second = asyncio.run(first_event())
+    assert '"type": "status"' in first
+    assert '"status": "running"' in first
+    assert '"seq": null' in first  # both list streams hide sequence gaps
+    assert "run_finished" in second
+    assert '"ok": true' in second
+    assert chat["id"] not in first + second
+    assert ("secret" in first + second) == (path == "/api/v1/events")
 
 
 def test_chat_accepts_follow_up_messages(tmp_path):
