@@ -241,7 +241,10 @@ def _print_event(t: str, d: dict, args) -> None:
         print(f"  {color}← {d['name']}{RESET} {DIM}({d['seconds']}s){RESET}")
         print(DIM + indent(d["output"], None if args.full else 12) + RESET)
     elif t == "compaction":
-        if d.get("tier") == "round_reset":
+        if d.get("tier") == "mask":
+            saved = int(d.get("tokens_saved") or 0)
+            print(f"{DIM}Replaced old tool outputs with recoverable receipts (~{saved} tokens saved){RESET}")
+        elif d.get("tier") == "round_reset":
             print(f"{DIM}round reset: ~{d['tokens_before']} → ~{d['tokens_after']} tokens{RESET}")
         else:
             print(f"{DIM}context compacted ({d['tier']}): ~{d['tokens_before']} → ~{d['tokens_after']} tokens{RESET}")

@@ -501,6 +501,19 @@ def test_watch_ignores_replayed_terminal_status_and_reconnects(calls, stream, ca
     assert plain(capsys.readouterr().out).count("status: done") == 2
 
 
+def test_print_event_mask_compaction(capsys):
+    cli._print_event("compaction", {"tier": "mask", "tokens_saved": 4200, "characters_saved": 12600},
+                     args_ns())
+    out = plain(capsys.readouterr().out)
+    assert out.strip() == "Replaced old tool outputs with recoverable receipts (~4200 tokens saved)"
+
+
+def test_print_event_elide_compaction_unchanged(capsys):
+    cli._print_event("compaction", {"tier": "elide", "tokens_before": 100, "tokens_after": 50}, args_ns())
+    out = plain(capsys.readouterr().out)
+    assert "context compacted (elide): ~100 → ~50 tokens" in out
+
+
 def test_watch_queue_compaction_and_print_only_events(calls, stream, capsys):
     calls.responses[("GET", "/sessions/s1")] = {"status": "done"}
     stream.script.append([

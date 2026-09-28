@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 
 from .db import Database
+
+log = logging.getLogger("harness.transcript")
 
 
 def _clock(ts: float) -> str:
@@ -94,6 +97,9 @@ def _r_snippet_result(at: str, d: dict, last_content: str) -> list[str]:
 
 
 def _r_compaction(at: str, d: dict, last_content: str) -> list[str]:
+    if d.get("tier") == "mask":
+        saved = int(d.get("tokens_saved") or 0)
+        return [f"#### {at} · Replaced old tool outputs with recoverable receipts (~{saved} tokens saved)", ""]
     if d.get("tier") == "round_reset":
         return [f"#### {at} · Round reset: ~{d['tokens_before']} → ~{d['tokens_after']} tokens", ""]
     lines = [f"#### {at} · Context compaction ({d['tier']}): ~{d['tokens_before']} → "
@@ -229,8 +235,12 @@ def render(db: Database, sid: str) -> str:
         if t == "assistant":
             last_content = d.get("content", "").strip()
         renderer = _RENDERERS.get(t)
-        if renderer is not None:
+        if renderer is None:
+            continue
+        try:
             lines += renderer(at, d, last_content)
+        except (KeyError, TypeError, ValueError):
+            log.warning("skipping malformed %s event in transcript for %s", t, sid)
     return "\n".join(lines)
 
 

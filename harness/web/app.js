@@ -2250,6 +2250,11 @@ async function viewSession(sid, tab, focusApproval) {
     },
     compaction: (e) => {
       const d = e.data;
+      if (d.tier === "mask") {
+        add(h("p", { class: "note" },
+          `Replaced old tool outputs with recoverable receipts (~${fmtTokens(d.tokens_saved)} tokens saved)`));
+        return;
+      }
       if (d.totals) totals = d.totals;
       if (d.tokens_after) ctxUsed = d.tokens_after;
       renderHead();
