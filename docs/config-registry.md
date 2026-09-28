@@ -131,6 +131,8 @@ budget are not increased):
 | `backends.local.model` | installed local models |
 | `backends.<name>.model` / `backends.<name>.effort` | each configured hosted backend |
 
+`compaction.mask_min_chars` is file-only (`config/harness.yaml`, clamped 1–10_000_000) and is not a live admin key. See [`compaction.md`](compaction.md).
+
 Restart-required feature switches (installed module + valid file config; enabling fails if required
 URLs, token files, models, or platform support are missing). These change effective daemon features,
 not `modules.*` installation. `capabilities.modules.<name>`, `/health`, `/api/v1` `features`, and
@@ -142,7 +144,7 @@ the Manager's tool construction are derived from `installed AND <section>.enable
 
 Installer/file-only metadata (value omitted): `listen.host`, `listen.port`, `paths.data_dir`, `paths.repos_dir`,
 `backup.dir`, `notify.server`, `notify.topic`, `notify.token_file`, `smart_approvals.secret_ref`,
-`smart_approvals.proxy`, `install.profile`, `modules.*`.
+`smart_approvals.proxy`, `install.profile`, `modules.*`, `compaction.mask_min_chars`.
 
 ## App keys (v1)
 
