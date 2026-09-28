@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import compaction, grounding, llm, projects, state as agent_state
+from . import compaction, efficiency, grounding, llm, projects, state as agent_state
 from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
@@ -523,8 +523,10 @@ class Runner:
             pending = unresolved_calls(s["context"])
             if pending:
                 if await self._resolve_calls(s, pending):
+                    self._emit_turn_metrics(sid)
                     await self._end_run(sid)
                     return
+                self._emit_turn_metrics(sid)
                 continue
 
             if s["inbox"]:
@@ -796,6 +798,7 @@ class Runner:
                 run["tool_errors"] = run.get("tool_errors", 0) + 1
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "tool_result", {"id": call_id, "name": name, "ok": ok, "seconds": seconds,
+                                               "output_chars": len(output),
                                                "output": truncate_middle(output, 20000)})
 
     def _claude_delta(self, sid: str, event: dict, _tool_names: dict[str, str] | None = None) -> None:
@@ -1191,10 +1194,20 @@ class Runner:
             self.bus.emit(sid, "model_waking", {"model": model.name, "expected_seconds": EXPECTED_WAKE_SECONDS})
 
         reading = self._progress_reporter(sid, "prompt_progress", {})
+        cache_box = {"seen": False, "tokens": None}
+
+        async def reading_with_cache(processed: int, total: int, cache: int = -1) -> None:
+            if not cache_box["seen"]:
+                cache_box["seen"] = True
+                cache_box["tokens"] = None if cache < 0 else cache
+            await reading(processed, total, cache)
+
         run = s["run"]
         tools = self.tool_schemas(s, ws)
-        completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading, run)
+        completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache, run)
         stream.flush()
+        if completion.cache_tokens is None and cache_box["seen"]:
+            completion.cache_tokens = cache_box["tokens"]
 
         run["turns"] += 1
         run["prompt_tokens"] += completion.prompt_tokens
@@ -1204,7 +1217,10 @@ class Runner:
             chars = sum(compaction.message_chars(m) for m in s["context"]) + len(json.dumps(tools))
             run["chars_per_token"] = min(6.0, max(1.5, chars / completion.prompt_tokens))
             run["context_tokens"] = completion.prompt_tokens + completion.completion_tokens
-        return self._commit_completion(s, run, completion, model)
+        ended = self._commit_completion(s, run, completion, model, tools)
+        if ended or not completion.tool_calls:
+            self._emit_turn_metrics(sid)
+        return ended
 
     async def _call_with_retries(self, sid: str, model, context: list, tools: list, stream: "_DeltaStream",
                                  reading, run: dict):
@@ -1220,9 +1236,36 @@ class Runner:
                 self.bus.emit(sid, "llm_retry", {"attempt": attempt + 1, "error": str(e)[:500]})
                 await asyncio.sleep(2 * attempt)
 
-    def _commit_completion(self, s: dict, run: dict, completion, model) -> bool:
+    def _turn_metrics_payload(self, s: dict, run: dict, completion, tools: list) -> dict:
+        composed = efficiency.compose(s["context"], len(json.dumps(tools)),
+                                      run.get("chars_per_token", 3.0), completion.prompt_tokens)
+        cache = completion.cache_tokens
+        return {
+            "turn": run["turns"],
+            "prompt_tokens": completion.prompt_tokens,
+            "completion_tokens": completion.completion_tokens,
+            "composition": composed["buckets"],
+            "estimated": composed["estimated"],
+            "cache_tokens": cache,
+            "recomputed_tokens": efficiency.recomputed_tokens(completion.prompt_tokens, cache),
+        }
+
+    def _emit_turn_metrics(self, sid: str) -> None:
+        s = self.db.get_session(sid)
+        pending = (s.get("run") or {}).get("pending_turn_metrics")
+        if not pending:
+            return
+        retries, correlated = efficiency.turn_increments(self.db.events(sid))
+        run = {k: v for k, v in s["run"].items() if k != "pending_turn_metrics"}
+        payload = {**pending, "dead_end_retries": retries, "compaction_correlated_retries": correlated}
+        with self.db.tx():
+            self.db.update_session(sid, run=run)
+            self.bus.emit(sid, "turn_metrics", payload)
+
+    def _commit_completion(self, s: dict, run: dict, completion, model, tools: list) -> bool:
         """Record one model reply: the context, totals and events, and whether the run is over."""
         sid = s["id"]
+        run["pending_turn_metrics"] = self._turn_metrics_payload(s, run, completion, tools)
         msg: dict = {"role": "assistant", "content": completion.content}
         if completion.reasoning:
             msg["reasoning_content"] = completion.reasoning
@@ -1617,11 +1660,12 @@ class Runner:
                 if path not in touched:
                     run["files_touched"] = (touched + [path])[:agent_state.FILES_MODIFIED_MAX]
                     self.db.update_session(sid, run=run)
+        output_chars = len(output)
         if len(output) > max_chars:
             output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
         self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
-                            artifact_content=artifact_content, extra=extra)
+                            artifact_content=artifact_content, extra=extra, output_chars=output_chars)
         return output
 
     def _read_artifact(self, sid: str, args: dict) -> str:
@@ -1654,7 +1698,8 @@ class Runner:
         self.db.update_session(sid, run=run)
 
     def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
-                       artifact_content: str | None = None, extra: dict | None = None) -> None:
+                       artifact_content: str | None = None, extra: dict | None = None,
+                       output_chars: int | None = None) -> None:
         with self.db.tx():
             s = self.db.get_session(sid)
             run = s["run"]
@@ -1676,7 +1721,9 @@ class Runner:
                         output += note
                         context[-1]["content"] = output
             payload = {"id": call["id"], "name": name, "ok": ok, "artifact_id": artifact_id,
-                       "seconds": round(seconds, 2), "output": truncate_middle(output, 20000)}
+                       "seconds": round(seconds, 2),
+                       "output_chars": len(output) if output_chars is None else output_chars,
+                       "output": truncate_middle(output, 20000)}
             if extra:
                 payload.update(extra)
             self.db.update_session(sid, context=context, run=run)
@@ -1925,6 +1972,7 @@ class Runner:
         self.set_status(sid, "cancelled", stop_reason="cancelled")
 
     async def _end_run(self, sid: str) -> None:
+        self._emit_turn_metrics(sid)
         s = self.db.get_session(sid)
         extra = {}
         if s.get("job_id"):  # scheduled job: the answer's last STATUS line decides how loudly to notify (jobs.py)
