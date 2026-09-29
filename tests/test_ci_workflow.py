@@ -30,7 +30,6 @@ MUST_RUN_PATHS = (
 EXPECTED_SKIP_PATHS = (
     "LICENSE",
     "third_party/Real-ESRGAN.LICENSE",
-    "docs/backlog.yaml",
     "docs/compatibility.md",
     "docs/config-registry.md",
     "docs/flux-fast.md",
