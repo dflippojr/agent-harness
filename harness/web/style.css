@@ -267,6 +267,7 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 
 .note { font-size: 0.8125rem; color: var(--muted); text-align: center; margin: 12px 0; }
 .note.bad { color: var(--bad); }
+.note.stream-diag { margin: 6px 0; font-size: 0.75rem; word-break: break-word; }
 .status-line { text-align: center; font-size: 0.8125rem; margin: 14px 0; }
 
 .composer {
