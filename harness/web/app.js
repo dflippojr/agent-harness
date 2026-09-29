@@ -120,8 +120,10 @@ function setHeader(feature, pageTitle = "", { page = false } = {}) {
 }
 window.addEventListener("resize", repaintBar);
 window.addEventListener("orientationchange", repaintBar);
-window.addEventListener("pageshow", () => { repaintBar(); repaintPage(); });
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { repaintBar(); repaintPage(); } });
+window.addEventListener("pageshow", repaintBar);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintBar(); });
+window.addEventListener("pageshow", repaintPage);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintPage(); });
 
 async function loadProfileIcon() {
   if (protocolBlocked) return;
