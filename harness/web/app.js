@@ -591,7 +591,7 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false, on
     source.onerror = () => {
       mark(false);
       report("failed", source.readyState === EventSource.CLOSED ? "connection closed" : "connection lost, retrying");
-      if (source.readyState === EventSource.CLOSED && onStatus) probeStream(url, report);
+      if (source.readyState === EventSource.CLOSED && onStatus) probeStream(url, (state, detail) => { if (!closed && run === generation) report(state, detail); });
       if (source.readyState === EventSource.CLOSED && run === generation) {
         clearTimeout(retry);
         retry = setTimeout(connect, 3000);
