@@ -523,7 +523,10 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false } =
       if (line.startsWith("event:")) type = line.slice(6).trim();
       else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
     }
-    if (data.length && handlers[type]) handlers[type](JSON.parse(data.join("\n")));
+    if (!data.length || !handlers[type]) return;
+    // One bad event must not tear down the stream (and force a reconnect); skip it and keep reading.
+    try { handlers[type](JSON.parse(data.join("\n"))); }
+    catch (e) { console.error(`stream event "${type}" failed`, e); }
   };
   const fetchStream = async (url) => {
     controller = new AbortController();
