@@ -88,6 +88,21 @@ function repaintBar() {
   });
 }
 
+// #81: after back navigation the installed iOS app can leave the upper part of the page unpainted until a scroll
+// invalidates it. Like repaintBar(), alternate a sub-pixel transform on the page content (and re-clamp the scroll
+// position, since a long subpage's restored offset can exceed the shorter page's height) once a route has rendered.
+let pagePaintFrame = 0;
+let pagePaintPhase = false;
+function repaintPage() {
+  cancelAnimationFrame(pagePaintFrame);
+  pagePaintFrame = requestAnimationFrame(() => {
+    pagePaintPhase = !pagePaintPhase;
+    $app.classList.toggle("paint-refresh", pagePaintPhase);
+    const { y, viewH, pageH } = pageMetrics(); // the cross-engine measurements the jump buttons use
+    if (y > pageH - viewH) scrollPage(pageH - viewH);
+  });
+}
+
 function profileIconHidden(topLevel, page = false) {
   // Show on Chat, Agents, Tasks, Images, and Actions. Hide on nested Back pages
   // and on Profile (page: true). Guest chrome is unchanged; this flag is route-only.
@@ -107,6 +122,8 @@ window.addEventListener("resize", repaintBar);
 window.addEventListener("orientationchange", repaintBar);
 window.addEventListener("pageshow", repaintBar);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintBar(); });
+window.addEventListener("pageshow", repaintPage);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintPage(); });
 
 async function loadProfileIcon() {
   if (protocolBlocked) return;
@@ -706,6 +723,7 @@ async function route() {
     append($app, h("p", { class: "note bad" }, e.message),
       h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings"));
   }
+  repaintPage();
 }
 $back.addEventListener("click", () => {
   if (protocolBlocked) return;
