@@ -29,8 +29,8 @@ mobile relay runs on Stably's servers. The harness is Tailscale-only.
 
 ## Backlog entries filed from this study
 
-`docs/backlog.yaml`: `review-diff-comments` (#165), `session-fan-out-compare` (#166), `github-issue-to-task` (#167),
-`generic-cli-backend` (#168). Landing the study itself is #169.
+GitHub issues: review diff comments (#165), session fan-out compare (#166), GitHub issue to task (#167),
+generic CLI backend (#168). Landing the study itself is #169.
 
 ## Findings mapped to in-flight work
 
