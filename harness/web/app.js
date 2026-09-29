@@ -2397,6 +2397,7 @@ async function viewSession(sid, tab, focusApproval) {
   onLeave(openStream(() => (isGuest() && !agentHarnessWeb.token
     ? agentHarnessWeb.url(`/sessions/${encodeURIComponent(sid)}/events?after=${lastSeq}`, "legacy")
     : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked, {
+    authorized: !!agentHarnessWeb.token,
     onStatus: (state, detail) => {
       if (state === "error") { diagState.errors++; diagState.lastError = detail; }
       else { diagState.state = state; diagState.detail = detail; }
