@@ -121,6 +121,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   isolation: isolate;
   will-change: transform;
 }
+main.paint-refresh { -webkit-transform: translate3d(0, 0, .001px); transform: translate3d(0, 0, .001px); }
 #bar.paint-refresh { -webkit-transform: translate3d(0, 0, .001px); transform: translate3d(0, 0, .001px); }
 #bar > * { position: relative; z-index: 1; }
 #bar h1 {
