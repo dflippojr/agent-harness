@@ -608,7 +608,7 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false, on
     source.onerror = () => {
       mark(false);
       report("failed", source.readyState === EventSource.CLOSED ? "connection closed" : "connection lost, retrying");
-      if (source.readyState === EventSource.CLOSED && onStatus) probeStream(url, (state, detail) => { if (!closed && run === generation) report(state, detail); });
+      if (source.readyState === EventSource.CLOSED && onStatus) void probeStream(url, (state, detail) => { if (!closed && run === generation) report(state, detail); });
       if (source.readyState === EventSource.CLOSED && run === generation) {
         clearTimeout(retry);
         retry = setTimeout(connect, 3000);
@@ -622,9 +622,9 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false, on
       });
     }
   };
-  const onVisible = () => { if (!protocolBlocked && document.visibilityState === "visible") connect(); };
+  const onVisible = () => { if (!protocolBlocked && document.visibilityState === "visible") void connect(); };
   document.addEventListener("visibilitychange", onVisible);
-  connect();
+  void connect();
   return () => {
     closed = true;
     clearTimeout(retry);
@@ -816,7 +816,7 @@ function openDrawer() {
   $scrim.hidden = false;
   $menu.setAttribute("aria-expanded", "true");
   document.body.classList.add("drawer-open");
-  refreshDrawerChats();
+  void refreshDrawerChats();
   drawerFocusable()[0]?.focus();
 }
 
@@ -1130,7 +1130,7 @@ async function viewChat(id) {
   };
   ui.send.addEventListener("click", send);
   ui.input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send(); }
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); }
   });
   ui.cancel.addEventListener("click", async () => {
     try { await api(`/chats/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
@@ -1338,7 +1338,7 @@ async function viewList() {
   };
   let searchTimer = null;
   search.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
-  if (searchQuery.trim()) runSearch();
+  if (searchQuery.trim()) void runSearch();
 
   const render = async () => {
     const [freshSessions, queue, gpu, projects] = await Promise.all([
@@ -1485,8 +1485,8 @@ async function saveTemplate({ prompt, project, backend, model }) {
   try {
     await api("/templates", { method: "POST", body: { name, project, backend, model, prompt } });
     toast("Template saved");
-    warmModel();
-    route();
+    void warmModel();
+    void route();
   } catch (err) { toast(err.message); }
 }
 
@@ -1499,8 +1499,8 @@ function templateManager(templates) {
           onclick: async () => {
             if (!confirm(`Delete template “${t.name}”?`)) return;
             await api(`/templates/${t.id}`, { method: "DELETE" });
-            warmModel();
-            route();
+            void warmModel();
+            void route();
           },
         }, "Delete")),
       h("div", { class: "preview" }, `${t.project} · ${t.prompt}`))));
@@ -1559,7 +1559,7 @@ async function viewNew() {
       newProjectTarget.value = target;
       for (const b of ev.currentTarget.parentNode.children) b.classList.toggle("primary", b === ev.currentTarget);
       fillChoices();
-      showTarget();
+      void showTarget();
       showProjectHint();
     },
   }, name === "tower" ? "🖥 Tower" : `💻 ${TARGET_LABEL[name] || name}`))) : null;
@@ -1578,8 +1578,8 @@ async function viewNew() {
       ? "Scratch is a fresh empty folder for this session only. It is not a git repo and does not add a new project."
       : "";
   };
-  project.addEventListener("change", () => { showTarget(); showProjectHint(); });
-  showTarget();
+  project.addEventListener("change", () => { void showTarget(); showProjectHint(); });
+  void showTarget();
   showProjectHint();
   const newProjectName = h("input", { type: "text", placeholder: "my-project", maxlength: "64", required: true,
     pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
@@ -1609,7 +1609,7 @@ async function viewNew() {
         fillChoices();
         project.value = created.name;
         if (targetSwitch) for (const b of targetSwitch.children) b.classList.toggle("primary", b.dataset.target === target);
-        showTarget();
+        void showTarget();
         showProjectHint();
         syncSkillChecks();
         projectCreator.open = false;
@@ -1711,19 +1711,19 @@ async function viewNew() {
     h("p", { class: "muted small" }, "Select a GitHub item from this project. Search filters the current page."),
     githubSearch,
     h("div", { class: "row" },
-      h("button", { type: "button", class: "btn small", onclick: () => { githubPageNumber = Math.max(1, githubPageNumber - 1); loadGitHub(); } }, "Previous"),
+      h("button", { type: "button", class: "btn small", onclick: () => { githubPageNumber = Math.max(1, githubPageNumber - 1); void loadGitHub(); } }, "Previous"),
       githubPage,
-      h("button", { type: "button", class: "btn small", onclick: () => { if (githubMore) { githubPageNumber++; loadGitHub(); } } }, "Next")),
+      h("button", { type: "button", class: "btn small", onclick: () => { if (githubMore) { githubPageNumber++; void loadGitHub(); } } }, "Next")),
     githubState, githubList,
     h("button", { type: "button", class: "btn small", onclick: () => {
       selectedGitHub = null; prompt.readOnly = false; prompt.value = "";
       githubState.textContent = "Selection cleared";
     } }, "Clear selection")) : null;
   githubSearch.addEventListener("input", showGitHubRows);
-  if (githubPicker) githubPicker.addEventListener("toggle", () => { if (githubPicker.open) loadGitHub(); });
+  if (githubPicker) githubPicker.addEventListener("toggle", () => { if (githubPicker.open) void loadGitHub(); });
   project.addEventListener("change", () => {
     selectedGitHub = null; prompt.readOnly = false; githubPageNumber = 1;
-    if (githubPicker?.open) loadGitHub();
+    if (githubPicker?.open) void loadGitHub();
   });
   const pollModel = async () => {
     if (!isMember()) {
@@ -1735,8 +1735,8 @@ async function viewNew() {
       paintModelState(modelState, await api("/models/status"), model.value, gpuHold());
     } catch (_) { /* offline: the form's own errors cover it */ }
   };
-  warmModel(true);
-  pollModel();
+  void warmModel(true);
+  void pollModel();
   const modelTimer = setInterval(pollModel, 3000);
   onLeave(() => clearInterval(modelTimer));
   const draftKey = "harness.draft";
@@ -1750,7 +1750,7 @@ async function viewNew() {
     if ((t.backend || "local") === "local" && t.model) localModel = t.model;
     backend.value = t.backend || "local";
     showBackend();
-    showTarget();
+    void showTarget();
     showProjectHint();
     prompt.value = t.prompt;
     syncSkillChecks();
@@ -1841,8 +1841,8 @@ function sessionTitle(session, isActive) {
       layoutBar();
     };
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); finish(true); }
-      if (e.key === "Escape") { e.preventDefault(); finish(false); }
+      if (e.key === "Enter") { e.preventDefault(); void finish(true); }
+      if (e.key === "Escape") { e.preventDefault(); void finish(false); }
     });
     input.addEventListener("blur", () => finish(true));
   };
@@ -2465,7 +2465,7 @@ function reviewCard(s) {
     try {
       const updated = await api(`/sessions/${s.id}/review/${action}`, { method: "POST" });
       toast(updated.review_detail || `${action} done`, 4000);
-      route();
+      void route();
     } catch (e) {
       toast(e.message, 6000);
       card.querySelectorAll("button").forEach((b) => { b.disabled = false; });
@@ -3292,7 +3292,7 @@ async function viewJob(id) {
       try {
         const saved = await api(isNew ? "/jobs" : `/jobs/${id}`, { method: isNew ? "POST" : "PUT", body: body() });
         toast(`Saved · next run ${whenText(saved.next_run_at)}`, 3500);
-        if (isNew) location.hash = `#/jobs/${saved.id}`; else route();
+        if (isNew) location.hash = `#/jobs/${saved.id}`; else void route();
       } catch (err) { toast(err.message, 5000); }
       save.disabled = false;
     },
@@ -3443,7 +3443,7 @@ function copyBox(value) {
   const btn = h("button", {
     class: "btn small", type: "button",
     onclick: async () => {
-      copyToClipboard(value, () => {
+      void copyToClipboard(value, () => {
         const range = document.createRange();
         range.selectNodeContents(code);
         getSelection().removeAllRanges();
@@ -3543,22 +3543,22 @@ async function accountsCard() {
           h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
             h("button", { class: "btn small", type: "button", onclick: () => {
               const next = window.prompt("Display name", a.display_name);
-              if (next) patch({ display_name: next });
+              if (next) void patch({ display_name: next });
             } }, "Rename"),
             h("button", { class: "btn small", type: "button", onclick: () => {
               const next = window.prompt("New Tailscale login", a.login);
               if (next && next !== a.login && confirm(`Rebind this account to ${next}? The old login stops working immediately.`)) {
-                patch({ login: next });
+                void patch({ login: next });
               }
             } }, "Rebind login"),
             h("button", { class: "btn small", type: "button", onclick: () => {
               const next = window.prompt("Disk quota in GiB", String(Math.round(a.disk_quota_bytes / 2 ** 30)));
-              if (next) patch({ disk_quota_bytes: Math.round(Number(next) * 2 ** 30) });
+              if (next) void patch({ disk_quota_bytes: Math.round(Number(next) * 2 ** 30) });
             } }, "Quota"),
             h("button", { class: "btn small", type: "button", onclick: () => {
               const running = window.prompt("Max running sessions", String(a.max_running));
               const queued = window.prompt("Max queued sessions", String(a.max_queued));
-              if (running || queued) patch({
+              if (running || queued) void patch({
                 max_running: running ? Number(running) : a.max_running,
                 max_queued: queued ? Number(queued) : a.max_queued,
               });
@@ -3685,7 +3685,7 @@ function connectionCard() {
       fill(minted,
         h("p", { class: "note" }, "Copy this token now; it is not shown again."), field,
         h("button", { class: "btn small", onclick: async () => {
-          copyToClipboard(key.key, () => field.select());
+          void copyToClipboard(key.key, () => field.select());
         } }, "Copy token"));
     } catch (e) { toast(e.message, 5000); }
   };
@@ -3697,7 +3697,7 @@ function connectionCard() {
       h("label", {}, "Owner token"), token,
       h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an Agent Harness App token; Agent Harness Web manages owner-only settings."),
       h("div", { class: "row", style: "margin-top:10px" },
-        h("button", { class: "btn", onclick: () => { server.value = ""; token.value = ""; save(); } }, "Use bundled Server"),
+        h("button", { class: "btn", onclick: () => { server.value = ""; token.value = ""; void save(); } }, "Use bundled Server"),
         h("span", { class: "spacer" }),
         h("button", { class: "btn primary", onclick: save }, "Save and test")), status),
     h("div", { class: "card" },
@@ -3943,7 +3943,7 @@ async function backendsCard() {
       const custom = sel.value === "__custom__";
       input.hidden = !custom;
       if (custom) input.focus();
-      else save(sel.value);
+      else void save(sel.value);
     });
     input.addEventListener("change", () => save(input.value.trim()));
     return [sel, input];
@@ -4259,10 +4259,10 @@ function gpuActionRow() {
   toggle.addEventListener("change", () => {
     duration.disabled = isGuest() || !toggle.checked;
     durationRow.classList.toggle("disabled", duration.disabled);
-    act(toggle.checked ? "pause" : "resume");
+    void act(toggle.checked ? "pause" : "resume");
   });
-  duration.addEventListener("change", () => { if (toggle.checked) act("pause"); });
-  load();
+  duration.addEventListener("change", () => { if (toggle.checked) void act("pause"); });
+  void load();
   const timer = setInterval(load, 5000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "action-item" },
@@ -4276,19 +4276,19 @@ function remoteControlCard() {
   let busy = "";
   const act = async (project, stop) => {
     busy = project;
-    load();
+    void load();
     try {
       const r = await api(`/remote-control/${encodeURIComponent(project)}${stop ? "/stop" : ""}`, { method: "POST" });
       if (stop) toast(`Stopped Remote Control for ${project}`);
       else toast(r.already_running ? "Already running" : "Remote Control is ready");
     } catch (e) { toast(e.message); }
     busy = "";
-    load();
+    void load();
   };
   const trust = async (project) => {
     if (!confirm(`Open Claude on the tower to trust “${project}”?\n\nReview the folder shown by Claude, then accept its workspace trust prompt. The harness cannot accept it for you.`)) return;
     busy = project;
-    load();
+    void load();
     try {
       const r = await api(`/remote-control/${encodeURIComponent(project)}/trust`, { method: "POST" });
       let message = "Claude trust window opened on the tower";
@@ -4297,7 +4297,7 @@ function remoteControlCard() {
       toast(message, 5000);
     } catch (e) { toast(e.message); }
     busy = "";
-    load();
+    void load();
   };
   const rcButton = (p) => {
     if (p.running) return h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop");
@@ -4337,8 +4337,8 @@ function remoteControlCard() {
         r.projects.length ? r.projects.map(row) : h("p", { class: "muted small" }, "No tower projects with a local folder."));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
-  load();
-  const timer = setInterval(() => { if (!busy) load(); }, 3000);
+  void load();
+  const timer = setInterval(() => { if (!busy) void load(); }, 3000);
   onLeave(() => clearInterval(timer));
   return h("div", { class: "card" }, h("h3", {}, "Claude Remote Control"), body);
 }
@@ -4398,23 +4398,23 @@ function installedSkillCard(sk) {
     sk.projects?.length ? h("p", { class: "muted small" }, `Projects: ${sk.projects.join(", ")}`) : h("p", { class: "muted small" }, "No project allowlist. Enable it and pick it on New task."),
     h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
       h("button", { class: "btn small", onclick: async () => {
-        try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
       } }, sk.enabled ? "Disable" : "Enable"),
       h("button", { class: "btn small", onclick: async () => {
         const raw = window.prompt("Project allowlist (comma-separated names)", (sk.projects || []).join(", "));
         if (raw === null) return;
         try {
           await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
-          route();
+          void route();
         } catch (e) { toast(e.message); }
       } }, "Projects"),
       h("button", { class: "btn small", onclick: async () => {
         if (!confirm("Roll back to the previous version?")) return;
-        try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
       } }, "Rollback"),
       h("button", { class: "btn small bad", onclick: async () => {
         if (!confirm(`Uninstall ${sk.slug}? Later sessions will not receive it.`)) return;
-        try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); route(); } catch (e) { toast(e.message); }
+        try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
       } }, "Uninstall")));
 }
 
@@ -4440,7 +4440,7 @@ async function skillsPage(pid) {
 
 function memoryCard() {
   const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
-  (async () => {
+  void (async () => {
     try {
       const mem = await api("/memory");
       if (!mem.enabled) return fill(body, h("p", { class: "muted small" }, "The memory library is disabled in config/harness.yaml."));
@@ -4522,13 +4522,13 @@ function endpointCard(me) {
             class: "btn small bad",
             onclick: async () => {
               if (!confirm(`Revoke the key “${k.name}”? Tools using it stop working.`)) return;
-              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No keys yet."),
         form, newBtn);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
-  load();
+  void load();
   return h("div", { class: "card" }, body);
 }
 
@@ -4634,7 +4634,7 @@ function appsCard(me) {
             class: "btn small bad",
             onclick: async () => {
               if (!confirm(`Revoke the app “${k.name}”? It can no longer start or read sessions.`)) return;
-              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
         webConnections.length ? [h("p", { class: "section-label" }, "Web connections"),
@@ -4642,29 +4642,29 @@ function appsCard(me) {
             h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
               if (!confirm(`Revoke “${k.name}”? That Agent Harness Web connection will stop working.`)) return;
-              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,
         cliConnections.length ? [h("p", { class: "section-label" }, "CLI connections"),
           h("ul", { class: "small" }, cliConnections.map((k) => h("li", {},
             h("strong", {}, k.name), ` ${k.prefix}… · non-browser${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
               if (!confirm(`Revoke “${k.name}”? That Agent Harness CLI connection will stop working.`)) return;
-              try { await api(`/keys/${k.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+              try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,
         pending.length ? h("ul", { class: "small" }, pending.map((p) => h("li", {},
           `Pairing pending for ${p.name} at ${p.origin} · expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
           h("button", { class: "btn small bad", onclick: async () => {
-            try { await api(`/pairing-codes/${p.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+            try { await api(`/pairing-codes/${p.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
           } }, "Cancel")))) : null,
         pendingRunners.length ? h("ul", { class: "small" }, pendingRunners.map((p) => h("li", {},
           `Mac pairing pending for ${p.name} (${p.runner}) Â· expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
           h("button", { class: "btn small bad", onclick: async () => {
-            try { await api(`/runner-pairing-codes/${p.id}`, { method: "DELETE" }); load(); } catch (e) { toast(e.message); }
+            try { await api(`/runner-pairing-codes/${p.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
           } }, "Cancel")))) : null,
         form, h("div", { class: "row", style: "margin-top:10px" }, newBtn, pairBtn, macBtn));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
-  load();
+  void load();
   return h("div", { class: "card" }, body);
 }
 
@@ -4734,7 +4734,7 @@ function diskCard() {
         }));
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
-  load();
+  void load();
   return h("div", {},
     h("div", { class: "card" }, body),
     isGuest() ? null : h("div", { class: "card" },
@@ -4747,7 +4747,7 @@ function diskCard() {
           try {
             const r = await api("/maintenance/cleanup", { method: "POST" });
             toast(`Removed ${r.containers_removed.length} containers, ${r.workspaces_removed.length + r.orphans_removed.length} workspaces`);
-            load();
+            void load();
           } catch (e) { toast(e.message); }
           ev.target.disabled = false;
         },
@@ -4769,7 +4769,7 @@ async function warmModel(force = false) {
     await api("/models/warm", { method: "POST" });
   } catch (_) { /* offline */ }
 }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") warmModel(); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") void warmModel(); });
 
 // ---------- boot ----------
 const UPDATE_GUARD = "harness.webUpdateAttempt";
@@ -4864,15 +4864,15 @@ if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") checkCompatibility({ foreground: true });
+  if (document.visibilityState === "visible") void checkCompatibility({ foreground: true });
 });
 
-checkCompatibility().then((compatible) => compatible && currentUser()).then((user) => {
+void checkCompatibility().then((compatible) => compatible && currentUser()).then((user) => {
   if (!user) return null;
   paintGuestChrome();
-  if (!isGuest()) warmModel();
+  if (!isGuest()) void warmModel();
   return loadProfileIcon();
 }).then((ready) => {
   if (ready === null) return null;
   return applyAppIcon(readAppIcon());
-}).then((ready) => { if (ready !== null) route(); });
+}).then((ready) => { if (ready !== null) void route(); });
