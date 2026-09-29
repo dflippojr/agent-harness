@@ -507,6 +507,19 @@ function safeStreamUrl(url) {
   return `${base}${path}${query}`;
 }
 
+// EventSource hides why a stream was refused. Re-request it with fetch to learn the HTTP status and message (#82 diagnostics).
+async function probeStream(url, report) {
+  const controller = new AbortController();
+  try {
+    const resp = await fetch(url, { headers: agentHarnessWeb.headers(), cache: "no-store", signal: controller.signal });
+    let detail = "";
+    if (!resp.ok) detail = (await resp.text()).slice(0, 160).replace(/\s+/g, " ");
+    report("failed", `probe: HTTP ${resp.status} ${resp.headers.get("content-type") || ""} ${detail}`.trim());
+  } catch (e) {
+    report("failed", `probe: ${e?.name}: ${e?.message}`);
+  } finally { controller.abort(); }
+}
+
 // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
 // Connection-dot updates are opt-in (`indicate`) so page streams can close without a false offline state.
 // `onStatus(state, detail)` reports "connecting" | "connected" | "failed" so a page can show why it is empty.
@@ -578,6 +591,7 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false, on
     source.onerror = () => {
       mark(false);
       report("failed", source.readyState === EventSource.CLOSED ? "connection closed" : "connection lost, retrying");
+      if (source.readyState === EventSource.CLOSED && onStatus) probeStream(url, report);
       if (source.readyState === EventSource.CLOSED && run === generation) {
         clearTimeout(retry);
         retry = setTimeout(connect, 3000);
@@ -585,6 +599,7 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false, on
     };
     for (const [type, fn] of Object.entries(handlers)) {
       source.addEventListener(type, (msg) => {
+        if (msg.data === undefined) return; // the browser's own connection "error" event, handled by onerror
         try { fn(JSON.parse(msg.data)); }
         catch (e) { report("error", `${type}: ${e?.message || e}`); }
       });
