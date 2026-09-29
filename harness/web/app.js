@@ -507,30 +507,15 @@ function safeStreamUrl(url) {
   return `${base}${path}${query}`;
 }
 
-// EventSource hides why a stream was refused. Re-request it with fetch to learn the HTTP status and message (#82 diagnostics).
-async function probeStream(url, report) {
-  const controller = new AbortController();
-  try {
-    const resp = await fetch(url, { headers: agentHarnessWeb.headers(), cache: "no-store", signal: controller.signal });
-    let detail = "";
-    if (!resp.ok) detail = (await resp.text()).slice(0, 160).replace(/\s+/g, " ");
-    report("failed", `probe: HTTP ${resp.status} ${resp.headers.get("content-type") || ""} ${detail}`.trim());
-  } catch (e) {
-    report("failed", `probe: ${e?.name}: ${e?.message}`);
-  } finally { controller.abort(); }
-}
-
 // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
 // Connection-dot updates are opt-in (`indicate`) so page streams can close without a false offline state.
-// `onStatus(state, detail)` reports "connecting" | "connected" | "failed" so a page can show why it is empty.
-function openStream(urlFor, handlers, { authorized = false, indicate = false, onStatus = null } = {}) {
+function openStream(urlFor, handlers, { authorized = false, indicate = false } = {}) {
   let es = null;
   let controller = null;
   let closed = false;
   let retry = null;
   let generation = 0;
   const mark = (on) => { if (indicate) setConnLive(on); };
-  const report = (state, detail = "") => { try { onStatus?.(state, detail); } catch (_) { /* diagnostics only */ } };
   const dispatch = (block) => {
     let type = "message";
     const data = [];
@@ -538,16 +523,13 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false, on
       if (line.startsWith("event:")) type = line.slice(6).trim();
       else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
     }
-    if (!data.length || !handlers[type]) return;
-    try { handlers[type](JSON.parse(data.join("\n"))); }
-    catch (e) { report("error", `${type}: ${e?.message || e}`); }
+    if (data.length && handlers[type]) handlers[type](JSON.parse(data.join("\n")));
   };
   const fetchStream = async (url) => {
     controller = new AbortController();
     const resp = await fetch(url, { headers: agentHarnessWeb.headers(), cache: "no-store", signal: controller.signal });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
     mark(true);
-    report("connected");
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -569,29 +551,25 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false, on
     es?.close();
     controller?.abort();
     let url;
-    report("connecting");
     try { url = await urlFor(); }
-    catch (e) {
+    catch (_) {
       mark(false);
-      report("failed", `stream URL: ${e?.message || e}`);
       if (!closed && run === generation) retry = setTimeout(connect, 3000);
       return;
     }
     url = safeStreamUrl(url);
-    if (!url) { mark(false); report("failed", "stream URL rejected"); return; }
+    if (!url) { mark(false); return; }
     if (authorized && agentHarnessWeb.token) {
-      try { await fetchStream(url); } catch (e) { report("failed", e?.message || String(e)); }
+      try { await fetchStream(url); } catch (_) { /* retry below */ }
       mark(false);
       if (!closed && run === generation) retry = setTimeout(connect, 3000);
       return;
     }
     const source = new EventSource(url);
     es = source;
-    source.onopen = () => { mark(true); report("connected"); };
+    source.onopen = () => mark(true);
     source.onerror = () => {
       mark(false);
-      report("failed", source.readyState === EventSource.CLOSED ? "connection closed" : "connection lost, retrying");
-      if (source.readyState === EventSource.CLOSED && onStatus) probeStream(url, (state, detail) => { if (!closed && run === generation) report(state, detail); });
       if (source.readyState === EventSource.CLOSED && run === generation) {
         clearTimeout(retry);
         retry = setTimeout(connect, 3000);
@@ -600,8 +578,7 @@ function openStream(urlFor, handlers, { authorized = false, indicate = false, on
     for (const [type, fn] of Object.entries(handlers)) {
       source.addEventListener(type, (msg) => {
         if (msg.data === undefined) return; // the browser's own connection "error" event, handled by onerror
-        try { fn(JSON.parse(msg.data)); }
-        catch (e) { report("error", `${type}: ${e?.message || e}`); }
+        fn(JSON.parse(msg.data));
       });
     }
   };
@@ -1954,17 +1931,7 @@ async function viewSession(sid, tab, focusApproval) {
   if (tab === "info") { viewInfo(session); jumps.updateJumps(); return; }
 
   const feed = h("div");
-  // Temporary diagnostics for #82 (iOS home-screen app shows an empty transcript): shows whether the
-  // stream connected, how many events arrived, and how tall the feed actually is.
-  const diag = h("p", { class: "note stream-diag" }, "Stream: starting");
-  const diagState = { state: "starting", detail: "", events: 0, errors: 0, lastError: "" };
-  const renderDiag = () => {
-    const d = diagState;
-    const parts = [`Stream: ${d.state}${d.detail ? ` (${d.detail})` : ""}`, `${d.events} events`, `feed ${feed.childNodes.length} items, ${Math.round(feed.offsetHeight || 0)}px`];
-    if (d.errors) parts.push(`${d.errors} render errors, last: ${d.lastError}`);
-    diag.textContent = parts.join(" · ");
-  };
-  append($app, diag, feed);
+  append($app, feed);
 
   // composer (owner only; guests may watch the live transcript)
   const input = h("textarea", { placeholder: "Message the agent…", rows: 1 });
@@ -2105,7 +2072,6 @@ async function viewSession(sid, tab, focusApproval) {
     const now = Date.now();
     if (live && !live.frozen) live.elapsed.textContent = ` ${fmtElapsed(now - live.start)}`;
     if (compactNote) compactNote.elapsed.textContent = fmtElapsed(now - compactNote.start);
-    renderDiag();
   }
   const ticker = setInterval(tick, 1000);
   onLeave(() => clearInterval(ticker));
@@ -2382,28 +2348,21 @@ async function viewSession(sid, tab, focusApproval) {
   const tracked = {};
   for (const type of SESSION_EVENT_TYPES) {
     tracked[type] = (e) => {
-      diagState.events++;
       const persisted = e.seq !== null && e.seq !== undefined;
       if (persisted) {
         if (e.seq <= lastSeq) return;
         lastSeq = e.seq;
         if (e.ts) { prevEventAt = lastEventAt; lastEventAt = e.ts * 1000; }
       }
-      handlers[type]?.(e); // a throw is counted by openStream's onStatus("error")
+      handlers[type]?.(e);
       const finalAnswer = type === "assistant" && !(e.data.tool_calls || []).length && (e.data.content || "").trim();
       if (persisted && !finalAnswer && !TERMINAL.has(session.status)) maybeThinking();
     };
   }
   onLeave(openStream(() => (isGuest() && !agentHarnessWeb.token
     ? agentHarnessWeb.url(`/sessions/${encodeURIComponent(sid)}/events?after=${lastSeq}`, "legacy")
-    : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked, {
-    authorized: !!agentHarnessWeb.token,
-    onStatus: (state, detail) => {
-      if (state === "error") { diagState.errors++; diagState.lastError = detail; }
-      else { diagState.state = state; diagState.detail = detail; }
-      renderDiag();
-    },
-  }));
+    : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked,
+    { authorized: !!agentHarnessWeb.token }));
   if (composer) onLeave(() => composer.remove());
 }
 
