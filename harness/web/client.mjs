@@ -103,11 +103,11 @@ export class AgentHarnessWebClient {
     return resp.blob();
   }
 
-  async sessionStreamUrl(sessionId, after = 0) {
-    if (!this.token) return this.url(`/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`, "app");
-    const data = await this.request(`/sessions/${encodeURIComponent(sessionId)}/events/ticket`, { method: "POST", surface: "app" });
-    const separator = data.events_url.includes("?") ? "&" : "?";
-    return `${this.baseUrl}${data.events_url}${separator}after=${after}`;
+  // With a token the page streams via fetch with the Authorization header (openStream's `authorized` path), so no
+  // ticket is needed. Tickets are for native EventSource, which a same-origin page cannot use: it sends no Origin
+  // header, so the ticket's Origin binding never matches and the stream is refused with 401 (#82).
+  sessionStreamUrl(sessionId, after = 0) {
+    return this.url(`/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`, "app");
   }
 }
 
