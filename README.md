@@ -5,7 +5,7 @@ Personal agent harness for `dflippotower`: agents run on the basement PC against
 MacBook over Tailscale. The phased plan lives in the agent memory library
 (`categories/project-ideas/capsules/local-agent-harness.md`).
 
-Phases 0–8 are built. Open work is GitHub issues, mirrored from `docs/backlog.yaml`.
+Phases 0–8 are built. Open work is tracked as GitHub issues.
 
 ## Product names
 
