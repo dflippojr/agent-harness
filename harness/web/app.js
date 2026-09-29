@@ -98,8 +98,8 @@ function repaintPage() {
   pagePaintFrame = requestAnimationFrame(() => {
     pagePaintPhase = !pagePaintPhase;
     $app.classList.toggle("paint-refresh", pagePaintPhase);
-    const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-    if (window.scrollY > max) window.scrollTo(0, max);
+    const { y, viewH, pageH } = pageMetrics(); // the cross-engine measurements the jump buttons use
+    if (y > pageH - viewH) scrollPage(pageH - viewH);
   });
 }
 
