@@ -702,7 +702,12 @@ def stage_comfyui(cfg, *, manifest: dict | None = None, client: httpx.Client | N
     manifest = manifest or load_manifest()
     pin = manifest["comfyui"]["pinned_portable"]
     staged = staged_comfy_dir(cfg)
-    archive = manifest_path(staged.parent, pin["filename"], plain_name=True)
+    # basename() first: manifest_path() refuses anything but a plain name anyway, but
+    # SonarCloud's taint analysis (S2083) only recognizes the standard sanitizer.
+    filename = os.path.basename(pin["filename"])
+    if filename != pin["filename"]:
+        raise ValueError("manifest path must be a safe relative path")
+    archive = manifest_path(staged.parent, filename, plain_name=True)
     need = pin["bytes"] + RESERVE_BYTES
     free = (_free_bytes if free_bytes is None else free_bytes)(staged.parent)
     if free < need:
