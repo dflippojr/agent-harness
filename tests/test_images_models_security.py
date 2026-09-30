@@ -175,3 +175,11 @@ def test_trusted_download_url_uses_the_allowlisted_origin():
     assert models.trusted_download_url("https://github.com:443/r/x.7z") == ("https://github.com/r/x.7z", "github.com")
     with pytest.raises(ValueError):
         models.trusted_download_url("https://us.aws.cdn.hf.co/x")
+
+
+@pytest.mark.parametrize("status,headers", [(302, {}), (304, {}), (300, {"Location": "https://github.com/x"})])
+def test_3xx_without_redirect_location_is_a_clean_http_error(tmp_path, status, headers):
+    client = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(status, headers=headers)))
+    with pytest.raises(RuntimeError, match=str(status)):
+        models.download_file("https://github.com/file", tmp_path / "model", "0" * 64, 1, client=client)
+    assert not (tmp_path / "model").exists()

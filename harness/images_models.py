@@ -98,7 +98,9 @@ def _download_response(client, url: str, headers: dict):
     # Disable even an injected client's automatic redirects; validate every hop.
     for _ in range(11):
         with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
-            if not response.is_redirect:
+            # has_redirect_location, not is_redirect: a 3xx without a usable Location
+            # (304, 300, a broken 302) has no next_request and must surface as an HTTP error.
+            if not response.has_redirect_location:
                 yield response
                 return
             url = str(response.next_request.url)
