@@ -164,8 +164,12 @@ def test_logged_values_strip_controls_and_tokens(caplog):
 
 
 def test_trusted_download_url_uses_the_allowlisted_origin():
-    assert models.trusted_download_url("https://huggingface.co/a/b.safetensors?download=1") == (
-        "https://huggingface.co/a/b.safetensors?download=1", "huggingface.co")
+    assert models.trusted_download_url("https://huggingface.co/a/b.safetensors") == (
+        "https://huggingface.co/a/b.safetensors", "huggingface.co")
+    assert models.trusted_download_url("https://huggingface.co/a b/c") == ("https://huggingface.co/a%20b/c", "huggingface.co")
+    for bad in ("https://huggingface.co/a?download=1", "https://huggingface.co/a/../b", "https://huggingface.co/./b"):
+        with pytest.raises(ValueError):
+            models.trusted_download_url(bad)
     assert models.trusted_download_url("https://github.com:443/r/x.7z") == ("https://github.com/r/x.7z", "github.com")
     with pytest.raises(ValueError):
         models.trusted_download_url("https://us.aws.cdn.hf.co/x")

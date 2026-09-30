@@ -58,13 +58,18 @@ def trusted_download_url(url: str) -> tuple[str, str]:
     """Validate a manifest URL and rebuild it on the matching allowlisted origin.
 
     Returns (url, host). The host is taken from DOWNLOAD_HOSTS, not from the
-    input, so the request target's origin is always one of our constants.
+    input, so the request target's origin is always one of our constants; each
+    path segment is percent-encoded and `..` segments are refused. Pinned
+    manifest URLs carry no query string, so one is refused too.
     """
     validate_download_url(url)
     parsed = urllib.parse.urlsplit(url)
+    segments = parsed.path.split("/")
+    if parsed.query or any(seg in (".", "..") for seg in segments):
+        raise ValueError("download URL must be a plain path without a query or dot segments")
     host = next(h for h in sorted(DOWNLOAD_HOSTS) if h == parsed.hostname)
-    query = f"?{parsed.query}" if parsed.query else ""
-    return f"https://{host}{parsed.path}{query}", host
+    path = "/".join(urllib.parse.quote(seg, safe="") for seg in segments)
+    return f"https://{host}{path}", host
 
 
 def manifest_path(base: Path, relative: str, *, plain_name: bool = False) -> Path:
