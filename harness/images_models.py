@@ -60,11 +60,14 @@ def trusted_download_url(url: str) -> tuple[str, str]:
     Returns (url, host). The host is taken from DOWNLOAD_HOSTS, not from the
     input, so the request target's origin is always one of our constants; each
     path segment is percent-encoded and `..` segments are refused. Pinned
-    manifest URLs carry no query string, so one is refused too.
+    manifest URLs carry no query string, so one is refused too. Existing
+    percent-escapes are preserved, not double-encoded.
     """
     validate_download_url(url)
     parsed = urllib.parse.urlsplit(url)
-    segments = parsed.path.split("/")
+    # Decode first so an escape already in the manifest (%20) is not encoded twice,
+    # and so an encoded dot segment (%2e%2e) is refused like a literal one.
+    segments = [urllib.parse.unquote(seg) for seg in parsed.path.split("/")]
     if parsed.query or any(seg in (".", "..") for seg in segments):
         raise ValueError("download URL must be a plain path without a query or dot segments")
     host = next(h for h in sorted(DOWNLOAD_HOSTS) if h == parsed.hostname)

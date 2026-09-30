@@ -167,7 +167,9 @@ def test_trusted_download_url_uses_the_allowlisted_origin():
     assert models.trusted_download_url("https://huggingface.co/a/b.safetensors") == (
         "https://huggingface.co/a/b.safetensors", "huggingface.co")
     assert models.trusted_download_url("https://huggingface.co/a b/c") == ("https://huggingface.co/a%20b/c", "huggingface.co")
-    for bad in ("https://huggingface.co/a?download=1", "https://huggingface.co/a/../b", "https://huggingface.co/./b"):
+    assert models.trusted_download_url("https://huggingface.co/r/file%20name.bin")[0] == "https://huggingface.co/r/file%20name.bin"
+    for bad in ("https://huggingface.co/a?download=1", "https://huggingface.co/a/../b", "https://huggingface.co/./b",
+                "https://huggingface.co/a/%2e%2e/b", "https://huggingface.co/a/%2E/b"):
         with pytest.raises(ValueError):
             models.trusted_download_url(bad)
     assert models.trusted_download_url("https://github.com:443/r/x.7z") == ("https://github.com/r/x.7z", "github.com")
