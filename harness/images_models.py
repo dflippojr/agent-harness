@@ -54,6 +54,19 @@ def validate_download_url(url: str, *, redirect: bool = False) -> None:
         raise ValueError("download URL must use HTTPS on an allowed host")
 
 
+def trusted_download_url(url: str) -> tuple[str, str]:
+    """Validate a manifest URL and rebuild it on the matching allowlisted origin.
+
+    Returns (url, host). The host is taken from DOWNLOAD_HOSTS, not from the
+    input, so the request target's origin is always one of our constants.
+    """
+    validate_download_url(url)
+    parsed = urllib.parse.urlsplit(url)
+    host = next(h for h in sorted(DOWNLOAD_HOSTS) if h == parsed.hostname)
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"https://{host}{parsed.path}{query}", host
+
+
 def manifest_path(base: Path, relative: str, *, plain_name: bool = False) -> Path:
     """Validate manifest paths on both Windows and POSIX, including symlink escapes."""
     parts = relative.replace("\\", "/").split("/")
@@ -488,7 +501,7 @@ def _write_part(resp, part: Path, have: int) -> None:
 def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx.Client | None = None,
                   timeout: float | httpx.Timeout | None = None) -> dict:
     """Stream to dest.part, resume with Range when the server honors it, verify, then atomically promote."""
-    validate_download_url(url)
+    url, host = trusted_download_url(url)
     manifest_path(dest.parent, dest.name, plain_name=True)
     manifest_path(dest.parent, dest.name + ".part", plain_name=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -511,7 +524,7 @@ def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx
         headers = dict(_headers())
         if have:
             headers["Range"] = f"bytes={have}-"
-        log.info("downloading %s (%s bytes, resume %s)", redact_url(url), _log_value(size), _log_value(have))
+        log.info("downloading from %s (%d bytes, resume %d)", host, int(size), int(have))
         with _download_response(client, url, headers) as resp:
             if resp.status_code == 416:
                 if _size_or_zero(part) == size:

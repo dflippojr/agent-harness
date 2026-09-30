@@ -161,3 +161,11 @@ def test_logged_values_strip_controls_and_tokens(caplog):
         models.log.info("downloading %s", models.redact_url(url))
     assert caplog.records[0].getMessage() == "downloading https://github.com/abcdforged"
     assert models._log_value("1\r\n\t\x1b\x9f2") == "12"
+
+
+def test_trusted_download_url_uses_the_allowlisted_origin():
+    assert models.trusted_download_url("https://huggingface.co/a/b.safetensors?download=1") == (
+        "https://huggingface.co/a/b.safetensors?download=1", "huggingface.co")
+    assert models.trusted_download_url("https://github.com:443/r/x.7z") == ("https://github.com/r/x.7z", "github.com")
+    with pytest.raises(ValueError):
+        models.trusted_download_url("https://us.aws.cdn.hf.co/x")
