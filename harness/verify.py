@@ -174,6 +174,9 @@ def render_verify(payload: dict) -> str:
         header = f"verify: {', '.join(parts) or 'checks did not pass'} ({len(checks)} checks)"
     lines = [header]
     named = {f.get("check") for f in failures}
+    # A timed-out check's own "[name] TIMED OUT" line already reports it; its placeholder failure is for
+    # the structured payload only, so it is neither rendered nor counted again (#254).
+    failures = [f for f in failures if f.get("kind") != "timeout"]
     for check in checks:
         if check.get("timed_out"):
             lines.append(f"[{check['name']}] TIMED OUT after {check.get('timeout')}s (exit 124)")
@@ -224,8 +227,10 @@ async def run_verify(checks: list, exec_cmd, summary_chars: int) -> ToolOutput:
         parser = row["parser"]
         if timed_out or code != 0:
             parsed = parse_pytest(output) if parser == "pytest" else parse_generic(output)
-            if timed_out and not parsed:
-                parsed = [{"kind": "error", "file": "", "line": None, "message": f"timed out after {timeout}s"}]
+            if timed_out:
+                # A hung check's log tail is not a distinct failure; the full log stays in the artifact.
+                parsed = [f for f in parsed if f["kind"] != "log"] or [
+                    {"kind": "timeout", "file": "", "line": None, "message": f"timed out after {timeout}s"}]
             failures.extend(_dedup(check.name, parsed))
     raw_log = "\n\n".join(logs)
     ok = all(row["code"] == 0 and not row["timed_out"] for row in check_rows)

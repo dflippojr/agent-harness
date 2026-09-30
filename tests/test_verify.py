@@ -217,6 +217,32 @@ def test_timeout_with_empty_output_is_still_a_failure():
     assert payload["checks"][0]["timed_out"] is True
     assert payload["failures"]
     assert "TIMED OUT" in result.text
+    # #254: one line for the check and a single count in the header, not "1 error, 1 timed out".
+    assert [ln for ln in result.text.splitlines() if ln.startswith("[slow]")] == [
+        "[slow] TIMED OUT after 2s (exit 124)"]
+    assert result.text.splitlines()[0] == "verify: 1 timed out (1 checks)"
+
+
+def test_hung_check_log_tail_is_not_a_second_failure():
+    async def exec_cmd(command, timeout):
+        return 124, "starting server\nwaiting for connections\n"
+    result = asyncio.run(run_verify([VerifyCheck("serve", "npm start", timeout=5)], exec_cmd, 4000))
+    payload = result.extra["verify"]
+    assert payload["ok"] is False
+    assert [f["kind"] for f in payload["failures"]] == ["timeout"]
+    assert [ln for ln in result.text.splitlines() if ln.startswith("[serve]")] == [
+        "[serve] TIMED OUT after 5s (exit 124)"]
+    assert result.text.splitlines()[0] == "verify: 1 timed out (1 checks)"
+    assert "waiting for connections" in result.artifact_content
+
+
+def test_timed_out_check_keeps_distinct_parsed_failures():
+    async def exec_cmd(command, timeout):
+        return 124, "error: build step failed\n"
+    result = asyncio.run(run_verify([VerifyCheck("build", "make", timeout=5)], exec_cmd, 4000))
+    lines = [ln for ln in result.text.splitlines() if ln.startswith("[build]")]
+    assert lines == ["[build] TIMED OUT after 5s (exit 124)", "[build] ERROR error: build step failed"]
+    assert result.text.splitlines()[0] == "verify: 1 error, 1 timed out (1 checks)"
 
 
 def test_mixed_passing_and_failing_checks_only_parse_failures():
