@@ -814,12 +814,13 @@ def _bounded_int(value, default: int, lo: int, hi: int) -> int:
     return parsed if lo <= parsed <= hi else default
 
 
-def _tool_output(raw) -> ToolOutputConfig:
+def _tool_output(raw, base: ToolOutputConfig = TOOL_OUTPUT_DEFAULTS) -> ToolOutputConfig:
+    """Validate a tool_output: block. Missing or invalid keys fall back to `base` (the package
+    defaults globally, the resolved global config for a project overlay)."""
     spec = raw if isinstance(raw, dict) else {}
     values = {}
     for key, (lo, hi) in _TOOL_OUTPUT_BOUNDS.items():
-        values[key] = _bounded_int(spec.get(key, getattr(TOOL_OUTPUT_DEFAULTS, key)),
-                                   getattr(TOOL_OUTPUT_DEFAULTS, key), lo, hi)
+        values[key] = _bounded_int(spec.get(key, getattr(base, key)), getattr(base, key), lo, hi)
     if values["read_file_lines"] > values["read_file_lines_max"]:
         values["read_file_lines"] = values["read_file_lines_max"]
     if values["search_matches"] > values["search_matches_max"]:
@@ -833,8 +834,7 @@ def resolve_tool_output(cfg: Config, project: Project | None = None) -> ToolOutp
     """Global tool_output, overlaid by a project's tool_output: block when present."""
     if project is None or not project.tool_output:
         return cfg.tool_output
-    merged = {**cfg.tool_output.__dict__, **project.tool_output}
-    return _tool_output(merged)
+    return _tool_output(project.tool_output, base=cfg.tool_output)
 
 
 def clamp_tool_limit(requested, default: int, maximum: int) -> int:

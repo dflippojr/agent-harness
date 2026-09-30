@@ -73,6 +73,20 @@ def test_resolve_tool_output_overlays_project_on_global(tmp_path):
     assert resolve_tool_output(cfg, Project(name="plain")) == cfg.tool_output
 
 
+def test_invalid_project_override_falls_back_to_global_not_package_default(tmp_path):
+    # #254: the owner raised search_matches globally; a project typo must not drop it back to 100.
+    cfg = config.Config(
+        host="127.0.0.1", port=0, data_dir=tmp_path / "data", repos_dir=tmp_path / "repos",
+        default_model="fake", models={}, sandbox=config.SandboxConfig(),
+        projects={}, tool_output=ToolOutputConfig(search_matches=300, run_shell_chars=50_000),
+    )
+    for bad in ("lots", 0, 10**9, True, None):
+        resolved = resolve_tool_output(cfg, Project(name="p", tool_output={"search_matches": bad}))
+        assert resolved.search_matches == 300, bad
+    resolved = resolve_tool_output(cfg, Project(name="p", tool_output={"run_shell_chars": "x", "read_file_lines": 7}))
+    assert resolved.run_shell_chars == 50_000 and resolved.read_file_lines == 7
+
+
 def test_tool_output_loaded_from_yaml(tmp_path):
     cfg_dir = tmp_path / "cfg"
     shutil.copytree(config.ROOT / "config", cfg_dir)
