@@ -16,7 +16,8 @@ import shutil
 import sys
 import threading
 import urllib.parse
-from pathlib import Path
+from contextlib import contextmanager
+from pathlib import Path, PureWindowsPath
 
 import httpx
 
@@ -30,6 +31,81 @@ CHUNK = 8 * 1024 * 1024
 ZIMAGE_ENCODER = "qwen_3_4b.safetensors"
 MAIN_PY = "main.py"
 REQUIRED_CLIP_TYPE = "flux2"
+# Origins in the pinned manifest. Redirects may also land on the CDN domains these
+# origins own; they rotate hostnames (e.g. us.aws.cdn.hf.co), so match by suffix.
+DOWNLOAD_HOSTS = frozenset({"huggingface.co", "github.com"})
+DOWNLOAD_DELIVERY_SUFFIXES = (".hf.co", ".huggingface.co", ".githubusercontent.com")
+
+
+def _allowed_host(host: str | None, *, redirect: bool) -> bool:
+    if host in DOWNLOAD_HOSTS:
+        return True
+    return redirect and bool(host) and host.endswith(DOWNLOAD_DELIVERY_SUFFIXES)
+
+
+def validate_download_url(url: str, *, redirect: bool = False) -> None:
+    """Reject untrusted origins, credentials, ports and ambiguous control characters."""
+    if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in url):
+        raise ValueError("download URL contains control characters")
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != "https" or not _allowed_host(parsed.hostname, redirect=redirect)
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port not in (None, 443)):
+        raise ValueError("download URL must use HTTPS on an allowed host")
+
+
+def trusted_download_url(url: str) -> tuple[str, str]:
+    """Validate a manifest URL and rebuild it on the matching allowlisted origin.
+
+    Returns (url, host). The host is taken from DOWNLOAD_HOSTS, not from the
+    input, so the request target's origin is always one of our constants; each
+    path segment is percent-encoded and `..` segments are refused. Pinned
+    manifest URLs carry no query string, so one is refused too. Existing
+    percent-escapes are preserved, not double-encoded.
+    """
+    validate_download_url(url)
+    parsed = urllib.parse.urlsplit(url)
+    # Decode first so an escape already in the manifest (%20) is not encoded twice,
+    # and so an encoded dot segment (%2e%2e) is refused like a literal one.
+    segments = [urllib.parse.unquote(seg) for seg in parsed.path.split("/")]
+    if parsed.query or any(seg in (".", "..") for seg in segments):
+        raise ValueError("download URL must be a plain path without a query or dot segments")
+    host = next(h for h in sorted(DOWNLOAD_HOSTS) if h == parsed.hostname)
+    path = "/".join(urllib.parse.quote(seg, safe="") for seg in segments)
+    return f"https://{host}{path}", host
+
+
+def manifest_path(base: Path, relative: str, *, plain_name: bool = False) -> Path:
+    """Validate manifest paths on both Windows and POSIX, including symlink escapes."""
+    parts = relative.replace("\\", "/").split("/")
+    if (not relative or PureWindowsPath(relative).drive or Path(relative).is_absolute()
+            or ":" in relative or any(part in ("", ".", "..") for part in parts)
+            or (plain_name and len(parts) != 1)
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in relative)):
+        raise ValueError("manifest path must be a safe relative path")
+    candidate = base.joinpath(*parts)
+    if not candidate.resolve().is_relative_to(base.resolve()):
+        raise ValueError("manifest path resolves outside its target directory")
+    return candidate
+
+
+def _log_value(value: object) -> str:
+    return "".join(char for char in str(value) if ord(char) >= 32 and not 127 <= ord(char) <= 159)
+
+
+@contextmanager
+def _download_response(client, url: str, headers: dict):
+    # Disable even an injected client's automatic redirects; validate every hop.
+    for _ in range(11):
+        with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
+            # has_redirect_location, not is_redirect: a 3xx without a usable Location
+            # (304, 300, a broken 302) has no next_request and must surface as an HTTP error.
+            if not response.has_redirect_location:
+                yield response
+                return
+            url = str(response.next_request.url)
+            validate_download_url(url, redirect=True)
+    raise RuntimeError("download exceeded redirect limit")
 
 
 def load_manifest(path: Path | None = None) -> dict:
@@ -39,7 +115,7 @@ def load_manifest(path: Path | None = None) -> dict:
 def redact_url(url: str) -> str:
     """Log scheme/host/path only — never query strings or fragments (tokens live there)."""
     parsed = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    return _log_value(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")))
 
 
 def models_dir(cfg) -> Path:
@@ -64,8 +140,7 @@ def failed_comfy_dir(cfg) -> Path:
 
 def encoder_paths(manifest: dict, root: Path) -> tuple[Path, Path]:
     enc = manifest["assets"]["encoder"]
-    sub = root / enc["subdir"]
-    return sub / enc["filename"], sub / enc["alt_filename"]
+    return asset_dest(enc, root), asset_dest(enc, root, enc["alt_filename"])
 
 
 def pin_registry(manifest: dict) -> tuple[tuple[str, str, str], ...]:
@@ -91,7 +166,8 @@ def exclusively_owned_by_flux_fast(manifest: dict, subdir: str, filename: str) -
 
 
 def asset_dest(asset: dict, root: Path, filename: str | None = None) -> Path:
-    return root / asset["subdir"] / (filename or asset["filename"])
+    sub = manifest_path(root, asset["subdir"])
+    return manifest_path(sub, filename if filename is not None else asset["filename"], plain_name=True)
 
 
 def sha256_file(path: Path, expected: int | None = None) -> str:
@@ -435,11 +511,14 @@ def _write_part(resp, part: Path, have: int) -> None:
 def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx.Client | None = None,
                   timeout: float | httpx.Timeout | None = None) -> dict:
     """Stream to dest.part, resume with Range when the server honors it, verify, then atomically promote."""
+    url, host = trusted_download_url(url)
+    manifest_path(dest.parent, dest.name, plain_name=True)
+    manifest_path(dest.parent, dest.name + ".part", plain_name=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     own_client = client is None
     timeout = timeout if timeout is not None else httpx.Timeout(60.0, read=600.0)
-    client = client or httpx.Client(timeout=timeout, follow_redirects=True, headers=_headers())
+    client = client or httpx.Client(timeout=timeout, headers=_headers())
 
     def promote(*, resumed: bool) -> dict:
         return _promote_part(part, dest, sha256, size, resumed)
@@ -455,8 +534,8 @@ def download_file(url: str, dest: Path, sha256: str, size: int, *, client: httpx
         headers = dict(_headers())
         if have:
             headers["Range"] = f"bytes={have}-"
-        log.info("downloading %s (%s bytes, resume %s)", redact_url(url), size, have)
-        with client.stream("GET", url, headers=headers) as resp:
+        log.info("downloading from %s (%d bytes, resume %d)", host, int(size), int(have))
+        with _download_response(client, url, headers) as resp:
             if resp.status_code == 416:
                 if _size_or_zero(part) == size:
                     return promote(resumed=True)
@@ -562,7 +641,7 @@ def remove_flux_fast(cfg, *, manifest: dict | None = None) -> dict:
         if asset.get("alt_filename"):
             names.append(asset["alt_filename"])
         for name in names:
-            dest = root / asset["subdir"] / name
+            dest = asset_dest(asset, root, name)
             for path in (dest, dest.with_name(name + ".part")):
                 key = str(path)
                 if key in considered:
@@ -623,7 +702,7 @@ def stage_comfyui(cfg, *, manifest: dict | None = None, client: httpx.Client | N
     manifest = manifest or load_manifest()
     pin = manifest["comfyui"]["pinned_portable"]
     staged = staged_comfy_dir(cfg)
-    archive = staged.parent / pin["filename"]
+    archive = manifest_path(staged.parent, pin["filename"], plain_name=True)
     need = pin["bytes"] + RESERVE_BYTES
     free = (_free_bytes if free_bytes is None else free_bytes)(staged.parent)
     if free < need:
