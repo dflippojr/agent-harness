@@ -108,10 +108,24 @@ def start_fixture(payloads: dict[str, bytes]):
     FixtureHandler.payloads = payloads
     FixtureHandler.hits = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
+    FixtureHandler.port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    url = f"http://127.0.0.1:{server.server_address[1]}"
+    url = "https://huggingface.co"
     return server, url
+
+
+@pytest.fixture(autouse=True)
+def route_download_fixture(monkeypatch):
+    """Route allowed-origin downloads to the real local HTTP fixture after validation."""
+    original = httpx.HTTPTransport.handle_request
+
+    def handle(transport, request):
+        if request.url.host == "huggingface.co" and request.url.path.lstrip("/") in FixtureHandler.payloads:
+            request.url = request.url.copy_with(scheme="http", host="127.0.0.1", port=FixtureHandler.port)
+        return original(transport, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle)
 
 
 def stop_fixture(server):
@@ -438,7 +452,7 @@ def test_download_file_promotes_complete_part_without_reget(tmp_path):
                               headers={"Content-Range": f"bytes */{len(body)}"})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    out = download_file("http://example.test/encoder", dest, _sha(body), len(body), client=client)
+    out = download_file("https://huggingface.co/encoder", dest, _sha(body), len(body), client=client)
     assert dest.read_bytes() == body
     assert not part.exists()
     assert out["bytes"] == len(body)
@@ -471,7 +485,7 @@ def test_download_file_416_on_complete_part_still_promotes(tmp_path, monkeypatch
                               headers={"Content-Range": f"bytes */{len(body)}"})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    out = download_file("http://example.test/unet", dest, _sha(body), len(body), client=client)
+    out = download_file("https://huggingface.co/unet", dest, _sha(body), len(body), client=client)
     assert dest.read_bytes() == body
     assert not part.exists()
     assert out["bytes"] == len(body)
@@ -490,7 +504,7 @@ def test_download_file_resumes_short_part_with_206(tmp_path):
                               headers={"Content-Range": f"bytes 5-{len(body) - 1}/{len(body)}"})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    download_file("http://example.test/vae", dest, _sha(body), len(body), client=client)
+    download_file("https://huggingface.co/vae", dest, _sha(body), len(body), client=client)
     assert dest.read_bytes() == body
     assert not part.exists()
 
