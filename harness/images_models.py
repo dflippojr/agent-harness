@@ -31,13 +31,16 @@ CHUNK = 8 * 1024 * 1024
 ZIMAGE_ENCODER = "qwen_3_4b.safetensors"
 MAIN_PY = "main.py"
 REQUIRED_CLIP_TYPE = "flux2"
-# Origins in the pinned manifest; delivery hosts are allowed only on redirects.
+# Origins in the pinned manifest. Redirects may also land on the CDN domains these
+# origins own; they rotate hostnames (e.g. us.aws.cdn.hf.co), so match by suffix.
 DOWNLOAD_HOSTS = frozenset({"huggingface.co", "github.com"})
-DOWNLOAD_DELIVERY_HOSTS = frozenset({
-    "release-assets.githubusercontent.com", "objects.githubusercontent.com",
-    "cdn-lfs.huggingface.co", "cdn-lfs.hf.co", "cdn-lfs-us-1.hf.co",
-    "cdn-lfs-eu-1.hf.co", "cas-bridge.xethub.hf.co",
-})
+DOWNLOAD_DELIVERY_SUFFIXES = (".hf.co", ".huggingface.co", ".githubusercontent.com")
+
+
+def _allowed_host(host: str | None, *, redirect: bool) -> bool:
+    if host in DOWNLOAD_HOSTS:
+        return True
+    return redirect and bool(host) and host.endswith(DOWNLOAD_DELIVERY_SUFFIXES)
 
 
 def validate_download_url(url: str, *, redirect: bool = False) -> None:
@@ -45,8 +48,7 @@ def validate_download_url(url: str, *, redirect: bool = False) -> None:
     if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in url):
         raise ValueError("download URL contains control characters")
     parsed = urllib.parse.urlsplit(url)
-    hosts = DOWNLOAD_HOSTS | DOWNLOAD_DELIVERY_HOSTS if redirect else DOWNLOAD_HOSTS
-    if (parsed.scheme != "https" or parsed.hostname not in hosts
+    if (parsed.scheme != "https" or not _allowed_host(parsed.hostname, redirect=redirect)
             or parsed.username is not None or parsed.password is not None
             or parsed.port not in (None, 443)):
         raise ValueError("download URL must use HTTPS on an allowed host")

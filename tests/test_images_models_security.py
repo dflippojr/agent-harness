@@ -49,7 +49,25 @@ def test_download_rejects_redirect_even_if_client_follows_redirects(tmp_path, ta
     assert not (tmp_path / "model.part").exists()
 
 
-@pytest.mark.parametrize("host", sorted(models.DOWNLOAD_HOSTS | models.DOWNLOAD_DELIVERY_HOSTS))
+# us.aws.cdn.hf.co is where the shipped Hugging Face URLs redirected on 2026-09-30.
+TRUSTED_REDIRECT_HOSTS = sorted(models.DOWNLOAD_HOSTS | {
+    "us.aws.cdn.hf.co", "cas-bridge.xethub.hf.co", "cdn-lfs.huggingface.co",
+    "release-assets.githubusercontent.com", "objects.githubusercontent.com"})
+
+
+@pytest.mark.parametrize("host", ["hf.co.evil.example", "evilhf.co", "githubusercontent.com.evil.example",
+                                  "notgithubusercontent.com", "example.com"])
+def test_redirect_host_suffix_is_anchored(host):
+    with pytest.raises(ValueError):
+        models.validate_download_url(f"https://{host}/payload", redirect=True)
+
+
+def test_cdn_hosts_are_redirect_only():
+    with pytest.raises(ValueError):
+        models.validate_download_url("https://us.aws.cdn.hf.co/payload")
+
+
+@pytest.mark.parametrize("host", TRUSTED_REDIRECT_HOSTS)
 def test_trusted_redirects_download_and_verify(tmp_path, host):
     hits = []
 
