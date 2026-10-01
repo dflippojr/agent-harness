@@ -211,6 +211,33 @@ def test_registry_has_only_dedicated_owner_settings(tmp_path, monkeypatch):
         service.patch_admin({'remote_control.discovery.enabled': True}, 0)
 
 
+def test_stale_root_does_not_block_unrelated_settings(tmp_path, monkeypatch):
+    cfg = make_cfg(tmp_path)
+    service = SettingsService(cfg)
+    calls = []
+
+    def ok(self, values):
+        calls.append(list(values))
+        return [Identity('C:\\Projects', 1, 'ab')]
+
+    monkeypatch.setattr(WindowsDirectories, 'roots', ok)
+    service.patch_admin({'remote_control.discovery.roots': ['C:\\Projects'],
+                         'remote_control.discovery.enabled': True}, 0)
+    assert calls  # a discovery change is validated against the live filesystem
+
+    def gone(self, values):
+        raise DiscoveryError('directory_unavailable')
+
+    # The root is later deleted or unplugged: unrelated settings must still save, and must not
+    # touch the filesystem for discovery (the full overlay is re-applied on every PATCH).
+    monkeypatch.setattr(WindowsDirectories, 'roots', gone)
+    service.patch_admin({'sessions.max_turns': 90}, 1)
+    assert service.registry.get('sessions.max_turns').getter(cfg) == 90
+    # Changing discovery itself still validates and is refused while the root is unavailable.
+    with pytest.raises(SettingsError):
+        service.patch_admin({'remote_control.discovery.max_depth': 2}, 2)
+
+
 def test_real_windows_root_fail_closed(tmp_path):
     fs = WindowsDirectories(make_cfg(tmp_path))
     # The checkout is under OneDrive; actual availability/attributes depend on

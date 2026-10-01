@@ -723,6 +723,8 @@ class SettingsService:
         cross = []
         for validator in self.registry.validators:
             cross.extend(validator(candidate_cfg, proposed_applied))
+        for validator in self.registry.change_validators:
+            cross.extend(validator(candidate_cfg, proposed_applied))
         if cross:
             keys = {item["key"]: {"code": item["code"], "message": item["message"]} for item in cross}
             raise SettingsError(400, INVALID_CONFIG, "validation_error", keys=keys)

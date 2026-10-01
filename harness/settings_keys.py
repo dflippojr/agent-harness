@@ -1000,8 +1000,13 @@ def _get_discovery_roots(cfg):
 
 
 def _set_discovery_roots(cfg, value):
-    from .discovery_paths import WindowsDirectories
-    cfg.remote_control.discovery.roots = [i.path for i in WindowsDirectories(cfg).roots(value)]
+    # Lexical only: this setter re-runs for every settings PATCH and at startup, so it must not
+    # depend on the filesystem. Live checks run in validate_discovery_roots_change (changes only)
+    # and again at scan start.
+    from .discovery_paths import DiscoveryError, lexical
+    if not isinstance(value, list) or len(value) > 8 or not all(isinstance(v, str) for v in value):
+        raise DiscoveryError('up_to_eight_roots')
+    cfg.remote_control.discovery.roots = [lexical(v) for v in value]
 
 
 def _get_discovery_depth(cfg):
@@ -1013,6 +1018,15 @@ def _set_discovery_depth(cfg, value):
 
 
 def validate_discovery(cfg, proposed):
+    """Cheap cross-field rule; runs on the full merged overlay, so no filesystem access."""
+    if cfg.remote_control.discovery.enabled and not cfg.remote_control.discovery.roots:
+        return [{'key': 'remote_control.discovery.roots', 'code': 'valid_root_required',
+                 'message': 'valid_root_required'}]
+    return []
+
+
+def validate_discovery_roots_change(cfg, proposed):
+    """Live Windows validation and canonicalization, only when this request changes discovery."""
     from .discovery_paths import DiscoveryError, WindowsDirectories
     if not any(k.startswith('remote_control.discovery.') for k in proposed):
         return []
@@ -1022,6 +1036,7 @@ def validate_discovery(cfg, proposed):
             raise DiscoveryError('valid_root_required')
     except DiscoveryError as error:
         return [{'key': 'remote_control.discovery.roots', 'code': error.code, 'message': error.code}]
+    cfg.remote_control.discovery.roots = [i.path for i in roots]
     return []
 
 
@@ -1049,7 +1064,8 @@ def discovery_specs():
 
 def build_registry(cfg: Config) -> Registry:
     specs = {spec.key: spec for spec in [*STATIC_ADMIN, *discovery_specs(), *backend_specs(cfg), *APP_SPECS]}
-    return Registry(specs=specs, validators=[validate_compaction, validate_enables, validate_discovery])
+    return Registry(specs=specs, validators=[validate_compaction, validate_enables, validate_discovery],
+                    change_validators=[validate_discovery_roots_change])
 
 
 def assert_explicit_registry(registry: Registry) -> None:

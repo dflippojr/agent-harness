@@ -105,6 +105,9 @@ class SettingSpec:
 class Registry:
     specs: dict[str, SettingSpec]
     validators: list[Validator] = field(default_factory=list)
+    # Run only on the keys a request actually changes (never on the full merged overlay that
+    # is re-applied for every PATCH and at startup), for checks that touch the live system.
+    change_validators: list[Validator] = field(default_factory=list)
 
     def get(self, key: str) -> SettingSpec:
         spec = self.specs.get(key)
