@@ -411,9 +411,7 @@ class GoogleOidc:
         try:
             claims = jwt.decode(
                 id_token, key=key, algorithms=list(ALGORITHMS), audience=client_id, issuer=TOKEN_ISSUERS,
-                leeway=LEEWAY_SECONDS, options={"require": ["iss", "sub", "aud", "exp", "iat"],
-                                                "verify_exp": False, "verify_iat": False,
-                                                "verify_nbf": False})
+                leeway=LEEWAY_SECONDS, options={"require": ["iss", "sub", "aud", "exp", "iat"]})
         except jwt.PyJWTError:
             raise GoogleSigninError(401, GENERIC_ERROR, "token_invalid") from None
         exp, iat = claims.get("exp"), claims.get("iat")

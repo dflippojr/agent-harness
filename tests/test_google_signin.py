@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from datetime import datetime
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -48,6 +49,19 @@ BOB_SUB = "100000000000000000002"
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+class _PyJwtDatetime:
+    """Stands in for `datetime` inside PyJWT so its exp/iat checks follow the test clock."""
+
+    def __init__(self, clock):
+        self.clock = clock
+
+    def now(self, tz=None):
+        return datetime.fromtimestamp(self.clock(), tz=tz)
+
+    def __getattr__(self, name):
+        return getattr(datetime, name)
 
 
 class Clock:
@@ -199,6 +213,8 @@ class Env:
                                                client_secret_file=str(self.secret_file), admitted_logins=[KITCHEN])
         self.cfg = cfg
         self.clock = Clock()
+        self.monkeypatch = monkeypatch
+        self.follow_clock()
         self.google = FakeGoogle(self.clock)
         self.m = Manager(cfg, chat=Script([Completion(content="done")]))
         self._wire(self.m)
@@ -210,6 +226,9 @@ class Env:
                                  headers={"Tailscale-User-Login": OWNER})
             assert r.status_code == 201, r.text
             self.ids[login] = r.json()["user_id"]
+
+    def follow_clock(self):
+        self.monkeypatch.setattr("jwt.api_jwt.datetime", _PyJwtDatetime(self.clock))
 
     def _wire(self, m):
         m.google_signin.clock = self.clock
@@ -599,6 +618,17 @@ def test_time_skew(env, skew, ok):
     claims = {"exp": now + skew.get("exp_offset", 3600), "iat": now + skew.get("iat_offset", 0)}
     r = env.flow(env.browser(KITCHEN), ALICE_SUB, ALICE, claims=claims)
     assert (r.headers["location"] == "/#/agents") is ok
+
+
+def test_pyjwt_rejects_expired_token_even_if_injected_clock_says_fresh(env):
+    env.link(ALICE, ALICE_SUB)
+    env.monkeypatch.setattr("jwt.api_jwt.datetime", datetime)  # PyJWT back on the real wall clock
+    real = int(time.time())
+    env.clock.now = real - 6000  # the injected clock still sees the token as fresh
+    claims = {"iat": real - 6000, "exp": real - 3600}
+    assert claims["exp"] > env.clock() + gs.LEEWAY_SECONDS  # the manual checks alone would accept it
+    r = env.flow(env.browser(KITCHEN), ALICE_SUB, ALICE, claims=claims)
+    assert r.headers["location"] == "/#/signin/failed"
 
 
 def test_jwks_rotation_and_cache_expiry(env):
