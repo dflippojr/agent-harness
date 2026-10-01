@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import compaction, efficiency, grounding, llm, projects, state as agent_state
+from . import compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state
 from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
@@ -262,12 +262,21 @@ class Runner:
             return False
         return self.policy(s).decide("read_artifact", {"artifact_id": "0" * 64}).action != DENY
 
+    @staticmethod
+    def delegate_edit_available(s: dict) -> bool:
+        """Whether this session is offered, and may run, delegate_edit and apply_delegated_edit: harness-managed
+        local-model agent sessions on the tower with a workspace (#157). Runner targets, hosted CLIs and chat never."""
+        return (s.get("kind") != "chat" and s.get("backend", "local") == "local" and s.get("target") == "tower"
+                and bool(s.get("workspace")) and not s.get("workspace_removed"))
+
     def tool_schemas(self, s: dict, ws) -> list[dict]:
         if s.get("kind") == "chat":
             return self.web.schemas() if self.web is not None else []
         schemas = ws.schemas()
         if self.artifact_tool_available(s):
             schemas = schemas + [READ_ARTIFACT_SCHEMA]
+        if self.delegate_edit_available(s):
+            schemas = schemas + [delegate_edit.PROPOSE_SCHEMA, delegate_edit.APPLY_SCHEMA]
         for kit in self.daemon_toolkits(s):
             schemas = schemas + kit.schemas()
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
@@ -1562,7 +1571,7 @@ class Runner:
         sid = s["id"]
         existing = self.db.approval_for_call(sid, call["id"])
         if existing is None:
-            decision = self.policy(s).decide(name, args)
+            decision = self._decide(s, name, args)
             self.bus.emit(sid, "tool_call", {"id": call["id"], "name": name, "args": args,
                                              "decision": decision.action, "reason": decision.reason})
             if decision.action == ALLOW:
@@ -1592,6 +1601,19 @@ class Runner:
         self._record_result(sid, call, name, output, ok=False)
         return output
 
+    def _decide(self, s: dict, name: str, args: dict):
+        """The policy decision for a call. Applying a delegated proposal is decided as an edit_file of each of its
+        files, taking the strictest, so project rules about edits cover it too."""
+        policy = self.policy(s)
+        if name != delegate_edit.APPLY:
+            return policy.decide(name, args)
+        proposal = (s["run"].get("delegate_proposals") or {}).get(str(args.get("patch_id")))
+        if proposal is None:  # nothing to write; execution reports the unknown patch_id
+            return policy.decide(name, args)
+        rank = {ALLOW: 0, ASK: 1, DENY: 2}
+        decisions = [policy.decide("edit_file", {"path": path}) for path in proposal["hashes"]]
+        return max(decisions, key=lambda d: rank.get(d.action, 1))
+
     def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
         """An approved call still can't run for a household member without the tool; the recorded error, else None."""
         if session_user_id(s) == OWNER_USER_ID:
@@ -1608,6 +1630,11 @@ class Runner:
         be applied as proposed, so the agent is told instead of bothering the user."""
         if name in ("write_file", "edit_file"):
             return await ws.preview(name, args), reason, None
+        if name == delegate_edit.APPLY:
+            proposal = (s["run"].get("delegate_proposals") or {}).get(str(args.get("patch_id")))
+            if proposal is None:
+                return "", reason, f"Error: unknown patch_id {args.get('patch_id')!r}; call delegate_edit first."
+            return await asyncio.to_thread(delegate_edit.preview, ws.files, proposal), reason, None
         kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names and hasattr(k, "preview")), None)
         if kit is None:
             return "", reason, None
@@ -1647,6 +1674,11 @@ class Runner:
                 if not self.artifact_tool_available(s):
                     raise ToolError("unknown tool 'read_artifact'")
                 output = self._read_artifact(sid, args)
+            elif name in delegate_edit.TOOL_NAMES:
+                if not self.delegate_edit_available(s) or not isinstance(ws, Workspace):
+                    raise ToolError(f"unknown tool '{name}'")
+                output = await (self._delegate_propose(sid, args, ws) if name == delegate_edit.PROPOSE
+                                else self._delegate_apply(sid, args, ws))
             elif self.app_tools is not None and name in self.app_tools.names(s):
                 def waiting() -> None:  # the app works on it: give the GPU to other sessions meanwhile
                     self.scheduler.release(sid)
@@ -1716,6 +1748,91 @@ class Runner:
         self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content, extra=extra, output_chars=output_chars)
         return output
+
+    # delegated edits (#157)
+    @staticmethod
+    def _delegate_result(patch_id: str | None = None, summary: str = "", status: str = "proposed",
+                         error: str | None = None) -> str:
+        """Everything the worker sees from delegate_edit or apply_delegated_edit: never file text or snippets."""
+        return json.dumps({"patch_id": patch_id, "summary": summary, "status": status, "error": error})
+
+    async def _delegate_propose(self, sid: str, args: dict, ws: Workspace) -> str:
+        """Ask a fresh, bounded model call for search/replace edits to the listed files and store them as a
+        proposal on the run. Failures are tool errors in the same {patch_id, summary, status, error} shape."""
+        try:
+            return await self._delegate_propose_inner(sid, args, ws)
+        except ToolError as e:
+            raise ToolError(self._delegate_result(status="error", error=str(e))) from None
+
+    async def _delegate_propose_inner(self, sid: str, args: dict, ws: Workspace) -> str:
+        s = self.db.get_session(sid)
+        model = self.cfg.models[s["model"]]
+        paths = [str(p) for p in args.get("paths") or []]
+        cap = int(delegate_edit.INPUT_SHARE * model.context_tokens * s["run"].get("chars_per_token", 3.0))
+        texts = await asyncio.to_thread(delegate_edit.read_inputs, ws.files, paths, cap)
+        key = delegate_edit.edit_key(list(texts), args.get("task_id"))
+        run = self.db.get_session(sid)["run"]
+        counts = dict(run.get("delegate_edits") or {})
+        if counts.get(key, 0) >= delegate_edit.MAX_ATTEMPTS:
+            raise ToolError(f"this edit was already delegated {counts[key]} times without being applied; make "
+                            "the change yourself with edit_file")
+        counts[key] = counts.get(key, 0) + 1
+        run["delegate_edits"] = counts
+        self.db.update_session(sid, run=run)
+        try:
+            completion = await self._model_call(
+                sid, model, delegate_edit.request(str(args.get("instruction", "")), texts), None, None,
+                max_tokens=min(model.max_tokens or delegate_edit.DELEGATE_MAX_TOKENS,
+                               delegate_edit.DELEGATE_MAX_TOKENS),
+                extra={"chat_template_kwargs": {"enable_thinking": False}})
+        except llm.LLMError as e:  # no usage to record: the endpoint returned none
+            raise ToolError(f"the delegate call failed: {e}") from None
+        self._add_delegate_tokens(sid, completion)
+        summary, edits = delegate_edit.parse_reply(completion.content, completion.finish_reason, texts)
+        new_texts = delegate_edit.apply_to_texts(texts, edits)
+        summary = delegate_edit.summarize(summary, edits, new_texts, texts)
+        patch_id, proposal = delegate_edit.new_proposal(texts, edits, key, summary)
+        run = self.db.get_session(sid)["run"]
+        proposals = {k: v for k, v in (run.get("delegate_proposals") or {}).items() if v.get("key") != key}
+        proposals[patch_id] = proposal  # a new proposal for the same edit supersedes the old one
+        run["delegate_proposals"] = proposals
+        self.db.update_session(sid, run=run)
+        return self._delegate_result(patch_id, summary)
+
+    async def _delegate_apply(self, sid: str, args: dict, ws: Workspace) -> str:
+        """Write a stored proposal, all of it or nothing. A stale file is an error and doesn't use up a retry."""
+        patch_id = str(args.get("patch_id", ""))
+        proposal = (self.db.get_session(sid)["run"].get("delegate_proposals") or {}).get(patch_id)
+        try:
+            if proposal is None:
+                raise ToolError(f"unknown patch_id {patch_id!r}; call delegate_edit first")
+            written = await asyncio.to_thread(delegate_edit.apply, ws.files, proposal)
+        except ToolError as e:
+            raise ToolError(self._delegate_result(patch_id, status="error", error=str(e))) from None
+        run = self.db.get_session(sid)["run"]
+        run["delegate_proposals"] = {k: v for k, v in (run.get("delegate_proposals") or {}).items()
+                                     if k != patch_id}
+        run["delegate_edits"] = {k: v for k, v in (run.get("delegate_edits") or {}).items()
+                                 if k != proposal["key"]}
+        touched = list(run.get("files_touched") or [])
+        touched += [p for p in proposal["hashes"] if p not in touched]
+        run["files_touched"] = touched[:agent_state.FILES_MODIFIED_MAX]
+        self.db.update_session(sid, run=run)
+        return self._delegate_result(patch_id, written, status="applied")
+
+    def _add_delegate_tokens(self, sid: str, c: llm.Completion) -> None:
+        """A delegate call's tokens go to session totals (not a turn) and to a separate delegate_tokens tally, on
+        the run and in totals; run["completion_tokens"], which the budget uses, stays the worker's alone."""
+        s = self.db.get_session(sid)
+        totals = self._add_totals(s["totals"], c, turn=False)
+        run = s["run"]
+        for holder in (totals, run):
+            d = dict(holder.get("delegate_tokens") or {})
+            d["prompt_tokens"] = d.get("prompt_tokens", 0) + c.prompt_tokens
+            d["completion_tokens"] = d.get("completion_tokens", 0) + c.completion_tokens
+            d["calls"] = d.get("calls", 0) + 1
+            holder["delegate_tokens"] = d
+        self.db.update_session(sid, totals=totals, run=run)
 
     def _read_artifact(self, sid: str, args: dict) -> str:
         """The model-facing read of a masked result: characters [start, end) of this session's artifact."""
