@@ -15,7 +15,7 @@ import threading
 import time
 import sys
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 
 from .config import PROJECT_NAME
@@ -196,7 +196,8 @@ class FolderDiscovery:
     async def start(self, actor):
         self.fs.supported()
         config_lock = self.settings._lock if self.settings else self._guard
-        with config_lock, self._guard:
+        config_store_lock = self.settings.store.lock() if self.settings else nullcontext()
+        with config_lock, config_store_lock, self._guard:
             self._expire()
             if self._active is not None:
                 return self.view(self._active)
@@ -380,7 +381,8 @@ class FolderDiscovery:
             entry = dict(identity=candidate['identity'].record(), root=candidate['root'].record(), owner_only=True)
             # Keep config revision stable across validation and the commit.
             config_lock = self.settings._lock if self.settings else self._guard
-            with config_lock, self.store.lock():
+            config_store_lock = self.settings.store.lock() if self.settings else nullcontext()
+            with config_lock, config_store_lock, self.store.lock():
                 if self.clock() - scan.created >= LIMITS['expiry_seconds']:
                     raise DiscoveryError('scan_expired_or_unknown', 404)
                 if self.revision() != scan.revision:
