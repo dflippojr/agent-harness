@@ -80,3 +80,29 @@ not increment round-reset accounting. A successful reset keeps the pinned
 head, injects the tagged state (including derived `files_modified`), a fixed
 next-step message, and the latest tool-call exchange.
 
+
+## Delegated edits
+
+`delegate_edit(paths, instruction, task_id?)` keeps file contents out of the
+worker's context for code edits. The daemon reads the listed workspace files
+itself (strict UTF-8, no line numbers; a decode failure or NUL byte is a
+"binary file" error; each file at most the read cap, all of them at most half
+the context window), sends them with the instruction to the session's model in
+a fresh context capped at 4096 completion tokens, and parses a JSON list of
+`{path, old_text, new_text}` edits. Every edit must match exactly once and
+edits must not overlap. The proposal and the sha256 of each file's text are
+stored on the run; the worker gets back only
+`{patch_id, summary, status, error}`.
+
+`apply_delegated_edit(patch_id)` rechecks the hashes, then writes the whole
+proposal or nothing. Its policy decision is that of an `edit_file` of each of
+its files (the strictest wins), and an approval shows the proposal's diff. A
+stale file is an error and does not use up a delegation.
+
+An edit (keyed by `task_id`, else the sorted file list) may be delegated three
+times per run, failed calls included; the count lives in
+`run["delegate_edits"]`, survives round resets and restarts, and is cleared
+when a proposal for it is applied. Delegate tokens are added to session totals
+(not as turns) and tallied in `delegate_tokens` on the run and in totals; they
+don't count against the run's completion budget. Only local-model agent
+sessions on the tower with a workspace are offered these tools.
