@@ -501,3 +501,17 @@ async def test_configured_duplicate_expands_server_environment(tmp_path, monkeyp
     assert scan['candidates'][0]['configured_duplicate']
     with pytest.raises(DiscoveryError, match='configured_duplicate'):
         promote(service, scan)
+
+
+@run_async
+async def test_managed_launch_keeps_real_trust_and_worktree_errors(tmp_path):
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\\Projects'] = [('package.json', False, False)]
+    scan = await scanned(service)
+    promote(service, scan)
+    with pytest.raises(ToolError, match="hasn't been trusted"):
+        await service.rc.launch('project', include_owner_only=True)
+    service.rc.claude_json.write_text(json.dumps({'projects': {'C:/Projects': {'hasTrustDialogAccepted': True}}}))
+    service.rc.rc.spawn = 'worktree'
+    with pytest.raises(ToolError, match="isn't a git repository"):
+        await service.rc.launch('project', include_owner_only=True)

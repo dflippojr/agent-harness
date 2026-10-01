@@ -26,7 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import psutil
@@ -356,15 +356,16 @@ class RemoteControl:
         entry = self.discovery.entries().get(name)
         if entry is None:
             raise RemoteControlError('folder unavailable')
+        stack = ExitStack()
         try:
-            with self.discovery.checked(entry) as identity:
-                yield Path(identity.path)
-        except (DiscoveryError, OSError, RemoteControlError) as error:
-            reason = error.code if isinstance(error, DiscoveryError) else ('remote_control_refused'
-                       if isinstance(error, RemoteControlError) else 'directory_unavailable')
+            identity = stack.enter_context(self.discovery.checked(entry))
+        except (DiscoveryError, OSError) as error:
+            reason = error.code if isinstance(error, DiscoveryError) else 'directory_unavailable'
             if action:
                 self.discovery.audit(action + '_refusal', actor, reason=reason)
             raise RemoteControlError(reason) from None
+        with stack:
+            yield Path(identity.path)
 
     async def stop(self, name: str, include_owner_only: bool = False) -> dict:
         if not include_owner_only and name not in self.rc.folders and name not in self.cfg.projects:
