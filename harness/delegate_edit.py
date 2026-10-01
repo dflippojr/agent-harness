@@ -245,7 +245,20 @@ def apply(files: FileOps, proposal: dict) -> str:
     """Write the whole proposal or nothing: hashes and every edit are checked before the first write."""
     current = _current(files, proposal)
     new_texts = apply_to_texts({p: t for p, (_, t) in current.items()}, proposal["edits"])
-    for path, new in new_texts.items():
-        with open(current[path][0], "w", encoding="utf-8", newline="") as f:  # as edit_file writes
-            f.write(new)
+    done: list[str] = []
+    try:
+        for path, new in new_texts.items():
+            with open(current[path][0], "w", encoding="utf-8", newline="") as f:  # as edit_file writes
+                done.append(path)  # opening truncates, so a failed write needs restoring too
+                f.write(new)
+    except OSError as e:
+        failed = []
+        for path in done:
+            try:
+                with open(current[path][0], "w", encoding="utf-8", newline="") as f:
+                    f.write(current[path][1])
+            except OSError:
+                failed.append(path)
+        note = f" Could not restore: {', '.join(failed)}." if failed else " Earlier writes were rolled back."
+        raise ToolError(f"write failed: {e}.{note}") from None
     return "applied " + ", ".join(new_texts)
