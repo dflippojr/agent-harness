@@ -4,6 +4,8 @@ import json
 import ntpath
 import socket
 import subprocess
+import ctypes
+import sys
 from functools import wraps
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -13,6 +15,7 @@ import pytest
 from harness.discovery_paths import DiscoveryError, Identity, WindowsDirectories, beneath, lexical
 from harness.folder_discovery import FolderDiscovery, FolderStore, LIMITS, MARKERS, SUFFIXES
 from harness.remote_control import RemoteControl
+from harness.fileops import ToolError
 from harness.settings_keys import build_registry
 from harness.settings_service import SettingsError, SettingsService
 from test_daemon import make_cfg
@@ -217,3 +220,179 @@ def test_real_windows_root_fail_closed(tmp_path):
             assert identity.file_id and identity.volume_serial
     except DiscoveryError as error:
         assert str(tmp_path) not in str(error)
+
+
+class WinFunction:
+    def __init__(self, function):
+        self.function = function
+
+    def __call__(self, *args):
+        return self.function(*args)
+
+
+def fake_windows(monkeypatch, bad_component='', tag=0, drive_type=3, device='\\Device\\HarddiskVolume3', fs='NTFS'):
+    handles, closed = {}, []
+    def create(path, *_):
+        handle = len(handles) + 1
+        handles[handle] = path
+        return handle
+    def info(handle, kind, output, size):
+        if kind == 9:
+            output._obj.attributes = 0x10 | (0x400 if bad_component and handles[handle].endswith(bad_component) else 0)
+            output._obj.tag = tag
+        elif kind == 18:
+            output._obj.volume = 17
+            output._obj.id[0] = 19
+        return 1
+    def final(handle, output, *_):
+        output.value = handles[handle]
+        return len(output.value)
+    def device_name(drive, output, size):
+        output.value = device
+        return len(device)
+    def volume(handle, name, count, serial, length, flags, output, size):
+        output.value = fs
+        return 1
+    api = SimpleNamespace(**{k: WinFunction(v) for k, v in dict(
+        CreateFileW=create, CloseHandle=lambda h: closed.append(h), GetFileInformationByHandleEx=info,
+        GetFinalPathNameByHandleW=final, GetVolumeInformationByHandleW=volume,
+        QueryDosDeviceW=device_name, GetDriveTypeW=lambda _: drive_type).items()})
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(ctypes, 'WinDLL', lambda *a, **kw: api, raising=False)
+    return handles, closed
+
+
+@pytest.mark.parametrize('component', ['C:\\', 'parent', 'project'])
+@pytest.mark.parametrize('tag', [0xA000000C, 0xA0000003, 0x9000001A, 0x9000001B, 0x80000000])
+def test_all_ancestor_reparse_tags_rejected(tmp_path, monkeypatch, component, tag):
+    fs = WindowsDirectories(make_cfg(tmp_path))
+    handles, closed = fake_windows(monkeypatch, bad_component=component, tag=tag)
+    with pytest.raises(DiscoveryError, match='reparse_point'):
+        with fs.opened('C:\\parent\\project'):
+            pytest.fail('reparse point accepted')
+    assert len(handles) == len(closed)
+
+
+@pytest.mark.parametrize('drive_type,device,filesystem', [(2, '\\Device\\HarddiskVolume3', 'NTFS'),
+                       (4, '\\Device\\LanmanRedirector', 'NTFS'), (5, '', 'NTFS'), (6, '', 'NTFS'),
+                       (3, '\\??\\C:\\parent', 'NTFS'), (3, '\\Device\\HarddiskVolume3', 'FAT32')])
+def test_nonlocal_nonfixed_and_non_ntfs_volumes(tmp_path, monkeypatch, drive_type, device, filesystem):
+    fs = WindowsDirectories(make_cfg(tmp_path))
+    fake_windows(monkeypatch, drive_type=drive_type, device=device, fs=filesystem)
+    with pytest.raises(DiscoveryError):
+        with fs.opened('C:\\parent\\project'):
+            pytest.fail('unsupported volume accepted')
+
+
+def test_canonical_case_overlap_and_sensitive_roots(tmp_path, monkeypatch):
+    cfg = make_cfg(tmp_path)
+    cfg.data_dir = 'C:\\daemon\\data'
+    cfg.provider_secret_files = {'provider': 'C:\\credentials-parent\\secret.txt'}
+    fs = WindowsDirectories(cfg)
+    fake_windows(monkeypatch)
+    roots = fs.roots(['C:\\parent\\project', 'c:\\PARENT', 'C:\\parent', 'C:\\parent-sibling'])
+    assert len(roots) == 2
+    for path in ['C:\\daemon\\data\\other', 'C:\\credentials-parent', 'C:\\parent\\.ssh',
+                 'C:\\Windows', 'C:\\parent\\node_modules', 'C:\\$Recycle.Bin']:
+        with pytest.raises(DiscoveryError):
+            fs.safe(path)
+
+
+@run_async
+async def test_managed_isolation_revalidation_and_removal(tmp_path, monkeypatch):
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\\Projects'] = [('package.json', False, False)]
+    scan = await scanned(service)
+    promote(service, scan)
+    rc = service.rc
+    assert 'project' not in rc.eligible()
+    assert not rc.status()
+    assert 'project' in rc.eligible(include_owner_only=True)
+    assert rc.status(include_owner_only=True)[0]['managed']
+    assert 'project' not in rc.schemas()[0]['function']['parameters']['properties']['project'].get('enum', [])
+    with pytest.raises(ToolError):
+        await rc.call('open_claude_remote_control', {'project': 'project'})
+    with pytest.raises(ToolError):
+        rc.open_trust_prompt('project')
+    with pytest.raises(ToolError):
+        await rc.stop('project')
+    fs.unsafe.add('C:\\Projects')
+    monkeypatch.setattr(rc, 'popen', lambda *a, **kw: pytest.fail('unsafe directory launched'))
+    with pytest.raises(ToolError, match='reparse_point'):
+        await rc.launch('project', include_owner_only=True)
+    with pytest.raises(ToolError, match='reparse_point'):
+        rc.open_trust_prompt('project', include_owner_only=True)
+    assert rc.status(include_owner_only=True)[0]['invalid'] == 'reparse_point'
+    fs.unsafe.clear()
+    rc._trust_processes['project'] = SimpleNamespace(poll=lambda: None)
+    with pytest.raises(DiscoveryError, match='entry_active'):
+        await service.remove('project', 'owner')
+    rc._trust_processes.clear()
+    with pytest.raises(DiscoveryError, match='managed_folder_unknown'):
+        await service.remove('file-defined', 'owner')
+    assert (await service.remove('project', 'owner'))['removed']
+    assert fs.tree['C:\\Projects'] == [('package.json', False, False)]
+
+
+def test_authorization_on_every_discovery_endpoint(tmp_path):
+    from test_admin import make_client, bearer, PREFIX
+    from harness.config import GuestAccess
+    client, manager = make_client(tmp_path)
+    cfg = manager.cfg
+    cfg.guests = [GuestAccess(login='guest@example.com', until='2099-01-01T00:00:00+00:00')]
+    cfg.remote_control.discovery.enabled = True
+    cfg.remote_control.discovery.roots = ['C:\\Projects']
+    cfg.remote_control.spawn = 'same-dir'
+    rc = RemoteControl(cfg, cfg.remote_control, claude_json=tmp_path / 'claude.json')
+    rc.discovery.fs = Metadata()
+    rc.discovery.settings = manager.settings
+    manager.remote_control = rc
+    rc.discovery.fs.tree['C:\\Projects'] = [('package.json', False, False)]
+    scan = asyncio.run(scanned(rc.discovery))
+    candidate = scan['candidates'][0]
+    root = PREFIX + '/remote-control'
+    operations = [('POST', root + '/discovery/scans', None), ('GET', root + '/discovery/scans/' + scan['id'], None),
+        ('DELETE', root + '/discovery/scans/' + scan['id'], None),
+        ('POST', root + '/discovery/scans/' + scan['id'] + '/candidates/' + candidate['id'] + '/promote',
+         dict(slug='project', confirmed_path=candidate['path'], confirmed_markers=candidate['markers'])),
+        ('DELETE', root + '/folders/project', None)]
+    with client:
+        app = client.post('/keys', json=dict(name='app', kind='app', scopes=['sessions', 'sessions:all',
+                            'approvals', 'images', 'inference', 'remote_control'])).json()
+        device = client.post('/keys', json=dict(name='device')).json()
+        owner = client.post('/keys', json=dict(name='owner', kind='owner', scopes=['admin'])).json()
+        member = client.post(PREFIX + '/accounts', json=dict(login='member@example.com', display_name='Member'))
+        assert member.status_code == 201
+        refused = [bearer(app['key']), bearer(device['key']), {'Tailscale-User-Login': 'member@example.com'},
+                   {'Tailscale-User-Login': 'guest@example.com'}, {'Tailscale-User-Login': 'unknown@example.com'},
+                   {**bearer(owner['key']), 'Origin': 'https://evil.example'}]
+        for method, path, body in operations:
+            for headers in refused:
+                response = client.request(method, path, headers=headers, json=body)
+                assert response.status_code in (401, 403, 404), response.text
+                assert 'Projects' not in response.text and candidate['id'] not in response.text
+        assert client.get(operations[1][1], headers=bearer(owner['key'])).status_code == 200
+        response = client.post(operations[3][1], headers=bearer(owner['key']), json=operations[3][2])
+        assert response.status_code == 200, response.text
+        assert not client.get('/api/v1/remote-control', headers=bearer(app['key'])).json()['projects']
+        assert client.post('/api/v1/remote-control/project', headers=bearer(app['key'])).status_code != 200
+        assert 'remote_control.discovery' not in json.dumps(client.get('/api/v1', headers=bearer(app['key'])).json())
+        assert '/remote-control/discovery' not in json.dumps(client.get('/api/v1', headers=bearer(app['key'])).json())
+        assert client.get(root, headers=bearer(owner['key'])).json()['projects'][0]['managed']
+        assert client.delete(root + '/folders/project', headers=bearer(owner['key'])).status_code == 200
+
+
+@run_async
+async def test_scanner_never_reads_files_or_runs_commands_or_network(tmp_path, monkeypatch):
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\\Projects'] = [('package.json', False, False)]
+    started = await service.start('owner')
+    await service._task
+    scan = service.get(started['id'])
+    monkeypatch.setattr(service, 'audit', lambda *a, **kw: None)
+    monkeypatch.setattr(subprocess, 'Popen', lambda *a, **kw: pytest.fail('command invoked'))
+    monkeypatch.setattr(socket, 'socket', lambda *a, **kw: pytest.fail('network invoked'))
+    monkeypatch.setattr('builtins.open', lambda *a, **kw: pytest.fail('file opened'))
+    scan.reason = ''
+    service._run(scan)
+    assert scan.status == 'finished'
