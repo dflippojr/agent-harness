@@ -23,6 +23,7 @@ class DiscoveryError(ValueError):
 EXCLUDED = frozenset({
     '.ssh', '.gnupg', '.aws', '.azure', '.config', '.codex', '.claude',
     '.git', 'node_modules', '.npm', '.yarn', '.pnpm-store', '.cache',
+    '.cargo', '.rustup', '.local', '.docker', 'vendor', 'deps', '.pytest_cache',
     '.venv', 'venv', 'env', '__pycache__', 'site-packages', '.tox',
     'build', 'dist', 'out', 'output', 'target', 'bin', 'obj', 'coverage',
     '.gradle', '.m2', '.nuget', 'packages', 'appdata', 'application data',
@@ -59,7 +60,7 @@ def lexical(value: str) -> str:
 
 
 def sensitive_paths(cfg) -> list[str]:
-    paths = [str(cfg.data_dir), str(cfg.config_dir)]
+    paths = [str(cfg.data_dir), str(cfg.config_dir), cfg.homelab.docker_root, cfg.images.log_dir]
     if cfg.backup.dir:
         paths.append(cfg.backup.dir)
     paths += [str(Path(p).parent) for p in cfg.provider_secret_files.values() if p]
@@ -74,7 +75,13 @@ def sensitive_paths(cfg) -> list[str]:
         paths.append(str(Path(cfg.notify.token_file).parent))
     if cfg.skills.reviewer_api_key_file:
         paths.append(str(Path(cfg.skills.reviewer_api_key_file).parent))
-    return [os.path.expandvars(os.path.expanduser(p)) for p in paths]
+    for runner in cfg.runners.values():
+        if runner.token_file:
+            paths.append(str(Path(runner.token_file).parent))
+    if cfg.github.token_file:
+        paths.append(str(Path(cfg.github.token_file).parent))
+    expanded = [os.path.expandvars(os.path.expanduser(p)) for p in paths if p]
+    return list(dict.fromkeys([*expanded, *(os.path.realpath(p) for p in expanded)]))
 
 
 @dataclass(frozen=True)

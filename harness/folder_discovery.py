@@ -179,15 +179,17 @@ class FolderDiscovery:
             raise DiscoveryError('audit_unavailable', 409) from None
 
     def _expire(self):
-        now = self.clock()
-        for scan_id, scan in list(self.scans.items()):
-            if now - scan.created >= LIMITS['expiry_seconds']:
-                scan.cancel.set()
-                del self.scans[scan_id]
+        with self._guard:
+            now = self.clock()
+            for scan_id, scan in list(self.scans.items()):
+                if now - scan.created >= LIMITS['expiry_seconds']:
+                    scan.cancel.set()
+                    del self.scans[scan_id]
 
     async def start(self, actor):
         self.fs.supported()
-        with self._guard:
+        config_lock = self.settings._lock if self.settings else self._guard
+        with config_lock, self._guard:
             self._expire()
             if self._active is not None:
                 return self.view(self._active)
@@ -362,6 +364,8 @@ class FolderDiscovery:
                     for existing_slug, value in old.values.items():
                         if value['identity'] == entry['identity']:
                             return dict(slug=existing_slug, already_added=True)
+                        if key(value['identity']['path']) == key(ident.path):
+                            raise DiscoveryError('managed_path_conflict', 409)
                     if slug in self.cfg.projects or slug in self.rc.rc.folders or slug in old.values:
                         raise DiscoveryError('slug_conflict', 409)
                     configured = list(self.rc.rc.folders.values()) + [p.repo for p in self.cfg.projects.values()]

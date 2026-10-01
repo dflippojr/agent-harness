@@ -180,6 +180,13 @@ class RemoteControl:
             entry = state.get(name)
             if entry and entry.get('owner_only') and not include_owner_only:
                 continue
+            if name in managed and not is_managed:
+                saved = entry if entry and entry.get('owner_only') else None
+                out.append(dict(project=name, path=managed[name]['identity']['path'], managed=True,
+                                owner_only=True, invalid='slug_conflict', trusted=False, git=False,
+                                trust_prompt_open=self._trust_prompt_open(name), running=bool(saved) and self._alive(saved)))
+                if saved:
+                    entry = None
             running = bool(entry) and self._alive(entry)
             if entry and not running and not entry.get("stopped_at"):
                 entry["stopped_at"] = time.time()
@@ -327,6 +334,11 @@ class RemoteControl:
     def _directory(self, name, include_owner_only=False, action='', actor=''):
         from .discovery_paths import DiscoveryError
         if name in self.rc.folders or name in self.cfg.projects:
+            if include_owner_only and self._load().get(name, {}).get('owner_only'):
+                saved = self._load()[name]
+                if self._alive(saved) or self._trust_prompt_open(name):
+                    self.discovery.audit(action + '_refusal' if action else 'folder_refusal', actor, reason='slug_conflict')
+                    raise RemoteControlError('slug_conflict')
             yield self.folder(name)
             return
         if not include_owner_only:

@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .discovery_paths import DiscoveryError
 from .manager import HarnessError
+import sys
 
 PREFIX = '/api/admin/v1/remote-control'
 
@@ -32,6 +33,8 @@ def register(app, mgr, require_admin):
     def service(request):
         token = require_admin(request, mgr)
         manager = mgr(request)
+        if sys.platform != 'win32':
+            raise HarnessError(400, 'unsupported_platform')
         if manager.remote_control is None:
             raise HarnessError(409, 'remote_control_disabled')
         actor = (token or {}).get('id') or getattr(request.state.access, 'user_id', '') or 'owner'

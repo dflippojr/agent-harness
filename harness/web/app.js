@@ -3943,7 +3943,7 @@ function settingInput(spec, draft) {
     const input = h("textarea", { class: "discovery-roots", rows: 3, disabled: !spec.writable,
       placeholder: "One local directory per line (up to 8)", value: (current || []).join("\n") });
     input.addEventListener("change", () => {
-      draft[spec.key] = input.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      draft[spec.key] = input.value.split(/\r?\n/).filter(s => s !== "");
     });
     return input;
   }
@@ -4248,9 +4248,9 @@ function discoveryLimitsText(limits) {
 
 function folderDiscoveryPanel(meta, reload) {
   const panel = h("div", { class: "folder-discovery" });
-  let scan = null, pending = false, timer = null, closed = false;
+  let scan = null, pending = false, timer = null, expiryTimer = null, expired = false, closed = false;
   const stopPolling = () => { clearTimeout(timer); timer = null; };
-  onLeave(() => { closed = true; stopPolling(); });
+  onLeave(() => { closed = true; stopPolling(); clearTimeout(expiryTimer); });
   const request = async (path, method = "GET", body) => {
     pending = true;
     try { return await api(`/remote-control/discovery/scans${path}`, { method, body }); }
@@ -4281,6 +4281,7 @@ function folderDiscoveryPanel(meta, reload) {
       h("p", { class: "muted small" }, "Markers do not imply safety or trust."),
       candidate.promoted || candidate.configured_duplicate
         ? h("p", { class: "muted small" }, candidate.promoted ? "Already added" : "Already configured")
+        : scan.status === "running" ? h("p", { class: "muted small" }, "Add folders after the scan finishes or is cancelled.")
         : h("div", { class: "row" }, slug, h("button", { class: "btn", disabled: pending || !candidate.launchable,
           onclick: () => add(candidate, slug.value) }, "Add folder")));
   };
@@ -4291,8 +4292,9 @@ function folderDiscoveryPanel(meta, reload) {
       h("p", { class: "muted small" }, "Windows · owner-only · metadata-only. No file contents are read. Hidden/system entries, reparse points (including OneDrive), sensitive locations, caches and build folders are excluded. Apps and agents cannot access these folders."),
       h("p", { class: "muted small" }, discoveryLimitsText(meta.limits)),
       !meta.enabled ? h("p", { class: "note" }, "Discovery is off. Configure valid roots and enable it in Settings.") : null,
+      expired ? h("p", { class: "note" }, "Results expired. Find folders again.") : null,
       h("button", { class: "btn", disabled: pending || !meta.enabled || scan?.status === "running", onclick: async () => {
-        scan = await request("", "POST"); render();
+        scan = await request("", "POST"); expired = false; clearTimeout(expiryTimer); expiryTimer = null; render();
       } }, "Find folders"),
       scan ? h("p", { role: "status" }, `${scan.status} · ${scan.visited} directories visited · ${scan.candidates.length} candidates · expires in ${scan.expires_in}s`) : null,
       scan?.status === "running" ? h("button", { class: "btn", disabled: pending, onclick: async () => {
@@ -4304,6 +4306,9 @@ function folderDiscoveryPanel(meta, reload) {
       scan?.errors.map(error => h("p", { class: "muted small" }, `${error.location}: ${error.code}`)),
       scan?.candidates.map(candidateCard));
     if (scan?.status === "running") timer = setTimeout(() => void poll(), 750);
+    if (scan && !expiryTimer) expiryTimer = setTimeout(() => {
+      scan = null; expired = true; expiryTimer = null; render();
+    }, (scan.expires_in + 1) * 1000);
   };
   panel.updateDiscovery = next => { if (meta.enabled !== next.enabled) { meta = next; render(); } };
   render();
