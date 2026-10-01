@@ -338,7 +338,10 @@ class RemoteControl:
         return {**self._view(name, include_owner_only), "trust_prompt_open": True}
 
     def _view(self, name: str, include_owner_only: bool = False) -> dict:
-        return next(s for s in self.status(include_owner_only) if s["project"] == name)
+        rows = [s for s in self.status(include_owner_only) if s["project"] == name]
+        # A configured folder wins over a managed entry with the same slug; the
+        # synthetic conflict row must never shadow the real one.
+        return next((s for s in rows if s.get("invalid") != "slug_conflict"), rows[0])
 
     @contextmanager
     def _directory(self, name, include_owner_only=False, action='', actor=''):

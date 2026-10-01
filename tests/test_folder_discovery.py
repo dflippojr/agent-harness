@@ -516,6 +516,8 @@ async def test_path_identity_conflicts_and_file_entries_win(tmp_path):
     status = service.rc.status(include_owner_only=True)
     assert any(row.get('managed') and row['invalid'] == 'slug_conflict' for row in status)
     assert any(not row.get('managed') and row['path'] == str(local) for row in status)
+    view = service.rc._view('project', include_owner_only=True)
+    assert not view.get('invalid') and not view.get('managed') and view['path'] == str(local)
 
 
 @run_async
