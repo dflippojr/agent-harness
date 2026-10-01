@@ -78,6 +78,11 @@ class FolderStore(ManagedStore):
         with self.lock():
             try:
                 envelope = self.read_active()
+                if envelope is None and self.lkg_path.exists():
+                    envelope = self.read_lkg()
+                    self.validate(envelope)
+                    if envelope is not None:
+                        self.commit(active=envelope)
                 self.validate(envelope)
                 return envelope or Envelope()
             except (ManagedConfigError, DiscoveryError):
@@ -110,6 +115,8 @@ class FolderStore(ManagedStore):
     def validate(envelope):
         if envelope is None:
             return
+        if not envelope.confirmed or envelope.unconfirmed:
+            raise DiscoveryError('managed_folders_corrupt', 409)
         for slug, entry in envelope.values.items():
             if (not PROJECT_NAME.fullmatch(slug) or not isinstance(entry, dict)
                     or entry.get('owner_only') is not True):
@@ -251,7 +258,7 @@ class FolderDiscovery:
                     with self.fs.opened(path) as ident:
                         if not beneath(ident.path, root.path):
                             raise DiscoveryError('containment_changed')
-                        markers, children = [], []
+                        markers, children, children_limited = [], [], False
                         with self.fs.entries(ident.path) as entries:
                             for entry in entries:
                                 reason = self._bound(scan)
@@ -278,7 +285,7 @@ class FolderDiscovery:
                                         if len(children) + len(stack) < LIMITS['visited_directories'] - scan.visited:
                                             children.append(child)
                                         else:
-                                            scan.truncated, scan.reason = True, 'directory_limit'
+                                            children_limited = True
                                     except DiscoveryError:
                                         pass
                         with self._guard:
@@ -289,6 +296,8 @@ class FolderDiscovery:
                                                                       markers=sorted(set(markers)))
                         if not markers and depth < scan.depth and not scan.reason:
                             stack.extend((child, root, depth + 1) for child in reversed(children))
+                            if children_limited:
+                                scan.truncated = True
                 except (DiscoveryError, OSError) as error:
                     with self._guard:
                         if len(scan.errors) < LIMITS['errors']:
@@ -302,6 +311,8 @@ class FolderDiscovery:
                     break
             with self._guard:
                 scan.status = 'cancelled' if scan.cancel.is_set() else 'finished'
+                if scan.truncated and not scan.reason:
+                    scan.reason = 'directory_limit'
                 if not scan.reason and scan.cancel.is_set():
                     scan.reason = 'cancelled'
                 self.audit('scan_finish', scan.actor, scan, scan.reason)
