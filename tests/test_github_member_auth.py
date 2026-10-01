@@ -890,3 +890,29 @@ def test_startup_retries_owed_erase_even_with_the_feature_disabled(tmp_path, fak
     with TestClient(create_app(m2)):
         assert wait_for(lambda: fake.namespaces() == set())
         assert wait_for(lambda: m.db.get_github_connection(a)["last_error"] == "")
+
+
+def test_failed_erase_after_a_rejected_credential_is_owed(tmp_path, fake, monkeypatch):
+    client, m, ids = setup(tmp_path, fake)
+    try:
+        a = ids[ALICE]
+        connect(client, fake, ALICE, a)
+        real_erase = ga.erase
+
+        def broken_erase(cfg, user_id, attempts=5):
+            raise GitHubAuthError("erase_failed", 500)
+
+        monkeypatch.setattr(ga, "erase", broken_erase)
+        raw = "remote: Invalid username or token.\nfatal: Authentication failed for 'https://github.com/o/r.git/'"
+        assert ga.classify_git_failure(raw) == "reconnect_required"
+        assert m.github_auth._failed(a, raw).code == "reconnect_required"
+        row = m.db.get_github_connection(a)
+        assert row["status"] == "reconnect_required" and row["last_error"] == "erase_failed"
+        assert m.github_auth.owes_erase()
+        monkeypatch.setattr(ga, "erase", real_erase)
+        m.github_auth.reconcile()
+        assert fake.namespaces() == set()
+        row = m.db.get_github_connection(a)
+        assert row["status"] == "reconnect_required" and row["last_error"] == ""
+    finally:
+        close(client)

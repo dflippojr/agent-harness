@@ -530,7 +530,9 @@ class MemberGitHub:
             try:
                 ga.erase(self.cfg, user_id)  # the rejected credential, in this namespace only
             except GitHubAuthError:
-                pass
+                # Still reconnect_required (credentialed Git stays blocked), but the erase is owed:
+                # reconcile() retries it at startup like every other failed erase.
+                self.db.set_github_connection(user_id, status="reconnect_required", last_error=ERASE_FAILED)
         return GitHubAuthError(code, 409)
 
     def _used(self, user_id: str) -> None:
