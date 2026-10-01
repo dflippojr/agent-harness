@@ -13,6 +13,8 @@ import re
 import secrets
 import threading
 import time
+import sys
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -40,6 +42,37 @@ class FolderStore(ManagedStore):
         self.active_path = self.data_dir / 'folders.json'
         self.lkg_path = self.data_dir / 'folders.lkg.json'
         self.lock_path = self.data_dir / 'folders.lock'
+        self._protected = False
+
+    @contextmanager
+    def lock(self):
+        if not self._protected:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            if sys.platform == 'win32':
+                import ctypes
+                from ctypes import wintypes as w
+                security = ctypes.WinDLL('advapi32', use_last_error=True)
+                kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [w.LPCWSTR, w.DWORD,
+                                                                                          ctypes.POINTER(w.LPVOID), w.LPDWORD]
+                security.SetFileSecurityW.argtypes = [w.LPCWSTR, w.DWORD, w.LPVOID]
+                kernel.LocalFree.argtypes = [w.LPVOID]
+                descriptor = w.LPVOID()
+                # Protected DACL: directory owner and SYSTEM only; children
+                # inherit this policy, including folder paths and audit files.
+                if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        'D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)', 1, ctypes.byref(descriptor), None):
+                    raise DiscoveryError('owner_protection_unavailable', 409)
+                try:
+                    if not security.SetFileSecurityW(str(self.data_dir), 4 | 0x80000000, descriptor):
+                        raise DiscoveryError('owner_protection_unavailable', 409)
+                finally:
+                    kernel.LocalFree(descriptor)
+            else:
+                os.chmod(self.data_dir, 0o700)
+            self._protected = True
+        with super().lock():
+            yield
 
     def load(self):
         with self.lock():
@@ -169,6 +202,7 @@ class FolderDiscovery:
             self.scans[scan.id] = scan
             self._active = scan
             self._task = asyncio.create_task(asyncio.to_thread(self._run, scan))
+            asyncio.get_running_loop().call_later(LIMITS['expiry_seconds'], self._expire)
             return self.view(scan)
 
     def get(self, scan_id):
@@ -317,6 +351,8 @@ class FolderDiscovery:
             # Keep config revision stable across validation and the commit.
             config_lock = self.settings._lock if self.settings else self._guard
             with config_lock, self.store.lock():
+                if self.clock() - scan.created >= LIMITS['expiry_seconds']:
+                    raise DiscoveryError('scan_expired_or_unknown', 404)
                 if self.revision() != scan.revision:
                     raise DiscoveryError('config_revision_changed', 409)
                 with self.checked(entry) as ident:
