@@ -1,0 +1,12 @@
+sessions 58 strict matches 0 exploratory 5
+S1 turns=16 calls=7 criteria=(True, True, False) truncated_results=0
+S2 turns=17 calls=7 criteria=(True, False, False) truncated_results=0
+S3 turns=12 calls=13 criteria=(False, False, True) truncated_results=0
+S4 turns=34 calls=40 criteria=(True, False, True) truncated_results=0
+S5 turns=11 calls=12 criteria=(True, False, False) truncated_results=0
+elide ctx_chars_full 2369165 kept 839725 saved_pct 64.6 dropped_items 13 needed 0 ambiguous 0 error_results_dropped 1 prefix_reuse_pct 87.1
+mask ctx_chars_full 2369165 kept 695980 saved_pct 70.6 dropped_items 9 needed 1 ambiguous 0 error_results_dropped 0 prefix_reuse_pct 89.7
+jev ctx_chars_full 2369165 kept 508304 saved_pct 78.5 dropped_items 30 needed 3 ambiguous 0 error_results_dropped 1 prefix_reuse_pct 84.3
+qwen calls 574 mean_s 0.461 max_s 17.454 total_s 265
+qwen request failures 0
+session ids (sha8): ['88fbb514', 'ec41d6a8', '6f39b5fd', 'f9752220', 'ac49b51e']
