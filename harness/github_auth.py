@@ -370,7 +370,9 @@ def git_config_args(cfg, user_id: str, *, hooks_dir: Path | None = None) -> list
     hooks = (hooks_dir or (member_dir(cfg, user_id) / "empty-hooks")).as_posix()
     pairs = [
         ("credential.helper", ""),                 # clear any inherited list
-        ("credential.helper", f'"{gcm}"'),         # then the pinned GCM, verbatim
+        # then the pinned GCM. `!` runs it as a shell command: git only treats an unquoted value as an absolute
+        # path, and the quotes keep a path with spaces (Program Files) intact.
+        ("credential.helper", f'!"{gcm}"'),
         ("credential.useHttpPath", "false"),
         ("credential.interactive", "never"),
         ("credential.namespace", namespace_for(user_id)),
@@ -557,6 +559,7 @@ def helper_command(cfg) -> Path:
 
 _AUTH_FAILURES = re.compile(
     r"(?i)authentication failed|could not read (username|password)|terminal prompts disabled|"
+    r"unable to get password|"
     r"invalid username or password|returned error: 401|cannot prompt because|bad credentials")
 _NOT_FOUND = re.compile(
     r"(?i)repository not found|returned error: 40[34]|not found|permission to .* denied|access denied|"

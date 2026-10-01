@@ -111,6 +111,7 @@ def test_redaction_patterns():
 def test_git_failure_classes_are_generic():
     assert ga.classify_git_failure("fatal: Authentication failed for 'x'") == "reconnect_required"
     assert ga.classify_git_failure("fatal: could not read Username: terminal prompts disabled") == "reconnect_required"
+    assert ga.classify_git_failure("fatal: unable to get password from user") == "reconnect_required"
     assert ga.classify_git_failure("remote: Repository not found.") == "repository_unavailable"
     assert ga.classify_git_failure("The requested URL returned error: 301") == "repository_unavailable"
     assert ga.classify_git_failure("something odd") == "git_failed"
@@ -142,7 +143,7 @@ def test_broker_env_is_minimal_and_namespaced(tmp_path, fake):
             assert (data / "users") not in home.parents  # not under a member's storage or workspace root
         args = ga.git_config_args(m.cfg, a)
         pairs = [args[i + 1] for i in range(0, len(args), 2)]
-        assert pairs[0] == "credential.helper=" and pairs[1] == f'credential.helper="{fake.gcm.as_posix()}"'
+        assert pairs[0] == "credential.helper=" and pairs[1] == f'credential.helper=!"{fake.gcm.as_posix()}"'
         for expected in ("http.followRedirects=false", "protocol.allow=never", "protocol.https.allow=always",
                          "http.extraHeader=", "http.proxy=", "submodule.recurse=false", "core.askPass=",
                          f"credential.namespace=agent-harness/v1/{a}", "filter.lfs.smudge="):
@@ -715,3 +716,32 @@ def test_web_ui_member_card_owner_controls_and_no_browser_storage():
     assert '"/github-member-auth"' in owner and "repo" not in owner.lower().replace("repositories", "")
     assert "github-connection/reset" in js and "Erase GitHub credential" in js
     assert "s.push_target" in js and "commit authors stay as they are" in js
+
+
+def test_real_git_reaches_only_the_pinned_helper_in_the_member_namespace(tmp_path, fake):
+    """Real `git credential fill` with the broker's env and -c overrides asks the pinned GCM, noninteractively."""
+    import shutil
+    client, m, ids = setup(tmp_path, fake)
+    try:
+        a = ids[ALICE]
+        connect(client, fake, ALICE, a)
+        before = len(fake.gcm_calls())
+        env = ga.broker_env(m.cfg, a)
+        r = subprocess.run([shutil.which("git"), *ga.git_config_args(m.cfg, a), "credential", "fill"],
+                           input="protocol=https\nhost=github.com\n\n", capture_output=True, text=True, env=env,
+                           timeout=60)
+        assert r.returncode == 0, r.stderr
+        assert "username=alice" in r.stdout  # the helper answered from Alice's namespace
+        calls = fake.gcm_calls()[before:]
+        assert [c["action"] for c in calls] == ["get"]
+        assert calls[0]["env"]["GCM_NAMESPACE"] == f"agent-harness/v1/{a}"
+        assert calls[0]["env"]["GCM_INTERACTIVE"] == "never" and "GH_TOKEN" not in calls[0]["env"]
+        # Bob has no credential: real git fails without prompting, and never sees Alice's
+        b = ids[BOB]
+        r = subprocess.run([shutil.which("git"), *ga.git_config_args(m.cfg, b), "credential", "fill"],
+                           input="protocol=https\nhost=github.com\n\n", capture_output=True, text=True,
+                           env=ga.broker_env(m.cfg, b), timeout=60, stdin=None)
+        assert r.returncode != 0 and "alice" not in r.stdout
+        assert fake.gcm_calls()[-1]["env"]["GCM_NAMESPACE"] == f"agent-harness/v1/{b}"
+    finally:
+        close(client)

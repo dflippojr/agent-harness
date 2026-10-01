@@ -154,7 +154,7 @@ env = {k: v for k, v in os.environ.items() if k != "GIT_ALLOW_PROTOCOL"}
 if sub not in ("clone", "fetch", "push") or not url:
     sys.exit(subprocess.run([REAL, *args], env=env).returncode)
 helpers = [c.split("=", 1)[1] for c in configs if c.startswith("credential.helper=")]
-helper = helpers[-1].strip('"') if helpers else ""
+helper = helpers[-1].removeprefix("!").strip('"') if helpers else ""
 server = load(HERE / "server.json", {})
 owner_repo = url.removeprefix("https://github.com/").removesuffix(".git")
 repo = server.get("repos", {}).get(owner_repo)
