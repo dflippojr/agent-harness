@@ -14,7 +14,7 @@ import pytest
 
 from harness.discovery_paths import DiscoveryError, Identity, WindowsDirectories, beneath, lexical
 from harness.folder_discovery import FolderDiscovery, FolderStore, LIMITS, MARKERS, SUFFIXES
-from harness.remote_control import RemoteControl
+from harness.remote_control import RemoteControl, RemoteControlError
 from harness.fileops import ToolError
 from harness.settings_keys import build_registry
 from harness.settings_service import SettingsError, SettingsService
@@ -563,6 +563,6 @@ async def test_removed_managed_slug_does_not_hide_configured_folder(tmp_path, mo
     configured.mkdir()
     rc.rc.folders['project'] = str(configured)
     assert [s['project'] for s in rc.status()] == ['project']
-    monkeypatch.setattr(rc, 'popen', lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('stop here')))
-    with pytest.raises(RuntimeError, match='stop here'):  # got past the owner-only gate to spawning
+    with pytest.raises(RemoteControlError, match='trusted') as error:  # past the owner-only gate
         await rc.launch('project')
+    assert 'unavailable' not in str(error.value)
