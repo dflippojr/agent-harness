@@ -334,7 +334,9 @@ async def test_managed_isolation_revalidation_and_removal(tmp_path, monkeypatch)
     assert fs.tree['C:\\Projects'] == [('package.json', False, False)]
 
 
-def test_authorization_on_every_discovery_endpoint(tmp_path):
+def test_authorization_on_every_discovery_endpoint(tmp_path, monkeypatch):
+    from harness import discovery_api
+    monkeypatch.setattr(discovery_api, 'sys', SimpleNamespace(platform='win32'))
     from test_admin import make_client, bearer, PREFIX
     from harness.config import GuestAccess
     client, manager = make_client(tmp_path)
@@ -360,10 +362,11 @@ def test_authorization_on_every_discovery_endpoint(tmp_path):
         app = client.post('/keys', json=dict(name='app', kind='app', scopes=['sessions', 'sessions:all',
                             'approvals', 'images', 'inference', 'remote_control'])).json()
         device = client.post('/keys', json=dict(name='device')).json()
+        _, runner_token = manager.db.create_api_key('runner', 'admin remote_control', kind='runner')
         owner = client.post('/keys', json=dict(name='owner', kind='owner', scopes=['admin'])).json()
         member = client.post(PREFIX + '/accounts', json=dict(login='member@example.com', display_name='Member'))
         assert member.status_code == 201
-        refused = [bearer(app['key']), bearer(device['key']), {'Tailscale-User-Login': 'member@example.com'},
+        refused = [bearer(app['key']), bearer(device['key']), bearer(runner_token), {'Tailscale-User-Login': 'member@example.com'},
                    {'Tailscale-User-Login': 'guest@example.com'}, {'Tailscale-User-Login': 'unknown@example.com'},
                    {**bearer(owner['key']), 'Origin': 'https://evil.example'}]
         for method, path, body in operations:
@@ -380,6 +383,10 @@ def test_authorization_on_every_discovery_endpoint(tmp_path):
         assert '/remote-control/discovery' not in json.dumps(client.get('/api/v1', headers=bearer(app['key'])).json())
         assert client.get(root, headers=bearer(owner['key'])).json()['projects'][0]['managed']
         assert client.delete(root + '/folders/project', headers=bearer(owner['key'])).status_code == 200
+        monkeypatch.setattr(discovery_api, 'sys', SimpleNamespace(platform='linux'))
+        for method, path, body in operations:
+            response = client.request(method, path, headers=bearer(owner['key']), json=body)
+            assert response.status_code == 400 and response.json()['detail'] == 'unsupported_platform'
 
 
 @run_async

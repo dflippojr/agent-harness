@@ -33,6 +33,7 @@ import psutil
 
 from .config import Config, RemoteControlConfig
 from .fileops import ToolError
+from .discovery_paths import Identity
 
 log = logging.getLogger("harness.remote_control")
 
@@ -170,8 +171,13 @@ class RemoteControl:
         for name in names:
             is_managed = name in managed and name not in self.rc.folders and name not in self.cfg.projects
             invalid = ''
+            managed_git = False
             try:
-                path = self.folder(name, include_owner_only)
+                if is_managed:
+                    with self._directory(name, True) as path:
+                        managed_git = self.discovery.git_present(Identity(**managed[name]['identity']))
+                else:
+                    path = self.folder(name, include_owner_only)
             except RemoteControlError as error:
                 if not is_managed:
                     continue
@@ -193,7 +199,7 @@ class RemoteControl:
                 changed = True
             info = {"project": name, "path": str(path), "trusted": _norm_path(path) in trusted,
                     "trust_prompt_open": self._trust_prompt_open(name),
-                    "git": False if invalid else (path / ".git").exists(), "running": running}
+                    "git": managed_git if is_managed else (path / ".git").exists(), "running": running}
             if is_managed:
                 info.update(managed=True, owner_only=True, invalid=invalid)
                 # Never probe the string path of an invalid managed entry.
@@ -258,7 +264,11 @@ class RemoteControl:
             raise RemoteControlError(
                 f"Claude Code hasn't been trusted in {path} yet. Open a terminal there, run `claude` once, "
                 "accept the workspace trust prompt, then try again (trust isn't inherited from parent folders).")
-        if self.rc.spawn == "worktree" and not (path / ".git").exists():
+        if name not in self.rc.folders and name not in self.cfg.projects:
+            git = self.discovery.git_present(Identity(**self.discovery.entries()[name]['identity']))
+        else:
+            git = (path / '.git').exists()
+        if self.rc.spawn == "worktree" and not git:
             raise RemoteControlError(f"{path} isn't a git repository, which worktree mode needs")
         self.dir.mkdir(parents=True, exist_ok=True)
         log_path = self.dir / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.log"
