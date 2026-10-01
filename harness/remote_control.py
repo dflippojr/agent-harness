@@ -367,7 +367,25 @@ class RemoteControl:
         rows = [s for s in self.status(include_owner_only) if s["project"] == name]
         # A configured folder wins over a managed entry with the same slug; the
         # synthetic conflict row must never shadow the real one.
-        return next((s for s in rows if s.get("invalid") != "slug_conflict"), rows[0])
+        real = next((s for s in rows if s.get("invalid") != "slug_conflict"), None)
+        if real is not None:
+            return real
+        if rows:
+            return rows[0]
+        return self._unavailable_row(name)
+
+    def _unavailable_row(self, name: str) -> dict:
+        # The folder became unavailable after the action began, so status() dropped it. The action
+        # itself succeeded; report that folder as unavailable rather than failing with a raw error.
+        entry = self._load().get(name)
+        running = bool(entry) and self._alive(entry)
+        info = {"project": name, "path": "", "trusted": False, "trust_prompt_open": self._trust_prompt_open(name),
+                "git": False, "running": running, "invalid": "directory_unavailable"}
+        if entry:
+            info.update({"started_at": entry["started_at"], "started_by": entry.get("started_by", ""),
+                         "pid": entry["pid"] if running else None})
+            info.update(parse_log(self._log_text(entry)) if running else {})
+        return info
 
     @contextmanager
     def _directory(self, name, include_owner_only=False, action='', actor=''):
