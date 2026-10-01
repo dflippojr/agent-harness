@@ -276,8 +276,8 @@ def test_web_shell_includes_transport_module_and_canonical_names():
     assert '"/api/admin/v1"' in client
     assert "body instanceof FormData" in client
     index = (web / "index.html").read_text(encoding="utf-8")
-    assert 'src="/app.js?v=4"' in index
-    assert 'href="/style.css?v=4"' in index
+    assert 'src="/app.js?v=5"' in index
+    assert 'href="/style.css?v=5"' in index
     assert "<title>Agent Harness Web</title>" in index
     assert 'apple-mobile-web-app-title" content="Harness"' in index
     manifest = (web / "manifest.webmanifest").read_text(encoding="utf-8")

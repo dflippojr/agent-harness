@@ -373,7 +373,19 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 }
 .small.bad, .preview.bad { color: var(--bad); }
 
+#boot-splash {
+  position: fixed; inset: 0; z-index: 10000;
+  display: grid; place-items: center; background: var(--bg);
+  pointer-events: none;
+}
+#boot-splash img { animation: boot-splash-in 120ms ease-out; }
+@keyframes boot-splash-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  #boot-splash img { animation: none; }
   .progress > span { transition: none; }
   .progress.indeterminate > span, .dots::after { animation: none; }
   .switch, .switch::after { transition: none; }
