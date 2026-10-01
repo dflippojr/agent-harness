@@ -42,6 +42,8 @@ STOP_GRACE = 3
 _CODE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
 _BRANCH = re.compile(r"^agent/[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
 PERSISTED = ("disconnected", "connected", "reconnect_required")
+# last_error marking a credential erase that failed and is still owed (retried by reconcile()).
+ERASE_FAILED = "erase_failed"
 
 
 @dataclass
@@ -378,8 +380,15 @@ class MemberGitHub:
             return "authorization_failed"
         if storer.returncode != 0:
             return "store_unavailable"
-        found = ga.probe(self.cfg, att.user_id)
-        return "connected" if found else "store_unavailable"
+        # probe() is True/False when it can tell, None when it cannot (timeout, busy keyring).
+        # GCM reported a successful store, so an unknown result may still mean a stored
+        # credential: retry briefly, then treat it as possibly stored so _finish erases it.
+        for delay in (0, 0.5, 1.5):
+            time.sleep(delay)
+            found = ga.probe(self.cfg, att.user_id)
+            if found is not None:
+                return "connected" if found else "store_unavailable"
+        return "store_unverified"
 
     def _finish(self, att: Attempt, outcome: str) -> None:
         uid = att.user_id
@@ -395,13 +404,16 @@ class MemberGitHub:
                                           namespace_version=ga.NAMESPACE_VERSION)
             self.db.insert_audit(uid, uid, "github_connect", "ok")
         else:
+            # A credential may be in the store if GCM stored it before a cancel/disable, or if the
+            # post-store check could not verify it. Never leave one behind a failed attempt.
+            may_hold = outcome in ("connected", "store_unverified")
             if outcome == "connected":
                 outcome = att.stop_reason or "connect_cancelled"
-                # stopped after GCM stored it: do not leave a credential behind a cancelled/disabled attempt
+            if may_hold:
                 try:
                     ga.erase(self.cfg, uid)
                 except GitHubAuthError:
-                    outcome = "erase_failed"
+                    outcome = ERASE_FAILED  # reconcile() retries the erase at startup
             # connect erased the previous credential first, so a failed attempt never leaves `connected`
             status = "reconnect_required" if att.prior in ("connected", "reconnect_required") else "disconnected"
             self.db.set_github_connection(uid, status=status, last_error=outcome)
@@ -426,7 +438,9 @@ class MemberGitHub:
             self.db.set_github_connection(user_id, status="disconnected", last_error="")
             ga.erase(self.cfg, user_id)
         except GitHubAuthError as e:
-            self.db.set_github_connection(user_id, status="disconnected", last_error=e.code)
+            # Fail closed (credentialed Git needs `connected`) and mark the erase as still owed;
+            # reconcile() retries it at startup. The caller sees the error.
+            self.db.set_github_connection(user_id, status="disconnected", last_error=ERASE_FAILED)
             self.db.insert_audit(actor_id or user_id, user_id, "github_erase", e.code)
             raise
         finally:
@@ -457,11 +471,20 @@ class MemberGitHub:
         self._stop_everyone("connect_cancelled", wait=STOP_GRACE + 3)
 
     def reconcile(self) -> None:
-        """Startup: a row that says connected but whose credential is gone (restored backup) needs reconnect."""
-        if not self.enabled() or not self.preflight().ok:
+        """Startup: retry erases that failed earlier, and move a row that says connected but whose
+        credential is gone (restored backup) to reconnect_required."""
+        if not self.configured() or not self.preflight().ok:
             return
         for row in self.db.list_github_connections():
-            if row.get("status") != "connected":
+            if row.get("last_error") == ERASE_FAILED and row.get("status") != "connected":
+                try:
+                    ga.erase(self.cfg, row["user_id"])
+                except GitHubAuthError:
+                    continue  # still owed; try again next start
+                self.db.set_github_connection(row["user_id"], status=row["status"], last_error="")
+                self.db.insert_audit(row["user_id"], row["user_id"], "github_erase", "ok_retry")
+                continue
+            if not self.enabled() or row.get("status") != "connected":
                 continue
             found = ga.probe(self.cfg, row["user_id"])
             if found is False:

@@ -297,7 +297,13 @@ def test_connect_routes_device_code_only_to_requesting_member(tmp_path, fake):
         assert att.procs[0].stdout.closed  # GCM get's credential output is piped to GCM store, never read here
         again = client.post(f"{ME}/connect", headers=H(ALICE)).json()
         assert again["status"] == "connecting" and again["prompt"]["user_code"] == CODE
-        assert sum(1 for c in fake.gcm_calls() if c["action"] == "get" and c["env"]["GCM_INTERACTIVE"] == "always") == 1
+        # The fake GCM logs its own call from a separate process, so on a slow runner the entry can
+        # land after the prompt is relayed: wait for it, then check the refresh did not add another.
+        def interactive_gets():
+            return sum(1 for c in fake.gcm_calls() if c["action"] == "get" and c["env"]["GCM_INTERACTIVE"] == "always")
+        assert wait_for(lambda: interactive_gets() >= 1)
+        time.sleep(0.3)
+        assert interactive_gets() == 1
         status = client.get(ME, headers=H(ALICE)).json()
         assert set(status) <= ALLOWED_STATUS_KEYS
         assert 0 < status["seconds_left"] <= ga.DEVICE_FLOW_SECONDS
@@ -778,5 +784,56 @@ def test_managed_repo_behind_link_is_refused(tmp_path, fake):
             m.github_auth.fetch(a, row["source_url"], link, root)
         assert e.value.code == "policy_rejected"
         assert len(fake.git_calls()) == calls
+    finally:
+        close(client)
+
+
+def test_unverifiable_store_check_erases_the_possibly_stored_credential(tmp_path, fake, monkeypatch):
+    client, m, ids = setup(tmp_path, fake)
+    try:
+        a = ids[ALICE]
+        connect(client, fake, ALICE, a, approve=False)
+        # GCM stores the credential, but the post-store verification cannot tell (timeout, busy
+        # keyring) for all three tries; afterwards the store answers normally, so the erase works.
+        real_probe, unknown = ga.probe, [3]
+
+        def flaky_probe(cfg, user_id):
+            if unknown[0]:
+                unknown[0] -= 1
+                return None
+            return real_probe(cfg, user_id)
+
+        monkeypatch.setattr(ga, "probe", flaky_probe)
+        fake.approve(a, "alice-gh")
+        assert wait_for(lambda: not m.github_auth._attempt(a).live, timeout=15)
+        assert m.github_auth._attempt(a).outcome == "store_unverified"
+        assert client.get(ME, headers=H(ALICE)).json()["status"] != "connected"
+        assert fake.namespaces() == set()  # nothing left behind in the member's namespace
+    finally:
+        close(client)
+
+
+def test_failed_erase_stays_owed_and_is_retried_at_startup(tmp_path, fake, monkeypatch):
+    client, m, ids = setup(tmp_path, fake)
+    try:
+        a = ids[ALICE]
+        connect(client, fake, ALICE, a)
+        real_erase = ga.erase
+
+        def broken_erase(cfg, user_id, attempts=5):
+            raise GitHubAuthError("erase_failed", 500)
+
+        monkeypatch.setattr(ga, "erase", broken_erase)
+        r = client.delete(ME, headers=H(ALICE))
+        assert r.status_code >= 400
+        row = m.db.get_github_connection(a)
+        assert row["status"] == "disconnected" and row["last_error"] == "erase_failed"
+        assert fake.namespaces() == {f"agent-harness/v1/{a}"}  # the credential really is still there
+        with pytest.raises(GitHubAuthError):
+            m.github_auth.require_connected(a)  # but credentialed Git fails closed
+        monkeypatch.setattr(ga, "erase", real_erase)
+        m.github_auth.reconcile()  # what startup runs
+        assert fake.namespaces() == set()
+        assert m.db.get_github_connection(a)["last_error"] == ""
     finally:
         close(client)
