@@ -137,7 +137,7 @@ def display_repo(canonical: str) -> str:
 _SECRET_PATTERNS = [
     re.compile(r"\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{10,}"),
     re.compile(r"(?i)\b(password|token|oauth_refresh_token|access_token|refresh_token)\s*[=:]\s*\S+"),
-    re.compile(r"(?i)\b(?:user[_ ]?code|device[_ ]?code)\b\s*[=:]?\s*\S+"),
+    re.compile(r"(?i)\b(?:user[_ ]?code|device[_ ]?code)\b\s*(?:[=:]\s*)?\S+"),
     re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4}\b"),
     re.compile(r"(?i)(authorization:\s*)(?:basic|bearer|token)\s+\S+"),
     re.compile(r"https?://[^/\s:@]+:[^/\s@]+@"),
@@ -256,8 +256,12 @@ def git_executable(cfg) -> str:
 
 
 def _parse_version(text: str) -> tuple[int, ...] | None:
-    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
-    return tuple(int(x) for x in m.groups()) if m else None
+    tokens = re.findall(r"\d+|\.|[^\d.]+", text or "")  # digit runs, dots, other text: one linear pass
+    for i in range(len(tokens) - 4):
+        a, d1, b, d2, c = tokens[i:i + 5]
+        if a.isdigit() and d1 == "." and b.isdigit() and d2 == "." and c.isdigit():
+            return int(a), int(b), int(c)
+    return None
 
 
 def store_settings(cfg, user_id: str | None) -> dict[str, str]:

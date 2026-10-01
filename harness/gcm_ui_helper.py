@@ -37,20 +37,21 @@ def _args(argv):
     return code, url
 
 
-def main(argv) -> int:
+def _serve(argv) -> None:
+    """Relay the code and wait; every path returns because there is no success to report."""
     parsed = _args(argv)
     relay = os.environ.get("AGENT_HARNESS_GCM_RELAY", "")
     nonce = os.environ.get("AGENT_HARNESS_GCM_NONCE", "")
     if parsed is None or not relay or not nonce:
-        return 1
+        return
     host, _, port = relay.rpartition(":")
     if host != "127.0.0.1" or not port.isdigit():
-        return 1
+        return
     code, url = parsed
     try:
         sock = socket.create_connection((host, int(port)), timeout=10)
     except OSError:
-        return 1
+        return
     try:
         sock.sendall(f"{nonce}\t{url}\t{code}\n".encode("ascii"))
         sock.settimeout(1.0)
@@ -58,17 +59,22 @@ def main(argv) -> int:
         while time.monotonic() < end:
             try:
                 if not sock.recv(64):
-                    return 1  # the daemon closed the relay: cancel
+                    return  # the daemon closed the relay: cancel
             except socket.timeout:
                 continue
             except OSError:
-                return 1
-        return 1
+                return
+        return
     finally:
         try:
             sock.close()
         except OSError:
             pass
+
+
+def main(argv) -> int:
+    _serve(argv)
+    return 1  # exiting at all tells GCM the user cancelled
 
 
 if __name__ == "__main__":

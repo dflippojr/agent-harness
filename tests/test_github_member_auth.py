@@ -108,6 +108,33 @@ def test_redaction_patterns():
         assert leaked not in out
 
 
+def test_redaction_code_label_forms_and_adversarial_input():
+    import time
+    assert "ABC" not in ga.redact("user code: ABC")
+    assert "ABC" not in ga.redact("device_code   =   ABC")
+    assert "ABC" not in ga.redact("usercode ABC")
+    assert ga.redact("devicecodes") == "devicecodes"
+    start = time.monotonic()
+    ga.redact("code" + " " * 200000 + "=")
+    ga.redact("user code" + " " * 200000)
+    assert time.monotonic() - start < 5
+
+
+def test_parse_version_pinned_and_linear():
+    import time
+    pv = ga._parse_version
+    assert pv("git version 2.43.0.windows.1") == (2, 43, 0)
+    assert pv("v10.20.30") == (10, 20, 30)
+    assert pv("a123.4.5b") == (123, 4, 5)
+    assert pv("1.2") is None and pv("1..2.3") is None and pv("") is None and pv(None) is None
+    assert pv("1.2.x 7.8.9") == (7, 8, 9)
+    start = time.monotonic()
+    assert pv("1" * 200000) is None
+    assert pv("1." * 100000) == (1, 1, 1)
+    assert pv("1." + "." * 200000 + "2") is None
+    assert time.monotonic() - start < 5
+
+
 def test_git_failure_classes_are_generic():
     assert ga.classify_git_failure("fatal: Authentication failed for 'x'") == "reconnect_required"
     assert ga.classify_git_failure("fatal: could not read Username: terminal prompts disabled") == "reconnect_required"
