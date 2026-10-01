@@ -1,12 +1,14 @@
 """Read-only helpers for the #172 study: load tool turns from the events table and select the corpus.
 Output is aggregate only; no transcript content is printed or stored."""
-import hashlib, json, sqlite3
+import hashlib, json, os, sqlite3
 
-DB = "D:/Agents/harness/harness.sqlite3"
 READ_TOOLS = {"read_file", "read_service_config", "list_files", "session_read", "memory_read"}
 
 
-def connect(path=DB):
+def connect(path=None):
+    path = path or os.environ.get("HARNESS_DB")
+    if not path:
+        raise SystemExit("set HARNESS_DB to the daemon's harness.sqlite3 (under its data_dir)")
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 

@@ -55,7 +55,7 @@ biased (see Limitations), so this is a direction, not a measured win.
   different other args; error safety = any `ok=false` result removed or shortened; cache reuse = estimated
   analytically as the share of the previous turn's context chars that form an unchanged prefix of the new turn's
   context. It is not a measured provider cache hit.
-- Reproduce: `python docs/jev-compaction-study/replay.py` from the repo root (read-only DB; needs a local Qwen on
+- Reproduce: `python docs/jev-compaction-study/replay.py` from the repo root with `HARNESS_DB` set to the daemon's `harness.sqlite3` (opened read-only; needs a local Qwen on
   :8090; `--no-qwen` skips the selector). Raw aggregate output: `docs/jev-compaction-study/results.txt`. The script
   prints only aggregates, and this doc contains no transcript excerpts.
 
