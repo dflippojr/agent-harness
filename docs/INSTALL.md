@@ -169,6 +169,8 @@ Agent Harness Server listens only on localhost. To reach Agent Harness Web from 
    `/api/v1`. Creating the first member while `allowed_logins` is empty fails closed.
    To let members use their own private GitHub repositories, configure `github_member_auth` and turn it on under
    **Actions → Accounts**; see [`member-github-auth.md`](member-github-auth.md).
+   For a shared household device whose tailnet login is no single member, configure `google_signin` so members
+   identify themselves with their linked Google account; see [`google-signin.md`](google-signin.md).
 5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Agent Harness Web icon is
    labeled **Harness**. iOS may retain an older label until you remove that icon and add it again; no server or
    browser data migration is required. See [`web.md`](web.md).
