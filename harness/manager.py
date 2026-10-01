@@ -283,7 +283,7 @@ class Manager:
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
         self.hub.close()
-        self.github_auth.shutdown()  # device prompts and credentialed Git do not outlive the daemon
+        await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
         if self.jobs is not None:
             await self.jobs.stop()
         if self.skills is not None and self.skills.reviewer is not None:

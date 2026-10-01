@@ -587,55 +587,6 @@ def _require_same_origin(request: Request, m: Manager) -> None:
     _check_browser_origin(request, m)
 
 
-def _github_member(request: Request, *, mutate: bool = False) -> tuple[Manager, str]:
-    """Only an enabled, ambient (Tailscale, not bearer) household member acts on their own connection."""
-    ident = request.state.access
-    m = mgr(request)
-    if ident.kind != "member" or not ident.bundled:
-        raise HarnessError(403, "only a signed-in household member can connect their own GitHub account")
-    if not ident.allowed or not ident.enabled:
-        raise HarnessError(403, "this household account is disabled")
-    if mutate:
-        _require_same_origin(request, m)
-    return m, ident.user_id
-
-
-def _github_error(e) -> HarnessError:
-    return HarnessError(e.status, str(e), code=e.code)
-
-
-@api_router.get("/me/github-connection")
-async def github_connection(request: Request):
-    m, uid = _github_member(request)
-    return await asyncio.to_thread(m.github_auth.status, uid, include_prompt=True)
-
-
-@api_router.post("/me/github-connection/connect")
-async def github_connect(request: Request):
-    from .github_auth import GitHubAuthError
-    m, uid = _github_member(request, mutate=True)
-    try:
-        return await asyncio.to_thread(m.github_auth.connect, uid)
-    except GitHubAuthError as e:
-        raise _github_error(e) from None
-
-
-@api_router.post("/me/github-connection/cancel")
-async def github_cancel(request: Request):
-    m, uid = _github_member(request, mutate=True)
-    return await asyncio.to_thread(m.github_auth.cancel, uid)
-
-
-@api_router.delete("/me/github-connection")
-async def github_disconnect(request: Request):
-    from .github_auth import GitHubAuthError
-    m, uid = _github_member(request, mutate=True)
-    try:
-        return await asyncio.to_thread(m.github_auth.disconnect, uid)
-    except GitHubAuthError as e:
-        raise _github_error(e) from None
-
-
 def _log_safe(value: object) -> str:
     """A client-supplied value as one log line: newlines and other control characters are escaped."""
     return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in str(value))

@@ -205,16 +205,11 @@ class MemberGitHub:
             raise GitHubAuthError(blocked, 403 if blocked == "account_disabled" else 409)
         with self._guard:
             current = self._attempts.get(user_id)
-            if current is not None and current.live:
-                return self.status(user_id, include_prompt=True)
-            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server.bind(("127.0.0.1", 0))
-            server.listen(1)
-            now = time.time()
-            att = Attempt(user_id=user_id, started=now, deadline=now + ga.DEVICE_FLOW_SECONDS,
-                          nonce=secrets.token_urlsafe(24), server=server,
-                          prior=self._row(user_id).get("status") or "disconnected")
-            self._attempts[user_id] = att
+            resume = current is not None and current.live
+            if not resume:
+                att = self._new_attempt(user_id)
+        if resume:
+            return self.status(user_id, include_prompt=True)
         threading.Thread(target=self._run_attempt, args=(att,), daemon=True,
                          name=f"github-connect-{user_id[:8]}").start()
         self.db.insert_audit(user_id, user_id, "github_connect", "started")
@@ -224,6 +219,18 @@ class MemberGitHub:
                 break
             time.sleep(0.1)
         return self.status(user_id, include_prompt=True)
+
+    def _new_attempt(self, user_id: str) -> Attempt:
+        """Register a new attempt with its one-time loopback relay; the caller holds `_guard`."""
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        now = time.time()
+        att = Attempt(user_id=user_id, started=now, deadline=now + ga.DEVICE_FLOW_SECONDS,
+                      nonce=secrets.token_urlsafe(24), server=server,
+                      prior=self._row(user_id).get("status") or "disconnected")
+        self._attempts[user_id] = att
+        return att
 
     def cancel(self, user_id: str, reason: str = "connect_cancelled") -> dict:
         att = self._attempt(user_id)
@@ -434,16 +441,20 @@ class MemberGitHub:
             self._stop_attempt(att, "account_disabled")
         self.ops.kill(user_id)
 
-    def _stop_everyone(self, reason: str) -> None:
+    def _stop_everyone(self, reason: str, wait: float = 0) -> None:
         with self._guard:
             attempts = [a for a in self._attempts.values() if a.live]
         for att in attempts:
             self._stop_attempt(att, reason)
         self.ops.kill_all()
+        end = time.monotonic() + wait
+        while wait and time.monotonic() < end and any(a.live for a in attempts):
+            time.sleep(0.05)
 
     def shutdown(self) -> None:
+        """Daemon stop: invalidate every device prompt and credentialed Git process before returning."""
         self._closed = True
-        self._stop_everyone("connect_cancelled")
+        self._stop_everyone("connect_cancelled", wait=STOP_GRACE + 3)
 
     def reconcile(self) -> None:
         """Startup: a row that says connected but whose credential is gone (restored backup) needs reconnect."""

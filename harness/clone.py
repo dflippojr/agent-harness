@@ -93,9 +93,11 @@ def public_https_url(url: str) -> str:
 
 def isolated_clone_env() -> dict[str, str]:
     """Environment for member clones: no prompts, no host helpers, no owner gitconfig."""
+    # GCM_* and host GitHub tokens are dropped too, so a member GitHub namespace (issue #63) or the owner's
+    # token can never become ambient for a credential-free public clone.
     env = {k: v for k, v in os.environ.items()
-           if not k.upper().startswith("GIT_") and k.upper() not in
-           ("GCM_INTERACTIVE", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+           if not k.upper().startswith(("GIT_", "GCM_")) and k.upper() not in
+           ("GIT_ASKPASS", "SSH_ASKPASS", "GH_TOKEN", "GITHUB_TOKEN")}
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GCM_INTERACTIVE"] = "Never"
