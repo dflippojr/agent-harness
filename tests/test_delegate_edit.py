@@ -413,3 +413,28 @@ def test_non_oserror_write_failure_rolls_back_and_raises_tool_error(tmp_path, mo
         delegate_edit.apply(files, proposal)
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "X = 1\n"
     assert (tmp_path / "b.py").read_text(encoding="utf-8") == "Y = 1\n"
+
+
+def test_content_based_edit_rules_apply_to_apply_delegated_edit(tmp_path):
+    delegate = Delegate(_reply([{"path": "other.py", "old_text": "VALUE = 1", "new_text": "VALUE = 2  # secret"}]))
+
+    async def body():
+        m = _manager(tmp_path, delegate)
+        s, _ = await _session(m)
+        sid = s["id"]
+        propose = call("delegate_edit", 1, paths=["other.py"], instruction="bump")
+        await _run(m, sid, propose)
+        patch_id = _payload(m, sid, propose)["patch_id"]
+        s = m.db.get_session(sid)
+        direct = {"path": "other.py", "old_text": "VALUE = 1", "new_text": "VALUE = 2  # secret"}
+        for action, args in (("deny", {"new_text": "secret"}), ("ask", {"old_text": "VALUE = 1"})):
+            rules = [{"tool": "edit_file", "args": args, "action": action, "reason": "content rule"}]
+            m.runner.policy = lambda _s, rules=rules: Policy(rules)
+            assert m.runner._decide(s, "edit_file", direct).action == action
+            decision = m.runner._decide(s, "apply_delegated_edit", {"patch_id": patch_id})
+            assert decision.action == action and decision.reason == "content rule"
+        m.runner.policy = lambda _s: Policy([{"tool": "edit_file", "args": {"new_text": "nomatch"},
+                                              "action": "deny"}])
+        assert m.runner._decide(s, "apply_delegated_edit", {"patch_id": patch_id}).action == "allow"
+        await m.stop()
+    asyncio.run(body())

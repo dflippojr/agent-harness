@@ -1603,7 +1603,8 @@ class Runner:
 
     def _decide(self, s: dict, name: str, args: dict):
         """The policy decision for a call. Applying a delegated proposal is decided as an edit_file of each of its
-        files, taking the strictest, so project rules about edits cover it too."""
+        edits, with the same args a direct edit_file would carry, taking the strictest, so project rules about edits
+        (including content-based ones) cover it too."""
         policy = self.policy(s)
         if name != delegate_edit.APPLY:
             return policy.decide(name, args)
@@ -1611,7 +1612,10 @@ class Runner:
         if proposal is None:  # nothing to write; execution reports the unknown patch_id
             return policy.decide(name, args)
         rank = {ALLOW: 0, ASK: 1, DENY: 2}
-        decisions = [policy.decide("edit_file", {"path": path}) for path in proposal["hashes"]]
+        decisions = [policy.decide("edit_file", {"path": e["path"], "old_text": e["old_text"],
+                                                 "new_text": e["new_text"]}) for e in proposal["edits"]]
+        decisions += [policy.decide("edit_file", {"path": path}) for path in proposal["hashes"]
+                      if not any(e["path"] == path for e in proposal["edits"])]
         return max(decisions, key=lambda d: rank.get(d.action, 1))
 
     def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
