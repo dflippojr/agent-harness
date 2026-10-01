@@ -155,9 +155,25 @@ def _windows_allow_sids(path: Path) -> set[str] | None:
 acl_reader = _windows_allow_sids
 
 
+_acl_cache: dict[tuple, tuple[float, set[str] | None]] = {}
+ACL_CACHE_SECONDS = 3600
+
+
+def _cached_acl(path: Path, st: os.stat_result) -> set[str] | None:
+    """Reading an ACL spawns PowerShell (~1s); the guard must not pay that on the request path every few minutes."""
+    key = (str(path), st.st_mtime_ns, st.st_size, st.st_ctime_ns, acl_reader)
+    hit = _acl_cache.get(key)
+    if hit and time.monotonic() - hit[0] < ACL_CACHE_SECONDS:
+        return hit[1]
+    sids = acl_reader(path)
+    _acl_cache.clear()
+    _acl_cache[key] = (time.monotonic(), sids)
+    return sids
+
+
 def permission_problem(path: Path, st: os.stat_result) -> str:
     if sys.platform == "win32":
-        sids = acl_reader(path)
+        sids = _cached_acl(path, st)
         if sids is None:
             return "could not read the client_secret_file ACL"
         if sids & BROAD_SIDS or "unresolved" in sids:
