@@ -71,6 +71,7 @@ class CreateProject(BaseModel):
     description: str = ""
     target: str = "tower"
     repo: str = ""  # empty workspace, or a local folder / git URL cloned for each session
+    github: bool = False  # issue #63: members only; clone with the member's own GitHub connection
 
 
 class SendMessage(BaseModel):
@@ -560,7 +561,13 @@ async def create_project(body: CreateProject, request: Request):
         raise HarnessError(403, "project creation is only for the signed-in Tailscale owner or member")
     m = mgr(request)
     if ident.role == "member":
-        return m.create_member_project(ident.user_id, body.name, body.description, body.repo)
+        if body.github:
+            _require_same_origin(request, m)
+        return m.create_member_project(ident.user_id, body.name, body.description, body.repo,
+                                       github=body.github)
+    if body.github:
+        raise HarnessError(400, "GitHub sign-in is for household member projects; owner projects keep their "
+                                "existing credential path")
     cfg = m.cfg
     if body.target != "tower" and body.target not in cfg.runners:
         raise HarnessError(400, f"runner {body.target!r} is not configured")
@@ -572,6 +579,61 @@ async def create_project(body: CreateProject, request: Request):
         raise HarnessError(400, str(e))
     return {"name": project.name, "description": project.description, "repo": bool(project.repo),
             "homelab": False, "target": project.target, "managed": True}
+
+
+def _require_same_origin(request: Request, m: Manager) -> None:
+    """Refuse cross-site browser requests for member credential actions."""
+    from .admin import _check_browser_origin
+    _check_browser_origin(request, m)
+
+
+def _github_member(request: Request, *, mutate: bool = False) -> tuple[Manager, str]:
+    """Only an enabled, ambient (Tailscale, not bearer) household member acts on their own connection."""
+    ident = request.state.access
+    m = mgr(request)
+    if ident.kind != "member" or not ident.bundled:
+        raise HarnessError(403, "only a signed-in household member can connect their own GitHub account")
+    if not ident.allowed or not ident.enabled:
+        raise HarnessError(403, "this household account is disabled")
+    if mutate:
+        _require_same_origin(request, m)
+    return m, ident.user_id
+
+
+def _github_error(e) -> HarnessError:
+    return HarnessError(e.status, str(e), code=e.code)
+
+
+@api_router.get("/me/github-connection")
+async def github_connection(request: Request):
+    m, uid = _github_member(request)
+    return await asyncio.to_thread(m.github_auth.status, uid, include_prompt=True)
+
+
+@api_router.post("/me/github-connection/connect")
+async def github_connect(request: Request):
+    from .github_auth import GitHubAuthError
+    m, uid = _github_member(request, mutate=True)
+    try:
+        return await asyncio.to_thread(m.github_auth.connect, uid)
+    except GitHubAuthError as e:
+        raise _github_error(e) from None
+
+
+@api_router.post("/me/github-connection/cancel")
+async def github_cancel(request: Request):
+    m, uid = _github_member(request, mutate=True)
+    return await asyncio.to_thread(m.github_auth.cancel, uid)
+
+
+@api_router.delete("/me/github-connection")
+async def github_disconnect(request: Request):
+    from .github_auth import GitHubAuthError
+    m, uid = _github_member(request, mutate=True)
+    try:
+        return await asyncio.to_thread(m.github_auth.disconnect, uid)
+    except GitHubAuthError as e:
+        raise _github_error(e) from None
 
 
 def _log_safe(value: object) -> str:

@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -107,6 +108,9 @@ class Manager:
         self.bus.add_listener(self.notifier.listener)
         self.image_archive = ImageArchive(cfg, self.db)
         self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
+        from .member_github import MemberGitHub
+        self.github_auth = MemberGitHub(cfg, self.db)
+        self.runner.github_auth = self.github_auth
         from .apps import AppToolBroker
         self.app_tools = AppToolBroker(self.db, self.bus)
         from .snippets import SnippetService
@@ -268,6 +272,9 @@ class Manager:
                 self.skills.reviewer.start()
         if getattr(self, "settings", None) is not None:
             self.settings.confirm_startup()
+        if self.github_auth.enabled():
+            # a restored backup can say `connected` with no credential in the store: reconcile off the loop
+            threading.Thread(target=self.github_auth.reconcile, daemon=True, name="github-reconcile").start()
         orphans = self.snippets.recover()
         if orphans:
             from .snippets import remove_orphans
@@ -276,6 +283,7 @@ class Manager:
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
         self.hub.close()
+        self.github_auth.shutdown()  # device prompts and credentialed Git do not outlive the daemon
         if self.jobs is not None:
             await self.jobs.stop()
         if self.skills is not None and self.skills.reviewer is not None:
@@ -976,6 +984,9 @@ class Manager:
             return ("merged" if result["merged"] else ""), result["message"]
         if action == "push":
             await asyncio.to_thread(projects.snapshot, ws, f"Work in progress from session {sid}")
+            github = self._member_github_project(s, project)
+            if github is not None:
+                return "pushed", await self._push_member_github(s, project, ws, github)
             return "pushed", await asyncio.to_thread(projects.push, project, ws, s["branch"])
         if action == "discard":
             await asyncio.to_thread(projects.discard, project, s["branch"])
@@ -984,6 +995,28 @@ class Manager:
                 await asyncio.to_thread(self.maintenance.remove_workspace, sid)
             return "discarded", "branch deleted and workspace removed"
         raise HarnessError(404, f"unknown review action {action!r}")
+
+    def _member_github_project(self, s: dict, project) -> dict | None:
+        """The member project row when this session's project uses the member's GitHub connection."""
+        uid = session_user_id(s)
+        if uid == OWNER_USER_ID or project is None:
+            return None
+        row = self.db.get_member_project(uid, project.name)
+        return row if row and row.get("source_auth") == "github" else None
+
+    async def _push_member_github(self, s: dict, project, ws: Path, row: dict) -> str:
+        """Issue #63: copy the session branch into the daemon-owned managed repository, then push exactly that
+        branch to the stored canonical origin host-side. The agent-writable workspace's remotes, config, and
+        hooks are never used for the credentialed push."""
+        from . import storage
+        from .github_auth import GitHubAuthError
+        uid = session_user_id(s)
+        await asyncio.to_thread(projects.publish_local, project, ws, s["branch"])
+        try:
+            return await asyncio.to_thread(self.github_auth.push, uid, row["source_url"], Path(row["repo"]),
+                                           storage.repos_dir(self.cfg, uid), s["branch"])
+        except GitHubAuthError as e:
+            raise projects.GitError(str(e), e.status) from None
 
     async def _review_remote(self, sid: str, s: dict, project, action: str) -> dict:
         if action not in ("merge", "push", "discard"):
@@ -1282,6 +1315,7 @@ class Manager:
         the next waiter while the disabled account's run is still executing.
         """
         self.revoke_member_streams(user_id)
+        self.github_auth.member_disabled(user_id)
         from .runner import ACTIVE
         waiting = []
         for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):
@@ -1299,7 +1333,8 @@ class Manager:
         if waiting:
             await asyncio.gather(*waiting, return_exceptions=True)
 
-    def create_member_project(self, user_id: str, name: str, description: str = "", repo: str = "") -> dict:
+    def create_member_project(self, user_id: str, name: str, description: str = "", repo: str = "",
+                              github: bool = False) -> dict:
         from . import catalog, storage
         account = self.db.account_by_id(user_id)
         if account is None or not account.get("enabled", 1):
@@ -1312,13 +1347,39 @@ class Manager:
         if self.db.get_member_project(user_id, slug) is not None:
             raise HarnessError(400, f"project {slug!r} already exists")
         storage.ensure_user_dirs(self.cfg, user_id)
-        managed, source_url = self._clone_member_repo(user_id, slug, account, (repo or "").strip())
+        if github:
+            managed, source_url = self._clone_member_github(user_id, slug, account, (repo or "").strip())
+        else:
+            managed, source_url = self._clone_member_repo(user_id, slug, account, (repo or "").strip())
         self.db.insert_member_project({
             "user_id": user_id, "slug": slug, "description": description,
-            "repo": managed, "source_url": source_url,
+            "repo": managed, "source_url": source_url, "source_auth": "github" if github else "",
         })
         project = catalog.get_project(self.cfg, self.db, user_id, slug)
         return catalog.public_project(project)
+
+    def _clone_member_github(self, user_id: str, slug: str, account: dict, repo: str) -> tuple[str, str]:
+        """Issue #63: clone with the member's own GitHub connection (only when that member is connected)."""
+        from . import catalog, storage
+        from .github_auth import GitHubAuthError, canonical_github_url
+        try:
+            canonical = canonical_github_url(repo)
+            self.github_auth.require_connected(user_id)
+        except GitHubAuthError as e:
+            raise HarnessError(e.status, str(e), code=e.code) from None
+        dest = catalog.member_managed_repo(self.cfg, user_id, slug)
+        root = storage.repos_dir(self.cfg, user_id)
+        limit = int(account["disk_quota_bytes"])
+        remaining = limit - storage.account_usage_bytes(self.cfg, user_id)
+        try:
+            source_url = self.github_auth.clone(user_id, canonical, dest, root, max_bytes=remaining)
+        except GitHubAuthError as e:
+            raise HarnessError(e.status, str(e), code=e.code) from None
+        used = storage.account_usage_bytes(self.cfg, user_id)
+        if used > limit:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise HarnessError(507, f"cannot start a project: {storage.quota_message(used, limit)}")
+        return str(dest), source_url
 
     def _clone_member_repo(self, user_id: str, slug: str, account: dict, repo: str) -> tuple[str, str]:
         """Clone a household member's public repo within their disk quota; returns (managed path, source URL)."""

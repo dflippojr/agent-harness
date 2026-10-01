@@ -142,19 +142,23 @@ def clone_public(url: str, dest: Path, root: Path, max_bytes: int | None = None)
 
 
 def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
-               max_bytes: int | None = None, remove_on_fail: bool = True) -> GitResult:
+               max_bytes: int | None = None, remove_on_fail: bool = True,
+               env: dict[str, str] | None = None, on_start=None) -> GitResult:
     """Run an isolated git clone, optionally killing it if `dest` grows past `max_bytes`.
 
     Fetch into an existing workspace passes `remove_on_fail=False` so a quota kill does not
-    delete the session tree.
+    delete the session tree. The member GitHub broker (issue #63) passes its own minimal `env` and an
+    `on_start(proc)` hook that registers the process so disconnect/disable can stop it.
     """
     from .fileops import dir_size
 
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="replace", env=isolated_clone_env(), stdin=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        encoding="utf-8", errors="replace", env=env if env is not None else isolated_clone_env(),
+        stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+    if on_start is not None:
+        on_start(proc)
     over = threading.Event()
     watcher = threading.Thread(target=_watch_size, args=(proc, dest, max_bytes, over), daemon=True)
     if max_bytes is not None:
