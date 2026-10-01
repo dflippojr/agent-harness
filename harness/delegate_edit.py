@@ -136,6 +136,15 @@ def _first_json_object(content: str):
     raise ToolError("the delegate's reply was not JSON")
 
 
+def _require_utf8(n: int, *texts: str) -> None:
+    """Reject text that cannot be written as UTF-8 (e.g. a lone surrogate from a JSON \ud800 escape)."""
+    for t in texts:
+        try:
+            t.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ToolError(f"edit {n} contains text that cannot be encoded as UTF-8") from None
+
+
 def parse_reply(content: str, finish_reason: str, texts: dict[str, str]) -> tuple[str, list[dict]]:
     """(summary, edits) from the delegate's reply. Unparsable, cut-off, empty or partial output is an error."""
     if finish_reason == "length":
@@ -160,6 +169,7 @@ def parse_reply(content: str, finish_reason: str, texts: dict[str, str]) -> tupl
             raise ToolError(f"edit {n} targets {e['path']}, which was not one of the listed files")
         if not e["old_text"]:
             raise ToolError(f"edit {n} has an empty old_text")
+        _require_utf8(n, e["old_text"], e["new_text"])
         edits.append({"path": path, "old_text": e["old_text"], "new_text": e["new_text"]})
     return summary, edits
 
@@ -190,6 +200,7 @@ def apply_to_texts(texts: dict[str, str], edits: list[dict]) -> dict[str, str]:
             pos = end
         out.append(original[pos:])
         result[path] = "".join(out)
+        _require_utf8(0, result[path])
     return result
 
 
@@ -251,13 +262,13 @@ def apply(files: FileOps, proposal: dict) -> str:
             with open(current[path][0], "w", encoding="utf-8", newline="") as f:  # as edit_file writes
                 done.append(path)  # opening truncates, so a failed write needs restoring too
                 f.write(new)
-    except OSError as e:
+    except Exception as e:  # any write-time failure, not just OSError, must restore and surface as ToolError
         failed = []
         for path in done:
             try:
                 with open(current[path][0], "w", encoding="utf-8", newline="") as f:
                     f.write(current[path][1])
-            except OSError:
+            except Exception:
                 failed.append(path)
         note = f" Could not restore: {', '.join(failed)}." if failed else " Earlier writes were rolled back."
         raise ToolError(f"write failed: {e}.{note}") from None
