@@ -403,3 +403,89 @@ async def test_scanner_never_reads_files_or_runs_commands_or_network(tmp_path, m
     scan.reason = ''
     service._run(scan)
     assert scan.status == 'finished'
+
+
+@run_async
+async def test_add_trust_and_launch_are_separate_and_revalidate(tmp_path, monkeypatch):
+    from harness import remote_control
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\\Projects'] = [('package.json', False, False)]
+    launches = []
+    process = SimpleNamespace(pid=999999999, poll=lambda: None)
+    service.rc.popen = lambda *a, **kw: launches.append((a, kw)) or process
+    scan = await scanned(service)
+    promote(service, scan)
+    assert not launches and not service.rc.claude_json.exists()
+    monkeypatch.setattr(remote_control, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(subprocess, 'CREATE_NEW_CONSOLE', 16, raising=False)
+    monkeypatch.setattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 512, raising=False)
+    monkeypatch.setattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000, raising=False)
+    monkeypatch.setattr(remote_control.shutil, 'which', lambda _: 'powershell.exe')
+    monkeypatch.setattr(service.rc, '_claude', lambda: 'claude.exe')
+    view = service.rc.open_trust_prompt('project', include_owner_only=True)
+    assert view['trust_prompt_open']
+    assert len(launches) == 1 and launches[0][1]['creationflags'] & 16
+    assert launches[0][1]['cwd'] == 'C:\\Projects'
+    assert not service.rc.claude_json.exists()
+    with pytest.raises(ToolError):
+        await service.rc.launch('project', include_owner_only=True)
+    service.rc.claude_json.write_text(json.dumps({'projects': {'C:/Projects': {'hasTrustDialogAccepted': True}}}))
+    service.rc._spawn_logged = lambda *a, **kw: launches.append((a, kw)) or process
+    service.rc._alive = lambda entry: bool(entry)
+    service.rc._log_text = lambda entry: 'https://claude.ai/code?environment=test_01'
+    view = await service.rc.launch('project', include_owner_only=True)
+    assert view['running'] and len(launches) == 2
+    fs.ids['C:\\Projects'] = 'changed-id'
+    with pytest.raises(ToolError):
+        await service.rc.launch('project', include_owner_only=True)
+    assert len(launches) == 2
+    with pytest.raises(DiscoveryError, match='entry_active'):
+        await service.remove('project', 'owner')
+    fs.ids.clear()
+    service.rc._alive = lambda _: False
+    service.rc._trust_processes.clear()
+    before = service.rc.claude_json.read_text()
+    await service.remove('project', 'owner')
+    assert service.rc.claude_json.read_text() == before
+
+
+@run_async
+async def test_candidate_error_and_time_caps_and_reparse_markers(tmp_path, monkeypatch):
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\\Projects'] = [('a', True, False), ('b', True, False)]
+    for name in ('a', 'b'):
+        fs.tree['C:\\Projects\\' + name] = [('package.json', False, False)]
+    monkeypatch.setitem(LIMITS, 'candidates', 1)
+    scan = await scanned(service)
+    assert scan['truncated'] and scan['reason'] == 'candidate_limit' and len(scan['candidates']) == 1
+    monkeypatch.setitem(LIMITS, 'candidates', 500)
+    fs.tree['C:\\Projects'] = [(str(i), True, False) for i in range(60)]
+    scan = await scanned(service)
+    assert len(scan['errors']) == 50 and scan['status'] == 'finished'
+    monkeypatch.setitem(LIMITS, 'seconds', 0)
+    scan = await scanned(service)
+    assert scan['reason'] == 'time_limit' and scan['truncated']
+    monkeypatch.setitem(LIMITS, 'seconds', 30)
+    fs.tree['C:\\Projects'] = [('.git', True, False, True), ('hidden', True, True, False)]
+    scan = await scanned(service)
+    assert not scan['candidates']
+
+
+@run_async
+async def test_path_identity_conflicts_and_file_entries_win(tmp_path):
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\\Projects'] = [('package.json', False, False)]
+    scan = await scanned(service)
+    promote(service, scan)
+    fs.ids['C:\\Projects'] = 'replacement'
+    scan = await scanned(service)
+    with pytest.raises(DiscoveryError, match='managed_path_conflict'):
+        promote(service, scan, 'another')
+    fs.ids.clear()
+    local = tmp_path / 'local'
+    local.mkdir()
+    service.rc.rc.folders['project'] = str(local)
+    assert service.rc.folder('project', include_owner_only=True) == local
+    status = service.rc.status(include_owner_only=True)
+    assert any(row.get('managed') and row['invalid'] == 'slug_conflict' for row in status)
+    assert any(not row.get('managed') and row['path'] == str(local) for row in status)
