@@ -691,8 +691,14 @@ async def api_create_project(body: dict, request: Request):
     description = str((body or {}).get("description") or "")
     repo = str((body or {}).get("repo") or "")
     target = str((body or {}).get("target") or "tower")
+    github = bool((body or {}).get("github"))
     if ident.role == "member":
-        return m.create_member_project(ident.user_id, name, description, repo)
+        if github:
+            _refuse_cross_site(request)
+        return m.create_member_project(ident.user_id, name, description, repo, github=github)
+    if github:
+        raise HarnessError(400, "GitHub sign-in is for household member projects; owner projects keep their "
+                                "existing credential path")
     from . import config as config_mod
     if target != "tower" and target not in m.cfg.runners:
         raise HarnessError(400, f"runner {target!r} is not configured")
@@ -704,6 +710,65 @@ async def api_create_project(body: dict, request: Request):
         raise HarnessError(400, str(e))
     return {"name": project.name, "description": project.description, "repo": bool(project.repo),
             "homelab": False, "target": project.target, "managed": True}
+
+
+def _refuse_cross_site(request: Request) -> None:
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        raise HarnessError(403, "cross-site requests cannot use GitHub sign-in")
+
+
+def _github_member(request: Request, *, mutate: bool = False) -> tuple:
+    """Issue #63: only an enabled, ambient same-origin household member acts on their own GitHub connection.
+
+    Owner, app, device, guest, and bearer credentials are refused, and the routes carry no user id, so no
+    principal can connect, inspect, or erase another member's connection here.
+    """
+    key = auth(request, "sessions")
+    ident = getattr(request.state, "access", None)
+    if (key.get("kind") != "member" or not key.get("bundled") or ident is None or ident.kind != "member"
+            or not ident.bundled or ident.user_id != key.get("user_id")):
+        raise HarnessError(403, "only a signed-in household member can connect their own GitHub account")
+    if not ident.allowed or not ident.enabled:
+        raise HarnessError(403, "this household account is disabled")
+    if mutate:
+        _refuse_cross_site(request)
+    return mgr(request), ident.user_id
+
+
+def _github_error(e) -> HarnessError:
+    return HarnessError(e.status, str(e), code=e.code)
+
+
+@route_table.get("/api/v1/me/github-connection")
+async def api_github_connection(request: Request):
+    m, uid = _github_member(request)
+    return await asyncio.to_thread(m.github_auth.status, uid, include_prompt=True)
+
+
+@route_table.post("/api/v1/me/github-connection/connect")
+async def api_github_connect(request: Request):
+    from .github_auth import GitHubAuthError
+    m, uid = _github_member(request, mutate=True)
+    try:
+        return await asyncio.to_thread(m.github_auth.connect, uid)
+    except GitHubAuthError as e:
+        raise _github_error(e) from None
+
+
+@route_table.post("/api/v1/me/github-connection/cancel")
+async def api_github_cancel(request: Request):
+    m, uid = _github_member(request, mutate=True)
+    return await asyncio.to_thread(m.github_auth.cancel, uid)
+
+
+@route_table.delete("/api/v1/me/github-connection")
+async def api_github_disconnect(request: Request):
+    from .github_auth import GitHubAuthError
+    m, uid = _github_member(request, mutate=True)
+    try:
+        return await asyncio.to_thread(m.github_auth.disconnect, uid)
+    except GitHubAuthError as e:
+        raise _github_error(e) from None
 
 
 @route_table.get("/api/v1/models")

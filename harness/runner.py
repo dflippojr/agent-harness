@@ -154,6 +154,7 @@ class Runner:
                  warmer: ModelWarmer | None = None, hub: RunnerHub | None = None):
         self.cfg = cfg
         self.hub = hub or RunnerHub(cfg.runners)
+        self.github_auth = None  # MemberGitHub, set by the Manager (issue #63)
         self.warmer = warmer or ModelWarmer()
         self.db = db
         self.bus = bus
@@ -1507,6 +1508,7 @@ class Runner:
             from . import clone, storage
             uid = session_user_id(s)
             root = storage.workspaces_dir(self.cfg, uid)
+            await self._github_refresh(s, project)
             try:
                 return await asyncio.to_thread(
                     clone.isolated_prepare, ws, project.repo, s["id"], root,
@@ -1522,11 +1524,38 @@ class Runner:
             from . import clone, storage
             from .fileops import dir_size
             uid = session_user_id(s)
+            project = self.project_for(s)
+            if project is not None:
+                await self._github_refresh(s, project)
             remaining = self._member_clone_budget(uid)
             cap = None if remaining is None else remaining + dir_size(ws)
             return await asyncio.to_thread(
                 clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, uid), cap)
         return await asyncio.to_thread(projects.refresh_origin, ws)
+
+    async def _github_refresh(self, s: dict, project) -> None:
+        """Issue #63: update a member's managed copy from their private GitHub origin, host-side and credentialed.
+
+        Failure is not fatal: the session works from the last fetched copy and the member sees a generic,
+        actionable message (for example, reconnect GitHub). The credential never reaches the sandbox.
+        """
+        gh = self.github_auth
+        uid = session_user_id(s)
+        row = self.db.get_member_project(uid, project.name) if gh is not None else None
+        if not row or row.get("source_auth") != "github":
+            return
+        from . import storage
+        from .github_auth import GitHubAuthError
+        try:
+            state = await asyncio.to_thread(gh.fetch, uid, row["source_url"], Path(row["repo"]),
+                                            storage.repos_dir(self.cfg, uid))
+        except GitHubAuthError as e:
+            self.bus.emit(s["id"], "error", {"message": f"could not refresh from GitHub: {e} "
+                                                        "This session uses the last fetched copy."})
+            return
+        if state == "diverged":
+            self.bus.emit(s["id"], "error", {"message": "fetched from GitHub, but the project's branch has local "
+                                                        "merges, so it was not fast-forwarded."})
 
     async def _authorize(self, s: dict, call: dict, name: str, args: dict, ws: Workspace) -> str | None:
         """Apply the policy. Returns None to proceed, or the tool result to record instead of running it."""

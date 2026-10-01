@@ -67,6 +67,15 @@ repositories from github.com, gitlab.com, or codeberg.org into their own managed
 ambient Tailscale human only — never an app token). They create, list, steer, cancel, approve, and review only
 their own local-model tower sessions, search only their own transcripts, and receive only their own live events.
 
+When the owner has turned on member GitHub sign-in ([`member-github-auth.md`](member-github-auth.md)), an
+ambient same-origin member (never a bearer token) manages **their own** connection:
+`GET /api/v1/me/github-connection` returns `status` (`disconnected | connecting | connected | reconnect_required |
+disabled`), the device-flow `deadline`/`seconds_left`, `last_used_at`, and a sanitized `error`, plus `prompt`
+(`verification_uri`, `user_code`) only while that member's own attempt is live. `POST .../connect` starts or
+resumes the attempt, `POST .../cancel` cancels it, and `DELETE /api/v1/me/github-connection` disconnects (erases).
+`POST /api/v1/projects` with `"github": true` clones a `https://github.com/<owner>/<repo>` URL with the member's
+own connection. It answers `not_connected` or `reconnect_required` (409) when the member must connect first.
+
 Members cannot use hosted-provider subscriptions, owner/app/device tokens, Mac runners, homelab or memory-library
 tools, image generation, Remote Control, inference keys, scheduled jobs, app management, notifications, backups,
 or another user's data. Those capabilities are forced off in service/tool construction, not only in the UI.

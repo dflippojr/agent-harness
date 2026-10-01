@@ -26,6 +26,11 @@ provider_secret_files: {}
 # The file must live under data_dir and contain a read-only fine-grained GitHub token.
 # github:
 #   token_file: D:/Agents/harness/secrets/github-readonly.token
+# Household members' own GitHub sign-in (docs/member-github-auth.md). Off until the owner turns it on in
+# Actions -> Accounts; executable and store come only from local config.
+# github_member_auth:
+#   gcm_path: C:/Program Files/Git/mingw64/bin/git-credential-manager.exe
+#   credential_store: wincredman
 # provider_secret_files:
 #   invoice-automation: D:/Agents/harness/secrets/invoice-automation.key
 

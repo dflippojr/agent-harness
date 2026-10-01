@@ -93,9 +93,11 @@ def public_https_url(url: str) -> str:
 
 def isolated_clone_env() -> dict[str, str]:
     """Environment for member clones: no prompts, no host helpers, no owner gitconfig."""
+    # GCM_* and host GitHub tokens are dropped too, so a member GitHub namespace (issue #63) or the owner's
+    # token can never become ambient for a credential-free public clone.
     env = {k: v for k, v in os.environ.items()
-           if not k.upper().startswith("GIT_") and k.upper() not in
-           ("GCM_INTERACTIVE", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+           if not k.upper().startswith(("GIT_", "GCM_")) and k.upper() not in
+           ("GIT_ASKPASS", "SSH_ASKPASS", "GH_TOKEN", "GITHUB_TOKEN")}
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GCM_INTERACTIVE"] = "Never"
@@ -142,19 +144,23 @@ def clone_public(url: str, dest: Path, root: Path, max_bytes: int | None = None)
 
 
 def _run_clone(cmd: list[str], dest: Path, *, timeout: int = 600,
-               max_bytes: int | None = None, remove_on_fail: bool = True) -> GitResult:
+               max_bytes: int | None = None, remove_on_fail: bool = True,
+               env: dict[str, str] | None = None, on_start=None) -> GitResult:
     """Run an isolated git clone, optionally killing it if `dest` grows past `max_bytes`.
 
     Fetch into an existing workspace passes `remove_on_fail=False` so a quota kill does not
-    delete the session tree.
+    delete the session tree. The member GitHub broker (issue #63) passes its own minimal `env` and an
+    `on_start(proc)` hook that registers the process so disconnect/disable can stop it.
     """
     from .fileops import dir_size
 
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="replace", env=isolated_clone_env(), stdin=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        encoding="utf-8", errors="replace", env=env if env is not None else isolated_clone_env(),
+        stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+    if on_start is not None:
+        on_start(proc)
     over = threading.Event()
     watcher = threading.Thread(target=_watch_size, args=(proc, dest, max_bytes, over), daemon=True)
     if max_bytes is not None:
