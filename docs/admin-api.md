@@ -78,6 +78,13 @@ identity. `PATCH /api/admin/v1/accounts/{user_id}` can rename, rebind the login 
 immediately), disable/re-enable, or change quota and concurrency. Disable cancels that member's running and queued
 work and revokes their live streams; data stays. There is no Delete in v1.
 
+Member GitHub sign-in ([`member-github-auth.md`](member-github-auth.md)): `GET /api/admin/v1/github-member-auth`
+returns `configured`, `enabled`, the last preflight result, and each member's coarse `status` and `last_used_at`
+only (no URLs, usernames, or codes; `?refresh=true` reruns preflight). `PUT /api/admin/v1/github-member-auth`
+with `{"enabled": true|false}` switches the feature (default off; disabling stops attempts and in-flight
+credentialed Git without erasing). `POST /api/admin/v1/accounts/{user_id}/github-connection/reset` with
+`{"confirm": true}` erases that member's stored GitHub credential. The owner cannot connect, test, or use it.
+
 `GET /api/admin/v1/accounts` returns aggregate metadata only: display name, login, account-id hint, enabled flag,
 disk used/quota, running/queued counts, last activity, and limits. It never includes prompts, answers, filenames,
 repo URLs, diffs, or transcript excerpts. `GET /api/admin/v1/accounts/audit` is owner-only (365-day retention) and
