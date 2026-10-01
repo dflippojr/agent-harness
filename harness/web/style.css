@@ -581,3 +581,8 @@ body.drawer-open { overflow: hidden; }
 .chat-composer .chat-notice { margin: 0 0 6px; }
 .chat-composer textarea { font-size: 1rem; } /* 16px+ keeps iOS from zooming on focus */
 body.chat-page main { padding-bottom: calc(190px + env(safe-area-inset-bottom, 0px)); }
+.discovery-roots { width: 100%; min-width: 0; font-size: 1rem; }
+.folder-discovery { margin-top: 20px; }
+.discovery-path { overflow-wrap: anywhere; }
+.discovery-candidate .row { flex-wrap: wrap; }
+.discovery-candidate input { flex: 1 1 180px; min-width: 0; font-size: 1rem; }

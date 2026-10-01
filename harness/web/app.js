@@ -3939,6 +3939,14 @@ async function backendsCard() {
 
 function settingInput(spec, draft) {
   const current = draft[spec.key] !== undefined ? draft[spec.key] : (spec.pending ?? spec.effective);
+  if (spec.type === "discovery_root_list") {
+    const input = h("textarea", { class: "discovery-roots", rows: 3, disabled: !spec.writable,
+      placeholder: "One local directory per line (up to 8)", value: (current || []).join("\n") });
+    input.addEventListener("change", () => {
+      draft[spec.key] = input.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    });
+    return input;
+  }
   if (spec.type === "bool") {
     const box = h("input", { type: "checkbox", class: "switch", checked: !!current, disabled: !spec.writable });
     box.addEventListener("change", () => { draft[spec.key] = box.checked; });
@@ -4015,6 +4023,7 @@ async function daemonSettingsCard() {
   const errorBox = h("div");
   const groups = {};
   for (const spec of view.settings || []) {
+    if (spec.key.startsWith("remote_control.discovery.") && !spec.available) continue;
     groups[spec.category] ||= [];
     groups[spec.category].push(spec);
   }
@@ -4233,9 +4242,78 @@ function gpuActionRow() {
     isGuest() ? h("div", { class: "muted small" }, "Demo access cannot change GPU hold.") : null);
 }
 
+function discoveryLimitsText(limits) {
+  return `${limits.visited_directories.toLocaleString()} directories · ${limits.candidates} candidates · ${limits.seconds} seconds · ${limits.errors} reported errors · one active scan · ${limits.expiry_seconds / 60}-minute expiry`;
+}
+
+function folderDiscoveryPanel(meta, reload) {
+  const panel = h("div", { class: "folder-discovery" });
+  let scan = null, pending = false, timer = null, closed = false;
+  const stopPolling = () => { clearTimeout(timer); timer = null; };
+  onLeave(() => { closed = true; stopPolling(); });
+  const request = async (path, method = "GET", body) => {
+    pending = true;
+    try { return await api(`/remote-control/discovery/scans${path}`, { method, body }); }
+    catch (e) { toast(e.message); return null; }
+    finally { pending = false; }
+  };
+  const poll = async () => {
+    if (closed || !scan || scan.status !== "running") return;
+    const updated = await request(`/${encodeURIComponent(scan.id)}`);
+    if (updated) scan = updated;
+    render();
+  };
+  const add = async (candidate, slug) => {
+    if (!confirm(`Add this owner-only folder?\n\n${candidate.path}\nMarkers: ${candidate.markers.join(", ")}\n\nMarker presence does not imply safety or trust. Adding never runs Claude or accepts trust.`)) return;
+    const result = await request(`/${encodeURIComponent(scan.id)}/candidates/${encodeURIComponent(candidate.id)}/promote`,
+      "POST", { slug, confirmed_path: candidate.path, confirmed_markers: candidate.markers });
+    if (result) { candidate.promoted = true; toast("Folder added. Trust in Claude is a separate action."); reload(); }
+    render();
+  };
+  const candidateCard = candidate => {
+    const slug = h("input", { type: "text", value: candidate.suggested_slug, maxlength: 64,
+      "aria-label": "Folder display slug", pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
+    return h("div", { class: "card discovery-candidate" },
+      h("p", { class: "discovery-path" }, candidate.path),
+      h("p", { class: "muted small" }, `Markers: ${candidate.markers.join(", ")}`),
+      h("p", { class: "muted small" }, candidate.trusted ? "Claude already trusts this exact folder" : "Claude workspace trust has not been accepted"),
+      candidate.requires_git ? h("p", { class: "muted small" }, candidate.git ? "Git marker present; current spawn mode requires Git" : "Cannot add for worktree mode: Git marker required") : null,
+      h("p", { class: "muted small" }, "Markers do not imply safety or trust."),
+      candidate.promoted || candidate.configured_duplicate
+        ? h("p", { class: "muted small" }, candidate.promoted ? "Already added" : "Already configured")
+        : h("div", { class: "row" }, slug, h("button", { class: "btn", disabled: pending || !candidate.launchable,
+          onclick: () => add(candidate, slug.value) }, "Add folder")));
+  };
+  const render = () => {
+    if (closed) return;
+    stopPolling();
+    fill(panel, h("h4", {}, "Find folders"),
+      h("p", { class: "muted small" }, "Windows · owner-only · metadata-only. No file contents are read. Hidden/system entries, reparse points (including OneDrive), sensitive locations, caches and build folders are excluded. Apps and agents cannot access these folders."),
+      h("p", { class: "muted small" }, discoveryLimitsText(meta.limits)),
+      !meta.enabled ? h("p", { class: "note" }, "Discovery is off. Configure valid roots and enable it in Settings.") : null,
+      h("button", { class: "btn", disabled: pending || !meta.enabled || scan?.status === "running", onclick: async () => {
+        scan = await request("", "POST"); render();
+      } }, "Find folders"),
+      scan ? h("p", { role: "status" }, `${scan.status} · ${scan.visited} directories visited · ${scan.candidates.length} candidates · expires in ${scan.expires_in}s`) : null,
+      scan?.status === "running" ? h("button", { class: "btn", disabled: pending, onclick: async () => {
+        const updated = await request(`/${encodeURIComponent(scan.id)}`, "DELETE"); if (updated) scan = updated; render();
+      } }, "Cancel scan") : null,
+      scan?.truncated ? h("p", { class: "note" }, `Scan truncated: ${scan.reason}. Results are partial; scans do not resume.`) : null,
+      scan?.reason && scan.status === "failed" ? h("p", { class: "note bad" }, scan.reason) : null,
+      scan?.errors.length ? h("p", { class: "note" }, `Some directories could not be inspected (${scan.errors.length} reported errors).`) : null,
+      scan?.errors.map(error => h("p", { class: "muted small" }, `${error.location}: ${error.code}`)),
+      scan?.candidates.map(candidateCard));
+    if (scan?.status === "running") timer = setTimeout(() => void poll(), 750);
+  };
+  panel.updateDiscovery = next => { if (meta.enabled !== next.enabled) { meta = next; render(); } };
+  render();
+  return panel;
+}
+
 function remoteControlCard() {
   const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
   let busy = "";
+  let finder = null;
   const act = async (project, stop) => {
     busy = project;
     void load();
@@ -4263,6 +4341,7 @@ function remoteControlCard() {
   };
   const rcButton = (p) => {
     if (p.running) return h("button", { class: "btn", disabled: !!busy, onclick: () => act(p.project, true) }, "Stop");
+    if (p.invalid) return h("span", { class: "note bad" }, `Invalid folder: ${p.invalid}`);
     if (!p.trusted) {
       return h("button", { class: "btn", disabled: !!busy || p.trust_prompt_open, onclick: () => trust(p.project) },
         p.trust_prompt_open ? "Trust window open" : "Trust in Claude…");
@@ -4271,7 +4350,12 @@ function remoteControlCard() {
   };
   const rcActions = (p) => h("div", { class: "row" },
     p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
-    rcButton(p));
+    rcButton(p),
+    p.managed ? h("button", { class: "btn", disabled: !!busy || p.running || p.trust_prompt_open, onclick: async () => {
+      if (!confirm(`Remove managed folder “${p.project}”?\n\n${p.path}\n\nThis removes only the harness entry. Files and Claude trust remain.`)) return;
+      try { await api(`/remote-control/folders/${encodeURIComponent(p.project)}`, { method: "DELETE" }); toast("Folder removed"); void load(); }
+      catch (e) { toast(e.message); }
+    } }, "Remove folder") : null);
   const row = (p) => {
     const remoteControlState = (p) => {
       if (p.running) {
@@ -4293,10 +4377,14 @@ function remoteControlCard() {
     try {
       const r = await api("/remote-control");
       if (!r.enabled) return fill(body, h("p", { class: "muted small" }, "Disabled in config/harness.yaml (remote_control)."));
+      if (r.discovery?.supported && !isGuest() && !isMember()) {
+        finder ||= folderDiscoveryPanel(r.discovery, () => void load());
+        finder.updateDiscovery(r.discovery);
+      }
       fill(body,
         h("p", { class: "muted small" }, "Start Claude Code in a project folder and continue in the Claude app. These sessions use your Claude subscription, not the harness."),
         h("p", { class: "muted small" }, "Only tower projects with a local folder appear. Homelab and scratch have none, so they are omitted."),
-        r.projects.length ? r.projects.map(row) : h("p", { class: "muted small" }, "No tower projects with a local folder."));
+        r.projects.length ? r.projects.map(row) : h("p", { class: "muted small" }, "No tower projects with a local folder."), finder);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
   };
   void load();
