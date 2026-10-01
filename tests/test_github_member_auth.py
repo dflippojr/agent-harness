@@ -293,6 +293,8 @@ def test_connect_routes_device_code_only_to_requesting_member(tmp_path, fake):
         assert CODE not in json.dumps(owner)
         assert {r["user_id"]: r["status"] for r in owner["members"]}[a] == "connecting"
         # a second connect (refresh) resumes the same live attempt rather than starting another
+        att = m.github_auth._attempt(a)
+        assert att.procs[0].stdout.closed  # GCM get's credential output is piped to GCM store, never read here
         again = client.post(f"{ME}/connect", headers=H(ALICE)).json()
         assert again["status"] == "connecting" and again["prompt"]["user_code"] == CODE
         assert sum(1 for c in fake.gcm_calls() if c["action"] == "get" and c["env"]["GCM_INTERACTIVE"] == "always") == 1
@@ -444,7 +446,8 @@ def _project(client, login, name, url, github=True):
     return client.post("/api/v1/projects", json={"name": name, "repo": url, "github": github}, headers=H(login))
 
 
-def test_private_clone_fetch_push_and_refused_retry_after_revocation(tmp_path, fake):
+def test_private_clone_fetch_push_and_refused_retry_after_revocation(tmp_path, fake, caplog):
+    caplog.set_level("DEBUG")
     client, m, ids = setup(tmp_path, fake)
     try:
         a = ids[ALICE]
@@ -507,6 +510,8 @@ def test_private_clone_fetch_push_and_refused_retry_after_revocation(tmp_path, f
             m.github_auth.push(a, row["source_url"], managed, repos_dir(m.cfg, a), "agent/s1")
         assert e.value.code == "reconnect_required" and len(fake.git_calls()) == calls  # no Git, no prompt
         _assert_no_secrets(m, fake, tmp_path)
+        for secret in [*fake.issued(), CODE]:
+            assert secret not in caplog.text
     finally:
         close(client)
 
@@ -743,5 +748,35 @@ def test_real_git_reaches_only_the_pinned_helper_in_the_member_namespace(tmp_pat
                            env=ga.broker_env(m.cfg, b), timeout=60, stdin=None)
         assert r.returncode != 0 and "alice" not in r.stdout
         assert fake.gcm_calls()[-1]["env"]["GCM_NAMESPACE"] == f"agent-harness/v1/{b}"
+    finally:
+        close(client)
+
+
+def test_managed_repo_behind_link_is_refused(tmp_path, fake):
+    """A symlink or junction inside the member repository root that leads elsewhere is refused before Git runs."""
+    import shutil
+    client, m, ids = setup(tmp_path, fake)
+    try:
+        a = ids[ALICE]
+        connect(client, fake, ALICE, a)
+        fake.add_repo("alice/ok", allowed=["alice"])
+        assert _project(client, ALICE, "ok", "https://github.com/alice/ok").status_code == 201
+        row = m.db.get_member_project(a, "ok")
+        from harness.storage import repos_dir
+        root = repos_dir(m.cfg, a)
+        link = root / "linked"
+        outside = tmp_path / "outside-copy"
+        shutil.copytree(Path(row["repo"]), outside)
+        if os.name == "nt":
+            r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True)
+            if r.returncode != 0:
+                pytest.skip("cannot create a junction here")
+        else:
+            link.symlink_to(outside)
+        calls = len(fake.git_calls())
+        with pytest.raises(GitHubAuthError) as e:
+            m.github_auth.fetch(a, row["source_url"], link, root)
+        assert e.value.code == "policy_rejected"
+        assert len(fake.git_calls()) == calls
     finally:
         close(client)

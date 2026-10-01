@@ -42,10 +42,15 @@ def save(p, data):
     tmp.write_text(json.dumps(data), encoding="utf-8")
     os.replace(tmp, p)
 
+def append(path, row):
+    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    try:
+        os.write(fd, (json.dumps(row) + "\n").encode("utf-8"))  # one write per line
+    finally:
+        os.close(fd)
+
 def record(action):
-    keep = {k: v for k, v in os.environ.items()}
-    with open(HERE / "calls.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps({"argv": sys.argv[1:], "action": action, "env": keep}) + "\n")
+    append(HERE / "calls.jsonl", {"argv": sys.argv[1:], "action": action, "env": dict(os.environ)})
 
 def read_input():
     out = {}
@@ -136,9 +141,15 @@ def load(p, default):
     except (OSError, ValueError):
         return default
 
+def append(path, row):
+    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    try:
+        os.write(fd, (json.dumps(row) + "\n").encode("utf-8"))  # one write per line
+    finally:
+        os.close(fd)
+
 args = sys.argv[1:]
-with open(HERE / "calls.jsonl", "a", encoding="utf-8") as f:
-    f.write(json.dumps({"argv": args, "env": dict(os.environ), "cwd": os.getcwd()}) + "\n")
+append(HERE / "calls.jsonl", {"argv": args, "env": dict(os.environ), "cwd": os.getcwd()})
 configs, i, cwd = [], 0, None
 while i < len(args):
     if args[i] == "-c":
@@ -180,8 +191,7 @@ else:
         sys.stderr.write(f"remote: Invalid username or password.\nfatal: Authentication failed for '{url}/'\n")
         sys.exit(128)
     login = issued[token]
-    with open(HERE / "auth.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps({"sub": sub, "repo": owner_repo, "login": login}) + "\n")
+    append(HERE / "auth.jsonl", {"sub": sub, "repo": owner_repo, "login": login})
 if repo is None or (login is not None and login not in repo.get("allowed", [])) or (login is None and not repo.get("public")):
     sys.stderr.write(f"remote: Repository not found.\nfatal: repository '{url}/' not found\n"); sys.exit(128)
 local = repo["path"]
@@ -317,10 +327,18 @@ class FakeGitHub:
 
 
 def _lines(path: Path) -> list[dict]:
+    """Complete JSON lines; a line another fake process is still writing is skipped."""
     try:
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return []
+    rows = []
+    for line in text.splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    return rows
 
 
 def wait_for(predicate, timeout: float = 20.0, interval: float = 0.05):
