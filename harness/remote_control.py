@@ -184,7 +184,7 @@ class RemoteControl:
                 path = Path(managed[name]['identity']['path'])
                 invalid = str(error)
             entry = state.get(name)
-            if entry and entry.get('owner_only') and not include_owner_only:
+            if self._owner_hidden(name, entry) and not include_owner_only:
                 continue
             if name in managed and not is_managed:
                 saved = entry if entry and entry.get('owner_only') else None
@@ -256,7 +256,7 @@ class RemoteControl:
     async def _launch(self, name, path, started_by, include_owner_only):
         state = self._load()
         entry = state.get(name)
-        if entry and entry.get('owner_only') and not include_owner_only:
+        if self._owner_hidden(name, entry) and not include_owner_only:
             raise RemoteControlError('folder unavailable')
         if entry and self._alive(entry):
             return {**self._view(name, include_owner_only), "already_running": True}
@@ -337,6 +337,13 @@ class RemoteControl:
         self._trust_processes[name] = proc
         return {**self._view(name, include_owner_only), "trust_prompt_open": True}
 
+    def _owner_hidden(self, name, entry) -> bool:
+        # A stale owner_only flag never hides a configured folder; a live managed server still does.
+        if not entry or not entry.get('owner_only'):
+            return False
+        configured = name in self.rc.folders or name in self.cfg.projects
+        return not configured or self._alive(entry)
+
     def _view(self, name: str, include_owner_only: bool = False) -> dict:
         rows = [s for s in self.status(include_owner_only) if s["project"] == name]
         # A configured folder wins over a managed entry with the same slug; the
@@ -374,7 +381,7 @@ class RemoteControl:
         if not include_owner_only and name not in self.rc.folders and name not in self.cfg.projects:
             raise RemoteControlError('folder unavailable')
         async with self._lock:
-            if self._load().get(name, {}).get('owner_only') and not include_owner_only:
+            if self._owner_hidden(name, self._load().get(name)) and not include_owner_only:
                 raise RemoteControlError('folder unavailable')
             return await self._stop(name)
 

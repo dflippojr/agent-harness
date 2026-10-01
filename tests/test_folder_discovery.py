@@ -544,3 +544,25 @@ async def test_managed_launch_keeps_real_trust_and_worktree_errors(tmp_path):
     service.rc.rc.spawn = 'worktree'
     with pytest.raises(ToolError, match="isn't a git repository"):
         await service.rc.launch('project', include_owner_only=True)
+
+
+@run_async
+async def test_removed_managed_slug_does_not_hide_configured_folder(tmp_path, monkeypatch):
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\Projects'] = [('package.json', False, False)]
+    promote(service, await scanned(service))
+    rc = service.rc
+    stale = dict(pid=2 ** 22 + 12345, started_at=1.0, owner_only=True, log=str(tmp_path / 'x.log'))
+    rc._save({'project': stale})
+    await service.remove('project', 'owner')
+    assert 'project' not in rc._load()  # removal clears the managed state entry
+
+    # A leftover flag (e.g. from an older build) must not hide a configured folder either.
+    rc._save({'project': stale})
+    configured = tmp_path / 'configured'
+    configured.mkdir()
+    rc.rc.folders['project'] = str(configured)
+    assert [s['project'] for s in rc.status()] == ['project']
+    monkeypatch.setattr(rc, 'popen', lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('stop here')))
+    with pytest.raises(RuntimeError, match='stop here'):  # got past the owner-only gate to spawning
+        await rc.launch('project')

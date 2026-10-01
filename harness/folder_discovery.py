@@ -420,6 +420,10 @@ class FolderDiscovery:
                     raise DiscoveryError('entry_active', 409)
                 self.audit('removal', actor, identity=Identity(**old.values[slug]['identity']))
                 self.store.save(old, {k: v for k, v in old.values.items() if k != slug})
+                state = self.rc._load()
+                if state.get(slug, {}).get('owner_only'):
+                    del state[slug]
+                    self.rc._save(state)
                 return dict(removed=True)
 
     def view(self, scan):
