@@ -26,12 +26,14 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import psutil
 
 from .config import Config, RemoteControlConfig
 from .fileops import ToolError
+from .discovery_paths import Identity
 
 log = logging.getLogger("harness.remote_control")
 
@@ -87,7 +89,9 @@ class RemoteControl:
         self.dir = cfg.data_dir / "remote-control"
         self.state_path = self.dir / "state.json"
         self._lock = asyncio.Lock()
-        self._trust_processes: dict[str, subprocess.Popen] = {}
+        self._trust_processes: dict[tuple[str, str], subprocess.Popen] = {}
+        from .folder_discovery import FolderDiscovery
+        self.discovery = FolderDiscovery(self)
 
     # registry
     def _load(self) -> dict:
@@ -112,7 +116,10 @@ class RemoteControl:
             return False
 
     # projects
-    def folder(self, name: str) -> Path:
+    def folder(self, name: str, include_owner_only: bool = False) -> Path:
+        if include_owner_only and name not in self.rc.folders and name not in self.cfg.projects:
+            with self._directory(name, True) as path:
+                return path
         folders = self.rc.folders or {}
         configured = folders.get(name)
         if configured is not None:
@@ -140,32 +147,63 @@ class RemoteControl:
             raise RemoteControlError(f"{name} has no local folder on the tower to open")
         return Path(os.path.expandvars(project.repo)).expanduser()
 
-    def eligible(self) -> list[str]:
+    def eligible(self, include_owner_only: bool = False) -> list[str]:
         names = []
         project_names = self.rc.projects if self.rc.projects is not None else self.cfg.projects
         candidates = dict.fromkeys([*project_names, *(self.rc.folders or {})])
+        if include_owner_only:
+            candidates.update(dict.fromkeys(self.discovery.entries()))
         for name in candidates:
             try:
-                self.folder(name)
+                self.folder(name, include_owner_only)
             except RemoteControlError:
                 continue
             names.append(name)
         return names
 
-    def status(self) -> list[dict]:
+    def status(self, include_owner_only: bool = False) -> list[dict]:
         state = self._load()
         trusted = trusted_folders(self.claude_json)
         out, changed = [], False
-        for name in self.eligible():
-            path = self.folder(name)
+        managed = self.discovery.entries() if include_owner_only else {}
+        names = dict.fromkeys(self.eligible())
+        names.update(dict.fromkeys(managed))
+        for name in names:
+            is_managed = name in managed and name not in self.rc.folders and name not in self.cfg.projects
+            invalid = ''
+            managed_git = False
+            try:
+                if is_managed:
+                    with self._directory(name, True) as path:
+                        managed_git = self._managed_git(Identity(**managed[name]['identity']))
+                else:
+                    path = self.folder(name, include_owner_only)
+            except RemoteControlError as error:
+                if not is_managed:
+                    continue
+                path = Path(managed[name]['identity']['path'])
+                invalid = str(error)
             entry = state.get(name)
+            if self._owner_hidden(name, entry) and not include_owner_only:
+                continue
+            if name in managed and not is_managed:
+                saved = entry if entry and entry.get('owner_only') else None
+                out.append(dict(project=name, path=managed[name]['identity']['path'], managed=True,
+                                owner_only=True, invalid='slug_conflict', trusted=False, git=False,
+                                trust_prompt_open=self._trust_prompt_open(name, True), running=bool(saved) and self._alive(saved)))
+                if saved:
+                    entry = None
             running = bool(entry) and self._alive(entry)
             if entry and not running and not entry.get("stopped_at"):
                 entry["stopped_at"] = time.time()
                 changed = True
             info = {"project": name, "path": str(path), "trusted": _norm_path(path) in trusted,
                     "trust_prompt_open": self._trust_prompt_open(name),
-                    "git": (path / ".git").exists(), "running": running}
+                    "git": managed_git if is_managed else (path / ".git").exists(), "running": running}
+            if is_managed:
+                info.update(managed=True, owner_only=True, invalid=invalid)
+                # Never probe the string path of an invalid managed entry.
+                info['git'] = False if invalid else info['git']
             if entry:
                 info.update({"started_at": entry["started_at"], "started_by": entry.get("started_by", ""),
                              "pid": entry["pid"] if running else None})
@@ -200,50 +238,70 @@ class RemoteControl:
                 "--permission-mode", self.rc.permission_mode,
                 "--capacity", str(self.rc.capacity)]
 
-    def _trust_prompt_open(self, name: str) -> bool:
-        proc = self._trust_processes.get(name)
+    def _configured(self, name: str) -> bool:
+        return name in self.rc.folders or name in self.cfg.projects
+
+    def _trust_key(self, name: str, managed: bool | None = None) -> tuple[str, str]:
+        # Configured and owner-promoted managed folders share a slug namespace; the kind keeps them apart.
+        if managed is None:
+            managed = not self._configured(name)
+        return ('managed' if managed else 'configured', name)
+
+    def _trust_prompt_open(self, name: str, managed: bool | None = None) -> bool:
+        key = self._trust_key(name, managed)
+        proc = self._trust_processes.get(key)
         if proc is None:
             return False
         if proc.poll() is None:
             return True
-        self._trust_processes.pop(name, None)
+        self._trust_processes.pop(key, None)
         return False
 
     # actions
-    async def launch(self, name: str, started_by: str = "") -> dict:
+    async def launch(self, name: str, started_by: str = "", include_owner_only: bool = False) -> dict:
         async with self._lock:
-            path = self.folder(name)
-            state = self._load()
-            entry = state.get(name)
-            if entry and self._alive(entry):
-                return {**self._view(name), "already_running": True}
-            if _norm_path(path) not in trusted_folders(self.claude_json):
-                raise RemoteControlError(
-                    f"Claude Code hasn't been trusted in {path} yet. Open a terminal there, run `claude` once, "
-                    "accept the workspace trust prompt, then try again (trust isn't inherited from parent folders).")
-            if self.rc.spawn == "worktree" and not (path / ".git").exists():
-                raise RemoteControlError(f"{path} isn't a git repository, which worktree mode needs")
-            self.dir.mkdir(parents=True, exist_ok=True)
-            log_path = self.dir / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.log"
-            cmd = self._command() + ["--name", f"{name} (harness)"]
-            flags = 0
-            if sys.platform == "win32":  # no console window; survives daemon restarts
-                flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-            proc = await asyncio.to_thread(self._spawn_logged, cmd, path, log_path, flags)
-            try:
-                created = psutil.Process(proc.pid).create_time()
-            except psutil.Error:
-                created = 0.0
-            state[name] = {"pid": proc.pid, "created": created, "started_at": time.time(), "log": str(log_path),
-                           "started_by": started_by, "command": cmd}
-            self._save(state)
+            with self._directory(name, include_owner_only, 'launch', started_by) as path:
+                return await self._launch(name, path, started_by, include_owner_only)
+
+    async def _launch(self, name, path, started_by, include_owner_only):
+        state = self._load()
+        entry = state.get(name)
+        if self._owner_hidden(name, entry) and not include_owner_only:
+            raise RemoteControlError('folder unavailable')
+        if entry and self._alive(entry):
+            return {**self._view(name, include_owner_only), "already_running": True}
+        if _norm_path(path) not in trusted_folders(self.claude_json):
+            raise RemoteControlError(
+                f"Claude Code hasn't been trusted in {path} yet. Open a terminal there, run `claude` once, "
+                "accept the workspace trust prompt, then try again (trust isn't inherited from parent folders).")
+        if name not in self.rc.folders and name not in self.cfg.projects:
+            git = self._managed_git(Identity(**self.discovery.entries()[name]['identity']))
+        else:
+            git = (path / '.git').exists()
+        if self.rc.spawn == "worktree" and not git:
+            raise RemoteControlError(f"{path} isn't a git repository, which worktree mode needs")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        log_path = self.dir / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+        cmd = self._command() + ["--name", f"{name} (harness)"]
+        flags = 0
+        if sys.platform == "win32":  # no console window; survives daemon restarts
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        proc = await asyncio.to_thread(self._spawn_logged, cmd, path, log_path, flags)
+        try:
+            created = psutil.Process(proc.pid).create_time()
+        except psutil.Error:
+            created = 0.0
+        state[name] = {"pid": proc.pid, "created": created, "started_at": time.time(), "log": str(log_path),
+                       "started_by": started_by, "command": cmd,
+                       "owner_only": name not in self.rc.folders and name not in self.cfg.projects}
+        self._save(state)
 
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             await asyncio.sleep(0.5)
             parsed = parse_log(self._log_text(state[name]))
             if parsed["pairing_url"]:
-                view = self._view(name)
+                view = self._view(name, include_owner_only)
                 self.notify({"title": f"Remote Control ready: {name}",
                              "message": "Tap to open it in the Claude app. Claude asks there before edits and commands.",
                              "priority": 3, "tags": ["iphone"], "click": parsed["pairing_url"]})
@@ -251,17 +309,20 @@ class RemoteControl:
             if proc.poll() is not None:
                 break
         text = ANSI.sub("", self._log_text(state[name])).strip()
-        await self.stop(name)
+        await self._stop(name)
         error = parse_log(text)["error"] or (text.splitlines()[-1] if text else "no output")
         raise RemoteControlError(f"Remote Control didn't start in {path}: {error}"[:500])
 
-    def open_trust_prompt(self, name: str) -> dict:
+    def open_trust_prompt(self, name: str, include_owner_only: bool = False, actor: str = '') -> dict:
+        with self._directory(name, include_owner_only, 'trust', actor) as path:
+            return self._open_trust_prompt(name, path, include_owner_only)
+
+    def _open_trust_prompt(self, name, path, include_owner_only):
         """Open Claude interactively in a project; Claude itself owns the trust decision."""
-        path = self.folder(name)
         if _norm_path(path) in trusted_folders(self.claude_json):
-            return {**self._view(name), "already_trusted": True}
+            return {**self._view(name, include_owner_only), "already_trusted": True}
         if self._trust_prompt_open(name):
-            return {**self._view(name), "already_open": True}
+            return {**self._view(name, include_owner_only), "already_open": True}
         if sys.platform != "win32":
             raise RemoteControlError("opening the Claude trust window is currently supported only on Windows")
         powershell = shutil.which("powershell.exe")
@@ -283,36 +344,89 @@ class RemoteControl:
         flags = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
         proc = self.popen([powershell, "-NoLogo", "-NoProfile", "-Command", script], cwd=str(path), env=env,
                           creationflags=flags)
-        self._trust_processes[name] = proc
-        return {**self._view(name), "trust_prompt_open": True}
+        self._trust_processes[self._trust_key(name)] = proc
+        return {**self._view(name, include_owner_only), "trust_prompt_open": True}
 
-    def _view(self, name: str) -> dict:
-        return next(s for s in self.status() if s["project"] == name)
+    def _managed_git(self, identity) -> bool:
+        # The folder can change while it is listed (a build tool or antivirus touching it). Report
+        # that one folder as unavailable, like the scanner does, instead of failing the whole
+        # status listing or the launch with a raw OSError (whose message may carry a path).
+        try:
+            return self.discovery.git_present(identity)
+        except OSError:
+            raise RemoteControlError('directory_unavailable') from None
 
-    async def stop(self, name: str) -> dict:
+    def _owner_hidden(self, name, entry) -> bool:
+        # A stale owner_only flag never hides a configured folder; a live managed server still does.
+        if not entry or not entry.get('owner_only'):
+            return False
+        configured = name in self.rc.folders or name in self.cfg.projects
+        return not configured or self._alive(entry)
+
+    def _view(self, name: str, include_owner_only: bool = False) -> dict:
+        rows = [s for s in self.status(include_owner_only) if s["project"] == name]
+        # A configured folder wins over a managed entry with the same slug; the
+        # synthetic conflict row must never shadow the real one.
+        return next((s for s in rows if s.get("invalid") != "slug_conflict"), rows[0])
+
+    @contextmanager
+    def _directory(self, name, include_owner_only=False, action='', actor=''):
+        from .discovery_paths import DiscoveryError
+        if name in self.rc.folders or name in self.cfg.projects:
+            if include_owner_only and self._load().get(name, {}).get('owner_only'):
+                saved = self._load()[name]
+                if self._alive(saved) or self._trust_prompt_open(name, True):
+                    self.discovery.audit(action + '_refusal' if action else 'folder_refusal', actor, reason='slug_conflict')
+                    raise RemoteControlError('slug_conflict')
+            yield self.folder(name)
+            return
+        if not include_owner_only:
+            raise RemoteControlError('folder unavailable')
+        entry = self.discovery.entries().get(name)
+        if entry is None:
+            raise RemoteControlError('folder unavailable')
+        stack = ExitStack()
+        try:
+            identity = stack.enter_context(self.discovery.checked(entry))
+        except (DiscoveryError, OSError) as error:
+            reason = error.code if isinstance(error, DiscoveryError) else 'directory_unavailable'
+            if action:
+                self.discovery.audit(action + '_refusal', actor, reason=reason)
+            raise RemoteControlError(reason) from None
+        with stack:
+            yield Path(identity.path)
+
+    async def stop(self, name: str, include_owner_only: bool = False) -> dict:
+        if not include_owner_only and name not in self.rc.folders and name not in self.cfg.projects:
+            raise RemoteControlError('folder unavailable')
         async with self._lock:
-            state = self._load()
-            entry = state.get(name)
-            if not entry:
-                raise RemoteControlError(f"no Remote Control server was started for {name}")
-            if self._alive(entry):
-                try:
-                    proc = psutil.Process(entry["pid"])
-                    children = proc.children(recursive=True)
-                    for child in children:
-                        try:
-                            child.kill()
-                        except psutil.Error:
-                            pass
+            if self._owner_hidden(name, self._load().get(name)) and not include_owner_only:
+                raise RemoteControlError('folder unavailable')
+            return await self._stop(name)
+
+    async def _stop(self, name):
+        state = self._load()
+        entry = state.get(name)
+        if not entry:
+            raise RemoteControlError(f"no Remote Control server was started for {name}")
+        if self._alive(entry):
+            try:
+                proc = psutil.Process(entry["pid"])
+                children = proc.children(recursive=True)
+                for child in children:
                     try:
-                        proc.kill()
+                        child.kill()
                     except psutil.Error:
                         pass
-                    await asyncio.to_thread(psutil.wait_procs, [*children, proc], timeout=STOP_TIMEOUT)
+                try:
+                    proc.kill()
                 except psutil.Error:
                     pass
-            entry["stopped_at"] = time.time()
-            self._save(state)
+                await asyncio.to_thread(psutil.wait_procs, [*children, proc], timeout=STOP_TIMEOUT)
+            except psutil.Error:
+                pass
+        entry["stopped_at"] = time.time()
+        self._save(state)
         return {"project": name, "running": False}
 
     # agent tool

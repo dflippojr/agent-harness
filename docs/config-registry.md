@@ -194,3 +194,9 @@ headers, machine-specific paths, and raw request bodies are never logged.
 3. Cover it in `tests/test_config_registry.py` (getter/setter, bounds, unknown-key rejection).
 4. Document it in the table above. Never add secrets, host paths, `modules.*`, sandbox/network, or
    identity fields to the writable registry.
+# Remote Control discovery
+
+The owner registry includes three live Windows-only discovery settings using a
+dedicated root-list type. Discovery is default-off and exposes no app or agent
+capability. See [owner folder discovery](remote-control-discovery.md) for limits,
+validation, promotion and separate Claude trust.

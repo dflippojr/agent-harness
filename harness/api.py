@@ -926,6 +926,10 @@ def remote_control(m):
     return m.remote_control
 
 
+def rc_owner_surface(request):
+    return request.scope.get('harness_original_path', '').startswith('/api/admin/v1/')
+
+
 @api_router.get("/remote-control")
 async def rc_status(request: Request):
     m = mgr(request)
@@ -933,7 +937,14 @@ async def rc_status(request: Request):
         return {"enabled": False, "projects": []}
     if request.state.access.role == "guest":
         return {"enabled": True, "projects": []}
-    return {"enabled": True, "projects": m.remote_control.status()}
+    owner = rc_owner_surface(request)
+    result = {"enabled": True, "projects": m.remote_control.status(include_owner_only=owner)}
+    if owner:
+        import sys
+        from .folder_discovery import LIMITS
+        result['discovery'] = dict(supported=sys.platform == 'win32',
+                                   enabled=m.cfg.remote_control.discovery.enabled, limits=dict(LIMITS))
+    return result
 
 
 @api_router.post("/remote-control/{project}")
@@ -941,7 +952,8 @@ async def rc_launch(project: str, request: Request):
     from .fileops import ToolError
     rc = remote_control(mgr(request))
     try:
-        return await rc.launch(project, started_by=request.headers.get("tailscale-user-login") or "web app")
+        return await rc.launch(project, started_by=getattr(request.state.access, 'user_id', '') or 'owner',
+                               include_owner_only=rc_owner_surface(request))
     except ToolError as e:
         raise HarnessError(400, str(e))
 
@@ -950,7 +962,8 @@ async def rc_launch(project: str, request: Request):
 async def rc_trust(project: str, request: Request):
     from .fileops import ToolError
     try:
-        return remote_control(mgr(request)).open_trust_prompt(project)
+        return remote_control(mgr(request)).open_trust_prompt(project, include_owner_only=rc_owner_surface(request),
+                                                            actor=getattr(request.state.access, 'user_id', '') or 'owner')
     except ToolError as e:
         raise HarnessError(400, str(e))
 
@@ -959,7 +972,7 @@ async def rc_trust(project: str, request: Request):
 async def rc_stop(project: str, request: Request):
     from .fileops import ToolError
     try:
-        return await remote_control(mgr(request)).stop(project)
+        return await remote_control(mgr(request)).stop(project, include_owner_only=rc_owner_surface(request))
     except ToolError as e:
         raise HarnessError(404, str(e))
 
