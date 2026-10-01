@@ -203,6 +203,20 @@ class DiscoveryConfig:
 
 
 @dataclass
+class GitHubMemberAuthConfig:
+    """`github_member_auth` in harness.yaml (issue #63): per-member GitHub sign-in through Git Credential Manager.
+
+    Installer/file configuration only. Agent Harness Web can switch the feature on or off but never sets the
+    executable or the store. Empty `gcm_path` means the feature is unavailable.
+    """
+    gcm_path: str = ""              # absolute, owner-controlled git-credential-manager executable
+    credential_store: str = ""      # wincredman | dpapi (Windows), keychain (macOS), secretservice | gpg (Linux)
+    gpg_pass_store_path: str = ""   # gpg only: an initialized `pass` store (has .gpg-id)
+    gnupg_home: str = ""            # gpg only: GNUPGHOME holding the store's key
+    git_path: str = ""              # optional absolute git executable; default: git on PATH
+
+
+@dataclass
 class RemoteControlConfig:
     """`remote_control` in harness.yaml."""
     enabled: bool = False
@@ -394,6 +408,7 @@ class Config:
     memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
     web: WebConfig = field(default_factory=WebConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
+    github_member_auth: GitHubMemberAuthConfig = field(default_factory=GitHubMemberAuthConfig)
     endpoint: EndpointConfig = field(default_factory=EndpointConfig)
     images: ImagesConfig = field(default_factory=ImagesConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
@@ -777,6 +792,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         memory_library=memory_library,
         web=web,
         github=GitHubConfig(**(raw.get("github") or {})),
+        github_member_auth=GitHubMemberAuthConfig(**(raw.get("github_member_auth") or {})),
         endpoint=endpoint,
         images=images,
         search=search,

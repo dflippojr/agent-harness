@@ -14,6 +14,7 @@ third-party app cannot reach this surface by presenting its own key.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -243,6 +244,14 @@ class AccountUpdateRequest(BaseModel):
     max_queued: int | None = None
 
 
+class GitHubMemberAuthRequest(BaseModel):
+    enabled: bool
+
+
+class GitHubResetRequest(BaseModel):
+    confirm: bool = False
+
+
 def _collect_operations(app: FastAPI, mgr) -> list[dict]:
     operations: list[dict] = []
     existing = [route for route in app.routes if isinstance(route, APIRoute) and route.path in ADMIN_PATHS]
@@ -261,6 +270,9 @@ def _collect_operations(app: FastAPI, mgr) -> list[dict]:
         {"method": "GET", "path": PREFIX + "/accounts/audit"},
         {"method": "GET", "path": PREFIX + "/accounts/{user_id}"},
         {"method": "PATCH", "path": PREFIX + "/accounts/{user_id}"},
+        {"method": "GET", "path": PREFIX + "/github-member-auth"},
+        {"method": "PUT", "path": PREFIX + "/github-member-auth"},
+        {"method": "POST", "path": PREFIX + "/accounts/{user_id}/github-connection/reset"},
     ])
     from . import config_api
     operations.extend(config_api.register_admin(app, mgr, require_admin))
@@ -361,6 +373,38 @@ def register(app: FastAPI, mgr) -> None:
         svc = _accounts(request)
         actor = _actor(request)
         return await _apply_account_update(svc, actor, user_id, body)
+
+    # Issue #63: the owner switches member GitHub sign-in on or off, sees each member's coarse state, and can
+    # erase a member's credential. The owner cannot connect, test, list repositories, or use it.
+    @app.get(PREFIX + "/github-member-auth")
+    async def github_member_auth(request: Request, refresh: bool = False):
+        require_admin(request, mgr)
+        gh = mgr(request).github_auth
+        if gh.configured() and (refresh or gh.cached_preflight() is None):
+            await asyncio.to_thread(gh.preflight, True)
+        return gh.owner_view()
+
+    @app.put(PREFIX + "/github-member-auth")
+    async def set_github_member_auth(body: GitHubMemberAuthRequest, request: Request):
+        from .github_auth import GitHubAuthError
+        require_admin(request, mgr)
+        try:
+            return await asyncio.to_thread(mgr(request).github_auth.set_enabled, _actor(request), body.enabled)
+        except GitHubAuthError as e:
+            raise HarnessError(e.status, str(e), code=e.code) from None
+
+    @app.post(PREFIX + "/accounts/{user_id}/github-connection/reset")
+    async def reset_member_github(user_id: str, body: GitHubResetRequest, request: Request):
+        from .github_auth import GitHubAuthError
+        require_admin(request, mgr)
+        if not body.confirm:
+            raise HarnessError(400, "confirm the erase-only reset")
+        _accounts(request)._require(user_id)
+        try:
+            await asyncio.to_thread(mgr(request).github_auth.disconnect, user_id, actor_id=_actor(request))
+        except GitHubAuthError as e:
+            raise HarnessError(e.status, str(e), code=e.code) from None
+        return mgr(request).github_auth.owner_view()
 
     @app.middleware("http")
     async def admin_alias(request: Request, call_next):

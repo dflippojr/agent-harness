@@ -347,6 +347,16 @@ CREATE TABLE IF NOT EXISTS member_projects (
     PRIMARY KEY (user_id, slug)
 );
 CREATE INDEX IF NOT EXISTS member_projects_user ON member_projects(user_id);
+-- Issue #63: non-secret GitHub connection state per household member. Never a token, code, or URL.
+CREATE TABLE IF NOT EXISTS github_connections (
+    user_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'disconnected',
+    namespace_version INTEGER NOT NULL DEFAULT 1,
+    connected_at REAL,
+    last_used_at REAL,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL
+);
 """
 
 AND_OWNER = " AND owner_id = ?"
@@ -416,6 +426,8 @@ MIGRATIONS = [
     ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
     # Issue #29: usage attribution names the credential class, never the key or its file reference.
     ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
+    # Issue #63: '' (credential-free public clone) or 'github' (the member's own GitHub connection).
+    ("member_projects", "source_auth", TEXT_EMPTY),
     # Issue #17: frozen owner-approved instruction skills for a session.
     ("sessions", "skills", TEXT_EMPTY_LIST),
     # Issue #18: sanitized smart-review recommendation on the ordinary approval row.
@@ -1641,11 +1653,37 @@ class Database:
         now = time.time()
         with self.lock:
             self.conn.execute(
-                "INSERT INTO member_projects (user_id, slug, description, repo, source_url, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO member_projects (user_id, slug, description, repo, source_url, source_auth, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (row["user_id"], row["slug"], row.get("description") or "", row.get("repo") or "",
-                 row.get("source_url") or "", now, now),
+                 row.get("source_url") or "", row.get("source_auth") or "", now, now),
             )
+
+    def get_github_connection(self, user_id: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM github_connections WHERE user_id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_github_connections(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM github_connections ORDER BY user_id").fetchall()
+        return [dict(r) for r in rows]
+
+    def set_github_connection(self, user_id: str, **fields) -> None:
+        """Upsert non-secret connection state: status, timestamps, and a sanitized error class only."""
+        allowed = {"status", "namespace_version", "connected_at", "last_used_at", "last_error"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"unknown github connection fields: {sorted(bad)}")
+        now = time.time()
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO github_connections (user_id, updated_at) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO NOTHING", (user_id, now))
+            if fields:
+                cols = ", ".join(f"{k} = ?" for k in fields)
+                self.conn.execute(f"UPDATE github_connections SET {cols}, updated_at = ? WHERE user_id = ?",
+                                  (*fields.values(), now, user_id))
 
     def delete_member_project(self, user_id: str, slug: str) -> bool:
         with self.lock:

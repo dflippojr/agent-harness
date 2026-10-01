@@ -167,6 +167,8 @@ Agent Harness Server listens only on localhost. To reach Agent Harness Web from 
    To add a household member, keep an explicit `allowed_logins` owner allowlist, then use **Actions → Accounts**
    (or `POST /api/admin/v1/accounts`) with their exact Tailscale login. Members see only their own work through
    `/api/v1`. Creating the first member while `allowed_logins` is empty fails closed.
+   To let members use their own private GitHub repositories, configure `github_member_auth` and turn it on under
+   **Actions → Accounts**; see [`member-github-auth.md`](member-github-auth.md).
 5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Agent Harness Web icon is
    labeled **Harness**. iOS may retain an older label until you remove that icon and add it again; no server or
    browser data migration is required. See [`web.md`](web.md).
@@ -245,7 +247,9 @@ install/uninstall.sh --remove-files  # also remove the install directory
   Optional `guests:` entries grant time-boxed read-only Agent Harness Web access to a named tailnet login without
   owner or member powers. Member data lives under `data_dir/users/<opaque-id>/`. The machine owner remains
   inside the host/OS trust boundary and can read local storage; household isolation prevents accidental or
-  API/UI cross-account access, not a hostile administrator.
+  API/UI cross-account access, not a hostile administrator. Optional member GitHub sign-in
+  ([`member-github-auth.md`](member-github-auth.md)) keeps each member's credential in the OS secure store under
+  their own Git Credential Manager namespace, inside the same host trust boundary.
 - Agents are untrusted: shell commands run in a Docker container with only the workspace mounted and no network
   unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first.
 - Web fetches refuse private, tailnet and metadata addresses. Agent Harness App-provided context and web pages are marked as
