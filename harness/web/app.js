@@ -1567,11 +1567,16 @@ async function viewNew() {
   const newProjectTarget = projectTargetInput(targets, target);
   const newProjectSource = h("select", {},
     h("option", { value: "empty" }, "Empty workspace"),
-    h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"));
+    h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"),
+    isMember() ? h("option", { value: "github" }, "Private GitHub repository (my GitHub connection)") : null);
+  const githubConnect = h("div");
   const newProjectRepo = h("input", { type: "text", placeholder: repoPlaceholder(), hidden: true });
   newProjectSource.addEventListener("change", () => {
-    newProjectRepo.hidden = newProjectSource.value !== "repo";
-    newProjectRepo.required = newProjectSource.value === "repo";
+    const repoSource = newProjectSource.value !== "empty";
+    newProjectRepo.hidden = !repoSource;
+    newProjectRepo.required = repoSource;
+    newProjectRepo.placeholder = newProjectSource.value === "github" ? "https://github.com/owner/repo" : repoPlaceholder();
+    fill(githubConnect);
   });
   const createProjectButton = h("button", { class: "btn primary", type: "submit" }, "Create project");
   const projectCreator = h("details", { class: "card" }, h("summary", {}, "＋ New project"),
@@ -1579,9 +1584,10 @@ async function viewNew() {
       e.preventDefault();
       createProjectButton.disabled = true;
       try {
+        const github = newProjectSource.value === "github";
         const created = await api("/projects", { method: "POST", body: {
           name: newProjectName.value, description: newProjectDescription.value, target: newProjectTarget.value,
-          repo: newProjectSource.value === "repo" ? newProjectRepo.value : "",
+          repo: newProjectSource.value === "empty" ? "" : newProjectRepo.value, github,
         } });
         projects.push(created);
         target = created.target;
@@ -1595,7 +1601,13 @@ async function viewNew() {
         projectCreator.open = false;
         toast(`Project ${created.name} created`);
       } catch (err) {
-        toast(err.message);
+        if (["not_connected", "reconnect_required"].includes(err.code) && newProjectSource.value === "github") {
+          // Keep the pending form in this page only (never browser storage) and submit it once connected.
+          const form = e.target;
+          fill(githubConnect, githubConnectionCard({ onConnected: () => { fill(githubConnect); form.requestSubmit(); } }));
+        } else {
+          toast(err.message, 6000);
+        }
       } finally {
         createProjectButton.disabled = false;
       }
@@ -1604,7 +1616,7 @@ async function viewNew() {
     h("label", {}, "Name"), newProjectName,
     h("label", {}, "Description"), newProjectDescription,
     isMember() ? [] : [h("label", {}, "Runs on"), newProjectTarget],
-    h("label", {}, "Workspace"), newProjectSource, newProjectRepo,
+    h("label", {}, "Workspace"), newProjectSource, newProjectRepo, githubConnect,
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   let localModel = model.value;
@@ -2442,6 +2454,11 @@ function reviewCard(s) {
   if (!isGuest() && !busy && !s.workspace_removed && s.review !== "discarded") {
     if (s.repo_kind === "local") {
       buttons.push(h("button", { class: "btn ok", onclick: act("merge", `Squash-merge ${s.branch} into ${base}?`) }, `Merge into ${base}`));
+      if (s.push_target) {
+        buttons.push(h("button", { class: "btn ok", onclick: act("push",
+          `Push branch ${s.branch} to GitHub repository ${s.push_target} (branch ${s.branch}) using your GitHub connection? `
+          + "GitHub records your account as the pusher; commit authors stay as they are.") }, "Push to GitHub"));
+      }
     } else {
       buttons.push(h("button", { class: "btn ok", onclick: act("push", `Push ${s.branch} to the remote?`) }, "Push branch"));
     }
@@ -3451,12 +3468,87 @@ function accountCard(me, profile) {
       isGuest() ? h("p", { class: "muted small" }, "Demo access — look around only.") : null,
       isMember() && usage.disk_note ? h("p", { class: "muted small" }, usage.disk_note) : null,
       isMember() ? h("p", { class: "muted small" }, `${usage.running || 0} running · ${usage.queued || 0} queued`) : null),
+    isMember() ? githubConnectionCard() : null,
     h("div", { class: "card" },
       h("h3", {}, "Connection"),
       me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
       h("p", { class: "muted small" }, live
         ? `Agent Harness Web is connected to Agent Harness Server at ${me.public_url || location.origin}.`
         : `Agent Harness Web is not receiving the live stream from Agent Harness Server at ${me.public_url || location.origin}.`)));
+}
+
+const GITHUB_DEVICE_URL = "https://github.com/login/device";
+
+// Issue #63: a household member's own GitHub sign-in (Git Credential Manager device flow). The token never
+// reaches the browser; only the verification URL and user code, shown to this member while connecting.
+function githubConnectionCard({ onConnected } = {}) {
+  const card = h("div", { class: "card" }, h("h3", {}, "GitHub"), h("p", { class: "muted small" }, "Loading…"));
+  let timer = null;
+  let shown = false;
+  const render = async () => {
+    try { show(await api("/me/github-connection")); }
+    catch (e) { fill(card, h("h3", {}, "GitHub"), h("p", { class: "note bad" }, e.message)); }
+  };
+  const act = (path, method, confirmText) => async () => {
+    if (confirmText && !confirm(confirmText)) return;
+    card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    try { show(await api(path, { method })); }
+    catch (e) { toast(e.message, 6000); await render(); }
+  };
+  const show = (st) => {
+    clearTimeout(timer);
+    if (shown && !card.isConnected) return;  // navigated away: stop polling
+    shown = true;
+    const note = h("p", { class: "muted small" }, st.scopes_note || "");
+    const err = st.message ? h("p", { class: "note bad" }, st.message) : null;
+    const used = st.last_used_at ? h("p", { class: "muted small" }, `Last used ${ago(st.last_used_at)}`) : null;
+    const connect = (label) => h("button", { class: "btn primary", type: "button",
+      onclick: act("/me/github-connection/connect", "POST") }, label);
+    if (st.status === "disabled") {
+      fill(card, h("h3", {}, "GitHub"), h("p", { class: "muted small" }, st.message || "GitHub sign-in is unavailable."));
+      return;
+    }
+    if (st.status === "connecting") {
+      const prompt = st.prompt;
+      const left = st.seconds_left || 0;
+      fill(card, h("h3", {}, "GitHub — connecting"),
+        prompt && prompt.verification_uri === GITHUB_DEVICE_URL ? [
+          h("p", { class: "small" }, "Open GitHub's device page and enter this code:"),
+          copyBox(prompt.user_code),
+          h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" },
+            h("a", { class: "btn small", href: GITHUB_DEVICE_URL, target: "_blank", rel: "noopener noreferrer" },
+              "Open github.com/login/device"),
+            h("button", { class: "btn small", type: "button", onclick: () => copyToClipboard(GITHUB_DEVICE_URL) },
+              "Copy link")),
+        ] : h("p", { class: "muted small" }, "Waiting for GitHub's sign-in code…"),
+        h("p", { class: "muted small" }, `This code expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}.`),
+        note,
+        h("div", { class: "row", style: "margin-top:8px" },
+          h("button", { class: "btn small", type: "button", onclick: act("/me/github-connection/cancel", "POST") }, "Cancel")));
+      timer = setTimeout(render, 2000);
+      return;
+    }
+    if (st.status === "connected") {
+      fill(card, h("h3", {}, "GitHub — connected"), used, note,
+        h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" },
+          connect("Reconnect"),
+          h("button", { class: "btn bad small", type: "button", onclick: act("/me/github-connection", "DELETE",
+            "Disconnect GitHub? The stored credential is erased. Your projects, workspaces, and history stay.") },
+            "Disconnect")));
+      const done = onConnected;
+      onConnected = null;
+      done?.();
+      return;
+    }
+    const again = st.status === "reconnect_required";
+    fill(card, h("h3", {}, again ? "GitHub — reconnect needed" : "GitHub"), err,
+      h("p", { class: "small" }, "Connect your own GitHub account to clone, fetch, and push your private repositories. "
+        + "Git Credential Manager keeps the credential in this machine's secure store; it never reaches the browser "
+        + "or agent sandboxes."),
+      note, used, h("div", { class: "row" }, connect(again ? "Reconnect" : "Connect")));
+  };
+  void render();
+  return card;
 }
 
 function fmtBytes(n) {
@@ -3466,12 +3558,39 @@ function fmtBytes(n) {
   return `${n} B`;
 }
 
+// Issue #63: the owner switches member GitHub sign-in on/off and can erase a member's credential. The owner
+// never sees repository URLs, GitHub usernames, or codes, and cannot connect, test, or use the credential.
+function githubOwnerCard(view, rerender) {
+  if (!view || !view.configured) {
+    return h("div", { class: "card" }, h("h3", {}, "Member GitHub sign-in"),
+      h("p", { class: "muted small" }, "Not set up. Configure github_member_auth (Git Credential Manager path and secure store) in harness.yaml to offer it."));
+  }
+  const pf = view.preflight;
+  const toggle = async () => {
+    const next = !view.enabled;
+    if (!confirm(next ? "Let household members connect their own GitHub accounts?"
+      : "Turn off member GitHub sign-in? Connection attempts and running GitHub operations stop now; stored credentials are not erased.")) return;
+    try { await api("/github-member-auth", { method: "PUT", surface: "admin", body: { enabled: next } }); await rerender(); }
+    catch (e) { toast(e.message, 6000); }
+  };
+  return h("div", { class: "card" }, h("h3", {}, "Member GitHub sign-in"),
+    h("p", { class: "muted small" }, view.enabled ? "On." : "Off."),
+    pf && !pf.ok ? h("p", { class: "note bad" }, pf.message || "The secure store check failed.") : null,
+    h("p", { class: "muted small" }, view.scopes_note || ""),
+    h("div", { class: "row" }, h("button", { class: "btn small", type: "button", onclick: toggle },
+      view.enabled ? "Turn off" : "Turn on")));
+}
+
 async function accountsCard() {
   const wrap = h("div");
   const render = async () => {
     let rows = [];
-    try { rows = await api("/accounts", { surface: "admin" }); }
-    catch (e) { fill(wrap, h("p", { class: "note bad" }, e.message)); return; }
+    let github = null;
+    try {
+      [rows, github] = await Promise.all([api("/accounts", { surface: "admin" }),
+        api("/github-member-auth", { surface: "admin" }).catch(() => null)]);
+    } catch (e) { fill(wrap, h("p", { class: "note bad" }, e.message)); return; }
+    const githubState = Object.fromEntries((github?.members || []).map((row) => [row.user_id, row]));
     const login = h("input", { type: "email", placeholder: "member@example.com", required: true });
     const name = h("input", { type: "text", placeholder: "Display name", required: true, maxlength: "80" });
     const create = h("button", { class: "btn primary", type: "submit" }, "Create member");
@@ -3488,7 +3607,17 @@ async function accountsCard() {
           await render();
         } catch (err) { toast(err.message, 5000); create.disabled = false; }
       } }, h("h3", {}, "New member"), login, name, h("div", { class: "row", style: "margin-top:12px" }, create)),
+      githubOwnerCard(github, render),
       rows.length ? rows.map((a) => {
+        const gh = githubState[a.user_id];
+        const resetGithub = async () => {
+          if (!confirm(`Erase ${a.display_name}'s stored GitHub credential? This only erases it; they can connect again themselves.`)) return;
+          try {
+            await api(`/accounts/${a.user_id}/github-connection/reset`, { method: "POST", surface: "admin", body: { confirm: true } });
+            toast("GitHub credential erased");
+            await render();
+          } catch (err) { toast(err.message, 6000); }
+        };
         const patch = async (body, confirmText) => {
           if (confirmText && !confirm(confirmText)) return;
           try {
@@ -3502,6 +3631,8 @@ async function accountsCard() {
           h("p", { class: "muted small" }, `id ${a.account_hint} · ${a.enabled ? "enabled" : "disabled"}`),
           h("p", { class: "muted small" }, `${fmtBytes(a.disk_used_bytes)} / ${fmtBytes(a.disk_quota_bytes)} · ${a.running} running · ${a.queued} queued`),
           a.last_activity_at ? h("p", { class: "muted small" }, `Last activity ${ago(a.last_activity_at)}`) : null,
+          gh && github?.configured ? h("p", { class: "muted small" },
+            `GitHub: ${gh.status.replace("_", " ")}${gh.last_used_at ? ` · last used ${ago(gh.last_used_at)}` : ""}`) : null,
           h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
             h("button", { class: "btn small", type: "button", onclick: () => {
               const next = window.prompt("Display name", a.display_name);
@@ -3528,7 +3659,9 @@ async function accountsCard() {
             h("button", { class: "btn small", type: "button", onclick: () => patch(
               { enabled: !a.enabled },
               a.enabled ? `Disable ${a.display_name}? Running work will be cancelled.` : `Re-enable ${a.display_name}?`,
-            ) }, a.enabled ? "Disable" : "Re-enable")));
+            ) }, a.enabled ? "Disable" : "Re-enable"),
+            gh && github?.configured && gh.status !== "disconnected"
+              ? h("button", { class: "btn small", type: "button", onclick: resetGithub }, "Erase GitHub credential") : null));
       }) : h("p", { class: "muted small" }, "No household members yet."));
   };
   await render();

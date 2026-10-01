@@ -1115,6 +1115,11 @@ class Manager:
         out["last_event_seq"] = self.db.last_event_seq(s["id"])
         project = self.project_for_session(s)
         out["repo_kind"] = self._repo_kind(project)
+        github = self._member_github_project(s, project)
+        if github is not None:
+            # issue #63: the member's own push destination (owner/repo), shown in the push confirmation
+            from .github_auth import display_repo
+            out["push_target"] = display_repo(github["source_url"])
         if s["target"] != "tower":
             out["target_online"] = self.hub.online(s["target"])
         if s["status"] == "waiting_approval":

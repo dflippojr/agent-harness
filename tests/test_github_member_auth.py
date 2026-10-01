@@ -696,3 +696,22 @@ def _assert_no_secrets(m, fake, tmp_path):
     rows = json.dumps([m.db.list_audit(500), m.db.list_github_connections()])
     for secret in secrets:
         assert secret not in rows
+
+
+def test_web_ui_member_card_owner_controls_and_no_browser_storage():
+    js = (Path(__file__).resolve().parents[1] / "harness" / "web" / "app.js").read_text(encoding="utf-8")
+    start = js.index("function githubConnectionCard(")
+    card = js[start:js.index("\nfunction fmtBytes(", start)]
+    for needed in ('"/me/github-connection/connect"', '"/me/github-connection/cancel"', 'act("/me/github-connection", "DELETE"',
+                   "copyBox(prompt.user_code)", 'rel: "noopener noreferrer"', "st.scopes_note"):
+        assert needed in card, needed
+    for forbidden in ("localStorage", "sessionStorage", "storeSet", "window.open"):
+        assert forbidden not in card, forbidden  # no browser automation, nothing persisted in the browser
+    form = js[js.index('const githubConnect = h("div");'):js.index("const model = h(\"select\"")]
+    assert "localStorage" not in form and "sessionStorage" not in form
+    assert not [line for line in form.splitlines() if "storeSet(" in line and "repo" in line.lower()]
+    assert "form.requestSubmit()" in form
+    owner = js[js.index("function githubOwnerCard("):js.index("async function accountsCard(")]
+    assert '"/github-member-auth"' in owner and "repo" not in owner.lower().replace("repositories", "")
+    assert "github-connection/reset" in js and "Erase GitHub credential" in js
+    assert "s.push_target" in js and "commit authors stay as they are" in js
