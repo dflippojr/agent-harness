@@ -163,6 +163,7 @@ class Manager:
         if module_effective(cfg, "remote_control"):
             from .remote_control import RemoteControl
             self.remote_control = RemoteControl(cfg, cfg.remote_control, notify=self._remote_control_ready)
+            self.remote_control.discovery.settings = self.settings
             self.runner.remote_control = self.remote_control
         self.jobs = None
         if module_effective(cfg, "jobs"):
@@ -1348,4 +1349,3 @@ class Manager:
             shutil.rmtree(dest, ignore_errors=True)
             raise HarnessError(507, f"cannot start a project: {storage.quota_message(used, limit)}")
         return str(dest), source_url
-
