@@ -4837,4 +4837,11 @@ void checkCompatibility().then((compatible) => compatible && currentUser()).then
 }).then((ready) => {
   if (ready === null) return null;
   return applyAppIcon(readAppIcon());
-}).then((ready) => { if (ready !== null) void route(); });
+}).then((ready) => {
+  if (ready !== null) return route();
+  return null;
+}).finally(() => {
+  // Includes compatibility/login early exits and failures; route paints its existing error state.
+  // Removal is instant, with no minimum time or fade-out, even during the icon's fade-in.
+  window.dismissBootSplash?.();
+});
