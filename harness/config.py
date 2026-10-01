@@ -196,6 +196,13 @@ class GitHubConfig:
 
 
 @dataclass
+class DiscoveryConfig:
+    enabled: bool = False
+    roots: list[str] = field(default_factory=list)
+    max_depth: int = 3
+
+
+@dataclass
 class RemoteControlConfig:
     """`remote_control` in harness.yaml."""
     enabled: bool = False
@@ -206,6 +213,11 @@ class RemoteControlConfig:
     projects: list[str] | None = None     # which projects may be launched; default: every tower project with a local repo
     # Extra local folders exposed only to native Claude Remote Control, never as harness session projects.
     folders: dict[str, str] = field(default_factory=dict)
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+
+    def __post_init__(self):
+        if isinstance(self.discovery, dict):
+            self.discovery = DiscoveryConfig(**self.discovery)
 
 
 @dataclass

@@ -987,9 +987,69 @@ def backend_specs(cfg: Config) -> list[SettingSpec]:
     return specs
 
 
+def _get_discovery_enabled(cfg):
+    return cfg.remote_control.discovery.enabled
+
+
+def _set_discovery_enabled(cfg, value):
+    cfg.remote_control.discovery.enabled = value
+
+
+def _get_discovery_roots(cfg):
+    return list(cfg.remote_control.discovery.roots)
+
+
+def _set_discovery_roots(cfg, value):
+    from .discovery_paths import WindowsDirectories
+    cfg.remote_control.discovery.roots = [i.path for i in WindowsDirectories(cfg).roots(value)]
+
+
+def _get_discovery_depth(cfg):
+    return cfg.remote_control.discovery.max_depth
+
+
+def _set_discovery_depth(cfg, value):
+    cfg.remote_control.discovery.max_depth = value
+
+
+def validate_discovery(cfg, proposed):
+    from .discovery_paths import DiscoveryError, WindowsDirectories
+    if not any(k.startswith('remote_control.discovery.') for k in proposed):
+        return []
+    try:
+        roots = WindowsDirectories(cfg).roots(cfg.remote_control.discovery.roots)
+        if cfg.remote_control.discovery.enabled and not roots:
+            raise DiscoveryError('valid_root_required')
+    except DiscoveryError as error:
+        return [{'key': 'remote_control.discovery.roots', 'code': error.code, 'message': error.code}]
+    return []
+
+
+def discovery_specs():
+    help_text = ('Windows owner-only, default-off metadata discovery. No file contents, trust or launch. '
+                 'Limits: 20,000 directories; 500 candidates; 30 seconds; 50 errors; '
+                 'one active scan; results expire after 15 minutes. Hidden/system entries, '
+                 'all reparse points (including OneDrive), credentials, caches and build folders are excluded.')
+    specs = [
+        _bool('remote_control.discovery.enabled', 'Folder discovery', help_text,
+              'Remote Control discovery', False, _get_discovery_enabled, _set_discovery_enabled,
+              ('remote_control', 'discovery', 'enabled')),
+        SettingSpec(key='remote_control.discovery.roots', label='Discovery roots', help=help_text,
+                    category='Remote Control discovery', value_type='discovery_root_list', default=[],
+                    scope='admin', apply_mode='live', getter=_get_discovery_roots, setter=_set_discovery_roots,
+                    bounds=Bounds(max_length=8), yaml_path=('remote_control', 'discovery', 'roots')),
+        _int('remote_control.discovery.max_depth', 'Discovery depth', help_text,
+             'Remote Control discovery', 3, _get_discovery_depth, _set_discovery_depth, 1, 5,
+             ('remote_control', 'discovery', 'max_depth')),
+    ]
+    for spec in specs:
+        spec.platforms = ('win32',)
+    return specs
+
+
 def build_registry(cfg: Config) -> Registry:
-    specs = {spec.key: spec for spec in [*STATIC_ADMIN, *backend_specs(cfg), *APP_SPECS]}
-    return Registry(specs=specs, validators=[validate_compaction, validate_enables])
+    specs = {spec.key: spec for spec in [*STATIC_ADMIN, *discovery_specs(), *backend_specs(cfg), *APP_SPECS]}
+    return Registry(specs=specs, validators=[validate_compaction, validate_enables, validate_discovery])
 
 
 def assert_explicit_registry(registry: Registry) -> None:
@@ -997,7 +1057,7 @@ def assert_explicit_registry(registry: Registry) -> None:
     for spec in registry.specs.values():
         assert spec.key and "." in spec.key
         assert spec.label and spec.help and spec.category
-        assert spec.value_type in ("bool", "int", "float", "string", "enum", "string_list")
+        assert spec.value_type in ("bool", "int", "float", "string", "enum", "string_list", "discovery_root_list")
         assert spec.scope in ("app", "admin")
         assert spec.apply_mode in APPLY_MODES
         assert spec.sensitivity in ("public", "redact", "hidden")

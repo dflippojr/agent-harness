@@ -325,10 +325,12 @@ class SettingsService:
 
     # --- views -----------------------------------------------------------
     def admin_schema(self) -> dict[str, Any]:
+        from .folder_discovery import LIMITS
         return {
             "schema_version": SCHEMA_VERSION,
             "supervised_restart": supervised_restart_supported(),
             "settings": [schema_entry(spec, self.cfg) for spec in self.registry.admin()],
+            "discovery_limits": dict(LIMITS),
         }
 
     def app_schema(self, key: dict) -> dict[str, Any]:
@@ -792,6 +794,9 @@ class SettingsService:
                 continue
             try:
                 parsed[key] = parse_value(spec, value)
+                if spec.value_type == 'discovery_root_list' and parsed[key] is not RESET:
+                    from .discovery_paths import WindowsDirectories
+                    parsed[key] = [i.path for i in WindowsDirectories(self.cfg).roots(parsed[key])]
             except ValueError as e:
                 errors[key] = {"code": "invalid_value", "message": str(e)}
         return parsed, errors
@@ -1009,8 +1014,8 @@ class SettingsService:
             safe = dict(extra)
             if "changes" in safe:
                 safe["changes"] = [
-                    {**row, "from": None if looks_hidden(row["key"], self.registry.specs.get(row["key"])) else row.get("from"),
-                     "to": None if looks_hidden(row["key"], self.registry.specs.get(row["key"])) else row.get("to")}
+                    {**row, "from": None if row['key'] == 'remote_control.discovery.roots' or looks_hidden(row["key"], self.registry.specs.get(row["key"])) else row.get("from"),
+                     "to": None if row['key'] == 'remote_control.discovery.roots' or looks_hidden(row["key"], self.registry.specs.get(row["key"])) else row.get("to")}
                     for row in safe["changes"]
                 ]
             record["extra"] = safe

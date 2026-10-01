@@ -19,7 +19,7 @@ SCHEMA_VERSION = 1
 RESET = object()
 SCOPES = ("app", "admin")
 APPLY_MODES = ("live", "daemon_restart", "installer_only")
-VALUE_TYPES = ("bool", "int", "float", "string", "enum", "string_list")
+VALUE_TYPES = ("bool", "int", "float", "string", "enum", "string_list", "discovery_root_list")
 SENSITIVITIES = ("public", "redact", "hidden")
 APP_CAPABILITIES = ("web", "images", "search", "memory_library", "remote_control", "homelab")
 
@@ -183,13 +183,14 @@ def parse_value(spec: SettingSpec, value: Any) -> Any:
         "string": parse_string,
         "enum": parse_string,
         "string_list": parse_string_list,
+        "discovery_root_list": parse_string_list,
     }
     parsed = parsers[spec.value_type](value)
     if spec.value_type in ("int", "float"):
         _check_number_bounds(spec.bounds, parsed)
     elif spec.value_type in ("string", "enum"):
         _check_string_bounds(spec.bounds, parsed)
-    elif spec.value_type == "string_list":
+    elif spec.value_type in ("string_list", "discovery_root_list"):
         _check_list_bounds(spec, parsed)
     return parsed
 
