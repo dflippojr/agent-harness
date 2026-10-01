@@ -1,4 +1,6 @@
 """Owner-only discovery routes; never registered on the app contract."""
+import asyncio
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,8 +69,9 @@ def register(app, mgr, require_admin):
     @app.post(PREFIX + '/discovery/scans/{scan_id}/candidates/{candidate_id}/promote')
     async def promote(scan_id: str, candidate_id: str, body: Promotion, request: Request):
         discovery, actor = service(request)
-        return invoke(lambda: discovery.promote(scan_id, candidate_id, body.slug, body.confirmed_path,
-                                               body.confirmed_markers, actor))
+        # promote() takes file locks and opens Windows handles: run it off the event loop.
+        return await asyncio.to_thread(invoke, lambda: discovery.promote(
+            scan_id, candidate_id, body.slug, body.confirmed_path, body.confirmed_markers, actor))
 
     @app.delete(PREFIX + '/folders/{slug}')
     async def remove(slug: str, request: Request):

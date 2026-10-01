@@ -195,12 +195,21 @@ class FolderDiscovery:
 
     async def start(self, actor):
         self.fs.supported()
+        # The config/store file locks and the Windows handle checks on every root can block, so
+        # they run off the event loop; only scheduling the scan task stays on it.
+        scan, created = await asyncio.to_thread(self._begin_scan, actor)
+        if created:
+            self._task = asyncio.create_task(asyncio.to_thread(self._run, scan))
+            asyncio.get_running_loop().call_later(LIMITS['expiry_seconds'], self._expire)
+        return self.view(scan)
+
+    def _begin_scan(self, actor):
         config_lock = self.settings._lock if self.settings else self._guard
         config_store_lock = self.settings.store.lock() if self.settings else nullcontext()
         with config_lock, config_store_lock, self._guard:
             self._expire()
             if self._active is not None:
-                return self.view(self._active)
+                return self._active, False
             config = self.cfg.remote_control.discovery
             if not config.enabled:
                 raise DiscoveryError('discovery_disabled', 409)
@@ -211,9 +220,7 @@ class FolderDiscovery:
             self.audit('scan_start', actor, scan)
             self.scans[scan.id] = scan
             self._active = scan
-            self._task = asyncio.create_task(asyncio.to_thread(self._run, scan))
-            asyncio.get_running_loop().call_later(LIMITS['expiry_seconds'], self._expire)
-            return self.view(scan)
+            return scan, True
 
     def get(self, scan_id):
         self.fs.supported()
@@ -411,22 +418,26 @@ class FolderDiscovery:
     async def remove(self, slug, actor):
         self.fs.supported()
         async with self.rc._lock:
-            with self.store.lock():
-                old = self.store.load()
-                if slug not in old.values:
-                    raise DiscoveryError('managed_folder_unknown', 404)
-                saved = self.rc._load().get(slug, {})
-                managed_server = saved.get('owner_only') and self.rc._alive(saved)
-                if self.rc._trust_prompt_open(slug, True) or managed_server:
-                    self.audit('removal_refusal', actor, reason='entry_active')
-                    raise DiscoveryError('entry_active', 409)
-                self.audit('removal', actor, identity=Identity(**old.values[slug]['identity']))
-                self.store.save(old, {k: v for k, v in old.values.items() if k != slug})
-                state = self.rc._load()
-                if state.get(slug, {}).get('owner_only'):
-                    del state[slug]
-                    self.rc._save(state)
-                return dict(removed=True)
+            # The store file lock and the process checks can block: keep them off the event loop.
+            return await asyncio.to_thread(self._remove_locked, slug, actor)
+
+    def _remove_locked(self, slug, actor):
+        with self.store.lock():
+            old = self.store.load()
+            if slug not in old.values:
+                raise DiscoveryError('managed_folder_unknown', 404)
+            saved = self.rc._load().get(slug, {})
+            managed_server = saved.get('owner_only') and self.rc._alive(saved)
+            if self.rc._trust_prompt_open(slug, True) or managed_server:
+                self.audit('removal_refusal', actor, reason='entry_active')
+                raise DiscoveryError('entry_active', 409)
+            self.audit('removal', actor, identity=Identity(**old.values[slug]['identity']))
+            self.store.save(old, {k: v for k, v in old.values.items() if k != slug})
+            state = self.rc._load()
+            if state.get(slug, {}).get('owner_only'):
+                del state[slug]
+                self.rc._save(state)
+            return dict(removed=True)
 
     def view(self, scan):
         from .remote_control import _norm_path, trusted_folders

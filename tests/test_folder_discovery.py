@@ -132,12 +132,26 @@ async def test_skips_depth_partial_errors_limits_cancel_expiry(tmp_path, monkeyp
     monkeypatch.setitem(LIMITS, 'visited_directories', 1)
     truncated = await scanned(service)
     assert truncated['truncated'] and truncated['visited'] == 1
+    # start() awaits a worker thread, which lets the scan task run; hold the scan at its first
+    # directory until it has been cancelled so the cancel is deterministic.
+    import threading
+    gate, real_entries = threading.Event(), fs.entries
+
+    @contextmanager
+    def gated(path):
+        gate.wait(5)
+        with real_entries(path) as it:
+            yield it
+
+    fs.entries = gated
     first = await service.start('owner-id')
     second = await service.start('owner-id')
     assert first['id'] == second['id']
     service.cancel(first['id'], 'owner-id')
     service.cancel(first['id'], 'owner-id')
+    gate.set()
     await service._task
+    fs.entries = real_entries
     assert service.get(first['id']).status == 'cancelled'
     service.clock = lambda: service.get.__self__.scans[first['id']].created + 901
     # Avoid recursive clock evaluation after expiry by capturing now.
