@@ -489,3 +489,15 @@ async def test_path_identity_conflicts_and_file_entries_win(tmp_path):
     status = service.rc.status(include_owner_only=True)
     assert any(row.get('managed') and row['invalid'] == 'slug_conflict' for row in status)
     assert any(not row.get('managed') and row['path'] == str(local) for row in status)
+
+
+@run_async
+async def test_configured_duplicate_expands_server_environment(tmp_path, monkeypatch):
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\\Projects'] = [('package.json', False, False)]
+    monkeypatch.setenv('DISCOVERY_TEST_ROOT', 'C:\\Projects')
+    service.rc.rc.folders['configured'] = '$DISCOVERY_TEST_ROOT'
+    scan = await scanned(service)
+    assert scan['candidates'][0]['configured_duplicate']
+    with pytest.raises(DiscoveryError, match='configured_duplicate'):
+        promote(service, scan)

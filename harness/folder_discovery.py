@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .config import PROJECT_NAME
-from .discovery_paths import DiscoveryError, EXCLUDED, Identity, WindowsDirectories, beneath, key
+from .discovery_paths import DiscoveryError, EXCLUDED, Identity, WindowsDirectories, beneath, key, lexical
 from .managed_config import Envelope, ManagedConfigError, ManagedStore, parse_envelope
 
 LIMITS = dict(visited_directories=20_000, candidates=500, seconds=30, errors=50,
@@ -327,6 +327,23 @@ class FolderDiscovery:
     def entries(self):
         return self.store.load().values
 
+    def configured_paths(self):
+        values = [*self.rc.rc.folders.values(), *(p.repo for p in self.cfg.projects.values() if p.repo)]
+        result = set()
+        for value in values:
+            try:
+                path = lexical(value)
+            except DiscoveryError:
+                continue
+            result.add(key(path))
+            try:
+                with self.fs.opened(path) as identity:
+                    result.add(key(identity.path))
+            except (DiscoveryError, OSError):
+                # File-configured folders remain read-only even when unavailable.
+                pass
+        return result
+
     @contextmanager
     def checked(self, entry):
         self.fs.supported()
@@ -379,8 +396,7 @@ class FolderDiscovery:
                             raise DiscoveryError('managed_path_conflict', 409)
                     if slug in self.cfg.projects or slug in self.rc.rc.folders or slug in old.values:
                         raise DiscoveryError('slug_conflict', 409)
-                    configured = list(self.rc.rc.folders.values()) + [p.repo for p in self.cfg.projects.values()]
-                    if any(key(p) == key(ident.path) for p in configured if p):
+                    if key(ident.path) in self.configured_paths():
                         raise DiscoveryError('configured_duplicate', 409)
                     self.audit('promotion', actor, scan, identity=ident)
                     self.store.save(old, {**old.values, slug: entry})
@@ -407,8 +423,7 @@ class FolderDiscovery:
     def view(self, scan):
         from .remote_control import _norm_path, trusted_folders
         with self._guard:
-            configured = {key(p) for p in self.rc.rc.folders.values()}
-            configured.update(key(p.repo) for p in self.cfg.projects.values() if p.repo)
+            configured = self.configured_paths()
             managed = {key(e['identity']['path']) for e in self.entries().values()}
             trusted = trusted_folders(self.rc.claude_json)
             candidates = []
