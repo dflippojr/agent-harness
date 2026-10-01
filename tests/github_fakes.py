@@ -43,11 +43,15 @@ def save(p, data):
     os.replace(tmp, p)
 
 def append(path, row):
-    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
-    try:
-        os.write(fd, (json.dumps(row) + "\n").encode("utf-8"))  # one write per line
-    finally:
-        os.close(fd)
+    # One file per record, renamed into place: concurrent O_APPEND writes from several fake
+    # processes are not atomic on Windows and could interleave (and lose) a long line.
+    import time as _time
+    d = path.with_name(path.name + ".d")
+    d.mkdir(exist_ok=True)
+    name = "%020d-%d-%s" % (_time.time_ns(), os.getpid(), os.urandom(4).hex())
+    tmp = d / (name + ".tmp")
+    tmp.write_text(json.dumps(row), encoding="utf-8")
+    os.replace(tmp, d / (name + ".json"))
 
 def record(action):
     append(HERE / "calls.jsonl", {"argv": sys.argv[1:], "action": action, "env": dict(os.environ)})
@@ -142,11 +146,15 @@ def load(p, default):
         return default
 
 def append(path, row):
-    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
-    try:
-        os.write(fd, (json.dumps(row) + "\n").encode("utf-8"))  # one write per line
-    finally:
-        os.close(fd)
+    # One file per record, renamed into place: concurrent O_APPEND writes from several fake
+    # processes are not atomic on Windows and could interleave (and lose) a long line.
+    import time as _time
+    d = path.with_name(path.name + ".d")
+    d.mkdir(exist_ok=True)
+    name = "%020d-%d-%s" % (_time.time_ns(), os.getpid(), os.urandom(4).hex())
+    tmp = d / (name + ".tmp")
+    tmp.write_text(json.dumps(row), encoding="utf-8")
+    os.replace(tmp, d / (name + ".json"))
 
 args = sys.argv[1:]
 append(HERE / "calls.jsonl", {"argv": args, "env": dict(os.environ), "cwd": os.getcwd()})
@@ -327,16 +335,17 @@ class FakeGitHub:
 
 
 def _lines(path: Path) -> list[dict]:
-    """Complete JSON lines; a line another fake process is still writing is skipped."""
+    """Records the fakes wrote for `path` (one renamed-into-place file each), oldest first."""
+    d = path.with_name(path.name + ".d")
     try:
-        text = path.read_text(encoding="utf-8")
+        names = sorted(p for p in d.iterdir() if p.suffix == ".json")
     except OSError:
         return []
     rows = []
-    for line in text.splitlines():
+    for p in names:
         try:
-            rows.append(json.loads(line))
-        except ValueError:
+            rows.append(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
             continue
     return rows
 
