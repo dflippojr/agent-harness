@@ -470,6 +470,11 @@ class MemberGitHub:
         self._closed = True
         self._stop_everyone("connect_cancelled", wait=STOP_GRACE + 3)
 
+    def owes_erase(self) -> bool:
+        """Whether some member's credential erase failed earlier and still has to be retried."""
+        return self.configured() and any(row.get("last_error") == ERASE_FAILED
+                                         for row in self.db.list_github_connections())
+
     def reconcile(self) -> None:
         """Startup: retry erases that failed earlier, and move a row that says connected but whose
         credential is gone (restored backup) to reconnect_required."""

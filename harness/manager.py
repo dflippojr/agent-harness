@@ -272,9 +272,10 @@ class Manager:
                 self.skills.reviewer.start()
         if getattr(self, "settings", None) is not None:
             self.settings.confirm_startup()
-        if self.github_auth.configured():
+        if self.github_auth.enabled() or self.github_auth.owes_erase():
             # Off the loop: retry erases that failed earlier (even with the feature disabled now), and
             # move `connected` rows whose credential is gone (restored backup) to reconnect_required.
+            # A disabled feature with nothing owed never touches the store at startup.
             threading.Thread(target=self.github_auth.reconcile, daemon=True, name="github-reconcile").start()
         orphans = self.snippets.recover()
         if orphans:
