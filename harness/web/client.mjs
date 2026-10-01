@@ -29,6 +29,8 @@ export class AgentHarnessWebClient {
     this.storage = storage;
     this.baseUrl = normalizeDaemonUrl(this._get(BASE_KEY));
     this.token = this._get(TOKEN_KEY).trim();
+    // Issue #64: per-session CSRF value for a Google Web session. Memory only: never storage, never a URL.
+    this.csrf = "";
   }
 
   _get(key) {
@@ -55,6 +57,7 @@ export class AgentHarnessWebClient {
   headers(extra = {}) {
     const headers = { ...extra, "X-Agent-Harness-Client": `web/${WEB_PROTOCOL}` };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    if (this.csrf && !this.independent) headers["X-Agent-Harness-CSRF"] = this.csrf;
     return headers;
   }
 
