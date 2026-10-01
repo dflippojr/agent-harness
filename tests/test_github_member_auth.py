@@ -864,3 +864,29 @@ def test_failed_erase_stays_owed_and_is_retried_at_startup(tmp_path, fake, monke
         assert m.db.get_github_connection(a)["last_error"] == ""
     finally:
         close(client)
+
+
+def test_startup_retries_owed_erase_even_with_the_feature_disabled(tmp_path, fake, monkeypatch):
+    client, m, ids = setup(tmp_path, fake)
+    a = ids[ALICE]
+    connect(client, fake, ALICE, a)
+    real_erase = ga.erase
+
+    def broken_erase(cfg, user_id, attempts=5):
+        raise GitHubAuthError("erase_failed", 500)
+
+    monkeypatch.setattr(ga, "erase", broken_erase)
+    assert client.delete(ME, headers=H(ALICE)).status_code >= 400
+    assert m.db.get_github_connection(a)["last_error"] == "erase_failed"
+    # the owner turns member sign-in off before the next restart
+    client.put(f"{PREFIX}/github-member-auth", json={"enabled": False}, headers=H(OWNER))
+    close(client)
+    monkeypatch.setattr(ga, "erase", real_erase)
+    from harness.manager import Manager
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+    from test_daemon import Script
+    m2 = Manager(m.cfg, db=m.db, chat=Script([]))
+    with TestClient(create_app(m2)):
+        assert wait_for(lambda: fake.namespaces() == set())
+        assert wait_for(lambda: m.db.get_github_connection(a)["last_error"] == "")

@@ -272,8 +272,9 @@ class Manager:
                 self.skills.reviewer.start()
         if getattr(self, "settings", None) is not None:
             self.settings.confirm_startup()
-        if self.github_auth.enabled():
-            # a restored backup can say `connected` with no credential in the store: reconcile off the loop
+        if self.github_auth.configured():
+            # Off the loop: retry erases that failed earlier (even with the feature disabled now), and
+            # move `connected` rows whose credential is gone (restored backup) to reconnect_required.
             threading.Thread(target=self.github_auth.reconcile, daemon=True, name="github-reconcile").start()
         orphans = self.snippets.recover()
         if orphans:
