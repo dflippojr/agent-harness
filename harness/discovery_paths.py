@@ -189,4 +189,4 @@ class WindowsDirectories:
 
     def entry(self, entry):
         attrs = entry.stat(follow_symlinks=False).st_file_attributes
-        return entry.name, bool(attrs & 0x10), bool(attrs & (0x2 | 0x4 | 0x400))
+        return entry.name, bool(attrs & 0x10), bool(attrs & (0x2 | 0x4)), bool(attrs & 0x400)

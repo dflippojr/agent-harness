@@ -224,7 +224,9 @@ class FolderDiscovery:
                                 if reason and reason != 'directory_limit':
                                     scan.reason, scan.truncated = reason, reason != 'cancelled'
                                     break
-                                name, directory, excluded = self.fs.entry(entry)
+                                name, directory, excluded, reparse = self.fs.entry(entry)
+                                if reparse:
+                                    continue
                                 # .git may be hidden; only its presence is inspected.
                                 if name.lower() == '.git':
                                     markers.append(name)
@@ -237,7 +239,7 @@ class FolderDiscovery:
                                     child = ntpath.join(ident.path, name)
                                     try:
                                         self.fs.safe(child)
-                                        if len(children) < LIMITS['visited_directories'] - scan.visited:
+                                        if len(children) + len(stack) < LIMITS['visited_directories'] - scan.visited:
                                             children.append(child)
                                         else:
                                             scan.truncated, scan.reason = True, 'directory_limit'
@@ -296,7 +298,7 @@ class FolderDiscovery:
 
     def git_present(self, identity):
         with self.fs.entries(identity.path) as entries:
-            return any(self.fs.entry(e)[0].lower() == '.git' for e in entries)
+            return any((info := self.fs.entry(e))[0].lower() == '.git' and not info[3] for e in entries)
 
     def promote(self, scan_id, candidate_id, slug, confirmed_path, confirmed_markers, actor):
         try:

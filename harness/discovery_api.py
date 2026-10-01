@@ -1,6 +1,7 @@
 """Owner-only discovery routes; never registered on the app contract."""
 from fastapi import Request
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from .discovery_paths import DiscoveryError
 from .manager import HarnessError
@@ -13,11 +14,21 @@ class Promotion(BaseModel):
     confirmed_path: str = Field(max_length=32768)
     confirmed_markers: list[str] = Field(max_length=500)
 
-    class Config:
-        extra = 'forbid'
+    model_config = ConfigDict(extra='forbid')
 
 
 def register(app, mgr, require_admin):
+    @app.middleware('http')
+    async def guard(request, call_next):
+        path = request.url.path
+        if request.method != 'OPTIONS' and (path.startswith(PREFIX + '/discovery/')
+                                            or path.startswith(PREFIX + '/folders/')):
+            try:
+                require_admin(request, mgr)
+            except HarnessError as error:
+                return JSONResponse({'detail': str(error)}, status_code=error.status)
+        return await call_next(request)
+
     def service(request):
         token = require_admin(request, mgr)
         manager = mgr(request)

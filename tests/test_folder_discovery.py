@@ -61,7 +61,7 @@ class Metadata:
     def entry(self, entry):
         if isinstance(entry, Exception):
             raise entry
-        return entry
+        return (*entry, False) if len(entry) == 3 else entry
 
 
 def discovery(tmp_path):

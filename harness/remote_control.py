@@ -178,13 +178,15 @@ class RemoteControl:
                 path = Path(managed[name]['identity']['path'])
                 invalid = str(error)
             entry = state.get(name)
+            if entry and entry.get('owner_only') and not include_owner_only:
+                continue
             running = bool(entry) and self._alive(entry)
             if entry and not running and not entry.get("stopped_at"):
                 entry["stopped_at"] = time.time()
                 changed = True
             info = {"project": name, "path": str(path), "trusted": _norm_path(path) in trusted,
                     "trust_prompt_open": self._trust_prompt_open(name),
-                    "git": (path / ".git").exists(), "running": running}
+                    "git": False if invalid else (path / ".git").exists(), "running": running}
             if is_managed:
                 info.update(managed=True, owner_only=True, invalid=invalid)
                 # Never probe the string path of an invalid managed entry.
@@ -241,6 +243,8 @@ class RemoteControl:
     async def _launch(self, name, path, started_by, include_owner_only):
         state = self._load()
         entry = state.get(name)
+        if entry and entry.get('owner_only') and not include_owner_only:
+            raise RemoteControlError('folder unavailable')
         if entry and self._alive(entry):
             return {**self._view(name, include_owner_only), "already_running": True}
         if _norm_path(path) not in trusted_folders(self.claude_json):
@@ -261,7 +265,8 @@ class RemoteControl:
         except psutil.Error:
             created = 0.0
         state[name] = {"pid": proc.pid, "created": created, "started_at": time.time(), "log": str(log_path),
-                       "started_by": started_by, "command": cmd}
+                       "started_by": started_by, "command": cmd,
+                       "owner_only": name not in self.rc.folders and name not in self.cfg.projects}
         self._save(state)
 
         deadline = time.monotonic() + START_TIMEOUT
@@ -332,8 +337,9 @@ class RemoteControl:
         try:
             with self.discovery.checked(entry) as identity:
                 yield Path(identity.path)
-        except (DiscoveryError, OSError) as error:
-            reason = error.code if isinstance(error, DiscoveryError) else 'directory_unavailable'
+        except (DiscoveryError, OSError, RemoteControlError) as error:
+            reason = error.code if isinstance(error, DiscoveryError) else ('remote_control_refused'
+                       if isinstance(error, RemoteControlError) else 'directory_unavailable')
             if action:
                 self.discovery.audit(action + '_refusal', actor, reason=reason)
             raise RemoteControlError(reason) from None
@@ -342,6 +348,8 @@ class RemoteControl:
         if not include_owner_only and name not in self.rc.folders and name not in self.cfg.projects:
             raise RemoteControlError('folder unavailable')
         async with self._lock:
+            if self._load().get(name, {}).get('owner_only') and not include_owner_only:
+                raise RemoteControlError('folder unavailable')
             return await self._stop(name)
 
     async def _stop(self, name):
