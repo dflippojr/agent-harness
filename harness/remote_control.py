@@ -175,7 +175,7 @@ class RemoteControl:
             try:
                 if is_managed:
                     with self._directory(name, True) as path:
-                        managed_git = self.discovery.git_present(Identity(**managed[name]['identity']))
+                        managed_git = self._managed_git(Identity(**managed[name]['identity']))
                 else:
                     path = self.folder(name, include_owner_only)
             except RemoteControlError as error:
@@ -275,7 +275,7 @@ class RemoteControl:
                 f"Claude Code hasn't been trusted in {path} yet. Open a terminal there, run `claude` once, "
                 "accept the workspace trust prompt, then try again (trust isn't inherited from parent folders).")
         if name not in self.rc.folders and name not in self.cfg.projects:
-            git = self.discovery.git_present(Identity(**self.discovery.entries()[name]['identity']))
+            git = self._managed_git(Identity(**self.discovery.entries()[name]['identity']))
         else:
             git = (path / '.git').exists()
         if self.rc.spawn == "worktree" and not git:
@@ -346,6 +346,15 @@ class RemoteControl:
                           creationflags=flags)
         self._trust_processes[self._trust_key(name)] = proc
         return {**self._view(name, include_owner_only), "trust_prompt_open": True}
+
+    def _managed_git(self, identity) -> bool:
+        # The folder can change while it is listed (a build tool or antivirus touching it). Report
+        # that one folder as unavailable, like the scanner does, instead of failing the whole
+        # status listing or the launch with a raw OSError (whose message may carry a path).
+        try:
+            return self.discovery.git_present(identity)
+        except OSError:
+            raise RemoteControlError('directory_unavailable') from None
 
     def _owner_hidden(self, name, entry) -> bool:
         # A stale owner_only flag never hides a configured folder; a live managed server still does.

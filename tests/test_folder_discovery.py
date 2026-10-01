@@ -617,3 +617,20 @@ async def test_same_slug_trust_prompts_are_isolated_by_kind(tmp_path, monkeypatc
     rc._trust_processes[('configured', 'project')] = SimpleNamespace(pid=3, poll=lambda: None)
     rows = {bool(r.get('managed')): r for r in rc.status(include_owner_only=True)}
     assert rows[False]['trust_prompt_open'] and not rows[True]['trust_prompt_open']
+
+
+@run_async
+async def test_folder_changing_mid_check_marks_only_that_folder_unavailable(tmp_path):
+    service, fs = discovery(tmp_path)
+    fs.tree['C:\Projects'] = [('package.json', False, False)]
+    scan = await scanned(service)
+    promote(service, scan)
+    service.rc.claude_json.write_text(json.dumps({'projects': {'C:/Projects': {'hasTrustDialogAccepted': True}}}))
+    # an entry disappears or becomes inaccessible between listing and stat
+    fs.tree['C:\Projects'] = [PermissionError('secret raw path')]
+    rows = service.rc.status(include_owner_only=True)  # the whole listing must not fail
+    row = next(r for r in rows if r['project'] == 'project')
+    assert row['invalid'] == 'directory_unavailable'
+    assert 'secret raw path' not in json.dumps(rows)
+    with pytest.raises(ToolError, match='directory_unavailable'):
+        await service.rc.launch('project', include_owner_only=True)
