@@ -111,8 +111,8 @@ approve = HERE / "approvals" / safe
 deny = HERE / "denials" / safe
 end = time.time() + float(mode.get("gcm_timeout", 60))
 while time.time() < end:
-    if approve.exists():
-        login = approve.read_text(encoding="utf-8").strip() or "octocat"
+    login = approve.read_text(encoding="utf-8").strip() if approve.exists() else ""
+    if login:
         token = "gho_" + secrets.token_hex(18)
         issued = load(HERE / "issued.json", {})
         issued[token] = login
@@ -306,10 +306,17 @@ class FakeGitHub:
 
     # --- device flow --------------------------------------------------------------------------------
     def approve(self, user_id: str, login: str = "octocat") -> None:
-        (self.gcm_dir / "approvals" / f"agent-harness_v1_{user_id}").write_text(login, encoding="utf-8")
+        self._publish(self.gcm_dir / "approvals" / f"agent-harness_v1_{user_id}", login)
 
     def deny(self, user_id: str) -> None:
-        (self.gcm_dir / "denials" / f"agent-harness_v1_{user_id}").write_text("x", encoding="utf-8")
+        self._publish(self.gcm_dir / "denials" / f"agent-harness_v1_{user_id}", "x")
+
+    @staticmethod
+    def _publish(path: Path, text: str) -> None:
+        # Atomic: the fake GCM polls for the file and must never see it empty.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
 
     # --- inspection -------------------------------------------------------------------------------------
     def store(self) -> dict:
