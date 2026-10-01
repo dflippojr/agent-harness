@@ -415,7 +415,9 @@ class FolderDiscovery:
                 old = self.store.load()
                 if slug not in old.values:
                     raise DiscoveryError('managed_folder_unknown', 404)
-                if self.rc._trust_prompt_open(slug) or self.rc._alive(self.rc._load().get(slug, {})):
+                saved = self.rc._load().get(slug, {})
+                managed_server = saved.get('owner_only') and self.rc._alive(saved)
+                if self.rc._trust_prompt_open(slug, True) or managed_server:
                     self.audit('removal_refusal', actor, reason='entry_active')
                     raise DiscoveryError('entry_active', 409)
                 self.audit('removal', actor, identity=Identity(**old.values[slug]['identity']))

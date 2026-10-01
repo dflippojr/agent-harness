@@ -351,7 +351,7 @@ async def test_managed_isolation_revalidation_and_removal(tmp_path, monkeypatch)
         rc.open_trust_prompt('project', include_owner_only=True)
     assert rc.status(include_owner_only=True)[0]['invalid'] == 'reparse_point'
     fs.unsafe.clear()
-    rc._trust_processes['project'] = SimpleNamespace(poll=lambda: None)
+    rc._trust_processes[('managed', 'project')] = SimpleNamespace(poll=lambda: None)
     with pytest.raises(DiscoveryError, match='entry_active'):
         await service.remove('project', 'owner')
     rc._trust_processes.clear()
@@ -566,3 +566,40 @@ async def test_removed_managed_slug_does_not_hide_configured_folder(tmp_path, mo
     with pytest.raises(RemoteControlError, match='trusted') as error:  # past the owner-only gate
         await rc.launch('project')
     assert 'unavailable' not in str(error.value)
+
+
+@pytest.mark.parametrize('owner', [True, False])
+@run_async
+async def test_same_slug_trust_prompts_are_isolated_by_kind(tmp_path, monkeypatch, owner):
+    from harness import remote_control
+    service, fs = discovery(tmp_path)
+    rc = service.rc
+    fs.tree['C:\Projects'] = [('package.json', False, False)]
+    promote(service, await scanned(service))
+    managed_proc = SimpleNamespace(pid=1, poll=lambda: None)
+    rc._trust_processes[('managed', 'project')] = managed_proc
+    local = tmp_path / 'local'
+    local.mkdir()
+    rc.rc.folders['project'] = str(local)
+    launches = []
+    rc.popen = lambda *a, **kw: launches.append((a, kw)) or SimpleNamespace(pid=2, poll=lambda: None)
+    monkeypatch.setattr(remote_control, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(subprocess, 'CREATE_NEW_CONSOLE', 16, raising=False)
+    monkeypatch.setattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 512, raising=False)
+    monkeypatch.setattr(remote_control.shutil, 'which', lambda _: 'powershell.exe')
+    monkeypatch.setattr(rc, '_claude', lambda: 'claude.exe')
+    # The configured folder must not see the managed folder's open window.
+    rows = {bool(r.get('managed')): r for r in rc.status(include_owner_only=owner)}
+    assert not rows[False]['trust_prompt_open']
+    if owner:
+        assert rows[True]['trust_prompt_open']
+    view = rc.open_trust_prompt('project', include_owner_only=owner)
+    assert len(launches) == 1 and 'already_open' not in view and view['trust_prompt_open']
+    assert rc._trust_processes[('configured', 'project')] is not managed_proc
+    assert rc._trust_processes[('managed', 'project')] is managed_proc
+    assert launches[0][1]['cwd'] == str(local)
+    # A configured window never blocks or masks the managed entry.
+    rc._trust_processes.clear()
+    rc._trust_processes[('configured', 'project')] = SimpleNamespace(pid=3, poll=lambda: None)
+    rows = {bool(r.get('managed')): r for r in rc.status(include_owner_only=True)}
+    assert rows[False]['trust_prompt_open'] and not rows[True]['trust_prompt_open']

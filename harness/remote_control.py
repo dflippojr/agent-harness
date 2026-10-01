@@ -89,7 +89,7 @@ class RemoteControl:
         self.dir = cfg.data_dir / "remote-control"
         self.state_path = self.dir / "state.json"
         self._lock = asyncio.Lock()
-        self._trust_processes: dict[str, subprocess.Popen] = {}
+        self._trust_processes: dict[tuple[str, str], subprocess.Popen] = {}
         from .folder_discovery import FolderDiscovery
         self.discovery = FolderDiscovery(self)
 
@@ -190,7 +190,7 @@ class RemoteControl:
                 saved = entry if entry and entry.get('owner_only') else None
                 out.append(dict(project=name, path=managed[name]['identity']['path'], managed=True,
                                 owner_only=True, invalid='slug_conflict', trusted=False, git=False,
-                                trust_prompt_open=self._trust_prompt_open(name), running=bool(saved) and self._alive(saved)))
+                                trust_prompt_open=self._trust_prompt_open(name, True), running=bool(saved) and self._alive(saved)))
                 if saved:
                     entry = None
             running = bool(entry) and self._alive(entry)
@@ -238,13 +238,23 @@ class RemoteControl:
                 "--permission-mode", self.rc.permission_mode,
                 "--capacity", str(self.rc.capacity)]
 
-    def _trust_prompt_open(self, name: str) -> bool:
-        proc = self._trust_processes.get(name)
+    def _configured(self, name: str) -> bool:
+        return name in self.rc.folders or name in self.cfg.projects
+
+    def _trust_key(self, name: str, managed: bool | None = None) -> tuple[str, str]:
+        # Configured and owner-promoted managed folders share a slug namespace; the kind keeps them apart.
+        if managed is None:
+            managed = not self._configured(name)
+        return ('managed' if managed else 'configured', name)
+
+    def _trust_prompt_open(self, name: str, managed: bool | None = None) -> bool:
+        key = self._trust_key(name, managed)
+        proc = self._trust_processes.get(key)
         if proc is None:
             return False
         if proc.poll() is None:
             return True
-        self._trust_processes.pop(name, None)
+        self._trust_processes.pop(key, None)
         return False
 
     # actions
@@ -334,7 +344,7 @@ class RemoteControl:
         flags = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
         proc = self.popen([powershell, "-NoLogo", "-NoProfile", "-Command", script], cwd=str(path), env=env,
                           creationflags=flags)
-        self._trust_processes[name] = proc
+        self._trust_processes[self._trust_key(name)] = proc
         return {**self._view(name, include_owner_only), "trust_prompt_open": True}
 
     def _owner_hidden(self, name, entry) -> bool:
@@ -356,7 +366,7 @@ class RemoteControl:
         if name in self.rc.folders or name in self.cfg.projects:
             if include_owner_only and self._load().get(name, {}).get('owner_only'):
                 saved = self._load()[name]
-                if self._alive(saved) or self._trust_prompt_open(name):
+                if self._alive(saved) or self._trust_prompt_open(name, True):
                     self.discovery.audit(action + '_refusal' if action else 'folder_refusal', actor, reason='slug_conflict')
                     raise RemoteControlError('slug_conflict')
             yield self.folder(name)
