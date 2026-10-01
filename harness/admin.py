@@ -278,6 +278,8 @@ def _collect_operations(app: FastAPI, mgr) -> list[dict]:
     operations.extend(config_api.register_admin(app, mgr, require_admin))
     from . import discovery_api
     operations.extend(discovery_api.register(app, mgr, require_admin))
+    from . import google_signin_api
+    operations.extend(google_signin_api.register(app, mgr))
     operations.sort(key=lambda row: (row["path"], row["method"]))
     return operations
 

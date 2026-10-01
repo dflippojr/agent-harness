@@ -22,6 +22,7 @@ from . import access as access_mod
 from . import compat
 from . import config as config_mod
 from . import efficiency
+from . import google_signin
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
 
@@ -375,12 +376,19 @@ async def guard(request: Request, call_next):
     info = _origin_info(request, m, public_path)
     # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
     login = request.headers.get("tailscale-user-login")
-    ident = access_mod.resolve_access(m.cfg, login, m.db)
+    # Issue #64: a linked Google session can select a member only on an admitted Serve login (precedence table in
+    # docs/google-signin.md). With Google sign-in off this is exactly `resolve_access`.
+    ident = m.google_signin.resolve(request, login)
+    web = request.state.web_auth
     request.state.access = ident
     if ident.kind in ("owner", "member") and ident.allowed and ident.user_id != "owner":
         m.db.touch_account(ident.user_id)
-    refusal = _access_refusal(request, m, ident, login, info.cors_headers)
+    refusal = _web_session_refusal(request, m, ident, web, public_path, info.cors_headers)
+    if refusal is None and not (web.admitted and not ident.allowed):
+        refusal = _access_refusal(request, m, ident, login, info.cors_headers)
     if refusal is not None:
+        if web.clear_cookie:
+            google_signin.clear_session_cookie(refusal)
         return refusal
     surface = compat.surface_for_path(public_path)
     compatibility = compat.check_client(request.headers.get(compat.CLIENT_HEADER, ""), surface) if surface else None
@@ -398,7 +406,26 @@ async def guard(request: Request, call_next):
         response.headers["Warning"] = '299 agent-harness "client version header will be required after this transition release"'
     for key, value in info.cors_headers.items():
         response.headers[key] = value
+    if web.clear_cookie:
+        google_signin.clear_session_cookie(response)
     return response
+
+
+def _web_session_refusal(request: Request, m: Manager, ident, web, public_path: str,
+                         cors_headers: dict) -> JSONResponse | None:
+    """Pre-sign-in admitted devices reach only the Web shell and sign-in routes; cookie mutations need CSRF."""
+    if web.admitted and not ident.allowed:
+        if m.google_signin.pre_auth_allowed(request.method, public_path):
+            return None
+        return JSONResponse({"detail": google_signin.SIGN_IN_REQUIRED, "error": {
+            "code": "sign_in_required", "message": google_signin.SIGN_IN_REQUIRED, "retryable": False,
+        }}, status_code=401, headers=cors_headers)
+    if web.via_session and request.method not in access_mod.SAFE_METHODS:
+        problem = m.google_signin.csrf_problem(request, web)
+        if problem:
+            log.warning("refused %s %s for a Google Web session (%s)", request.method, request.url.path, problem)
+            return JSONResponse({"detail": problem}, status_code=403, headers=cors_headers)
+    return None
 
 
 async def harness_error(request: Request, exc: HarnessError):
