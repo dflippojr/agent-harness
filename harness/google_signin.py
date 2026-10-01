@@ -167,7 +167,8 @@ def _cached_acl(path: Path, st: os.stat_result) -> set[str] | None:
         return hit[1]
     sids = acl_reader(path)
     _acl_cache.clear()
-    _acl_cache[key] = (time.monotonic(), sids)
+    if sids is not None:  # an unreadable ACL (timeout, transient failure) is retried, not remembered for an hour
+        _acl_cache[key] = (time.monotonic(), sids)
     return sids
 
 
@@ -240,7 +241,7 @@ def read_client_secret(cfg) -> str:
     return _parse_secret(cfg, data)
 
 
-def config_problems(cfg) -> list[str]:
+def config_problems(cfg, member_logins=()) -> list[str]:
     """Static readiness checks, in the order an owner would fix them. Empty means ready to preflight."""
     conf = cfg.google_signin
     if not conf.enabled:
@@ -255,9 +256,9 @@ def config_problems(cfg) -> list[str]:
     if not CLIENT_ID_RE.fullmatch((conf.client_id or "").strip()):
         problems.append("client_id must be a Google OAuth web client ID (*.apps.googleusercontent.com)")
     guests = {g.login for g in cfg.guests}
-    overlap = set(conf.admitted_logins) & (set(cfg.allowed_logins) | guests)
+    overlap = set(conf.admitted_logins) & (set(cfg.allowed_logins) | guests | set(member_logins))
     if overlap:
-        problems.append("admitted_logins must not include an owner or guest login")
+        problems.append("admitted_logins must not include an owner, guest, or member login")
     try:
         read_client_secret(cfg)
     except ValueError as e:
@@ -528,14 +529,17 @@ class GoogleSignin:
             file_key = None
         return (conf.enabled, conf.client_id, conf.client_secret_file, tuple(conf.admitted_logins),
                 self.cfg.public_url, self.cfg.host, tuple(self.cfg.allowed_logins),
-                tuple(g.login for g in self.cfg.guests), file_key)
+                tuple(g.login for g in self.cfg.guests), self._member_logins(), file_key)
+
+    def _member_logins(self) -> tuple:
+        return tuple(sorted(a["login"] for a in self.db.list_accounts() if a.get("login")))
 
     def problems(self) -> list[str]:
         key = self._static_key()
         cached = self._static
         if cached and cached[0] == key and self.clock() - cached[1] < STATIC_CACHE_SECONDS:
             return cached[2]
-        problems = config_problems(self.cfg)
+        problems = config_problems(self.cfg, key[-2])
         self._static = (key, self.clock(), problems)
         return problems
 

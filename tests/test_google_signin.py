@@ -353,7 +353,34 @@ def test_windows_acl_reader_reads_real_acl(tmp_path):
     path = tmp_path / "secret.txt"
     path.write_text(SECRET, encoding="utf-8")
     sids = gs._windows_allow_sids(path)
+    if sids is None:
+        pytest.skip("PowerShell Get-Acl is unavailable in this environment (the product treats this as insecure)")
     assert sids and all(s.startswith("S-1-") or s == "unresolved" for s in sids)
+
+
+def test_admitted_login_overlapping_a_member_fails_closed(env):
+    env.cfg.google_signin.admitted_logins = [ALICE]
+    problems = env.m.google_signin.problems()
+    assert any("member login" in p for p in problems), problems
+    assert any("member login" in p for p in gs.config_problems(env.cfg, [ALICE]))
+    assert not env.m.google_signin.enabled()
+    view = env.owner("GET", f"{PREFIX}/google-signin", params={"refresh": "true"}).json()
+    assert view["ready"] is False and view["preflight"]["ok"] is False
+
+
+def test_unreadable_acl_is_retried_not_cached(env, monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("Windows ACL cache")
+    calls = []
+
+    def flaky(path):
+        calls.append(path)
+        return None if len(calls) == 1 else {"S-1-5-18"}
+    monkeypatch.setattr(gs, "acl_reader", flaky)
+    gs._acl_cache.clear()
+    st = os.stat(env.secret_file)
+    assert gs.permission_problem(env.secret_file, st) == "could not read the client_secret_file ACL"
+    assert gs.permission_problem(env.secret_file, st) == ""
 
 
 def test_secret_inside_source_tree_refused(env):
