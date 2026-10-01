@@ -1,6 +1,7 @@
 """Owner discovery contracts; fake metadata backend exercises races on every OS."""
 import asyncio
 import json
+import os
 import ntpath
 import socket
 import subprocess
@@ -634,3 +635,52 @@ async def test_folder_changing_mid_check_marks_only_that_folder_unavailable(tmp_
     assert 'secret raw path' not in json.dumps(rows)
     with pytest.raises(ToolError, match='directory_unavailable'):
         await service.rc.launch('project', include_owner_only=True)
+
+
+@run_async
+async def test_configured_folder_vanishing_after_trust_prompt_returns_unavailable_view(tmp_path, monkeypatch):
+    from harness import remote_control
+    service, _ = discovery(tmp_path)
+    rc = service.rc
+    local = tmp_path / 'local'
+    local.mkdir()
+    rc.rc.folders['proj'] = str(local)
+
+    def vanish(*a, **kw):
+        local.rmdir()
+        return SimpleNamespace(pid=2, poll=lambda: None)
+
+    rc.popen = vanish
+    monkeypatch.setattr(remote_control, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(subprocess, 'CREATE_NEW_CONSOLE', 16, raising=False)
+    monkeypatch.setattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 512, raising=False)
+    monkeypatch.setattr(remote_control.shutil, 'which', lambda _: 'powershell.exe')
+    monkeypatch.setattr(rc, '_claude', lambda: 'claude.exe')
+    view = rc.open_trust_prompt('proj')
+    assert view['invalid'] == 'directory_unavailable' and view['trust_prompt_open']
+
+
+@run_async
+async def test_configured_folder_vanishing_after_launch_returns_unavailable_view(tmp_path, monkeypatch):
+    from harness import remote_control
+    service, _ = discovery(tmp_path)
+    rc = service.rc
+    local = tmp_path / 'local'
+    local.mkdir()
+    rc.rc.folders['proj'] = str(local)
+    rc.dir.mkdir(parents=True, exist_ok=True)
+    rc.claude_json.write_text(json.dumps({'projects': {str(local): {'hasTrustDialogAccepted': True}}}))
+    log = {}
+
+    def spawn(cmd, path, log_path, flags):
+        local.rmdir()
+        log_path.write_text('https://claude.ai/code/session_x\n')
+        return SimpleNamespace(pid=os.getpid(), poll=lambda: None)
+
+    monkeypatch.setattr(rc, '_spawn_logged', spawn)
+    monkeypatch.setattr(rc, '_claude', lambda: 'claude.exe')
+    monkeypatch.setattr(remote_control, 'parse_log', lambda t: {'pairing_url': 'https://claude.ai/code/x', 'error': ''})
+    rc.notify = lambda payload: log.setdefault('n', payload)
+    view = await rc.launch('proj')
+    assert view['invalid'] == 'directory_unavailable' and view['running']
+    assert view['pairing_url'] == 'https://claude.ai/code/x'

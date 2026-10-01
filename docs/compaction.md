@@ -80,7 +80,6 @@ not increment round-reset accounting. A successful reset keeps the pinned
 head, injects the tagged state (including derived `files_modified`), a fixed
 next-step message, and the latest tool-call exchange.
 
-
 ## Delegated edits
 
 `delegate_edit(paths, instruction, task_id?)` keeps file contents out of the
@@ -106,3 +105,7 @@ when a proposal for it is applied. Delegate tokens are added to session totals
 (not as turns) and tallied in `delegate_tokens` on the run and in totals; they
 don't count against the run's completion budget. Only local-model agent
 sessions on the tower with a workspace are offered these tools.
+
+## Research backlog
+
+[Context Language Models](context-language-models-research.md) is a concept to investigate (2026-10-01); the note describes a proposed comparison with the current implementation.
