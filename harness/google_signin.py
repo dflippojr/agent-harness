@@ -815,7 +815,8 @@ class GoogleSignin:
             user_id = self._finish_signin(web, claims, now)
         else:
             user_id = self._finish_link(web, ident, attempt, claims, now)
-        return user_id, self.issue_session(user_id, replacing=web.token)
+        # The callback is a cross-site navigation, so the cookie was not used for auth; still retire it.
+        return user_id, self.issue_session(user_id, replacing=request.cookies.get(SESSION_COOKIE, ""))
 
     def _finish_signin(self, web: WebAuth, claims: dict, now: float) -> str:
         if not web.admitted:
