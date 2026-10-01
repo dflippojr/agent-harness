@@ -80,3 +80,6 @@ not increment round-reset accounting. A successful reset keeps the pinned
 head, injects the tagged state (including derived `files_modified`), a fixed
 next-step message, and the latest tool-call exchange.
 
+## Research backlog
+
+[Context Language Models](context-language-models-research.md) is a concept to investigate (2026-10-01); the note describes a proposed comparison with the current implementation.
