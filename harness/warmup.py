@@ -46,6 +46,7 @@ class ModelWarmer:
         self._keepalive: asyncio.Task | None = None
         self._changed = asyncio.Event()  # set by notify(): the guard changed state, so re-check a load in progress
         self._unparking: set[asyncio.Task] = set()  # loads that may have removed the pause flag (park waits for them)
+        self._parking = 0  # parks in progress: a load in flight aborts and no new one starts
 
     def _control_for(self, model: ModelConfig):
         return self.control() if model.name == self.managed_model else None
@@ -103,13 +104,21 @@ class ModelWarmer:
         return state
 
     async def park(self, stop: Callable[[], Awaitable[None]]) -> None:
-        """Something takes the GPU (`blocked()` is already true): a load that removed the pause flag stops first and
-        puts it back, then `stop` (ServerControl.stop) writes the flag again and stops llama-server."""
-        self.notify()
-        loads = [t for t in self._unparking if not t.done()]
-        if loads:
-            await asyncio.wait(loads)
-        await stop()
+        """The one path that stops llama-server (a GPU hold, an image batch, Unload now). A load in flight is aborted,
+        not waited out: it puts the pause flag back and returns, then `stop` (ServerControl.stop) writes the flag again
+        and stops llama-server. No new load starts until `stop` is done."""
+        self._parking += 1
+        try:
+            self.notify()
+            loads = [t for t in self._unparking if not t.done()]
+            if loads:
+                await asyncio.wait(loads)
+            await stop()
+        finally:
+            self._parking -= 1
+
+    def _held(self) -> bool:
+        return self.blocked() or self._parking > 0
 
     def notify(self) -> None:
         """The guard's state or the pause flag changed; a load waiting on /health re-checks now."""
@@ -144,8 +153,8 @@ class ModelWarmer:
     async def _unpark(self, model: ModelConfig, ctl) -> None:
         """Remove the pause flag; the supervisor starts llama-server, which loads the model before /health is OK.
         `blocked()` is checked and the load registered with no await before the flag goes, so `park` always sees it."""
-        if self.blocked():
-            log.info("not loading %s: the guard or an image batch holds the GPU", model.name)
+        if self._held():
+            log.info("not loading %s: the guard or an image batch holds the GPU, or it is being unloaded", model.name)
             return
         task = asyncio.current_task()
         self._unparking.add(task)
@@ -161,9 +170,9 @@ class ModelWarmer:
         deadline = started + HEALTH_TIMEOUT_SECONDS
         while (remaining := deadline - time.monotonic()) > 0:
             self._changed.clear()
-            if self.blocked():
-                ctl.write_flag()  # the GPU was taken meanwhile: llama-server must not start
-                log.info("loading %s stopped: the guard or an image batch holds the GPU", model.name)
+            if self._held():
+                ctl.write_flag()  # the GPU was taken or the model unloaded meanwhile: llama-server must not start
+                log.info("loading %s stopped: the guard or an image batch holds the GPU, or it was unloaded", model.name)
                 return
             if ctl.flagged():
                 log.info("loading %s stopped: the model was unloaded", model.name)

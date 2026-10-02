@@ -37,10 +37,13 @@ These **don't** load the model:
   `-LoadAtLogon` restores the old eager start. *Decision:* lazy by default. The daemon is the model's only consumer
   on the tower (Grafana only scrapes `/metrics`, which is simply down while parked). Installed instances
   (`install/run-server.ps1`, `run-server.sh`) still start eagerly at logon. Their daemons are lazy after holds.
-- **A GPU hold or image batch that starts during a load.** Every load removes the flag through
-  `ModelWarmer._unpark`, and every GPU taker stops the server through `ModelWarmer.park`. The taker waits for a load
-  in flight to end; the load puts the flag back when it sees the GPU taken. The taker then writes the flag again, so
-  the supervisor can't start llama-server while ComfyUI or a game owns the card.
+- **A GPU hold, image batch or Unload now that starts during a load.** Every load removes the flag through
+  `ModelWarmer._unpark`, and every path that stops the server (the hold, an image batch, Unload now) goes through
+  `ModelWarmer.park`. Park aborts a load in flight rather than waiting it out: the load puts the flag back as soon as
+  its unlink has landed and returns. Park then writes the flag again and stops llama-server, and no new load starts
+  until it is done, so the supervisor can't start llama-server while ComfyUI or a game owns the card or after an
+  unload. (`run-qwen.ps1` writes the flag at logon, before the daemon runs; llama-server's own idle sleep doesn't
+  touch the flag.)
 
 `lazy_load: false` in `config/harness.yaml` restores the old eager reload after holds and image batches.
 

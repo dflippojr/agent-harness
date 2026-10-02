@@ -550,12 +550,12 @@ class GpuGuard:
     async def unload(self, before_stop: Callable[[], None] | None = None) -> bool:
         """Unload the model now (park it) without holding the queue. False while a model turn is running or about to
         (it holds a lease in `busy`). `before_stop` runs only once the unload is decided, with no await between the
-        check and it, so a refused unload changes nothing."""
+        check and it, so a refused unload changes nothing. A load in flight (Load local model now) is aborted (park)."""
         if self.state != CLEAR or self.busy():
             return False
         if before_stop is not None:
             before_stop()
-        await self.control.stop()
+        await self.park(self.control.stop)
         self.on_change()
         return True
 

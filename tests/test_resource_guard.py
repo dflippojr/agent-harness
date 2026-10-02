@@ -770,3 +770,50 @@ def test_guard_hold_during_a_load_keeps_the_pause_flag(tmp_path, monkeypatch):
         await asyncio.wait_for(load, 2)
         assert m.guard.state == PAUSED and control.flag and control.stops == 1
     asyncio.run(body())
+
+
+def test_unload_during_a_load_now_aborts_it_and_keeps_the_model_unloaded(tmp_path, monkeypatch):
+    """Load local model now, then Unload now while the flag's unlink is still landing: the unload goes through
+    park, which aborts the load, so the flag stays, the pin is gone and nothing restarts the server."""
+    import harness.warmup as warmup
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
+
+    async def body():
+        m = guarded_manager(tmp_path)
+        await m.start(maintenance=False)
+        control = m.guard.control = SlowUnlink()
+        model = m.cfg.models[m.cfg.default_model]
+        m.warmer.keepalive_seconds = 0.05
+        assert await m.warmer.load_now(model, 3600) == UNLOADED
+        await asyncio.sleep(0.02)
+        assert control.starts == 1
+        unload = asyncio.create_task(m.guard.unload(before_stop=m.warmer.unpin))
+        await asyncio.sleep(0.02)
+        control.go.set()  # the unlink lands after the unload began
+        assert await asyncio.wait_for(unload, 2)
+        await asyncio.sleep(0.2)  # several keepalive periods
+        assert control.flag and control.stops == 1 and control.starts == 1
+        assert not m.warmer.pinned() and m.warmer.waking_for(model) is None
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_unload_during_the_health_wait_stops_the_load(tmp_path, monkeypatch):
+    import harness.warmup as warmup
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
+
+    async def body():
+        m = guarded_manager(tmp_path)
+        await m.start(maintenance=False)
+        control = m.guard.control
+        control.flag, control.health = True, False
+        model = m.cfg.models[m.cfg.default_model]
+        await m.warmer.load_now(model, 3600)
+        await asyncio.sleep(0.02)
+        assert control.starts == 1 and not control.flag  # waiting on /health
+        assert await asyncio.wait_for(m.guard.unload(before_stop=m.warmer.unpin), 2)
+        await asyncio.sleep(0.05)
+        assert control.flag and control.starts == 1 and not m.warmer.pinned()
+        assert m.warmer.waking_for(model) is None
+        await m.stop()
+    asyncio.run(body())
