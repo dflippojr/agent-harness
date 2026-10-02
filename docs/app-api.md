@@ -253,8 +253,9 @@ Requires owning the session (or an owner token); `sessions:all` does not authori
 
 ### Secret scan before push and merge
 
-`GET /api/v1/sessions/{id}/changes` (and the owner-surface equivalent) includes `secret_scan` for tower sessions. The
-pinned gitleaks release and rules in `harness/gitleaks/` scan only the lines the session added (`base..HEAD` plus
+`GET /api/v1/sessions/{id}/changes` (and the owner-surface equivalent) includes `secret_scan` for tower sessions. For a
+session on another target (such as `macbook`) it is `{"status": "unsupported", "message": "...", "findings": []}`:
+those sessions are not scanned. The pinned gitleaks release and rules in `harness/gitleaks/` scan only the lines the session added (`base..HEAD` plus
 uncommitted and untracked files), and the lines each commit in `base..HEAD` added. A value that a later commit removed
 is still in the commit a push sends, so it is reported with that commit's short SHA in `"commit"` (and in its
 fingerprint). No workspace `.gitleaks.toml`, `.gitleaksignore`, baseline, or `gitleaks:allow`
@@ -266,14 +267,16 @@ comment changes the result.
   "fingerprint": "64e5b1561387016aa53e", "preview": "AK…7Q", "dismissed": false}]}
 ```
 
-`status` is `ok`, `unavailable` (the pinned binary is missing or the wrong version), or `error` (it failed to run).
+`status` is `ok`, `unavailable` (the pinned binary is missing or the wrong version), `error` (it failed to run), or
+`unsupported` (not a tower session).
 `preview` shows at most the first and last two characters. The value is never returned, logged, or stored, and the
 diff in the same response shows each flagged value as `[secret AK…7Q]`. A dismissed finding has
 `"dismissed": true` and `dismissal: {reason, actor_id, at}`. Dismissals apply to the same fingerprint at later heads of
 that session. A repeated scan of an unchanged head, commit range and working tree comes from a cache
 (`"cached": true`).
 
-Review `merge` and `push` scan after committing uncommitted work. `push` sends every commit, so it counts every
+The gate below applies to **tower sessions only**. Review `merge` and `push` on other targets are not scanned or
+blocked. On tower sessions, Review `merge` and `push` scan after committing uncommitted work. `push` sends every commit, so it counts every
 finding; `merge` squashes, so it ignores findings with a `"commit"` (values no longer in the net diff). They return
 **409** `secret_findings` (`details: {findings, rules: {rule: count}}`) while any such finding is not dismissed, and
 **503** `secret_scan_unavailable` if the scanner cannot run. They fail closed, so a broken install blocks them until it is

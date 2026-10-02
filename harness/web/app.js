@@ -2567,6 +2567,10 @@ async function viewChanges(session) {
 // Values never reach the browser; `preview` keeps at most the first and last two characters.
 function secretScanCard(sid, scan, state, canComment, render) {
   if (!scan) return null;
+  if (scan.status === "unsupported") {  // remote targets: the gate covers tower sessions only
+    return h("section", { class: "card secret-scan" }, h("h3", {}, "Secret scan"),
+      h("p", { class: "note" }, `Secret scan not available for this target: ${scan.message}.`));
+  }
   if (scan.status !== "ok") {
     return h("section", { class: "card secret-scan" }, h("h3", {}, "Secret scan"),
       h("p", { class: "note" }, `The secret scan could not run, so Merge and Push are blocked: ${scan.message}`));

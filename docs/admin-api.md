@@ -49,7 +49,7 @@ same; only the prefix and the owner credential check are new.
 | Identity | `/me`, `/profile` |
 | Household accounts | `/accounts`, `/accounts/{user_id}`, `/accounts/audit` |
 | Sessions | `/sessions`, `/sessions/{ref}`, messages, cancel, rerun, approvals, transcript, events, **metrics** |
-| Review | `/sessions/{ref}/changes`, `/sessions/{ref}/review/{action}` (`merge` \| `push` \| `discard`) Line comments: `GET/POST /sessions/{ref}/review-comments`, `DELETE .../{comment_id}`, `POST .../send` (one follow-up; owner and members in their own sessions, never app tokens; the same paths under `/api/v1`). Secret scan: `changes` carries `secret_scan`; `POST /sessions/{ref}/secret-findings/fix` drafts one comment per open finding; `POST /sessions/{ref}/secret-findings/{fingerprint}/dismiss` `{reason}` (owner only, audited). See [app-api.md](app-api.md#secret-scan-before-push-and-merge) |
+| Review | `/sessions/{ref}/changes`, `/sessions/{ref}/review/{action}` (`merge` \| `push` \| `discard`) Line comments: `GET/POST /sessions/{ref}/review-comments`, `DELETE .../{comment_id}`, `POST .../send` (one follow-up; owner and members in their own sessions, never app tokens; the same paths under `/api/v1`). Secret scan (tower sessions only): `changes` carries `secret_scan`; `POST /sessions/{ref}/secret-findings/fix` drafts one comment per open finding; `POST /sessions/{ref}/secret-findings/{fingerprint}/dismiss` `{reason}` (owner only, audited). See [app-api.md](app-api.md#secret-scan-before-push-and-merge) |
 | Search | `/search`, `/events`, `/queue` |
 | Projects and jobs | `/projects`, `/templates`, `/jobs` |
 | Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}` |
@@ -249,7 +249,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
-| 1.15 | 2026-10-01 | Secret scan of a session's added lines on `changes`; Review `merge`/`push` return 409 `secret_findings` (or 503 `secret_scan_unavailable`) until findings are fixed or dismissed; fix and dismiss endpoints |
+| 1.15 | 2026-10-01 | Secret scan of a session's added lines on `changes`; Review `merge`/`push` on tower sessions return 409 `secret_findings` (or 503 `secret_scan_unavailable`) until findings are fixed or dismissed; fix and dismiss endpoints |
 | 1.14 | 2026-09-28 | Owner session context-efficiency metrics and Prometheus retry/cache counters |
 | 1.12 | 2026-09-19 | Owner masked inpainting: upload, edit, cancel, and delete |
 | 1.11 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |

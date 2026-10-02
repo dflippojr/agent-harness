@@ -482,3 +482,17 @@ def test_clean_branch_scan_is_fast(tmp_path):
         assert (await m.changes(s["id"]))["secret_scan"]["cached"]
         await m.stop()
     asyncio.run(body())
+
+
+def test_remote_session_changes_say_the_scan_is_not_available(tmp_path, monkeypatch):
+    """The gate covers tower sessions only (issue #263); a remote target's Changes says so instead of nothing."""
+    m = Manager(project_cfg(tmp_path, str(make_repo(tmp_path / "src"))), chat=edit_steps())
+    s = {"id": "s1", "target": "macbook", "workspace_removed": 0, "base_commit": "abc"}
+    monkeypatch.setattr(m, "get", lambda ref: s)
+
+    async def remote(session, op, args, timeout=None):
+        return {"repos": []}
+    monkeypatch.setattr(m, "remote", remote)
+    scan = asyncio.run(m.changes("s1"))["secret_scan"]
+    assert scan["status"] == "unsupported" and scan["findings"] == []
+    assert "macbook" in scan["message"] and "not available" in scan["message"]

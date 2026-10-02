@@ -758,7 +758,12 @@ class Manager:
         if s["workspace_removed"]:
             return {"repos": [], "removed": True}
         if s["target"] != "tower":
-            return await self.remote(s, "changes", {"base_commit": s["base_commit"]}, timeout=120)
+            data = await self.remote(s, "changes", {"base_commit": s["base_commit"]}, timeout=120)
+            # The push/merge secret gate covers tower sessions only (issue #263); say so rather than show nothing.
+            return {**data, "secret_scan": {
+                "status": "unsupported", "scanner": secret_scan.SCANNER, "findings": [], "open": 0,
+                "message": f"the secret scan is not available for the {s['target']} target, so Merge and Push "
+                           "are not checked for secrets"}}
         sid = s["id"]
 
         def scan(diffs: list[dict]) -> tuple[dict, list[str]]:
