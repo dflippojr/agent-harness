@@ -492,17 +492,25 @@ class Runner:
             try:
                 await self._run(sid, recovered)
             finally:
-                s = self.db.get_session(sid)
-                root.set({"harness.status": s["status"]})
-                run = s["run"]
-                run["trace"] = {**(run.get("trace") or trace), "last_stop": time.time()}
-                self.db.update_session(sid, run=run)
+                self._trace_run_stopped(sid, trace, root)
+
+    def _trace_run_stopped(self, sid: str, trace: dict, root) -> None:
+        """Record the run's end on the session so the next run's `idle` span starts there."""
+        s = self.db.get_session(sid)
+        if s is None:  # deleted while running
+            return
+        root.set({"harness.status": s["status"]})
+        run = s["run"]
+        run["trace"] = {**(run.get("trace") or trace), "last_stop": time.time()}
+        self.db.update_session(sid, run=run)
 
     def _session_trace(self, sid: str) -> dict:
         """The session's persisted trace ids ({} when tracing is off), created on its first traced run."""
         if not telemetry.tracer().enabled:
             return {}
         s = self.db.get_session(sid)
+        if s is None:
+            return {}
         trace = s["run"].get("trace") or {}
         if not trace.get("trace_id"):
             trace = {**telemetry.tracer().new_trace(), "started_at": s["created_at"]}
