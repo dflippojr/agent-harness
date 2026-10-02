@@ -1,0 +1,8 @@
+# Experiment-only (#264): repository map generator, harness/repomap.py. Not needed by the daemon unless repo_map.enabled.
+# Abi3 wheels exist for Windows and Linux; verified to install on Windows (cp310).
+tree-sitter==0.26.0
+tree-sitter-python==0.25.0
+tree-sitter-javascript==0.25.0
+tree-sitter-typescript==0.23.2
+tree-sitter-go==0.25.0
+tree-sitter-rust==0.24.2
