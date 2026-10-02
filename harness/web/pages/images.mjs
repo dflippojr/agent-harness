@@ -2,6 +2,8 @@
 // (DOM builder, api, router, header) is injected by app.js so this module imports under plain Node and never
 // reaches into another page.
 
+import { ago } from "../lib/format.mjs";
+
 export const IMAGE_PHASE = {
   idle: "", waiting: "Waiting for the GPU (a game or transcode is using it)", switching: "Unloading the language model",
   starting: "Starting ComfyUI", warm: "Image generator is ready", generating: "Generating",
