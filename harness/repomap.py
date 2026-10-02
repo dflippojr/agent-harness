@@ -159,6 +159,8 @@ def _signature(node, src: bytes) -> str:
     lines[-1] = re.sub(r"\s*(#|//).*$", "", lines[-1])  # a trailing comment after the colon or brace
     sig = " ".join(" ".join(lines).split())
     sig = sig.rstrip(":{ ").strip()
+    if node.type == "type_spec":  # Go: the `type` keyword belongs to the enclosing type_declaration
+        sig = "type " + sig
     if len(sig) > MAX_SIGNATURE_CHARS:
         sig = sig[:MAX_SIGNATURE_CHARS - 3].rstrip() + "..."
     return sig
