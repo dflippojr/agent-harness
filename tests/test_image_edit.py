@@ -685,7 +685,7 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
 
 
 def test_web_mask_editor_round_trips_source_pixels():
-    js = (Path(__file__).parents[1] / "harness" / "web" / "app.js").read_text(encoding="utf-8")
+    js = (Path(__file__).parents[1] / "harness" / "web" / "pages" / "images.mjs").read_text(encoding="utf-8")
     css = (Path(__file__).parents[1] / "harness" / "web" / "style.css").read_text(encoding="utf-8")
     client = (Path(__file__).parents[1] / "harness" / "web" / "client.mjs").read_text(encoding="utf-8")
     assert "function maskEditor" in js
