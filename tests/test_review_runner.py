@@ -1682,3 +1682,51 @@ def test_adoption_docs_caller_matches_reusable_workflow():
     assert "dflippojr/agent-harness/.github/workflows/review.yml@*" in section
     assert '"context": "Automated Code Review", "integration_id": 15368' in section
     assert "git tag -f review-v1" in section
+
+
+def test_github_output_tolerates_result_without_verdict(tmp_path):
+    output_path = tmp_path / "posted-review.md"
+    github_output = tmp_path / "github-output.txt"
+    result = run_powershell(
+        tmp_path,
+        f"""
+$script:diff = @'
+diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -1 +1 @@
+-x
++y
+'@
+function Get-ReviewCoverage {{
+    param(
+        [AllowEmptyString()][string]$RequestedMode,
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [AllowEmptyString()][string]$Repository
+    )
+    return [pscustomobject]@{{
+        Mode = 'full'; Reason = 'test'; Diff = $script:diff; LastSha = ''; HeadSha = '{HEAD_SHA}'
+        CommitCount = 0; LineCount = 0; CoverageLine = 'Reviewed the full diff'; BaseRef = 'main'
+    }}
+}}
+function Invoke-ReviewFallback {{
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Backends,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory,
+        [Parameter(Mandatory = $true)][scriptblock]$Runner,
+        [string]$CursorBase = ''
+    )
+    return [pscustomobject]@{{ Backend = 'codex'; Output = 'legacy output'; Model = $null }}
+}}
+$env:GITHUB_OUTPUT = '{github_output}'
+Invoke-ReviewMain -Backend codex -ConfiguredBackends '' -Mode full -Workspace '{tmp_path}' -PrNumber '143' -Prompt 'review prompt' -OutputPath '{output_path}' -ScratchDirectory '{tmp_path}'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    written = github_output.read_text(encoding="utf-8-sig")
+    assert "backend=codex" in written
+    assert "verdict=" in written

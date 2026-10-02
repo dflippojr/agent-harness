@@ -1172,8 +1172,10 @@ function Invoke-ReviewMain {
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-        "verdict=$($result.Verdict)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-        "findings=$($result.FindingCount)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        $verdictValue = if ($result.PSObject.Properties['Verdict']) { [string]$result.Verdict } else { '' }
+        $findingValue = if ($result.PSObject.Properties['FindingCount']) { [string]$result.FindingCount } else { '' }
+        "verdict=$verdictValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        "findings=$findingValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "omitted_files=$(@($embedding.OmittedFiles).Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         if (-not [string]::IsNullOrWhiteSpace([string]$result.Model)) {
             "model=$($result.Model)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
