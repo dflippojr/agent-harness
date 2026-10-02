@@ -1137,6 +1137,7 @@ class Runner:
             existing = await self._wait_approval(existing["id"])
         if existing["status"] == "approved":
             self.set_status(sid, "running")
+            self._taint_allowed_cli_request(sid, name, args)
             await cli.respond_permission(request_id, "allow", args)
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
@@ -1147,14 +1148,11 @@ class Runner:
                               call_id: str) -> dict | None:
         """Apply the policy to a new CLI tool request: answer it now (None) or persist an approval to wait on."""
         sid = s["id"]
-        source = taint.source_for(name, args)
-        if source is not None:  # a hosted CLI web request is untrusted content the moment it is allowed to run
-            self._add_taint(sid, *source)
-            s = self.db.get_session(sid)
         decision = self._taint_layer(s, name, args, self.policy(s).decide(name, args))
         self.bus.emit(sid, "tool_call", {"id": call_id, "name": name, "args": args,
                                          "decision": decision.action, "reason": decision.reason})
         if decision.action == ALLOW:
+            self._taint_allowed_cli_request(sid, name, args)
             await cli.respond_permission(request_id, "allow", args)
             return None
         if decision.action != ASK:
@@ -1167,6 +1165,14 @@ class Runner:
                     "detail": str(request.get("description") or "")}
         extra = await self._review_ask(s, name, args, decision)
         return self._persist_ask(sid, existing, extra)
+
+    def _taint_allowed_cli_request(self, sid: str, name: str, args: dict) -> None:
+        """Taint for a hosted CLI web request at the moment it is allowed to run. The CLI's tool_result only carries
+        the call id, not the URL, so unlike the daemon path (which taints on a successful result) this taints on
+        allow; a denied request never ran and leaves the session untouched."""
+        source = taint.source_for(name, args)
+        if source is not None:
+            self._add_taint(sid, *source)
 
     def _finish_cli_result(self, sid: str, result: dict) -> None:
         s = self.db.get_session(sid)

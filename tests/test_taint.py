@@ -55,10 +55,14 @@ def test_tainted_session_asks_survives_restart_and_clear_is_evented(tmp_path):
     cfg = make_cfg(tmp_path, rules=NET_ALLOW)
 
     async def body():
-        m = Manager(cfg, chat=Script([_shell(), Completion(content="done")]))
+        # Control: the rule allows the networked shell in an untainted session. Decided directly rather than run,
+        # since running a networked shell needs the Docker sandbox, which CI and some dev hosts don't have.
+        m = Manager(cfg, chat=Script([Completion(content="done")]))
         await m.start()
         clean = m.create("untainted", project="guarded")
-        await wait_status(m, clean["id"], "done")  # rule allows it: unchanged behavior
+        await wait_status(m, clean["id"], "done")
+        shell = {"command": "echo hi", "network": True}
+        assert m.runner._decide(m.db.get_session(clean["id"]), "run_shell", shell).action == ALLOW
         await m.stop()
 
         m = Manager(cfg, chat=Script([_shell(), Completion(content="done")]))
@@ -120,15 +124,68 @@ def test_tainted_session_is_never_smart_approved_and_cli_web_taints(tmp_path):
         extra = await m.runner._review_ask(m.db.get_session(s["id"]), "Bash", {"command": "ls"}, tagged)
         assert extra["status"] == "pending" and m.runner.smart.calls == []
 
-        # a hosted CLI WebFetch request taints the session; a later Bash is asked, never auto-approved
+        # an allowed hosted CLI WebFetch request taints the session; a later Bash is asked, never auto-approved
         s2 = m.create("cli")
         await wait_status(m, s2["id"], "done")
         cli = Cli()
-        await m.runner._ask_cli_policy(m.db.get_session(s2["id"]), cli, "r1", {}, "WebFetch",
-                                       {"url": "https://other.example/x"}, "c1")
+        req = {"tool_name": "WebFetch", "input": {"url": "https://other.example/x"}, "tool_use_id": "c1"}
+        task = asyncio.create_task(m.runner._authorize_cli(s2["id"], cli, "r1", req))
+        while not task.done() and not m.db.pending_approvals(s2["id"]):
+            await asyncio.sleep(0.01)
+        if not task.done():
+            m.decide(s2["id"], None, approve=True)
+        await task
+        assert cli.answers == ["allow"]
         assert m.db.get_session(s2["id"])["taint"][0]["origin"] == "other.example"
         pending = await m.runner._ask_cli_policy(m.db.get_session(s2["id"]), cli, "r2", {}, "Bash",
                                                  {"command": "ls"}, "c2")
         assert pending["status"] == "pending"
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_cli_web_request_taints_only_once_allowed(tmp_path):
+    """A hosted CLI WebFetch that is denied (by rule or by the owner) never ran, so it must not taint the session."""
+    cfg = make_cfg(tmp_path, rules=[{"tool": "WebFetch", "action": "deny"}])
+
+    class Cli:
+        def __init__(self):
+            self.answers = []
+
+        async def respond_permission(self, request_id, behavior, args, message=""):
+            self.answers.append(behavior)
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(content="x")]))
+        await m.start()
+        s = m.create("cli", project="guarded")
+        await wait_status(m, s["id"], "done")
+        cli = Cli()
+        req = {"tool_name": "WebFetch", "input": {"url": "https://denied.example/x"}, "tool_use_id": "c1"}
+        await m.runner._authorize_cli(s["id"], cli, "r1", req)
+        assert cli.answers == ["deny"] and not m.db.get_session(s["id"])["taint"]
+
+        cfg.projects["guarded"].rules[:] = [{"tool": "WebFetch", "action": "ask"}]
+        req = {"tool_name": "WebFetch", "input": {"url": "https://refused.example/x"}, "tool_use_id": "c2"}
+        task = asyncio.create_task(m.runner._authorize_cli(s["id"], cli, "r2", req))
+        await wait_status(m, s["id"], "waiting_approval")
+        assert not m.db.get_session(s["id"])["taint"]
+        m.decide(s["id"], None, approve=False)
+        await task
+        assert cli.answers[-1] == "deny" and not m.db.get_session(s["id"])["taint"]
+
+        req = {"tool_name": "WebFetch", "input": {"url": "https://approved.example/x"}, "tool_use_id": "c3"}
+        task = asyncio.create_task(m.runner._authorize_cli(s["id"], cli, "r3", req))
+        await wait_status(m, s["id"], "waiting_approval")
+        m.decide(s["id"], None, approve=True)
+        await task
+        assert cli.answers[-1] == "allow"
+        assert [t["origin"] for t in m.db.get_session(s["id"])["taint"]] == ["approved.example"]
+
+        cfg.projects["guarded"].rules[:] = [{"tool": "WebFetch", "action": "allow"}]
+        req = {"tool_name": "WebFetch", "input": {"url": "https://allowed.example/x"}, "tool_use_id": "c4"}
+        await m.runner._authorize_cli(s["id"], cli, "r4", req)
+        assert cli.answers[-1] == "allow"
+        assert m.db.get_session(s["id"])["taint"][-1]["origin"] == "allowed.example"
         await m.stop()
     asyncio.run(body())
