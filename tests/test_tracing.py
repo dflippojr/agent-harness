@@ -319,3 +319,40 @@ def test_trace_url_from_template():
     assert telemetry.trace_url(template, "") == ""
     assert telemetry.trace_url("", "ab" * 16) == ""
     assert telemetry.trace_url("https://grafana/explore", "ab" * 16) == ""
+
+
+def test_summary_returns_trace_id_and_url_when_on(tmp_path):
+    cfg = make_cfg(tmp_path)
+
+    async def body():
+        m, _ = _traced_manager(cfg, Script([Completion(content="done")]))
+        m.cfg.telemetry = TelemetryConfig(otlp_endpoint=ON.otlp_endpoint, trace_url_template="https://g/x?q={trace_id}")
+        await m.start()
+        s = await wait_status(m, m.create("try")["id"], "done")
+        out = m.summary(s)
+        await m.stop()
+        return out
+    out = asyncio.run(body())
+    assert len(out["trace_id"]) == 32 and out["trace_url"] == "https://g/x?q=" + out["trace_id"]
+
+
+def test_ops_observability_files_are_valid_and_documented():
+    import json
+
+    import yaml
+    ops = ROOT / "ops" / "observability"
+    tempo = yaml.safe_load((ops / "tempo.yaml").read_text(encoding="utf-8"))
+    assert "otlp" in tempo["distributor"]["receivers"]
+    compose = yaml.safe_load((ops / "docker-compose.tempo.yml").read_text(encoding="utf-8"))
+    assert compose["services"]["tempo"]["ports"] == ["127.0.0.1:4318:4318"]  # loopback only
+    datasource = yaml.safe_load((ops / "grafana-datasource-tempo.yaml").read_text(encoding="utf-8"))
+    assert datasource["datasources"][0]["type"] == "tempo" and datasource["datasources"][0]["uid"] == "tempo"
+    dashboard = json.loads((ops / "dashboard-agent-harness-traces.json").read_text(encoding="utf-8"))
+    assert dashboard["panels"] and all(p["datasource"]["uid"] == "tempo" for p in dashboard["panels"])
+    docs = (ROOT / "docs" / "observability.md").read_text(encoding="utf-8")
+    for name in ("tempo.yaml", "ops/observability", "ALLOWED_ATTRIBUTES", "trace_url_template"):
+        assert name in docs or name in (ops / "README.md").read_text(encoding="utf-8")
+    for span in telemetry.SPAN_NAMES:
+        assert span in docs
+    for key in telemetry.ALLOWED_ATTRIBUTES:
+        assert key in docs

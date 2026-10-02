@@ -186,7 +186,7 @@ SPAN_NAMES = frozenset({"session", "idle", "turn", "chat", "execute_tool", "appr
 ALLOWED_ATTRIBUTES = frozenset({
     "harness.session_id", "harness.backend", "harness.status", "harness.recovered", "harness.turn",
     "gen_ai.operation.name", "gen_ai.request.model", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens",
-    "harness.cache_read_tokens", "harness.prompt_ms", "harness.decode_ms", "harness.attempt",
+    "harness.cache_read_tokens", "harness.prompt_ms", "harness.decode_ms",
     "gen_ai.tool.name", "gen_ai.tool.call.id", "harness.policy_decision", "harness.parallel", "harness.ok",
     "harness.output_chars", "harness.approval_status", "harness.queue_front",
     "harness.compaction_tier", "harness.tokens_before", "harness.tokens_after",

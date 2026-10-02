@@ -1,0 +1,17 @@
+# Add this service to the observability stack's compose file (D:\Docker\observability-stack), next to Grafana and
+# Prometheus. Copy tempo.yaml beside it as tempo/tempo.yaml. See README.md.
+services:
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:4318:4318"   # OTLP/HTTP from the harness on the host; loopback only
+    restart: unless-stopped
+    # Grafana reaches Tempo at http://tempo:3200 on the stack's network; the query port is not published.
+
+volumes:
+  tempo-data:
