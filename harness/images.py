@@ -1119,7 +1119,9 @@ class ImageService:
             if empty:
                 return
             self.phase = "switching"
-            await self.control.stop()  # stop llama-server; its supervisor waits while the flag exists
+            # A model load in flight ends first; then the flag is written and llama-server stopped (its supervisor
+            # waits while the flag exists).
+            await self.runner.warmer.park(self.control.stop)
             flagged = True
             first, empty = self._batch_is_empty(first)
             if empty:

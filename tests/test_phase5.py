@@ -91,6 +91,9 @@ class FakeControl:
     def flagged(self):
         return self.flag
 
+    def write_flag(self):
+        self.flag = True
+
     async def stop(self):
         self.flag, self.running = True, False
         self.stops += 1

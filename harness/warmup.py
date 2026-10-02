@@ -6,8 +6,11 @@ takes about a minute. `/props` reports `is_sleeping` without waking the server; 
 With the resource guard's `lazy_load` the server can also be parked: stopped, with the pause flag left in place so
 its supervisor doesn't start it (and load the model) until something needs it. That is `unloaded` here.
 `ensure_loaded` (a queued turn or an endpoint request) and `warm` (the user selected the local model in the app)
-remove the flag; `load_now` also pins the model for a while, sending a one-token request every `keepalive_seconds`
-so the idle unload doesn't fire. Page navigation alone never loads the model (docs/resource-guard.md).
+remove the flag, always through `_unpark`; `load_now` also pins the model for a while, sending a one-token request
+every `keepalive_seconds` so the idle unload doesn't fire. Page navigation alone never loads the model
+(docs/resource-guard.md).
+Whatever takes the GPU (a guard hold, an image batch) stops the server through `park`, which lets a load in flight
+end first, so the flag is in place for as long as it holds the GPU.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Callable
+from typing import Awaitable, Callable
 
 import httpx
 
@@ -42,6 +45,7 @@ class ModelWarmer:
         self.pinned_until: float | None = None  # epoch seconds; "Load local model now" keeps it loaded until then
         self._keepalive: asyncio.Task | None = None
         self._changed = asyncio.Event()  # set by notify(): the guard changed state, so re-check a load in progress
+        self._unparking: set[asyncio.Task] = set()  # loads that may have removed the pause flag (park waits for them)
 
     def _control_for(self, model: ModelConfig):
         return self.control() if model.name == self.managed_model else None
@@ -98,6 +102,15 @@ class ModelWarmer:
             self._keepalive = asyncio.create_task(self._keep_loaded(model), name=f"keepalive-{model.name}")
         return state
 
+    async def park(self, stop: Callable[[], Awaitable[None]]) -> None:
+        """Something takes the GPU (`blocked()` is already true): a load that removed the pause flag stops first and
+        puts it back, then `stop` (ServerControl.stop) writes the flag again and stops llama-server."""
+        self.notify()
+        loads = [t for t in self._unparking if not t.done()]
+        if loads:
+            await asyncio.wait(loads)
+        await stop()
+
     def notify(self) -> None:
         """The guard's state or the pause flag changed; a load waiting on /health re-checks now."""
         self._changed.set()
@@ -129,15 +142,31 @@ class ModelWarmer:
         await self._ping(model, "warmed")
 
     async def _unpark(self, model: ModelConfig, ctl) -> None:
-        """Remove the pause flag; the supervisor starts llama-server, which loads the model before /health is OK."""
+        """Remove the pause flag; the supervisor starts llama-server, which loads the model before /health is OK.
+        `blocked()` is checked and the load registered with no await before the flag goes, so `park` always sees it."""
+        if self.blocked():
+            log.info("not loading %s: the guard or an image batch holds the GPU", model.name)
+            return
+        task = asyncio.current_task()
+        self._unparking.add(task)
+        try:
+            await self._load(model, ctl)
+        finally:
+            self._unparking.discard(task)
+
+    async def _load(self, model: ModelConfig, ctl) -> None:
         started = time.monotonic()
         log.info("loading %s (removing the pause flag)", model.name)
         await ctl.start()
         deadline = started + HEALTH_TIMEOUT_SECONDS
         while (remaining := deadline - time.monotonic()) > 0:
             self._changed.clear()
-            if self.blocked() or ctl.flagged():
-                log.info("loading %s stopped: the guard holds the GPU again", model.name)
+            if self.blocked():
+                ctl.write_flag()  # the GPU was taken meanwhile: llama-server must not start
+                log.info("loading %s stopped: the guard or an image batch holds the GPU", model.name)
+                return
+            if ctl.flagged():
+                log.info("loading %s stopped: the model was unloaded", model.name)
                 return
             if await ctl.healthy():
                 log.info("loaded %s in %.0f s", model.name, time.monotonic() - started)

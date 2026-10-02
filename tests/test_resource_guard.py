@@ -661,3 +661,112 @@ def test_model_call_fails_rather_than_spins_when_the_parked_model_cannot_load(tm
         assert len(calls) == 1 and control.starts == 0
         await m.stop()
     asyncio.run(body())
+
+
+# a GPU taker during a load (#342 round 2): the pause flag stays in place whatever the load was doing
+class SlowUnlink(FakeControl):
+    """The flag's unlink (a thread in ServerControl.start) lands only after `go`: a taker has started meanwhile."""
+
+    def __init__(self):
+        super().__init__()
+        self.flag, self.health = True, False  # parked; once started, llama-server takes a while to load
+        self.go = asyncio.Event()
+
+    async def start(self):
+        self.starts += 1
+        await self.go.wait()
+        self.flag = False
+
+    async def stop(self):
+        await super().stop()
+        self.go.set()
+
+
+def guarded_image_manager(tmp_path, control):
+    from harness.config import ImagesConfig
+    from test_phase6 import fake_comfy
+    import httpx
+    cfg = make_cfg(tmp_path)
+    cfg.gpu_guard = GpuGuardConfig(enabled=True, resume_after_seconds=0, poll_seconds=3600)
+    cfg.images = ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"), linger_seconds=0.2,
+                              comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"),
+                              upscale_dir=str(tmp_path / "upscale"))
+    m = Manager(cfg, chat=Script([Completion(content="done")]))
+    m.guard.detector = FakeDetect()
+    m.guard.control = m.images.control = control  # two ServerControls on one pause flag in the daemon
+    m.images.transport = httpx.MockTransport(fake_comfy()[0])
+    flags_while_comfy = []
+
+    async def comfy_start():
+        flags_while_comfy.append(control.flag)
+
+    async def comfy_stop():
+        flags_while_comfy.append(control.flag)
+    m.images.comfy.start, m.images.comfy.stop = comfy_start, comfy_stop
+    return m, flags_while_comfy
+
+
+def test_image_takeover_during_a_load_keeps_the_pause_flag(tmp_path, monkeypatch):
+    import harness.warmup as warmup
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)  # only a notify ends the /health wait
+
+    async def body():
+        control = SlowUnlink()
+        m, flags_while_comfy = guarded_image_manager(tmp_path, control)
+        model = m.cfg.models[m.cfg.default_model]
+        await m.start(maintenance=False)
+        load = asyncio.create_task(m.warmer.ensure_loaded(model))
+        for _ in range(100):
+            if control.starts:
+                break
+            await asyncio.sleep(0.01)
+        assert control.starts == 1 and not load.done()  # removing the flag
+        job = m.images.submit("a lighthouse at dusk", model="fast")
+        for _ in range(500):
+            if m.images.phase == "switching" or control.go.is_set():
+                break
+            await asyncio.sleep(0.01)
+        control.go.set()  # the unlink lands after the takeover began
+        done = await asyncio.wait_for(m.images.wait(job["id"]), 5)
+        assert done["status"] == "done"
+        await asyncio.wait_for(load, 2)  # the load stopped
+        assert control.flag and flags_while_comfy == [True, True]  # run-qwen.ps1 never saw the flag gone
+        control.health = True  # the hold is over: the next model call loads normally
+        await asyncio.wait_for(m.warmer.ensure_loaded(model), 2)
+        assert control.starts == 2 and not control.flag
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_a_load_queued_before_an_image_takeover_leaves_the_flag(tmp_path):
+    async def body():
+        control = FakeControl()
+        control.flag = True
+        m, _ = guarded_image_manager(tmp_path, control)
+        model = m.cfg.models[m.cfg.default_model]
+        wake = m.warmer._start_wake(model)  # e.g. selecting the local model, just before Generate
+        m.images.phase = "switching"         # the batch took the GPU before the load task ran
+        await asyncio.wait_for(wake, 2)
+        assert control.flag and control.starts == 0
+    asyncio.run(body())
+
+
+def test_guard_hold_during_a_load_keeps_the_pause_flag(tmp_path, monkeypatch):
+    import harness.warmup as warmup
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
+
+    async def body():
+        m = guarded_manager(tmp_path)
+        control = m.guard.control = SlowUnlink()
+        model = m.cfg.models[m.cfg.default_model]
+        load = asyncio.create_task(m.warmer.ensure_loaded(model))
+        await asyncio.sleep(0.02)
+        assert control.starts == 1
+        m.guard.detector.signals = [GAME]
+        check = asyncio.create_task(m.guard.check())  # PAUSING, then (nothing running) stop
+        await asyncio.sleep(0.02)
+        control.go.set()
+        await asyncio.wait_for(check, 2)
+        await asyncio.wait_for(load, 2)
+        assert m.guard.state == PAUSED and control.flag and control.stops == 1
+    asyncio.run(body())

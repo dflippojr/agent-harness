@@ -274,9 +274,12 @@ class ServerControl:
     def flagged(self) -> bool:
         return self.flag.exists()
 
-    async def stop(self) -> None:
+    def write_flag(self) -> None:
         self.flag.parent.mkdir(parents=True, exist_ok=True)
         self.flag.write_text(f"paused by agent-harness at {time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
+
+    async def stop(self) -> None:
+        self.write_flag()
         for pid in await self._listening_pids():
             code, out, err = await run_cmd(["taskkill", "/PID", str(pid), "/F"], timeout=30)
             log.info("stopped model server pid %s (exit %s) %s", pid, code, (out + err).strip()[:200])
@@ -319,6 +322,8 @@ class GpuGuard:
         self.memory = memory or MemoryWatch(cfg.min_available_ram_gb)
         self.want_model: Callable[[], bool] = lambda: False  # lazy_load: reload at the end of a hold anyway (queued work)
         self.on_change: Callable[[], None] = lambda: None  # the state or the pause flag changed (ModelWarmer.notify)
+        # Stops the server once a load in flight has ended (ModelWarmer.park), so the pause flag stays in place.
+        self.park: Callable[[Callable[[], Awaitable[None]]], Awaitable[None]] = lambda stop: stop()
         self._state_path = Path(data_dir) / MANUAL_HOLD_FILE if data_dir is not None else None
         self.state = CLEAR
         self.signals: list[dict] = []
@@ -539,7 +544,7 @@ class GpuGuard:
                 if self.on_pause:
                     self.on_pause(self.reasons)
         if self.state == PAUSING and (not self.busy() or now >= self._drain_deadline):
-            await self.control.stop()
+            await self.park(self.control.stop)
             self._set(PAUSED)
 
     async def unload(self, before_stop: Callable[[], None] | None = None) -> bool:

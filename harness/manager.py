@@ -248,6 +248,7 @@ class Manager:
         warmer.memory_low = lambda: guard.memory.low()
         warmer.keepalive_seconds = cfg.gpu_guard.keepalive_seconds
         guard.on_change = warmer.notify
+        guard.park = warmer.park
         # Work held by the pause (or a pinned model) reloads at the end of the hold; anything else loads on demand.
         guard.want_model = lambda: warmer.pinned() or bool(self.runner.gpu_paused_sessions)
         self.runner.ram = guard.memory
