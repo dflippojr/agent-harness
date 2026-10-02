@@ -37,15 +37,29 @@ don't depend on that count. Add a task to `web_suite.TASKS` (and record its fixt
 One run at **03:00 tower-local time** (`canary.at`) on the deployed commit (`HARNESS_BUILD_COMMIT`, else the
 checkout's `HEAD`). There is no post-deploy trigger and no admin endpoint.
 
+`canary.at` is a time of day, `"HH:MM"`. Quote it: YAML 1.1 reads an unquoted `3:05` as the number 185, which
+the loader turns back into `"03:05"`. Anything else that isn't a time of day (or a canary number below its minimum,
+`min_prior_runs` above `baseline_runs`, or an enabled canary whose `suite` file is missing) is a config error at
+load, naming the key. If the nightly loop still can't schedule a run it logs the error and turns itself off; it never
+takes the daemon down.
+
 - A commit that already has a finished row (`complete`, `timeout`, `skipped`) is not run again: one row per SHA.
 - A run that could not start (GPU slot busy, queue not empty or guard not `clear` for `canary.start_wait_seconds`)
   leaves the row `blocked` and is retried at the next nightly slot. If that also cannot start the row becomes
   `skipped`.
 - A run past `canary.total_cap_seconds` (45 min) stops; the remaining tasks are recorded as `timeout`. Timed-out
   runs do not count towards baselines or alerts.
-- A task attempt still running at its wall-clock limit (the hard task's `wall_limit`, 1500 s for web tasks) is
-  cancelled and recorded as `wall_limit`, a graded fail. One that finishes in the same poll as the limit keeps its
-  real outcome; stopping a session that already ended is never an error.
+- A task attempt's time limit (the hard task's `wall_limit`, 1500 s for web tasks) counts only time the canary had
+  the GPU: not time queued behind a real session (including before its first turn), stepped aside, paused by the
+  guard, or held up by an image batch that took the GPU over. An attempt that reaches the limit is cancelled and
+  recorded as `wall_limit`, a graded fail. One that finishes in the same poll as the limit keeps its real outcome;
+  stopping a session that already ended is never an error. An attempt still waiting for the GPU when the run reaches
+  its cap is cancelled and recorded as `suspended` (excluded, never a fail). An attempt's `seconds` (and the row's
+  `wall_seconds`) are that GPU time.
+- A run with web tasks refuses to start if `canary.fixture_dir` has no `manifest.json`: replaying an empty web
+  would fail every web task and look like a regression. The row is left `blocked`.
+- Once a SHA's row is claimed it is always finished, whatever goes wrong: a crash or shutdown in the first run
+  leaves it `blocked`; one during the confirmation rerun keeps the first run's results with no alert.
 
 ## Yielding
 
@@ -92,8 +106,8 @@ confirmation rerun.
   there are none, such as a newly added task with no history, every task that failed this time); its results replace
   theirs in the row (marked `confirm`). An alert is never sent without a confirmation rerun, and the rerun counts
   only if it is `complete` and finished at least one attempt of every rerun task. Otherwise (it timed out, could not
-  start, or a task was only suspended or cancelled) the row keeps the first run's results, no alert is sent and the
-  daemon logs why.
+  start, raised, or a task was only suspended or cancelled) the row keeps the first run's results, no alert is sent
+  and the daemon logs why.
 - One ntfy notification (through `Notifier.send`) with the SHA, baseline, new rate and
   `https://github.com/dflippojr/agent-harness/compare/<baseline_sha>...<new_sha>`. `baseline_sha` is the earlier run
   closest to the median.

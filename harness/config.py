@@ -601,6 +601,9 @@ def _load_canary(raw) -> CanaryConfig:
             raise ValueError(f"canary.{key} must be at least {low}, got {value!r}")
     if raw["min_prior_runs"] > raw["baseline_runs"]:
         raise ValueError("canary.min_prior_runs can't be more than canary.baseline_runs (no run would ever be judged)")
+    suite = raw.get("suite", CanaryConfig.suite)
+    if raw.get("enabled") and suite and not (ROOT / suite).is_file():
+        raise ValueError(f"canary.suite {suite!r} is not a file")
     return CanaryConfig(**raw)
 
 

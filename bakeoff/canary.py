@@ -87,6 +87,9 @@ class CanaryRunner:
         cap = self.clock() + self.cfg.total_cap_seconds
         plan = [(t, "hard") for t in self.suite["hard"] if not only or t.id in only]
         plan += [(t, "web") for t in self.suite["web"] if not only or t.id in only]
+        if any(kind == "web" for _, kind in plan) and not (self.fixture / "manifest.json").is_file():
+            # without it every search misses and each web task fails: a false regression, not a result
+            raise FileNotFoundError(f"canary web fixture {self.fixture} has no manifest.json")
         projects = self.m.cfg.projects
         projects[HARD_PROJECT] = Project(name=HARD_PROJECT, web=False, memory_library=False, images=False,
                                          session_search=False)
@@ -138,19 +141,19 @@ class CanaryRunner:
                 baseline = self._prepare_hard(task, Path(s["workspace"]))
                 run = dict(m.db.get_session(sid)["run"], max_turns=task.max_turns)
                 m.db.update_session(sid, run=run)
-            # The limit counts only time the canary held the GPU: never time queued behind a real session (even
-            # before its first turn), stepped aside, or paused by the guard. A wait that outlasts the run's cap is
-            # no verdict on the agent: the attempt is stopped and excluded as suspended.
+            # The limit counts only time the canary had the GPU: never time queued behind a real session (even
+            # before its first turn), stepped aside, paused by the guard, or held up by an image batch that took the
+            # GPU over. A wait that outlasts the run's cap is no verdict on the agent: stopped, excluded as suspended.
             limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else 1500), 0.0, False, False
             while m.db.get_session(sid)["status"] not in DONE:
-                held, before = m.scheduler.holder == sid, self.clock()
+                held, before = self._has_gpu(sid), self.clock()
                 await self.sleep(1 if self.poll > 1 else self.poll)
                 if held:
                     ran += self.clock() - before
                 if ran > limit:
                     stopped = await self._stop(sid)  # False: it finished on its own in this poll window
                     break
-                if self.clock() >= cap and m.scheduler.holder != sid:
+                if self.clock() >= cap and not self._has_gpu(sid):
                     starved = await self._stop(sid)
                     break
             final = m.db.get_session(sid)
@@ -181,6 +184,9 @@ class CanaryRunner:
         finally:
             m.scheduler.low_priority.discard(sid)
             m.runner.web_overrides.pop(sid, None)
+
+    def _has_gpu(self, sid: str) -> bool:
+        return self.m.scheduler.holder == sid and not self.m.runner.gate.exclusive
 
     async def _stop(self, sid: str) -> bool:
         """Cancel the canary session unless it already ended (safe to race its finish). True if this call ended it."""

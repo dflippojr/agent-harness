@@ -344,8 +344,10 @@ def test_canary_at_is_normalised_or_rejected_when_the_config_loads(tmp_path):
     assert config._load_canary(yaml.safe_load("at: 23:59")).at == "23:59"
     assert config._load_canary({"at": "3:05"}).at == "03:05"
     assert config._load_canary(None).at == "03:00"
+    assert config._load_canary({"enabled": True}).suite == "bakeoff/canary.yaml"
     for raw in ({"at": "25:00"}, {"at": 1440}, {"at": "noon"}, {"at": True}, {"repeats": 0},
-                {"min_prior_runs": 6, "baseline_runs": 5}, {"total_cap_seconds": "soon"}):
+                {"min_prior_runs": 6, "baseline_runs": 5}, {"total_cap_seconds": "soon"}, {"drop_points": 0},
+                {"enabled": True, "suite": "bakeoff/nope.yaml"}):
         try:
             config._load_canary(raw)
             raise AssertionError(f"{raw} accepted")
@@ -469,6 +471,7 @@ def _runner(m, tmp_path, **kw):
         t["now"] += max(s, 0.5)
         await asyncio.sleep(0)
     suite = {"repeats": 1, "hard": [], "web": [__import__("bakeoff.web_suite", fromlist=["TASKS"]).TASKS[2]]}
+    (tmp_path / "manifest.json").write_text('{"searches": {}, "pages": {}}', encoding="utf-8")
     return CanaryRunner(m, cfg, tmp_path, suite, poll_seconds=1, clock=lambda: t["now"], sleep=sleep, **kw), t
 
 
@@ -652,6 +655,30 @@ def test_a_task_that_never_gets_the_gpu_before_the_cap_is_excluded_not_failed(tm
         assert row["attempts"] == 0 and row["pass_rate"] is None and not row["alerted"]
         m.scheduler.release("real-session")
     _hard_night(tmp_path, _blocked_chat(asyncio.Event()), nothing, check, prepare=real_wins_the_slot)
+
+
+def test_time_an_image_batch_has_the_gpu_is_not_run_time(tmp_path):
+    async def image_batch(m):  # images.py took the GPU over (gate.exclusive) while the canary holds the slot
+        m.runner.gate.exclusive_active = True
+        await asyncio.sleep(0)
+
+    async def check(m, row):
+        o = row["outcomes"][0]
+        assert o["status"] == "suspended" and o["seconds"] == 0 and row["attempts"] == 0
+        m.runner.gate.exclusive_active = False
+    _hard_night(tmp_path, _blocked_chat(asyncio.Event()), image_batch, check)
+
+
+def test_a_missing_web_fixture_stops_the_run_before_any_session(tmp_path):
+    m = FakeManager()
+    runner, _ = _runner(m, tmp_path)
+    runner.fixture = tmp_path / "nowhere"
+    try:
+        run(runner.run("sha"))
+        raise AssertionError("every web task would fail against an empty replay")
+    except FileNotFoundError as e:
+        assert "manifest.json" in str(e)
+    assert not m.created and m.cfg.projects == {}
 
 
 def test_suspended_on_every_attempt_is_excluded_and_never_alerts(tmp_path):

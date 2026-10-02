@@ -258,7 +258,7 @@ def _canary_metrics(m: Manager, out: _Out) -> None:
     for name, key, help_ in (("harness_canary_pass_rate", "pass_rate", "Canary pass rate (0-1) per commit."),
                              ("harness_canary_turns", "turns", "Agent turns used by the canary run."),
                              ("harness_canary_prompt_tokens", "prompt_tokens", "Prompt tokens used by the canary run."),
-                             ("harness_canary_wall_seconds", "wall_seconds", "Wall seconds of the canary run.")):
+                             ("harness_canary_wall_seconds", "wall_seconds", "Seconds the canary run's attempts had the GPU.")):
         out.metric(name, "gauge", help_, [({"sha": r["sha"][:SHORT_SHA]}, r[key]) for r in rows])
 
 
