@@ -5,3 +5,5 @@ macrunner/** text eol=lf
 # Files read inside Linux containers must keep LF endings (Git for Windows defaults to autocrlf).
 ops/egress/** text eol=lf
 sandbox/** text eol=lf
+# The pinned gitleaks rules (harness/gitleaks/pin.json) must hash the same on every checkout.
+harness/gitleaks/** text eol=lf
