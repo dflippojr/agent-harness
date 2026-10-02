@@ -400,6 +400,8 @@ TEXT_EMPTY_OBJECT = "TEXT NOT NULL DEFAULT '{}'"
 MIGRATIONS = [
     # Conversation kind: 'agent' (default, every pre-existing row) or 'chat' (Chat home, no project workspace).
     ("sessions", "kind", "TEXT NOT NULL DEFAULT 'agent'"),
+    # Untrusted sources the session has read (taint.py): JSON list of {kind, origin, first_seen}.
+    ("sessions", "taint", TEXT_EMPTY_LIST),
     # Secret for deciding one approval from a notification button, without a session cookie or JSON body.
     ("approvals", "token", TEXT_EMPTY),
     # Phase 3: git-backed projects. `review` is '' | merged | pushed | discarded.
@@ -477,7 +479,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "app_defaults", "data",
                 "origins", "models", "smart", "risk_flags", "skills", "references", "examples", "manifest",
-                "static_findings", "findings", "provenance"}
+                "static_findings", "findings", "provenance", "taint"}
 # skill_proposals.review is JSON; sessions.review is a plain merge/push/discard string.
 SKILL_JSON_COLUMNS = JSON_COLUMNS | {"review"}
 

@@ -46,7 +46,7 @@ const SESSION_EVENT_TYPES = [
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "state", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
   "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "app_context", "app_tool_call", "app_tool_result",
-  "quote_check", "ungrounded_quotes",
+  "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared",
 ];
 const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
 const fmtElapsed = (ms) => {
@@ -2082,6 +2082,15 @@ async function viewSession(sid, tab, focusApproval) {
           } catch (e) { toast(e.message); }
         },
       }, "Run again as new session") : null,
+      (session.taint || []).length ? h("button", {
+        class: "btn small",
+        type: "button",
+        title: `Untrusted content read: ${session.taint.map((t) => t.origin).join(", ")}. Risky actions ask for approval until cleared.`,
+        onclick: async () => {
+          if (!confirm("Clear taint? Risky actions will follow the project rules again.")) return;
+          try { session = { ...session, ...(await api(`/sessions/${sid}/taint/clear`, { method: "POST" })) }; renderActions(); } catch (e) { toast(e.message); }
+        },
+      }, "Clear taint") : null,
       h("span", { class: "spacer" }),
       h("button", { class: "btn small", type: "button", onclick: () => go(`#/s/${sid}/changes`, true) }, "Changes"));
   };
@@ -2248,6 +2257,16 @@ async function viewSession(sid, tab, focusApproval) {
   const handlers = {
     user_message: (e) => { add(h("div", { class: "ev msg user" }, e.data.content)); },
     app_context: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Context from the app"), h("div", { class: "text" }, e.data.content))),
+    taint_added: (e) => {
+      session = { ...session, taint: [...(session.taint || []), { origin: e.data.origin, kind: e.data.kind }] };
+      renderActions();
+      add(h("p", { class: "note" }, `Session read untrusted content from ${e.data.origin}: risky actions now ask for approval`));
+    },
+    taint_cleared: () => {
+      session = { ...session, taint: [] };
+      renderActions();
+      add(h("p", { class: "note" }, "Taint cleared by the owner"));
+    },
     app_tool_call: (e) => add(h("p", { class: "note" }, `Asked the app to run ${e.data.name}`)),
     app_tool_result: (e) => add(h("p", { class: "note" }, `The app returned ${e.data.ok ? "a result" : "an error"} (${e.data.chars} characters)`)),
     billing_warning: (e) => add(h("p", { class: "note bad" }, e.data.message)),

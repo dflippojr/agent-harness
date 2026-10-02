@@ -23,6 +23,7 @@ from . import compat
 from . import config as config_mod
 from . import efficiency
 from . import google_signin
+from . import taint
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
 from .webgzip import WebGzipMiddleware
@@ -1226,7 +1227,8 @@ async def create_github_session(body: CreateGitHubSession, request: Request):
     prompt = github_tasks.prompt(source)
     s = m.create(prompt, project=body.project, target=body.target, backend=body.backend,
                  model=body.model, title=source["title"], owner_id=owner_id(request),
-                 skills=body.skills, app_metadata={"github_base_branch": source["base_branch"]})
+                 skills=body.skills, app_metadata={"github_base_branch": source["base_branch"]},
+                 taint=taint.add([], "github", f"GitHub {repo} #{body.number}"))
     return m.summary(s)
 
 
@@ -1452,6 +1454,12 @@ async def cancel_snippet(ref: str, run_id: str, request: Request):
 async def cancel_chat(ref: str, request: Request):
     m, sid, _ = owned_chat(request, ref)
     return m.summary(await m.cancel(sid))
+
+
+@api_router.post("/sessions/{ref}/taint/clear")
+async def clear_taint(ref: str, request: Request):
+    m = require_owner(request)
+    return m.summary(m.clear_taint(ref))
 
 
 @api_router.post("/sessions/{ref}/cancel")

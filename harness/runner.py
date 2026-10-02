@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state
+from . import compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, taint
 from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
@@ -298,7 +298,7 @@ class Runner:
     async def _review_ask(self, s: dict, name: str, args: dict, decision) -> dict:
         """Consult the smart reviewer for a tagged ASK. Never auto-denies; failures stay pending."""
         extra = {"status": "pending", "smart": {}}
-        if decision.action != ASK:
+        if decision.action != ASK or self._taint_of(s):  # a tainted session is never auto-approved
             return extra
         project = self.cfg.projects.get(s["project"])
         repo = bool(project and project.repo)
@@ -1146,7 +1146,11 @@ class Runner:
                               call_id: str) -> dict | None:
         """Apply the policy to a new CLI tool request: answer it now (None) or persist an approval to wait on."""
         sid = s["id"]
-        decision = self.policy(s).decide(name, args)
+        source = taint.source_for(name, args)
+        if source is not None:  # a hosted CLI web request is untrusted content the moment it is allowed to run
+            self._add_taint(sid, *source)
+            s = self.db.get_session(sid)
+        decision = self._taint_layer(s, name, args, self.policy(s).decide(name, args))
         self.bus.emit(sid, "tool_call", {"id": call_id, "name": name, "args": args,
                                          "decision": decision.action, "reason": decision.reason})
         if decision.action == ALLOW:
@@ -1605,6 +1609,34 @@ class Runner:
         """The policy decision for a call. Applying a delegated proposal is decided as an edit_file of each of its
         edits, with the same args a direct edit_file would carry, taking the strictest, so project rules about edits
         (including content-based ones) cover it too."""
+        return self._taint_layer(s, name, args, self._decide_rules(s, name, args))
+
+    def _taint_layer(self, s: dict, name: str, args: dict, decision):
+        sources = self._taint_of(s)
+        if not sources:
+            return decision
+        app_names = self.app_tools.names(s) if self.app_tools is not None else set()
+        return taint.escalate(decision, name, args, sources, app_names)
+
+    def _taint_of(self, s: dict) -> list:
+        """The session's current taint (read fresh: an earlier call in the same batch may have just set it)."""
+        if s.get("kind") == "chat":
+            return []
+        fresh = self.db.get_session(s["id"])
+        return list((fresh or s).get("taint") or [])
+
+    def _add_taint(self, sid: str, kind: str, origin: str) -> None:
+        s = self.db.get_session(sid)
+        if s is None or s.get("kind") == "chat":
+            return
+        updated = taint.add(s.get("taint") or [], kind, origin)
+        if updated is None:
+            return
+        with self.db.tx():
+            self.db.update_session(sid, taint=updated)
+            self.bus.emit(sid, "taint_added", {"kind": kind, "origin": origin, "sources": len(updated)})
+
+    def _decide_rules(self, s: dict, name: str, args: dict):
         policy = self.policy(s)
         if name != delegate_edit.APPLY:
             return policy.decide(name, args)
@@ -1617,6 +1649,17 @@ class Runner:
         decisions += [policy.decide("edit_file", {"path": path}) for path in proposal["hashes"]
                       if not any(e["path"] == path for e in proposal["edits"])]
         return max(decisions, key=lambda d: rank.get(d.action, 1))
+
+    def _taint_from_result(self, s: dict, name: str, args: dict) -> None:
+        source = taint.source_for(name, args)
+        if source is None and name == "session_read":
+            ref = str(args.get("session_id", "")).strip()
+            ids = self.db.find_session_ids(ref, kind="agent") if ref else []
+            other = self.db.get_session(ids[0]) if len(ids) == 1 else None
+            if other and other.get("taint"):
+                source = ("session", f"session {other['id']} ({other['taint'][0]['origin']})")
+        if source is not None:
+            self._add_taint(s["id"], *source)
 
     def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
         """An approved call still can't run for a household member without the tool; the recorded error, else None."""
@@ -1703,6 +1746,8 @@ class Runner:
         except (ToolError, OSError, UnicodeError) as e:
             ok = False
             output = f"Error: {e}"
+        if ok:
+            self._taint_from_result(s, name, args)
         extra = {}
         artifact_content = None
         if isinstance(output, ToolOutput):
