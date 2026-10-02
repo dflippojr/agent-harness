@@ -145,7 +145,11 @@ adds roughly 25-40 ms for the first request; not a meaningful contributor.
 4. Warm loads re-download `app.js` and `style.css` in full. The service worker fetches shell files with
    `cache: "no-cache"` (`harness/web/sw.js`), so the cache is only the offline fallback by design. In this setup those
    fetches went out without an `If-None-Match` validator and returned `200` with the full body every time (checked at
-   the proxy), even though the server sends an `ETag`. Warm is therefore not meaningfully cheaper than cold.
+   the proxy), even though the server sends an `ETag`. Warm is therefore not meaningfully cheaper than cold. Browser
+   check outside Playwright: not run (owner decision, 2026-10-01); the `StaticFiles` mounts return `304` for a
+   matching `If-None-Match`, which a test now guards. `/`, `/sw.js` and `/manifest.webmanifest` have their own
+   `FileResponse` routes that send an `ETag` but always answer `200` (Starlette does not evaluate conditionals there);
+   not changed, per the owner decision.
 5. Routes differ little from one another (2.6-3.1 s throttled). The dispatcher gates every route on the same shared
    start-up chain, so per-route data (`/sessions`, `/queue`, `/gpu`, `/projects`, `/images`, `/jobs`) is a small part.
    New task is the slowest (about 3.1 s cold) because it adds `/projects`, `/models` and `/gpu` fetches after the
@@ -160,7 +164,8 @@ adds roughly 25-40 ms for the first request; not a meaningful contributor.
 - Issuing `/health`, `/me`, `/gpu` and `/profile` in parallel, or starting them from a small inline script before
   `app.js` finishes, would remove most of the serial round trips. Not prototyped.
 - The missing conditional request on warm loads may be specific to Playwright's browser contexts; a normal Chromium
-  profile may revalidate and return `304`. Needs one check outside automation before acting on finding 4.
+  profile may revalidate and return `304`. The browser check was not run (owner decision, 2026-10-01, #290); no
+  behavior change was made. The server side is regression-tested (`tests/test_webgzip.py::test_shell_revalidates_with_304`).
 - If the field complaint is mostly about the first request after a server restart or deploy window, this study did not
   reproduce it: server restart added only tens of milliseconds locally.
 - Real devices on real cellular or Tailscale paths add TLS/connection setup and path variance that this model omits.
@@ -198,7 +203,8 @@ Recommendations are filed as separate issues rather than implemented here:
 
 - #288: compress static assets (finding 3; the compression saving is a hypothesis).
 - #289: shorten the serial start-up request chain (finding 3; the saving is a hypothesis).
-- #290: verify warm-load revalidation outside Playwright (finding 4; possibly an automation artifact).
+- #290: verify warm-load revalidation outside Playwright (finding 4; possibly an automation artifact). Browser check
+  not run by owner decision; only the server-side 304 regression test was added.
 
 ## Reproducing
 
