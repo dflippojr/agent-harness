@@ -12,6 +12,7 @@ from .projects import git
 from .review_comments import parse_diff
 
 MAX_DIFF_CHARS = 400_000
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # the parent of a root commit
 SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 
 
@@ -65,26 +66,68 @@ def _repo_diff(repo: Path, base: str, untracked: list[str]) -> str:
     return diff
 
 
-def workspace_changes(workspace: Path, base_commit: str | None = None) -> dict:
-    """`base_commit` is where a git project's session branch started; it applies to the repo at the root."""
+def commit_diffs(repo: Path, base: str) -> list[dict]:
+    """Each commit in base..HEAD, oldest first, with its own diff against its first parent: what a push sends."""
+    out = []
+    for sha in _git(repo, "rev-list", "--reverse", f"{base}..HEAD").split() if base else ():
+        parent = _git(repo, "rev-parse", "--verify", "-q", f"{sha}^").strip() or EMPTY_TREE
+        out.append({"sha": sha, "diff": _git(repo, "diff", parent, sha, "--no-color", "--no-ext-diff",
+                                             "--no-textconv")})
+    return out
+
+
+def published(repo: Path, commit: str, tips: list[str]) -> bool:
+    """Whether `commit` is at or before one of `tips` (remote-tracking refs, pushed heads): already on the remote,
+    so rewriting it would need a force-push. A pushed head that no longer resolves counts as covering it."""
+    for tip in tips:
+        if not _git(repo, "rev-parse", "--verify", "-q", f"{tip}^{{commit}}").strip():
+            if tip.startswith("refs/"):
+                continue  # no such remote branch
+            return True
+        if git(repo, "merge-base", "--is-ancestor", commit, tip, timeout=60, check=False).code == 0:
+            return True
+    return False
+
+
+def repo_diffs(workspace: Path, base_commit: str | None = None) -> list[dict]:
+    """Each repository's full (untruncated) diff from its base to the working tree, untracked files included,
+    and each commit since the base with its own diff (`commits`)."""
     workspace = workspace.resolve()
-    repos = []
-    budget = MAX_DIFF_CHARS
+    out = []
     for repo in find_repos(workspace):
-        rel = repo.relative_to(workspace).as_posix()
         files = _status_files(repo)
         # Show untracked files in the diff too, without staging anything for real.
         untracked = [f["path"] for f in files if f["status"] == "??" and "__pycache__/" not in f["path"]]
         base = _base_commit(repo, workspace, base_commit)
-        diff = _repo_diff(repo, base, untracked)
+        out.append({"repo": repo, "path": repo.relative_to(workspace).as_posix() or ".", "files": files,
+                    "base": base, "diff": _repo_diff(repo, base, untracked),
+                    "head": _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip(),
+                    "commits": commit_diffs(repo, base)})
+    return out
+
+
+def workspace_changes(workspace: Path, base_commit: str | None = None, scan=None) -> dict:
+    """`base_commit` is where a git project's session branch started; it applies to the repo at the root.
+
+    `scan(diffs) -> (public result, [diff per repo])` is the secret scan (issue #263): it sees the full diffs and
+    returns them with flagged values masked, before truncation and parsing."""
+    diffs = repo_diffs(workspace, base_commit)
+    secret = None
+    if scan is not None:
+        secret, masked = scan(diffs)
+        for d, text in zip(diffs, masked):
+            d["diff"] = text
+    repos = []
+    budget = MAX_DIFF_CHARS
+    for d in diffs:
+        repo, base, diff = d["repo"], d["base"], d["diff"]
         truncated = len(diff) > budget
         diff = diff[:max(0, budget)]
         budget -= len(diff)
         new_commits = _git(repo, "log", "--oneline", "--no-color", f"{base}..HEAD") if base else ""
         branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
-        repos.append({"path": rel or ".", "branch": branch, "files": files, "diff": diff,
-                      "truncated": truncated, "base": base[:12],
-                      "head": _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip()[:12],
+        repos.append({"path": d["path"], "branch": branch, "files": d["files"], "diff": diff,
+                      "truncated": truncated, "base": base[:12], "head": d["head"][:12],
                       "parsed": parse_diff(diff),
                       "commits": new_commits.splitlines()})
-    return {"repos": repos}
+    return {"repos": repos} if secret is None else {"repos": repos, "secret_scan": secret}

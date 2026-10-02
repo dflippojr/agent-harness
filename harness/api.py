@@ -99,6 +99,10 @@ class ReviewComment(BaseModel):
     head: str = ""
 
 
+class SecretDismissal(BaseModel):
+    reason: str
+
+
 class SessionUpdate(BaseModel):
     title: str
 
@@ -1313,6 +1317,21 @@ async def send_review_comments(ref: str, request: Request):
     """Send the drafted line comments to the agent as one follow-up message."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(await m.send_review_comments(sid))
+
+
+@api_router.post("/sessions/{ref}/secret-findings/fix", status_code=201)
+async def secret_findings_fix(ref: str, request: Request):
+    """Ask agent to fix: one draft review comment per open secret-scan finding (send them like any draft)."""
+    m, sid, _ = owned_session(request, ref)
+    return await m.secret_findings_fix(sid)
+
+
+@api_router.post("/sessions/{ref}/secret-findings/{fingerprint}/dismiss")
+async def dismiss_secret_finding(ref: str, fingerprint: str, body: SecretDismissal, request: Request):
+    """Owner-only: dismiss one secret-scan finding with a reason (audited)."""
+    require_owner(request)
+    m, sid, _ = owned_session(request, ref)
+    return await m.dismiss_secret_finding(sid, fingerprint, body.reason, owner_id(request))
 
 
 @api_router.post("/sessions/{ref}/review/{action}")
