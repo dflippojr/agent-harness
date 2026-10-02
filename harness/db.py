@@ -9,6 +9,10 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Sequence
+
+from . import migrations as migrations_mod
+from .migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
 
 from .telemetry import TimedLock
 
@@ -403,83 +407,6 @@ AND_APP = " AND app_id = ?"
 AND_KIND = " AND kind = ?"
 AND_JOIN = " AND "
 
-# Column definitions reused across the migration table below.
-TEXT_EMPTY = "TEXT NOT NULL DEFAULT ''"
-TEXT_LOCAL = "TEXT NOT NULL DEFAULT 'local'"
-INT_ZERO = "INTEGER NOT NULL DEFAULT 0"
-TEXT_EMPTY_LIST = "TEXT NOT NULL DEFAULT '[]'"
-TEXT_EMPTY_OBJECT = "TEXT NOT NULL DEFAULT '{}'"
-
-# Columns added after a table first shipped: (table, column, definition).
-MIGRATIONS = [
-    # Conversation kind: 'agent' (default, every pre-existing row) or 'chat' (Chat home, no project workspace).
-    ("sessions", "kind", "TEXT NOT NULL DEFAULT 'agent'"),
-    # Secret for deciding one approval from a notification button, without a session cookie or JSON body.
-    ("approvals", "token", TEXT_EMPTY),
-    # Phase 3: git-backed projects. `review` is '' | merged | pushed | discarded.
-    ("sessions", "branch", TEXT_EMPTY),
-    ("sessions", "base_branch", TEXT_EMPTY),
-    ("sessions", "base_commit", TEXT_EMPTY),
-    ("sessions", "review", TEXT_EMPTY),
-    ("sessions", "review_detail", TEXT_EMPTY),
-    # Set when cleanup deleted the workspace (or the user discarded it).
-    ("sessions", "workspace_removed", INT_ZERO),
-    # Phase 6e: sessions created through the app API, their registered tools and metadata; key scopes.
-    ("sessions", "app_id", TEXT_EMPTY),
-    ("sessions", "app_tools", TEXT_EMPTY_LIST),
-    ("sessions", "app_metadata", TEXT_EMPTY_OBJECT),
-    # Issue #57: human-owned Agent Harness Web data. v1 has one stable owner; guests own nothing.
-    ("sessions", "owner_id", "TEXT NOT NULL DEFAULT 'owner'"),
-    ("api_keys", "scopes", "TEXT NOT NULL DEFAULT 'inference'"),
-    ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),
-    ("api_keys", "origins", TEXT_EMPTY_LIST),
-    # Phase 7d: sessions started by a scheduled job, and the STATUS the job's answer ended with (ok | attention).
-    ("sessions", "job_id", TEXT_EMPTY),
-    ("sessions", "job_status", TEXT_EMPTY),
-    # Phase 8a: local inference or a hosted CLI session backend.
-    ("sessions", "backend", TEXT_LOCAL),
-    # Issue #166: sessions started together from one prompt to compare backends/models share a group id.
-    ("sessions", "compare_group", TEXT_EMPTY),
-    ("jobs", "backend", TEXT_LOCAL),
-    ("templates", "backend", TEXT_LOCAL),
-    # UI refresh: explicit image resolution while preserving model-native defaults for old callers.
-    ("images", "resolution", "TEXT NOT NULL DEFAULT 'auto'"),
-    ("images", "base_model", TEXT_EMPTY),
-    ("images", "lora", TEXT_EMPTY),
-    ("images", "lora_revision", TEXT_EMPTY),
-    ("images", "lora_sha256", TEXT_EMPTY),
-    # Issue #86: durable image archive state. The canonical digest detects later source corruption.
-    ("images", "sha256", TEXT_EMPTY),
-    ("images", "archive_bytes", INT_ZERO),
-    ("images", "archived_at", "REAL"),
-    ("images", "archive_error", TEXT_EMPTY),
-    ("images", "archive_deleted_at", "REAL"),
-    # Issue #87: opt-in Real-ESRGAN derived images keep the original PNG unchanged.
-    ("images", "parent_id", TEXT_EMPTY),
-    # Issue #88: masked edits retain their pinned model revision and feathering input.
-    ("images", "operation", "TEXT NOT NULL DEFAULT 'generate'"),
-    ("images", "model_revision", TEXT_EMPTY),
-    ("images", "feather", INT_ZERO),
-    ("images", "scale", "INTEGER NOT NULL DEFAULT 1"),
-    ("images", "upscale_model", TEXT_EMPTY),
-    ("images", "requested_upscale", "TEXT NOT NULL DEFAULT 'none'"),
-    # Issue #29: usage attribution names the credential class, never the key or its file reference.
-    ("usage", "credential_source", "TEXT NOT NULL DEFAULT 'subscription'"),
-    # Issue #63: '' (credential-free public clone) or 'github' (the member's own GitHub connection).
-    ("member_projects", "source_auth", TEXT_EMPTY),
-    # Issue #17: frozen owner-approved instruction skills for a session.
-    ("sessions", "skills", TEXT_EMPTY_LIST),
-    # Issue #18: sanitized smart-review recommendation on the ordinary approval row.
-    ("approvals", "smart", TEXT_EMPTY_OBJECT),
-    # Issue #66: freeze hosted effort at session start; app-scoped settings live beside the token.
-    ("sessions", "effort", TEXT_EMPTY),
-    # Issue #66: in-flight app sessions keep the defaults they started with if the app is revoked.
-    ("sessions", "app_defaults", TEXT_EMPTY_OBJECT),
-    # Issue #92: enough to reproduce a generation; old rows stay readable with {}.
-    # Keep this PR's migration after every migration already present on main.
-    ("images", "provenance", TEXT_EMPTY_OBJECT),
-]
-
 APP_SETTINGS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_settings (
     app_id TEXT PRIMARY KEY,
@@ -516,21 +443,41 @@ def _row(row: sqlite3.Row | None) -> dict | None:
 
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, migrations: Sequence[migrations_mod.Step] | None = None):
+        """Open (creating if needed) and migrate the database. `migrations` overrides the discovered steps."""
+        steps = migrations_mod.discover() if migrations is None else migrations_mod.validate(migrations)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.executescript(SCHEMA)
-        self.conn.executescript(APP_SETTINGS_SCHEMA)
-        for table, column, definition in MIGRATIONS:
-            existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
-            if column not in existing:
-                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        try:
+            # Refuse a database from a newer harness before anything writes to it.
+            version = migrations_mod.user_version(self.conn)
+            migrations_mod.check_not_too_new(version, steps)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            # A pre-versioning file that already holds tables has real data: after the add-only bootstrap it
+            # still gets a snapshot before any numbered step. Only a fresh, empty database skips the backup.
+            had_tables = self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone()
+            if version < BASELINE_VERSION:
+                self._bootstrap()
+            backup = version >= BASELINE_VERSION or had_tables is not None
+            migrations_mod.apply_pending(self.conn, path, steps, backup=backup)
+        except BaseException:
+            self.conn.close()
+            raise
         self._ensure_search_index_columns()
         self.lock = TimedLock()
         self._build_search_index()
+
+    def _bootstrap(self) -> None:
+        """Bring a pre-versioning (or empty) database to the frozen baseline; idempotent, so it also repairs."""
+        self.conn.executescript(SCHEMA)
+        self.conn.executescript(APP_SETTINGS_SCHEMA)
+        for table, column, definition in LEGACY_COLUMNS:
+            existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        self.conn.execute(f"PRAGMA user_version = {BASELINE_VERSION}")
 
     def close(self) -> None:
         self.conn.close()

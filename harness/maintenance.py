@@ -28,6 +28,7 @@ from .db import Database
 from .remote import RunnerError
 from .runner import ACTIVE, Runner, dir_size
 from .sandbox import run_cmd
+from .sqlite_backup import backup_sqlite
 
 log = logging.getLogger("harness.maintenance")
 
@@ -172,17 +173,7 @@ class Maintenance:
         return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": ""}
 
     def _backup_db(self, db_copy: Path) -> None:
-        import sqlite3
-        source = sqlite3.connect(str(self.cfg.db_path))
-        target = sqlite3.connect(str(db_copy))
-        try:
-            source.backup(target)  # consistent snapshot while the daemon keeps writing (WAL)
-            check = target.execute("PRAGMA integrity_check").fetchone()[0]
-        finally:
-            target.close()
-            source.close()
-        if check != "ok":
-            raise RuntimeError(f"backup copy failed its integrity check: {check}")
+        backup_sqlite(self.cfg.db_path, db_copy)
 
     @staticmethod
     def _prune_old_backups(root: Path, dest: Path, cutoff: float) -> list:
