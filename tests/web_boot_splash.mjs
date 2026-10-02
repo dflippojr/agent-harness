@@ -77,8 +77,8 @@ async function bootScenario({ compatible = true, user = {}, failure = null, time
       painted = true;
     },
   };
-  // The script's completion value is the production chain's final promise.
-  const done = runInNewContext(boot, context);
+  // Drop only the chain's `void` so the script's completion value is the production chain's final promise.
+  const done = runInNewContext(boot.replace("void bootCompatible.then", "bootCompatible.then"), context);
   const outcome = done.then(() => null, (error) => error);
   for (let i = 0; i < 20; i++) await Promise.resolve();
   if (!compatible || !user || failure) {

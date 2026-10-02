@@ -5245,7 +5245,7 @@ document.addEventListener("visibilitychange", () => {
 // /health and /me start together; /me is a read-only GET whose result is only adopted once /health passes.
 const bootCompatible = checkCompatibility();
 const bootIdentity = fetchMe();
-bootCompatible.then((compatible) => (compatible ? bootIdentity : null)).then((me) => {
+void bootCompatible.then((compatible) => (compatible ? bootIdentity : null)).then((me) => {
   if (!me) return null;
   currentMe = me;
   bootMe = Promise.resolve(me);
