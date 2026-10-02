@@ -819,9 +819,38 @@ class Database:
         return [_row(r) for r in rows]
 
     @_writes
+    def add_checkpoint(self, sid: str, turn: int, sha: str, head: str, branch: str) -> None:
+        with self.lock:
+            seq = self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?", (sid,)).fetchone()[0]
+            self.conn.execute("INSERT OR REPLACE INTO checkpoints (session_id, turn, sha, head, branch, event_seq, "
+                              "hidden, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+                              (sid, turn, sha, head, branch, seq, time.time()))
+
+    @_reads
+    def checkpoints(self, sid: str, hidden: bool | None = False) -> list[dict]:
+        """Checkpoints oldest first; `hidden` None returns both visible and rewound-past ones."""
+        sql, params = "SELECT * FROM checkpoints WHERE session_id = ?", [sid]
+        if hidden is not None:
+            sql += " AND hidden = ?"
+            params.append(int(hidden))
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(sql + " ORDER BY turn", params).fetchall()]
+
+    @_writes
+    def hide_checkpoints_after(self, sid: str, turn: int) -> None:
+        with self.lock:
+            self.conn.execute("UPDATE checkpoints SET hidden = 1 WHERE session_id = ? AND turn > ?", (sid, turn))
+
+    @_writes
+    def delete_checkpoints(self, sid: str, turns: list[int]) -> None:
+        with self.lock:
+            self.conn.executemany("DELETE FROM checkpoints WHERE session_id = ? AND turn = ?",
+                                  [(sid, t) for t in turns])
+
+    @_writes
     def delete_session(self, sid: str) -> None:
         with self._tx():
-            for table in ("events", "approvals", "review_comments", "secret_dismissals", "artifacts"):
+            for table in ("events", "approvals", "review_comments", "secret_dismissals", "artifacts", "checkpoints"):
                 self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM search_index WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
