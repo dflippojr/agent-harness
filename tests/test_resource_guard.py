@@ -9,6 +9,7 @@ import pytest
 
 from harness.config import GpuGuardConfig
 from harness.gpu_guard import CLEAR, GIB, PAUSED, MemoryWatch
+from harness.gpu_guard import memory_reading as real_memory_reading  # before conftest's plenty_of_ram patches it
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.warmup import LOW_MEMORY, PAUSED as MODEL_PAUSED, READY, UNLOADED, WAKING, ModelWarmer
@@ -477,4 +478,164 @@ def test_load_gives_up_when_health_never_answers(tmp_path, monkeypatch):
         m.guard.control.flag, m.guard.control.health = True, False
         await asyncio.wait_for(m.warmer.ensure_loaded(model), 2)
         assert m.guard.control.starts == 1
+    asyncio.run(body())
+
+
+# diagnostics probes (harness/resources.py, gpu_guard.memory_reading, doctor): best-effort readings
+def test_gpu_reading_parses_nvidia_smi_and_caches(monkeypatch):
+    from harness import resources
+    outputs = ["1024, 8192, 37\n", "not, a, number\n", None]
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: outputs.pop(0))
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    first = resources.gpu_reading()
+    assert first == {"vram_used": 1024 * resources.MIB, "vram_total": 8192 * resources.MIB, "gpu_load": 37.0}
+    assert resources.gpu_reading(cached=True) == first and len(outputs) == 2  # no second nvidia-smi
+    assert resources.gpu_reading() is None  # unparseable
+    assert resources.gpu_reading() is None  # nvidia-smi missing
+
+
+def test_run_returns_none_when_the_tool_is_missing():
+    from harness import resources
+    assert resources._run(["definitely-not-a-real-tool-311"]) is None
+
+
+def test_container_memory_sums_harness_containers(monkeypatch):
+    from harness import resources
+    out = "harness-worker-1\t1.5GiB / 31GiB\nharness-sandbox\t512MiB / 31GiB\nother\t9GiB / 31GiB\n"
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: out)
+    assert resources.container_memory() == int(1.5 * GIB) + 512 * resources.MIB
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: None)
+    assert resources.container_memory() is None
+
+
+def test_parse_size_units():
+    from harness.resources import MIB, parse_size
+    assert parse_size("12kB") == 12000 and parse_size("512MiB") == 512 * MIB and parse_size("2GB") == 2 * 1000 ** 3
+    assert parse_size("10B") == 10
+    assert parse_size("xGiB") == 0 and parse_size("12 parsecs") == 0
+
+
+def test_process_memory_sums_matching_processes(monkeypatch):
+    import psutil
+    from harness import resources
+
+    class Proc:
+        def __init__(self, name, rss=None, broken=False):
+            self.broken = broken
+            self._info = {"name": name, "memory_info": type("M", (), {"rss": rss})() if rss else None}
+
+        @property
+        def info(self):
+            if self.broken:
+                raise psutil.AccessDenied()
+            return self._info
+    procs = [Proc("llama-server.exe", 3 * GIB), Proc("llama-server", 1 * GIB), Proc("llama-server.exe"),
+             Proc("python.exe", 5 * GIB), Proc("x", broken=True)]
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: iter(procs))
+    is_llama = lambda n: n.lower().startswith("llama-server")  # noqa: E731
+    assert resources._process_memory(is_llama) == 4 * GIB
+    assert resources._process_memory(lambda n: n == "none") == 0
+
+
+def test_cpu_and_daemon_probes_survive_psutil_errors(monkeypatch):
+    import psutil
+    from harness import resources
+
+    def boom(*a, **k):
+        raise RuntimeError("no counters")
+    assert isinstance(resources.daemon_memory(), int)
+    monkeypatch.setattr(psutil, "cpu_percent", boom)
+    monkeypatch.setattr(psutil, "Process", boom)
+    assert resources.cpu_load() is None and resources.cpu_percent_since_last() is None
+    assert resources.daemon_memory() is None
+
+
+def test_memory_reading_without_psutil_or_off_windows(monkeypatch):
+    import psutil
+    from harness import gpu_guard
+    monkeypatch.setattr(gpu_guard.sys, "platform", "linux")
+    reading = real_memory_reading()
+    assert reading["available"] > 0 and reading["total"] >= reading["available"] and reading["commit"] is None
+
+    def boom():
+        raise RuntimeError("no counters")
+    monkeypatch.setattr(psutil, "virtual_memory", boom)
+    assert real_memory_reading() is None
+    assert MemoryWatch(4, read=lambda: None, ttl=0).status()["available_bytes"] is None
+    from harness.gpu_guard import describe_memory
+    assert describe_memory({"available_bytes": None}) == "low memory"
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="GlobalMemoryStatusEx is Windows-only")
+def test_memory_reading_reports_commit_on_windows():
+    reading = real_memory_reading()
+    assert reading["commit_limit"] >= reading["commit"] > 0
+
+
+def test_diagnostics_without_a_guard_and_with_images_holding_the_gpu(tmp_path, monkeypatch):
+    from harness import resources
+    monkeypatch.setattr(resources, "gpu_reading", lambda cached=False: None)
+    monkeypatch.setattr(resources, "cpu_load", lambda: None)
+    monkeypatch.setattr(resources, "container_memory", lambda prefix="harness-": None)
+    monkeypatch.setattr(resources, "_process_memory", lambda match: None)
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        m.guard = None
+        m.images = type("Images", (), {"gpu_taken": True})()
+        diag = await resources.diagnostics(m)
+        assert diag["guard"] == {"enabled": False, "state": "clear"}
+        assert diag["vram"]["holders"] == ["llama-server", "ComfyUI"] and diag["vram"]["used_bytes"] is None
+        assert diag["ram"]["threshold_bytes"] == 0
+        m.cfg.modules.local_model = False
+        assert await resources.model_status(m) == {"state": "disabled"}
+    asyncio.run(body())
+
+
+def test_doctor_reports_the_resource_guard(tmp_path, monkeypatch, capsys):
+    import httpx
+    from harness import doctor
+    cfg = make_cfg(tmp_path)
+    cfg.gpu_guard = GpuGuardConfig(enabled=True, pause_flag=str(tmp_path / "llama.paused"))
+    gpu = {"enabled": True, "state": "clear", "lazy_load": True, "memory": {"low": True}}
+
+    def get(url, timeout=None):
+        payload = {"/health": {"profile": cfg.profile}, "/models/status": [{"state": "ready"}], "/gpu": gpu,
+                   "/maintenance": {"backup": {}}}["/" + url.split("/", 3)[3]]
+        return httpx.Response(200, json=payload)
+    monkeypatch.setattr(doctor.httpx, "get", get)
+    (tmp_path / "llama.paused").write_text("x")
+    r = doctor.Report()
+    doctor.check_daemon(r, cfg)
+    assert "model parked until needed; RAM low, new work waits" in capsys.readouterr().out
+    gpu["lazy_load"] = False
+    doctor.check_daemon(r, cfg)
+    assert r.warned == 1 and "exists but the guard is clear" in capsys.readouterr().out
+
+
+def test_load_now_refuses_during_a_hold_or_without_a_local_model(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+
+    m = guarded_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        m.guard.pause()
+        held = client.post("/resources/load", json={"duration_seconds": 600})
+        assert held.status_code == 409 and "turn the hold off first" in held.text
+        m.guard.resume()
+        m.cfg.modules.local_model = False
+        assert client.post("/resources/load", json={"duration_seconds": 600}).status_code == 400
+        assert m.guard.control.starts == 0 and m.warmer.pinned_until is None
+
+
+def test_memory_recovered_notification(tmp_path):
+    async def body():
+        m = guarded_manager(tmp_path)
+        s = m.create("hello")
+        m.db.insert_event(s["id"], "memory_recovered", {"seconds": 150})
+        m.db.insert_event(s["id"], "memory_recovered", {"seconds": 20})
+        notes = [m.notifier.build(e) for e in m.db.events(s["id"]) if e["type"] == "memory_recovered"]
+        assert [n["message"] for n in notes] == ["Memory recovered after 2 min; the task continues.",
+                                                 "Memory recovered after 20 s; the task continues."]
+        assert notes[0]["title"].startswith("Resumed:") and notes[0]["sequence_id"] == f"mem-{s['id']}"
     asyncio.run(body())
