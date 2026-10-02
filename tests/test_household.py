@@ -626,6 +626,42 @@ def test_disable_member_awaits_cancel_before_granting_gpu(tmp_path):
     asyncio.run(body())
 
 
+def test_disable_member_cancelled_mid_write_still_cancels_all_its_work(tmp_path):
+    """The disable request is cancelled while it commits one session's cancelled status: every queued session of
+    the account is still cancelled, released and audited (#294)."""
+    import threading
+    from waits import scaled
+
+    async def body():
+        _, m = household(tmp_path)
+        alice = AccountService(m).create(OWNER_USER_ID, ALICE, "Alice")
+        now = 1_700_000_000.0
+        for sid in ("aliceq01", "aliceq02"):
+            m.db.insert_session({
+                "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
+                "title": sid, "status": "queued", "workspace": "", "created_at": now, "updated_at": now,
+                "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
+            })
+        entered, release = threading.Event(), threading.Event()
+        update_session = m.db.update_session
+
+        def slow_update(sid, **fields):
+            if fields.get("status") == "cancelled" and not entered.is_set():
+                entered.set()
+                release.wait(scaled(10))
+            return update_session(sid, **fields)
+        m.db.update_session = slow_update
+        request = asyncio.create_task(m.disable_member(alice["user_id"]))
+        await asyncio.to_thread(entered.wait, scaled(10))
+        request.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert [m.db.get_session(sid)["status"] for sid in ("aliceq01", "aliceq02")] == ["cancelled", "cancelled"]
+        assert sum(1 for a in m.db.list_audit() if a["action"] == "cancel") == 2
+    asyncio.run(body())
+
+
 def test_isolated_refresh_origin_refuses_rewritten_origin(tmp_path):
     client, m = household(tmp_path)
     with client:

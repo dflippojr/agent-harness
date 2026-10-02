@@ -24,7 +24,7 @@ from .image_archive import ImageArchive
 from .notify import Notifier
 from .warmup import ModelWarmer
 from .config import Config
-from .db import Database
+from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .remote import RunnerError, RunnerHub, RunnerOffline
 from .runner import (ACTIVE, END_PENDING, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT,
@@ -1226,8 +1226,8 @@ class Manager:
         def record_review() -> None:
             self.db.update_session(sid, review=state, review_detail=detail)
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail, "head": head[:12]})
+            self.db.after_commit(lambda: self.runner.write_transcript(sid))  # even if the request is cancelled
         await self.db.awrite(record_review)
-        self.runner.write_transcript(sid)
         return self.db.get_session(sid)
 
     async def _review_local(self, sid: str, s: dict, project, ws: Path, action: str) -> tuple[str, str]:
@@ -1298,8 +1298,8 @@ class Manager:
             self.db.update_session(sid, **fields)
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail,
                                           "head": result.get("head", "")[:12]})
+            self.db.after_commit(lambda: self.runner.write_transcript(sid))  # even if the request is cancelled
         await self.db.awrite(record_review)
-        self.runner.write_transcript(sid)
         return self.db.get_session(sid)
 
     def decide_by_token(self, token: str, approve: bool) -> dict:
@@ -1599,6 +1599,11 @@ class Manager:
         self.revoke_member_streams(user_id)
         self.github_auth.member_disabled(user_id)
         self.google_signin.member_disabled(user_id)
+        # One unit: a cancelled request must not leave the rest of the account's work running (or a cancelled
+        # status without its release and audit row).
+        await finish_then_cancel(self._cancel_member_work(user_id, actor_id))
+
+    async def _cancel_member_work(self, user_id: str, actor_id: str) -> None:
         from .runner import ACTIVE
         waiting = []
         for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):

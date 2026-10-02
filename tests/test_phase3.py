@@ -121,6 +121,39 @@ def test_merge_refusals_leave_source_clean(tmp_path):
     asyncio.run(body())
 
 
+def test_review_cancelled_mid_write_still_rewrites_the_transcript(tmp_path):
+    """The review request is cancelled while its result commits: the transcript still gets the review (#294)."""
+    import threading
+    from waits import scaled
+    src = make_repo(tmp_path / "bare.git", bare=True)
+    cfg = project_cfg(tmp_path, str(src))
+
+    async def body():
+        m = Manager(cfg, chat=edit_steps())
+        await m.start(maintenance=False)
+        s = await finished(m, m.create("bump", project="proj")["id"])
+        entered, release = threading.Event(), threading.Event()
+        update_session, written = m.db.update_session, []
+
+        def slow_update(sid, **fields):
+            if "review" in fields:
+                entered.set()
+                release.wait(scaled(10))
+            return update_session(sid, **fields)
+        m.db.update_session = slow_update
+        m.runner.write_transcript = written.append
+        request = asyncio.create_task(m.review(s["id"], "merge"))
+        await asyncio.to_thread(entered.wait, scaled(10))
+        request.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert m.db.get_session(s["id"])["review"] == "merged"
+        assert written == [s["id"]]
+        await m.stop()
+    asyncio.run(body())
+
+
 def test_bare_source_merge_and_discard(tmp_path):
     src = make_repo(tmp_path / "bare.git", bare=True)
     cfg = project_cfg(tmp_path, str(src))
