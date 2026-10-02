@@ -1,22 +1,11 @@
 // The md() link pattern (javascript:S8786) backtracked super-linearly on crafted input: a nested-bracket label
-// and a run of "[x](http://" with no closing ")" (#239). app.js now uses a linear scanner (mdLinks/mdLinkAt);
+// and a run of "[x](http://" with no closing ")" (#239). lib/markdown.mjs uses a linear scanner (mdLinks/mdLinkAt);
 // this proves it matches the old regex on every input that was previously linear, and stays fast on the rest.
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { runInNewContext } from "node:vm";
-
-const here = dirname(fileURLToPath(import.meta.url));
-const read = (p) => readFileSync(p, "utf8").split("\r").join("");
-const app = read(join(here, "..", "harness/web/app.js"));
-const start = app.indexOf("const MD_BLOCK_MARK");
-const end = app.indexOf("\n}\n", app.indexOf("function md(")) + 3;
-if (start < 0 || end < 3) throw new Error("markdown block not found in app.js");
-const mdInline = runInNewContext(`${app.slice(start, end)}\nmdInline;`);
+import { mdInline } from "../harness/web/lib/markdown.mjs";
 
 const fail = (msg) => { throw new Error(msg); };
 
-// Kept here in isolation, never imported by app.js, only to prove the new scanner matches it on linear inputs.
+// Kept here in isolation, never imported by the app, only to prove the new scanner matches it on linear inputs.
 const OLD_LINK_RE = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
 const oldLinks = (s) => s.replace(OLD_LINK_RE, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 

@@ -1,5 +1,13 @@
 name: CI
 
+# One workflow, two jobs, both GitHub-hosted (free for this public repo):
+#   test  - the complete pytest suite with coverage (coverage.xml artifact)
+#   sonar - SonarCloud analysis of that coverage, with the quality-gate wait
+# The suite runs once. Tests used to run a second time on a self-hosted
+# `agent-harness-ci` pool on the tower; that pool is retired so CI no longer
+# competes with llama-server and the desktop for RAM. The job ids `test` and
+# `sonar` keep the check names they had before the merge.
+#
 # Feature-branch pushes without a PR do not run. `pull_request` covers open and
 # later commits on a PR (`synchronize`); `push` to main still runs after merge.
 #
@@ -12,14 +20,18 @@ name: CI
 # docs/CI-CD.md by
 # tests/test_review_runner.py::test_ci_docs_explain_backend_configuration_and_manual_verification.
 # Adding a test that reads a skipped file requires removing that path from
-# paths-ignore in the same change.
+# paths-ignore in the same change. None of the skipped files are Sonar
+# sources, so skipping the analysis with them loses nothing.
 #
 # main currently has no branch protection or rulesets, so a skipped `test`
 # check is acceptable. If `test` ever becomes required, add a tiny
 # always-running success job (do not add that job here).
 # .github/workflows/ci-cd.yml already deploys only when
 # workflow_run.conclusion == 'success' for a push to main, so a skipped or
-# absent CI run does not publish or deploy (desired).
+# absent CI run does not publish or deploy (desired). On a push to main the
+# `sonar` job is continue-on-error: a failing quality gate shows on the job
+# but does not block the deploy; only failing tests do. On pull requests the
+# quality gate still fails the check.
 on:
   push:
     branches: [main]
@@ -50,7 +62,12 @@ on:
       - docs/phase8b-results.md
       - docs/phase8c-results.md
   pull_request:
+    types: [opened, synchronize, reopened]
     paths-ignore: *ci-skip-unread-paths
+
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -58,27 +75,81 @@ concurrency:
 
 jobs:
   test:
-    # Pytest pool (`agent-harness-ci`, three tower members). SonarCloud is
-    # GitHub-hosted (`sonar.yml`); review uses the `agent-harness-review`
-    # pool; the tower runner is deploy only (`ci-cd.yml` `deploy-tower`).
-    runs-on: [self-hosted, Windows, X64, agent-harness-ci]
+    # The suite is Windows-native (CreateProcess flags, msvcrt, PowerShell), so
+    # it runs on windows-latest; Ubuntu fails on msvcrt, console-creation flags,
+    # and Windows paths. Docker-image and GPU tests skip on the hosted runner.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up virtualenv
-        shell: powershell
-        run: |
-          python -m venv .venv
-          .venv\Scripts\python -m pip install --upgrade pip
-          .venv\Scripts\python -m pip install -r requirements.txt pytest-xdist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
 
-      # Fixed -n (never auto): the tower shares RAM with llama-server and other
-      # agent-harness-ci jobs. Started at -n 4; a 20-run soak median of 192 s was
-      # still above two minutes, so CI uses -n 8 (cap). pytest-xdist is a CI extra,
-      # not in requirements.txt. Flags stay on this command (no repo-wide addopts)
-      # so sonar.yml can use a different fixed -n (4 on 4-vCPU hosted Windows)
-      # without inheriting this job's -n 8.
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-repomap.txt pytest-cov pytest-xdist
+
+      # pytest-cov and pytest-xdist are CI extras (not in requirements.txt).
+      # Fixed -n 4 --dist loadfile: hosted windows-latest has 4 vCPUs; do not
+      # use pytest's auto worker count. NUMBER_OF_PROCESSORS is logged so run
+      # logs can verify the 4-vCPU assumption. pytest-cov merges worker data
+      # into coverage.xml. COVERAGE_CORE sysmon is not set: .coveragerc enables
+      # branch coverage, and sysmon cannot measure branches on Python 3.12
+      # (branch sysmon needs 3.14+).
       # Serial escape hatch locally: python -m pytest tests -q -p no:xdist
-      - name: Run test suite
+      - name: Confirm hosted runner cores
         shell: powershell
-        run: .venv\Scripts\python -m pytest tests -q -n 8 --dist loadfile
+        run: Write-Host "NUMBER_OF_PROCESSORS=$env:NUMBER_OF_PROCESSORS"
+
+      - name: Run tests with coverage
+        # A hung test fails the step after 40 minutes with its log saved, and faulthandler prints the stack of any
+        # test that runs longer than 5 minutes (that is how the Python 3.12 subprocess hang on #228 was found).
+        timeout-minutes: 40
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: >
+          python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
+          --cov=harness --cov=sdk --cov=scripts --cov=macrunner
+          --cov-report=xml:coverage.xml --cov-report=term
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          retention-days: 3
+
+  sonar:
+    # SonarCloud analysis of the `test` job's coverage. Automatic analysis is
+    # turned off in SonarCloud; this job is the analysis. Same windows-latest
+    # image as `test`, so the absolute <source> paths in coverage.xml resolve.
+    needs: test
+    runs-on: windows-latest
+    # Secrets are not passed to pull requests from forks; skip rather than fail.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    continue-on-error: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so SonarCloud can blame lines and find the PR base.
+          fetch-depth: 0
+
+      - name: Download coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage
+
+      - name: Scan with SonarCloud
+        uses: SonarSource/sonarqube-scan-action@v8
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARCLOUD_TOKEN }}
+        with:
+          args: >
+            -Dsonar.host.url=https://sonarcloud.io
+            -Dsonar.qualitygate.wait=true

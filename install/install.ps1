@@ -321,6 +321,20 @@ if ($EnableModules -contains 'image_edit') {
     }
 }
 
+# ---------------------------------------------------------------- pinned secret scanner (gitleaks, MIT)
+# Review push/merge fail closed without it. harness.secret_scan fetches the release pinned in
+# harness/gitleaks/pin.json and checks its SHA-256; the daemon does the same at start if this step failed.
+Step 'Secret scanner (gitleaks, pinned version and SHA-256)'
+if ($DryRun) {
+    Info '[dry run] python -m harness.secret_scan install'
+} else {
+    Push-Location $AppDir
+    try {
+        & $python -m harness.secret_scan install --config-dir $configDir
+        if ($LASTEXITCODE -ne 0) { Warn 'gitleaks is not installed; Review push and merge stay blocked until it is (the daemon retries at start)' }
+    } finally { Pop-Location }
+}
+
 # ---------------------------------------------------------------- doctor
 Step 'Checking the install (python -m harness.doctor)'
 if ($DryRun) { Info '[dry run] skipped' } else {

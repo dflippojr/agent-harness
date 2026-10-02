@@ -152,6 +152,12 @@ compaction:
   keep_recent: 0.20    # fraction of context kept verbatim after a summary
   state_max_chars: 8000  # cap on serialized update_state object
 
+# Experiment (#264, docs/repo-map-study.md): ranked repository map appended to local-model system prompts, refreshed
+# only on a round reset. Off by default; needs `pip install -r requirements-repomap.txt`.
+# repo_map:
+#   enabled: false
+#   budget_tokens: 1500   # estimated as chars / 4
+
 # Bounds on managed-runner tool results (tower and macbook). Hosted Claude/Codex/Cursor sessions never see these.
 # Omitted or invalid values fall back to these defaults. The agent may raise a limit per call with max_lines,
 # max_matches, or max_chars, clamped to the matching *_max. These replace FileOps.read_lines, the hard-coded

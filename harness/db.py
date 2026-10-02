@@ -14,6 +14,8 @@ from typing import Sequence
 from . import migrations as migrations_mod
 from .migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
 
+from .telemetry import TimedLock
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -340,6 +342,18 @@ CREATE TABLE IF NOT EXISTS review_comments (   -- draft diff line comments, sent
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS review_comments_session ON review_comments(session_id, created_at);
+CREATE TABLE IF NOT EXISTS secret_dismissals (   -- owner-dismissed secret-scan findings (secret_scan.py, #263)
+    session_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    path TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (session_id, fingerprint)
+);
 CREATE TABLE IF NOT EXISTS member_projects (
     user_id TEXT NOT NULL,
     slug TEXT NOT NULL,
@@ -452,7 +466,7 @@ class Database:
             self.conn.close()
             raise
         self._ensure_search_index_columns()
-        self.lock = threading.RLock()
+        self.lock = TimedLock()
         self._build_search_index()
 
     def _bootstrap(self) -> None:
@@ -541,7 +555,7 @@ class Database:
 
     def delete_session(self, sid: str) -> None:
         with self.tx():
-            for table in ("events", "approvals", "review_comments", "artifacts"):
+            for table in ("events", "approvals", "review_comments", "secret_dismissals", "artifacts"):
                 self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM search_index WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
@@ -584,6 +598,21 @@ class Database:
             rows = self.conn.execute(
                 "SELECT * FROM review_comments WHERE session_id = ? ORDER BY created_at, id", (sid,)).fetchall()
         return [{**dict(r), "quoted": json.loads(r["quoted"])} for r in rows]
+
+    # secret-scan dismissals: by fingerprint, so they follow the same value to later heads
+    def add_secret_dismissal(self, sid: str, d: dict) -> dict:
+        row = {"session_id": sid, "created_at": time.time(), **d}
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO secret_dismissals (session_id, fingerprint, rule, repo, path, line, reason, "
+                "actor_id, created_at) VALUES (:session_id, :fingerprint, :rule, :repo, :path, :line, :reason, "
+                ":actor_id, :created_at)", row)
+        return row
+
+    def secret_dismissals(self, sid: str) -> dict[str, dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM secret_dismissals WHERE session_id = ?", (sid,)).fetchall()
+        return {r["fingerprint"]: dict(r) for r in rows}
 
     def delete_review_comments(self, sid: str, ids: list[str] | None = None) -> int:
         """Delete one session's drafts: the given ids, or all of them."""
@@ -729,6 +758,13 @@ class Database:
                 "SELECT * FROM events WHERE session_id = ? AND seq > ? ORDER BY seq", (sid, after)
             ).fetchall()
         return [_row(r) for r in rows]
+
+    def pushed_heads(self, sid: str) -> list[str]:
+        """The short heads a session's branch was pushed at, from its `review` events (issue #263)."""
+        with self.lock:
+            rows = self.conn.execute("SELECT data FROM events WHERE session_id = ? AND type = 'review'",
+                                     (sid,)).fetchall()
+        return [d["head"] for d in (json.loads(r["data"]) for r in rows) if d.get("action") == "push" and d.get("head")]
 
     def snippet_events(self) -> list[dict]:
         """Every chat's snippet run events, oldest first (snippets.py restart recovery)."""
