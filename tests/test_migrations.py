@@ -299,9 +299,10 @@ def test_baseline_plus_migrations_equals_fresh_build(tmp_path):
     # And with the real migration set, a migrated pre-versioning DB equals a fresh one.
     legacy, fresh_real = tmp_path / "legacy.db", tmp_path / "fresh_real.db"
     _legacy_db(legacy)
-    Database(legacy).close()
-    Database(fresh_real).close()
+    Database(legacy, migrations=_REAL_DISCOVER()).close()  # the autouse fixture hides shipped steps
+    Database(fresh_real, migrations=_REAL_DISCOVER()).close()
     assert _snapshot(legacy) == _snapshot(fresh_real)
+    assert _version(legacy) == _version(fresh_real) == migrations.latest_version(_REAL_DISCOVER())
 
 
 def test_maintenance_backup_delegates_to_backup_sqlite(tmp_path):
