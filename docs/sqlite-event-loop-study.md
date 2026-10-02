@@ -123,6 +123,14 @@ Before (`origin/main` at 8ee0aae, re-run 2026-10-02 with the Phase 1 benchmark) 
 | after, with scraping | 23395 | 4066 MB | 0.5 ms | **0.5 ms** | 25 ms |
 | before, no scraping | 6580 | 733 MB | 10 ms | **100 ms** | 100 ms |
 | after, no scraping | 17519 | 1974 MB | 0.5 ms | **10 ms** | 25 ms |
+| after + atomic writes, with scraping | 17885 | 2893 MB | 0.5 ms | **5 ms** | 25 ms |
+| after + atomic writes, no scraping | 23236 | 2611 MB | 0.5 ms | **0.5 ms** | 25 ms |
+
+The last two rows are a re-run (30 s each, same machine) after every `@_writes` method became one transaction on the
+writer (`BEGIN IMMEDIATE ... COMMIT`), so that a pooled reader can no longer see an event without its search-index row
+or an allowlist mid-save. p99 stays well under 50 ms; the 0.5 / 5 / 10 ms differences between runs are run-to-run
+noise (one histogram bucket), and `insert_event` still holds the writer about 26 of the 30 s. The full outputs below
+are from the first after runs.
 
 After, with scraping:
 
