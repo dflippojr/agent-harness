@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state
+from . import compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
@@ -82,7 +82,7 @@ def new_run(carry: dict | None = None) -> dict:
     """Counters for one run. Notes and the token calibration belong to the session, so they carry over."""
     run = {"turns": 0, "tool_calls": 0, "invalid_tool_calls": 0, "tool_errors": 0, "prompt_tokens": 0,
            "completion_tokens": 0, "idle": 0, "executing": None, "started_at": time.time()}
-    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits", "state"):
+    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits", "state", "trace"):
         if carry and key in carry:
             run[key] = carry[key]
     return run
@@ -361,7 +361,8 @@ class Runner:
             self.set_status(sid, "queued")
         if self.guard is not None and self.guard.active:
             self.note_gpu_pause(sid)
-        await self.scheduler.acquire(sid, front=front)
+        with telemetry.span("gpu_slot_wait", {"harness.queue_front": front}):
+            await self.scheduler.acquire(sid, front=front)
         self.set_status(sid, "running")
 
     # GPU contention (gpu_guard.py)
@@ -393,7 +394,11 @@ class Runner:
             turn = await self.gate.agent_turn()  # endpoint requests (an editor, a script) go first
             self.generating.add(sid)
             try:
-                return await self.chat(*args, **kwargs)
+                with telemetry.span("chat", {"gen_ai.operation.name": "chat",
+                                             "gen_ai.request.model": getattr(args[0], "name", "") if args else ""}):
+                    completion = await self.chat(*args, **kwargs)
+                    telemetry.annotate(self._chat_attributes(completion))
+                return completion
             except llm.LLMError as e:
                 if self.guard is None or not self.guard.active:
                     raise
@@ -401,6 +406,12 @@ class Runner:
             finally:
                 self.generating.discard(sid)
                 await turn.release()
+
+    @staticmethod
+    def _chat_attributes(c: llm.Completion) -> dict:
+        return {"gen_ai.usage.input_tokens": c.prompt_tokens, "gen_ai.usage.output_tokens": c.completion_tokens,
+                "harness.cache_read_tokens": c.cache_tokens, "harness.prompt_ms": c.prompt_ms or None,
+                "harness.decode_ms": c.decode_ms or None}
 
     # runner targets (the MacBook)
     async def _wait_for_target(self, sid: str) -> None:
@@ -469,6 +480,36 @@ class Runner:
 
     # main entry
     async def run(self, sid: str, recovered: bool = False) -> None:
+        trace = self._session_trace(sid)
+        if not trace:
+            await self._run(sid, recovered)
+            return
+        s = self.db.get_session(sid)
+        attrs = {"harness.session_id": sid, "harness.backend": s.get("backend", "local"),
+                 "gen_ai.request.model": s["model"], "harness.recovered": recovered}
+        with telemetry.tracer().session_run(trace, float(trace.get("started_at") or s["created_at"]),
+                                            trace.get("last_stop"), attrs) as root:
+            try:
+                await self._run(sid, recovered)
+            finally:
+                s = self.db.get_session(sid)
+                root.set({"harness.status": s["status"]})
+                run = s["run"]
+                run["trace"] = {**(run.get("trace") or trace), "last_stop": time.time()}
+                self.db.update_session(sid, run=run)
+
+    def _session_trace(self, sid: str) -> dict:
+        """The session's persisted trace ids ({} when tracing is off), created on its first traced run."""
+        if not telemetry.tracer().enabled:
+            return {}
+        s = self.db.get_session(sid)
+        trace = s["run"].get("trace") or {}
+        if not trace.get("trace_id"):
+            trace = {**telemetry.tracer().new_trace(), "started_at": s["created_at"]}
+            self.db.update_session(sid, run={**s["run"], "trace": trace})
+        return trace
+
+    async def _run(self, sid: str, recovered: bool = False) -> None:
         try:
             s = self.db.get_session(sid)
             if s.get("backend", "local") != "local":
@@ -511,11 +552,12 @@ class Runner:
             self.bus.emit(sid, "resumed", {"status": s["status"]})
             if (s["run"].get("executing") or {}).get("name") in ("run_shell", "git_clone"):
                 await self.sandbox(s).restart()  # kill the orphaned command
-        await self._wait_for_target(sid)
-        s = self.db.get_session(sid)
-        await self._prepare_repo(s)
-        self._snapshot_git_baseline(sid)
-        self._repo_map_at_start(sid)
+        with telemetry.span("run_setup"):
+            await self._wait_for_target(sid)
+            s = self.db.get_session(sid)
+            await self._prepare_repo(s)
+            self._snapshot_git_baseline(sid)
+            self._repo_map_at_start(sid)
         if s["status"] != "waiting_approval":  # _resolve_calls waits without holding the GPU
             await self._acquire(sid)
         await self._loop(sid)
@@ -536,34 +578,56 @@ class Runner:
         self.set_status(sid, "failed", stop_reason=stop_reason)
 
     async def _loop(self, sid: str) -> None:
-        while True:
-            s = self.db.get_session(sid)
-            if s["status"] not in ACTIVE:
-                return
-            pending = unresolved_calls(s["context"])
-            if pending:
-                if await self._resolve_calls(s, pending):
+        # One `turn` span covers compaction, the model call, and the tool calls that reply asked for.
+        tracer = telemetry.tracer()
+        turn = telemetry.NOOP_SPAN
+        try:
+            while True:
+                s = self.db.get_session(sid)
+                if s["status"] not in ACTIVE:
+                    return
+                pending = unresolved_calls(s["context"])
+                if pending:
+                    with tracer.activate(turn):
+                        done = await self._resolve_calls(s, pending)
                     self._emit_turn_metrics(sid)
+                    if done:
+                        turn = self._close_span(turn)
+                        await self._end_run(sid)
+                        return
+                    continue
+
+                if s["inbox"]:
+                    context = s["context"] + [{"role": "user", "content": m} for m in s["inbox"]]
+                    self.db.update_session(sid, context=context, inbox=[])
+                    continue
+
+                reason = self._budget_reason(s["run"])
+                if reason:
+                    turn = self._close_span(turn)
+                    self.set_status(sid, "done", stop_reason=reason)
                     await self._end_run(sid)
                     return
-                self._emit_turn_metrics(sid)
-                continue
 
-            if s["inbox"]:
-                context = s["context"] + [{"role": "user", "content": m} for m in s["inbox"]]
-                self.db.update_session(sid, context=context, inbox=[])
-                continue
+                self._close_span(turn)
+                turn = tracer.start("turn", {"harness.turn": int(s["run"].get("turns", 0)) + 1})
+                with tracer.activate(turn):
+                    s = await self._maybe_compact(s)
+                    ended = await self._generate(s)
+                if ended:
+                    turn = self._close_span(turn)
+                    await self._end_run(sid)
+                    return
+        except Exception as e:
+            turn.fail(e)
+            raise
+        finally:
+            turn.end()
 
-            reason = self._budget_reason(s["run"])
-            if reason:
-                self.set_status(sid, "done", stop_reason=reason)
-                await self._end_run(sid)
-                return
-
-            s = await self._maybe_compact(s)
-            if await self._generate(s):
-                await self._end_run(sid)
-                return
+    @staticmethod
+    def _close_span(span) -> telemetry.NoopSpan:
+        span.end()
+        return telemetry.NOOP_SPAN
 
     def _budget_reason(self, run: dict) -> str:
         """Why the run is out of budget ("" while it has some left)."""
@@ -597,9 +661,11 @@ class Runner:
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
             try:
                 async with slot:
-                    cli = await self._start_cli(sid, backend_name, backend, credential, use_api_key, api_key,
-                                                backend_session_id, recovered)
-                    await self._pump_cli(sid, cli, credential, use_api_key, recovered)
+                    with telemetry.span("hosted_cli_turn", {"harness.backend": backend_name,
+                                                            "gen_ai.request.model": backend.model}):
+                        cli = await self._start_cli(sid, backend_name, backend, credential, use_api_key, api_key,
+                                                    backend_session_id, recovered)
+                        await self._pump_cli(sid, cli, credential, use_api_key, recovered)
                     return
             except CliLimitError as limit:
                 await self._cli_limit_reached(sid, backend_name, limit, use_api_key)
@@ -1406,12 +1472,16 @@ class Runner:
             self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)
             return None, None
 
-        output = await self._authorize(s, call, name, args, ws)
-        if output is None:
-            output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
-            if name in ("run_shell", "git_clone", "write_file", "generate_image") and await self._over_quota(sid):
-                self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
-                return True, None
+        with telemetry.tool_span(name, call["id"]) as span:
+            output = await self._authorize(s, call, name, args, ws)
+            executed = output is None
+            if executed:
+                output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
+            span.set({"harness.ok": executed, "harness.output_chars": len(output)})
+        if executed and name in ("run_shell", "git_clone", "write_file", "generate_image") \
+                and await self._over_quota(sid):
+            self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
+            return True, None
         return None, len(output)
 
     def _skip_rest(self, sid: str, rest: list[dict], reason: str) -> None:
@@ -1573,6 +1643,7 @@ class Runner:
         existing = self.db.approval_for_call(sid, call["id"])
         if existing is None:
             decision = self._decide(s, name, args)
+            telemetry.annotate({"harness.policy_decision": decision.action})
             self.bus.emit(sid, "tool_call", {"id": call["id"], "name": name, "args": args,
                                              "decision": decision.action, "reason": decision.reason})
             if decision.action == ALLOW:
@@ -1593,7 +1664,9 @@ class Runner:
         if existing["status"] == "pending":
             self.scheduler.release(sid)
             self.set_status(sid, "waiting_approval")
-            existing = await self._wait_approval(existing["id"])
+            with telemetry.span("approval_wait") as span:
+                existing = await self._wait_approval(existing["id"])
+                span.set({"harness.approval_status": existing["status"]})
             await self._acquire(sid)
         if existing["status"] == "approved":
             return self._member_tool_block(s, call, name, ws)
@@ -1675,32 +1748,9 @@ class Runner:
         ok = True
         try:
             kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
-            if name == "read_artifact":
-                if not self.artifact_tool_available(s):
-                    raise ToolError("unknown tool 'read_artifact'")
-                output = self._read_artifact(sid, args)
-            elif name in delegate_edit.TOOL_NAMES:
-                if not self.delegate_edit_available(s) or not isinstance(ws, Workspace):
-                    raise ToolError(f"unknown tool '{name}'")
-                output = await (self._delegate_propose(sid, args, ws) if name == delegate_edit.PROPOSE
-                                else self._delegate_apply(sid, args, ws))
-            elif self.app_tools is not None and name in self.app_tools.names(s):
-                def waiting() -> None:  # the app works on it: give the GPU to other sessions meanwhile
-                    self.scheduler.release(sid)
-                    self.set_status(sid, "waiting_app")
-                output = await self.app_tools.call(s, call["id"], name, args, on_wait=waiting,
-                                                   on_resume=lambda: self._acquire(sid))
-            elif kit is not None and kit is self.images:
-                output = await self._call_images(sid, s, ws, kit, name, args)
-            elif kit is not None and getattr(kit, "wants_session", False):
-                output = await kit.call(name, args, session=s, call_id=call["id"])
-            elif kit is not None:
-                output = await kit.call(name, args)  # daemon-side for every target
-            elif isinstance(ws, RemoteWorkspace):
-                await self._wait_for_target(sid)
-                output = await self._remote_call(sid, ws, name, args)
-            else:
-                output = await ws.call(name, args)
+            with telemetry.span("image_job" if kit is not None and kit is self.images else "sandbox_exec",
+                                {"gen_ai.tool.name": name}):
+                output = await self._dispatch(sid, s, call, name, args, ws, kit)
         except (ToolError, OSError, UnicodeError) as e:
             ok = False
             output = f"Error: {e}"
@@ -1752,6 +1802,36 @@ class Runner:
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
         self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content, extra=extra, output_chars=output_chars)
+        return output
+
+    async def _dispatch(self, sid: str, s: dict, call: dict, name: str, args: dict, ws: Workspace, kit) -> str:
+        """Run one authorized tool call wherever it lives (daemon, app, image service, sandbox, runner)."""
+        if name == "read_artifact":
+            if not self.artifact_tool_available(s):
+                raise ToolError("unknown tool 'read_artifact'")
+            output = self._read_artifact(sid, args)
+        elif name in delegate_edit.TOOL_NAMES:
+            if not self.delegate_edit_available(s) or not isinstance(ws, Workspace):
+                raise ToolError(f"unknown tool '{name}'")
+            output = await (self._delegate_propose(sid, args, ws) if name == delegate_edit.PROPOSE
+                            else self._delegate_apply(sid, args, ws))
+        elif self.app_tools is not None and name in self.app_tools.names(s):
+            def waiting() -> None:  # the app works on it: give the GPU to other sessions meanwhile
+                self.scheduler.release(sid)
+                self.set_status(sid, "waiting_app")
+            output = await self.app_tools.call(s, call["id"], name, args, on_wait=waiting,
+                                               on_resume=lambda: self._acquire(sid))
+        elif kit is not None and kit is self.images:
+            output = await self._call_images(sid, s, ws, kit, name, args)
+        elif kit is not None and getattr(kit, "wants_session", False):
+            output = await kit.call(name, args, session=s, call_id=call["id"])
+        elif kit is not None:
+            output = await kit.call(name, args)  # daemon-side for every target
+        elif isinstance(ws, RemoteWorkspace):
+            await self._wait_for_target(sid)
+            output = await self._remote_call(sid, ws, name, args)
+        else:
+            output = await ws.call(name, args)
         return output
 
     # delegated edits (#157)
@@ -2053,7 +2133,9 @@ class Runner:
         explicit = bool(s["run"].get("pending_round_reset"))
         valid = self.has_valid_saved_state(s)
         if (explicit or before >= self.cfg.reset_at * n) and valid:
-            return self._round_reset(s, context, before, cpt, overhead)
+            with telemetry.span("compaction", {"harness.compaction_tier": "round_reset",
+                                               "harness.tokens_before": before}):
+                return self._round_reset(s, context, before, cpt, overhead)
         if explicit:
             run = {**s["run"]}
             run.pop("pending_round_reset", None)
@@ -2061,17 +2143,19 @@ class Runner:
             s = self.db.get_session(sid)
         if before < self.cfg.elide_at * n:
             return s
-        context, _ = compaction.elide(context)
-        after = compaction.estimate_tokens(context, cpt) + overhead
-        data = {"tier": "elide", "tokens_before": before, "tokens_after": after}
-        if after >= self.cfg.summarize_at * n:
-            split = compaction.split_for_summary(context, keep_chars=int(self.cfg.keep_recent * n * cpt))
-            if split:
-                context = await self._summarize_context(s, context, split, data, before, cpt, overhead)
-        data["context_tokens"] = n
-        with self.db.tx():
-            self.db.update_session(sid, context=context)
-            self.bus.emit(sid, "compaction", data)
+        with telemetry.span("compaction", {"harness.tokens_before": before}) as span:
+            context, _ = compaction.elide(context)
+            after = compaction.estimate_tokens(context, cpt) + overhead
+            data = {"tier": "elide", "tokens_before": before, "tokens_after": after}
+            if after >= self.cfg.summarize_at * n:
+                split = compaction.split_for_summary(context, keep_chars=int(self.cfg.keep_recent * n * cpt))
+                if split:
+                    context = await self._summarize_context(s, context, split, data, before, cpt, overhead)
+            data["context_tokens"] = n
+            span.set({"harness.compaction_tier": data["tier"], "harness.tokens_after": data.get("tokens_after")})
+            with self.db.tx():
+                self.db.update_session(sid, context=context)
+                self.bus.emit(sid, "compaction", data)
         return self.db.get_session(sid)
 
     def _mask_used_results(self, s: dict) -> tuple[list, dict, int]:
@@ -2164,6 +2248,10 @@ class Runner:
         self.set_status(sid, "cancelled", stop_reason="cancelled")
 
     async def _end_run(self, sid: str) -> None:
+        with telemetry.span("run_end"):
+            await self._end_run_inner(sid)
+
+    async def _end_run_inner(self, sid: str) -> None:
         self._emit_turn_metrics(sid)
         s = self.db.get_session(sid)
         extra = {}
