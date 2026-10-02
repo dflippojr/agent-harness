@@ -71,7 +71,11 @@ async def wait_status(m: Manager, sid: str, *statuses: str, timeout: float = 30)
     while time.monotonic() < deadline:
         s = m.db.get_session(sid)
         if s["status"] in statuses:
-            return s
+            # A finished run still records its job status and run_finished after the status commit (each write
+            # is awaited, #294); let that bookkeeping land before the caller reads it.
+            task = m.tasks.get(sid) if s["status"] in ("done", "failed", "cancelled") else None
+            if task is None or task.done():
+                return m.db.get_session(sid) if task is not None else s
         await asyncio.sleep(0.02)
     raise AssertionError(f"session stayed {m.db.get_session(sid)['status']}, wanted {statuses}")
 

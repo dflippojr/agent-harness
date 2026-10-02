@@ -1126,7 +1126,7 @@ class Manager:
         if self.db.get_session(sid)["status"] in ACTIVE:
             # cancelled before its first step, so the run's own cleanup never ran and it would be resumed on restart
             self.runner.user_cancelled.discard(sid)
-            self.runner.set_status(sid, "cancelled", stop_reason="cancelled")
+            await self.runner.aset_status(sid, "cancelled", stop_reason="cancelled")
 
     # draft line comments on the Changes diff
     def review_comments(self, ref: str) -> list[dict]:
@@ -1180,7 +1180,7 @@ class Manager:
         try:
             state, detail = await self._review_local(sid, s, project, ws, action)
         except projects.GitError as e:
-            self.bus.emit(sid, "error", {"message": f"{action} failed: {e}"})
+            await self.bus.aemit(sid, "error", {"message": f"{action} failed: {e}"})
             raise HarnessError(e.status, str(e))
         head = "" if action == "discard" else await asyncio.to_thread(projects.head, ws)
 
@@ -1243,7 +1243,7 @@ class Manager:
         try:
             result = await self.remote(s, action, params, timeout=600)
         except HarnessError as e:
-            self.bus.emit(sid, "error", {"message": f"{action} failed: {e}"})
+            await self.bus.aemit(sid, "error", {"message": f"{action} failed: {e}"})
             raise
         if action == "merge":
             state, detail = ("merged" if result["merged"] else ""), result["message"]
@@ -1313,7 +1313,7 @@ class Manager:
         if s["status"] not in ACTIVE:
             raise HarnessError(409, f"session is {s['status']}, nothing to cancel")
         if task is None:  # no live task (shouldn't happen); fix the record anyway
-            self.runner.set_status(sid, "cancelled", stop_reason="cancelled")
+            await self.runner.aset_status(sid, "cancelled", stop_reason="cancelled")
             return self.db.get_session(sid)
         self.runner.user_cancelled.add(sid)
         task.cancel()
@@ -1571,7 +1571,7 @@ class Manager:
                 waiting.append(task)
             else:
                 if s["status"] in ACTIVE:
-                    self.runner.set_status(sid, "cancelled", stop_reason="account_disabled")
+                    await self.runner.aset_status(sid, "cancelled", stop_reason="account_disabled")
                 self.scheduler.release(sid)
             self.db.insert_audit(actor_id, user_id, "cancel", "ok")
         if waiting:
