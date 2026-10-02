@@ -363,6 +363,12 @@ def check_optional(r: Report, cfg) -> None:
         r.warn("Phone access", "not published on a tailnet (optional; see docs/INSTALL.md)")
 
 
+def check_canary(r: Report, cfg) -> None:
+    reason = getattr(getattr(cfg, "canary", None), "disabled_reason", "")
+    if reason:
+        r.fail("Canary", f"disabled: {reason}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Diagnose an agent-harness install")
     ap.add_argument("--config-dir")
@@ -384,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     check_data_dir(r, cfg)
     check_schema_version(r, cfg)
     check_github_token(r, cfg)
+    check_canary(r, cfg)
     check_docker(r, cfg)
     check_model_server(r, cfg)
     check_daemon(r, cfg)

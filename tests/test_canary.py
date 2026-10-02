@@ -347,8 +347,7 @@ def test_canary_at_is_normalised_or_rejected_when_the_config_loads(tmp_path):
     (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
     assert config._load_canary({"enabled": True, "fixture_dir": str(tmp_path)}).suite == "bakeoff/canary.yaml"
     for raw in ({"at": "25:00"}, {"at": 1440}, {"at": "noon"}, {"at": True}, {"repeats": 0},
-                {"min_prior_runs": 6, "baseline_runs": 5}, {"total_cap_seconds": "soon"}, {"drop_points": 0},
-                {"enabled": True, "suite": "bakeoff/nope.yaml"}):
+                {"min_prior_runs": 6, "baseline_runs": 5}, {"total_cap_seconds": "soon"}, {"drop_points": 0}):
         try:
             config._load_canary(raw)
             raise AssertionError(f"{raw} accepted")
@@ -840,13 +839,47 @@ def test_a_missing_suite_file_is_a_config_error_too(tmp_path):
         assert "nope.yaml" in str(e)
 
 
-def test_enabling_the_canary_without_a_web_fixture_is_rejected_when_the_config_loads(tmp_path):
+def _doctor_lines(cfg):
+    from harness import doctor
+
+    class Rec(doctor.Report):
+        def __init__(self):
+            super().__init__()
+            self.lines = []
+
+        def ok(self, name, detail=""):
+            self.lines.append(("ok", name, detail))
+
+        def fail(self, name, detail):
+            super().fail(name, detail)
+            self.lines.append(("fail", name, detail))
+    r = Rec()
+    doctor.check_canary(r, cfg)
+    return r.lines
+
+
+def test_a_missing_web_fixture_disables_only_the_canary_and_doctor_fails(tmp_path, caplog):
+    from types import SimpleNamespace
     from harness import config
-    try:
-        config._load_canary({"enabled": True, "fixture_dir": str(tmp_path)})
-        raise AssertionError("accepted a fixture_dir without manifest.json")
-    except ValueError as e:
-        assert "canary.fixture_dir" in str(e) and "manifest.json" in str(e)
+    with caplog.at_level("ERROR", logger="harness.config"):
+        cfg = config._load_canary({"enabled": True, "fixture_dir": str(tmp_path)})  # no raise: the daemon starts
+    assert cfg.enabled is False
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1 and "canary.fixture_dir" in errors[0] and "manifest.json" in errors[0]
+    lines = _doctor_lines(SimpleNamespace(canary=cfg))
+    assert lines[0][0] == "fail" and cfg.disabled_reason in lines[0][2]
     (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
-    assert config._load_canary({"enabled": True, "fixture_dir": str(tmp_path)}).fixture_dir == str(tmp_path)
+    ok = config._load_canary({"enabled": True, "fixture_dir": str(tmp_path)})
+    assert ok.enabled is True and ok.fixture_dir == str(tmp_path) and not _doctor_lines(SimpleNamespace(canary=ok))
     assert config._load_canary({"fixture_dir": str(tmp_path / "nope")}).enabled is False  # off: not checked
+
+
+def test_a_missing_suite_file_disables_only_the_canary_and_doctor_fails(tmp_path, caplog):
+    from types import SimpleNamespace
+    from harness import config
+    with caplog.at_level("ERROR", logger="harness.config"):
+        cfg = config._load_canary({"enabled": True, "suite": "nope/missing.yaml"})
+    assert cfg.enabled is False
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1 and "canary.suite" in errors[0] and "missing.yaml" in errors[0]
+    assert _doctor_lines(SimpleNamespace(canary=cfg))[0][0] == "fail"

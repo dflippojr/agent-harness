@@ -39,8 +39,7 @@ checkout's `HEAD`). There is no post-deploy trigger and no admin endpoint.
 
 `canary.at` is a time of day, `"HH:MM"`. Quote it: YAML 1.1 reads an unquoted `3:05` as the number 185, which
 the loader turns back into `"03:05"`. Anything else that isn't a time of day (or a canary number below its minimum,
-`min_prior_runs` above `baseline_runs`, or an enabled canary whose `suite` file is missing) is a config error at
-load, naming the key. If the nightly loop still can't schedule a run it logs the error and turns itself off; it never
+`min_prior_runs` above `baseline_runs`) is a config error at load, naming the key. If the nightly loop still can't schedule a run it logs the error and turns itself off; it never
 takes the daemon down.
 
 - A commit that already has a finished row (`complete`, `timeout`, `skipped`) is not run again: one row per SHA.
@@ -57,8 +56,10 @@ takes the daemon down.
   its cap is cancelled and recorded as `suspended` (excluded, never a fail). An attempt's `seconds` (and the row's
   `wall_seconds`) are that GPU time.
 - A missing web fixture or suite file is a configuration problem, not a result (#316). With `canary.enabled: true`,
-  the config refuses to load if `canary.suite` is not a file, or if the suite has web tasks and `canary.fixture_dir`
-  has no `manifest.json`. If either goes missing after the daemon started, the run stops before any session (an
+  if `canary.suite` is not a file, or the suite has web tasks and `canary.fixture_dir` has no `manifest.json`, the
+  loader logs one error naming the key and path and disables only the canary for that process (the nightly loop
+  doesn't run); the daemon and all sessions stay up, and `harness doctor` reports it as FAIL with the same message.
+  If either goes missing after the daemon started, the run stops before any session (an
   empty web replay would fail every web task and look like a regression) and the row is finished `skipped`, with
   the reason in its `note` and one error in the log. That SHA is not retried; fix the fixture and the next deployed
   commit runs normally.
