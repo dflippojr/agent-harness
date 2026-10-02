@@ -111,3 +111,37 @@ def test_scratch_workspace_without_git(tmp_path):
     (ws / "z.txt").write_text("z")
     assert store.restore(ws, sha) == []
     assert (ws / "d" / "a.txt").read_text() == "a" and not (ws / "z.txt").exists()
+
+
+def test_head_and_branch_is_one_isolated_git_call(repo, monkeypatch):
+    ws, _ = repo
+    calls = []
+    real = projects.git
+    monkeypatch.setattr(projects, "git", lambda *a, **k: calls.append(a) or real(*a, **k))
+    head, branch = checkpoints.head_and_branch(ws)
+    assert len(calls) == 1          # each isolated call costs several processes; a snapshot runs every turn
+    assert head == sh(ws, "rev-parse", "HEAD").strip() and branch == "agent/x"
+
+
+def test_head_and_branch_of_an_unborn_branch_is_empty(tmp_path):
+    ws = tmp_path / "unborn"
+    ws.mkdir()
+    sh(ws, "init", "-q")
+    assert checkpoints.head_and_branch(ws) == ("", "")
+
+
+def test_snapshot_reports_files_and_bytes_from_its_index(repo):
+    ws, store = repo
+    (ws / "ignored").mkdir()
+    (ws / "ignored" / "big.bin").write_bytes(b"x" * 5000)      # ignored: not in the snapshot
+    (ws / "new.txt").write_bytes(b"12345678")
+    (ws / "gone.txt").unlink()
+    store.snapshot(ws, "x", 1, "", "")
+    kept = [ws / ".gitignore", ws / "keep.txt", ws / "edit.txt", ws / "new.txt"]
+    assert (store.files, store.bytes) == (len(kept), sum(p.stat().st_size for p in kept))
+
+
+def test_index_stats_tolerates_junk():
+    assert checkpoints.index_stats(b"") == (0, 0)
+    assert checkpoints.index_stats(b"not an index at all") == (0, 0)
+    assert checkpoints.index_stats(b"DIRC" + (4).to_bytes(4, "big") + (3).to_bytes(4, "big")) == (3, 0)

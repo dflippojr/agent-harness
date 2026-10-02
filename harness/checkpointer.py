@@ -25,24 +25,31 @@ class Checkpointer:
         return Store(storage.checkpoints_dir(self.cfg, session_user_id(s)) / s["id"])
 
     # take -------------------------------------------------------------------------------------------------------
-    def take(self, sid: str, only_if_changed: bool = False) -> dict | None:
+    def take(self, sid: str, only_if_changed: bool = False, stats: dict | None = None) -> dict | None:
         """Checkpoint the session's workspace now. Returns the "checkpoint" event payload (`turn`, or `status`
         "skipped" and a `reason`), or None when there was nothing to record. Never raises: a checkpoint is a
-        convenience and must not fail the turn it describes."""
+        convenience and must not fail the turn it describes. `stats`, when given, is filled with the trace span's
+        attributes: `turn`, `files`, `bytes`, and a `skipped` code (never the reason text, which can hold paths)."""
+        stats = {} if stats is None else stats
         s = self.db.get_session(sid)
         if s is None or not eligible(s):
+            stats["skipped"] = "ineligible"
             return None
         store, workspace = self.store(s), Path(s["workspace"])
         turn = int(s.get("turn_seq") or 0) + 1
+        stats["turn"] = turn
         try:
             head, branch = head_and_branch(workspace)
             sha = store.snapshot(workspace, sid, turn, head, branch)
+            stats.update(files=store.files, bytes=store.bytes)
             if only_if_changed and self._same_tree(store, sid, sha):
                 store.delete(sid, [turn])
+                stats["skipped"] = "unchanged"
                 return None
             store.save_context(turn, s["context"])
         except (GitError, OSError, ValueError, subprocess.SubprocessError) as e:
             log.warning("checkpoint %s/%s failed: %s", sid, turn, e)
+            stats["skipped"] = "snapshot_failed"
             return self._skipped(sid, f"the snapshot failed ({str(e)[-160:]})")
         stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
         store.delete(sid, stale)
@@ -55,6 +62,7 @@ class Checkpointer:
             store.delete(sid, [turn])
             store.reclaim()
             self.db.update_session(sid, turn_seq=turn - 1)
+            stats["skipped"] = "over_quota"
             return self._skipped(sid, "the account is over its disk quota")
         if pruned:
             store.reclaim()

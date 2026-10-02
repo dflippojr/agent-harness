@@ -1518,9 +1518,15 @@ class Runner:
 
     async def _checkpoint(self, sid: str, only_if_changed: bool = False) -> None:
         """Snapshot the workspace off the loop (git can take seconds), then report it on the loop."""
-        event = await asyncio.to_thread(self.checkpointer.take, sid, only_if_changed)
-        if event:
-            await self.bus.aemit(sid, "checkpoint", event)
+        stats: dict = {}
+        with telemetry.span("checkpoint") as span:
+            try:
+                event = await asyncio.to_thread(self.checkpointer.take, sid, only_if_changed, stats)
+            finally:
+                span.set({"harness.turn": stats.get("turn"), "harness.files": stats.get("files"),
+                          "harness.bytes": stats.get("bytes"), "harness.skipped_reason": stats.get("skipped")})
+            if event:
+                await self.bus.aemit(sid, "checkpoint", event)
 
     async def _resolve_call(self, s: dict, call: dict, rest: list[dict], executing: dict,
                             budget: int) -> tuple[bool | None, int | None]:

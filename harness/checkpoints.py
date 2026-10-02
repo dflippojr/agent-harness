@@ -32,6 +32,28 @@ MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_de
 REF_PREFIX = "refs/harness/checkpoints"
 
 
+def index_stats(raw: bytes) -> tuple[int, int]:
+    """(entries, total file bytes) of a git index, read from the file itself rather than another git process.
+    Bytes are summed for the version 2/3 layout git writes by default; another version reports 0 bytes."""
+    if len(raw) < 12 or raw[:4] != b"DIRC":
+        return 0, 0
+    version, count = int.from_bytes(raw[4:8], "big"), int.from_bytes(raw[8:12], "big")
+    if version not in (2, 3):
+        return count, 0
+    total, pos = 0, 12
+    for _ in range(count):       # fixed 62-byte header (+2 extended flags), the path, NUL padding to 8 bytes
+        if pos + 62 > len(raw):
+            break
+        total += int.from_bytes(raw[pos + 36:pos + 40], "big")
+        flags = int.from_bytes(raw[pos + 60:pos + 62], "big")
+        start = pos + 62 + (2 if version == 3 and flags & 0x4000 else 0)
+        end = raw.find(b"\0", start)
+        if end < 0:
+            break
+        pos += ((end - pos) // 8 + 1) * 8
+    return count, total
+
+
 def ref_name(sid: str, turn: int) -> str:
     return f"{REF_PREFIX}/{sid}/{turn}"
 
@@ -49,6 +71,7 @@ class Store:
         self.base = Path(base)
         self.repo = self.base / "repo.git"
         self.contexts = self.base / "context"
+        self.files = self.bytes = 0   # what the last snapshot holds, for its trace span
 
     # git plumbing -----------------------------------------------------------------------------------------------
     def _git(self, workspace: Path | None, index: Path | None, *args: str, input_: str | None = None,
@@ -86,6 +109,7 @@ class Store:
             tree = self._tree_of(workspace, index)
             message = f"checkpoint {turn}\n\nHarness-Session: {sid}\nHarness-Turn: {turn}\nHead: {head}\nBranch: {branch}\n"
             sha = self._git(None, None, "commit-tree", tree, input_=message).out.strip()
+            self.files, self.bytes = index_stats(index.read_bytes())
         self._git(None, None, "update-ref", ref_name(sid, turn), sha)
         return sha
 
@@ -177,11 +201,13 @@ def reset_branch(workspace: Path, head: str, branch: str) -> None:
 
 
 def head_and_branch(workspace: Path) -> tuple[str, str]:
+    """HEAD's sha and branch name, ("", "") for a scratch workspace or an unborn branch. One isolated git call:
+    each sets up a throwaway GIT_DIR, which costs several processes."""
     if not (workspace / ".git").exists():
         return "", ""
-    head = projects.git(workspace, "rev-parse", "HEAD", check=False)
-    branch = projects.git(workspace, "rev-parse", "--abbrev-ref", "HEAD", check=False)
-    return (head.out.strip() if head.code == 0 else "", branch.out.strip() if branch.code == 0 else "")
+    result = projects.git(workspace, "rev-parse", "HEAD", "--abbrev-ref", "HEAD", check=False)
+    lines = result.out.split()
+    return (lines[0], lines[1]) if result.code == 0 and len(lines) == 2 else ("", "")
 
 
 def remove_store(base: Path) -> None:
