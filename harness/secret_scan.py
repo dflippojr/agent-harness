@@ -257,7 +257,8 @@ def _secret_in(matched: str, redacted_match: str) -> tuple[str, int, int]:
 
     The whole match when unsure."""
     prefix, sep, suffix = redacted_match.partition("REDACTED")
-    if sep and "REDACTED" not in suffix and matched.startswith(prefix) and matched.endswith(suffix)             and len(matched) > len(prefix) + len(suffix):
+    if (sep and "REDACTED" not in suffix and matched.startswith(prefix) and matched.endswith(suffix)
+            and len(matched) > len(prefix) + len(suffix)):
         return matched[len(prefix):len(matched) - len(suffix)], len(prefix.encode()), len(suffix.encode())
     return matched, 0, 0
 
