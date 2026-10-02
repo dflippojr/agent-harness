@@ -206,3 +206,22 @@ The harness was a short Playwright script outside the repository: per route it o
 run, reloads for the warm run, and for the update run installs a service worker from a rewritten `BUILD_ID` first. The
 in-page observers record `first-contentful-paint` and the time the route marker element first appears. Throttled runs go
 through a small local TLS proxy that delays each request by 150 ms and limits the downstream rate to 200 KB/s.
+
+## Follow-up: gzip for the web shell (#288)
+
+The daemon now gzips the shell at runtime (`harness/webgzip.py`): `/static/*`, root-mounted assets, `/` and `/sw.js`, text
+types only, for clients that send `Accept-Encoding: gzip`. API JSON, SSE, images and package downloads are untouched.
+Compressed responses carry `Vary: Accept-Encoding` and a weak ETag, so `If-None-Match` still returns 304 for both
+variants. Hosting `harness/web` from a plain static host at its root is out of scope; that host's own compression applies.
+
+Transferred bytes measured from the real app (identity vs gzip), with the slow-link model (200 KB/s) applied analytically:
+
+| Asset | Identity | gzip | Transfer time at 200 KB/s |
+| --- | --- | --- | --- |
+| `/static/app.js` | 268,244 | 72,746 | 1.34 s -> 0.36 s |
+| `/static/style.css` | 34,978 | 7,935 | 0.17 s -> 0.04 s |
+| `/` | 4,099 | 1,478 | 0.02 s -> 0.01 s |
+
+The shell drops by about 225 KB, i.e. roughly 1.1 s of transfer time on the modelled link; the per-request +150 ms RTT is
+unchanged. This is a byte-count model, **not** a re-run of the Playwright first-load script (that harness lives outside
+the repo), so the ~1 s first-load saving is supported by the arithmetic but not re-measured end to end.
