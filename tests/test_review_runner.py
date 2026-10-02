@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -1228,8 +1229,8 @@ def test_workflow_exposes_backend_input_and_delegates_to_runner():
     assert "${{ vars.REVIEW_MODEL_CLAUDE }}" in workflow
     assert "${{ vars.REVIEW_MODEL_CURSOR }}" in workflow
     assert "${{ vars.REVIEW_MODEL_CODEX }}" in workflow
-    assert "REVIEW_MODE: ${{ github.event.inputs.mode }}" in workflow
-    assert ".\\ops\\review\\run-review.ps1" in workflow
+    assert "REVIEW_MODE: ${{ inputs.mode }}" in workflow
+    assert ".\\.review-tooling\\ops\\review\\run-review.ps1" in workflow
     assert "-Mode $env:REVIEW_MODE" in workflow
     assert "steps.agent.outputs.backend" in workflow
     assert "diff embedded in this prompt" in workflow
@@ -1237,8 +1238,9 @@ def test_workflow_exposes_backend_input_and_delegates_to_runner():
     assert "The workspace is the pull request head" in workflow
     assert "Run 'gh pr diff" not in workflow
     assert "REVIEW_STATUS: COMPLETE" in workflow
-    assert '$title = "Automated review $conclusion"' in workflow
-    assert '$title = "Review by $backend"' in workflow
+    assert "`REVIEW_VERDICT: CLEAN`" in workflow
+    assert "`REVIEW_VERDICT: FINDINGS <n>`" in workflow
+    assert '$title = "Clean review by $backend"' in workflow
     assert '-f "output[title]=$title"' in workflow
     assert "Cursor Agent is reviewing" not in workflow
     assert "--force" not in workflow
@@ -1252,8 +1254,8 @@ def test_workflow_keeps_review_security_and_scheduling_contracts():
     assert "pull-requests: write" in workflow
     assert "contents: read" in workflow
     assert "checks: write" in workflow
-    assert "runs-on: [self-hosted, Windows, X64, agent-harness-review]" in workflow
-    assert "group: review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}" in workflow
+    assert """fromJSON(inputs.runs_on || '["self-hosted","Windows","X64","agent-harness-review"]')""" in workflow
+    assert "group: review-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pr_number }}" in workflow
     assert "cancel-in-progress: true" in workflow
     assert "types: [opened]" in workflow
 
@@ -1264,7 +1266,7 @@ def test_reviews_use_separate_full_history_pr_head_checkout():
     assert "github.event.pull_request.head.sha" in workflow
     assert "format('refs/pull/{0}/head', steps.pr.outputs.number)" in workflow
     assert "path: pr" in workflow
-    assert workflow.count("fetch-depth: 0") == 2
+    assert workflow.count("fetch-depth: 0") == 1
     assert workflow.count("persist-credentials: false") == 2
     assert "$workspace = Join-Path $env:GITHUB_WORKSPACE 'pr'" in workflow
     assert "REVIEW_WORKSPACE: ${{ steps.pr.outputs.workspace }}" in workflow
@@ -1473,7 +1475,7 @@ Write-ReviewResult -Result $r -OutputPath '{str(out).replace("'", "''")}' -Cover
 
 
 def test_workflow_and_docs_cover_max_diff_bytes():
-    assert "REVIEW_MAX_DIFF_BYTES: ${{ vars.REVIEW_MAX_DIFF_BYTES }}" in WORKFLOW.read_text(encoding="utf-8")
+    assert "REVIEW_MAX_DIFF_BYTES: ${{ inputs.max_diff_bytes || vars.REVIEW_MAX_DIFF_BYTES }}" in WORKFLOW.read_text(encoding="utf-8")
     assert "REVIEW_MAX_DIFF_BYTES" in CI_DOCS.read_text(encoding="utf-8")
 
 
@@ -1528,3 +1530,134 @@ $r = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}'
     value = json.loads(result.stdout.strip().splitlines()[-1])
     assert value == {"backend": "claude", "verdict": "findings", "count": 2, "body": "- a.py:1: bug\n- b.py:2: bug"}
     assert "codex failed (missing or invalid review verdict)" in result.stdout
+
+
+def _workflow_step(name: str) -> dict:
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    return next(step for step in workflow["jobs"]["review"]["steps"] if step.get("name") == name)
+
+
+def _complete_check(tmp_path: Path, env: dict[str, str], review: str = "Reviewed the full diff\n\n- a.py:1: bug") -> dict:
+    """Run the workflow's real "Complete PR check" script against a fake gh."""
+    if not POWERSHELL:
+        pytest.skip("Windows PowerShell is not installed")
+    step = _workflow_step("Complete PR check")
+    (tmp_path / "review-output.md").write_text(review, encoding="utf-8-sig")
+    calls = tmp_path / "gh-calls.json"
+    calls_path = str(calls).replace("'", "''")
+    fake_gh = (
+        "function gh {\n"
+        "    $fields = [ordered]@{}\n"
+        "    for ($i = 0; $i -lt $args.Count; $i++) {\n"
+        "        if ($args[$i] -in @('-f', '-F')) {\n"
+        "            $pair = [string]$args[$i + 1]; $eq = $pair.IndexOf('=')\n"
+        "            $value = $pair.Substring($eq + 1)\n"
+        "            if ($args[$i] -eq '-F' -and $value.StartsWith('@')) {\n"
+        "                $value = [System.IO.File]::ReadAllText($value.Substring(1))\n"
+        "            }\n"
+        "            $fields[$pair.Substring(0, $eq)] = $value\n"
+        "        }\n"
+        "    }\n"
+        f"    $fields | ConvertTo-Json -Compress | Set-Content -LiteralPath '{calls_path}' -Encoding utf8\n"
+        "    $global:LASTEXITCODE = 0\n"
+        "}\n"
+    )
+    script = tmp_path / "complete-check.ps1"
+    script.write_text(fake_gh + step["run"], encoding="utf-8-sig")
+    full_env = {
+        **os.environ,
+        "GITHUB_REPOSITORY": "owner/repo",
+        "RUNNER_TEMP": str(tmp_path),
+        "CHECK_ID": "42",
+        "AGENT_CONCLUSION": "success",
+        "POST_CONCLUSION": "success",
+        "REVIEW_BACKEND": "claude",
+        "REVIEW_VERDICT": "",
+        "REVIEW_FINDINGS": "",
+        "REVIEW_OMITTED_FILES": "0",
+        **env,
+    }
+    result = subprocess.run(
+        [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        cwd=tmp_path,
+        env=full_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, output(result)
+    return json.loads(calls.read_text(encoding="utf-8-sig"))
+
+
+@pytest.mark.parametrize(
+    ("env", "conclusion", "title"),
+    [
+        ({"REVIEW_VERDICT": "clean", "REVIEW_FINDINGS": "0"}, "success", "Clean review by claude"),
+        ({"REVIEW_VERDICT": "findings", "REVIEW_FINDINGS": "3"}, "failure", "3 findings"),
+        ({"REVIEW_VERDICT": "findings", "REVIEW_FINDINGS": "1"}, "failure", "1 finding"),
+        (
+            {"REVIEW_VERDICT": "clean", "REVIEW_FINDINGS": "0", "REVIEW_OMITTED_FILES": "4"},
+            "neutral",
+            "Partial review: 4 files not reviewed",
+        ),
+        (
+            {"REVIEW_VERDICT": "findings", "REVIEW_FINDINGS": "2", "REVIEW_OMITTED_FILES": "4"},
+            "failure",
+            "2 findings (partial review: 4 files not reviewed)",
+        ),
+        ({"REVIEW_VERDICT": "", "REVIEW_FINDINGS": ""}, "failure", "Review did not complete"),
+        ({"REVIEW_VERDICT": "findings", "REVIEW_FINDINGS": "x"}, "failure", "Review did not complete"),
+        ({"AGENT_CONCLUSION": "failure"}, "failure", "Review did not complete"),
+        ({"REVIEW_VERDICT": "clean", "POST_CONCLUSION": "failure"}, "failure", "Review did not complete"),
+        ({"AGENT_CONCLUSION": "cancelled"}, "cancelled", "Automated review cancelled"),
+    ],
+)
+def test_complete_check_conclusion_follows_review_verdict(tmp_path, env, conclusion, title):
+    fields = _complete_check(tmp_path, env)
+    assert fields["status"] == "completed"
+    assert fields["conclusion"] == conclusion
+    assert fields["output[title]"] == title
+    if title == "Review did not complete" or conclusion == "cancelled":
+        assert "a.py:1" not in fields["output[summary]"]
+    else:
+        assert fields["output[summary]"].startswith("Reviewed the full diff")
+        assert "- a.py:1: bug" in fields["output[summary]"]
+
+
+def test_complete_check_truncates_long_review_summary(tmp_path):
+    fields = _complete_check(tmp_path, {"REVIEW_VERDICT": "findings", "REVIEW_FINDINGS": "1"}, review="x" * 70000)
+    assert len(fields["output[summary]"]) < 65535
+    assert fields["output[summary]"].endswith("_(truncated; see the PR comment)_")
+
+
+def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    triggers = workflow[True]
+    call_inputs = triggers["workflow_call"]["inputs"]
+    assert set(call_inputs) == {"pr_number", "backend", "mode", "runs_on", "max_diff_bytes", "tooling_ref"}
+    assert call_inputs["runs_on"]["required"] is True
+    assert call_inputs["tooling_ref"]["default"] == "review-v1"
+    assert "push" not in triggers
+    assert triggers["pull_request"] == {"types": ["opened"]}
+    job = workflow["jobs"]["review"]
+    assert "head.repo.full_name == github.repository" in job["if"]
+    tooling = _workflow_step("Check out review tooling")["with"]
+    assert tooling["repository"] == "dflippojr/agent-harness"
+    assert tooling["path"] == ".review-tooling"
+    assert "inputs.tooling_ref" in tooling["ref"]
+    resolve = _workflow_step("Resolve PR number")["run"]
+    assert "isCrossRepository" in resolve
+    assert "Refusing to review PR" in resolve
+    assert r"notmatch '^\d+$'" in resolve
+    check = _workflow_step("Attach running check to the PR")
+    assert "if" not in check
+    assert 'name="Automated Code Review"' in check["run"]
+    text = WORKFLOW.read_text(encoding="utf-8")
+    header = " ".join(line.lstrip("# ") for line in text.split("\non:", 1)[0].splitlines())
+    assert "Consumers trigger it only by workflow_dispatch, never pull_request" in header
+    assert "The job refuses pull requests from forks" in header
