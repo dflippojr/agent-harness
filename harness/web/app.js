@@ -2558,8 +2558,62 @@ async function viewChanges(session) {
     try { comments = await api(`/sessions/${sid}/review-comments`); } catch { comments = []; }
   }
   const state = { comments, sel: null };  // sel: {repo, path, side, anchor, start, end}
-  const render = () => fill(box, data.repos.map((repo) => repoChanges(sid, repo, state, canComment, render)));
+  const render = () => fill(box, secretScanCard(sid, data.secret_scan, state, canComment, render),
+    data.repos.map((repo) => repoChanges(sid, repo, state, canComment, render)));
   render();
+}
+
+// Secret scan of the added lines (issue #263): findings block Merge/Push until fixed or dismissed with a reason.
+// Values never reach the browser; `preview` keeps at most the first and last two characters.
+function secretScanCard(sid, scan, state, canComment, render) {
+  if (!scan) return null;
+  if (scan.status !== "ok") {
+    return h("section", { class: "card secret-scan" }, h("h3", {}, "Secret scan"),
+      h("p", { class: "note" }, `The secret scan could not run, so Merge and Push are blocked: ${scan.message}`));
+  }
+  if (!scan.findings.length) return null;
+  const askFix = async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const made = await api(`/sessions/${sid}/secret-findings/fix`, { method: "POST" });
+      state.comments.push(...made);
+      toast(made.length ? "Drafted a comment per finding; send them below." : "Those findings already have drafts.");
+    } catch (err) { toast(err.message, 6000); }
+    render();
+  };
+  const dismiss = (f) => async (e) => {
+    const box = e.currentTarget.closest(".secret-finding");
+    const input = h("input", { type: "text", maxlength: "500", placeholder: "Why this is not a secret (required)", "aria-label": "Reason" });
+    const confirm = h("button", { class: "btn small bad", type: "button", onclick: async () => {
+      const reason = input.value.trim();
+      if (!reason) return input.focus();
+      confirm.disabled = true;
+      try {
+        const done = await api(`/sessions/${sid}/secret-findings/${f.fingerprint}/dismiss`, { method: "POST", body: { reason } });
+        Object.assign(f, { dismissed: true, dismissal: done.dismissal });
+        scan.open = scan.findings.filter((x) => !x.dismissed).length;
+        render();
+      } catch (err) { toast(err.message, 6000); confirm.disabled = false; }
+    } }, "Dismiss");
+    box.querySelector(".secret-actions").replaceChildren(input, confirm);
+    input.focus();
+  };
+  const row = (f) => h("div", { class: "secret-finding" },
+    h("div", { class: "row", style: "justify-content:space-between" },
+      h("span", { class: "small" }, `${f.repo === "." ? "" : f.repo + "/"}${f.file}:${f.line} · ${f.rule} · `, h("code", {}, f.preview)),
+      f.dismissed ? h("span", { class: "badge cancelled" }, "dismissed") : null),
+    f.dismissed && f.dismissal ? h("div", { class: "muted small" }, `Reason: ${f.dismissal.reason}`) : null,
+    !f.dismissed && isOwner() ? h("div", { class: "row end secret-actions" },
+      h("button", { class: "btn small", type: "button", onclick: dismiss(f) }, "Dismiss…")) : null);
+  return h("section", { class: "card secret-scan" },
+    h("h3", {}, "Secret scan"),
+    h("p", { class: scan.open ? "note" : "muted small" }, scan.open
+      ? `${pluralize(scan.open, "possible secret")} in the added lines. Merge and Push are blocked until each is fixed or dismissed with a reason.`
+      : "Every finding was dismissed."),
+    scan.findings.map(row),
+    scan.open && canComment ? h("div", { class: "row end", style: "margin-top:8px" },
+      h("button", { class: "btn ok", type: "button", onclick: askFix }, "Ask agent to fix")) : null,
+    h("p", { class: "muted small" }, `${scan.scanner}${scan.cached ? " · cached" : ""}`));
 }
 
 // Text of each line on one side of a file in a parsed diff: {line number: text}.

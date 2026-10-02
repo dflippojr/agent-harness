@@ -299,6 +299,8 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .review-drafts { margin: 10px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; }
 .review-draft { padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 .review-quote { white-space: pre-wrap; margin: 4px 0; color: var(--muted); }
+.secret-finding { padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.secret-actions input { flex: 1; min-width: 0; }
 
 #toast {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom) + 90px);

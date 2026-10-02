@@ -297,6 +297,19 @@ def check_images(r: Report, cfg) -> None:
         r.ok("Image upscaling", f"Real-ESRGAN x2plus/x4plus in {upscale_mod.models_dir(cfg.images)}")
 
 
+def check_secret_scanner(r: Report, cfg) -> None:
+    """Review push/merge fail closed without the pinned gitleaks (issue #263); the daemon fetches it at start."""
+    from . import secret_scan
+    scanner = secret_scan.Scanner(secret_scan.tools_dir(cfg))
+    problem = scanner.problem()
+    if not problem:
+        r.ok("Secret scanner", f"{secret_scan.SCANNER} at {scanner.binary}")
+        return
+    last = scanner.bootstrap_error()
+    r.warn("Secret scanner", f"{problem}; Review push and merge are blocked until it is fixed "
+                             f"(python -m harness.secret_scan install)" + (f". Last fetch: {last}" if last else ""))
+
+
 def check_optional(r: Report, cfg) -> None:
     if cfg.web.enabled:
         try:
@@ -338,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
     check_model_server(r, cfg)
     check_daemon(r, cfg)
     check_autostart(r, cfg, args)
+    check_secret_scanner(r, cfg)
     check_optional(r, cfg)
 
     print(f"\n{r.failed} failed, {r.warned} warnings")
