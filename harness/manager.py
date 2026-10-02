@@ -831,7 +831,9 @@ class Manager:
         items = [{"turn": c["turn"], "head": c["head"][:12], "created_at": c["created_at"]}
                  for c in self.db.checkpoints(s["id"], hidden=False)]
         hosted = s.get("backend", "local") != "local"
-        return {"checkpoints": items, "can_rewind": not hosted, "can_fork": True, "hosted": hosted,
+        # Mac Runner sessions are out of scope (the runner protocol has no snapshot ops), so they have none.
+        supported = s["target"] == "tower" and s.get("kind", "agent") == "agent" and not s["workspace_removed"]
+        return {"checkpoints": items, "can_rewind": supported and not hosted, "can_fork": supported, "hosted": hosted,
                 "parent_id": s.get("parent_id", ""), "fork_turn": s.get("fork_turn", 0)}
 
     async def _idle_for_checkpoint(self, sid: str) -> dict:

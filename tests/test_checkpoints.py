@@ -208,3 +208,33 @@ def test_disk_view_and_usage_count_checkpoints_and_cleanup_removes_them(tmp_path
         assert not base.exists() and not m.db.checkpoints(sid, hidden=None)
 
     asyncio.run(body())
+
+
+def test_rewind_and_fork_refuse_active_and_runner_sessions(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        sid = s["id"]
+        m.db.update_session(sid, status="running")
+        for action in (m.rewind(sid, 1), m.fork(sid, 1, "again")):
+            with pytest.raises(HarnessError) as e:
+                await action
+            assert e.value.status == 409 and "idle" in str(e.value)
+        m.db.update_session(sid, status="done", target="mac")
+        with pytest.raises(HarnessError) as e:
+            await m.rewind(sid, 1)
+        assert e.value.status == 409 and "tower" in str(e.value)
+        assert m.checkpoints(sid)["can_rewind"] is False
+
+    asyncio.run(body())
+
+
+def test_rewind_after_compaction_restores_the_saved_context(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        sid = s["id"]
+        saved = checkpoints.Store(storage.checkpoints_dir(m.cfg, "owner") / sid).load_context(1)
+        m.db.update_session(sid, context=[s["context"][0], {"role": "user", "content": "[summary of everything]"}])
+        rewound = await m.rewind(sid, 1)
+        assert rewound["context"] == saved and "[summary of everything]" not in str(rewound["context"])
+
+    asyncio.run(body())
