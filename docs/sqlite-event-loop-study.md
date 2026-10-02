@@ -127,14 +127,18 @@ Before (`origin/main` at 8ee0aae, re-run 2026-10-02 with the Phase 1 benchmark) 
 | after + atomic writes, no scraping | 23236 | 2611 MB | 0.5 ms | **0.5 ms** | 25 ms |
 | after + cancel-safe `awrite`, with scraping | 22744 | 3729 MB | 0.5 ms | **0.5 ms** | 25 ms |
 | after + cancel-safe `awrite`, no scraping | 22949 | 2579 MB | 0.5 ms | **0.5 ms** | 25 ms |
+| after + cancel-safe follow-ups, with scraping | 23043 | 3785 MB | 0.5 ms | **0.5 ms** | 25 ms |
+| after + cancel-safe follow-ups, no scraping | 21763 | 2453 MB | 0.5 ms | **0.5 ms** | 25 ms |
 
 The atomic-writes rows are a re-run (30 s each, same machine) after every `@_writes` method became one transaction on the
 writer (`BEGIN IMMEDIATE ... COMMIT`), so that a pooled reader can no longer see an event without its search-index row
 or an allowlist mid-save. p99 stays well under 50 ms; the 0.5 / 5 / 10 ms differences between runs are run-to-run
 noise (one histogram bucket), and `insert_event` still holds the writer about 26 of the 30 s. The cancel-safe rows
 are a further re-run after `awrite` began running its after-commit callbacks from the writer job's completion (so a
-cancelled awaiter cannot drop them) and holding a cancel until its write has committed: no measurable change. The full
-outputs below are from the first after runs.
+cancelled awaiter cannot drop them) and holding a cancel until its write has committed: no measurable change. The
+cancel-safe follow-up rows are a re-run after the work a commit requires (a follow-up's spawn, a run's end under any
+cancel, the `end_pending` marker on `run`) was tied to its commit: no measurable change either. The full outputs below
+are from the first after runs.
 
 After, with scraping:
 
