@@ -91,7 +91,7 @@ def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir:
                     sandbox.stop()
                 record = {
                     "task": task.id, "category": task.category, "repeat": r, "repo_map": repo_map_budget is not None,
-                    "system_prompt_chars": len(agent.system_prompt()), "passed": passed, "note": note,
+                    "system_prompt_chars": result.system_prompt_chars, "passed": passed, "note": note,
                     "finished": result.finished, "stop_reason": result.stop_reason, "turns": result.turns,
                     "tool_calls": result.tool_calls, "invalid_tool_calls": result.invalid_tool_calls,
                     "tool_errors": result.tool_errors, "prompt_tokens": result.prompt_tokens,

@@ -127,3 +127,19 @@ def test_harness_on_adds_map_once_and_refreshes_only_on_reset(tmp_path):
         assert refreshed != first and repomap.strip_section(refreshed) == base
         await m.stop()
     asyncio.run(body())
+
+
+@needs_parsers
+def test_bakeoff_records_the_prompt_size_actually_sent(tmp_path):
+    root = _workspace(tmp_path)
+    agent = bakeoff_agent.Agent("http://unused", "m", bakeoff_agent.Workspace(root, None), repo_map_budget=1500)
+    before = len(agent.system_prompt())
+
+    def chat(messages, timeout):  # the task renames a mapped symbol, then answers
+        (root / "core.py").write_text("class RenamedEngineWithALongerName:\n    def go(self): pass\n", encoding="utf-8")
+        return {"choices": [{"message": {"content": "done"}}]}
+
+    agent._chat = chat
+    result = agent.run("x")
+    assert len(agent.system_prompt()) != before  # the edited workspace now maps differently
+    assert result.system_prompt_chars == before == len(result.messages[0]["content"])

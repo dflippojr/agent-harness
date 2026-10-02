@@ -249,6 +249,7 @@ class AgentResult:
     prompt_tps: list[float] = field(default_factory=list)
     gen_tps: list[float] = field(default_factory=list)
     messages: list[dict] = field(default_factory=list)
+    system_prompt_chars: int = 0  # size of the prompt actually sent, captured before the run edits the workspace
 
 
 class Agent:
@@ -310,7 +311,9 @@ class Agent:
 
     def run(self, task_prompt: str) -> AgentResult:
         result = AgentResult()
-        messages = [{"role": "system", "content": self.system_prompt()}, {"role": "user", "content": task_prompt}]
+        system = self.system_prompt()
+        result.system_prompt_chars = len(system)
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": task_prompt}]
         result.messages = messages
         started = time.monotonic()
         idle_turns = 0
