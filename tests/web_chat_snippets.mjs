@@ -1,13 +1,9 @@
 // UI harness for Chat snippets (#85): Run appears only for supported-language fenced blocks and the manual
 // editor, sending a message never runs code, the editor needs an explicit language, and results render as text.
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appSrc = readFileSync(join(root, "harness/web/app.js"), "utf8")
-  .replace(/import \{[^}]+\} from "\.\/client\.mjs";\r?\n/, "");
+import { createContext } from "node:vm";
+import { md as renderMd } from "../harness/web/lib/markdown.mjs";
+import { snippetLanguage } from "../harness/web/lib/snippets.mjs";
+import { runApp } from "./web_app_loader.mjs";
 
 const fail = (msg) => { throw new Error(msg); };
 
@@ -165,11 +161,11 @@ const sandbox = createContext({
   agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL, Node, Event, JSON, Date, Math, Number, String, Boolean, Array, Object,
   Set, Map, Promise, Error, parseInt, encodeURIComponent, decodeURIComponent, undefined,
 });
-runInContext(appSrc, sandbox);
+runApp(sandbox);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // md(): only supported fence tags are marked for a Run button; code stays escaped.
-const md = (src) => runInContext(`md(${JSON.stringify(src)}, [])`, sandbox);
+const md = (src) => renderMd(src, []);
 const html = md("```python\nprint(1)\n```\n\n```bash\nrm -rf /\n```\n\n```c#\nConsole.WriteLine(1);\n```\n\n```\nplain\n```\n\n```html\n<script>alert(1)</script>\n```");
 if ((html.match(/data-snippet-lang=/g) || []).length !== 2) fail(`expected two runnable blocks: ${html}`);
 if (!html.includes('data-snippet-lang="python"') || !html.includes('data-snippet-lang="csharp"')) fail(html);
@@ -189,10 +185,10 @@ const scaled = timeUnclosedFence(100000);
 if (scaled > baseline * 40 + 300) fail(`md() backtracks super-linearly on an unclosed fence with a whitespace run: ${baseline.toFixed(1)}ms at 10k, ${scaled.toFixed(1)}ms at 100k`);
 if (!md("```py  \nprint(1)```").includes("<code>print(1)</code>")) fail("trailing spaces after the tag are dropped");
 for (const [tag, id] of [["py", "python"], ["js", "javascript"], ["node", "javascript"], ["java", "java"], ["cs", "csharp"], ["cpp", "cpp"], ["c++", "cpp"]]) {
-  if (runInContext(`snippetLanguage(${JSON.stringify(tag)})`, sandbox) !== id) fail(`fence ${tag} should map to ${id}`);
+  if (snippetLanguage(tag) !== id) fail(`fence ${tag} should map to ${id}`);
 }
 for (const tag of ["", "bash", "sh", "ruby", "c", "html", "python2", "rust"]) {
-  if (runInContext(`snippetLanguage(${JSON.stringify(tag)})`, sandbox) !== "") fail(`fence ${tag} must not be runnable`);
+  if (snippetLanguage(tag) !== "") fail(`fence ${tag} must not be runnable`);
 }
 
 loc.hash = `#/chat/${CHAT}`;

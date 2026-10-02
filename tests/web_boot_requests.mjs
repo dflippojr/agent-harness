@@ -1,13 +1,7 @@
 // UI harness (#289): boot starts /health and /me together, requests /me once, and starts route data
 // right after both resolve without waiting on /profile, /gpu or /models/warm. Scenario = argv[2].
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appSrc = readFileSync(join(root, "harness/web/app.js"), "utf8")
-  .replace(/import \{[^}]+\} from "\.\/client\.mjs";\r?\n/, "");
+import { createContext } from "node:vm";
+import { runApp } from "./web_app_loader.mjs";
 
 class Emitter {
   constructor() { this._l = {}; }
@@ -259,7 +253,7 @@ const sandbox = createContext({
   undefined,
 });
 
-runInContext(appSrc, sandbox);
+runApp(sandbox);
 await sleep(400);
 const paths = log.map((e) => `${e.method} ${e.path}`);
 const first = (p) => log.find((e) => e.path === p);

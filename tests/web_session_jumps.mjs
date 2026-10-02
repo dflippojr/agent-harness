@@ -1,13 +1,5 @@
 // Jump-arrow visibility from scrollY / viewport / page height (#184).
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const src = readFileSync(join(root, "harness/web/app.js"), "utf8");
-const match = src.match(/function sessionJumpHidden\([\s\S]*?\n\}/);
-if (!match) throw new Error("sessionJumpHidden missing from app.js");
-const sessionJumpHidden = new Function(`${match[0]}; return sessionJumpHidden;`)();
+import { sessionJumpHidden } from "../harness/web/lib/layout.mjs";
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);

@@ -1,13 +1,7 @@
 // UI harness: New task defaults to Claude during a GPU hold, shows a linked
 // notice under Backend for local models, and labels the submit Queue task. (#185)
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appSrc = readFileSync(join(root, "harness/web/app.js"), "utf8")
-  .replace(/import \{[^}]+\} from "\.\/client\.mjs";\r?\n/, "");
+import { createContext } from "node:vm";
+import { runApp } from "./web_app_loader.mjs";
 
 class Emitter {
   constructor() { this._l = {}; }
@@ -259,7 +253,7 @@ const sandbox = createContext({
   decodeURIComponent, undefined,
 });
 
-runInContext(appSrc, sandbox);
+runApp(sandbox);
 
 process.on("unhandledRejection", (err) => {
   console.error(err);
