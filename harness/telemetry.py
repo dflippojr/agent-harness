@@ -8,6 +8,7 @@ time the event loop was unable to run other callbacks.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -83,6 +84,19 @@ class HistogramFamily:
 lock_held = HistogramFamily(LOCK_BUCKETS)
 loop_stall = Histogram(LOOP_BUCKETS)
 
+# Lock-taking helpers that are not themselves the operation: `Database.tx()` and the contextlib frames that
+# drive it. The label skips past them to the method that called `with db.tx():`.
+_PASS_THROUGH = frozenset({"tx"})
+_CONTEXTLIB = contextlib.__file__
+
+
+def _caller_method(depth: int = 2) -> str:
+    frame = sys._getframe(depth)
+    while frame.f_back is not None and (
+            frame.f_code.co_name in _PASS_THROUGH or frame.f_code.co_filename == _CONTEXTLIB):
+        frame = frame.f_back
+    return frame.f_code.co_name
+
 
 class TimedLock:
     """Re-entrant lock that records the hold time of each outermost acquisition, per calling method."""
@@ -93,7 +107,7 @@ class TimedLock:
         self._owner = threading.local()
 
     def __enter__(self):
-        method = sys._getframe(1).f_code.co_name
+        method = _caller_method()
         self._lock.acquire()
         owner = self._owner
         depth = getattr(owner, "depth", 0)
