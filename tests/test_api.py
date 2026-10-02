@@ -137,8 +137,9 @@ def test_web_app_and_guard(tmp_path):
         assert "prefers-reduced-motion: reduce" in css
         assert ".image-status .progress.indeterminate > span" in css
         assert 'showFab("#/new", "+ New task")' in js
-        assert 'showFab("#/jobs/new", "+ New job")' in js
-        assert 'api("/backends?auth=skip")' in js
+        jobs_page = client.get("/static/pages/jobs.mjs").text
+        assert 'showFab("#/jobs/new", "+ New job")' in jobs_page
+        assert 'api("/backends?auth=skip")' in jobs_page
         assert 'if (images && !route.onImages) api("/images/warmup"' not in js
         assert "function imageModeEntries" in js
         assert "function installedImageModeEntries" in js
