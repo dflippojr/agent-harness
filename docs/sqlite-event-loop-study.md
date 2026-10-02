@@ -40,13 +40,45 @@ the run, larger than a typical daemon database, so absolute values are an upper-
 ## Results: sessions + search + `/metrics` scrapes
 
 ```
-@@WITH@@
+Machine: Windows 10 (AMD64), 28 logical CPUs, Python 3.10.11, SQLite 3.40.1
+Config: 4 concurrent sessions, 30 s, one ~1 MB tool result every 10 events per session, search every 50 ms, /metrics render every 250 ms
+Work done: 2165 event pairs (216 large), 169 search rounds, 36 scrapes, database 243 MB
+
+Event-loop stall (10 ms probe overshoot, bucket upper bounds)
+- samples: 560, p50: 10 ms, p99: 1000 ms, max bucket: 2500 ms
+- p99 EXCEEDS the 50 ms threshold
+
+Lock hold per Database method (sorted by total time held)
+| method | count | p50 | p99 | total (s) |
+|---|---|---|---|---|
+| _core_metrics | 36 | 1000 ms | 2500 ms | 21.55 |
+| insert_event | 4330 | 0.5 ms | 25 ms | 3.07 |
+| search_events | 844 | 0.5 ms | 10 ms | 0.76 |
+| session_brief | 336 | 0.5 ms | 0.5 ms | 0.00 |
+| _skill_metrics | 36 | 0.5 ms | 0.5 ms | 0.00 |
+| _smart_review_metrics | 36 | 0.5 ms | 0.5 ms | 0.00 |
+| _endpoint_metrics | 36 | 0.5 ms | 0.5 ms | 0.00 |
+| insert_session | 4 | 0.5 ms | 0.5 ms | 0.00 |
 ```
 
 ## Results: sessions + search, no scraping (attribution run)
 
 ```
-@@WITHOUT@@
+Machine: Windows 10 (AMD64), 28 logical CPUs, Python 3.10.11, SQLite 3.40.1
+Config: 4 concurrent sessions, 30 s, one ~1 MB tool result every 10 events per session, search every 50 ms, /metrics render every 250 ms (disabled)
+Work done: 6072 event pairs (604 large), 456 search rounds, 0 scrapes, database 676 MB
+
+Event-loop stall (10 ms probe overshoot, bucket upper bounds)
+- samples: 1521, p50: 10 ms, p99: 100 ms, max bucket: 250 ms
+- p99 EXCEEDS the 50 ms threshold
+
+Lock hold per Database method (sorted by total time held)
+| method | count | p50 | p99 | total (s) |
+|---|---|---|---|---|
+| insert_event | 12144 | 0.5 ms | 25 ms | 7.99 |
+| search_events | 2280 | 0.5 ms | 25 ms | 5.48 |
+| session_brief | 912 | 0.5 ms | 0.5 ms | 0.01 |
+| insert_session | 4 | 0.5 ms | 0.5 ms | 0.00 |
 ```
 
 ## Phase 2 design (for the follow-up issue)
