@@ -106,23 +106,31 @@ class Scanner:
 
     def install(self, fetch=None) -> str:
         """Fetch the pinned release, verify its SHA-256, and extract the binary. Returns '' or the error."""
+        problem = self._install(fetch)
+        if problem:
+            self._record(problem)
+        else:
+            self.error_file.unlink(missing_ok=True)
+        return problem
+
+    def _install(self, fetch) -> str:
         key = asset_key()
         asset = PIN["assets"].get(key)
         if asset is None:
-            return self._record(f"no pinned gitleaks build for {key}")
+            return f"no pinned gitleaks build for {key}"
         try:
             data = (fetch or _download)(PIN["url"].format(name=asset["name"]))
         except Exception as e:  # noqa: BLE001 - any fetch failure leaves push/merge blocked
-            return self._record(f"could not download {asset['name']}: {type(e).__name__}: {e}")
+            return f"could not download {asset['name']}: {type(e).__name__}: {e}"
         if self.cancelled.is_set():
             return CANCELLED
         got = hashlib.sha256(data).hexdigest()
         if got != asset["sha256"]:
-            return self._record(f"checksum mismatch for {asset['name']}: got {got}, pinned {asset['sha256']}")
+            return f"checksum mismatch for {asset['name']}: got {got}, pinned {asset['sha256']}"
         try:
             binary = _extract(data, asset["name"], self.binary.name)
         except (OSError, KeyError, tarfile.TarError, zipfile.BadZipFile) as e:
-            return self._record(f"could not extract {asset['name']}: {e}")
+            return f"could not extract {asset['name']}: {e}"
         self.dir.mkdir(parents=True, exist_ok=True)
         tmp = self.binary.with_name(f"{self.binary.name}.{os.getpid()}.part")
         tmp.write_bytes(binary)
@@ -135,10 +143,7 @@ class Scanner:
         except OSError:  # another process installed it meanwhile and Windows locks a running .exe
             tmp.unlink(missing_ok=True)
         self._checked = None
-        problem = self.problem()
-        if not problem:
-            self.error_file.unlink(missing_ok=True)
-        return self._record(problem) if problem else ""
+        return self.problem()
 
     def ensure(self, fetch=None) -> str:
         """Daemon start: install the pinned binary when it is missing or the wrong version."""
@@ -153,15 +158,14 @@ class Scanner:
         except OSError:
             return ""
 
-    def _record(self, message: str) -> str:
+    def _record(self, message: str) -> None:
         if self.cancelled.is_set():
-            return message
+            return
         try:
             self.error_file.parent.mkdir(parents=True, exist_ok=True)
             self.error_file.write_text(message + "\n", encoding="utf-8")
         except OSError:
             pass
-        return message
 
     # ---------------------------------------------------------------- scanning
     def scan(self, repos: list[dict], salt: str) -> dict:
