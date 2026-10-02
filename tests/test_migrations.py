@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,11 +119,13 @@ def test_synthetic_migrations_apply_in_order_after_a_backup(tmp_path):
     assert len(backups) == 1
     # The snapshot was taken before the first step.
     assert _version(backups[0]) == 45
-    cols = {r[1] for r in sqlite3.connect(str(backups[0])).execute("PRAGMA table_info(sessions)")}
+    with closing(sqlite3.connect(str(backups[0]))) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
     assert "note" not in cols
-    # Reopening with nothing pending takes no further backup.
+    # Reopening with nothing pending takes no further backup. Count backups only: opening one may leave
+    # -wal/-shm sidecars until its connection is finalized, which coverage tracing delays.
     Database(path, migrations=SYNTHETIC).close()
-    assert len(list((tmp_path / "pre-migration").iterdir())) == 1
+    assert len(list((tmp_path / "pre-migration").glob("harness-v*.sqlite3"))) == 1
 
 
 def test_fresh_database_runs_migrations_without_backup(tmp_path):
