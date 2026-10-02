@@ -907,13 +907,16 @@ class Manager:
                    "parent_id": sid, "fork_turn": int(turn), "turn_seq": int(turn)}
         if not git_fields:
             session["branch"] = ""
-        self._insert_created(session, None, [], "", prompt)
-        ckpt = cp.checkpoint(sid, int(turn))
-        cp.store(session).save_context(int(turn), base_context)
-        self.db.add_checkpoint(new_sid, int(turn), ckpt["sha"], ckpt["head"], session["branch"])
-        self.bus.emit(new_sid, "forked", {"parent": sid, "turn": int(turn), **(
-            {"summary_note": "hosted session: a fresh CLI session started from a transcript digest, no model call"}
-            if hosted else {})})
+        await asyncio.to_thread(cp.store(session).save_context, int(turn), base_context)
+
+        def insert_fork() -> None:     # one transaction on the writer thread (#294): the row, its checkpoint, events
+            self._insert_created(session, None, [], "", prompt)
+            ckpt = cp.checkpoint(sid, int(turn))
+            self.db.add_checkpoint(new_sid, int(turn), ckpt["sha"], ckpt["head"], session["branch"])
+            self.bus.emit(new_sid, "forked", {"parent": sid, "turn": int(turn), **(
+                {"summary_note": "hosted session: a fresh CLI session started from a transcript digest, no model call"}
+                if hosted else {})})
+        await self.db.awrite(insert_fork)
         self._spawn(new_sid)
         return self.db.get_session(new_sid)
 

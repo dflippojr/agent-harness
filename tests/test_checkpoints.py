@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -236,5 +237,42 @@ def test_rewind_after_compaction_restores_the_saved_context(tmp_path):
         m.db.update_session(sid, context=[s["context"][0], {"role": "user", "content": "[summary of everything]"}])
         rewound = await m.rewind(sid, 1)
         assert rewound["context"] == saved and "[summary of everything]" not in str(rewound["context"])
+
+    asyncio.run(body())
+
+
+def test_take_reports_a_reason_code_never_the_reason_text(tmp_path, monkeypatch):
+    async def body():
+        m, s = await started(tmp_path)
+        secret = str(Path(s["workspace"]) / "private-path")
+
+        def fail(*args, **kwargs):
+            raise checkpoints.GitError(f"git add failed in {secret}")
+        monkeypatch.setattr(checkpoints.Store, "snapshot", fail)
+        stats: dict = {}
+        event = m.runner.checkpointer.take(s["id"], stats=stats)
+        assert event["status"] == "skipped" and secret in event["reason"]     # the user sees the detail
+        assert stats == {"turn": 3, "skipped": "snapshot_failed"}            # the trace span does not
+
+    asyncio.run(body())
+
+
+def test_fork_writes_through_the_writer_without_blocking_the_loop(tmp_path, monkeypatch):
+    async def body():
+        m, s = await started(tmp_path)
+        loop_thread, blocking = threading.current_thread(), []
+        real = type(m.db).write
+
+        def spy(db, fn, *args, **kwargs):
+            if threading.current_thread() is loop_thread:
+                blocking.append(getattr(fn, "__name__", repr(fn)))
+            return real(db, fn, *args, **kwargs)
+        monkeypatch.setattr(type(m.db), "write", spy)
+        fork = await m.fork(s["id"], 1, "carry on")
+        monkeypatch.undo()
+        assert blocking == []                                               # #294: awrite from async code
+        assert [c["turn"] for c in m.db.checkpoints(fork["id"])] == [1]
+        assert events(m, fork["id"], "forked")[-1]["turn"] == 1
+        await finished(m, fork["id"])
 
     asyncio.run(body())
