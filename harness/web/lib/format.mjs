@@ -32,3 +32,23 @@ export function holdRemainingText(seconds) {
   if (seconds === null) return "until you turn it off";
   return `for about ${fmtSpan(seconds, Math.ceil)}`;
 }
+
+export function fmtBytes(n) {
+  if (!n && n !== 0) return "—";
+  if (n >= 2 ** 30) return `${(n / 2 ** 30).toFixed(1)} GiB`;
+  if (n >= 2 ** 20) return `${(n / 2 ** 20).toFixed(1)} MiB`;
+  return `${n} B`;
+}
+
+export function gpuText(g) {
+  const why = (g.reasons || []).map((r) => r.detail).filter((d, i, a) => a.indexOf(d) === i).join(", ") || "GPU busy";
+  if (g.manual) {
+    if (g.manual_remaining_seconds === null) return "Local models held until you turn this off";
+    const left = g.manual_remaining_seconds;
+    return `Local models held for ${fmtSpan(left, Math.ceil)}`;
+  }
+  if (g.state === "pausing") return `Pausing for ${why}: finishing the current model turn`;
+  if (g.state === "paused") return `Paused for ${why}`;
+  if (g.state === "resuming") return "GPU free: reloading the model";
+  return "Agents have the GPU";
+}

@@ -165,15 +165,16 @@ def test_web_app_and_guard(tmp_path):
         assert '"Upscale 4×"' in js
         assert "upscale: upscale.value" in js
         assert 'href: "#/profile/account"' in js
-        assert "gpuActionRow()" in js
+        actions_js = client.get("/static/pages/actions.mjs").text
+        assert "gpuActionRow()" in actions_js
         assert "function gpuCard()" not in js
-        assert 'h("span", {}, "Duration:")' in js
-        assert 'duration.disabled = isGuest() || !g.manual' in js
-        assert "function viewActions" in js
+        assert 'h("span", {}, "Duration:")' in actions_js
+        assert 'duration.disabled = isGuest() || !g.manual' in actions_js
+        assert "function viewActions" in actions_js
         assert 'go(`#/actions/${parts[1]}`, true)' in js
-        assert js.index('["gpu", "GPU"]') < js.index('["accounts", "Accounts"]')
-        assert js.index('["accounts", "Accounts"]') < js.index('["remote-control", "Claude Remote Control"]')
-        assert js.index('["remote-control", "Claude Remote Control"]') < js.index('["disk", "Disk"]')
+        assert actions_js.index('["gpu", "GPU"]') < actions_js.index('["accounts", "Accounts"]')
+        assert actions_js.index('["accounts", "Accounts"]') < actions_js.index('["remote-control", "Claude Remote Control"]')
+        assert actions_js.index('["remote-control", "Claude Remote Control"]') < actions_js.index('["disk", "Disk"]')
         assert 'nav === "actions" && !isOwner()' in js
         assert 'href: "#/profile/remote-control"' not in js
         assert 'href: "#/profile/disk"' not in js
