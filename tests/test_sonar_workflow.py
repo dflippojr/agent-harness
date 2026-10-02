@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
-WORKFLOW = ROOT / ".github" / "workflows" / "sonar.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 PROPERTIES = ROOT / "sonar-project.properties"
 
 
@@ -21,7 +21,14 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert "-n auto" not in coverage_step
     assert "COVERAGE_CORE" not in coverage_step
     assert "NUMBER_OF_PROCESSORS" in workflow
-    assert "jobs:\n  sonar:" in workflow
+    assert "jobs:\n  test:" in workflow
+    sonar_job = workflow[workflow.index("\n  sonar:\n") :]
+    assert "needs: test" in sonar_job
+    assert "actions/download-artifact" in sonar_job
+    assert "fetch-depth: 0" in sonar_job
+    # A failing quality gate on main shows on the job but never blocks the deploy; failing tests still do.
+    assert "continue-on-error: ${{ github.event_name == 'push' }}" in sonar_job
+    assert "runs-on: [self-hosted" not in workflow
     assert "runs-on: windows-latest" in workflow
     assert "runs-on: ubuntu-latest" not in workflow
     assert "sonar.qualitygate.wait=true" in workflow
