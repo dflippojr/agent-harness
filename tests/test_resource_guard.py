@@ -218,7 +218,10 @@ def test_memory_watch_threshold():
     assert not MemoryWatch(4, read=lambda: None, ttl=0).low()  # no reading: don't block work
 
 
-def test_session_waits_for_memory_before_loading_then_continues(tmp_path):
+def test_session_waits_for_memory_before_loading_then_continues(tmp_path, monkeypatch):
+    from harness import gpu_guard
+    monkeypatch.setattr(gpu_guard, "MEMORY_POLL_SECONDS", 0.02)
+
     async def body():
         ram = FakeRam(2)
         m = guarded_manager(tmp_path, ram=ram)
