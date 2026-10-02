@@ -294,6 +294,7 @@ class CanaryConfig:
     drop_points: float = 15.0
     metrics_limit: int = 30
     suite: str = "bakeoff/canary.yaml"
+    fixture_dir: str = "D:/Agents/harness/web-fixture"  # the recorded web for the web tasks (bakeoff/web_suite.py)
 
 
 @dataclass

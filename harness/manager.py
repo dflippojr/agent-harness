@@ -220,6 +220,9 @@ class Manager:
             from .jobs import JobScheduler
             self.jobs = JobScheduler(self.db, self.create, active=self._is_active, poll_seconds=cfg.jobs.poll_seconds)
         self.guard = None
+        self.canary = None
+        if cfg.canary.enabled:
+            self.canary = self._build_canary()
         if module_effective(cfg, "gpu_guard"):
             from .gpu_guard import GpuGuard
             self.guard = GpuGuard(cfg.gpu_guard, cfg.models[cfg.default_model], self.scheduler,
@@ -254,6 +257,18 @@ class Manager:
                             "message": (job["prompt"][:200] if ok else job["error"][:300]), "priority": 2 if ok else 3,
                             "tags": ["frame_with_picture" if ok else "x"],
                             "click": self.notifier.link(f"/#/images/{job['id']}")})
+
+    def _build_canary(self):
+        """The nightly regression canary (#265): runs bakeoff/canary.py's suite on this manager at 03:00."""
+        from . import canary
+        store = canary.CanaryStore(self.db)
+
+        async def run_suite(sha: str, only: list[str] | None) -> canary.Report:
+            from bakeoff.canary import CanaryRunner  # dev-side package, imported only when the canary is on
+            return await CanaryRunner(self, self.cfg.canary, Path(self.cfg.canary.fixture_dir)).run(sha, only)
+
+        runner = canary.Canary(store, run_suite, self.cfg.canary, self.notifier.send, self.cfg.notify.topic)
+        return canary.Nightly(runner, self.cfg.canary)
 
     def _is_active(self, sid: str) -> bool:
         s = self.db.get_session(sid)
@@ -315,6 +330,8 @@ class Manager:
             self._spawn(s["id"], recovered=True)
         if self.jobs is not None:
             self.jobs.start()
+        if self.canary is not None:
+            self.canary.start()
         if self.skills is not None:
             self.skills.reconcile()
             if self.skills.reviewer is not None:
@@ -337,6 +354,8 @@ class Manager:
         await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
         if self.jobs is not None:
             await self.jobs.stop()
+        if self.canary is not None:
+            await self.canary.stop()
         if self.skills is not None and self.skills.reviewer is not None:
             await self.skills.reviewer.stop()
         tasks = list(self.tasks.values())

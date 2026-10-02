@@ -15,6 +15,15 @@ from harness.db import APP_SETTINGS_SCHEMA, SCHEMA, Database
 from harness.maintenance import Maintenance
 from harness.migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
 
+_REAL_DISCOVER = migrations.discover
+
+
+@pytest.fixture(autouse=True)
+def _no_shipped_steps(monkeypatch):
+    """These tests exercise the runner against the frozen baseline; shipped steps (0046+) have their own tests."""
+    monkeypatch.setattr(migrations, "discover",
+                        lambda package=migrations.__name__: [] if package == migrations.__name__ else _REAL_DISCOVER(package))
+
 
 def _legacy_db(path: Path, skip: set[tuple[str, str]] = frozenset()) -> None:
     """What the pre-#256 `Database` built: SCHEMA plus every add-column entry, user_version left at 0."""
@@ -77,7 +86,8 @@ def _seed_session(path: Path, sid: str = "s1") -> None:
 
 def test_baseline_is_frozen_at_45():
     assert BASELINE_VERSION == 45 and len(LEGACY_COLUMNS) == 45
-    assert migrations.discover() == []  # no real 0046+ step ships with #256
+    shipped = [n for n, _ in _REAL_DISCOVER()]  # the real steps are valid and gap-free from 0046
+    assert shipped == list(range(46, 46 + len(shipped)))
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):
