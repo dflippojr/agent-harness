@@ -441,9 +441,13 @@ class Database:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
+            # A pre-versioning file that already holds tables has real data: after the add-only bootstrap it
+            # still gets a snapshot before any numbered step. Only a fresh, empty database skips the backup.
+            had_tables = self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone()
             if version < BASELINE_VERSION:
                 self._bootstrap()
-            migrations_mod.apply_pending(self.conn, path, steps, backup=version >= BASELINE_VERSION)
+            backup = version >= BASELINE_VERSION or had_tables is not None
+            migrations_mod.apply_pending(self.conn, path, steps, backup=backup)
         except BaseException:
             self.conn.close()
             raise

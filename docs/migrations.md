@@ -57,9 +57,10 @@ Recreate every index and trigger the old table had; they are dropped with it.
 
 ## Backups and rollback
 
-Before the first pending step on an existing database (version 45 or later), the runner writes a verified
-copy to `<data dir>/pre-migration/harness-v<from>-<YYYYmmddTHHMMSS>.sqlite3`. A database bootstrapped from
-version 0 in the same start gets no backup. These files are never deleted automatically.
+Before the first pending step on an existing database, the runner writes a verified copy to
+`<data dir>/pre-migration/harness-v<from>-<YYYYmmddTHHMMSS>.sqlite3`. That includes a pre-versioning file
+(version 0) that already held tables: it is bootstrapped to 45 first (add-only), then backed up as v45 before
+any numbered step. Only a fresh, empty database gets no backup. These files are never deleted automatically.
 
 If a step raises, that step is rolled back (its `user_version` bump with it), earlier steps stay applied, and
 the daemon fails to start with a `MigrationError` naming the step and the backup path. Fixing the migration

@@ -101,7 +101,8 @@ def apply_pending(conn: sqlite3.Connection, db_path: Path, steps: Sequence[Step]
 
     `conn` must be in autocommit mode (`isolation_level=None`). With `backup`, a database at or past the
     baseline gets a snapshot under `<db dir>/pre-migration/` before the first step; the caller passes
-    `backup=False` for a database it just bootstrapped from version 0. Returns the backup path, if any.
+    `backup=False` only for a fresh, empty database it just bootstrapped (a pre-versioning file that already
+    held tables is still backed up). Returns the backup path, if any.
     """
     current = user_version(conn)
     check_not_too_new(current, steps)

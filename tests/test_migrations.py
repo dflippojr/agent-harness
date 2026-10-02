@@ -135,6 +135,24 @@ def test_fresh_database_runs_migrations_without_backup(tmp_path):
     assert not (tmp_path / "pre-migration").exists()
 
 
+def test_version_zero_database_with_data_is_backed_up_before_numbered_steps(tmp_path):
+    # An install from before #256 that upgrades straight to a release with 0046+ steps.
+    path = tmp_path / "old.db"
+    _legacy_db(path)
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.execute("INSERT INTO sessions (id, title, project, target, model, status, workspace, created_at,"
+                     " updated_at, context) VALUES ('s1', 'kept', 'p', 't', 'm', 'idle', 'w', 1, 1, '[]')")
+        conn.commit()
+    db = Database(path, migrations=SYNTHETIC)
+    assert db.get_session("s1")["note"] == "title:kept"
+    db.close()
+    backups = list((tmp_path / "pre-migration").glob("harness-v45-*.sqlite3"))
+    assert len(backups) == 1
+    with closing(sqlite3.connect(str(backups[0]))) as conn:
+        assert conn.execute("SELECT title FROM sessions WHERE id = 's1'").fetchone()[0] == "kept"
+        assert "note" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+
+
 def test_failing_step_rolls_back_only_itself(tmp_path):
     path = tmp_path / "harness.db"
     _seed_session(path)
