@@ -175,17 +175,24 @@ function showFab(href, label) {
 }
 
 let currentMe = { role: "owner" };
-async function currentUser() {
+// Resolves (never rejects) to the caller's identity without touching app state, so boot can start it
+// speculatively beside /health and only adopt the result once compatibility has passed.
+async function fetchMe() {
   const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
   try {
-    currentMe = await api("/me", { surface: bootstrap });
+    return await api("/me", { surface: bootstrap });
   } catch (e) {
-    if (e.code === "sign_in_required") { currentMe = { role: "signin" }; return currentMe; }
-    try { currentMe = await api("/me", { surface: "app" }); }
-    catch (_) { currentMe = { role: "guest" }; }
+    if (e.code === "sign_in_required") return { role: "signin" };
+    try { return await api("/me", { surface: "app" }); }
+    catch (_) { return { role: "guest" }; }
   }
+}
+async function currentUser() {
+  currentMe = await fetchMe();
   return currentMe;
 }
+// Identity fetched during boot; the first route() adopts it instead of requesting /me a second time.
+let bootMe = null;
 
 // Issue #64: Google sign-in state for bundled, same-origin Web only. The CSRF value stays in memory.
 let webAuth = null;
@@ -762,8 +769,10 @@ async function route() {
   document.querySelector(".composer")?.remove();
   $fabHost.hidden = true;
   document.querySelectorAll(".jump").forEach((el) => el.remove());
-  await loadWebAuth();
-  await currentUser();
+  const prefetched = bootMe;
+  bootMe = null;
+  const [, me] = await Promise.all([loadWebAuth(), prefetched || fetchMe()]);
+  currentMe = me;
   paintGuestChrome();
   const parts = hashParts();
   if (needsSignIn()) {
@@ -5233,17 +5242,19 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void checkCompatibility({ foreground: true });
 });
 
-void checkCompatibility().then((compatible) => compatible && currentUser()).then((user) => {
-  if (!user) return null;
+// /health and /me start together; /me is a read-only GET whose result is only adopted once /health passes.
+const bootCompatible = checkCompatibility();
+const bootIdentity = fetchMe();
+void bootCompatible.then((compatible) => (compatible ? bootIdentity : null)).then((me) => {
+  if (!me) return null;
+  currentMe = me;
+  bootMe = Promise.resolve(me);
   paintGuestChrome();
   if (!isGuest()) void warmModel();
-  return loadProfileIcon();
-}).then((ready) => {
-  if (ready === null) return null;
-  return applyAppIcon(readAppIcon());
-}).then((ready) => {
-  if (ready !== null) return route();
-  return null;
+  // The profile emoji paints when it arrives; route data never waits on it.
+  void loadProfileIcon().then(() => applyAppIcon(readAppIcon()));
+  applyAppIcon(readAppIcon());
+  return route();
 }).finally(() => {
   // Includes compatibility/login early exits and failures; route paints its existing error state.
   // Removal is instant, with no minimum time or fade-out, even during the icon's fade-in.
