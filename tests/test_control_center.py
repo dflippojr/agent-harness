@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -23,6 +24,14 @@ def make_client(tmp_path):
     return TestClient(create_app(manager)), manager
 
 
+def wait_done(manager, sid: str, timeout: float = 10) -> None:
+    """The run continues on the app's loop after the create request returns (its writes are awaited, #294)."""
+    deadline = time.monotonic() + timeout
+    while manager.db.get_session(sid)["status"] != "done" or sid in manager.tasks:
+        assert time.monotonic() < deadline, manager.db.get_session(sid)["status"]
+        time.sleep(0.01)
+
+
 def test_bundled_web_dogfoods_app_api_without_becoming_an_app(tmp_path):
     client, manager = make_client(tmp_path)
     with client:
@@ -30,6 +39,7 @@ def test_bundled_web_dogfoods_app_api_without_becoming_an_app(tmp_path):
         assert created.status_code == 201
         sid = created.json()["id"]
         assert manager.db.get_session(sid)["app_id"] == ""
+        wait_done(manager, sid)
         listed = client.get("/api/v1/sessions").json()[0]
         assert listed["id"] == sid
         assert listed["chat_summary"] == "from bundled Agent Harness Web — done"

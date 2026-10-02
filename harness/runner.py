@@ -22,7 +22,7 @@ from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
 from .config import Config, resolve_tool_output, clamp_tool_limit
-from .db import Database
+from .db import Database, finish_then_cancel
 from .homelab import Homelab
 from .principal import OWNER_USER_ID, session_user_id
 from .policy import ALLOW, ASK, DENY, ChatPolicy, Policy
@@ -63,6 +63,11 @@ MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the wor
 HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, ask to restart one with restart_service, and, after a code or Dockerfile change has been merged into a stack, ask to rebuild it with rebuild_service (the user approves restarts and rebuilds). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
 
 ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit")
+# Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
+# cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
+# that run's end from where it stopped (Manager.start).
+END_PENDING = "end_pending"
+RUN_FINISHED = "run_finished"
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
 QUOTA_CHECK_SECONDS = 30
@@ -132,7 +137,7 @@ class _DeltaStream:
 
     async def on_delta(self, kind: str, text: str) -> None:
         if self.waking_since is not None:
-            self.bus.emit(self.sid, "model_ready", {"model": self.model_name,
+            await self.bus.aemit(self.sid, "model_ready", {"model": self.model_name,
                                                     "seconds": round(time.monotonic() - self.waking_since)})
             self.waking_since = None
         self.buffer[kind] += text
@@ -162,6 +167,7 @@ class Runner:
         self.chat = chat
         self.approval_events: dict[str, asyncio.Event] = {}
         self.user_cancelled: set[str] = set()
+        self._unended: set[str] = set()  # live runs whose _end_run has not started
         self._sandboxes: dict[str, Sandbox] = {}
         self._cli_sessions: dict[str, ClaudeSession | CodexSession | CursorSession] = {}
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
@@ -327,7 +333,8 @@ class Runner:
         public = {k: existing[k] for k in ("id", "tool_call_id", "tool", "args", "reason", "detail") if k in existing}
         if existing.get("smart"):
             public["smart"] = existing["smart"]
-        with self.db.tx():
+
+        def persist_ask() -> None:
             self.db.insert_approval(existing)
             if record is not None:
                 persist_review(self.db, sid, existing["id"], record)
@@ -336,6 +343,7 @@ class Runner:
                 self.bus.emit(sid, "approval_auto_approved", {"id": existing["id"], **(record or {})})
             else:
                 self.bus.emit(sid, "approval_requested", public)
+        self.db.write(persist_ask)
         return existing
 
     def _member_clone_budget(self, user_id: str) -> int | None:
@@ -348,25 +356,40 @@ class Runner:
         from .storage import account_usage_bytes
         return max(0, int(account["disk_quota_bytes"]) - account_usage_bytes(self.cfg, user_id))
 
-    def set_status(self, sid: str, status: str, **fields) -> None:
-        with self.db.tx():
+    def _status_writer(self, sid: str, status: str, fields: dict):
+        def set_status() -> None:
             self.db.update_session(sid, status=status, **fields)
+            self._flag_end_pending(sid, status)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
-        # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
-        self.scheduler.recheck()
+            # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
+            self.db.after_commit(self.scheduler.recheck)
+        return set_status
+
+    def _flag_end_pending(self, sid: str, status: str) -> None:
+        """Inside the write that sets `status`: mark a live run's final status as awaiting its _end_run."""
+        if status in ACTIVE or sid not in self._unended:
+            return
+        self.db.update_session(sid, run={**self.db.get_session(sid)["run"], END_PENDING: True})
+
+    def set_status(self, sid: str, status: str, **fields) -> None:
+        self.db.write(self._status_writer(sid, status, fields))
+
+    async def aset_status(self, sid: str, status: str, **fields) -> None:
+        """`set_status` for the event loop."""
+        await self.db.awrite(self._status_writer(sid, status, fields))
 
     async def _acquire(self, sid: str, front: bool = False) -> None:
         if self.scheduler.holder == sid:
             return
         s = self.db.get_session(sid)
         if s["status"] != "queued":
-            self.set_status(sid, "queued")
+            await self.aset_status(sid, "queued")
         if self.guard is not None and self.guard.active:
             self.note_gpu_pause(sid)
         with telemetry.span("gpu_slot_wait", {"harness.queue_front": front}):
             await self.scheduler.acquire(sid, front=front)
-        self.set_status(sid, "running")
+        await self.aset_status(sid, "running")
 
     # GPU contention (gpu_guard.py)
     def note_gpu_pause(self, sid: str) -> None:
@@ -408,7 +431,8 @@ class Runner:
             except llm.LLMError as e:
                 if self.guard is None or not self.guard.active:
                     raise
-                self.bus.emit(sid, "llm_retry", {"attempt": 0, "error": f"model server paused for the GPU: {e}"[:500]})
+                await self.bus.aemit(sid, "llm_retry",
+                                     {"attempt": 0, "error": f"model server paused for the GPU: {e}"[:500]})
             finally:
                 self.generating.discard(sid)
                 await turn.release()
@@ -437,16 +461,20 @@ class Runner:
         previous = s["status"]
         self.scheduler.release(sid)
         since = time.monotonic()
-        with self.db.tx():
+
+        def waiting() -> None:
             self.db.update_session(sid, status="waiting_target")
             self.bus.emit(sid, "status", {"status": "waiting_target"})
             self.bus.emit(sid, "target_waiting", {"target": target})
+        await self.db.awrite(waiting)
         await self.hub.wait_online(target)
         status = "waiting_approval" if previous == "waiting_approval" else "queued"
-        with self.db.tx():
+
+        def online() -> None:
             self.db.update_session(sid, status=status)
             self.bus.emit(sid, "status", {"status": status})
             self.bus.emit(sid, "target_online", {"target": target, "seconds": round(time.monotonic() - since)})
+        await self.db.awrite(online)
         if held:
             await self._acquire(sid)
 
@@ -467,10 +495,13 @@ class Runner:
                 if offline and waiting_since is None:
                     waiting_since = time.monotonic()
                     self.scheduler.release(sid)
-                    self.set_status(sid, "waiting_target")
-                    self.bus.emit(sid, "target_waiting", {"target": ws.target, "during": name})
+
+                    def wait_for_target() -> None:  # one commit, so nobody sees the status without its target
+                        self._status_writer(sid, "waiting_target", {})()
+                        self.bus.emit(sid, "target_waiting", {"target": ws.target, "during": name})
+                    await self.db.awrite(wait_for_target)
                 elif not offline and waiting_since is not None:
-                    self.bus.emit(sid, "target_online", {"target": ws.target,
+                    await self.bus.aemit(sid, "target_online", {"target": ws.target,
                                                          "seconds": round(time.monotonic() - waiting_since)})
                     waiting_since = None
                     await self._acquire(sid)
@@ -479,7 +510,7 @@ class Runner:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             if waiting_since is not None:
-                self.bus.emit(sid, "target_online", {"target": ws.target,
+                await self.bus.aemit(sid, "target_online", {"target": ws.target,
                                                      "seconds": round(time.monotonic() - waiting_since)})
                 if not task.cancelled():
                     await self._acquire(sid)
@@ -524,6 +555,7 @@ class Runner:
         return trace
 
     async def _run(self, sid: str, recovered: bool = False) -> None:
+        self._unended.add(sid)
         try:
             s = self.db.get_session(sid)
             if s.get("backend", "local") != "local":
@@ -533,7 +565,7 @@ class Runner:
                 raise CliBackendError("the local model is disabled in this service profile")
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
-            await self._take_pending_cancel(sid)
+            await self._take_pending_cancel(sid, cancelled=True)
             raise
         except CliBackendError as e:
             if await self._take_pending_cancel(sid):
@@ -560,10 +592,11 @@ class Runner:
             await asyncio.shield(self._stop_cli(sid))
             self.scheduler.release(sid)
             self.user_cancelled.discard(sid)
+            self._unended.discard(sid)
 
     async def _run_local(self, sid: str, s: dict, recovered: bool) -> None:
         if recovered:
-            self.bus.emit(sid, "resumed", {"status": s["status"]})
+            await self.bus.aemit(sid, "resumed", {"status": s["status"]})
             if (s["run"].get("executing") or {}).get("name") in ("run_shell", "git_clone"):
                 await self.sandbox(s).restart()  # kill the orphaned command
         with telemetry.span("run_setup"):
@@ -623,7 +656,7 @@ class Runner:
                 reason = self._budget_reason(s["run"])
                 if reason:
                     turn = self._close_span(turn)
-                    self.set_status(sid, "done", stop_reason=reason)
+                    await self.aset_status(sid, "done", stop_reason=reason)
                     await self._end_run(sid)
                     return
 
@@ -665,7 +698,7 @@ class Runner:
         if backend_name not in ("claude", "codex", "cursor"):
             raise CliBackendError(f"backend {backend_name!r} is not implemented")
         if recovered:
-            self.bus.emit(sid, "resumed", {"status": s["status"]})
+            await self.bus.aemit(sid, "resumed", {"status": s["status"]})
         await self._prepare_repo(s)
         slot = self._backend_slots[backend_name]
         while True:
@@ -674,7 +707,7 @@ class Runner:
                 delay = max(0, float(s["run"].get("limit_resets_at") or 0) - time.time())
                 if delay:
                     await asyncio.sleep(delay)
-                self.set_status(sid, "queued")
+                await self.aset_status(sid, "queued")
             backend_session_id = str(s["run"].get("backend_session_id") or "")
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
             try:
@@ -706,7 +739,7 @@ class Runner:
         """Start (or resume) the hosted CLI for this attempt and record its billing mode."""
         s = self.db.get_session(sid)
         if s["status"] != "waiting_approval":
-            self.set_status(sid, "running")
+            await self.aset_status(sid, "running")
         source = credential["source"] if use_api_key else "subscription"
         run = {**s["run"], "billing_mode": "api_key" if use_api_key else backend.billing,
                "credential_source": source,
@@ -716,7 +749,7 @@ class Runner:
         if warning and not run.get("billing_warned"):
             run["billing_warned"] = True
             self.db.update_session(sid, run=run)
-            self.bus.emit(sid, "billing_warning", {"backend": backend_name, "message": warning})
+            await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": warning})
         factory = {"claude": self.cli_factory, "codex": self.codex_factory,
                    "cursor": self.cursor_factory}[backend_name]
         from dataclasses import replace
@@ -765,13 +798,16 @@ class Runner:
         if credential["policy"] == "subscription_then_api_key" and credential["key"] and not use_api_key:
             run = {**s["run"], "backend_auth": "api_key"}
             self.db.update_session(sid, run=run)
-            self.bus.emit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
+            await self.bus.aemit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
             return
         reset = limit.reset_at or time.time() + 300
         run = {**s["run"], "limit_resets_at": reset}
-        self.db.update_session(sid, run=run)
-        self.set_status(sid, "waiting_limit")
-        self.bus.emit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
+
+        def wait_for_limit() -> None:  # one commit, so nobody sees waiting_limit without when it resets
+            self.db.update_session(sid, run=run)
+            self._status_writer(sid, "waiting_limit", {})()
+            self.bus.emit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
+        await self.db.awrite(wait_for_limit)
 
     @staticmethod
     def _secret_marker(path: str) -> tuple[int, int] | None:
@@ -811,10 +847,12 @@ class Runner:
             return
         for content in queued:
             await cli.send(cli.user_message(content))
-        with self.db.tx():
+
+        def drain_inbox() -> None:
             current = self.db.get_session(sid)["inbox"]
             remaining = current[len(queued):] if current[:len(queued)] == queued else current
             self.db.update_session(sid, inbox=remaining)
+        await self.db.awrite(drain_inbox)
 
     @staticmethod
     def _cli_text(content) -> str:
@@ -895,7 +933,8 @@ class Runner:
 
     def _record_cli_tool_result(self, sid: str, call_id: str, name: str, ok: bool, output: str,
                                 seconds: float = 0) -> None:
-        with self.db.tx():
+
+        def record_cli_tool_result() -> None:
             run = self.db.get_session(sid)["run"]
             run["tool_calls"] = run.get("tool_calls", 0) + 1
             if not ok:
@@ -904,6 +943,7 @@ class Runner:
             self.bus.emit(sid, "tool_result", {"id": call_id, "name": name, "ok": ok, "seconds": seconds,
                                                "output_chars": len(output),
                                                "output": truncate_middle(output, 20000)})
+        self.db.write(record_cli_tool_result)
 
     def _claude_delta(self, sid: str, event: dict, _tool_names: dict[str, str] | None = None) -> None:
         delta = (event.get("event") or {}).get("delta") or {}
@@ -1217,15 +1257,15 @@ class Runner:
             if existing is None:
                 return
         if existing["status"] == "pending":
-            self.set_status(sid, "waiting_approval")
+            await self.aset_status(sid, "waiting_approval")
             existing = await self._wait_approval(existing["id"])
         if existing["status"] == "approved":
-            self.set_status(sid, "running")
+            await self.aset_status(sid, "running")
             self._taint_allowed_cli_request(sid, name, args)
             await cli.respond_permission(request_id, "allow", args)
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
-        self.set_status(sid, "running")
+        await self.aset_status(sid, "running")
         await cli.respond_permission(request_id, "deny", args, f"The user denied this {name} call.{note}")
 
     async def _ask_cli_policy(self, s: dict, cli, request_id, request: dict, name: str, args: dict,
@@ -1233,7 +1273,7 @@ class Runner:
         """Apply the policy to a new CLI tool request: answer it now (None) or persist an approval to wait on."""
         sid = s["id"]
         decision = self._taint_layer(s, name, args, self.policy(s).decide(name, args))
-        self.bus.emit(sid, "tool_call", {"id": call_id, "name": name, "args": args,
+        await self.bus.aemit(sid, "tool_call", {"id": call_id, "name": name, "args": args,
                                          "decision": decision.action, "reason": decision.reason})
         if decision.action == ALLOW:
             self._taint_allowed_cli_request(sid, name, args)
@@ -1281,14 +1321,17 @@ class Runner:
             failure = {"code": "provider_error", "provider": s["backend"],
                        "message": answer or str(result.get("subtype") or "provider failed"), "retryable": True}
             run["failure"] = failure
-        with self.db.tx():
+
+        def finish_cli_result() -> None:
             self.db.update_session(sid, run=run, totals=totals, status=status, stop_reason=reason, answer=answer)
+            self._flag_end_pending(sid, status)
             self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
                                  str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
                                  str(run.get("credential_source") or "subscription"))
             if failed:
                 self.bus.emit(sid, "error", failure)
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})
+        self.db.write(finish_cli_result)
 
     async def _stop_cli(self, sid: str) -> None:
         cli = self._cli_sessions.pop(sid, None)
@@ -1305,7 +1348,7 @@ class Runner:
         # A sleeping model takes about a minute to reload; tell the user instead of looking stuck.
         if await self.warmer.state(model) in (SLEEPING, WAKING):
             stream.waking_since = time.monotonic()
-            self.bus.emit(sid, "model_waking", {"model": model.name, "expected_seconds": EXPECTED_WAKE_SECONDS})
+            await self.bus.aemit(sid, "model_waking", {"model": model.name, "expected_seconds": EXPECTED_WAKE_SECONDS})
 
         reading = self._progress_reporter(sid, "prompt_progress", {})
         cache_box = {"seen": False, "tokens": None}
@@ -1331,7 +1374,7 @@ class Runner:
             chars = sum(compaction.message_chars(m) for m in s["context"]) + len(json.dumps(tools))
             run["chars_per_token"] = min(6.0, max(1.5, chars / completion.prompt_tokens))
             run["context_tokens"] = completion.prompt_tokens + completion.completion_tokens
-        ended = self._commit_completion(s, run, completion, model, tools)
+        ended = await self._commit_completion(s, run, completion, model, tools)
         if ended or not completion.tool_calls:
             self._emit_turn_metrics(sid)
         return ended
@@ -1347,7 +1390,7 @@ class Runner:
                     raise
                 if "HTTP 500" in str(e):
                     run["invalid_tool_calls"] += 1
-                self.bus.emit(sid, "llm_retry", {"attempt": attempt + 1, "error": str(e)[:500]})
+                await self.bus.aemit(sid, "llm_retry", {"attempt": attempt + 1, "error": str(e)[:500]})
                 await asyncio.sleep(2 * attempt)
 
     def _turn_metrics_payload(self, s: dict, run: dict, completion, tools: list) -> dict:
@@ -1372,11 +1415,13 @@ class Runner:
         retries, correlated = efficiency.turn_increments(self.db.events(sid))
         run = {k: v for k, v in s["run"].items() if k != "pending_turn_metrics"}
         payload = {**pending, "dead_end_retries": retries, "compaction_correlated_retries": correlated}
-        with self.db.tx():
+
+        def emit_turn_metrics() -> None:
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "turn_metrics", payload)
+        self.db.write(emit_turn_metrics)
 
-    def _commit_completion(self, s: dict, run: dict, completion, model, tools: list) -> bool:
+    async def _commit_completion(self, s: dict, run: dict, completion, model, tools: list) -> bool:
         """Record one model reply: the context, totals and events, and whether the run is over."""
         sid = s["id"]
         run["pending_turn_metrics"] = self._turn_metrics_payload(s, run, completion, tools)
@@ -1399,11 +1444,13 @@ class Runner:
         quotes = self._quote_check(s, run, completion.content) if final else []
         if quotes:
             final = False
-        with self.db.tx():
+
+        def commit_completion() -> bool:
             if final:
                 run["idle"] = 0
                 self.db.update_session(sid, context=context, run=run, totals=totals, status="done",
                                        stop_reason="final_message", answer=completion.content)
+                self._flag_end_pending(sid, "done")
                 self.bus.emit(sid, "assistant", event)
                 self.bus.emit(sid, "status", {"status": "done", "stop_reason": "final_message",
                                               "answer": completion.content})
@@ -1411,8 +1458,11 @@ class Runner:
             self._nudge(sid, context, run, completion, quotes)
             self.db.update_session(sid, context=context, run=run, totals=totals)
             self.bus.emit(sid, "assistant", event)
+            return False
+        if await self.db.awrite(commit_completion):
+            return True
         if run["idle"] >= 3:
-            self.set_status(sid, "done", stop_reason="empty_replies")
+            await self.aset_status(sid, "done", stop_reason="empty_replies")
             return True
         return False
 
@@ -1465,7 +1515,7 @@ class Runner:
         fn = call.get("function") or {}
         name = fn.get("name", "")
         if executing.get("id") == call["id"]:
-            self._record_result(sid, call, name, INTERRUPTED, ok=False)
+            await self._record_result(sid, call, name, INTERRUPTED, ok=False)
             return None, None
         try:
             args = json.loads(fn.get("arguments") or "{}")
@@ -1473,31 +1523,31 @@ class Runner:
                 raise ValueError("arguments must be a JSON object")
         except ValueError as e:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, name, f"Error: tool arguments were not a valid JSON object ({e}).",
+            await self._record_result(sid, call, name, f"Error: tool arguments were not a valid JSON object ({e}).",
                                 ok=False)
             return None, None
 
         if name == "finish":
-            return self._finish_call(s, call, args, rest), None
+            return await self._finish_call(s, call, args, rest), None
         if name == "update_notes" and isinstance(args.get("notes"), str):
-            return self._update_notes_call(sid, call, args), None
+            return await self._update_notes_call(sid, call, args), None
         if name == "update_state":
-            return self._update_state_call(sid, call, args), None
+            return await self._update_state_call(sid, call, args), None
         if name == "reset_round":
-            return self._reset_round_call(sid, call, args), None
+            return await self._reset_round_call(sid, call, args), None
 
         ws = self.workspace(s)
         schemas = {t["function"]["name"]: t for t in self.tool_schemas(s, ws)}
         if name not in schemas:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
+            await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
                                                  f"{', '.join(schemas)}.", ok=False)
             return None, None
         try:
             args = validate_args(schemas[name], args)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)
+            await self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)
             return None, None
 
         with telemetry.tool_span(name, call["id"]) as span:
@@ -1508,30 +1558,31 @@ class Runner:
             span.set({"harness.ok": executed, "harness.output_chars": len(output)})
         if executed and name in ("run_shell", "git_clone", "write_file", "generate_image") \
                 and await self._over_quota(sid):
-            self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
+            await self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
             return True, None
         return None, len(output)
 
-    def _skip_rest(self, sid: str, rest: list[dict], reason: str) -> None:
+    async def _skip_rest(self, sid: str, rest: list[dict], reason: str) -> None:
         for call in rest:
-            self._record_result(sid, call, call["function"].get("name", ""), reason, ok=False)
+            await self._record_result(sid, call, call["function"].get("name", ""), reason, ok=False)
 
-    def _finish_call(self, s: dict, call: dict, args: dict, rest: list[dict]) -> bool:
+    async def _finish_call(self, s: dict, call: dict, args: dict, rest: list[dict]) -> bool:
         """The agent called `finish`: True when the task is done, False when its quotes need fixing first."""
         sid = s["id"]
         answer = str(args.get("answer", ""))
         run = self.db.get_session(sid)["run"]
         quotes = self._quote_check(s, run, answer)
         if quotes:
-            with self.db.tx():
+            def quote_check() -> None:
                 self.db.update_session(sid, run=run)
                 self.bus.emit(sid, "quote_check", {"quotes": quotes})
-            self._record_result(sid, call, "finish", "Not finished yet. " + grounding.nudge(quotes), ok=False)
-            self._skip_rest(sid, rest, "Not run: fix the quotes first.")
+            await self.db.awrite(quote_check)
+            await self._record_result(sid, call, "finish", "Not finished yet. " + grounding.nudge(quotes), ok=False)
+            await self._skip_rest(sid, rest, "Not run: fix the quotes first.")
             return False
-        self._record_result(sid, call, "finish", "Task finished.", ok=True)
-        self._skip_rest(sid, rest, "Not run: the task was already finished.")
-        self.set_status(sid, "done", stop_reason="finished", answer=answer)
+        await self._record_result(sid, call, "finish", "Task finished.", ok=True)
+        await self._skip_rest(sid, rest, "Not run: the task was already finished.")
+        await self.aset_status(sid, "done", stop_reason="finished", answer=answer)
         return True
 
     async def _over_quota(self, sid: str) -> bool:
@@ -1561,15 +1612,15 @@ class Runner:
                 if used >= limit:
                     message = (f"{quota_message(used, limit)}, so the run was stopped. Delete unused files "
                                "or ask the owner to raise the account quota.")
-                    self.bus.emit(sid, "error", {"message": message})
-                    self.set_status(sid, "failed", stop_reason=f"account_quota_exceeded: {used} > {limit}")
+                    await self.bus.aemit(sid, "error", {"message": message})
+                    await self.aset_status(sid, "failed", stop_reason=f"account_quota_exceeded: {used} > {limit}")
                     return True
         if mb <= quota or mb <= last:
             return False
         message = (f"The workspace is {mb} MB, over its {quota} MB quota, so the run was stopped. Send a message "
                    "asking the agent to delete build artifacts or other large files, or raise quota_mb for the project.")
-        self.bus.emit(sid, "error", {"message": message})
-        self.set_status(sid, "failed", stop_reason=f"quota_exceeded: {mb} MB > {quota} MB")
+        await self.bus.aemit(sid, "error", {"message": message})
+        await self.aset_status(sid, "failed", stop_reason=f"quota_exceeded: {mb} MB > {quota} MB")
         return True
 
     async def _prepare_repo(self, s: dict) -> None:
@@ -1594,13 +1645,15 @@ class Runner:
             s = self.db.get_session(s["id"])
             context = s["context"]
             context[0] = {**context[0], "content": context[0]["content"].replace("{base_branch}", info["base_branch"])}
-            with self.db.tx():
+
+            def workspace_ready() -> None:
                 self.db.update_session(s["id"], context=context, **info)
                 self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
+            await self.db.awrite(workspace_ready)
         elif not s["run"].get("origin_refreshed"):
             error = await self._refresh_origin(s, ws, remote, member)
             if error:
-                self.bus.emit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
+                await self.bus.aemit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
             run = self.db.get_session(s["id"])["run"]
             self.db.update_session(s["id"], run={**run, "origin_refreshed": True})
 
@@ -1658,12 +1711,12 @@ class Runner:
             state = await asyncio.to_thread(gh.fetch, uid, row["source_url"], Path(row["repo"]),
                                             storage.repos_dir(self.cfg, uid))
         except GitHubAuthError as e:
-            self.bus.emit(s["id"], "error", {"message": f"could not refresh from GitHub: {e} "
+            await self.bus.aemit(s["id"], "error", {"message": f"could not refresh from GitHub: {e} "
                                                         "This session uses the last fetched copy."})
             return
         if state == "diverged":
-            self.bus.emit(s["id"], "error", {"message": "fetched from GitHub, but the project's branch has local "
-                                                        "merges, so it was not fast-forwarded."})
+            await self.bus.aemit(s["id"], "error", {"message": "fetched from GitHub, but the project's branch has "
+                                                         "local merges, so it was not fast-forwarded."})
 
     async def _authorize(self, s: dict, call: dict, name: str, args: dict, ws: Workspace) -> str | None:
         """Apply the policy. Returns None to proceed, or the tool result to record instead of running it."""
@@ -1672,17 +1725,17 @@ class Runner:
         if existing is None:
             decision = self._decide(s, name, args)
             telemetry.annotate({"harness.policy_decision": decision.action})
-            self.bus.emit(sid, "tool_call", {"id": call["id"], "name": name, "args": args,
+            await self.bus.aemit(sid, "tool_call", {"id": call["id"], "name": name, "args": args,
                                              "decision": decision.action, "reason": decision.reason})
             if decision.action == ALLOW:
                 return None
             if decision.action != ASK:
                 output = f"Error: blocked by policy ({decision.reason or 'not allowed'}). Don't retry this."
-                self._record_result(sid, call, name, output, ok=False)
+                await self._record_result(sid, call, name, output, ok=False)
                 return output
             detail, reason, error = await self._ask_details(s, name, args, ws, decision.reason)
             if error is not None:
-                self._record_result(sid, call, name, error, ok=False)
+                await self._record_result(sid, call, name, error, ok=False)
                 return error
             existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call["id"],
                         "tool": name, "args": args, "reason": reason, "detail": detail}
@@ -1691,16 +1744,16 @@ class Runner:
 
         if existing["status"] == "pending":
             self.scheduler.release(sid)
-            self.set_status(sid, "waiting_approval")
+            await self.aset_status(sid, "waiting_approval")
             with telemetry.span("approval_wait") as span:
                 existing = await self._wait_approval(existing["id"])
                 span.set({"harness.approval_status": existing["status"]})
             await self._acquire(sid)
         if existing["status"] == "approved":
-            return self._member_tool_block(s, call, name, ws)
+            return await self._member_tool_block(s, call, name, ws)
         note = f" Their note: {existing['note']}" if existing.get("note") else ""
         output = f"Error: the user denied this {name} call.{note} Don't retry it; choose another approach or explain."
-        self._record_result(sid, call, name, output, ok=False)
+        await self._record_result(sid, call, name, output, ok=False)
         return output
 
     def _decide(self, s: dict, name: str, args: dict):
@@ -1730,9 +1783,11 @@ class Runner:
         updated = taint.add(s.get("taint") or [], kind, origin)
         if updated is None:
             return
-        with self.db.tx():
+
+        def add_taint() -> None:
             self.db.update_session(sid, taint=updated)
             self.bus.emit(sid, "taint_added", {"kind": kind, "origin": origin, "sources": len(updated)})
+        self.db.write(add_taint)
 
     def _decide_rules(self, s: dict, name: str, args: dict):
         policy = self.policy(s)
@@ -1759,14 +1814,14 @@ class Runner:
         if source is not None:
             self._add_taint(s["id"], *source)
 
-    def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
+    async def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
         """An approved call still can't run for a household member without the tool; the recorded error, else None."""
         if session_user_id(s) == OWNER_USER_ID:
             return None
         if name in {t["function"]["name"] for t in self.tool_schemas(s, ws)}:
             return None
         output = "Error: this account cannot use that tool."
-        self._record_result(s["id"], call, name, output, ok=False)
+        await self._record_result(s["id"], call, name, output, ok=False)
         return output
 
     async def _ask_details(self, s: dict, name: str, args: dict, ws: Workspace,
@@ -1869,7 +1924,7 @@ class Runner:
         if len(output) > max_chars:
             output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
-        self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
+        await self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content, extra=extra, output_chars=output_chars)
         return output
 
@@ -2017,10 +2072,11 @@ class Runner:
         run[counter] = run.get(counter, 0) + 1
         self.db.update_session(sid, run=run)
 
-    def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
+    async def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
                        artifact_content: str | None = None, extra: dict | None = None,
                        output_chars: int | None = None) -> None:
-        with self.db.tx():
+        def record_result() -> None:
+            nonlocal output
             s = self.db.get_session(sid)
             run = s["run"]
             run["tool_calls"] = run.get("tool_calls", 0) + 1
@@ -2046,6 +2102,7 @@ class Runner:
                 payload.update(extra)
             self.db.update_session(sid, context=context, run=run)
             self.bus.emit(sid, "tool_result", payload)
+        await self.db.awrite(record_result)
 
     def _progress_reporter(self, sid: str, event: str, base: dict):
         """on_progress callback that sends throttled ephemeral progress events for long prompts."""
@@ -2064,50 +2121,54 @@ class Runner:
                                             "cached": state["first"]})
         return report
 
-    def _update_notes_call(self, sid: str, call: dict, args: dict) -> None:
+    async def _update_notes_call(self, sid: str, call: dict, args: dict) -> None:
         """Deprecated alias: set notes only and preserve every other state field."""
         notes = args["notes"]
-        with self.db.tx():
+
+        def update_notes() -> None:
             run = {**self.db.get_session(sid)["run"], "notes": notes}
             if isinstance(run.get("state"), dict):
                 run["state"] = {**run["state"], "notes": notes}
                 self.bus.emit(sid, "state", {"state": run["state"]})
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "notes", {"notes": notes})
-        self._record_result(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).", ok=True)
+        await self.db.awrite(update_notes)
+        await self._record_result(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).", ok=True)
 
-    def _update_state_call(self, sid: str, call: dict, args: dict) -> None:
+    async def _update_state_call(self, sid: str, call: dict, args: dict) -> None:
         try:
             payload = agent_state.validate_state(args, self.cfg.state_max_chars)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, "update_state", f"Error: {e}", ok=False)
+            await self._record_result(sid, call, "update_state", f"Error: {e}", ok=False)
             return
-        with self.db.tx():
+
+        def update_state() -> None:
             run = {**self.db.get_session(sid)["run"], "state": payload, "notes": payload["notes"]}
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "state", {"state": payload})
             if payload["notes"]:
                 self.bus.emit(sid, "notes", {"notes": payload["notes"]})
-        self._record_result(sid, call, "update_state",
+        await self.db.awrite(update_state)
+        await self._record_result(sid, call, "update_state",
                             f"State saved ({len(agent_state.dump_state(payload))} characters).", ok=True)
 
-    def _reset_round_call(self, sid: str, call: dict, args: dict) -> None:
+    async def _reset_round_call(self, sid: str, call: dict, args: dict) -> None:
         if args:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, "reset_round",
+            await self._record_result(sid, call, "reset_round",
                                 "Error: reset_round takes no arguments.", ok=False)
             return
         s = self.db.get_session(sid)
         if not self.has_valid_saved_state(s):
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, "reset_round",
+            await self._record_result(sid, call, "reset_round",
                                 "Error: call update_state first so a valid saved state exists before reset_round.",
                                 ok=False)
             return
         run = {**s["run"], "pending_round_reset": True}
         self.db.update_session(sid, run=run)
-        self._record_result(sid, call, "reset_round", "Round reset scheduled.", ok=True)
+        await self._record_result(sid, call, "reset_round", "Round reset scheduled.", ok=True)
 
     @staticmethod
     def has_valid_saved_state(s: dict) -> bool:
@@ -2172,10 +2233,12 @@ class Runner:
         after = compaction.estimate_tokens(new_context, cpt) + overhead
         run = {**self.db.get_session(sid)["run"]}
         run.pop("pending_round_reset", None)
-        with self.db.tx():
+
+        def round_reset() -> None:
             self.db.update_session(sid, context=new_context, run=run)
             self.bus.emit(sid, "compaction", {"tier": "round_reset", "tokens_before": before,
                                               "tokens_after": after, "context_tokens": model.context_tokens})
+        self.db.write(round_reset)
         return self.db.get_session(sid)
 
     # compaction
@@ -2191,13 +2254,14 @@ class Runner:
         if self.artifact_tool_available(s):  # a receipt tells the model to call read_artifact
             context, artifacts, masked_chars = self._mask_used_results(s)
         if artifacts:
-            with self.db.tx():
+            def mask_results() -> None:
                 for digest, content in artifacts.items():
                     self.db.put_artifact(sid, digest, content)
                 self.db.update_session(sid, context=context)
                 if masked_chars > 0:
                     self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
                                                        "characters_saved": masked_chars})
+            await self.db.awrite(mask_results)
         s = self.db.get_session(sid)
         explicit = bool(s["run"].get("pending_round_reset"))
         valid = self.has_valid_saved_state(s)
@@ -2222,9 +2286,11 @@ class Runner:
                     context = await self._summarize_context(s, context, split, data, before, cpt, overhead)
             data["context_tokens"] = n
             span.set({"harness.compaction_tier": data["tier"], "harness.tokens_after": data.get("tokens_after")})
-            with self.db.tx():
+
+            def compact() -> None:
                 self.db.update_session(sid, context=context)
                 self.bus.emit(sid, "compaction", data)
+            await self.db.awrite(compact)
         return self.db.get_session(sid)
 
     def _mask_used_results(self, s: dict) -> tuple[list, dict, int]:
@@ -2250,7 +2316,7 @@ class Runner:
         n = model.context_tokens
         start, end = split
         # Persisted, so a client that opens the session mid-summary still shows it.
-        self.bus.emit(sid, "compaction_started", {"messages": end - start, "tokens_before": before,
+        await self.bus.aemit(sid, "compaction_started", {"messages": end - start, "tokens_before": before,
                                                   "context_tokens": n})
         request = compaction.summary_request(context, start, end, max_chars=int(0.45 * n * cpt))
         written = {"tokens": 0, "last": 0.0}
@@ -2269,7 +2335,7 @@ class Runner:
                                              extra={"chat_template_kwargs": {"enable_thinking": False}},
                                              on_progress=reading)
         except llm.LLMError as e:
-            self.bus.emit(sid, "error", {"message": f"compaction summary failed: {e}"})
+            await self.bus.aemit(sid, "error", {"message": f"compaction summary failed: {e}"})
             return context
         totals = self._add_totals(self.db.get_session(sid)["totals"], summary, turn=False)
         self.db.update_session(sid, totals=totals)
@@ -2294,58 +2360,98 @@ class Runner:
         return quotes
 
     # run end
-    async def _take_pending_cancel(self, sid: str) -> bool:
-        """If the user cancelled, finalize as cancelled and skip any failure path. False if not pending."""
+    async def _take_pending_cancel(self, sid: str, cancelled: bool = False) -> bool:
+        """If the user cancelled, finalize as cancelled and skip any failure path. False if not pending.
+        `cancelled`: the run's task was cancelled, by anyone (daemon shutdown too); a final status that already
+        committed still gets its _end_run then."""
         if sid not in self.user_cancelled:
-            return False
+            s = self.db.get_session(sid)
+            if not cancelled or sid not in self._unended or not s or s["status"] in ACTIVE:
+                return False
+            await self._end_run(sid)
+            return True
         s = self.db.get_session(sid)
         if s["status"] in ("cancelled", "done"):
-            return False
-        self._record_cancel(sid)
-        await self._end_run(sid)
+            if sid not in self._unended:
+                return False
+            # The final status committed, but the cancel came before the run ended: end it as it stands.
+            await self._end_run(sid)
+            return True
+        # One unit: a second cancel (daemon shutdown) during the cancelled status write must not skip the run's end.
+        await finish_then_cancel(self._record_cancel_and_end(sid))
         return True
 
-    def _record_cancel(self, sid: str) -> None:
+    async def _record_cancel_and_end(self, sid: str) -> None:
+        await self._record_cancel(sid)
+        await self._end_run(sid)
+
+    async def end_pending_run(self, sid: str) -> None:
+        """At daemon start: end a run whose final status committed but whose _end_run never finished."""
+        await self._end_run(sid)
+
+    async def _record_cancel(self, sid: str) -> None:
         s = self.db.get_session(sid)
         executing = (s["run"].get("executing") or {}).get("id")
         for call in unresolved_calls(s["context"]):
             text = ("Cancelled by the user while running." if call["id"] == executing
                     else "Not run: the user cancelled the task.")
-            self._record_result(sid, call, call["function"].get("name", ""), text, ok=False)
+            await self._record_result(sid, call, call["function"].get("name", ""), text, ok=False)
         for approval in self.db.pending_approvals(sid):
             self.db.decide_approval(approval["id"], "cancelled")
-        self.set_status(sid, "cancelled", stop_reason="cancelled")
+        await self.aset_status(sid, "cancelled", stop_reason="cancelled")
 
     async def _end_run(self, sid: str) -> None:
+        """Runs to the end even if the run is cancelled meanwhile (the cancel is raised after), so a run that
+        reached a final status always gets its run_finished, branch save and transcript."""
+        self._unended.discard(sid)
         with telemetry.span("run_end"):
-            await self._end_run_inner(sid)
+            await finish_then_cancel(self._end_run_inner(sid))
 
     async def _end_run_inner(self, sid: str) -> None:
-        self._emit_turn_metrics(sid)
         s = self.db.get_session(sid)
-        extra = {}
-        if s.get("job_id"):  # scheduled job: the answer's last STATUS line decides how loudly to notify (jobs.py)
-            from .jobs import parse_status
-            job_status, reason = parse_status(s["answer"]) if s["status"] == "done" else ("", "")
-            self.db.update_session(sid, job_status=job_status)
-            extra = {"job_id": s["job_id"], "job_status": job_status, "job_reason": reason}
-        if s["status"] == "done" and s["answer"] and self.cfg.web.quote_check:
-            quotes = grounding.ungrounded_quotes(s["answer"],
-                                                 grounding.session_sources(s["context"], self.db.events(sid)))
-            if quotes:
-                with self.db.tx():
-                    self.db.update_session(sid, run={**s["run"], "ungrounded_quotes": quotes})
-                    self.bus.emit(sid, "ungrounded_quotes", {"quotes": quotes})
-                s = self.db.get_session(sid)
-                extra["ungrounded_quotes"] = quotes
-        self.bus.emit(sid, "run_finished", {"status": s["status"], "stop_reason": s["stop_reason"],
-                                            "answer": s["answer"], "run": s["run"], **extra})
+        if s["run"].get(END_PENDING) != RUN_FINISHED:  # else a restart after its run_finished: just the rest
+            s = await self._run_finished(sid)
         if s.get("backend", "local") == "local":
             await asyncio.shield(self.sandbox(s).stop())
         else:
             await asyncio.shield(self._stop_cli(sid))
         await asyncio.shield(self.save_branch(sid))
         self.write_transcript(sid)
+
+        def ended() -> None:
+            current = self.db.get_session(sid)
+            if current and current["run"].pop(END_PENDING, None) is not None:
+                self.db.update_session(sid, run=current["run"])
+        await self.db.awrite(ended)
+
+    async def _run_finished(self, sid: str) -> dict:
+        self._emit_turn_metrics(sid)
+        s = self.db.get_session(sid)
+        extra, fields, quotes = {}, {}, []
+        if s.get("job_id"):  # scheduled job: the answer's last STATUS line decides how loudly to notify (jobs.py)
+            from .jobs import parse_status
+            job_status, reason = parse_status(s["answer"]) if s["status"] == "done" else ("", "")
+            fields["job_status"] = job_status
+            extra = {"job_id": s["job_id"], "job_status": job_status, "job_reason": reason}
+        if s["status"] == "done" and s["answer"] and self.cfg.web.quote_check:
+            quotes = grounding.ungrounded_quotes(s["answer"],
+                                                 grounding.session_sources(s["context"], self.db.events(sid)))
+            if quotes:
+                fields["run"] = {**s["run"], "ungrounded_quotes": quotes}
+                extra["ungrounded_quotes"] = quotes
+
+        def run_finished() -> dict:  # one commit, so nobody sees the job status without its run_finished
+            if fields:
+                self.db.update_session(sid, **fields)
+            if quotes:
+                self.bus.emit(sid, "ungrounded_quotes", {"quotes": quotes})
+            final = self.db.get_session(sid)
+            run = {k: v for k, v in final["run"].items() if k != END_PENDING}
+            self.db.update_session(sid, run={**run, END_PENDING: RUN_FINISHED})
+            self.bus.emit(sid, "run_finished", {"status": final["status"], "stop_reason": final["stop_reason"],
+                                                "answer": final["answer"], "run": run, **extra})
+            return final
+        return await self.db.awrite(run_finished)
 
     def write_transcript(self, sid: str) -> None:
         try:
@@ -2375,8 +2481,8 @@ class Runner:
         try:
             if s["target"] != "tower":
                 if not self.hub.online(s["target"]):
-                    self.bus.emit(sid, "error", {"message": f"the {s['target']} is offline, so the branch wasn't "
-                                                            "saved yet; review saves it when it's back"})
+                    await self.bus.aemit(sid, "error", {"message": f"the {s['target']} is offline, so the branch "
+                                                             "wasn't saved yet; review saves it when it's back"})
                     return
                 info = await self.hub.call(s["target"], "save_branch", {
                     "session": sid, "repo": project.repo, "branch": s["branch"], "base_commit": s["base_commit"]},
@@ -2384,10 +2490,12 @@ class Runner:
             else:
                 info = await asyncio.to_thread(work)
         except (projects.GitError, RunnerError) as e:
-            self.bus.emit(sid, "error", {"message": f"could not save the session branch: {e}"})
+            await self.bus.aemit(sid, "error", {"message": f"could not save the session branch: {e}"})
             return
-        with self.db.tx():
+
+        def branch_saved() -> None:
             reviewed = next((e["data"] for e in reversed(self.db.events(sid)) if e["type"] == "review"), None)
             if s["review"] and reviewed and reviewed.get("head") != info["head"]:
                 self.db.update_session(sid, review="", review_detail="")  # new work since the last review action
             self.bus.emit(sid, "branch_saved", {"branch": s["branch"], **info})
+        await self.db.awrite(branch_saved)

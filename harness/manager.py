@@ -24,11 +24,11 @@ from .image_archive import ImageArchive
 from .notify import Notifier
 from .warmup import ModelWarmer
 from .config import Config
-from .db import Database
+from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .remote import RunnerError, RunnerHub, RunnerOffline
-from .runner import (ACTIVE, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner,
-                     new_run)
+from .runner import (ACTIVE, END_PENDING, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT,
+                     SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from . import llm, projects, secret_scan, telemetry
@@ -341,6 +341,10 @@ class Manager:
         if self.runner.memory is not None:
             self.runner.memory.refresh_soon()  # so the first session's profile is current
         self._end_interrupted_canary()
+        for s in self.db.sessions_with_run_flag(END_PENDING):
+            if s["status"] not in ACTIVE:
+                log.info("ending session %s (%s): the daemon stopped before its run ended", s["id"], s["status"])
+                self._spawn_task(s["id"], self.runner.end_pending_run(s["id"]))
         for s in self.db.sessions_with_status(*ACTIVE):
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
@@ -394,7 +398,10 @@ class Manager:
             await self.images.stop()
 
     def _spawn(self, sid: str, recovered: bool = False) -> None:
-        task = asyncio.create_task(self.runner.run(sid, recovered=recovered), name=f"session-{sid}")
+        self._spawn_task(sid, self.runner.run(sid, recovered=recovered))
+
+    def _spawn_task(self, sid: str, coro) -> None:
+        task = asyncio.create_task(coro, name=f"session-{sid}")
         self.tasks[sid] = task
         task.add_done_callback(lambda t, sid=sid: self.tasks.pop(sid, None) if self.tasks.get(sid) is t else None)
 
@@ -526,7 +533,8 @@ class Manager:
 
     def _insert_created(self, session: dict, app: dict | None, tools: list, job_id: str, prompt: str) -> None:
         sid = session["id"]
-        with self.db.tx():
+
+        def insert_created() -> None:
             self.db.insert_session(session)
             self.bus.emit(sid, "session_created", {**{k: session[k] for k in
                                                        ("project", "target", "model", "backend", "title")},
@@ -534,6 +542,7 @@ class Manager:
                                                       if app else {}), **({"job_id": job_id} if job_id else {}),
                                                    **({"skills": session["skills"]} if session["skills"] else {})})
             self.bus.emit(sid, "user_message", {"content": prompt})
+        self.db.write(insert_created)
 
     @staticmethod
     def _create_scope(opts: CreateOptions, prompt: str, project: str, target: str | None) -> tuple:
@@ -789,7 +798,8 @@ class Manager:
         # Chat: snippets the user ran since their last message reach the model with this one (the transcript keeps
         # the message as typed).
         model_content = self.snippets.context_for(sid) + content if s.get("kind") == "chat" else content
-        with self.db.tx():
+
+        def deliver() -> None:
             self.bus.emit(sid, kind, {"content": content})
             if s["status"] in ACTIVE:
                 # Delivered before the agent's next model call.
@@ -804,8 +814,9 @@ class Manager:
                 self.db.update_session(sid, context=s["context"] + [{"role": "user", "content": model_content}],
                                        run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
-        if sid not in self.tasks:
-            self._spawn(sid)
+            # With the commit, not after the await: a request cancelled mid-write still gets its run.
+            self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))
+        await self.db.awrite(deliver)
         return self.db.get_session(sid)
 
     def original_prompt(self, sid: str) -> str:
@@ -1157,7 +1168,7 @@ class Manager:
         if self.db.get_session(sid)["status"] in ACTIVE:
             # cancelled before its first step, so the run's own cleanup never ran and it would be resumed on restart
             self.runner.user_cancelled.discard(sid)
-            self.runner.set_status(sid, "cancelled", stop_reason="cancelled")
+            await self.runner.aset_status(sid, "cancelled", stop_reason="cancelled")
 
     # draft line comments on the Changes diff
     def review_comments(self, ref: str) -> list[dict]:
@@ -1211,13 +1222,15 @@ class Manager:
         try:
             state, detail = await self._review_local(sid, s, project, ws, action)
         except projects.GitError as e:
-            self.bus.emit(sid, "error", {"message": f"{action} failed: {e}"})
+            await self.bus.aemit(sid, "error", {"message": f"{action} failed: {e}"})
             raise HarnessError(e.status, str(e))
         head = "" if action == "discard" else await asyncio.to_thread(projects.head, ws)
-        with self.db.tx():
+
+        def record_review() -> None:
             self.db.update_session(sid, review=state, review_detail=detail)
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail, "head": head[:12]})
-        self.runner.write_transcript(sid)
+            self.db.after_commit(lambda: self.runner.write_transcript(sid))  # even if the request is cancelled
+        await self.db.awrite(record_review)
         return self.db.get_session(sid)
 
     async def _review_local(self, sid: str, s: dict, project, ws: Path, action: str) -> tuple[str, str]:
@@ -1272,7 +1285,7 @@ class Manager:
         try:
             result = await self.remote(s, action, params, timeout=600)
         except HarnessError as e:
-            self.bus.emit(sid, "error", {"message": f"{action} failed: {e}"})
+            await self.bus.aemit(sid, "error", {"message": f"{action} failed: {e}"})
             raise
         if action == "merge":
             state, detail = ("merged" if result["merged"] else ""), result["message"]
@@ -1280,14 +1293,16 @@ class Manager:
             state, detail = "pushed", result["message"]
         else:
             state, detail = "discarded", "branch deleted and workspace removed"
-        with self.db.tx():
+
+        def record_review() -> None:
             fields = {"review": state, "review_detail": detail}
             if action == "discard":
                 fields["workspace_removed"] = 1
             self.db.update_session(sid, **fields)
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail,
                                           "head": result.get("head", "")[:12]})
-        self.runner.write_transcript(sid)
+            self.db.after_commit(lambda: self.runner.write_transcript(sid))  # even if the request is cancelled
+        await self.db.awrite(record_review)
         return self.db.get_session(sid)
 
     def decide_by_token(self, token: str, approve: bool) -> dict:
@@ -1310,10 +1325,12 @@ class Manager:
         if approval is None or approval["session_id"] != sid:
             raise HarnessError(404, f"no approval {approval_id} in session {sid}")
         status = "approved" if approve else "denied"
-        with self.db.tx():
+
+        def decide() -> None:
             if not self.db.decide_approval(approval_id, status, note):
                 raise HarnessError(409, f"approval is already {self.db.get_approval(approval_id)['status']}")
             self.bus.emit(sid, "approval_decided", {"id": approval_id, "status": status, "note": note})
+        self.db.write(decide)
         event = self.runner.approval_events.get(approval_id)
         if event:
             event.set()
@@ -1324,9 +1341,11 @@ class Manager:
         sid = self.resolve_id(ref)
         s = self.db.get_session(sid)
         cleared = list(s.get("taint") or [])
-        with self.db.tx():
+
+        def clear_taint() -> None:
             self.db.update_session(sid, taint=[])
             self.bus.emit(sid, "taint_cleared", {"cleared": [t["origin"] for t in cleared]})
+        self.db.write(clear_taint)
         return self.db.get_session(sid)
 
     async def cancel(self, ref: str) -> dict:
@@ -1336,7 +1355,7 @@ class Manager:
         if s["status"] not in ACTIVE:
             raise HarnessError(409, f"session is {s['status']}, nothing to cancel")
         if task is None:  # no live task (shouldn't happen); fix the record anyway
-            self.runner.set_status(sid, "cancelled", stop_reason="cancelled")
+            await self.runner.aset_status(sid, "cancelled", stop_reason="cancelled")
             return self.db.get_session(sid)
         self.runner.user_cancelled.add(sid)
         task.cancel()
@@ -1583,6 +1602,11 @@ class Manager:
         self.revoke_member_streams(user_id)
         self.github_auth.member_disabled(user_id)
         self.google_signin.member_disabled(user_id)
+        # One unit: a cancelled request must not leave the rest of the account's work running (or a cancelled
+        # status without its release and audit row).
+        await finish_then_cancel(self._cancel_member_work(user_id, actor_id))
+
+    async def _cancel_member_work(self, user_id: str, actor_id: str) -> None:
         from .runner import ACTIVE
         waiting = []
         for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):
@@ -1594,7 +1618,7 @@ class Manager:
                 waiting.append(task)
             else:
                 if s["status"] in ACTIVE:
-                    self.runner.set_status(sid, "cancelled", stop_reason="account_disabled")
+                    await self.runner.aset_status(sid, "cancelled", stop_reason="account_disabled")
                 self.scheduler.release(sid)
             self.db.insert_audit(actor_id, user_id, "cancel", "ok")
         if waiting:

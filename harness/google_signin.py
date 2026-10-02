@@ -851,7 +851,7 @@ class GoogleSignin:
         if not (web.admitted or (ident.is_member and ident.user_id == user_id)):
             raise GoogleSigninError(403, GENERIC_ERROR, "principal_changed")
         try:
-            with self.db.tx():
+            def link() -> None:
                 if self._enabled_member(user_id) is None:
                     raise GoogleSigninError(403, GENERIC_ERROR, "member_unavailable")
                 if attempt.mode == "invite" and not self.db.consume_google_invitation(
@@ -859,6 +859,7 @@ class GoogleSignin:
                     raise GoogleSigninError(400, GENERIC_ERROR, "invitation_used_or_expired")
                 if not self.db.link_google_identity(user_id, claims["sub"], claims["email"], now):
                     raise GoogleSigninError(409, GENERIC_ERROR, "already_linked")
+            self.db.write(link)
         except GoogleSigninError as e:
             self.db.insert_audit(user_id, user_id, f"google_{attempt.mode}", "denied", e.reason)
             raise

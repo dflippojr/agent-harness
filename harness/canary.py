@@ -88,46 +88,53 @@ def _row(row) -> dict | None:
 
 
 class CanaryStore:
+    """Writes run on the database's writer thread, one transaction each; reads use a pooled read connection.
+    Every method blocks the calling thread: event-loop code calls them through `asyncio.to_thread`."""
+
     def __init__(self, db):
         self.db = db
 
     def get(self, sha: str) -> dict | None:
-        with self.db.lock:
-            row = self.db.conn.execute("SELECT * FROM canary_results WHERE sha = ?", (sha,)).fetchone()
-        return _row(row)
+        def read():
+            return self.db.conn.execute("SELECT * FROM canary_results WHERE sha = ?", (sha,)).fetchone()
+        return _row(self.db.read(read))
 
     def begin(self, sha: str, now: float) -> int:
         """Record a start try for `sha` (one row per commit); returns how many tries it has had."""
-        with self.db.lock:
+        def claim():
             self.db.conn.execute(
                 "INSERT INTO canary_results (sha, started_at, status) VALUES (?, ?, 'running') "
                 "ON CONFLICT(sha) DO UPDATE SET status = 'running', tries = tries + 1, started_at = excluded.started_at",
                 (sha, now))
             return self.db.conn.execute("SELECT tries FROM canary_results WHERE sha = ?", (sha,)).fetchone()[0]
+        return self.db.write(claim)
 
     def first_run(self, sha: str, outcomes: list[dict]) -> None:
         """Keep a completed first run while the confirmation reruns, so a restart can still finish the row with it."""
-        with self.db.lock:
+        def keep():
             self.db.conn.execute("UPDATE canary_results SET outcomes = ? WHERE sha = ? AND status = 'running'",
                                  (json.dumps(outcomes), sha))
+        self.db.write(keep)
 
     def finish(self, sha: str, status: str, outcomes: list[dict], now: float, baseline_sha: str = "",
                baseline_rate: float | None = None, alerted: bool = False, note: str = "") -> None:
         t = totals(outcomes)
         rate = pass_rate(outcomes) if valid(outcomes) else None
-        with self.db.lock:
+
+        def record():
             self.db.conn.execute(
                 "UPDATE canary_results SET status=?, finished_at=?, outcomes=?, passes=?, attempts=?, pass_rate=?, "
                 "turns=?, prompt_tokens=?, wall_seconds=?, baseline_sha=?, baseline_rate=?, alerted=?, note=? WHERE sha=?",
                 (status, now, json.dumps(outcomes), t["passes"], t["attempts"], rate, t["turns"], t["prompt_tokens"],
                  t["wall_seconds"], baseline_sha, baseline_rate, int(alerted), note, sha))
+        self.db.write(record)
 
     def interrupted(self, now: float) -> list[dict]:
         """At daemon start, finish every row a crash left `running` (#316): with the first run's results if it had
         completed (no alert: an alert is never sent unconfirmed), else `blocked`, so the next slot may retry."""
-        with self.db.lock:
-            rows = [_row(r) for r in self.db.conn.execute(
-                "SELECT * FROM canary_results WHERE status = 'running'").fetchall()]
+        def read():
+            return self.db.conn.execute("SELECT * FROM canary_results WHERE status = 'running'").fetchall()
+        rows = [_row(r) for r in self.db.read(read)]
         for row in rows:
             if row["outcomes"]:
                 self.finish(row["sha"], "complete", row["outcomes"], now,
@@ -138,18 +145,18 @@ class CanaryStore:
 
     def completed_before(self, sha: str, limit: int) -> list[dict]:
         """The newest `limit` completed runs other than `sha`, newest first."""
-        with self.db.lock:
-            rows = self.db.conn.execute(
+        def read():
+            return self.db.conn.execute(
                 "SELECT * FROM canary_results WHERE status = 'complete' AND pass_rate IS NOT NULL AND sha != ? ORDER BY started_at DESC LIMIT ?",
                 (sha, limit)).fetchall()
-        return [_row(r) for r in rows]
+        return [_row(r) for r in self.db.read(read)]
 
     def latest(self, limit: int) -> list[dict]:
-        with self.db.lock:
-            rows = self.db.conn.execute(
+        def read():
+            return self.db.conn.execute(
                 "SELECT * FROM canary_results WHERE finished_at IS NOT NULL AND pass_rate IS NOT NULL "
                 "ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
-        return [_row(r) for r in rows]
+        return [_row(r) for r in self.db.read(read)]
 
 
 @dataclass
@@ -216,10 +223,10 @@ class Canary:
         retried once at the next slot, then recorded as skipped."""
         if not sha:
             return None
-        row = self.store.get(sha)
+        row = await asyncio.to_thread(self.store.get, sha)
         if row and row["status"] in FINAL:
             return row
-        tries = self.store.begin(sha, self.clock())
+        tries = await asyncio.to_thread(self.store.begin, sha, self.clock())
         # Every way out after the claim finishes the row, with the best state reached so far: a crash or shutdown
         # in the first run leaves it blocked (the next slot may retry); after that, the first run's results stand.
         status, outcomes, verdict, note = "blocked", [], Verdict(False), ""
@@ -230,21 +237,21 @@ class Canary:
             else:
                 status, outcomes = report.status, report.outcomes
                 if report.status == "complete":
-                    self.store.first_run(sha, outcomes)
+                    await asyncio.to_thread(self.store.first_run, sha, outcomes)
                     outcomes, verdict = await self._judge(sha, report)
         except CanaryConfigError as e:
             # the same config fails the same way every night: final for this commit, logged once (the row is final)
             status, note = "skipped", str(e)
             log.error("canary %s skipped: %s", sha[:SHORT_SHA], e)
         finally:
-            self.store.finish(sha, status, outcomes, self.clock(), verdict.baseline_sha, verdict.baseline_rate,
-                              verdict.alert, note)
+            await asyncio.to_thread(self.store.finish, sha, status, outcomes, self.clock(), verdict.baseline_sha,
+                                    verdict.baseline_rate, verdict.alert, note)
         if verdict.alert:
             self._alert(sha, pass_rate(outcomes), verdict)
-        return self.store.get(sha)
+        return await asyncio.to_thread(self.store.get, sha)
 
     async def _judge(self, sha: str, report: Report) -> tuple[list[dict], Verdict]:
-        prior = self.store.completed_before(sha, self.cfg.baseline_runs)
+        prior = await asyncio.to_thread(self.store.completed_before, sha, self.cfg.baseline_runs)
         rule = {"min_prior": self.cfg.min_prior_runs, "drop_points": self.cfg.drop_points}
         outcomes = report.outcomes
         if not valid(outcomes):

@@ -22,12 +22,12 @@ async def _session(m: Manager, prompt: str = "task") -> dict:
     return await wait_status(m, m.create(prompt)["id"], "done")
 
 
-def _seed_result(m: Manager, sid: str, idx: int, output: str, name: str = "read_file") -> str:
+async def _seed_result(m: Manager, sid: str, idx: int, output: str, name: str = "read_file") -> str:
     """Append one assistant tool call plus its recorded result, the way a real turn does."""
     c = call(name, idx, path="big.txt")
     s = m.db.get_session(sid)
     m.db.update_session(sid, context=s["context"] + [{"role": "assistant", "content": None, "tool_calls": [c]}])
-    m.runner._record_result(sid, c, name, output[:20000], ok=True, artifact_content=output)
+    await m.runner._record_result(sid, c, name, output[:20000], ok=True, artifact_content=output)
     return c["id"]
 
 
@@ -41,7 +41,7 @@ def test_masking_loads_the_full_stored_output_not_the_capped_read(tmp_path):
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
         s = await _session(m)
         sid = s["id"]
-        call_id = _seed_result(m, sid, 1, BIG)
+        call_id = await _seed_result(m, sid, 1, BIG)
         _finish_turn(m, sid)
         await m.runner._maybe_compact(m.db.get_session(sid))
 
@@ -61,7 +61,7 @@ def test_masking_is_idempotent_and_emits_once(tmp_path):
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
         s = await _session(m)
         sid = s["id"]
-        _seed_result(m, sid, 1, BIG)
+        await _seed_result(m, sid, 1, BIG)
         _finish_turn(m, sid)
         await m.runner._maybe_compact(m.db.get_session(sid))
         masked_context = m.db.get_session(sid)["context"]
@@ -71,7 +71,7 @@ def test_masking_is_idempotent_and_emits_once(tmp_path):
         assert len([e for e in events(m, sid, "compaction") if e["tier"] == "mask"]) == 1
 
         # A new result still gets masked later, and only that one produces a second event.
-        _seed_result(m, sid, 2, "y" * 3000)
+        await _seed_result(m, sid, 2, "y" * 3000)
         _finish_turn(m, sid)
         await m.runner._maybe_compact(m.db.get_session(sid))
         assert len([e for e in events(m, sid, "compaction") if e["tier"] == "mask"]) == 2
@@ -86,8 +86,8 @@ def test_masking_skips_fresh_and_small_results(tmp_path):
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
         s = await _session(m)
         sid = s["id"]
-        _seed_result(m, sid, 1, "small")
-        _seed_result(m, sid, 2, BIG)  # newest turn: the model has not read it yet
+        await _seed_result(m, sid, 1, "small")
+        await _seed_result(m, sid, 2, BIG)  # newest turn: the model has not read it yet
         before = m.db.get_session(sid)["context"]
         await m.runner._maybe_compact(m.db.get_session(sid))
         assert m.db.get_session(sid)["context"] == before
@@ -339,7 +339,7 @@ def test_agent_session_still_masks_the_same_fetch(tmp_path):
         sid = s["id"]
         assert m.runner.artifact_tool_available(s)
         assert "read_artifact" in {t["function"]["name"] for t in m.runner.tool_schemas(s, m.runner.workspace(s))}
-        call_id = _seed_result(m, sid, 1, PAGE, name="web_fetch")
+        call_id = await _seed_result(m, sid, 1, PAGE, name="web_fetch")
         _finish_turn(m, sid)
         await m.runner._maybe_compact(m.db.get_session(sid))
         assert _ctx_text(m, sid, call_id).startswith(compaction.RECEIPT_PREFIX)
@@ -365,7 +365,7 @@ def test_denied_by_project_policy_removes_the_tool_and_disables_masking(tmp_path
                                 {"artifact_id": _digest(PAGE)}, m.runner.workspace(s))
         assert _ctx_text(m, sid, "c8-read_artifact") == "Error: unknown tool 'read_artifact'"
 
-        call_id = _seed_result(m, sid, 1, PAGE, name="web_fetch")
+        call_id = await _seed_result(m, sid, 1, PAGE, name="web_fetch")
         _finish_turn(m, sid)
         await m.runner._maybe_compact(m.db.get_session(sid))
         assert _ctx_text(m, sid, call_id) == PAGE
@@ -380,14 +380,14 @@ def test_policy_change_after_masking_stops_further_masking(tmp_path):
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
         s = await _session(m)
         sid = s["id"]
-        first = _seed_result(m, sid, 1, PAGE, name="web_fetch")
+        first = await _seed_result(m, sid, 1, PAGE, name="web_fetch")
         _finish_turn(m, sid)
         await m.runner._maybe_compact(m.db.get_session(sid))
         assert _ctx_text(m, sid, first).startswith(compaction.RECEIPT_PREFIX)
 
         from harness.policy import Policy
         m.runner.policy = lambda _s: Policy([{"tool": "read_artifact", "action": "deny"}])
-        second = _seed_result(m, sid, 2, PAGE + "x", name="web_fetch")
+        second = await _seed_result(m, sid, 2, PAGE + "x", name="web_fetch")
         _finish_turn(m, sid)
         await m.runner._maybe_compact(m.db.get_session(sid))
         assert _ctx_text(m, sid, second) == PAGE + "x"

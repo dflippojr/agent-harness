@@ -588,7 +588,7 @@ class SkillStore:
         return public_proposal(row, include_body=include_body)
 
     def reject(self, pid: str, reason: str = "") -> dict:
-        with self.db.tx() as db:
+        def reject(db=self.db) -> None:
             row = db.skill_proposal(pid)
             if row is None:
                 raise SkillError(404, NO_SUCH_PROPOSAL)
@@ -601,10 +601,11 @@ class SkillStore:
                         raise SkillError(409, "an installed proposal cannot be rejected; uninstall it instead")
                     raise SkillError(409, "this proposal could not be rejected")
             db.reject_skill_hash(row["content_hash"], pid, reason)
+        self.db.write(reject)
         return self.get_proposal(pid, include_body=False)
 
     def reopen(self, pid: str) -> dict:
-        with self.db.tx() as db:
+        def reopen(db=self.db) -> None:
             row = db.skill_proposal(pid)
             if row is None:
                 raise SkillError(404, NO_SUCH_PROPOSAL)
@@ -615,10 +616,11 @@ class SkillStore:
             if not db.update_skill_proposal(pid, expected_status=row["status"], status=target):
                 raise SkillError(409, "only a rejected proposal can be reopened")
             db.clear_rejected_skill_hash(row["content_hash"])
+        self.db.write(reopen)
         return self.get_proposal(pid, include_body=False)
 
     def delete_draft(self, pid: str) -> None:
-        with self.db.tx() as db:
+        def delete_draft(db=self.db) -> None:
             row = db.skill_proposal(pid)
             if row is None:
                 raise SkillError(404, NO_SUCH_PROPOSAL)
@@ -627,6 +629,7 @@ class SkillStore:
             if not db.delete_skill_proposal(pid, not_status="installed"):
                 raise SkillError(409, "delete the draft before install, or uninstall the skill")
             db.clear_rejected_skill_hash(row["content_hash"])
+        self.db.write(delete_draft)
         shutil.rmtree(self.proposals_dir / pid, ignore_errors=True)
 
     def install(self, pid: str, content_hash: str) -> dict:
@@ -646,8 +649,7 @@ class SkillStore:
                 raise SkillError(409, "proposal bytes changed after validation; propose and review again")
             self._check_install_validation(bundle, live_hash)
             try:
-                with self.db.tx() as db:
-                    result, slug = self._install_in_tx(db, pid, want, bundle, live_hash)
+                result, slug = self.db.write(self._install_in_tx, self.db, pid, want, bundle, live_hash)
             except sqlite3.IntegrityError as exc:
                 raise SkillError(409, "skill store constraint failed") from exc
             return result if result is not None else self._public_installed(self.db.skill_installed(slug))
@@ -732,20 +734,24 @@ class SkillStore:
             raise SkillError(409, "no previous version to roll back to")
         target = older[-1]
         now = time.time()
-        with self.db.tx():
+
+        def rollback() -> None:
             self.db.upsert_skill_installed({
                 **row, "current_version": target["version"], "current_hash": target["content_hash"],
                 "title": target["title"], "purpose": target["purpose"], "updated_at": now,
             })
+        self.db.write(rollback)
         return self._public_installed(self.db.skill_installed(slug))
 
     def uninstall(self, slug: str) -> None:
         row = self.db.skill_installed(slug)
         if row is None:
             raise SkillError(404, NO_SUCH_SKILL)
-        with self.db.tx():
+
+        def uninstall() -> None:
             self.db.delete_skill_installed(slug)
             self.db.clear_skill_allowlist(slug)
+        self.db.write(uninstall)
         dest = self.installed_dir / slug
         if dest.exists():
             shutil.rmtree(dest)

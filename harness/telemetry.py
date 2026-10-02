@@ -1,8 +1,8 @@
 """Event-loop and SQLite-lock timing (#257) and opt-in OpenTelemetry session traces (#259).
 
-`TimedLock` replaces `Database.lock` and records how long each outermost `with db.lock:` block holds the lock,
-labelled by the calling method. `LoopLagProbe` records how late a fixed-interval sleep wakes up, which is the
-time the event loop was unable to run other callbacks.
+`TimedLock` is `Database.lock` (one per connection since #294) and records how long each outermost `with db.lock:`
+block holds it, labelled by the calling method. `LoopLagProbe` records how late a fixed-interval sleep wakes up,
+which is the time the event loop was unable to run other callbacks.
 
 Tracing: `configure(cfg.telemetry)` picks the tracer. With `otlp_endpoint` empty (the default), or the
 `opentelemetry` packages missing, every call site gets the no-op shim and nothing imports `opentelemetry`. Only
@@ -91,9 +91,10 @@ class HistogramFamily:
 lock_held = HistogramFamily(LOCK_BUCKETS)
 loop_stall = Histogram(LOOP_BUCKETS)
 
-# Lock-taking helpers that are not themselves the operation: `Database.tx()` and the contextlib frames that
-# drive it. The label skips past them to the method that called `with db.tx():`.
-_PASS_THROUGH = frozenset({"tx"})
+# Lock-taking helpers that are not themselves the operation: `Database._tx()` and the contextlib frames that
+# drive it. The label skips past them to the method that called `with self._tx():`. A `db.write(fn)` transaction
+# is labelled by `fn`'s name instead (`TimedLock.labelled`).
+_PASS_THROUGH = frozenset({"_tx"})
 _CONTEXTLIB = contextlib.__file__
 
 
@@ -114,14 +115,25 @@ class TimedLock:
         self._owner = threading.local()
 
     def __enter__(self):
-        method = _caller_method()
+        self._enter(_caller_method())
+        return self
+
+    def _enter(self, method: str) -> None:
         self._lock.acquire()
         owner = self._owner
         depth = getattr(owner, "depth", 0)
         if depth == 0:
             owner.method, owner.start = method, time.perf_counter()
         owner.depth = depth + 1
-        return self
+
+    @contextlib.contextmanager
+    def labelled(self, method: str):
+        """Hold the lock, recording the hold time under `method` rather than the calling frame."""
+        self._enter(method)
+        try:
+            yield self
+        finally:
+            self.__exit__(None, None, None)
 
     def __exit__(self, *exc):
         owner = self._owner

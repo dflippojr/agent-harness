@@ -1,9 +1,12 @@
-"""Benchmark how long synchronous SQLite work blocks the daemon's event loop (#257).
+"""Benchmark how long SQLite work blocks the daemon's event loop (#257, #294).
 
-Runs in one process on one asyncio loop against a temp database, the way the daemon does: fake sessions call
-`Database.insert_event` directly on the loop (some with ~1 MB tool results), a searcher calls `session_search`
-and `search.search` on the loop, and a scraper renders `/metrics` in a worker thread (as `api.metrics` does).
-The always-on loop-lag probe and the per-method lock-hold histograms from `harness.telemetry` do the measuring.
+Runs in one process on one asyncio loop against a temp database, the way the daemon does: fake sessions await
+`db.aio.insert_event` (what `EventBus.aemit` does; some events are ~1 MB tool results), a searcher runs
+`search.search` and the `session_search` tool in worker threads (as `api.search` and `SessionSearch.call` do), and a
+scraper renders `/metrics` in a worker thread (as `api.metrics` does). Before #294 the sessions and the searcher
+called the Database synchronously on the loop. The always-on loop-lag probe and the per-method lock-hold histograms
+from `harness.telemetry` do the measuring (since #294 each connection has its own lock, so "lock hold" is the time a
+method kept its connection busy).
 
     python scripts/bench_event_loop.py [--sessions 4] [--seconds 20] [--large-every 10] [--no-scrape] > out.md
 
@@ -50,17 +53,17 @@ def _session(sid: str, workspace: str) -> dict:
 
 
 async def fake_session(db: Database, sid: str, stop: asyncio.Event, large_every: int, stats: dict, workspace: str) -> None:
-    db.insert_session(_session(sid, workspace))
+    await db.aio.insert_session(_session(sid, workspace))
     blob = ("x" * 63 + "\n") * (LARGE_BYTES // 64)
     i = 0
     while not stop.is_set():
         i += 1
-        db.insert_event(sid, "assistant", {"text": _text(60, i), "tool_calls": []})
+        await db.aio.insert_event(sid, "assistant", {"text": _text(60, i), "tool_calls": []})
         if i % large_every == 0:
-            db.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": blob})
+            await db.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": blob})
             stats["large"] += 1
         else:
-            db.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": _text(300, i)})
+            await db.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": _text(300, i)})
         stats["events"] += 1
         await asyncio.sleep(0.005)  # model latency stand-in; the loop is otherwise free
 
@@ -72,8 +75,8 @@ async def searcher(db: Database, stop: asyncio.Event, stats: dict) -> None:
     while not stop.is_set():
         q = queries[i % len(queries)]
         i += 1
-        search.search(db, q, limit=10)
-        tool.session_search(q, limit=5)
+        await asyncio.to_thread(search.search, db, q, limit=10)
+        await tool.call("session_search", {"query": q, "limit": 5})
         stats["searches"] += 1
         await asyncio.sleep(0.05)
 
@@ -125,7 +128,7 @@ async def run(args) -> dict:
         stop.set()
         await asyncio.gather(*tasks)
         await probe.stop()
-        db_file = Path(db.conn.execute("PRAGMA database_list").fetchone()["file"])
+        db_file = db.path
         db_bytes = sum(p.stat().st_size for p in db_file.parent.glob(db_file.name + "*"))
         db.close()
     methods = [(name, h.snapshot()[2], h.quantile(0.5), h.quantile(0.99), h.snapshot()[1])

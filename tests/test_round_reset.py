@@ -310,8 +310,8 @@ def test_threshold_without_state_falls_through(tmp_path):
         m = Manager(cfg, chat=Script([step]))
         orig = m.runner._record_result
 
-        def padded(sid, c, name, output, ok, seconds=0.0):
-            orig(sid, c, name, output + big, ok, seconds)
+        async def padded(sid, c, name, output, ok, seconds=0.0):
+            await orig(sid, c, name, output + big, ok, seconds)
         m.runner._record_result = padded
         await m.start()
         s = await wait_status(m, m.create("long task")["id"], "done", timeout=20)

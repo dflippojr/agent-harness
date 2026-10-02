@@ -1,12 +1,24 @@
-"""SQLite persistence. Every state change is committed before the daemon acts on it, so a restart can resume."""
+"""SQLite persistence. Every state change is committed before the daemon acts on it, so a restart can resume.
+
+Threading (#294): one writer thread owns the read-write connection and drains a queue of writes; reads use a small
+pool of read-only WAL connections. The sync methods keep working from any thread (a write blocks its caller until
+the writer has committed it). Event-loop code awaits instead: `await db.aio.<method>(...)` for one method, and
+`await db.awrite(fn)` for a multi-statement transaction (`fn` runs whole on the writer thread, so it cannot await).
+"""
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import functools
 import json
+import queue
 import secrets
 import sqlite3
 import threading
 import time
+import weakref
+from concurrent.futures import Future
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Sequence
@@ -442,12 +454,119 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return out
 
 
+READ_CONNECTIONS = 4
+
+
+def _writes(fn):
+    """A method that writes: it runs on the writer thread as one transaction (joining the caller's when inside a
+    `write`), so a pooled reader never sees it half-done."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        return self.write(fn, self, *args, **kwargs)
+    wrapper.db_kind = "write"
+    return wrapper
+
+
+def _reads(fn):
+    """A method that only reads: it runs on a pooled read-only connection (the writer's own inside a write)."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if getattr(self._local, "conn", None) is not None:
+            return fn(self, *args, **kwargs)
+        with self.reading():
+            return fn(self, *args, **kwargs)
+    wrapper.db_kind = "read"
+    return wrapper
+
+
+async def finish_then_cancel(awaitable):
+    """Await `awaitable` to the end even if the awaiting task is cancelled meanwhile, then raise that cancel (its
+    own error, if it failed, wins)."""
+    future = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not future.done():
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            if future.cancelled():
+                raise
+            cancelled = True
+    result = future.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+def _run_callbacks(callbacks: list) -> None:
+    for cb in callbacks:
+        cb()
+
+
+class _Writer(threading.Thread):
+    """Runs queued jobs one at a time on the read-write connection. Holds no reference to the Database, so an
+    unclosed Database can still be collected (its finalizer stops this thread)."""
+
+    def __init__(self, conn: sqlite3.Connection, lock: TimedLock, local: threading.local):
+        super().__init__(name="harness-db-writer", daemon=True)
+        self.jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self._conn, self._lock, self._local = conn, lock, local
+
+    def run(self) -> None:
+        self._local.conn, self._local.lock, self._local.after_commit = self._conn, self._lock, None
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            future, fn, args, kwargs = job
+            del job
+            if future.set_running_or_notify_cancel():
+                try:
+                    result = fn(*args, **kwargs)
+                except BaseException as exc:  # handed to the waiting caller
+                    future.set_exception(exc)
+                else:
+                    future.set_result(result)
+                    del result
+            del future, fn, args, kwargs  # an idle writer keeps nothing alive
+
+    def stop(self) -> None:
+        if self.is_alive():
+            self.jobs.put(None)
+            if threading.current_thread() is not self:
+                self.join(timeout=10)
+
+
+class AsyncDatabase:
+    """`await db.aio.<method>(...)`: any Database method without blocking the event loop. A write goes straight to
+    the writer queue; a read (or a composite method) runs in a worker thread on a pooled read connection."""
+
+    def __init__(self, db: Database):
+        self._db = db
+
+    def __getattr__(self, name: str):
+        db = self._db
+        method = getattr(type(db), name)
+        if getattr(method, "db_kind", None) == "write":
+            inner = method.__wrapped__
+
+            async def write(*args, **kwargs):
+                return await db.awrite(inner, db, *args, **kwargs)
+            return write
+        bound = getattr(db, name)
+
+        async def read(*args, **kwargs):
+            return await asyncio.to_thread(bound, *args, **kwargs)
+        return read
+
+
 class Database:
     def __init__(self, path: Path, migrations: Sequence[migrations_mod.Step] | None = None):
         """Open (creating if needed) and migrate the database. `migrations` overrides the discovered steps."""
         steps = migrations_mod.discover() if migrations is None else migrations_mod.validate(migrations)
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
+        self._local = threading.local()
+        self._closed = False
+        self._wconn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         try:
             # Refuse a database from a newer harness before anything writes to it.
             version = migrations_mod.user_version(self.conn)
@@ -463,11 +582,137 @@ class Database:
             backup = version >= BASELINE_VERSION or had_tables is not None
             migrations_mod.apply_pending(self.conn, path, steps, backup=backup)
         except BaseException:
-            self.conn.close()
+            self._wconn.close()
             raise
         self._ensure_search_index_columns()
-        self.lock = TimedLock()
+        self.path = path
+        self._wlock = TimedLock()
+        self._idle: queue.LifoQueue = queue.LifoQueue()
+        self._readers: list[sqlite3.Connection] = []
+        self._pool_lock = threading.Lock()
+        self._writer = _Writer(self._wconn, self._wlock, self._local)
+        self._writer.start()
+        self._finalizer = weakref.finalize(self, self._writer.stop)
+        self.aio = AsyncDatabase(self)
         self._build_search_index()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """This thread's connection: the writer's on the writer thread, a pooled reader inside `reading()`.
+        Anywhere else the read-write connection itself, which only startup code and tests should touch."""
+        return getattr(self._local, "conn", None) or self._wconn
+
+    @property
+    def lock(self) -> TimedLock:
+        """Times (and serializes) the work on `conn`: one lock per connection."""
+        return getattr(self._local, "lock", None) or self._wlock
+
+    def _on_writer(self) -> bool:
+        return getattr(self._local, "conn", None) is self._wconn
+
+    def _submit(self, fn, *args, **kwargs) -> Future:
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        future: Future = Future()
+        self._writer.jobs.put((future, fn, args, kwargs))
+        return future
+
+    def _open_reader(self) -> tuple[sqlite3.Connection, TimedLock]:
+        conn = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        return conn, TimedLock()
+
+    @contextmanager
+    def reading(self):
+        """Check out a read-only WAL connection for this thread; `conn` and `lock` refer to it inside the block."""
+        local = self._local
+        if getattr(local, "conn", None) is not None:  # already reading, or on the writer
+            yield local.conn
+            return
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        try:
+            conn, lock = self._idle.get_nowait()
+        except queue.Empty:
+            with self._pool_lock:
+                create = len(self._readers) < READ_CONNECTIONS
+                if create:
+                    conn, lock = self._open_reader()
+                    self._readers.append(conn)
+            if not create:
+                conn, lock = self._idle.get()
+        local.conn, local.lock = conn, lock
+        try:
+            yield conn
+        finally:
+            local.conn = local.lock = None
+            self._idle.put((conn, lock))
+
+    def read(self, fn, *args, **kwargs):
+        """Run fn(*args, **kwargs) with a read-only connection checked out for this thread."""
+        with self.reading():
+            return fn(*args, **kwargs)
+
+    async def aread(self, fn, *args, **kwargs):
+        """`read` in a worker thread, for the event loop."""
+        return await asyncio.to_thread(self.read, fn, *args, **kwargs)
+
+    def in_transaction(self) -> bool:
+        """True inside a `write`/`awrite` callable (which runs on the writer thread)."""
+        return self._on_writer() and self._local.after_commit is not None
+
+    def after_commit(self, callback) -> None:
+        """Run callback() in the caller's thread once the current transaction commits; at once outside one."""
+        if self.in_transaction():
+            self._local.after_commit.append(callback)
+        else:
+            callback()
+
+    def _run_tx(self, fn, args, kwargs):
+        callbacks: list = []
+        self._local.after_commit = callbacks
+        try:
+            with self._tx(label=getattr(fn, "__name__", None)):
+                value = fn(*args, **kwargs)
+        finally:
+            self._local.after_commit = None
+        return value, callbacks
+
+    def write(self, fn, *args, **kwargs):
+        """Run fn(*args, **kwargs) as one transaction on the writer thread and return its result once committed.
+        `fn` must not wait on the event loop. Blocks the calling thread: event-loop code uses `awrite`."""
+        if self.in_transaction():  # nested: part of the outer transaction
+            return fn(*args, **kwargs)
+        if self._on_writer():
+            value, callbacks = self._run_tx(fn, args, kwargs)
+        else:
+            value, callbacks = self._submit(self._run_tx, fn, args, kwargs).result()
+        _run_callbacks(callbacks)
+        return value
+
+    async def awrite(self, fn, *args, **kwargs):
+        """`write` for the event loop: the loop stays free until the transaction has committed. Once submitted, the
+        write commits whether or not its awaiter is cancelled, so its after_commit callbacks run on the loop
+        regardless, exactly once, and a cancel reaches the awaiter only after both (as it would a blocking write)."""
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()
+        done = loop.create_future()
+
+        def deliver(job: Future) -> None:  # on the loop
+            try:
+                value, callbacks = job.result()
+                _run_callbacks(callbacks)
+            except Exception as e:  # noqa: BLE001 - handed to the awaiter
+                done.set_exception(e)
+            else:
+                done.set_result(value)
+
+        def committed(job: Future) -> None:  # on the writer (or here, if it already finished)
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(deliver, job, context=context)
+        self._submit(self._run_tx, fn, args, kwargs).add_done_callback(committed)
+        return await finish_then_cancel(done)
 
     def _bootstrap(self) -> None:
         """Bring a pre-versioning (or empty) database to the frozen baseline; idempotent, so it also repairs."""
@@ -480,20 +725,34 @@ class Database:
         self.conn.execute(f"PRAGMA user_version = {BASELINE_VERSION}")
 
     def close(self) -> None:
-        self.conn.close()
+        if self._closed:
+            return
+        self._closed = True
+        self._finalizer()  # the writer finishes the writes already queued, then stops
+        with self._pool_lock:
+            readers, self._readers = self._readers, []
+        for conn in readers:
+            conn.close()
+        self._wconn.close()
 
     @contextmanager
-    def tx(self):
-        with self.lock:
-            self.conn.execute("BEGIN IMMEDIATE")
+    def _tx(self, label: str | None = None):
+        """One transaction on the writer thread; a nested block joins the outer one."""
+        conn = self._wconn
+        with self.lock.labelled(label) if label else self.lock:
+            if conn.in_transaction:
+                yield self
+                return
+            conn.execute("BEGIN IMMEDIATE")
             try:
                 yield self
             except BaseException:
-                self.conn.execute("ROLLBACK")
+                conn.execute("ROLLBACK")
                 raise
-            self.conn.execute("COMMIT")
+            conn.execute("COMMIT")
 
     # sessions
+    @_writes
     def insert_session(self, s: dict) -> None:
         cols = list(s)
         values = [json.dumps(s[c]) if c in JSON_COLUMNS else s[c] for c in cols]
@@ -502,6 +761,7 @@ class Database:
                 f"INSERT INTO sessions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", values
             )
 
+    @_writes
     def update_session(self, sid: str, **fields) -> None:
         fields["updated_at"] = time.time()
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -509,15 +769,18 @@ class Database:
         with self.lock:
             self.conn.execute(f"UPDATE sessions SET {sets} WHERE id = ?", [*values, sid])
 
+    @_reads
     def get_session(self, sid: str) -> dict | None:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone())
 
+    @_reads
     def get_session_for_user(self, sid: str, user_id: str) -> dict | None:
         with self.lock:
             return _row(self.conn.execute(
                 "SELECT * FROM sessions WHERE id = ? AND owner_id = ?", (sid, user_id)).fetchone())
 
+    @_reads
     def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None,
                          kind: str | None = None) -> list[str]:
         sql = "SELECT id FROM sessions WHERE id LIKE ?"
@@ -535,6 +798,7 @@ class Database:
             rows = self.conn.execute(sql, params).fetchall()
         return [r["id"] for r in rows]
 
+    @_reads
     def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent") -> list[dict]:
         """Sessions of one conversation kind, newest first. Agent lists never include Chat and vice versa."""
         where = " WHERE kind = ?" + (AND_OWNER if owner_id is not None else "")
@@ -547,19 +811,22 @@ class Database:
             ).fetchall()
         return [_row(r) for r in rows]
 
+    @_reads
     def group_sessions(self, group: str, owner_id: str) -> list[dict]:
         with self.lock:
             rows = self.conn.execute("SELECT * FROM sessions WHERE compare_group = ? AND owner_id = ? "
                                      "ORDER BY created_at, id", (group, owner_id)).fetchall()
         return [_row(r) for r in rows]
 
+    @_writes
     def delete_session(self, sid: str) -> None:
-        with self.tx():
+        with self._tx():
             for table in ("events", "approvals", "review_comments", "secret_dismissals", "artifacts"):
                 self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM search_index WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
 
+    @_writes
     def put_artifact(self, sid: str, hash_: str, content: str) -> None:
         with self.lock:
             self.conn.execute("INSERT OR IGNORE INTO artifacts (session_id, hash, content) VALUES (?, ?, ?)",
@@ -575,6 +842,7 @@ class Database:
         chunk = text[start:min(stop, start + 20000)]
         return chunk, stop > start + len(chunk)
 
+    @_reads
     def full_artifact(self, sid: str, hash_: str) -> str | None:
         """The whole stored string, uncapped. Only for the daemon's own masking; the model-facing read is bounded."""
         with self.lock:
@@ -583,6 +851,7 @@ class Database:
         return row["content"] if row else None
 
     # draft review comments
+    @_writes
     def add_review_comment(self, sid: str, c: dict) -> dict:
         row = {"id": "rc-" + secrets.token_hex(5), "session_id": sid, "created_at": time.time(), **c}
         row["quoted"] = json.dumps(c["quoted"])
@@ -593,6 +862,7 @@ class Database:
                 ":end_line, :quoted, :comment, :base, :head, :created_at)", row)
         return {**row, "quoted": c["quoted"]}
 
+    @_reads
     def list_review_comments(self, sid: str) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -600,6 +870,7 @@ class Database:
         return [{**dict(r), "quoted": json.loads(r["quoted"])} for r in rows]
 
     # secret-scan dismissals: by fingerprint, so they follow the same value to later heads
+    @_writes
     def add_secret_dismissal(self, sid: str, d: dict) -> dict:
         row = {"session_id": sid, "created_at": time.time(), **d}
         with self.lock:
@@ -609,11 +880,13 @@ class Database:
                 ":actor_id, :created_at)", row)
         return row
 
+    @_reads
     def secret_dismissals(self, sid: str) -> dict[str, dict]:
         with self.lock:
             rows = self.conn.execute("SELECT * FROM secret_dismissals WHERE session_id = ?", (sid,)).fetchall()
         return {r["fingerprint"]: dict(r) for r in rows}
 
+    @_writes
     def delete_review_comments(self, sid: str, ids: list[str] | None = None) -> int:
         """Delete one session's drafts: the given ids, or all of them."""
         with self.lock:
@@ -625,6 +898,7 @@ class Database:
                     f"DELETE FROM review_comments WHERE session_id = ? AND id IN ({marks})", (sid, *ids))
             return cur.rowcount
 
+    @_reads
     def sessions_with_status(self, *statuses: str, user_id: str | None = None) -> list[dict]:
         marks = ",".join("?" * len(statuses))
         query = f"SELECT * FROM sessions WHERE status IN ({marks})"
@@ -636,6 +910,16 @@ class Database:
             rows = self.conn.execute(query + " ORDER BY updated_at", params).fetchall()
         return [_row(r) for r in rows]
 
+    @_reads
+    def sessions_with_run_flag(self, flag: str) -> list[dict]:
+        """Sessions whose current run carries `flag` (a key of the `run` JSON)."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM sessions WHERE json_extract(run, ?) IS NOT NULL ORDER BY updated_at",
+                (f"$.{flag}",)).fetchall()
+        return [_row(r) for r in rows]
+
+    @_reads
     def count_sessions(self, user_id: str, *statuses: str) -> int:
         marks = ",".join("?" * len(statuses))
         with self.lock:
@@ -646,6 +930,7 @@ class Database:
         return int(row["n"] if row else 0)
 
     # events
+    @_writes
     def insert_event(self, sid: str, type_: str, data: dict) -> dict:
         ts = time.time()
         with self.lock:
@@ -687,6 +972,7 @@ class Database:
                 (item[1], sid, seq, item[0], ts, uid),
             )
 
+    @_writes
     def _build_search_index(self) -> None:
         """Index events written before search existed (or by an older index version). Runs once."""
         from .search import INDEX_VERSION
@@ -694,20 +980,15 @@ class Database:
             row = self.conn.execute("SELECT value FROM meta WHERE key = 'search_index'").fetchone()
             if row and row["value"] == INDEX_VERSION:
                 return
-            self.conn.execute("BEGIN IMMEDIATE")
-            try:
-                self.conn.execute("DELETE FROM search_index")
-                owners = {r["id"]: (r["owner_id"] or "owner")
-                          for r in self.conn.execute("SELECT id, owner_id FROM sessions")}
-                for r in self.conn.execute("SELECT seq, session_id, ts, type, data FROM events ORDER BY seq").fetchall():
-                    self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]),
-                                      user_id=owners.get(r["session_id"], "owner"))
-                self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('search_index', ?)", (INDEX_VERSION,))
-            except BaseException:
-                self.conn.execute("ROLLBACK")
-                raise
-            self.conn.execute("COMMIT")
+            self.conn.execute("DELETE FROM search_index")
+            owners = {r["id"]: (r["owner_id"] or "owner")
+                      for r in self.conn.execute("SELECT id, owner_id FROM sessions")}
+            for r in self.conn.execute("SELECT seq, session_id, ts, type, data FROM events ORDER BY seq").fetchall():
+                self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]),
+                                  user_id=owners.get(r["session_id"], "owner"))
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('search_index', ?)", (INDEX_VERSION,))
 
+    @_reads
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600,
                       user_id: str | None = None, app_id: str | None = None,
                       session_kind: str | None = "agent") -> list[dict]:
@@ -738,6 +1019,7 @@ class Database:
                 return []
         return [dict(r) for r in rows]
 
+    @_reads
     def session_brief(self, sid: str, user_id: str | None = None, kind: str | None = "agent") -> dict | None:
         query = ("SELECT id, project, target, title, status, created_at, updated_at, branch, "
                  "review, owner_id, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?")
@@ -752,6 +1034,7 @@ class Database:
             row = self.conn.execute(query, params).fetchone()
         return dict(row) if row else None
 
+    @_reads
     def events(self, sid: str, after: int = 0) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -759,6 +1042,7 @@ class Database:
             ).fetchall()
         return [_row(r) for r in rows]
 
+    @_reads
     def pushed_heads(self, sid: str) -> list[str]:
         """The short heads a session's branch was pushed at, from its `review` events (issue #263)."""
         with self.lock:
@@ -766,6 +1050,7 @@ class Database:
                                      (sid,)).fetchall()
         return [d["head"] for d in (json.loads(r["data"]) for r in rows) if d.get("action") == "push" and d.get("head")]
 
+    @_reads
     def snippet_events(self) -> list[dict]:
         """Every chat's snippet run events, oldest first (snippets.py restart recovery)."""
         with self.lock:
@@ -774,12 +1059,14 @@ class Database:
                 "AND type IN ('snippet_started', 'snippet_result') ORDER BY seq").fetchall()
         return [_row(r) for r in rows]
 
+    @_reads
     def last_event_seq(self, sid: str) -> int:
         with self.lock:
             row = self.conn.execute("SELECT MAX(seq) AS seq FROM events WHERE session_id = ?", (sid,)).fetchone()
         return row["seq"] or 0
 
     # approvals
+    @_writes
     def insert_approval(self, a: dict) -> None:
         status = a.get("status") or "pending"
         decided_at = time.time() if status != "pending" else None
@@ -793,16 +1080,19 @@ class Database:
                  secrets.token_urlsafe(24), json.dumps(smart), decided_at),
             )
 
+    @_reads
     def approval_by_token(self, token: str) -> dict | None:
         if not token:
             return None
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM approvals WHERE token = ?", (token,)).fetchone())
 
+    @_reads
     def get_approval(self, aid: str) -> dict | None:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM approvals WHERE id = ?", (aid,)).fetchone())
 
+    @_reads
     def approval_for_call(self, sid: str, call_id: str) -> dict | None:
         with self.lock:
             return _row(self.conn.execute(
@@ -810,6 +1100,7 @@ class Database:
                 (sid, call_id),
             ).fetchone())
 
+    @_reads
     def pending_approvals(self, sid: str | None = None, user_id: str | None = None) -> list[dict]:
         query = "SELECT a.* FROM approvals a"
         params: list = []
@@ -825,6 +1116,7 @@ class Database:
         with self.lock:
             return [_row(r) for r in self.conn.execute(query + " ORDER BY a.created_at", params).fetchall()]
 
+    @_reads
     def approvals(self, sid: str) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -832,27 +1124,32 @@ class Database:
         return [_row(r) for r in rows]
 
     # small user-facing preferences (profile emoji, later display choices)
+    @_reads
     def get_meta(self, key: str, default: str = "") -> str:
         with self.lock:
             row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
 
+    @_writes
     def set_meta(self, key: str, value: str) -> None:
         with self.lock:
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
     # hosted backend usage and limits
+    @_writes
     def set_backend_usage(self, backend: str, data: dict) -> None:
         with self.lock:
             self.conn.execute("INSERT INTO backend_usage (backend, data, updated_at) VALUES (?, ?, ?) "
                               "ON CONFLICT(backend) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
                               (backend, json.dumps(data), time.time()))
 
+    @_reads
     def get_backend_usage(self, backend: str) -> dict:
         with self.lock:
             row = self.conn.execute("SELECT * FROM backend_usage WHERE backend = ?", (backend,)).fetchone()
         return _row(row) or {"backend": backend, "data": {}, "updated_at": None}
 
+    @_writes
     def record_usage(self, backend: str, sid: str, app_id: str, prompt_tokens: int,
                      completion_tokens: int, cost_usd: float, billing: str,
                      credential_source: str = "subscription") -> None:
@@ -862,6 +1159,7 @@ class Database:
                               (backend, sid, app_id, prompt_tokens, completion_tokens, cost_usd, billing,
                                credential_source, time.time()))
 
+    @_reads
     def usage_tally(self, backend: str, since: float, app_id: str | None = None) -> dict:
         app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
         with self.lock:
@@ -872,6 +1170,7 @@ class Database:
                                     f"WHERE backend = ? AND created_at >= ?{app_clause}", params).fetchone()
         return dict(row)
 
+    @_reads
     def usage_by_source(self, backend: str, since: float, app_id: str | None = None) -> dict[str, dict]:
         app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
         with self.lock:
@@ -885,10 +1184,11 @@ class Database:
                 for row in rows}
 
     # Owner-managed per-app provider policy. Secret values and file paths never enter this database.
+    @_writes
     def set_app_provider_credential(self, app_id: str, backend: str, secret_ref: str, policy: str,
                                     models: list[str]) -> dict:
         now, cid = time.time(), "pc-" + secrets.token_hex(5)
-        with self.tx():
+        with self._tx():
             self.conn.execute("UPDATE app_provider_credentials SET revoked_at = ? "
                               "WHERE app_id = ? AND backend = ? AND revoked_at IS NULL", (now, app_id, backend))
             self.conn.execute("INSERT INTO app_provider_credentials "
@@ -897,22 +1197,26 @@ class Database:
                               (cid, app_id, backend, secret_ref, policy, json.dumps(models), now))
         return self.app_provider_credential(app_id, backend)
 
+    @_reads
     def app_provider_credential(self, app_id: str, backend: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM app_provider_credentials WHERE app_id = ? AND backend = ? "
                                     "AND revoked_at IS NULL", (app_id, backend)).fetchone()
         return _row(row)
 
+    @_reads
     def app_provider_credential_by_id(self, cid: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM app_provider_credentials WHERE id = ?", (cid,)).fetchone()
         return _row(row)
 
+    @_reads
     def app_provider_managed(self, app_id: str) -> bool:
         with self.lock:
             return self.conn.execute("SELECT 1 FROM app_provider_credentials WHERE app_id = ? LIMIT 1",
                                      (app_id,)).fetchone() is not None
 
+    @_reads
     def list_app_provider_credentials(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -920,21 +1224,25 @@ class Database:
                 "LEFT JOIN api_keys k ON k.id = c.app_id ORDER BY c.created_at DESC").fetchall()
         return [_row(row) for row in rows]
 
+    @_writes
     def revoke_app_provider_credential(self, cid: str) -> bool:
         with self.lock:
             return self.conn.execute("UPDATE app_provider_credentials SET revoked_at = ? "
                                      "WHERE id = ? AND revoked_at IS NULL", (time.time(), cid)).rowcount == 1
 
     # scheduled jobs
+    @_reads
     def list_jobs(self) -> list[dict]:
         with self.lock:
             return [dict(r) for r in self.conn.execute("SELECT * FROM jobs ORDER BY name").fetchall()]
 
+    @_reads
     def get_job(self, jid: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone()
         return dict(row) if row else None
 
+    @_writes
     def insert_job(self, job: dict) -> None:
         now = time.time()
         row = {**job, "created_at": now, "updated_at": now}
@@ -942,6 +1250,7 @@ class Database:
             self.conn.execute(f"INSERT INTO jobs ({','.join(row)}) VALUES ({','.join('?' * len(row))})",
                               [int(v) if isinstance(v, bool) else v for v in row.values()])
 
+    @_writes
     def update_job(self, jid: str, **fields) -> None:
         fields["updated_at"] = time.time()
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -949,10 +1258,12 @@ class Database:
             self.conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?",
                               [*(int(v) if isinstance(v, bool) else v for v in fields.values()), jid])
 
+    @_writes
     def delete_job(self, jid: str) -> bool:
         with self.lock:
             return self.conn.execute("DELETE FROM jobs WHERE id = ?", (jid,)).rowcount == 1
 
+    @_reads
     def job_sessions(self, jid: str, limit: int = 10) -> list[dict]:
         with self.lock:
             rows = self.conn.execute("SELECT id, title, status, stop_reason, job_status, created_at, updated_at, "
@@ -961,15 +1272,18 @@ class Database:
         return [dict(r) for r in rows]
 
     # templates
+    @_reads
     def list_templates(self) -> list[dict]:
         with self.lock:
             return [dict(r) for r in self.conn.execute("SELECT * FROM templates ORDER BY name").fetchall()]
 
+    @_reads
     def get_template(self, tid: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM templates WHERE id = ?", (tid,)).fetchone()
         return dict(row) if row else None
 
+    @_writes
     def upsert_template(self, t: dict) -> None:
         now = time.time()
         with self.lock:
@@ -982,11 +1296,13 @@ class Database:
                  t["prompt"], now, now),
             )
 
+    @_writes
     def delete_template(self, tid: str) -> bool:
         with self.lock:
             return self.conn.execute("DELETE FROM templates WHERE id = ?", (tid,)).rowcount == 1
 
     # images
+    @_writes
     def insert_image(self, job: dict) -> None:
         cols = ["id", "session_id", "source", "prompt", "model", "aspect_ratio", "resolution", "width", "height",
                 "seed", "base_model", "lora", "lora_revision", "lora_sha256",
@@ -1005,6 +1321,7 @@ class Database:
                 f"({','.join('?' * len(cols))}, ?, ?, ?)",
                 values + [json.dumps(provenance), status, created])
 
+    @_writes
     def update_image(self, iid: str, **fields) -> None:
         if "provenance" in fields and not isinstance(fields["provenance"], str):
             fields = {**fields, "provenance": json.dumps(fields["provenance"])}
@@ -1012,15 +1329,18 @@ class Database:
         with self.lock:
             self.conn.execute(f"UPDATE images SET {sets} WHERE id = ?", [*fields.values(), iid])
 
+    @_reads
     def get_image(self, iid: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM images WHERE id = ?", (iid,)).fetchone()
         return self._image_row(row)
 
+    @_writes
     def delete_image(self, iid: str) -> bool:
         with self.lock:
             return self.conn.execute("DELETE FROM images WHERE id = ?", (iid,)).rowcount == 1
 
+    @_reads
     def list_images(self, limit: int = 60, status: tuple = (), operations: tuple = ()) -> list[dict]:
         query, params = "SELECT * FROM images", []
         clauses = []
@@ -1050,11 +1370,13 @@ class Database:
             out["provenance"] = {}
         return out
 
+    @_reads
     def images_for_archive(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute("SELECT * FROM images WHERE status = 'done' ORDER BY created_at, id").fetchall()
         return [dict(r) for r in rows]
 
+    @_reads
     def find_image_upscale(self, parent_id: str, upscale: str) -> dict | None:
         """Return the existing derived upscale for this parent and scale, if any (including failed)."""
         choice = str(upscale or "").strip().lower().replace("×", "x")
@@ -1070,6 +1392,7 @@ class Database:
                 (parent_id, choice, scale)).fetchone()
         return dict(row) if row else None
 
+    @_reads
     def image_children(self, parent_id: str) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -1077,6 +1400,7 @@ class Database:
         return [dict(r) for r in rows]
 
     # inference endpoint keys and request log
+    @_writes
     def create_api_key(self, name: str, scopes: str = "inference", kind: str = "device",
                        origins: list[str] | None = None) -> tuple[dict, str]:
         import hashlib
@@ -1092,6 +1416,7 @@ class Database:
         return row, key
 
     # browser pairing and EventSource tickets
+    @_writes
     def create_pairing_code(self, name: str, origin: str, scopes: str, ttl_seconds: int) -> tuple[dict, str]:
         import hashlib
         now = time.time()
@@ -1105,28 +1430,32 @@ class Database:
                                row["expires_at"]))
         return row, code
 
+    @_reads
     def list_pairing_codes(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute("SELECT id, name, origin, scopes, created_at, expires_at, used_at, key_id "
                                      "FROM pairing_codes ORDER BY created_at DESC LIMIT 100").fetchall()
         return [dict(r) for r in rows]
 
+    @_writes
     def revoke_pairing_code(self, pid: str) -> bool:
         with self.lock:
             return self.conn.execute("UPDATE pairing_codes SET expires_at = ? WHERE id = ? AND used_at IS NULL "
                                      "AND expires_at > ?", (time.time(), pid, time.time())).rowcount == 1
 
+    @_reads
     def pairing_origin_active(self, origin: str) -> bool:
         with self.lock:
             row = self.conn.execute("SELECT 1 FROM pairing_codes WHERE origin = ? AND used_at IS NULL "
                                     "AND expires_at > ? LIMIT 1", (origin, time.time())).fetchone()
         return row is not None
 
+    @_writes
     def redeem_pairing_code(self, code: str, origin: str) -> tuple[dict | None, str, str]:
         """Atomically redeem a bootstrap code. Returns (key row, secret, error)."""
         import hashlib
         digest, now = hashlib.sha256(code.encode()).hexdigest(), time.time()
-        with self.tx():
+        with self._tx():
             pairing = self.conn.execute("SELECT * FROM pairing_codes WHERE hash = ?", (digest,)).fetchone()
             if pairing is None:
                 return None, "", "invalid pairing code"
@@ -1149,6 +1478,7 @@ class Database:
 
     # Agent Harness for Mac pairing is separate from browser-origin pairing. It authorizes one owner CLI token;
     # the runner token remains in its configured owner file and never enters SQLite.
+    @_writes
     def create_runner_pairing_code(self, name: str, runner: str, ttl_seconds: int) -> tuple[dict, str]:
         import hashlib
         now = time.time()
@@ -1162,6 +1492,7 @@ class Database:
                                row["expires_at"]))
         return row, code
 
+    @_reads
     def list_runner_pairing_codes(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -1169,17 +1500,19 @@ class Database:
                 "FROM runner_pairing_codes ORDER BY created_at DESC LIMIT 100").fetchall()
         return [dict(row) for row in rows]
 
+    @_writes
     def revoke_runner_pairing_code(self, pid: str) -> bool:
         now = time.time()
         with self.lock:
             return self.conn.execute("UPDATE runner_pairing_codes SET expires_at = ? WHERE id = ? "
                                      "AND used_at IS NULL AND expires_at > ?", (now, pid, now)).rowcount == 1
 
+    @_writes
     def redeem_runner_pairing_code(self, code: str) -> tuple[dict | None, dict | None, str, str]:
         """Atomically redeem a native-client code. Returns (pairing, owner key, secret, error)."""
         import hashlib
         digest, now = hashlib.sha256(code.encode()).hexdigest(), time.time()
-        with self.tx():
+        with self._tx():
             pairing = self.conn.execute("SELECT * FROM runner_pairing_codes WHERE hash = ?", (digest,)).fetchone()
             if pairing is None:
                 return None, None, "", "invalid runner pairing code"
@@ -1198,6 +1531,7 @@ class Database:
                               (now, key["id"], pairing["id"]))
         return dict(pairing), key, secret, ""
 
+    @_reads
     def origin_allowed(self, origin: str, kind: str | None = None) -> bool:
         query = "SELECT origins FROM api_keys WHERE revoked_at IS NULL"
         params: tuple = ()
@@ -1208,6 +1542,7 @@ class Database:
             rows = self.conn.execute(query, params).fetchall()
         return any(origin in (json.loads(r["origins"] or "[]")) for r in rows)
 
+    @_writes
     def create_stream_ticket(self, key_id: str, session_id: str, origin: str,
                              ttl_seconds: int = 60) -> tuple[str, float]:
         import hashlib
@@ -1221,6 +1556,7 @@ class Database:
                                now + ttl_seconds))
         return ticket, now + ttl_seconds
 
+    @_reads
     def stream_ticket_key(self, ticket: str, session_id: str, origin: str) -> dict | None:
         import hashlib
         if not ticket or not origin:
@@ -1233,6 +1569,7 @@ class Database:
                 (hashlib.sha256(ticket.encode()).hexdigest(), session_id, origin, time.time())).fetchone()
         return _row(row)
 
+    @_reads
     def stream_ticket_origin_active(self, ticket: str, origin: str) -> bool:
         import hashlib
         if not ticket or not origin:
@@ -1245,18 +1582,21 @@ class Database:
         return row is not None
 
     # app tool calls
+    @_writes
     def insert_app_tool_call(self, sid: str, call_id: str, name: str, args: dict) -> None:
         with self.lock:
             self.conn.execute("INSERT OR IGNORE INTO app_tool_calls (session_id, call_id, name, args, status, "
                               "created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
                               (sid, call_id, name, json.dumps(args), time.time()))
 
+    @_reads
     def get_app_tool_call(self, sid: str, call_id: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM app_tool_calls WHERE session_id = ? AND call_id = ?",
                                     (sid, call_id)).fetchone()
         return _row(row)
 
+    @_reads
     def app_tool_calls(self, sid: str, status: str | None = None) -> list[dict]:
         query, params = "SELECT * FROM app_tool_calls WHERE session_id = ?", [sid]
         if status:
@@ -1265,6 +1605,7 @@ class Database:
         with self.lock:
             return [_row(r) for r in self.conn.execute(query + " ORDER BY created_at", params).fetchall()]
 
+    @_writes
     def finish_app_tool_call(self, sid: str, call_id: str, status: str, output: str, ok: bool) -> bool:
         with self.lock:
             return self.conn.execute(
@@ -1272,6 +1613,7 @@ class Database:
                 "WHERE session_id = ? AND call_id = ? AND status = 'pending'",
                 (status, output, int(ok), time.time(), sid, call_id)).rowcount == 1
 
+    @_reads
     def api_key_by_secret(self, key: str) -> dict | None:
         import hashlib
         if not key:
@@ -1281,11 +1623,13 @@ class Database:
                                     (hashlib.sha256(key.encode()).hexdigest(),)).fetchone()
         return _row(row)
 
+    @_reads
     def get_api_key(self, kid: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM api_keys WHERE id = ?", (kid,)).fetchone()
         return _row(row)
 
+    @_reads
     def list_api_keys(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -1294,6 +1638,7 @@ class Database:
                 "FROM api_keys k ORDER BY k.created_at").fetchall()
         return [_row(r) for r in rows]
 
+    @_writes
     def revoke_api_key(self, kid: str) -> bool:
         with self.lock:
             ok = self.conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
@@ -1302,6 +1647,7 @@ class Database:
                 self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
             return ok
 
+    @_reads
     def get_app_settings(self, app_id: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM app_settings WHERE app_id = ?", (app_id,)).fetchone()
@@ -1314,6 +1660,7 @@ class Database:
             out["values"] = {}
         return out
 
+    @_writes
     def set_app_settings(self, app_id: str, revision: int, values: dict) -> None:
         payload = json.dumps(values)
         now = time.time()
@@ -1325,10 +1672,12 @@ class Database:
                 (app_id, revision, payload, now),
             )
 
+    @_writes
     def delete_app_settings(self, app_id: str) -> None:
         with self.lock:
             self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (app_id,))
 
+    @_writes
     def log_endpoint_request(self, r: dict) -> None:
         with self.lock:
             self.conn.execute(
@@ -1338,6 +1687,7 @@ class Database:
                  r.get("completion_tokens", 0), r.get("wait_ms", 0), r.get("total_ms", 0), time.time()))
             self.conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (time.time(), r["key_id"]))
 
+    @_writes
     def decide_approval(self, aid: str, status: str, note: str = "") -> bool:
         with self.lock:
             cur = self.conn.execute(
@@ -1346,6 +1696,7 @@ class Database:
             )
         return cur.rowcount == 1
 
+    @_writes
     def insert_smart_review(self, rid: str, sid: str, approval_id: str, record: dict) -> None:
         flags = record.get("risk_flags") or []
         with self.lock:
@@ -1363,6 +1714,7 @@ class Database:
                  float(record.get("cost_usd") or 0), time.time()),
             )
 
+    @_reads
     def smart_review_stats(self, since: float | None = None) -> dict:
         since = time.time() - 7 * 86400 if since is None else since
         with self.lock:
@@ -1393,6 +1745,7 @@ class Database:
             "escalations_by_reason": {str(reason or "unknown"): n for reason, n in reasons},
         }
 
+    @_reads
     def smart_reviews(self, limit: int = 50) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -1400,6 +1753,7 @@ class Database:
         return [_row(r) for r in rows]
 
     # instruction skills (issue #17)
+    @_writes
     def insert_skill_proposal(self, row: dict) -> None:
         cols = ("id", "slug", "title", "purpose", "activation_suggestion", "content_hash", "status",
                 "source_session_id", "skill_md", "references", "examples", "manifest", "static_findings",
@@ -1410,6 +1764,7 @@ class Database:
             self.conn.execute(
                 f"INSERT INTO skill_proposals ({','.join(sql_cols)}) VALUES ({','.join('?' * len(cols))})", values)
 
+    @_writes
     def update_skill_proposal(self, pid: str, *, expected_status: str | tuple[str, ...] | None = None,
                               **fields) -> bool:
         if not fields:
@@ -1428,16 +1783,19 @@ class Database:
         with self.lock:
             return self.conn.execute(query, params).rowcount == 1
 
+    @_reads
     def skill_proposal(self, pid: str) -> dict | None:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM skill_proposals WHERE id = ?", (pid,)).fetchone())
 
+    @_reads
     def skill_proposal_by_hash(self, content_hash: str) -> dict | None:
         with self.lock:
             return _row(self.conn.execute(
                 "SELECT * FROM skill_proposals WHERE content_hash = ? ORDER BY created_at DESC LIMIT 1",
                 (content_hash,)).fetchone())
 
+    @_reads
     def list_skill_proposals(self, slug: str | None = None) -> list[dict]:
         query, params = "SELECT * FROM skill_proposals", []
         if slug:
@@ -1447,6 +1805,7 @@ class Database:
             rows = self.conn.execute(query + " ORDER BY created_at DESC", params).fetchall()
         return [_row(r) for r in rows]
 
+    @_reads
     def skill_proposal_count(self, since: float, session_id: str | None = None) -> int:
         query, params = "SELECT COUNT(*) FROM skill_proposals WHERE created_at >= ?", [since]
         if session_id:
@@ -1455,6 +1814,7 @@ class Database:
         with self.lock:
             return int(self.conn.execute(query, params).fetchone()[0])
 
+    @_writes
     def delete_skill_proposal(self, pid: str, *, not_status: str | tuple[str, ...] | None = None) -> bool:
         query = "DELETE FROM skill_proposals WHERE id = ?"
         params: list = [pid]
@@ -1465,31 +1825,37 @@ class Database:
         with self.lock:
             return self.conn.execute(query, params).rowcount == 1
 
+    @_writes
     def reject_skill_hash(self, content_hash: str, proposal_id: str, reason: str = "") -> None:
         with self.lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO skill_rejected (content_hash, proposal_id, reason, rejected_at) "
                 "VALUES (?, ?, ?, ?)", (content_hash, proposal_id, reason, time.time()))
 
+    @_writes
     def clear_rejected_skill_hash(self, content_hash: str) -> None:
         with self.lock:
             self.conn.execute("DELETE FROM skill_rejected WHERE content_hash = ?", (content_hash,))
 
+    @_reads
     def skill_hash_rejected(self, content_hash: str) -> bool:
         with self.lock:
             row = self.conn.execute("SELECT 1 FROM skill_rejected WHERE content_hash = ?",
                                     (content_hash,)).fetchone()
         return row is not None
 
+    @_reads
     def skill_installed(self, slug: str) -> dict | None:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM skill_installed WHERE slug = ?", (slug,)).fetchone())
 
+    @_reads
     def list_skill_installed(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute("SELECT * FROM skill_installed ORDER BY slug").fetchall()
         return [_row(r) for r in rows]
 
+    @_writes
     def upsert_skill_installed(self, row: dict) -> None:
         with self.lock:
             self.conn.execute(
@@ -1501,10 +1867,12 @@ class Database:
                 (row["slug"], row["title"], row.get("purpose") or "", row["current_version"], row["current_hash"],
                  int(row.get("enabled") or 0), row["installed_at"], row["updated_at"]))
 
+    @_writes
     def delete_skill_installed(self, slug: str) -> None:
         with self.lock:
             self.conn.execute("DELETE FROM skill_installed WHERE slug = ?", (slug,))
 
+    @_writes
     def insert_skill_version(self, row: dict) -> None:
         with self.lock:
             self.conn.execute(
@@ -1514,44 +1882,52 @@ class Database:
                  row["skill_md"], json.dumps(row.get("references") or []), json.dumps(row.get("examples") or []),
                  json.dumps(row.get("manifest") or {}), row["installed_at"]))
 
+    @_reads
     def skill_version(self, slug: str, version: int) -> dict | None:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM skill_versions WHERE slug = ? AND version = ?",
                                           (slug, version)).fetchone())
 
+    @_reads
     def skill_version_by_hash(self, content_hash: str) -> dict | None:
         with self.lock:
             return _row(self.conn.execute("SELECT * FROM skill_versions WHERE content_hash = ?",
                                           (content_hash,)).fetchone())
 
+    @_reads
     def list_skill_versions(self, slug: str) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
                 "SELECT * FROM skill_versions WHERE slug = ? ORDER BY version", (slug,)).fetchall()
         return [_row(r) for r in rows]
 
+    @_reads
     def skill_allowlist(self, slug: str) -> list[str]:
         with self.lock:
             rows = self.conn.execute(
                 "SELECT project FROM skill_project_allowlist WHERE slug = ? ORDER BY project", (slug,)).fetchall()
         return [r[0] for r in rows]
 
+    @_reads
     def skill_allowlisted_slugs(self, project: str) -> list[str]:
         with self.lock:
             rows = self.conn.execute(
                 "SELECT slug FROM skill_project_allowlist WHERE project = ? ORDER BY slug", (project,)).fetchall()
         return [r[0] for r in rows]
 
+    @_writes
     def set_skill_allowlist(self, slug: str, projects: list[str]) -> None:
         with self.lock:
             self.conn.execute("DELETE FROM skill_project_allowlist WHERE slug = ?", (slug,))
             self.conn.executemany("INSERT INTO skill_project_allowlist (project, slug) VALUES (?, ?)",
                                   [(p, slug) for p in projects])
 
+    @_writes
     def clear_skill_allowlist(self, slug: str) -> None:
         with self.lock:
             self.conn.execute("DELETE FROM skill_project_allowlist WHERE slug = ?", (slug,))
 
+    @_writes
     def insert_skill_review_job(self, row: dict) -> None:
         with self.lock:
             self.conn.execute(
@@ -1561,12 +1937,14 @@ class Database:
                  json.dumps(row.get("findings") or {}), row.get("error") or "", row["created_at"],
                  row.get("started_at"), row.get("finished_at")))
 
+    @_writes
     def update_skill_review_job(self, jid: str, **fields) -> None:
         values = [json.dumps(v) if k in JSON_COLUMNS else v for k, v in fields.items()]
         sets = ", ".join(f"{k} = ?" for k in fields)
         with self.lock:
             self.conn.execute(f"UPDATE skill_review_jobs SET {sets} WHERE id = ?", [*values, jid])
 
+    @_reads
     def list_skill_review_jobs(self, status: tuple[str, ...] | None = None) -> list[dict]:
         query, params = "SELECT * FROM skill_review_jobs", []
         if status:
@@ -1577,11 +1955,13 @@ class Database:
         return [_row(r) for r in rows]
 
     # household accounts (non-secret metadata only: never tokens, credentials, or session material)
+    @_reads
     def member_count(self) -> int:
         with self.lock:
             row = self.conn.execute("SELECT COUNT(*) AS n FROM accounts WHERE role = 'member'").fetchone()
         return int(row["n"] if row else 0)
 
+    @_reads
     def account_by_login(self, login: str) -> dict | None:
         if not login:
             return None
@@ -1589,16 +1969,19 @@ class Database:
             row = self.conn.execute("SELECT * FROM accounts WHERE login = ?", (login,)).fetchone()
         return dict(row) if row else None
 
+    @_reads
     def account_by_id(self, user_id: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM accounts WHERE user_id = ?", (user_id,)).fetchone()
         return dict(row) if row else None
 
+    @_reads
     def list_accounts(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute("SELECT * FROM accounts WHERE role = 'member' ORDER BY created_at").fetchall()
         return [dict(r) for r in rows]
 
+    @_writes
     def insert_account(self, row: dict) -> None:
         cols = ("user_id", "role", "login", "display_name", "enabled", "disk_quota_bytes",
                 "max_running", "max_queued", "created_at", "updated_at", "last_activity_at")
@@ -1608,6 +1991,7 @@ class Database:
                 [row.get(c) for c in cols],
             )
 
+    @_writes
     def update_account(self, user_id: str, **fields) -> bool:
         if not fields:
             return False
@@ -1618,6 +2002,7 @@ class Database:
                 f"UPDATE accounts SET {sets} WHERE user_id = ?", [*fields.values(), user_id]
             ).rowcount == 1
 
+    @_writes
     def touch_account(self, user_id: str) -> None:
         if not user_id or user_id == "owner":
             return
@@ -1625,6 +2010,7 @@ class Database:
             self.conn.execute("UPDATE accounts SET last_activity_at = ? WHERE user_id = ?",
                               (time.time(), user_id))
 
+    @_writes
     def insert_audit(self, actor_id: str, target_id: str, action: str, outcome: str, detail: str = "") -> None:
         with self.lock:
             self.conn.execute(
@@ -1635,6 +2021,7 @@ class Database:
             cutoff = time.time() - 365 * 86400
             self.conn.execute("DELETE FROM account_audit WHERE ts < ?", (cutoff,))
 
+    @_reads
     def list_audit(self, limit: int = 200) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -1643,6 +2030,7 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    @_reads
     def get_member_project(self, user_id: str, slug: str) -> dict | None:
         with self.lock:
             row = self.conn.execute(
@@ -1650,6 +2038,7 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    @_reads
     def list_member_projects(self, user_id: str) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
@@ -1657,6 +2046,7 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    @_writes
     def insert_member_project(self, row: dict) -> None:
         now = time.time()
         with self.lock:
@@ -1667,16 +2057,19 @@ class Database:
                  row.get("source_url") or "", row.get("source_auth") or "", now, now),
             )
 
+    @_reads
     def get_github_connection(self, user_id: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM github_connections WHERE user_id = ?", (user_id,)).fetchone()
         return dict(row) if row else None
 
+    @_reads
     def list_github_connections(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute("SELECT * FROM github_connections ORDER BY user_id").fetchall()
         return [dict(r) for r in rows]
 
+    @_writes
     def set_github_connection(self, user_id: str, **fields) -> None:
         """Upsert non-secret connection state: status, timestamps, and a sanitized error class only."""
         allowed = {"status", "namespace_version", "connected_at", "last_used_at", "last_error"}
@@ -1693,6 +2086,7 @@ class Database:
                 self.conn.execute(f"UPDATE github_connections SET {cols}, updated_at = ? WHERE user_id = ?",
                                   (*fields.values(), now, user_id))
 
+    @_writes
     def delete_member_project(self, user_id: str, slug: str) -> bool:
         with self.lock:
             return self.conn.execute(
@@ -1700,16 +2094,19 @@ class Database:
             ).rowcount == 1
 
     # Issue #64: Google identities, link invitations, and Agent Harness Web sessions (hashes only).
+    @_reads
     def google_identity(self, user_id: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM google_identities WHERE user_id = ?", (user_id,)).fetchone()
         return dict(row) if row else None
 
+    @_reads
     def google_identity_by_sub(self, sub: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM google_identities WHERE sub = ?", (sub,)).fetchone()
         return dict(row) if row else None
 
+    @_writes
     def link_google_identity(self, user_id: str, sub: str, email: str, now: float) -> bool:
         """Insert the link unless the member or the `sub` is already linked. Callers hold `tx()` when combining."""
         with self.lock:
@@ -1721,15 +2118,18 @@ class Database:
                 return False
         return True
 
+    @_writes
     def unlink_google_identity(self, user_id: str) -> bool:
         with self.lock:
             return self.conn.execute("DELETE FROM google_identities WHERE user_id = ?", (user_id,)).rowcount == 1
 
+    @_writes
     def touch_google_sign_in(self, user_id: str, email: str, now: float) -> None:
         with self.lock:
             self.conn.execute("UPDATE google_identities SET email = ?, last_sign_in_at = ? WHERE user_id = ?",
                               (email, now, user_id))
 
+    @_writes
     def put_google_invitation(self, user_id: str, code_hash: str, now: float, expires_at: float) -> None:
         """Replace any pending invitation for this member."""
         with self.lock:
@@ -1739,6 +2139,7 @@ class Database:
                 "created_at = excluded.created_at, expires_at = excluded.expires_at",
                 (user_id, code_hash, now, expires_at))
 
+    @_reads
     def google_invitation(self, user_id: str, now: float) -> dict | None:
         with self.lock:
             row = self.conn.execute(
@@ -1746,6 +2147,7 @@ class Database:
                 "WHERE user_id = ? AND expires_at > ?", (user_id, now)).fetchone()
         return dict(row) if row else None
 
+    @_reads
     def google_invitation_user(self, code_hash: str, now: float) -> str | None:
         with self.lock:
             row = self.conn.execute(
@@ -1753,33 +2155,39 @@ class Database:
                 (code_hash, now)).fetchone()
         return row["user_id"] if row else None
 
+    @_writes
     def consume_google_invitation(self, user_id: str, code_hash: str, now: float) -> bool:
         with self.lock:
             return self.conn.execute(
                 "DELETE FROM google_link_invitations WHERE user_id = ? AND code_hash = ? AND expires_at > ?",
                 (user_id, code_hash, now)).rowcount == 1
 
+    @_writes
     def cancel_google_invitation(self, user_id: str) -> bool:
         with self.lock:
             return self.conn.execute(
                 "DELETE FROM google_link_invitations WHERE user_id = ?", (user_id,)).rowcount == 1
 
+    @_writes
     def insert_web_session(self, id_hash: str, user_id: str, now: float, expires_at: float) -> None:
         with self.lock:
             self.conn.execute(
                 "INSERT INTO web_sessions (id_hash, user_id, created_at, last_seen_at, expires_at) "
                 "VALUES (?, ?, ?, ?, ?)", (id_hash, user_id, now, now, expires_at))
 
+    @_reads
     def web_session(self, id_hash: str) -> dict | None:
         with self.lock:
             row = self.conn.execute("SELECT * FROM web_sessions WHERE id_hash = ?", (id_hash,)).fetchone()
         return dict(row) if row else None
 
+    @_writes
     def touch_web_session(self, id_hash: str, now: float) -> None:
         with self.lock:
             self.conn.execute("UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ? AND revoked_at IS NULL",
                               (now, id_hash))
 
+    @_writes
     def revoke_web_session(self, id_hash: str, now: float) -> str | None:
         """Revoke one session; returns its member `user_id` when it was active."""
         with self.lock:
@@ -1790,12 +2198,14 @@ class Database:
             self.conn.execute("UPDATE web_sessions SET revoked_at = ? WHERE id_hash = ?", (now, id_hash))
         return row["user_id"]
 
+    @_writes
     def revoke_web_sessions(self, user_id: str, now: float) -> int:
         with self.lock:
             return self.conn.execute(
                 "UPDATE web_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
                 (now, user_id)).rowcount
 
+    @_reads
     def count_web_sessions(self, user_id: str, now: float, idle_seconds: float) -> int:
         with self.lock:
             row = self.conn.execute(
@@ -1803,6 +2213,7 @@ class Database:
                 "AND expires_at > ? AND last_seen_at > ?", (user_id, now, now - idle_seconds)).fetchone()
         return int(row["n"])
 
+    @_writes
     def purge_web_sessions(self, before: float) -> int:
         """Drop rows that expired or were revoked before `before`."""
         with self.lock:
