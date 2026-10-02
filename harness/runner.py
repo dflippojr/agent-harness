@@ -596,6 +596,10 @@ class Runner:
                     return
                 pending = unresolved_calls(s["context"])
                 if pending:
+                    if turn is telemetry.NOOP_SPAN:
+                        # Calls left pending by an earlier run (daemon restart) resolve under their own turn.
+                        turn = tracer.start("turn", {"harness.turn": int(s["run"].get("turns", 0)),
+                                                     "harness.resumed": True})
                     with tracer.activate(turn):
                         done = await self._resolve_calls(s, pending)
                     self._emit_turn_metrics(sid)

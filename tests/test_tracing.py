@@ -14,6 +14,7 @@ from harness import telemetry
 from harness.config import TelemetryConfig
 from harness.llm import Completion
 from harness.manager import Manager
+from harness.warmup import READY
 from test_daemon import Script, call, make_cfg, wait_status
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -280,6 +281,65 @@ def test_scripted_session_produces_one_covering_trace(tmp_path):
     assert {"approval_wait", "sandbox_exec"} <= tool_kids
     wait = next(sp for sp in spans if sp.name == "approval_wait")
     assert wait.attributes["harness.approval_status"] == "approved"
+
+
+def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path):
+    """A daemon restart mid-approval resolves the pending call under a `turn`, not straight under `session`."""
+    cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "path": "secret/*", "action": "ask", "reason": "x"}])
+    script = Script([
+        Completion(tool_calls=[call("write_file", 0, path="secret/a.txt", content="x")]),
+        Completion(content="done writing"),
+    ])
+
+    async def slow_chat(*args, **kwargs):
+        await asyncio.sleep(0.15)  # model time dominates the bookkeeping between spans
+        return await script(*args, **kwargs)
+
+    async def ready(model):
+        return READY
+
+    def daemon():
+        m, exporter = _traced_manager(cfg, slow_chat)
+        m.warmer.state = ready  # skip the un-spanned probe of the fake model's unresolvable base_url
+        return m, exporter
+
+    async def first():
+        m, exporter = daemon()
+        await m.start()
+        s = m.create("write the secret", project="guarded")
+        await wait_status(m, s["id"], "waiting_approval")
+        await m.stop()
+        m.db.close()
+        return s["id"], exporter.get_finished_spans()
+
+    async def second(sid):
+        m, exporter = daemon()
+        await m.start()
+        await asyncio.sleep(0.2)
+        m.decide(sid, None, approve=True)
+        await wait_status(m, sid, "done")
+        await m.stop()
+        return exporter.get_finished_spans()
+
+    sid, before = asyncio.run(first())
+    after = asyncio.run(second(sid))
+    spans = before + after
+    tools = [sp for sp in after if sp.name == "execute_tool"]
+    by_id = {sp.context.span_id: sp for sp in spans}
+    assert tools
+    for tool in tools:
+        assert by_id[tool.parent.span_id].name == "turn"
+    resumed = by_id[tools[0].parent.span_id]
+    assert resumed.attributes["harness.resumed"] is True
+    for turn in (sp for sp in spans if sp.name == "turn"):
+        kids = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == turn.context.span_id]
+        assert _covered(turn, kids) >= 0.95, _gaps(turn, kids)
+        assert _sum_ratio(turn, kids) <= 1.05
+    root = next(sp for sp in after if sp.name == "session")
+    children = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == root.context.span_id]
+    assert not {c.name for c in children} & {"execute_tool", "approval_wait", "sandbox_exec"}
+    assert _covered(root, children) >= 0.95, _gaps(root, children)
+    assert _sum_ratio(root, children) <= 1.05
 
 
 def test_sentinel_never_reaches_a_span(tmp_path):

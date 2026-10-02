@@ -72,7 +72,7 @@ Work outside a session isn't traced, for example image jobs started from the Ima
 | Span | Attributes |
 |---|---|
 | `session` | `harness.session_id`, `harness.backend`, `gen_ai.request.model`, `harness.recovered`, `harness.status` |
-| `turn` | `harness.turn` (1-based model turn in the run) |
+| `turn` | `harness.turn` (1-based model turn in the run), `harness.resumed` (set on the turn that finishes tool calls left pending by a daemon restart) |
 | `chat` | `gen_ai.operation.name=chat`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `harness.cache_read_tokens`, `harness.prompt_ms` (prompt processing), `harness.decode_ms` (generation) |
 | `execute_tool` | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `harness.policy_decision` (allow/ask/deny), `harness.ok` (false when blocked or denied), `harness.output_chars`, `harness.parallel` |
 | `approval_wait` | `harness.approval_status` |
