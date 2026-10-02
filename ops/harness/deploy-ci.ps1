@@ -163,6 +163,11 @@ try {
         throw "staged deployment Python is missing: $stagedPython"
     }
     Run $stagedPython @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $requirements)
+    # Optional tracing packages (#326); repomap stays opt-in.
+    $telemetryRequirements = Join-Path $release 'requirements-telemetry.txt'
+    if ($DryRun -or (Test-Path -LiteralPath $telemetryRequirements)) {
+        Run $stagedPython @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $telemetryRequirements)
+    }
 } catch {
     Remove-DeploymentDirectory $stagedVenv
     throw

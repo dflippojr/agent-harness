@@ -118,6 +118,11 @@ try {
         throw "candidate requirements are missing: $requirements"
     }
     Run $stagingPython @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $requirements)
+    # Optional tracing packages (#326); repomap stays opt-in.
+    $telemetryRequirements = Join-Path $StagingCheckout 'requirements-telemetry.txt'
+    if ($planOnly -or (Test-Path -LiteralPath $telemetryRequirements)) {
+        Run $stagingPython @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $telemetryRequirements)
+    }
     Write-Host '[staging] dependencies installed'
 
     # Capability overlay: the trusted profile file wins over the candidate's harness.yaml and the owner's local

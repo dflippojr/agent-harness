@@ -117,6 +117,9 @@ def test_deploy_plan_resolves_dependencies_before_stopping_and_swapping(tmp_path
     assert guards < resolve < stop < swap < merge < start
     assert ".venv\\Scripts\\python.exe -m pip install" not in plan
     assert ".venv.deploy-" in plan
+    assert "requirements.txt" in plan
+    assert "requirements-telemetry.txt" in plan
+    assert "requirements-repomap.txt" not in plan
 
 
 def test_deploy_plan_rolls_back_after_post_stop_failure(tmp_path):
