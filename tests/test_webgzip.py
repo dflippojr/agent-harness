@@ -74,3 +74,31 @@ def test_sse_and_binary_not_compressed():
     for url in ("/static/sse", "/static/pic.png", "/chats/x/events"):
         r = c.get(url, headers=GZ)
         assert "content-encoding" not in r.headers, url
+
+
+ROUTE_FILES = {"sw.js", "manifest.webmanifest"}
+SHELL_FILES = ["app.js", "client.mjs", "style.css", "manifest.webmanifest", "sw.js"]
+# Served by StaticFiles, which handles conditionals. `/`, `/sw.js` and `/manifest.webmanifest` have their own
+# FileResponse routes (Starlette does not answer If-None-Match there), so they only get the ETag check below.
+SHELL_URLS = [f"/static/{f}" for f in SHELL_FILES] + [f"/{f}" for f in SHELL_FILES if f not in ROUTE_FILES]
+
+
+@pytest.mark.parametrize("hdrs", [GZ, PLAIN])
+@pytest.mark.parametrize("url", SHELL_URLS)
+def test_shell_revalidates_with_304(tmp_path, url, hdrs):
+    """Server-side guard for #290: every shell URL (both static mounts) sends an ETag and honors If-None-Match."""
+    client, _, _ = make_client(tmp_path, [])
+    with client:
+        first = client.get(url, headers=hdrs)
+        assert first.status_code == 200
+        etag = first.headers["etag"]
+        again = client.get(url, headers={**hdrs, "If-None-Match": etag})
+        assert again.status_code == 304
+        assert not again.content
+
+
+@pytest.mark.parametrize("url", ["/", "/sw.js", "/manifest.webmanifest"])
+def test_route_served_shell_sends_etag(tmp_path, url):
+    client, _, _ = make_client(tmp_path, [])
+    with client:
+        assert client.get(url, headers=PLAIN).headers["etag"]

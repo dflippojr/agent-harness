@@ -3,10 +3,12 @@
 `.github/workflows/ci.yml` is the single test workflow, and `.github/workflows/ci-cd.yml` publishes and deploys only
 after that workflow succeeds for the exact commit pushed to `main`:
 
-1. **CI / test** runs the complete test suite on the repository-scoped `agent-harness-ci` runner **pool** (three
-   members on the tower) for pull requests and pushes to `main`. The job installs `pytest-xdist` as a CI extra (not
-   in `requirements.txt`) and runs `python -m pytest tests -q -n 8 --dist loadfile`. There is no duplicate
-   `windows-latest` test job in the image/deployment workflow.
+1. **CI / test** runs the complete test suite once, with coverage, on GitHub-hosted `windows-latest` for pull
+   requests and pushes to `main`, and uploads `coverage.xml` as an artifact. **CI / sonar** (same workflow,
+   `needs: test`) feeds that coverage to SonarCloud. On a push to `main`, `sonar` is `continue-on-error`, so a failing
+   quality gate shows on the job but does not block deployment; only failing tests do. On pull requests the quality
+   gate still fails the check. Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
+   tower; that pool is retired so CI no longer competes with llama-server for the tower's RAM.
 2. **publish-images** is triggered by `workflow_run` only after `CI` completes successfully for a push to `main`.
    It checks out `github.event.workflow_run.head_sha`, never a branch name, and GitHub-hosted Linux builders publish
    both runtime images to GHCR:
@@ -38,16 +40,17 @@ scheduled tasks, local repository paths, Docker sandbox creation, GPU/model cont
 
 The owner explicitly approved the repository-scoped self-hosted runners. The `agent-harness-tower` runner gives
 trusted `main` workflow code the tower user's filesystem, Docker, credentials, and service-restart authority. It is
-reserved for deployment; tests use the `agent-harness-ci` pool, SonarCloud uses GitHub-hosted Windows, and automated
-review uses the `agent-harness-review` pool.
+reserved for deployment; tests and SonarCloud use GitHub-hosted Windows, and automated review uses the
+`agent-harness-review` pool.
 
-`.github/workflows/sonar.yml` is the analysis. It runs on GitHub-hosted `windows-latest` against SonarCloud
-organization `dflippojr`, project key `dflippojr_agent-harness` (`sonar-project.properties`), host
-`https://sonarcloud.io`, using the repository Actions secret `SONARCLOUD_TOKEN`. It installs `pytest-cov` and
-`pytest-xdist` as extras (not in `requirements.txt`), logs `NUMBER_OF_PROCESSORS` to confirm the hosted 4-vCPU
+The `sonar` job in `.github/workflows/ci.yml` is the analysis. It runs on GitHub-hosted `windows-latest` against
+SonarCloud organization `dflippojr`, project key `dflippojr_agent-harness` (`sonar-project.properties`), host
+`https://sonarcloud.io`, using the repository Actions secret `SONARCLOUD_TOKEN`. The `test` job installs `pytest-cov`
+and `pytest-xdist` as extras (not in `requirements.txt`), logs `NUMBER_OF_PROCESSORS` to confirm the hosted 4-vCPU
 shape, then runs `python -m pytest tests -q -n 4 --dist loadfile` with pytest-cov Cobertura output
-(`coverage.xml`). Worker count is fixed at 4 (not pytest's auto count) because a public-repo `windows-latest` runner has
-4 vCPUs; tower CI uses `-n 8` on a larger machine. pytest-cov merges xdist workers into one `coverage.xml`.
+(`coverage.xml`), which `sonar` downloads before scanning. Both jobs use `windows-latest`, so the absolute source paths
+in `coverage.xml` resolve. Worker count is fixed at 4 (not pytest's auto count) because a public-repo
+`windows-latest` runner has 4 vCPUs. pytest-cov merges xdist workers into one `coverage.xml`.
 `COVERAGE_CORE=sysmon` is not used: `.coveragerc` sets `branch = True`, and coverage.py's sysmon core cannot
 measure branches on Python 3.12 (this job; sysmon branch support starts at 3.14). The scan still uses
 `sonar.qualitygate.wait=true`. The suite is Windows-native; Ubuntu hosted runners fail coverage collection on
@@ -55,12 +58,12 @@ measure branches on Python 3.12 (this job; sysmon branch support starts at 3.14)
 and do not contribute coverage. Non-Python trees (`harness/web`, `ops`, scripts that are not `.py`) are excluded
 from the coverage metric. Confirm the SonarCloud project still uses a gate that includes coverage on new code;
 the workflow cannot set that condition itself. PR analysis stays on GitHub-hosted Windows; it must not move to
-the tower or reuse the tower CI job's results.
+the tower.
 
 Serial `sonar` job baseline from nine successful hosted runs on 2026-09-23 (createdAt 02:47–19:42 UTC): job
 wall-clock median 818 s, worst 1026 s; `Run tests with coverage` median 684 s, worst 843 s (the 828 s figure in
-issue #191 is run 35911097047). Parallel after timings belong on the first PR that exercises this workflow;
-pushing a branch without a pull request does not trigger `sonar.yml`.
+issue #191 is run 35911097047). Pushing a branch without a pull request does not trigger `ci.yml`, and the
+`paths-ignore` allow-list that skips `test` skips `sonar` with it (none of those files are Sonar sources).
 
 SonarCloud **Automatic Analysis must stay OFF**. This workflow is the analysis; turning Automatic Analysis on would
 duplicate and fight it. To rotate the token, create a new SonarCloud user token, replace the repo Actions secret
@@ -149,78 +152,25 @@ reported `head_sha`; they never check out or execute pull-request code. Third-pa
 commits, main deployments serialize rather than being canceled midway, and the GitHub `tower-production` environment
 accepts deployments from `main` only.
 
-## CI runner pool
+## Retired CI runner pool
 
-Pytest (`.github/workflows/ci.yml`) uses three repository-scoped self-hosted runners that share the
-`agent-harness-ci` label. `runs-on` is already `[self-hosted, Windows, X64, agent-harness-ci]`; expanding the pool
-does not change the workflow selector. Each member takes one job, so tests for different refs can overlap instead of
-serializing behind a single runner. `concurrency` remains `ci-${{ github.ref }}` with `cancel-in-progress: true`.
+Until 2026-10, pytest also ran on three self-hosted `agent-harness-ci` runners on the tower
+(`dflippotower-agent-harness-ci`, `-ci-2`, `-ci-3`, installed under `D:\Agents\github-runner-ci*` with logon tasks
+`AgentHarness-GitHubRunner-CI*`), duplicating the hosted suite that SonarCloud needs anyway. Each job ran
+`pytest -n 8` next to llama-server on a 31.8 GB machine, and PR runs waited on the busy tower (7–51 minutes, versus
+9–14 for the hosted job). Tests now run once, GitHub-hosted, in `ci.yml` `test`.
 
-They are named, installed, and started as:
-
-| GitHub name | Install dir | Hidden logon task |
-| --- | --- | --- |
-| `dflippotower-agent-harness-ci` | `D:\Agents\github-runner-ci` | `AgentHarness-GitHubRunner-CI` |
-| `dflippotower-agent-harness-ci-2` | `D:\Agents\github-runner-ci-2` | `AgentHarness-GitHubRunner-CI-2` |
-| `dflippotower-agent-harness-ci-3` | `D:\Agents\github-runner-ci-3` | `AgentHarness-GitHubRunner-CI-3` |
-
-Default `-WorkDir _work` is correct: each member has its own checkout and `.venv` under that install dir. Do not
-reuse an `InstallDir` that already contains `.runner`.
-
-Use the existing parameterized installer (`ops/github/install-runner.ps1`). Obtain a fresh short-lived registration
-token for **each** member (the token is single-use), then:
+After that change is on `main`, remove each member: delete the runner in GitHub (**Settings > Actions > Runners**),
+then
 
 ```powershell
-$gh = 'C:\Program Files\GitHub CLI\gh.exe'
-$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
-.\ops\github\install-runner.ps1 -Token $token -Labels agent-harness-ci `
-  -InstallDir D:\Agents\github-runner-ci -Name dflippotower-agent-harness-ci `
-  -TaskName AgentHarness-GitHubRunner-CI
-$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
-.\ops\github\install-runner.ps1 -Token $token -Labels agent-harness-ci `
-  -InstallDir D:\Agents\github-runner-ci-2 -Name dflippotower-agent-harness-ci-2 `
-  -TaskName AgentHarness-GitHubRunner-CI-2
-$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
-.\ops\github\install-runner.ps1 -Token $token -Labels agent-harness-ci `
-  -InstallDir D:\Agents\github-runner-ci-3 -Name dflippotower-agent-harness-ci-3 `
-  -TaskName AgentHarness-GitHubRunner-CI-3
+Unregister-ScheduledTask -TaskName AgentHarness-GitHubRunner-CI -Confirm:$false
+Remove-Item -LiteralPath D:\Agents\github-runner-ci -Recurse -Force
 ```
 
-Each call consumes the token; request a new one for every member. The token is never saved by the installer.
-
-To add another member later, repeat the same pattern with unused `-InstallDir` / `-Name` / `-TaskName` values and the
-same `agent-harness-ci` label. To repair or remove a member, delete the runner in GitHub (**Settings > Actions >
-Runners**), uninstall the matching scheduled task, and delete that member's install directory, then reinstall with
-the snippet above if you are repairing it:
-
-```powershell
-Unregister-ScheduledTask -TaskName AgentHarness-GitHubRunner-CI-2 -Confirm:$false
-Remove-Item -LiteralPath D:\Agents\github-runner-ci-2 -Recurse -Force
-```
-
-Replace `-2` with the member you are removing.
-
-### Capacity (2026-09-20)
-
-The tower has 28 logical cores and 31.8 GB RAM. `llama-server` (`ops/llama-server/run-qwen.ps1`, port 8090) uses
-about 9 GB RSS when the model is loaded. Three concurrent CI jobs (separate `_work` checkouts) each run
-`python -m pytest tests -q -n 8 --dist loadfile` (fixed workers, never `-n auto`; raised from `-n 4` after a
-20-run soak median of 192 s stayed above two minutes) plus the live daemon still left about 8.6 GB free while all
-three were in the test step. Historically a serial `python -m pytest tests -q` was about 5 minutes (302 s on
-GitHub-hosted Windows; 426 s in the #132 soak on this Windows machine). Issue #132 soak on this Windows host
-(782 passed, 4 skipped each run, no flakes): serial `-p no:xdist` 426 s; `-n 4 --dist loadfile` 20/20 green,
-median 192 s, p90 194 s; `-n 8 --dist loadfile` 20/20 green, median 152 s, p90 156 s. The 1–2 minute band was
-not reached at the worker cap of 8. The pool stays at **three** members. Local serial escape hatch:
-`python -m pytest tests -q -p no:xdist`. Parallel-safety: Docker test networks are already unique per process;
-listen ports use `port=0`; data dirs stay under `tmp_path`. No serial-only xdist marks were required.
-
-### Cross-job isolation
-
-Jobs must not share a checkout or venv (enforced by separate install dirs). Tests use `tmp_path` / `port=0` and do
-not read `HARNESS_HOME` or the live daemon data dir. The live Docker networks `harness-sandbox` / `harness-egress`
-belong to the production daemon; pytest uses per-job names `harness-test-sbx-<pid>-<id>` and
-`harness-test-egress-<pid>-<id>`. Session containers are `harness-<10-hex-id>`. Remaining shared host resources that
-are **read-only** or out of pytest control: the Docker engine itself and the `agent-harness-sandbox:py312` image tag.
+and repeat with `-2` and `-3`. Parallel-safety still holds for the hosted `-n 4 --dist loadfile` run: Docker test
+networks are unique per process, listen ports use `port=0`, and data dirs stay under `tmp_path`. Local serial escape
+hatch: `python -m pytest tests -q -p no:xdist`.
 
 ## Tower runner
 
