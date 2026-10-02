@@ -163,6 +163,14 @@ class BackupConfig:
 
 
 @dataclass
+class TelemetryConfig:
+    """OpenTelemetry traces (#259, docs/observability.md). Off unless `otlp_endpoint` is set."""
+    otlp_endpoint: str = ""        # OTLP/HTTP traces URL on loopback or the tailnet, e.g. http://127.0.0.1:4318/v1/traces
+    service_name: str = "agent-harness"
+    trace_url_template: str = ""   # optional Grafana Explore URL with a {trace_id} placeholder, for the Info tab
+
+
+@dataclass
 class MemoryLibraryConfig:
     """The user's memory library for agents (memory_library.py): reads, approved writes, and the agent profile."""
     enabled: bool = False
@@ -428,6 +436,7 @@ class Config:
     runners: dict[str, RunnerConfig] = field(default_factory=dict)
     gpu_guard: GpuGuardConfig = field(default_factory=GpuGuardConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
     web: WebConfig = field(default_factory=WebConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
@@ -820,6 +829,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         runners=runners,
         gpu_guard=gpu_guard,
         backup=backup,
+        telemetry=TelemetryConfig(**(raw.get("telemetry") or {})),
         memory_library=memory_library,
         web=web,
         github=GitHubConfig(**(raw.get("github") or {})),

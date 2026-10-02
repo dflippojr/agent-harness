@@ -9,6 +9,7 @@ import { compareTargets, pickDefaultBackend, runnerStateText } from "../harness/
 import { CRON_PRESETS, cronLabel, newJobDefaults, whenText } from "../harness/web/lib/jobs.mjs";
 import { mountJobs } from "../harness/web/pages/jobs.mjs";
 import { approvalWhat, toolSummaryText } from "../harness/web/lib/tools.mjs";
+import { traceInfo } from "../harness/web/lib/trace.mjs";
 
 const failures = [];
 const eq = (label, got, want) => {
@@ -114,6 +115,13 @@ const eq = (label, got, want) => {
   eq("newJobDefaults homelab", newJobDefaults([{ name: "homelab" }]).project, "homelab");
   eq("newJobDefaults scratch", newJobDefaults([]).project, "scratch");
   eq("mountJobs views", Object.keys(mountJobs({})).sort(), ["viewJob", "viewJobs"]);
+  const id = "0af7651916cd43dd8448eb211c80319c";
+  eq("trace off", traceInfo({ trace_id: "" }), null);
+  eq("trace missing", traceInfo({}), null);
+  eq("trace bare id", traceInfo({ trace_id: id }), { id, url: "" });
+  eq("trace link", traceInfo({ trace_id: id, trace_url: `https://grafana.tail/explore?t=${id}` }),
+    { id, url: `https://grafana.tail/explore?t=${id}` });
+  eq("trace unsafe link", traceInfo({ trace_id: id, trace_url: "javascript:alert(1)" }), { id, url: "" });
 }
 
 if (failures.length) {

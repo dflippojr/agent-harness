@@ -28,6 +28,8 @@ class Completion:
     completion_tokens: int = 0
     prompt_tps: float = 0.0
     gen_tps: float = 0.0
+    prompt_ms: float = 0.0   # llama.cpp timings: prompt processing and decode wall time
+    decode_ms: float = 0.0
     cache_tokens: int | None = None
     _saw_prompt_progress: bool = field(default=False, repr=False, compare=False)
 
@@ -57,6 +59,8 @@ async def _apply_chunk(chunk: dict, out: Completion, calls: dict[int, dict],
     if timings:
         out.prompt_tps = timings.get("prompt_per_second", 0.0)
         out.gen_tps = timings.get("predicted_per_second", 0.0)
+        out.prompt_ms = timings.get("prompt_ms", 0.0)
+        out.decode_ms = timings.get("predicted_ms", 0.0)
     for choice in chunk.get("choices") or []:
         await _apply_choice(choice, out, calls, on_delta)
 

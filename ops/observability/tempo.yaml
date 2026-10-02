@@ -1,0 +1,22 @@
+# Grafana Tempo for agent-harness session traces (#259). Single-binary, local storage.
+# Receives OTLP/HTTP from the harness on :4318 and serves queries to Grafana on :3200.
+# Retention and sampling are left at Tempo's defaults (out of scope for #259).
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318   # published on 127.0.0.1 only by the compose snippet
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks

@@ -90,7 +90,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-repomap.txt pytest-cov pytest-xdist
+          python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt pytest-cov pytest-xdist
 
       # pytest-cov and pytest-xdist are CI extras (not in requirements.txt).
       # Fixed -n 4 --dist loadfile: hosted windows-latest has 4 vCPUs; do not

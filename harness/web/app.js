@@ -29,6 +29,7 @@ import { escapeHtml, md } from "./lib/markdown.mjs";
 import { settingValueText, settingMeta, lastUpdateText, compatibilityText, lastSeenText, recoveryNote } from "./lib/settings-text.mjs";
 import { profileIconHidden, sessionJumpHidden } from "./lib/layout.mjs";
 import { protocolMismatch } from "./lib/compat.mjs";
+import { traceInfo } from "./lib/trace.mjs";
 import { withTaint } from "./lib/taint.mjs";
 import { mountJobs } from "./pages/jobs.mjs";
 
@@ -2543,8 +2544,13 @@ function viewInfo(s) {
   if (frozen.length) {
     rows.push(["Skills", frozen.map((sk) => `${sk.slug} v${sk.version} (${(sk.content_hash || "").slice(0, 12)})`).join(", ")]);
   }
+  const trace = traceInfo(s);
+  const traceRow = trace && h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
+    h("span", { class: "muted" }, "Trace"),
+    trace.url ? h("a", { href: trace.url, target: "_blank", rel: "noopener", style: "overflow-wrap:anywhere;text-align:right" }, trace.id)
+      : copyBox(trace.id));
   append($app, h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
-    h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v))))),
+    h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v)))), traceRow),
   h("button", { class: "btn", onclick: () => downloadDaemonFile(`/sessions/${s.id}/transcript`, `${s.id}.md`) },
     "Download Markdown transcript"));
 }

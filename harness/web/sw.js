@@ -1,6 +1,6 @@
 // Service worker: caches the app shell so the app opens instantly (and shows a clear offline state).
 // API responses are never cached: session state must always be live.
-const BUILD_ID = "2026.10.02.3";
+const BUILD_ID = "2026.10.02.4";
 const SHELL = `harness-shell-${BUILD_ID}`;
 // Every module app.js loads is listed explicitly (tests/test_web_sw_assets.py fails on an omission), so the whole
 // module graph is served network-first and cached together for offline use.
@@ -18,6 +18,7 @@ const ASSETS = [
   "/lib/targets.mjs",
   "/lib/tools.mjs",
   "/pages/jobs.mjs",
+  "/lib/trace.mjs",
 ];
 
 self.addEventListener("install", (event) => {
