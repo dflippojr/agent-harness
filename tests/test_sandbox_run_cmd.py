@@ -149,6 +149,7 @@ def test_run_cmd_returns_when_detached_child_holds_the_pipe(tmp_path, monkeypatc
         assert pidfile.exists(), "background child never wrote its pid"
         pid = int(pidfile.read_text().strip())
         assert code == 0, err
+        assert "parent-done" in out, f"parent's output was lost: {out!r}"
         # The mechanism: both pumps returned before run_cmd did, though the grandchild still holds the pipe. Without
         # the unblock they stay in read() and run_cmd gives up on them after two 10 s joins.
         assert len(finished) == 2, f"pump join leaked: {2 - len(finished)} pump(s) still reading"
