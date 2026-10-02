@@ -132,14 +132,14 @@ class CanaryRunner:
         sid = s["id"]
         # Everything up to the first await runs before the session's task does: the workspace is ready when it starts.
         m.scheduler.low_priority.add(sid)
-        if kind == "web":
-            m.runner.web_overrides[sid] = web
-        else:
-            baseline = self._prepare_hard(task, Path(s["workspace"]))
-            run = dict(m.db.get_session(sid)["run"], max_turns=task.max_turns)
-            m.db.update_session(sid, run=run)
-        limit = task.wall_limit if kind == "hard" else 1500
         try:
+            if kind == "web":
+                m.runner.web_overrides[sid] = web
+            else:
+                baseline = self._prepare_hard(task, Path(s["workspace"]))
+                run = dict(m.db.get_session(sid)["run"], max_turns=task.max_turns)
+                m.db.update_session(sid, run=run)
+            limit = task.wall_limit if kind == "hard" else 1500
             while m.db.get_session(sid)["status"] not in DONE:
                 await self.sleep(1 if self.poll > 1 else self.poll)
                 if self.clock() - started > limit:
@@ -162,9 +162,20 @@ class CanaryRunner:
                     "status": final["status"], "turns": totals.get("turns", 0),
                     "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(self.clock() - started, 1),
                     "suspended": suspended}
+        except BaseException:  # setup failed (Docker down) or the run was cancelled: leave no canary on the GPU
+            await self._stop(sid)
+            raise
         finally:
             m.scheduler.low_priority.discard(sid)
             m.runner.web_overrides.pop(sid, None)
+
+    async def _stop(self, sid: str) -> None:
+        m = self.m
+        if m.db.get_session(sid)["status"] in DONE:
+            return
+        await m.cancel(sid)
+        if m.db.get_session(sid)["status"] not in DONE:  # cancelled before its task ever ran: nothing marked it
+            m.runner.set_status(sid, "cancelled", stop_reason="cancelled")
 
 
 def _missing(task_id: str, repeat: int, status: str) -> dict:

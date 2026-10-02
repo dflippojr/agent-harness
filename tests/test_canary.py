@@ -333,6 +333,40 @@ def test_a_suspended_task_restarts_and_the_cap_records_timeout(tmp_path):
     run(body())
 
 
+def test_hard_setup_failure_stops_the_spawned_session_and_clears_low_priority(tmp_path):
+    from bakeoff.canary import CanaryRunner
+    from bakeoff.tasks_hard import HARD_TASKS
+    from harness.llm import Completion
+    from harness.manager import Manager
+    from test_daemon import Script, make_cfg
+    task = next(t for t in HARD_TASKS if t.id == "merge_conflict")
+    seen: list[str] = []
+
+    async def body():
+        cfg = make_cfg(tmp_path)
+        m = Manager(cfg, chat=Script([Completion(content="done")]))
+        await m.start(maintenance=False)
+
+        def docker_down(t, ws):
+            seen.extend(m.scheduler.low_priority)  # the session was already spawned when setup runs
+            raise RuntimeError("Cannot connect to the Docker daemon")
+        try:
+            runner = CanaryRunner(m, cfg.canary, tmp_path, {"repeats": 1, "hard": [task], "web": []},
+                                  prepare_hard=docker_down)
+            try:
+                await runner.run("sha")
+                raise AssertionError("setup error must reach the nightly (recorded blocked)")
+            except RuntimeError:
+                pass
+            assert len(seen) == 1
+            assert m.db.get_session(seen[0])["status"] == "cancelled"
+            assert not m.tasks and m.scheduler.holder is None and not m.scheduler.low_priority
+        finally:
+            await m.stop()
+            m.db.close()
+    run(body())
+
+
 def test_suspended_on_every_attempt_is_excluded_and_never_alerts(tmp_path):
     async def body():
         m = FakeManager()
