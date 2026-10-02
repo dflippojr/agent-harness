@@ -554,3 +554,41 @@ def test_a_failed_quota_check_after_keeping_does_not_fail_the_turn(tmp_path, mon
         assert_not_checkpointed(m, s)
 
     asyncio.run(body())
+
+
+def test_a_write_that_trips_the_quota_stop_is_still_checkpointed(tmp_path, monkeypatch):
+    from harness.runner import Runner
+
+    async def over(self, sid):                                       # the write put the session over its quota
+        await self.aset_status(sid, "failed", stop_reason="quota_exceeded: test")
+        return True
+    monkeypatch.setattr(Runner, "_over_quota", over)
+    script = Script([Completion(tool_calls=[call("write_file", 0, path="big.bin", content="x" * 100)]),
+                     Completion(content="never reached")])
+
+    async def body():
+        m, s = await started(tmp_path, script=script)
+        sid = s["id"]
+        assert s["status"] == "failed" and (Path(s["workspace"]) / "big.bin").exists()
+        assert [c["turn"] for c in m.db.checkpoints(sid)] == [1]
+        assert [e.get("turn") for e in events(m, sid, "checkpoint")] == [1]
+        sha = m.db.checkpoints(sid)[0]["sha"]
+        store = m.runner.checkpointer.store(s)
+        assert "big.bin" in store._git(None, None, "ls-tree", "-r", "--name-only", sha).out
+
+    asyncio.run(body())
+
+
+def test_a_mutating_call_the_policy_blocked_is_not_checkpointed(tmp_path, monkeypatch):
+    from harness.policy import DENY, Decision
+    from harness.runner import Runner
+    monkeypatch.setattr(Runner, "_decide", lambda self, s, name, args: Decision(DENY, "test"))
+    script = Script([Completion(tool_calls=[call("write_file", 0, path="app.py", content="VALUE = 2\n")]),
+                     Completion(content="All done.")])
+
+    async def body():
+        m, s = await started(tmp_path, script=script)
+        assert s["status"] == "done"
+        assert m.db.checkpoints(s["id"], hidden=None) == [] and events(m, s["id"], "checkpoint") == []
+
+    asyncio.run(body())

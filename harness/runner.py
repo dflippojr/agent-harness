@@ -1501,11 +1501,10 @@ class Runner:
         model = self.cfg.models[s["model"]]
         # Parallel reads can overflow the window in one turn, so all results of a turn share one budget.
         budget = int(0.35 * model.context_tokens * s["run"].get("chars_per_token", 3.0))
-        mutated = False
+        mutated: list[str] = []     # mutating tools that ran this turn (or started to), whatever their outcome
         try:
             for i, call in enumerate(pending):
-                done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget)
-                mutated = mutated or (used is not None and call["function"].get("name") in MUTATING_TOOLS)
+                done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget, mutated)
                 if done is not None:
                     return done
                 if used is not None:
@@ -1529,13 +1528,16 @@ class Runner:
                 await self.bus.aemit(sid, "checkpoint", event)
 
     async def _resolve_call(self, s: dict, call: dict, rest: list[dict], executing: dict,
-                            budget: int) -> tuple[bool | None, int | None]:
+                            budget: int, mutated: list[str]) -> tuple[bool | None, int | None]:
         """Run one tool call. Returns (done, used): done is True/False when the turn ends there (None to go on),
-        used is the output length that counts against the turn's budget (None when nothing ran)."""
+        used is the output length that counts against the turn's budget (None when nothing ran). A mutating tool
+        is added to `mutated` as it starts, so a quota stop, an error or a cancel after it still checkpoints."""
         sid = s["id"]
         fn = call.get("function") or {}
         name = fn.get("name", "")
         if executing.get("id") == call["id"]:
+            if name in MUTATING_TOOLS:                          # it may have changed files before it was cut off
+                mutated.append(name)
             await self._record_result(sid, call, name, INTERRUPTED, ok=False)
             return None, None
         try:
@@ -1575,6 +1577,8 @@ class Runner:
             output = await self._authorize(s, call, name, args, ws)
             executed = output is None
             if executed:
+                if name in MUTATING_TOOLS:
+                    mutated.append(name)
                 output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
             span.set({"harness.ok": executed, "harness.output_chars": len(output)})
         if executed and name in ("run_shell", "git_clone", "write_file", "generate_image") \
