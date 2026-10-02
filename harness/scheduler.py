@@ -33,8 +33,15 @@ class GpuScheduler:
         return out
 
     def real_waiting(self) -> bool:
-        """True while a session that isn't low priority is queued for the slot."""
-        return any(sid not in self.low_priority for sid in self._waiters)
+        """True while a session that isn't low priority is queued and would be granted the slot. A waiter that
+        isn't eligible (a member at their running cap) can't use the slot, so the canary doesn't step aside for it."""
+        return any(self._real_grantable(sid, fut) for sid, fut in self._waiters.items())
+
+    def _grantable(self, sid: str) -> bool:
+        return self._eligible is None or self._eligible(sid)
+
+    def _real_grantable(self, sid: str, fut: asyncio.Future) -> bool:
+        return sid not in self.low_priority and not fut.done() and self._grantable(sid)
 
     def idle(self) -> bool:
         """Slot free, nobody queued, queue open."""
@@ -107,11 +114,11 @@ class GpuScheduler:
             nxt, fut = self._waiters.popitem(last=False)
             if fut.done():
                 continue
-            if self._eligible is not None and not self._eligible(nxt):
+            if not self._grantable(nxt):
                 skipped[nxt] = fut
                 continue
-            if nxt in self.low_priority and any(w not in self.low_priority for w in self._waiters):
-                skipped[nxt] = fut  # a real session is queued behind it: it goes first
+            if nxt in self.low_priority and any(self._real_grantable(w, f) for w, f in self._waiters.items()):
+                skipped[nxt] = fut  # a real session that can run is queued behind it: it goes first
                 continue
             self.holder = nxt
             fut.set_result(None)

@@ -264,6 +264,47 @@ def test_a_real_session_queued_behind_the_canary_is_granted_first():
     run(body())
 
 
+
+def _gate_host(sch: GpuScheduler) -> SimpleNamespace:
+    host = SimpleNamespace(scheduler=sch, guard=None, yields={}, acquires=0)
+
+    async def _acquire(sid, front=False):
+        host.acquires += 1
+        if host.acquires > 3:
+            raise AssertionError("the gate is spinning on release/reacquire")
+        await sch.acquire(sid, front=front)
+    host._acquire = _acquire
+    return host
+
+
+def test_an_ineligible_member_waiter_neither_preempts_nor_starves_the_canary():
+    async def body():
+        capped = {"member2"}  # a household member at max_running: queued, never granted while capped
+        sch = GpuScheduler(eligible=lambda sid: sid not in capped)
+        sch.low_priority.add("canary")
+        await sch.acquire("real0")
+        c = asyncio.create_task(sch.acquire("canary"))
+        member = asyncio.create_task(sch.acquire("member2"))
+        await asyncio.sleep(0)
+        sch.release("real0")
+        await asyncio.sleep(0)
+        assert sch.holder == "canary" and c.done()  # not starved behind a waiter that can't run
+        assert not sch.real_waiting()
+        host = _gate_host(sch)
+        await asyncio.wait_for(Runner._gpu_gate(host, "canary"), 1)  # no preemption, no spin
+        assert sch.holder == "canary" and host.yields == {} and host.acquires == 0
+        # the member's cap frees up: now it is a real session that would be granted, and it goes first
+        capped.clear()
+        sch.recheck()
+        assert sch.real_waiting()
+        gate = asyncio.create_task(Runner._gpu_gate(host, "canary"))
+        await member
+        assert sch.holder == "member2" and host.yields == {"canary": 1}
+        sch.release("member2")
+        await gate
+        assert sch.holder == "canary"
+    run(body())
+
 # run start conditions and suspend/restart, against a fake manager
 class FakeManager:
     def __init__(self, guard_state="clear"):
