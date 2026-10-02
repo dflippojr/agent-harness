@@ -95,8 +95,8 @@ background and the promises made to app builders are in `docs/app-api.md` → "S
   - Host → CLI, deny: `... "response":{"behavior":"deny","message":"why"}`.
   - Read-only commands (`echo`, Read/Grep/Glob) never produce a request in `default` mode.
 - `--permission-mode default|acceptEdits|plan|...`, `--model`, `--append-system-prompt` (app context),
-  `--resume <session_id>` (follow-up messages after a daemon restart), `--max-turns`, and `--mcp-config` (to expose
-  harness daemon tools such as web_search, memory or app tools later).
+  `--resume <session_id>` (follow-up messages after a daemon restart), `--max-turns`, and `--mcp-config` (exposes
+  the harness daemon tools; see "Harness tools over MCP" below).
 - Events seen in a real run:
   - `system/init`: session_id, tools, model
   - **`rate_limit_event`**: `rate_limit_info` with `status` (e.g. `allowed_warning`), `rateLimitType`,
@@ -176,6 +176,32 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
 - The CLI's own sandbox stays enabled where it has one (Codex `workspace-write`, Cursor `--sandbox enabled`), inside
   the container.
 
+### Harness tools over MCP (#300, Claude Code only)
+
+- **What:** a hosted Claude Code session can call `web_search`, `web_fetch`, `session_search`, `session_read`, the
+  memory library tools, `generate_image` and app-registered tools as `mcp__harness__<tool>`, as far as the project
+  and `app.capabilities` enable them for the native loop. Remote control and skills are not served.
+- **Network path:** a per-session relay sidecar (`harness-<sid>-mcp`, `harness/mcp_relay.js` run by `node` from the
+  CLI image, `--cap-drop ALL`, no published ports) joins `harness-cli-claude` and listens on `127.0.0.1:8790`. The
+  Claude container runs with `--network container:harness-<sid>-mcp`, so it shares the relay's namespace. It keeps
+  the same network, proxy and allowlist, and it is the only container that can reach that loopback port. The relay
+  hands each HTTP request to the daemon as a JSON line over its stdio pipe. The daemon opens no listener, so there
+  is nothing on the host for a container to reach. The relay stops and is removed with the session's CLI.
+- **Token:** minted per CLI start (`McpTokens`), kept in daemon memory only, and revoked when the CLI stops. Claude
+  gets it as `-e HARNESS_MCP_TOKEN` (name only, value from the docker client's environment). `--mcp-config`
+  refers to it as `${HARNESS_MCP_TOKEN}`. The endpoint rejects a missing or revoked token (401) and another
+  session's token (403). `--strict-mcp-config` ignores any `.mcp.json` in the workspace.
+- **Policy:** `Policy.decide` treats `mcp__harness__<tool>` as `<tool>`, so project rules (written with either name),
+  the defaults and `ALWAYS_ASK` apply unchanged. Other `mcp__*` servers are denied. Claude Code asks through
+  `can_use_tool` before each MCP call. An allowed or approved call leaves a one-use grant (tool, args, tool_use_id),
+  and the endpoint refuses a `tools/call` without one, so the approval gate holds even if a permission mode skips
+  the prompt. Memory-library approvals carry the diff as for native calls. Successful MCP results taint the session
+  like the native tools (#262). Each run is wrapped in an `mcp_tool_call` span.
+- **Transcript:** the calls and results are Claude's own `tool_use`/`tool_result` records, so they show as ordinary
+  tool events named `mcp__harness__<tool>`.
+- **Off switch:** `backends.claude.mcp: false`. Codex and Cursor get no MCP endpoint until their config mechanism
+  and approval path are verified on the tower.
+
 ### Login (requirement 1)
 
 - **Codex:** `codex login --device-auth` inside the auth volume. The daemon shows the URL and the *user code* on the
@@ -196,7 +222,7 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
 | Codex | app-server approval requests (command, file change) → the same path. Fallback if app-server proves unstable: `codex exec --sandbox workspace-write` with approvals off, contained by the Docker sandbox plus branch review. |
 | Cursor | No host approvals exist. **Decided:** `--force` inside the Docker sandbox (egress allowlist: Cursor's domains only), with changes landing only through branch review. |
 
-Policy rules gain CLI tool names (`Bash`, `Edit`, `Write`, `WebFetch`, `mcp__*`, Codex `exec_command` /
+Policy rules gain CLI tool names (`Bash`, `Edit`, `Write`, `WebFetch`, `mcp__harness__<tool>`, Codex `exec_command` /
 `apply_patch`), so the existing project rules format keeps working.
 
 ### Usage, limits and billing (requirement 5)

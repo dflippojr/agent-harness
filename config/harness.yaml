@@ -82,6 +82,7 @@ backends:
     proxy: http://harness-egress-claude:8888
     volume: harness-auth-claude
     network: harness-cli-claude
+    mcp: true                     # harness tools over MCP via a per-session relay sidecar (#300)
   codex:
     enabled: true
     image: agent-harness-cli:1
