@@ -880,6 +880,16 @@ class Manager:
                                     "fix them or dismiss each with a reason.",
                                code="secret_findings", details={"findings": n, "rules": rules})
 
+    async def _on_remote(self, s: dict, repos: list[dict], finding: dict) -> bool:
+        """Whether a commit-only finding's commit is at or before the remote branch's tip: its remote-tracking ref,
+        or (session repo) a head the harness pushed, since a member GitHub push leaves no tracking ref."""
+        repo = next((r for r in repos if r["path"] == finding["repo"]), {})
+        branch = s["branch"] if finding["repo"] == "." else repo.get("branch", "")
+        tips = [f"refs/remotes/origin/{branch}"] if branch and branch != "HEAD" else []
+        if finding["repo"] == ".":
+            tips += self.db.pushed_heads(s["id"])
+        return await asyncio.to_thread(published, Path(s["workspace"]) / finding["repo"], finding["commit"], tips)
+
     async def secret_findings_fix(self, ref: str) -> dict:
         """Ask agent to fix (rule and place, never the value): one draft review comment per open finding in the diff;
         for a value only in the branch's earlier commits, a message now asking the agent to rewrite base..HEAD. A
@@ -896,13 +906,7 @@ class Manager:
             if f["dismissed"]:
                 continue
             if "commit" in f:  # no line in the diff to comment on: the branch history has to change
-                repo = next((r for r in data["repos"] if r["path"] == f["repo"]), {})
-                branch = s["branch"] if f["repo"] == "." else repo.get("branch", "")
-                tips = [f"refs/remotes/origin/{branch}"] if branch and branch != "HEAD" else []
-                if f["repo"] == ".":
-                    tips += self.db.pushed_heads(sid)
-                on_remote = await asyncio.to_thread(published, Path(s["workspace"]) / f["repo"], f["commit"], tips)
-                (pushed if on_remote else rewrite).append(f)
+                (pushed if await self._on_remote(s, data["repos"], f) else rewrite).append(f)
                 continue
             if any(d["repo"] == f["repo"] and d["path"] == f["file"] and d["side"] == "new"
                    and d["start_line"] == f["line"] and d["comment"].startswith(SECRET_FIX) for d in drafts):
