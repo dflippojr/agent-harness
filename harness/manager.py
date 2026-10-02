@@ -54,6 +54,7 @@ class CreateOptions:
     skill_missing: str = "error"
     kind: str = "agent"
     compare_group: str = ""
+    taint: list | None = None  # untrusted sources the session starts with (taint.py)
 REMOTE_WORKSPACE_ROOT = "~/.agent-harness/workspaces"  # where runners keep session workspaces (display only)
 MEMORY_PROMPT = ("User context: memory_index, memory_search, and memory_read give read access to part of the "
                  "user's personal memory library (projects, work, home, tastes). Check it when the task depends on "
@@ -472,6 +473,7 @@ class Manager:
             "app_defaults": dict(defaults) if app else {},
             "job_id": opts.job_id, "owner_id": owner_id, "kind": opts.kind, "compare_group": opts.compare_group,
             "skills": self.skills.freeze_public(frozen) if self.skills is not None else [],
+            "taint": list(opts.taint or []),
         }
         self._insert_created(session, app, tools, opts.job_id, prompt)
         self._spawn(sid)
@@ -1276,6 +1278,16 @@ class Manager:
         if event:
             event.set()
         return public_approval(self.db.get_approval(approval_id))
+
+    def clear_taint(self, ref: str) -> dict:
+        """Owner action: forget the untrusted sources this session has read, and record that it happened."""
+        sid = self.resolve_id(ref)
+        s = self.db.get_session(sid)
+        cleared = list(s.get("taint") or [])
+        with self.db.tx():
+            self.db.update_session(sid, taint=[])
+            self.bus.emit(sid, "taint_cleared", {"cleared": [t["origin"] for t in cleared]})
+        return self.db.get_session(sid)
 
     async def cancel(self, ref: str) -> dict:
         sid = self.resolve_id(ref)
