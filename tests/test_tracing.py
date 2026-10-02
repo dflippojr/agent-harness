@@ -16,6 +16,7 @@ from harness.llm import Completion
 from harness.manager import Manager
 from harness.warmup import READY
 from test_daemon import Script, call, make_cfg, wait_status
+from waits import timeout_scale
 
 ROOT = Path(__file__).resolve().parent.parent
 SENTINEL = "zq-sentinel-7f3a91"
@@ -47,7 +48,9 @@ def _traced_manager(cfg, chat):
 # The longest un-spanned stretch a parent may have. Real work in these tests (a 150 ms model call, 200-300 ms waits)
 # is far longer, so leaving any of it outside a child span fails; the few-ms bookkeeping between spans doesn't,
 # however slow the runner. A summed-coverage ratio did fail there: many sub-5 ms gaps added up (#312).
-MAX_GAP_NS = 50_000_000
+# It scales with the CI factor from waits.py (50 ms locally, 250 ms on CI/coverage): hosted runners showed 119-147 ms
+# bookkeeping gaps (#333). A 1 s gap still fails there.
+MAX_GAP_NS = int(50_000_000 * max(1.0, timeout_scale() * 1.25))
 # Some span edges come from float-second timestamps (about 256 ns of precision at today's epoch), so a shared edge
 # can land a few hundred ns either way.
 EDGE_NS = 1_000
