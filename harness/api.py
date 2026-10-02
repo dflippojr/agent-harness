@@ -157,6 +157,7 @@ class ImageUpscaleRequest(BaseModel):
 
 class GpuHoldRequest(BaseModel):
     duration_seconds: int | None = None
+    force: bool = False   # load: go ahead although available RAM is under the guard's threshold
 
 
 class ProfileUpdate(BaseModel):
@@ -932,20 +933,59 @@ async def get_image(iid: str, request: Request):
     return FileResponse(path, media_type="image/png", headers=headers)
 
 
-# GPU contention guard
+# Resource guard (formerly the GPU guard; /gpu stays as an alias). docs/resource-guard.md
+async def _resources_status(m) -> dict:
+    from .resources import model_status
+    status = m.guard.status() if m.guard else {"enabled": False, "state": "clear", "signals": []}
+    return {**status, "model": await model_status(m),
+            "load_now_default_minutes": m.cfg.gpu_guard.load_now_default_minutes}
+
+
 @api_router.get("/gpu")
+@api_router.get("/resources")
 async def gpu(request: Request):
-    m = mgr(request)
-    return m.guard.status() if m.guard else {"enabled": False, "state": "clear", "signals": []}
+    return await _resources_status(mgr(request))
+
+
+@api_router.get("/resources/diagnostics")
+async def resources_diagnostics(request: Request):
+    """One reading for Actions -> Resources (VRAM, RAM, GPU/CPU load, model and guard state). Not polled."""
+    from .resources import diagnostics
+    return await diagnostics(mgr(request))
+
+
+async def _load_now(m, body: GpuHoldRequest | None) -> None:
+    if not m.cfg.modules.local_model:
+        raise HarnessError(400, "the local model is disabled by this service profile")
+    if m.guard.active or m.guard.manual:
+        raise HarnessError(409, "the GPU is held; turn the hold off first")
+    minutes = m.cfg.gpu_guard.load_now_default_minutes
+    duration = body.duration_seconds if body and body.duration_seconds else minutes * 60
+    if not 60 <= duration <= 24 * 60 * 60:
+        raise HarnessError(400, "duration_seconds must be between 60 and 86400")
+    if m.runner.memory_low() and not (body and body.force):
+        from .gpu_guard import describe_memory
+        raise HarnessError(409, f"low memory: {describe_memory(m.guard.memory.status())}; loading the model "
+                                "takes about 14 GB more. Send force to load anyway", code="low_memory")
+    await m.warmer.load_now(m.cfg.models[m.cfg.default_model], duration)
 
 
 @api_router.post("/gpu/{action}")
+@api_router.post("/resources/{action}")
 async def gpu_action(action: str, request: Request, body: GpuHoldRequest | None = None):
-    """pause: hold the GPU for other uses until resumed. resume: reload now, ignoring the current triggers."""
+    """pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the
+    model stays unloaded until something needs it). load: load the model now and keep it loaded for
+    duration_seconds. unload: unload it now without holding the queue."""
     m = mgr(request)
     if m.guard is None:
-        raise HarnessError(400, "the GPU guard is disabled in config/harness.yaml")
-    if action == "pause":
+        raise HarnessError(400, "the resource guard is disabled in config/harness.yaml")
+    if action == "load":
+        await _load_now(m, body)
+    elif action == "unload":
+        m.warmer.unpin()
+        if not await m.guard.unload():
+            raise HarnessError(409, "a model turn is running or the GPU is held; try again when it's idle")
+    elif action == "pause":
         duration = body.duration_seconds if body else None
         if duration is not None and not 1 <= duration <= 24 * 60 * 60:
             raise HarnessError(400, "duration_seconds must be between 1 and 86400")
@@ -956,7 +996,7 @@ async def gpu_action(action: str, request: Request, body: GpuHoldRequest | None 
         m.guard.resume(override_signals=not m.guard.manual)
     else:
         raise HarnessError(404, "unknown action")
-    return m.guard.status()
+    return await _resources_status(m)
 
 
 # Claude Code Remote Control servers (remote_control.py)

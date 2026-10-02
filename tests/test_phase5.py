@@ -456,7 +456,7 @@ def test_guard_startup_with_leftover_flag_resumes_when_clear():
     asyncio.run(body())
 
 
-def test_gpu_pause_notification_points_at_actions_gpu(tmp_path):
+def test_gpu_pause_notification_points_at_actions_resources(tmp_path):
     from harness.db import Database
     from harness.notify import Notifier
     from test_phase7 import seed
@@ -471,7 +471,7 @@ def test_gpu_pause_notification_points_at_actions_gpu(tmp_path):
         "data": {"reason": "Hades.exe", "resume_after_seconds": 180},
     })
     assert note is not None
-    assert "Actions → GPU" in note["message"]
+    assert "Actions → Resources" in note["message"]
     assert "Settings" not in note["message"]
 
 
@@ -511,7 +511,7 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
         assert events(m, sid, "gpu_paused")[0]["reason"] == "Hades.exe"
         note = next(m.notifier.build(e) for e in m.db.events(sid) if e["type"] == "gpu_paused")
         assert note["title"].startswith("Paused for the GPU")
-        assert "Actions → GPU" in note["message"]
+        assert "Actions → Resources" in note["message"]
         assert "Settings" not in note["message"]
 
         # a follow-up while paused waits in the queue, then runs once the GPU is clear
