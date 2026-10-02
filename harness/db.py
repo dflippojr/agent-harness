@@ -10,6 +10,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .telemetry import TimedLock
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -515,7 +517,7 @@ class Database:
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         self._ensure_search_index_columns()
-        self.lock = threading.RLock()
+        self.lock = TimedLock()
         self._build_search_index()
 
     def close(self) -> None:

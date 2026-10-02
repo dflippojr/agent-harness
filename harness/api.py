@@ -24,6 +24,7 @@ from . import compat
 from . import config as config_mod
 from . import efficiency
 from . import google_signin
+from . import telemetry
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
 from .webgzip import WebGzipMiddleware
@@ -1760,9 +1761,13 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.manager = manager or Manager(config_mod.load())
+        telemetry.enable_asyncio_debug()
+        probe = telemetry.LoopLagProbe()
+        probe.start()
         await app.state.manager.start()
         yield
         await app.state.manager.stop()
+        await probe.stop()
 
     app = FastAPI(title="agent-harness", lifespan=lifespan)
     app.middleware("http")(guard)
