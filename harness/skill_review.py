@@ -275,7 +275,8 @@ class SkillReviewer:
 
     def _finish_review(self, job: dict, findings: dict) -> None:
         now = time.time()
-        with self.db.tx() as db:
+
+        def finish_review(db=self.db) -> None:
             latest = db.skill_proposal(job["proposal_id"])
             if latest is None:
                 db.update_skill_review_job(job["id"], status="error", error="proposal disappeared",
@@ -291,3 +292,4 @@ class SkillReviewer:
                 if db.update_skill_proposal(job["proposal_id"], expected_status=REVIEWABLE_STATUSES, **fields):
                     return
             db.update_skill_proposal(job["proposal_id"], review=findings, review_status="done")
+        self.db.write(finish_review)
