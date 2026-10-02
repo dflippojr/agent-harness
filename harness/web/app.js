@@ -2157,7 +2157,7 @@ async function viewSession(sid, tab, focusApproval) {
         btn.disabled = true;
         try {
           const s = await api(`/sessions/${sid}/checkpoints/${turn}/${path}`, { method: "POST", body });
-          if (path === "fork") go(`#/s/${s.id}`, true); else viewSession(sid);
+          if (path === "fork") go(`#/s/${s.id}`, true); else await viewSession(sid);
         } catch (err) { toast(err.message, 8000); btn.disabled = false; }
       };
       // Hosted CLI sessions keep their own state, which can't be truncated: Fork (with a transcript digest) only.
@@ -2166,11 +2166,11 @@ async function viewSession(sid, tab, focusApproval) {
       add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved `,
         local ? h("button", {
           class: "btn small", type: "button", title: "Restore the workspace and the agent's context to this point. Packages, processes and files outside the workspace are not undone.",
-          onclick: (ev) => confirm(`Rewind to checkpoint ${turn}? Later file changes are undone (the transcript keeps them).`) && act(ev.target, "rewind"),
+          onclick: (ev) => confirm(`Rewind to checkpoint ${turn}? Later file changes are undone (the transcript keeps them).`) && void act(ev.target, "rewind"),
         }, "Rewind here") : null, " ",
         h("button", {
           class: "btn small", type: "button", title: "Start a new session from this point, on its own branch",
-          onclick: (ev) => { const prompt = window.prompt("Instruction for the forked session"); if (prompt?.trim()) act(ev.target, "fork", { prompt }); },
+          onclick: (ev) => { const prompt = window.prompt("Instruction for the forked session"); if (prompt?.trim()) void act(ev.target, "fork", { prompt }); },
         }, "Fork from here")));
     },
     rewound: (e) => add(h("p", { class: "note" }, `Rewound to checkpoint ${e.data.turn}: the workspace and context are as they were then; later turns above are kept for the record`)),
