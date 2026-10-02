@@ -192,6 +192,13 @@ backup:
   image_archive_keep_days: 0       # 0 = keep forever; deletion is still an explicit owner action
   image_archive_min_free_gb: 1
 
+# OpenTelemetry traces, one per session (harness/telemetry.py, docs/observability.md). Off while otlp_endpoint is
+# empty. Needs `pip install -r requirements-telemetry.txt`. Point it at loopback/tailnet only (Tempo's OTLP/HTTP port).
+telemetry:
+  otlp_endpoint: ""                # e.g. http://127.0.0.1:4318/v1/traces
+  service_name: agent-harness
+  trace_url_template: ""           # e.g. a Grafana Explore URL containing {trace_id}
+
 # Memory library for agents (harness/memory_library.py). The daemon keeps its own clone and pulls it at most every
 # refresh_minutes. Only these categories are visible; sensitive ones (health, emotions, feelings, finance,
 # relationships, identity) and the top-level index, inbox, and cross-category capsules are not.

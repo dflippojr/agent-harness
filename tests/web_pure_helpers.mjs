@@ -7,6 +7,7 @@ import { fmtSpan, fmtTokens, holdRemainingText, pluralize } from "../harness/web
 import { compatibilityText, lastSeenText, recoveryNote, settingValueText } from "../harness/web/lib/settings-text.mjs";
 import { compareTargets, pickDefaultBackend, runnerStateText } from "../harness/web/lib/targets.mjs";
 import { approvalWhat, toolSummaryText } from "../harness/web/lib/tools.mjs";
+import { traceInfo } from "../harness/web/lib/trace.mjs";
 
 const failures = [];
 const eq = (label, got, want) => {
@@ -101,6 +102,16 @@ const eq = (label, got, want) => {
   eq("backend hold", pickDefaultBackend([{ name: "local" }, { name: "claude" }], true), "claude");
   eq("backend no hold", pickDefaultBackend([{ name: "local" }, { name: "claude" }], false), "local");
   eq("backend none", pickDefaultBackend([], true), "local");
+}
+
+{
+  const id = "0af7651916cd43dd8448eb211c80319c";
+  eq("trace off", traceInfo({ trace_id: "" }), null);
+  eq("trace missing", traceInfo({}), null);
+  eq("trace bare id", traceInfo({ trace_id: id }), { id, url: "" });
+  eq("trace link", traceInfo({ trace_id: id, trace_url: `https://grafana.tail/explore?t=${id}` }),
+    { id, url: `https://grafana.tail/explore?t=${id}` });
+  eq("trace unsafe link", traceInfo({ trace_id: id, trace_url: "javascript:alert(1)" }), { id, url: "" });
 }
 
 if (failures.length) {

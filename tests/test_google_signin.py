@@ -403,7 +403,8 @@ def test_unreadable_acl_is_retried_not_cached(env, monkeypatch):
 
 
 def test_secret_inside_source_tree_refused(env):
-    env.cfg.google_signin.client_secret_file = str(gs.ROOT / "config" / "harness.yaml")
+    # any small regular file inside the repo; harness.yaml itself can outgrow SECRET_MAX_BYTES (checked first)
+    env.cfg.google_signin.client_secret_file = str(gs.ROOT / "requirements.txt")
     assert any("source tree" in p for p in gs.config_problems(env.cfg))
 
 

@@ -31,7 +31,7 @@ from .runner import (ACTIVE, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT,
                      new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
-from . import llm, projects, secret_scan
+from . import llm, projects, secret_scan, telemetry
 
 log = logging.getLogger("harness.manager")
 
@@ -137,6 +137,7 @@ class HarnessError(Exception):
 class Manager:
     def __init__(self, cfg: Config, db: Database | None = None, chat=llm.chat):
         self.cfg = cfg
+        telemetry.configure(cfg.telemetry)
         self.db = db or Database(cfg.db_path)
         require_owner_allowlist(cfg, self.db.member_count())
         self.bus = EventBus(self.db)
@@ -363,6 +364,7 @@ class Manager:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        telemetry.configure(None)  # flush pending spans
         if self._scanner_boot is not None:
             self.secret_scanner.cancelled.set()
             self._scanner_boot.cancel()
@@ -479,6 +481,9 @@ class Manager:
         run = new_run()
         run["max_turns"] = max_turns
         run["max_completion_tokens"] = max_tokens
+        trace = telemetry.tracer().new_trace()
+        if trace:  # created now so the session API shows it at once; the runner opens the root span
+            run["trace"] = {**trace, "started_at": now}
         session = {
             "id": sid, "project": project, "target": target, "model": model, "backend": backend,
             "effort": effort or "",
@@ -1349,6 +1354,10 @@ class Manager:
         out["context_used"] = (s.get("run") or {}).get("context_tokens", 0)
         out["context_limit"] = model.context_tokens if model else 0
         out["last_event_seq"] = self.db.last_event_seq(s["id"])
+        out["trace_id"] = ((s.get("run") or {}).get("trace") or {}).get("trace_id", "")
+        trace_url = telemetry.trace_url(self.cfg.telemetry.trace_url_template, out["trace_id"])
+        if trace_url:
+            out["trace_url"] = trace_url
         project = self.project_for_session(s)
         out["repo_kind"] = self._repo_kind(project)
         github = self._member_github_project(s, project)

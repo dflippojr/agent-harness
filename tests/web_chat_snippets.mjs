@@ -173,11 +173,17 @@ if (!html.includes("<pre><code>rm -rf /</code></pre>") || !html.includes("<pre><
 if (html.includes("<script>") || !html.includes("&lt;script&gt;")) fail(`fence content must stay escaped: ${html}`);
 // A fence opener followed by a long whitespace run and no closing fence must stay linear (Sonar S8786).
 // Compare 10x the input against a baseline instead of an absolute time: linear growth is about 10x, quadratic
-// about 100x, and an absolute limit flakes on a slow, loaded runner (#217).
+// about 100x, and an absolute limit flakes on a slow, loaded runner (#217). Each time is the median of five runs,
+// so one GC or JIT pause can't pass for quadratic growth (#312).
 const timeUnclosedFence = (n) => {
-  const t0 = performance.now();
-  md("```py" + " ".repeat(n) + "\n".repeat(n));
-  return performance.now() - t0;
+  const input = "```py" + " ".repeat(n) + "\n".repeat(n);
+  const times = [];
+  for (let i = 0; i < 5; i++) {
+    const t0 = performance.now();
+    md(input);
+    times.push(performance.now() - t0);
+  }
+  return times.sort((a, b) => a - b)[2];
 };
 timeUnclosedFence(1000); // warm up the regex engine
 const baseline = Math.max(timeUnclosedFence(10000), 5);
