@@ -243,6 +243,7 @@ First paint (the shell and boot splash) does not regress: the module graph is de
 code starts about 185 ms later on the throttled cold model, because the `lib/` imports are only discovered after `app.js`
 arrives (one extra round trip; `markdown.mjs -> snippets.mjs` adds no visible second one). Preload hints in `index.html`
 recover it fully. Per the #258 decision (preload only if first paint regresses) they are not added; the numbers are here
-so the trade-off can be revisited as `pages/` modules land. Warm and update loads are not re-measured here: they are
-served by the service worker, and every new module is in its `ASSETS`. This is not the out-of-repo Playwright script
+so the trade-off can be revisited as `pages/` modules land. Warm and update loads were not re-measured: the service
+worker is network-first and only falls back to its cache offline, so they make the same requests as a cold load. This
+is not the out-of-repo Playwright script
 used above, so compare the rows in this table with each other, not with the earlier tables.
