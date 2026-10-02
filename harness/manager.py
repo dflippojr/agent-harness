@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import secrets
@@ -17,7 +18,7 @@ from pathlib import Path
 from .bus import EventBus
 from . import review_comments
 from . import review_comments
-from .changes import workspace_changes
+from .changes import published, repo_diffs, workspace_changes
 from .maintenance import Maintenance
 from .image_archive import ImageArchive
 from .notify import Notifier
@@ -30,11 +31,13 @@ from .runner import (ACTIVE, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT,
                      new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
-from . import llm, projects
+from . import llm, projects, secret_scan
 
 log = logging.getLogger("harness.manager")
 
 TARGETS = ("tower", "macbook")
+SECRET_FIX = "Secret scan:"  # opens each Ask agent to fix draft (issue #263)
+MAX_DISMISS_REASON = 500
 ACCOUNT_DISABLED = "this household account is disabled"
 
 
@@ -80,6 +83,45 @@ def public_approval(a: dict | None) -> dict | None:
     return a and {k: v for k, v in a.items() if k != "token"}
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _secret_rewrite_message(findings: list[dict], bases: dict[str, str]) -> str:
+    """Ask agent to fix for values a later commit removed: rewrite the branch's own commits (issue #263)."""
+    places = "\n".join(f"- commit {f['commit']}{'' if f['repo'] == '.' else ' in ' + f['repo']}: {f['file']} line "
+                       f"{f['line']}, rule {f['rule']}" for f in findings)
+    ranges = ", ".join(sorted({f"{bases.get(f['repo']) or '<base>'}..HEAD"
+                               + ('' if f['repo'] == '.' else f" in {f['repo']}") for f in findings}))
+    return (f"{SECRET_FIX} earlier commits on this branch add a possible credential that a later commit removed, "
+            "so the working tree is clean but the branch history still has it and Push stays blocked (the values "
+            f"are not shown):\n{places}\n\nRewrite only this branch's own commits ({ranges}) so that no commit in "
+            "that range contains the value, keeping the rest of each commit's changes. Do it non-interactively, "
+            "for example `git rebase -i <base>` with a GIT_SEQUENCE_EDITOR script that marks each listed commit "
+            "`edit` (remove the value, `git commit --amend --no-edit`, `git rebase --continue`, resolving the "
+            "conflict with the commit that removed it) or with fixup commits and `--autosquash`. Never rewrite the "
+            "base commit or anything before it, never touch the base branch, and do not push. Read the value "
+            "from the environment or an untracked secret store instead, then check that no commit in the range "
+            "still adds it.")
+
+
+def _secret_fix_summary(drafted: int, already: int, rewrite: int, pushed: int) -> str:
+    """What Ask agent to fix did, for the toast and API clients."""
+    parts = []
+    if drafted:
+        parts.append(f"Drafted {_plural(drafted, 'review comment')}; send them to the agent.")
+    elif already:
+        parts.append("The findings in the diff already have draft comments; send them to the agent.")
+    if rewrite:
+        parts.append(f"Asked the agent to remove {_plural(rewrite, 'finding')} from the branch's earlier commits; "
+                     "Push stays blocked until no commit since the base contains them.")
+    if pushed:
+        parts.append(f"{_plural(pushed, 'finding')} {'is' if pushed == 1 else 'are'} in commits already on the "
+                     "remote branch: removing them would need a force-push, which the harness does not do, so "
+                     "dismiss them with a reason (and rotate the credential).")
+    return " ".join(parts) or "There are no open findings to fix."
+
+
 class HarnessError(Exception):
     def __init__(self, status: int, message: str, code: str = "", keys: dict | None = None,
                  details: dict | None = None):
@@ -111,6 +153,8 @@ class Manager:
         self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
         from .member_github import MemberGitHub
         self.github_auth = MemberGitHub(cfg, self.db)
+        self.secret_scanner = secret_scan.Scanner(secret_scan.tools_dir(cfg))
+        self._scanner_boot: asyncio.Task | None = None
         from .google_signin import GoogleSignin
         self.google_signin = GoogleSignin(self)
         self.runner.github_auth = self.github_auth
@@ -257,6 +301,8 @@ class Manager:
     # lifecycle
     async def start(self, maintenance: bool = True) -> None:
         self.notifier.start()
+        # Issue #263: fetch the pinned gitleaks if it's missing; push/merge wait for this, then fail closed.
+        self._scanner_boot = asyncio.create_task(self._bootstrap_scanner(), name="secret-scanner")
         if maintenance:
             self.maintenance.start()
         if self.guard is not None:
@@ -298,6 +344,10 @@ class Manager:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self._scanner_boot is not None:
+            self.secret_scanner.cancelled.set()
+            self._scanner_boot.cancel()
+            await asyncio.gather(self._scanner_boot, return_exceptions=True)
         await self.snippets.stop()
         await self.notifier.stop()
         await self.maintenance.stop()
@@ -749,8 +799,155 @@ class Manager:
         if s["workspace_removed"]:
             return {"repos": [], "removed": True}
         if s["target"] != "tower":
-            return await self.remote(s, "changes", {"base_commit": s["base_commit"]}, timeout=120)
-        return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None)
+            data = await self.remote(s, "changes", {"base_commit": s["base_commit"]}, timeout=120)
+            # The push/merge secret gate covers tower sessions only (issue #263); say so rather than show nothing.
+            return {**data, "secret_scan": {
+                "status": "unsupported", "scanner": secret_scan.SCANNER, "findings": [], "open": 0,
+                "message": f"the secret scan is not available for the {s['target']} target, so Merge and Push "
+                           "are not checked for secrets"}}
+        sid = s["id"]
+
+        def scan(diffs: list[dict]) -> tuple[dict, list[str]]:
+            result = self.secret_scanner.scan(diffs, sid)
+            masked = [secret_scan.redact(d["diff"], i, result["findings"]) for i, d in enumerate(diffs)]
+            return self._public_scan(sid, result), masked
+
+        # No wait for the start-up fetch here: the diff shows at once, with the scan `unavailable` until it lands.
+        return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None, scan)
+
+    # secret scanning before push/merge (issue #263)
+    async def _bootstrap_scanner(self) -> None:
+        # A daemon thread, not the default executor: stop() cancels this task while a download may still be
+        # running, and the loop's shutdown must not wait for it. `cancelled` keeps that late fetch from installing.
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future = loop.create_future()
+
+        def settle(problem: str | None, error: BaseException | None) -> None:
+            if done.done():
+                return
+            if error is not None:
+                done.set_exception(error)
+            else:
+                done.set_result(problem)
+
+        def fetch() -> None:
+            try:
+                problem, error = self.secret_scanner.ensure(), None
+            except Exception as e:  # noqa: BLE001 - surfaced through the future
+                problem, error = None, e
+            with contextlib.suppress(RuntimeError):  # the loop already closed
+                loop.call_soon_threadsafe(settle, problem, error)
+
+        threading.Thread(target=fetch, name="secret-scanner-fetch", daemon=True).start()
+        problem = await done
+        if problem:
+            log.warning("secret scanner unavailable; push and merge stay blocked: %s", problem)
+
+    async def _scanner_waited(self) -> None:
+        """Wait for the start-up fetch; a fetch that failed or was cancelled leaves the scan `unavailable`."""
+        if self._scanner_boot is not None and not self._scanner_boot.done():
+            await asyncio.wait({self._scanner_boot})
+
+    def _public_scan(self, sid: str, result: dict) -> dict:
+        """A scan result for the API: no diff positions, each finding marked dismissed or not."""
+        dismissed = self.db.secret_dismissals(sid)
+        out = secret_scan.public(result)
+        for f in out["findings"]:
+            d = dismissed.get(f["fingerprint"])
+            f["dismissed"] = d is not None
+            if d is not None:
+                f["dismissal"] = {"reason": d["reason"], "actor_id": d["actor_id"], "at": d["created_at"]}
+        out["open"] = sum(not f["dismissed"] for f in out["findings"])
+        return out
+
+    async def _secret_gate(self, sid: str, s: dict, ws: Path, action: str) -> None:
+        """Block push/merge while an undismissed finding exists, or when the scanner can't run (fail closed)."""
+        await self._scanner_waited()
+        result = self._public_scan(sid, await asyncio.to_thread(
+            lambda: self.secret_scanner.scan(repo_diffs(ws, s["base_commit"] or None), sid)))
+        if result["status"] != "ok":
+            raise HarnessError(503, f"{action} is blocked: the secret scan could not run ({result['message']}). "
+                                    "Fix the gitleaks install (python -m harness.doctor) and retry.",
+                               code="secret_scan_unavailable")
+        # A push sends every commit since the base; a merge squashes, so only the net diff reaches the base branch.
+        blocking = [f for f in result["findings"] if not f["dismissed"] and (action == "push" or "commit" not in f)]
+        if blocking:
+            rules: dict[str, int] = {}
+            for f in blocking:
+                rules[f["rule"]] = rules.get(f["rule"], 0) + 1
+            n = len(blocking)
+            counts = ", ".join(f"{k}: {v}" for k, v in sorted(rules.items()))
+            raise HarnessError(409, f"{action} is blocked: the secret scan found {n} possible secret"
+                                    f"{'' if n == 1 else 's'} ({counts}). On the Changes tab, ask the agent to "
+                                    "fix them or dismiss each with a reason.",
+                               code="secret_findings", details={"findings": n, "rules": rules})
+
+    async def _on_remote(self, s: dict, repos: list[dict], finding: dict) -> bool:
+        """Whether a commit-only finding's commit is at or before the remote branch's tip: its remote-tracking ref,
+        or (session repo) a head the harness pushed, since a member GitHub push leaves no tracking ref."""
+        repo = next((r for r in repos if r["path"] == finding["repo"]), {})
+        branch = s["branch"] if finding["repo"] == "." else repo.get("branch", "")
+        tips = [f"refs/remotes/origin/{branch}"] if branch and branch != "HEAD" else []
+        if finding["repo"] == ".":
+            tips += self.db.pushed_heads(s["id"])
+        return await asyncio.to_thread(published, Path(s["workspace"]) / finding["repo"], finding["commit"], tips)
+
+    async def secret_findings_fix(self, ref: str) -> dict:
+        """Ask agent to fix (rule and place, never the value): one draft review comment per open finding in the diff;
+        for a value only in the branch's earlier commits, a message now asking the agent to rewrite base..HEAD. A
+        commit already on the remote would need a force-push, so that finding can only be dismissed."""
+        sid = self.resolve_id(ref)
+        s = self.get(sid)
+        data = await self.changes(sid)
+        scan = data.get("secret_scan")
+        if not scan or scan["status"] != "ok":
+            raise HarnessError(409, "there is no secret scan result for this session")
+        drafts = self.db.list_review_comments(sid)
+        made, rewrite, pushed, already = [], [], [], 0
+        for f in scan["findings"]:
+            if f["dismissed"]:
+                continue
+            if "commit" in f:  # no line in the diff to comment on: the branch history has to change
+                (pushed if await self._on_remote(s, data["repos"], f) else rewrite).append(f)
+                continue
+            if any(d["repo"] == f["repo"] and d["path"] == f["file"] and d["side"] == "new"
+                   and d["start_line"] == f["line"] and d["comment"].startswith(SECRET_FIX) for d in drafts):
+                already += 1
+                continue
+            repo = next((r for r in data["repos"] if r["path"] == f["repo"]), None)
+            lines = review_comments.side_lines(repo["parsed"], f["file"], "new") if repo else {}
+            comment = (f"{SECRET_FIX} rule {f['rule']} flagged a possible credential on this line (the value is not "
+                       "shown). Remove it from your changes, read it from the environment or an untracked secret "
+                       "store instead, and make sure no commit on this branch still contains it.")
+            made.append(self.add_review_comment(sid, {
+                "repo": f["repo"], "path": f["file"], "side": "new", "start_line": f["line"],
+                "end_line": f["line"], "quoted": [lines.get(f["line"], "")], "comment": comment,
+                "base": repo["base"] if repo else "", "head": repo["head"] if repo else ""}))
+        if rewrite:
+            await self.send(sid, _secret_rewrite_message(rewrite, {r["path"]: r["base"] for r in data["repos"]}))
+        return {"drafts": made, "already_drafted": already, "rewrite": rewrite, "pushed": pushed,
+                "message": _secret_fix_summary(len(made), already, len(rewrite), len(pushed))}
+
+    async def dismiss_secret_finding(self, ref: str, fingerprint: str, reason: str, actor_id: str) -> dict:
+        """Owner-only (the callers check): dismiss one finding by fingerprint for this session, with a reason."""
+        sid = self.resolve_id(ref)
+        reason = " ".join(str(reason or "").split())
+        if not reason:
+            raise HarnessError(400, "a reason is required to dismiss a secret-scan finding")
+        if len(reason) > MAX_DISMISS_REASON:
+            raise HarnessError(400, f"the reason is over {MAX_DISMISS_REASON} characters")
+        scan = (await self.changes(sid)).get("secret_scan")
+        finding = next((f for f in (scan or {}).get("findings", []) if f["fingerprint"] == fingerprint), None)
+        if finding is None:
+            raise HarnessError(404, "no current secret-scan finding has that fingerprint")
+        self.db.add_secret_dismissal(sid, {
+            "fingerprint": fingerprint, "rule": finding["rule"], "repo": finding["repo"], "path": finding["file"],
+            "line": finding["line"], "reason": reason, "actor_id": actor_id})
+        self.db.insert_audit(actor_id, sid, "secret_finding_dismiss", "ok", json.dumps(
+            {"session": sid, "rule": finding["rule"], "repo": finding["repo"], "file": finding["file"],
+             "line": finding["line"], "fingerprint": fingerprint, "reason": reason}))
+        return {**finding, "dismissed": True,
+                "dismissal": {"reason": reason, "actor_id": actor_id, "at": time.time()}}
 
     # compare groups (issue #166): one prompt, several backend/model choices, one session each
     MAX_COMPARE = 4
@@ -985,12 +1182,15 @@ class Manager:
 
     async def _review_local(self, sid: str, s: dict, project, ws: Path, action: str) -> tuple[str, str]:
         """Run a review action on the tower; returns the resulting review state and detail."""
+        if action in ("merge", "push"):
+            # Snapshot first so uncommitted work is scanned too, then gate on the scan (issue #263).
+            await asyncio.to_thread(projects.snapshot, ws, f"Work in progress from session {sid}")
+            await self._secret_gate(sid, s, ws, action)
         if action == "merge":
             result = await asyncio.to_thread(projects.merge, project, ws, sid, s["branch"], s["base_branch"],
                                              s["title"])
             return ("merged" if result["merged"] else ""), result["message"]
         if action == "push":
-            await asyncio.to_thread(projects.snapshot, ws, f"Work in progress from session {sid}")
             github = self._member_github_project(s, project)
             if github is not None:
                 return "pushed", await self._push_member_github(s, project, ws, github)

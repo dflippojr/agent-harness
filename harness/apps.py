@@ -156,6 +156,10 @@ class ReviewComment(BaseModel):
     head: str = ""
 
 
+class SecretDismissal(BaseModel):
+    reason: str
+
+
 class AppContext(BaseModel):
     context: list[ContextBlock]
 
@@ -926,6 +930,23 @@ async def api_delete_review_comment(ref: str, comment_id: str, request: Request)
 async def api_send_review_comments(ref: str, request: Request):
     m, sid = review_comment_session(request, ref)
     return m.summary(await m.send_review_comments(sid))
+
+
+@route_table.post("/api/v1/sessions/{ref}/secret-findings/fix", status_code=201)
+async def api_secret_findings_fix(ref: str, request: Request):
+    m, sid = review_comment_session(request, ref)
+    return await m.secret_findings_fix(sid)
+
+
+@route_table.post("/api/v1/sessions/{ref}/secret-findings/{fingerprint}/dismiss")
+async def api_dismiss_secret_finding(ref: str, fingerprint: str, body: SecretDismissal, request: Request):
+    """Owner-only: members and app tokens can ask the agent to fix a finding but never dismiss one."""
+    m = mgr(request)
+    key = auth(request, "sessions")
+    s = own_session(request, key, ref)
+    if not owner_key(key):
+        raise HarnessError(403, "only the owner can dismiss secret-scan findings")
+    return await m.dismiss_secret_finding(s["id"], fingerprint, body.reason, "owner")
 
 
 @route_table.post("/api/v1/sessions/{ref}/review/{action}")

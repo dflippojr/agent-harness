@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 import time
 
+from . import telemetry
 from .manager import Manager
 from .runner import ACTIVE
 
@@ -29,6 +30,28 @@ class _Out:
         for labels, value in samples:
             label = ",".join(f'{k}="{_esc(v)}"' for k, v in labels.items())
             self.lines.append(f"{name}{{{label}}} {float(value):g}" if label else f"{name} {float(value):g}")
+
+
+def _histogram_lines(out: _Out, name: str, help_: str, series: list[tuple[dict, telemetry.Histogram]]) -> None:
+    out.lines += [f"# HELP {name} {help_}", f"# TYPE {name} histogram"]
+    for labels, hist in series:
+        cumulative, total, count = hist.snapshot()
+        base = "".join(f'{k}="{_esc(v)}",' for k, v in labels.items())
+        for bound, n in cumulative:
+            out.lines.append(f'{name}_bucket{{{base}le="{bound:g}"}} {n}')
+        out.lines.append(f'{name}_bucket{{{base}le="+Inf"}} {count}')
+        suffix = "{" + base.rstrip(",") + "}" if base else ""
+        out.lines.append(f"{name}_sum{suffix} {total:g}")
+        out.lines.append(f"{name}_count{suffix} {count}")
+
+
+def _telemetry_metrics(out: _Out) -> None:
+    _histogram_lines(out, "harness_db_lock_held_seconds",
+                     "Time the SQLite lock was held per outermost acquisition, by calling method.",
+                     [({"method": method}, h) for method, h in telemetry.lock_held.items()])
+    _histogram_lines(out, "harness_event_loop_stall_seconds",
+                     "Event-loop lag: how much later than scheduled a 10 ms probe sleep woke up.",
+                     [({}, telemetry.loop_stall)])
 
 
 def _core_metrics(m: Manager, out: _Out, db) -> dict:
@@ -283,4 +306,5 @@ def render(m: Manager) -> str:
     _guard_metrics(m, out)
     _maintenance_metrics(m, out)
     _skill_metrics(out, db, by_status)
+    _telemetry_metrics(out)
     return "\n".join(out.lines) + "\n"

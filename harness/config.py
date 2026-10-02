@@ -274,6 +274,14 @@ class SearchConfig:
 
 
 @dataclass
+class RepoMapConfig:
+    """Experiment (#264, docs/repo-map-study.md): ranked repository map appended to local-model system prompts.
+    Off by default; needs requirements-repomap.txt."""
+    enabled: bool = False
+    budget_tokens: int = 1500  # estimated as chars / 4
+
+
+@dataclass
 class EndpointConfig:
     """OpenAI/Anthropic-compatible inference endpoint for other tools (endpoint.py)."""
     enabled: bool = False
@@ -440,6 +448,7 @@ class Config:
     reset_at: float = 0.60
     mask_min_chars: int = 2000
     state_max_chars: int = 8000
+    repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
     tool_output: ToolOutputConfig = field(default_factory=ToolOutputConfig)
 
     @property
@@ -819,6 +828,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         endpoint=endpoint,
         images=images,
         search=search,
+        repo_map=RepoMapConfig(**(raw.get("repo_map") or {})),
         jobs=jobs,
         skills=skills,
         remote_control=remote_control,

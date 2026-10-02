@@ -2,16 +2,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
+import { createContext } from "node:vm";
+import { profileIconHidden } from "../harness/web/lib/layout.mjs";
+import { runApp } from "./web_app_loader.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appSrc = readFileSync(join(root, "harness/web/app.js"), "utf8")
-  .replace(/import \{[^}]+\} from "\.\/client\.mjs";\r?\n/, "");
 const cssSrc = readFileSync(join(root, "harness/web/style.css"), "utf8");
-
-const match = appSrc.match(/function profileIconHidden\([\s\S]*?\n\}/);
-if (!match) throw new Error("profileIconHidden missing from app.js");
-const profileIconHidden = new Function(`${match[0]}; return profileIconHidden;`)();
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
@@ -340,7 +336,7 @@ const sandbox = createContext({
   undefined,
 });
 
-runInContext(appSrc, sandbox);
+runApp(sandbox);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (pred, label, ms = 2000) => {

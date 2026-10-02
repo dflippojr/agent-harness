@@ -145,7 +145,11 @@ adds roughly 25-40 ms for the first request; not a meaningful contributor.
 4. Warm loads re-download `app.js` and `style.css` in full. The service worker fetches shell files with
    `cache: "no-cache"` (`harness/web/sw.js`), so the cache is only the offline fallback by design. In this setup those
    fetches went out without an `If-None-Match` validator and returned `200` with the full body every time (checked at
-   the proxy), even though the server sends an `ETag`. Warm is therefore not meaningfully cheaper than cold.
+   the proxy), even though the server sends an `ETag`. Warm is therefore not meaningfully cheaper than cold. Browser
+   check outside Playwright: not run (owner decision, 2026-10-01); the `StaticFiles` mounts return `304` for a
+   matching `If-None-Match`, which a test now guards. `/`, `/sw.js` and `/manifest.webmanifest` have their own
+   `FileResponse` routes that send an `ETag` but always answer `200` (Starlette does not evaluate conditionals there);
+   not changed, per the owner decision.
 5. Routes differ little from one another (2.6-3.1 s throttled). The dispatcher gates every route on the same shared
    start-up chain, so per-route data (`/sessions`, `/queue`, `/gpu`, `/projects`, `/images`, `/jobs`) is a small part.
    New task is the slowest (about 3.1 s cold) because it adds `/projects`, `/models` and `/gpu` fetches after the
@@ -160,7 +164,8 @@ adds roughly 25-40 ms for the first request; not a meaningful contributor.
 - Issuing `/health`, `/me`, `/gpu` and `/profile` in parallel, or starting them from a small inline script before
   `app.js` finishes, would remove most of the serial round trips. Not prototyped.
 - The missing conditional request on warm loads may be specific to Playwright's browser contexts; a normal Chromium
-  profile may revalidate and return `304`. Needs one check outside automation before acting on finding 4.
+  profile may revalidate and return `304`. The browser check was not run (owner decision, 2026-10-01, #290); no
+  behavior change was made. The server side is regression-tested (`tests/test_webgzip.py::test_shell_revalidates_with_304`).
 - If the field complaint is mostly about the first request after a server restart or deploy window, this study did not
   reproduce it: server restart added only tens of milliseconds locally.
 - Real devices on real cellular or Tailscale paths add TLS/connection setup and path variance that this model omits.
@@ -198,7 +203,8 @@ Recommendations are filed as separate issues rather than implemented here:
 
 - #288: compress static assets (finding 3; the compression saving is a hypothesis).
 - #289: shorten the serial start-up request chain (finding 3; the saving is a hypothesis).
-- #290: verify warm-load revalidation outside Playwright (finding 4; possibly an automation artifact).
+- #290: verify warm-load revalidation outside Playwright (finding 4; possibly an automation artifact). Browser check
+  not run by owner decision; only the server-side 304 regression test was added.
 
 ## Reproducing
 
@@ -225,3 +231,25 @@ Transferred bytes measured from the real app (identity vs gzip), with the slow-l
 The shell drops by about 225 KB, i.e. roughly 1.1 s of transfer time on the modelled link; the per-request +150 ms RTT is
 unchanged. This is a byte-count model, **not** a re-run of the Playwright first-load script (that harness lives outside
 the repo), so the ~1 s first-load saving is supported by the arithmetic but not re-measured end to end.
+
+## Follow-up: app.js split into ES modules, stage (a) (#258)
+
+Stage (a) moved the pure helpers into nine `harness/web/lib/*.mjs` modules, so a cold load fetches 11 scripts instead of
+2 (`app.js`, `client.mjs`, `lib/`). Measured with `scripts/web-first-paint.mjs` (in repo; headless Chromium 153.0.8010.12
+over CDP, cold profile per run, 390x844 DPR 3, 4x CPU, +150 ms per request, 200 KB/s, gzip like `harness/webgzip.py`,
+`/api` answering 503 so the route renders its offline state). 5 runs, median (min-max) ms, route `#/agents`:
+
+| Bundle | FCP | Module graph executed (DOMContentLoaded end) | JS requests |
+| --- | --- | --- | --- |
+| `main` at `301e61f` (before) | 480 (476-496) | 957 (933-960) | 2 |
+| stage (a) | 488 (488-496) | 1142 (1123-1159) | 11 |
+| stage (a) + `<link rel=modulepreload>` for `lib/` and `client.mjs` (not shipped) | 480 (468-504) | 961 (940-993) | 11 |
+
+First paint (the shell and boot splash) does not regress: the module graph is deferred and does not block it. The app
+code starts about 185 ms later on the throttled cold model, because the `lib/` imports are only discovered after `app.js`
+arrives (one extra round trip; `markdown.mjs -> snippets.mjs` adds no visible second one). Preload hints in `index.html`
+recover it fully. Per the #258 decision (preload only if first paint regresses) they are not added; the numbers are here
+so the trade-off can be revisited as `pages/` modules land. Warm and update loads were not re-measured: the service
+worker is network-first and only falls back to its cache offline, so they make the same requests as a cold load. This
+is not the out-of-repo Playwright script
+used above, so compare the rows in this table with each other, not with the earlier tables.

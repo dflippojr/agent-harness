@@ -61,7 +61,7 @@
  ],
  [
   "x ```py\nfoo\n``` y ```js\nbar\n```",
-  "<p>x <pre><code>foo</code></pre> y <pre data-snippet-lang=\"javascript\"><code>bar</code></pre></p>"
+  "<p>x <pre data-snippet-lang=\"python\"><code>foo</code></pre> y <pre data-snippet-lang=\"javascript\"><code>bar</code></pre></p>"
  ],
  [
   "| a |\n| b |",

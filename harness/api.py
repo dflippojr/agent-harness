@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import sqlite3
 import uuid
@@ -24,11 +25,17 @@ from . import config as config_mod
 from . import efficiency
 from . import google_signin
 from . import taint
+from . import telemetry
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
 from .webgzip import WebGzipMiddleware
 
 NO_SUCH_JOB = "no such job"
+
+# Static files get their type from `mimetypes`, which on Windows also reads the registry, where .js/.mjs can
+# be missing or mapped to text/plain. Browsers refuse a module script without a JavaScript type, so pin both.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
 
 log = logging.getLogger("harness.api")
 WEB = Path(__file__).parent / "web"
@@ -91,6 +98,10 @@ class ReviewComment(BaseModel):
     comment: str
     base: str = ""
     head: str = ""
+
+
+class SecretDismissal(BaseModel):
+    reason: str
 
 
 class SessionUpdate(BaseModel):
@@ -1310,6 +1321,21 @@ async def send_review_comments(ref: str, request: Request):
     return m.summary(await m.send_review_comments(sid))
 
 
+@api_router.post("/sessions/{ref}/secret-findings/fix", status_code=201)
+async def secret_findings_fix(ref: str, request: Request):
+    """Ask agent to fix: one draft review comment per open secret-scan finding (send them like any draft)."""
+    m, sid, _ = owned_session(request, ref)
+    return await m.secret_findings_fix(sid)
+
+
+@api_router.post("/sessions/{ref}/secret-findings/{fingerprint}/dismiss")
+async def dismiss_secret_finding(ref: str, fingerprint: str, body: SecretDismissal, request: Request):
+    """Owner-only: dismiss one secret-scan finding with a reason (audited)."""
+    require_owner(request)
+    m, sid, _ = owned_session(request, ref)
+    return await m.dismiss_secret_finding(sid, fingerprint, body.reason, owner_id(request))
+
+
 @api_router.post("/sessions/{ref}/review/{action}")
 async def review(ref: str, action: str, request: Request):
     """merge | push | discard the session's git branch."""
@@ -1762,9 +1788,13 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.manager = manager or Manager(config_mod.load())
+        telemetry.enable_asyncio_debug()
+        probe = telemetry.LoopLagProbe()
+        probe.start()
         await app.state.manager.start()
         yield
         await app.state.manager.stop()
+        await probe.stop()
 
     app = FastAPI(title="agent-harness", lifespan=lifespan)
     app.middleware("http")(guard)

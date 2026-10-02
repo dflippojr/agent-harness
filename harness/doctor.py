@@ -78,6 +78,42 @@ def check_data_dir(r: Report, cfg) -> None:
         r.fail("Data directory", str(e))
 
 
+SCHEMA_CHECK = "Database schema"
+
+
+def check_schema_version(r: Report, cfg) -> None:
+    """Compare the database's `user_version` with the migrations this code ships. Read-only; never migrates."""
+    import sqlite3
+
+    from . import migrations
+
+    path = Path(cfg.db_path)
+    if not path.is_file():
+        r.ok(SCHEMA_CHECK, "skipped: no database yet (created on first start)")
+        return
+    try:
+        steps = migrations.discover()
+    except Exception as e:  # a broken NNNN_*.py can raise anything at import; report it, don't abort the doctor run
+        r.fail(SCHEMA_CHECK, f"could not load migrations: {type(e).__name__}: {e}")
+        return
+    try:
+        latest = migrations.latest_version(steps)
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            current = migrations.user_version(conn)
+        finally:
+            conn.close()
+    except (sqlite3.Error, migrations.MigrationError) as e:
+        r.fail(SCHEMA_CHECK, f"{path}: {e}")
+        return
+    if current > latest:
+        r.fail(SCHEMA_CHECK, migrations.too_new_message(current, latest))
+    elif current < latest:
+        r.warn(SCHEMA_CHECK, f"v{current}, will migrate to v{latest} on the next daemon start")
+    else:
+        r.ok(SCHEMA_CHECK, f"v{current} (current)")
+
+
 def check_github_token(r: Report, cfg) -> None:
     """Never print the token or its path."""
     if not cfg.github.token_file:
@@ -297,6 +333,19 @@ def check_images(r: Report, cfg) -> None:
         r.ok("Image upscaling", f"Real-ESRGAN x2plus/x4plus in {upscale_mod.models_dir(cfg.images)}")
 
 
+def check_secret_scanner(r: Report, cfg) -> None:
+    """Review push/merge fail closed without the pinned gitleaks (issue #263); the daemon fetches it at start."""
+    from . import secret_scan
+    scanner = secret_scan.Scanner(secret_scan.tools_dir(cfg))
+    problem = scanner.problem()
+    if not problem:
+        r.ok("Secret scanner", f"{secret_scan.SCANNER} at {scanner.binary}")
+        return
+    last = scanner.bootstrap_error()
+    r.warn("Secret scanner", f"{problem}; Review push and merge are blocked until it is fixed "
+                             f"(python -m harness.secret_scan install)" + (f". Last fetch: {last}" if last else ""))
+
+
 def check_optional(r: Report, cfg) -> None:
     if cfg.web.enabled:
         try:
@@ -333,11 +382,13 @@ def main(argv: list[str] | None = None) -> int:
 
     check_gpu(r, cfg)
     check_data_dir(r, cfg)
+    check_schema_version(r, cfg)
     check_github_token(r, cfg)
     check_docker(r, cfg)
     check_model_server(r, cfg)
     check_daemon(r, cfg)
     check_autostart(r, cfg, args)
+    check_secret_scanner(r, cfg)
     check_optional(r, cfg)
 
     print(f"\n{r.failed} failed, {r.warned} warnings")
