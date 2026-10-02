@@ -24,6 +24,8 @@ The CLI Dockerfile accepts `SANDBOX_IMAGE` so its hosted build is based on the e
 The supervisor reads the ignored `.venv-path` file when present. Deployment switches that pointer rather than moving
 the newly built environment, so Windows entry points keep their original absolute paths; the original `.venv` remains
 untouched for first-deployment rollback. Later successful deployments remove the superseded managed environment.
+Deploys (production and staging) install `requirements.txt` plus, when present, `requirements-telemetry.txt`, so tracing
+works in production; `requirements-repomap.txt` stays opt-in.
 
 Both builds read any available GitHub Actions cache, but cache export uses `ignore-error=true`. A `workflow_run` token
 may be unable to write the default branch's Actions cache; that optional optimization must never block GHCR publication

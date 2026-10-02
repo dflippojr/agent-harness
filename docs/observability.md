@@ -17,7 +17,7 @@ telemetry:
 
 - `otlp_endpoint` is the full OTLP/HTTP traces URL. Use loopback or the tailnet only; nothing is meant to leave
   the tower.
-- The OpenTelemetry packages are optional: `pip install -r requirements-telemetry.txt`. They aren't in
+- The OpenTelemetry packages are optional locally: `pip install -r requirements-telemetry.txt`. Production and staging deploys install them automatically. They aren't in
   `requirements.txt`, so neither the base nor the service profile depends on them.
 - If the endpoint is set but the packages are missing, the daemon logs one warning and runs without tracing.
 - The settings are read at daemon start. Restart the daemon to apply a change.
