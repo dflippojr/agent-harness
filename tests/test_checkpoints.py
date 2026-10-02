@@ -454,3 +454,103 @@ def test_rewind_refuses_up_front_when_a_file_is_locked(tmp_path, monkeypatch):
         assert touched == [] and state() == before                       # refused before touching anything
 
     asyncio.run(body())
+
+
+def objects(store) -> list[str]:
+    """Every object in the checkpoint repository, reachable or not."""
+    return store._git(None, None, "cat-file", "--batch-all-objects", "--batch-check").out.splitlines()
+
+
+def test_unchanged_hosted_runs_write_no_objects(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        cp = m.runner.checkpointer
+        store = cp.store(s)
+        before = objects(store)
+        for _ in range(20):                                              # a hosted run that changed nothing
+            stats: dict = {}
+            assert cp.take(s["id"], only_if_changed=True, stats=stats) is None
+            assert stats["skipped"] == "unchanged"
+        assert objects(store) == before
+        (Path(s["workspace"]) / "new.txt").write_text("changed\n")         # a change is still recorded
+        assert cp.take(s["id"], only_if_changed=True)["turn"] == 3
+
+    asyncio.run(body())
+
+
+def test_unrecorded_snapshot_objects_are_reclaimed(tmp_path, monkeypatch):
+    async def body():
+        m, s = await started(tmp_path)
+        cp = m.runner.checkpointer
+        store = cp.store(s)
+        store.reclaim()
+        before = objects(store)
+        (Path(s["workspace"]) / "new.txt").write_text("never kept\n")      # new blob, tree and commit
+
+        def fail(*args, **kwargs):
+            raise checkpoints.GitError("cannot pack the context")
+        monkeypatch.setattr(checkpoints.Store, "pack_context", fail)
+        assert cp.take(s["id"])["status"] == "skipped"
+        assert objects(store) == before
+
+    asyncio.run(body())
+
+
+def assert_not_checkpointed(m, s):
+    """The run succeeded, each mutating turn says it was not checkpointed, and nothing of a checkpoint remains."""
+    sid = s["id"]
+    assert s["status"] == "done"
+    assert [e.get("status") for e in events(m, sid, "checkpoint")] == ["skipped", "skipped"]
+    assert m.db.checkpoints(sid, hidden=None) == [] and not s["turn_seq"]
+    store = m.runner.checkpointer.store(s)
+    assert checkpoints.REF_PREFIX not in store._git(None, None, "for-each-ref").out
+    assert not any(store.contexts.iterdir())
+    assert not [o for o in objects(store) if " commit " in o]
+
+
+def test_a_failed_context_write_does_not_fail_the_turn(tmp_path, monkeypatch):
+    write_bytes = Path.write_bytes
+
+    def disk_full(self, data):
+        if self.name.endswith(".json.gz"):
+            write_bytes(self, data[:10])                                 # a partial file, then the error
+            raise OSError(28, "No space left on device", str(self))
+        return write_bytes(self, data)
+    monkeypatch.setattr(Path, "write_bytes", disk_full)
+
+    async def body():
+        m, s = await started(tmp_path)
+        assert_not_checkpointed(m, s)
+
+    asyncio.run(body())
+
+
+def test_a_failed_checkpoint_record_does_not_fail_the_turn(tmp_path, monkeypatch):
+    import sqlite3
+    from harness.checkpointer import Checkpointer
+    record = Checkpointer._record
+
+    def locked(self, *args):
+        record(self, *args)                                              # rolled back with the transaction
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(Checkpointer, "_record", locked)
+
+    async def body():
+        m, s = await started(tmp_path)
+        assert_not_checkpointed(m, s)
+
+    asyncio.run(body())
+
+
+def test_a_failed_quota_check_after_keeping_does_not_fail_the_turn(tmp_path, monkeypatch):
+    from harness.checkpointer import Checkpointer
+
+    def broken(*args):
+        raise OSError(5, "I/O error measuring the account")
+    monkeypatch.setattr(Checkpointer, "_within_quota", broken)
+
+    async def body():
+        m, s = await started(tmp_path)
+        assert_not_checkpointed(m, s)
+
+    asyncio.run(body())

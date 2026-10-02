@@ -30,9 +30,22 @@ class Checkpointer:
     def take(self, sid: str, only_if_changed: bool = False, stats: dict | None = None) -> dict | None:
         """Checkpoint the session's workspace now. Returns the "checkpoint" event payload (`turn`, or `status`
         "skipped" and a `reason`), or None when there was nothing to record. Never raises: a checkpoint is a
-        convenience and must not fail the turn it describes. `stats`, when given, is filled with the trace span's
+        convenience and must not fail the turn it describes, so any failure leaves the turn not checkpointed, with
+        nothing of it kept (row, ref, context or objects). `stats`, when given, is filled with the trace span's
         attributes: `turn`, `files`, `bytes`, and a `skipped` code (never the reason text, which can hold paths)."""
         stats = {} if stats is None else stats
+        made: dict = {}
+        try:
+            return self._take(sid, only_if_changed, stats, made)
+        except Exception as e:      # noqa: BLE001 (the contract above: git, disk and database errors alike)
+            log.warning("checkpoint %s/%s failed: %s", sid, stats.get("turn"), e,
+                        exc_info=not isinstance(e, (GitError, OSError, subprocess.SubprocessError)))
+            self._discard(sid, made)
+            stats["skipped"] = "snapshot_failed"
+            return self._skipped(sid, f"the snapshot failed ({str(e)[-160:]})")
+
+    def _take(self, sid: str, only_if_changed: bool, stats: dict, made: dict) -> dict | None:
+        """`take`, raising on failure; `made` tracks what exists so far for `_discard`."""
         s = self.db.get_session(sid)
         if s is None or not eligible(s):
             stats["skipped"] = "ineligible"
@@ -40,18 +53,15 @@ class Checkpointer:
         store, workspace = self.store(s), Path(s["workspace"])
         turn = int(s.get("turn_seq") or 0) + 1
         stats["turn"] = turn
-        try:
-            head, branch = head_and_branch(workspace)
-            sha = store.snapshot(workspace, sid, turn, head, branch, publish=False)
-            stats.update(files=store.files, bytes=store.bytes)
-            if only_if_changed and self._same_tree(store, sid, sha):
-                stats["skipped"] = "unchanged"
-                return None
-            context = store.pack_context(s["context"])
-        except (GitError, OSError, ValueError, subprocess.SubprocessError) as e:
-            log.warning("checkpoint %s/%s failed: %s", sid, turn, e)
-            stats["skipped"] = "snapshot_failed"
-            return self._skipped(sid, f"the snapshot failed ({str(e)[-160:]})")
+        made.update(store=store, turn=turn)
+        head, branch = head_and_branch(workspace)
+        unless = self._last_tree(store, sid) if only_if_changed else ""
+        made["sha"] = sha = store.snapshot(workspace, sid, turn, head, branch, publish=False, unless_tree=unless)
+        stats.update(files=store.files, bytes=store.bytes)
+        if not sha:                                         # the same files as the last checkpoint: nothing written
+            stats["skipped"] = "unchanged"
+            return None
+        context = store.pack_context(s["context"])
         # Quota is decided before anything existing is touched: a skipped snapshot leaves every checkpoint,
         # including the rewound-past ones a later rewind can still redo (one may share this turn's number).
         if not self._room_for(s, store, sha, len(context)):
@@ -60,6 +70,7 @@ class Checkpointer:
             return self._skipped(sid, "the account is over its disk quota")
         stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
         capped = self.db.write(self._record, sid, turn, sha, head, branch, stale)
+        made["recorded"] = True
         store.delete(sid, [t for t in stale + capped if t != turn])
         store.keep(sid, turn, sha, context)                 # replaces a rewound-past ref and context of this turn
         if stale or capped:
@@ -68,17 +79,37 @@ class Checkpointer:
             log.warning("checkpoint %s/%s kept although the account is still over its quota", sid, turn)
         return {"turn": turn, "head": head[:12]}
 
+    def _discard(self, sid: str, made: dict) -> None:
+        """Remove what a failed `_take` left behind. Once recorded, the turn's row replaced any rewound-past one of
+        the same number, so its ref and context go too; before that nothing was named. Unnamed objects are pruned."""
+        store = made.get("store")
+        if store is None:
+            return
+        try:
+            if made.get("recorded"):
+                self.db.write(self._unrecord, sid, made["turn"])
+                store.delete(sid, [made["turn"]])
+            if made.get("sha"):
+                store.reclaim()
+        except Exception as e:      # noqa: BLE001 (best effort: what is left costs disk, not correctness of take)
+            log.error("could not clean up the failed checkpoint %s/%s: %s", sid, made.get("turn"), e)
+
+    def _unrecord(self, sid: str, turn: int) -> None:
+        """One transaction (pass to `db.write`): undo `_record`'s row and turn number."""
+        self.db.delete_checkpoints(sid, [turn])
+        s = self.db.get_session(sid)
+        if s is not None and s.get("turn_seq") == turn:
+            self.db.update_session(sid, turn_seq=turn - 1)
+
     @staticmethod
     def _skipped(sid: str, reason: str) -> dict:
         log.info("checkpoint for %s skipped: %s", sid, reason)
         return {"status": "skipped", "reason": reason}
 
-    def _same_tree(self, store: Store, sid: str, sha: str) -> bool:
+    def _last_tree(self, store: Store, sid: str) -> str:
+        """The tree of the session's latest checkpoint; "" when there is none (or git cannot tell)."""
         known = self.db.checkpoints(sid, hidden=None)
-        if not known:
-            return False
-        trees = [store.tree_of_commit(c) for c in (sha, known[-1]["sha"])]
-        return trees[0] == trees[1] != ""
+        return store.tree_of_commit(known[-1]["sha"]) if known else ""
 
     def _record(self, sid: str, turn: int, sha: str, head: str, branch: str, stale: list[int]) -> list[int]:
         """One transaction (pass to `db.write`): the new checkpoint replaces the rewound-past ones and the oldest

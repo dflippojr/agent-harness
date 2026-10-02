@@ -147,13 +147,17 @@ class Store:
         return tree, files, size + nested_bytes, nested
 
     # snapshot ---------------------------------------------------------------------------------------------------
-    def snapshot(self, workspace: Path, sid: str, turn: int, head: str, branch: str, publish: bool = True) -> str:
+    def snapshot(self, workspace: Path, sid: str, turn: int, head: str, branch: str, publish: bool = True,
+                 unless_tree: str = "") -> str:
         """Commit the workspace's current files (ignored ones excluded) to the hidden ref; returns the commit sha.
         With `publish` False no ref is written until `keep` names the commit, so a rewound-past checkpoint with the
-        same turn number survives a snapshot that is then dropped."""
+        same turn number survives a snapshot that is then dropped. Returns "" without committing when the files
+        are exactly `unless_tree`: staging them then wrote no object the repository did not already hold."""
         self.init()
         with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
             tree, self.files, self.bytes, _ = self._build(workspace, Path(tmp) / "index")
+            if unless_tree and tree == unless_tree:
+                return ""
             message = f"checkpoint {turn}\n\nHarness-Session: {sid}\nHarness-Turn: {turn}\nHead: {head}\nBranch: {branch}\n"
             sha = self._git(None, None, "commit-tree", tree, input_=message).out.strip()
         if publish:
