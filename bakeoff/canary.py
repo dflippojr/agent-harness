@@ -126,7 +126,6 @@ class CanaryRunner:
 
     async def _once(self, task, kind: str, repeat: int, web, cap: float) -> dict:
         m = self.m
-        started = self.clock()
         project = HARD_PROJECT if kind == "hard" else WEB_PROJECT
         s = m.create(task.prompt, project=project, title=f"canary {task.id} #{repeat}")
         sid = s["id"]
@@ -139,14 +138,23 @@ class CanaryRunner:
                 baseline = self._prepare_hard(task, Path(s["workspace"]))
                 run = dict(m.db.get_session(sid)["run"], max_turns=task.max_turns)
                 m.db.update_session(sid, run=run)
-            limit, stopped = (task.wall_limit if kind == "hard" else 1500), False
+            # The limit counts only time the canary held the GPU: never time queued behind a real session (even
+            # before its first turn), stepped aside, or paused by the guard. A wait that outlasts the run's cap is
+            # no verdict on the agent: the attempt is stopped and excluded as suspended.
+            limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else 1500), 0.0, False, False
             while m.db.get_session(sid)["status"] not in DONE:
+                held, before = m.scheduler.holder == sid, self.clock()
                 await self.sleep(1 if self.poll > 1 else self.poll)
-                if self.clock() - started > limit:
+                if held:
+                    ran += self.clock() - before
+                if ran > limit:
                     stopped = await self._stop(sid)  # False: it finished on its own in this poll window
                     break
+                if self.clock() >= cap and m.scheduler.holder != sid:
+                    starved = await self._stop(sid)
+                    break
             final = m.db.get_session(sid)
-            status = WALL_LIMIT if stopped else final["status"]
+            status = WALL_LIMIT if stopped else "suspended" if starved else final["status"]
             suspended = bool(m.runner.yields.pop(sid, 0)) or any(
                 e["type"] == "gpu_paused" for e in m.db.events(sid))
             if kind == "hard":
@@ -160,10 +168,12 @@ class CanaryRunner:
                     ok, note = False, f"{note}; quotes not in any fetched text"
             if stopped:
                 note = f"{note}; stopped at the {limit:.0f} s wall-clock limit"
+            if starved:  # excluded as it is: restarting would only wait past the cap again
+                note, suspended = f"{note}; still waiting for the GPU at the run's cap", False
             totals = final["totals"]
             return {"task": task.id, "repeat": repeat, "ok": bool(ok and status == "done"), "note": note,
                     "status": status, "turns": totals.get("turns", 0),
-                    "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(self.clock() - started, 1),
+                    "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(ran, 1),
                     "suspended": suspended}
         except BaseException:  # setup failed (Docker down) or the run was cancelled: leave no canary on the GPU
             await self._stop(sid)

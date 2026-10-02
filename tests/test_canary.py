@@ -205,6 +205,37 @@ def test_a_confirmation_with_valid_evidence_alerts_once_and_ignores_unfinished_a
     assert len(row["outcomes"]) == 20 and row["attempts"] == 17 and row["pass_rate"] == 14 / 17
 
 
+def test_a_confirmation_rerun_that_raises_finishes_the_row_with_the_first_run_and_no_alert(tmp_path):
+    notes: list[dict] = []
+
+    def docker_down(only):
+        raise RuntimeError("Cannot connect to the Docker daemon")  # prepare_hard_task in the rerun
+    suite = ConfirmSuite(docker_down)
+    c, _ = _canary(tmp_path, suite, notes)
+    _seed(c, [20, 20, 20, 20, 20])
+    row = run(c.run_for("4" * 40))
+    assert len(suite.calls) == 2 and notes == [] and not row["alerted"]
+    assert row["status"] == "complete" and row["finished_at"] is not None and row["pass_rate"] == 0.85
+    assert len(row["outcomes"]) == 20 and not any(o.get("confirm") for o in row["outcomes"])
+    assert len(run(c.run_for("4" * 40))["outcomes"]) == 20 and len(suite.calls) == 2  # never rerun for this SHA
+
+
+def test_a_shutdown_during_the_confirmation_still_finishes_the_row_with_the_first_run(tmp_path):
+    notes: list[dict] = []
+
+    def shutdown(only):
+        raise asyncio.CancelledError
+    c, _ = _canary(tmp_path, ConfirmSuite(shutdown), notes)
+    _seed(c, [20, 20, 20, 20, 20])
+    try:
+        run(c.run_for("5" * 40))
+        raise AssertionError("a shutdown must still stop the nightly")
+    except asyncio.CancelledError:
+        pass
+    row = c.store.get("5" * 40)
+    assert notes == [] and not row["alerted"] and row["status"] == "complete" and row["pass_rate"] == 0.85
+
+
 def test_baseline_is_the_median_of_the_previous_five(tmp_path):
     prior = [{"pass_rate": r, "sha": str(i), "started_at": i} for i, r in enumerate([1.0, 0.9, 0.2, 0.95, 0.9])]
     v = canary.judge(0.75, prior, min_prior=3, drop_points=15)
@@ -276,6 +307,55 @@ def test_nightly_fires_at_the_slot_for_the_deployed_sha(tmp_path):
 
     run(body())
     assert seen == ["abc"] and slept == [1.0]
+
+
+def test_next_slot_rejects_anything_but_hh_mm():
+    for bad in ("3", "25:00", "03:60", "x:y", 185, None):
+        try:
+            canary.next_slot(datetime(2026, 10, 2, 1, 0), bad)
+            raise AssertionError(f"{bad!r} accepted")
+        except ValueError:
+            pass
+
+
+def test_a_bad_slot_time_disables_the_nightly_with_a_log_instead_of_killing_the_daemon(tmp_path, caplog):
+    seen: list[str] = []
+
+    class Fake:
+        async def run_for(self, sha):
+            seen.append(sha)
+
+    async def body():
+        n = Nightly(Fake(), CanaryConfig(enabled=True, at=185), sha=lambda: "abc")
+        n.start()
+        await asyncio.wait_for(n._task, 1)  # the loop ends on its own, without raising
+        await n.stop()
+    with caplog.at_level("ERROR", logger="harness.canary"):
+        run(body())
+    assert not seen and "canary disabled" in caplog.text
+
+
+def test_canary_at_is_normalised_or_rejected_when_the_config_loads(tmp_path):
+    import shutil
+    import yaml
+    from pathlib import Path
+    from harness import config
+    assert config._load_canary(yaml.safe_load("at: 3:05")).at == "03:05"   # YAML 1.1 sexagesimal int 185
+    assert config._load_canary(yaml.safe_load("at: 23:59")).at == "23:59"
+    assert config._load_canary({"at": "3:05"}).at == "03:05"
+    assert config._load_canary(None).at == "03:00"
+    for raw in ({"at": "25:00"}, {"at": 1440}, {"at": "noon"}, {"at": True}, {"repeats": 0},
+                {"min_prior_runs": 6, "baseline_runs": 5}, {"total_cap_seconds": "soon"}):
+        try:
+            config._load_canary(raw)
+            raise AssertionError(f"{raw} accepted")
+        except ValueError as e:
+            assert "canary." in str(e)
+    cfg_dir = tmp_path / "cfg"
+    shutil.copytree(Path(__file__).resolve().parent.parent / "config", cfg_dir)
+    with (cfg_dir / "harness.yaml").open("a", encoding="utf-8") as f:
+        f.write("\ncanary:\n  at: 3:05\n")
+    assert config.load(cfg_dir, data_dir=tmp_path / "data").canary.at == "03:05"
 
 
 # yielding
@@ -469,7 +549,7 @@ def test_hard_setup_failure_stops_the_spawned_session_and_clears_low_priority(tm
     run(body())
 
 
-def _hard_night(tmp_path, chat, on_sleep, run_body):
+def _hard_night(tmp_path, chat, on_sleep, run_body, prepare=None):
     """One hard task (no Docker: setup and checker stubbed) through a real Manager and Canary.run_for."""
     from bakeoff.canary import CanaryRunner
     from bakeoff.tasks_hard import HARD_TASKS
@@ -485,10 +565,15 @@ def _hard_night(tmp_path, chat, on_sleep, run_body):
 
         async def sleep(_):
             await on_sleep(m)
+            for _ in range(100):  # a real poll lasts seconds: let the session get the slot (or end) first
+                if not m.tasks or m.scheduler.holder in m.tasks:
+                    break
+                await asyncio.sleep(0.005)
             t["now"] += task.wall_limit + 1  # every poll crosses the task's wall-clock limit
         try:
             runner = CanaryRunner(m, cfg.canary, tmp_path, {"repeats": 1, "hard": [task], "web": []},
-                                  clock=lambda: t["now"], sleep=sleep, prepare_hard=lambda tk, ws: {},
+                                  clock=lambda: t["now"], sleep=sleep,
+                                  prepare_hard=(lambda tk, ws: prepare(m) or {}) if prepare else lambda tk, ws: {},
                                   grade_hard=lambda tk, ws, answer, base: (answer == "done", "graded"))
             c = Canary(CanaryStore(m.db), runner.run, cfg.canary, lambda n: None)
             row = await c.run_for("f00d" * 10)
@@ -523,10 +608,11 @@ def _blocked_chat(gate: asyncio.Event):
 
 
 def test_a_cancel_that_races_the_finish_records_the_real_outcome(tmp_path):
-    gate, cancels = asyncio.Event(), []
+    gate, cancels, armed = asyncio.Event(), [], []
 
     async def nothing(m):
-        if not cancels:  # first poll: arm the race; Manager.cancel finds the session already done (409)
+        if not armed:  # first poll: arm the race; Manager.cancel finds the session already done (409)
+            armed.append(True)
             real = m.cancel
 
             async def racing(sid):
@@ -551,6 +637,21 @@ def test_an_attempt_stopped_at_the_wall_limit_is_a_graded_fail(tmp_path):
         assert o["status"] == canary.WALL_LIMIT and not o["ok"] and "wall-clock limit" in o["note"]
         assert row["status"] == "complete" and row["attempts"] == 1 and row["pass_rate"] == 0.0
     _hard_night(tmp_path, _blocked_chat(asyncio.Event()), nothing, check)
+
+
+def test_a_task_that_never_gets_the_gpu_before_the_cap_is_excluded_not_failed(tmp_path):
+    def real_wins_the_slot(m):  # right after create, before the canary session's first acquire
+        m.scheduler.holder = "real-session"
+
+    async def nothing(m):
+        await asyncio.sleep(0)
+
+    async def check(m, row):
+        o = row["outcomes"][0]
+        assert o["status"] == "suspended" and not o["ok"] and o["seconds"] == 0 and "GPU" in o["note"]
+        assert row["attempts"] == 0 and row["pass_rate"] is None and not row["alerted"]
+        m.scheduler.release("real-session")
+    _hard_night(tmp_path, _blocked_chat(asyncio.Event()), nothing, check, prepare=real_wins_the_slot)
 
 
 def test_suspended_on_every_attempt_is_excluded_and_never_alerts(tmp_path):

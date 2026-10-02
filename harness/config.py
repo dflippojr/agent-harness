@@ -578,6 +578,32 @@ def _load_google_signin(raw) -> GoogleSigninConfig:
     return GoogleSigninConfig(**raw)
 
 
+def _load_canary(raw) -> CanaryConfig:
+    """`at` comes back as "HH:MM"; anything the nightly can't use is a config error here, not a dead loop at night."""
+    from .canary import parse_at
+    raw = dict(raw or {})
+    at = raw.get("at", CanaryConfig.at)
+    if isinstance(at, int) and not isinstance(at, bool):  # YAML 1.1 reads an unquoted 3:05 as 3 * 60 + 5
+        at = f"{at // 60}:{at % 60}" if 0 <= at < 24 * 60 else str(at)
+    hour, minute = parse_at(at)
+    raw["at"] = f"{hour:02d}:{minute:02d}"
+    for key, kind, low in (("repeats", int, 1), ("total_cap_seconds", int, 1), ("start_wait_seconds", int, 0),
+                           ("baseline_runs", int, 1), ("min_prior_runs", int, 1), ("drop_points", float, 1),
+                           ("metrics_limit", int, 1)):
+        value = raw.get(key, getattr(CanaryConfig, key))
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            raw[key] = kind(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"canary.{key} must be a number, got {value!r}") from None
+        if raw[key] < low:
+            raise ValueError(f"canary.{key} must be at least {low}, got {value!r}")
+    if raw["min_prior_runs"] > raw["baseline_runs"]:
+        raise ValueError("canary.min_prior_runs can't be more than canary.baseline_runs (no run would ever be judged)")
+    return CanaryConfig(**raw)
+
+
 def _load_guests(raw) -> list[GuestAccess]:
     guests = []
     for item in raw or []:
@@ -846,7 +872,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         images=images,
         search=search,
         repo_map=RepoMapConfig(**(raw.get("repo_map") or {})),
-        canary=CanaryConfig(**(raw.get("canary") or {})),
+        canary=_load_canary(raw.get("canary")),
         jobs=jobs,
         skills=skills,
         remote_control=remote_control,

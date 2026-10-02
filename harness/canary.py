@@ -193,19 +193,20 @@ class Canary:
         if row and row["status"] in FINAL:
             return row
         tries = self.store.begin(sha, self.clock())
+        # Every way out after the claim finishes the row, with the best state reached so far: a crash or shutdown
+        # in the first run leaves it blocked (the next slot may retry); after that, the first run's results stand.
+        status, outcomes, verdict = "blocked", [], Verdict(False)
         try:
             report = await self.run_suite(sha, None)
-        except BaseException:
-            self.store.finish(sha, "blocked", [], self.clock())  # a crash or shutdown: the next slot may retry
-            raise
-        if report.status == "blocked":
-            self.store.finish(sha, "blocked" if tries < 2 else "skipped", [], self.clock())
-            return self.store.get(sha)
-        outcomes, verdict = report.outcomes, Verdict(False)
-        if report.status == "complete":
-            outcomes, verdict = await self._judge(sha, report)
-        self.store.finish(sha, report.status, outcomes, self.clock(), verdict.baseline_sha, verdict.baseline_rate,
-                          verdict.alert)
+            if report.status == "blocked":
+                status = "blocked" if tries < 2 else "skipped"
+            else:
+                status, outcomes = report.status, report.outcomes
+                if report.status == "complete":
+                    outcomes, verdict = await self._judge(sha, report)
+        finally:
+            self.store.finish(sha, status, outcomes, self.clock(), verdict.baseline_sha, verdict.baseline_rate,
+                              verdict.alert)
         if verdict.alert:
             self._alert(sha, pass_rate(outcomes), verdict)
         return self.store.get(sha)
@@ -222,8 +223,13 @@ class Canary:
         # confirmation: rerun only the regressed tasks; with none (e.g. a new task failing without history), every
         # task that failed this run. Their new results replace the old ones. An alert is never sent unconfirmed.
         tasks = regressed_tasks(outcomes, prior) or list(dict.fromkeys(o["task"] for o in valid(outcomes) if not o["ok"]))
-        again = await self.run_suite(sha, tasks) if tasks else None
-        unusable = _unconfirmed(again, tasks)
+        try:
+            again = await self.run_suite(sha, tasks) if tasks else None
+        except Exception as e:  # e.g. Docker down in a hard task's setup: no confirmation, so no alert
+            again, error = None, f"confirmation rerun failed: {e!r}"
+        else:
+            error = ""
+        unusable = error or _unconfirmed(again, tasks)
         if unusable:
             log.warning("canary %s: %s, alert suppressed (%s)", sha[:SHORT_SHA], unusable, verdict.reason)
             return outcomes, Verdict(False, reason=unusable)
@@ -238,8 +244,19 @@ class Canary:
                      "priority": 4, "tags": ["warning"], "click": url})
 
 
+def parse_at(at) -> tuple[int, int]:
+    """`canary.at` as (hour, minute); ValueError unless it is an "HH:MM" string of a real time of day."""
+    parts = at.split(":") if isinstance(at, str) else []
+    if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
+        raise ValueError(f"canary.at must be a time of day as \"HH:MM\", got {at!r}")
+    hour, minute = (int(p) for p in parts)
+    if hour > 23 or minute > 59:
+        raise ValueError(f"canary.at must be a time of day as \"HH:MM\", got {at!r}")
+    return hour, minute
+
+
 def next_slot(now: datetime, at: str) -> datetime:
-    hour, minute = (int(x) for x in at.split(":"))
+    hour, minute = parse_at(at)
     slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     return slot if slot > now else slot + timedelta(days=1)
 
@@ -264,7 +281,12 @@ class Nightly:
 
     async def _loop(self) -> None:
         while True:
-            await asyncio.sleep(max(1.0, (next_slot(self.now(), self.cfg.at) - self.now()).total_seconds()))
+            try:
+                wait = (next_slot(self.now(), self.cfg.at) - self.now()).total_seconds()
+            except Exception:  # config.load rejects a bad `at`; a value set some other way must not kill the daemon
+                log.exception("canary disabled: can't schedule the nightly run at %r", self.cfg.at)
+                return
+            await asyncio.sleep(max(1.0, wait))
             try:
                 await self.canary.run_for(self.sha())
             except asyncio.CancelledError:
