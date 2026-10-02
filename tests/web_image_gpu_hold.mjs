@@ -1,13 +1,7 @@
 // UI harness: Images hides uninstalled models, Queue Generation during a GPU
 // hold, and spaces the gallery below Generate. (#186)
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appSrc = readFileSync(join(root, "harness/web/app.js"), "utf8")
-  .replace(/import \{[^}]+\} from "\.\/client\.mjs";\r?\n/, "");
+import { createContext } from "node:vm";
+import { runApp } from "./web_app_loader.mjs";
 
 class Emitter {
   constructor() { this._l = {}; }
@@ -280,7 +274,7 @@ const sandbox = createContext({
   decodeURIComponent, undefined,
 });
 
-runInContext(appSrc, sandbox);
+runApp(sandbox);
 
 process.on("unhandledRejection", (err) => {
   console.error(err);

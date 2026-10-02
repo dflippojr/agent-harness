@@ -100,7 +100,7 @@ def test_web_app_and_guard(tmp_path):
         assert "applyTextSize" in js
         assert 'setHeader("agents", "New task", { page: true })' in js
         assert "sessionJumpHidden" in js
-        assert "Math.min(160, 0.75 * vh)" in js
+        assert "Math.min(160, 0.75 * vh)" in client.get("/static/lib/layout.mjs").text
         assert 'type: "color"' not in js
         assert "swatch split" in js
         assert "Scratch is a fresh empty folder" in js

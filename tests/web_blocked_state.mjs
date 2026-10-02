@@ -1,14 +1,8 @@
 // UI harness: load app.js in a stub DOM, enter protocol-blocked state, and prove
 // hashchange / feature-nav / visibility / online / SW messages cannot dismiss the
 // update card or start /api/v1 traffic.
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appSrc = readFileSync(join(root, "harness/web/app.js"), "utf8")
-  .replace(/import \{[^}]+\} from "\.\/client\.mjs";\r?\n/, "");
+import { createContext } from "node:vm";
+import { runApp } from "./web_app_loader.mjs";
 
 class Emitter {
   constructor() { this._l = {}; }
@@ -256,7 +250,7 @@ const sandbox = createContext({
   undefined,
 });
 
-runInContext(appSrc, sandbox);
+runApp(sandbox);
 
 const waitForCard = async () => {
   for (let i = 0; i < 40; i++) {

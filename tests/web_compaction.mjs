@@ -1,12 +1,6 @@
 // Session-page VM: mask compaction must not crash summary notes or ctxUsed (#248).
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appSrc = readFileSync(join(root, "harness/web/app.js"), "utf8")
-  .replace(/import \{[^}]+\} from "\.\/client\.mjs";\r?\n/, "");
+import { createContext } from "node:vm";
+import { runApp } from "./web_app_loader.mjs";
 
 const fail = (msg) => { throw new Error(msg); };
 
@@ -270,7 +264,7 @@ const sandbox = createContext({
   agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL, Node, Event, JSON, Date, Math, Number, String, Boolean, Array, Object,
   Set, Map, Promise, Error, parseInt, encodeURIComponent, decodeURIComponent, undefined,
 });
-runInContext(appSrc, sandbox);
+runApp(sandbox);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (pred, label, ms = 2000) => {

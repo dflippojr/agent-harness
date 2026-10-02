@@ -1,34 +1,12 @@
 // UI harness: the small pure helpers pulled out of app.js by the Sonar style cleanup (#229) keep the
-// exact strings and choices the inline ternaries produced. Each helper is sliced out of the source and
-// evaluated on its own, so no DOM is needed.
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const src = readFileSync(join(root, "harness/web/app.js"), "utf8").replace(/\r\n/g, "\n");
-
-// A top-level `function name(...) {...}` (cut at the first closing brace on its own line) or a
-// `const name = ...;` that is either one line or a block arrow closed by `};` on its own line.
-function slice(name) {
-  const fn = src.indexOf(`function ${name}(`);
-  if (fn >= 0) {
-    const end = src.indexOf("\n}\n", fn);
-    return src.slice(fn, end + 3);
-  }
-  const start = src.indexOf(`const ${name} =`);
-  if (start < 0) throw new Error(`helper not found: ${name}`);
-  const firstLine = src.indexOf("\n", start);
-  const multiline = src.slice(start, firstLine).endsWith("{");
-  const end = multiline ? src.indexOf("\n};\n", start) + 4 : firstLine + 1;
-  return src.slice(start, end);
-}
-
-const load = (names, env = {}) => {
-  const keys = Object.keys(env);
-  const body = `${names.map(slice).join("\n")}\nreturn { ${names.join(", ")} };`;
-  return new Function(...keys, body)(...keys.map((k) => env[k]));
-};
+// exact strings and choices the inline ternaries produced. They live in harness/web/lib/ and are imported
+// directly, so no DOM is needed (#258).
+import { approvalDiffClass, diffLineClass } from "../harness/web/lib/diff.mjs";
+import { protocolMismatch } from "../harness/web/lib/compat.mjs";
+import { fmtSpan, fmtTokens, holdRemainingText, pluralize } from "../harness/web/lib/format.mjs";
+import { compatibilityText, lastSeenText, recoveryNote, settingValueText } from "../harness/web/lib/settings-text.mjs";
+import { compareTargets, pickDefaultBackend, runnerStateText } from "../harness/web/lib/targets.mjs";
+import { approvalWhat, toolSummaryText } from "../harness/web/lib/tools.mjs";
 
 const failures = [];
 const eq = (label, got, want) => {
@@ -36,7 +14,6 @@ const eq = (label, got, want) => {
 };
 
 {
-  const { fmtTokens, fmtSpan, pluralize } = load(["fmtTokens", "fmtSpan", "pluralize"]);
   eq("fmtTokens 0", fmtTokens(0), "0");
   eq("fmtTokens undefined", fmtTokens(undefined), "0");
   eq("fmtTokens 999", fmtTokens(999), "999");
@@ -54,19 +31,16 @@ const eq = (label, got, want) => {
 }
 
 {
-  const { compareTargets } = load(["compareTargets"]);
   eq("targets sort", ["mac", "tower", "alpha"].sort(compareTargets), ["tower", "alpha", "mac"]);
 }
 
 {
-  const { holdRemainingText } = load(["holdRemainingText", "fmtSpan"]);
   eq("hold forever", holdRemainingText(null), "until you turn it off");
   eq("hold seconds", holdRemainingText(60), "for about 60 s");
   eq("hold minutes", holdRemainingText(100), "for about 2 min");
 }
 
 {
-  const { toolSummaryText } = load(["toolSummaryText"]);
   eq("summary shell", toolSummaryText({ name: "run_shell" }, { command: "ls" }), "ls");
   eq("summary clone", toolSummaryText({ name: "git_clone" }, { url: "u" }), "u");
   eq("summary fetch", toolSummaryText({ name: "web_fetch" }, { url: "w" }), "w");
@@ -78,7 +52,6 @@ const eq = (label, got, want) => {
 }
 
 {
-  const { approvalWhat, approvalDiffClass } = load(["approvalWhat", "approvalDiffClass"]);
   eq("what shell", approvalWhat({ tool: "run_shell", args: { command: "ls", network: true } }), "🌐 network · $ ls");
   eq("what bash", approvalWhat({ tool: "Bash", args: { command: "ls" } }), "$ ls");
   eq("what clone", approvalWhat({ tool: "git_clone", args: { url: "u" } }), "git clone u");
@@ -91,7 +64,6 @@ const eq = (label, got, want) => {
 }
 
 {
-  const { diffLineClass } = load(["diffLineClass"]);
   eq("diff +++", diffLineClass("+++ b/x"), "");
   eq("diff ---", diffLineClass("--- a/x"), "");
   eq("diff add", diffLineClass("+x"), "add");
@@ -100,16 +72,13 @@ const eq = (label, got, want) => {
 }
 
 {
-  const { protocolMismatch } = load(["protocolMismatch"], { WEB_PROTOCOL: 5 });
-  eq("protocol none", protocolMismatch(undefined), null);
-  eq("protocol ok", protocolMismatch({ min: 4, max: 6 }), null);
-  eq("protocol client old", protocolMismatch({ min: 6, max: 8 }), "client_update_required");
-  eq("protocol daemon old", protocolMismatch({ min: 1, max: 4 }), "daemon_update_required");
+  eq("protocol none", protocolMismatch(undefined, 5), null);
+  eq("protocol ok", protocolMismatch({ min: 4, max: 6 }, 5), null);
+  eq("protocol client old", protocolMismatch({ min: 6, max: 8 }, 5), "client_update_required");
+  eq("protocol daemon old", protocolMismatch({ min: 1, max: 4 }, 5), "daemon_update_required");
 }
 
 {
-  const { settingValueText, recoveryNote, lastSeenText, compatibilityText } =
-    load(["settingValueText", "recoveryNote", "lastSeenText", "compatibilityText"]);
   eq("setting plain", settingValueText({ effective: 3 }), "effective 3");
   eq("setting none", settingValueText({ effective: null }), "effective —");
   eq("setting configured", settingValueText({ effective: 3, configured: 5, inherited: 1 }), "effective 3 · configured 5 · inherited 1");
@@ -124,7 +93,6 @@ const eq = (label, got, want) => {
 }
 
 {
-  const { runnerStateText, pickDefaultBackend } = load(["runnerStateText", "pickDefaultBackend"], { TARGET_LABEL: { macbook: "MacBook" } });
   eq("runner offline", runnerStateText("macbook", { online: false }),
     "Runs on the MacBook, which is offline or asleep: the task will wait for it");
   eq("runner missing", runnerStateText("x", undefined), "Runs on the x, which is offline or asleep: the task will wait for it");
@@ -133,32 +101,6 @@ const eq = (label, got, want) => {
   eq("backend hold", pickDefaultBackend([{ name: "local" }, { name: "claude" }], true), "claude");
   eq("backend no hold", pickDefaultBackend([{ name: "local" }, { name: "claude" }], false), "local");
   eq("backend none", pickDefaultBackend([], true), "local");
-}
-
-{
-  // showSecretOnce (hoisted from four nested callbacks): shows the secret once, Copy copies it, Done reloads.
-  const calls = [];
-  let focused = 0;
-  const h = (tag, attrs = {}, ...kids) => ({ tag, attrs, kids, select: () => { focused++; } });
-  const fill = (form, ...kids) => calls.push(["fill", form, kids]);
-  const copyToClipboard = (text, after) => { calls.push(["copy", text]); after(); };
-  const { showSecretOnce } = load(["showSecretOnce"], { h, fill, copyToClipboard });
-  let reloaded = 0;
-  const form = {};
-  showSecretOnce(form, () => { reloaded++; }, "Intro text", "sekret", "Copy install command");
-  const [, gotForm, [intro, field, row]] = calls[0];
-  eq("secret form", gotForm, form);
-  eq("secret intro", intro.kids, ["Intro text"]);
-  eq("secret field", [field.attrs.readonly, field.attrs.value], [true, "sekret"]);
-  eq("secret labels", row.kids.map((b) => b.kids[0]), ["Copy install command", "Done"]);
-  let selected = 0;
-  field.attrs.onclick({ target: { select: () => { selected++; } } });
-  eq("field click selects", selected, 1);
-  row.kids[0].attrs.onclick();
-  eq("copy", calls[1], ["copy", "sekret"]);
-  eq("copy reselects field", focused, 1);
-  row.kids[1].attrs.onclick();
-  eq("done reloads", reloaded, 1);
 }
 
 if (failures.length) {
