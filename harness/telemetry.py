@@ -15,9 +15,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import random
 import logging
 import os
+import secrets
 import sys
 import threading
 import time
@@ -319,8 +319,8 @@ class OtelTracer:
         self.tracer = self.provider.get_tracer("agent-harness")
 
     def new_trace(self) -> dict:
-        return {"trace_id": format(random.getrandbits(128) or 1, "032x"),
-                "span_id": format(random.getrandbits(64) or 1, "016x")}
+        return {"trace_id": format(secrets.randbits(128) or 1, "032x"),
+                "span_id": format(secrets.randbits(64) or 1, "016x")}
 
     def _start(self, name: str, parent: _Span, attrs: dict | None, start: float | None = None) -> _Span:
         span = self.tracer.start_span(name, context=self._trace.set_span_in_context(parent._span),
