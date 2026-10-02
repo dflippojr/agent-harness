@@ -40,32 +40,30 @@ class Checkpointer:
         stats["turn"] = turn
         try:
             head, branch = head_and_branch(workspace)
-            sha = store.snapshot(workspace, sid, turn, head, branch)
+            sha = store.snapshot(workspace, sid, turn, head, branch, publish=False)
             stats.update(files=store.files, bytes=store.bytes)
             if only_if_changed and self._same_tree(store, sid, sha):
-                store.delete(sid, [turn])
                 stats["skipped"] = "unchanged"
                 return None
-            store.save_context(turn, s["context"])
+            context = store.pack_context(s["context"])
         except (GitError, OSError, ValueError, subprocess.SubprocessError) as e:
             log.warning("checkpoint %s/%s failed: %s", sid, turn, e)
             stats["skipped"] = "snapshot_failed"
             return self._skipped(sid, f"the snapshot failed ({str(e)[-160:]})")
-        stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
-        store.delete(sid, stale)
-        self.db.delete_checkpoints(sid, stale)
-        self.db.add_checkpoint(sid, turn, sha, head, branch)
-        self.db.update_session(sid, turn_seq=turn)
-        pruned = bool(stale) + self._prune_cap(sid, store)
-        if not self._within_quota(s, store, sid, turn):
-            self.db.delete_checkpoints(sid, [turn])
-            store.delete(sid, [turn])
-            store.reclaim()
-            self.db.update_session(sid, turn_seq=turn - 1)
+        # Quota is decided before anything existing is touched: a skipped snapshot leaves every checkpoint,
+        # including the rewound-past ones a later rewind can still redo (one may share this turn's number).
+        if not self._room_for(s, store, sha, len(context)):
+            store.reclaim()                                 # drops the unnamed snapshot's objects
             stats["skipped"] = "over_quota"
             return self._skipped(sid, "the account is over its disk quota")
-        if pruned:
+        stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
+        capped = self.db.write(self._record, sid, turn, sha, head, branch, stale)
+        store.delete(sid, [t for t in stale + capped if t != turn])
+        store.keep(sid, turn, sha, context)                 # replaces a rewound-past ref and context of this turn
+        if stale or capped:
             store.reclaim()
+        if not self._within_quota(s, store, sid, turn):     # the account grew meanwhile; its quota check refuses writes
+            log.warning("checkpoint %s/%s kept although the account is still over its quota", sid, turn)
         return {"turn": turn, "head": head[:12]}
 
     @staticmethod
@@ -80,25 +78,45 @@ class Checkpointer:
         trees = [store.tree_of_commit(c) for c in (sha, known[-1]["sha"])]
         return trees[0] == trees[1] != ""
 
-    def _prune_cap(self, sid: str, store: Store) -> int:
+    def _record(self, sid: str, turn: int, sha: str, head: str, branch: str, stale: list[int]) -> list[int]:
+        """One transaction (pass to `db.write`): the new checkpoint replaces the rewound-past ones and the oldest
+        beyond the cap. Returns the capped turns; the caller deletes their refs once this has committed."""
+        self.db.delete_checkpoints(sid, stale)
+        self.db.add_checkpoint(sid, turn, sha, head, branch)
+        self.db.update_session(sid, turn_seq=turn)
         visible = self.db.checkpoints(sid, hidden=False)
-        extra = [c["turn"] for c in visible[:max(0, len(visible) - CAP)]]
-        if extra:
-            store.delete(sid, extra)
-            self.db.delete_checkpoints(sid, extra)
-        return len(extra)
+        capped = [c["turn"] for c in visible[:max(0, len(visible) - CAP)]]
+        self.db.delete_checkpoints(sid, capped)
+        return capped
+
+    def _quota(self, s: dict) -> tuple[str, int] | None:
+        """(account, limit) for a member's session; None for the owner, who is only measured."""
+        from .principal import OWNER_USER_ID, session_user_id
+        uid = session_user_id(s)
+        account = self.db.account_by_id(uid) if uid != OWNER_USER_ID else None
+        return None if account is None else (uid, int(account["disk_quota_bytes"]))
+
+    def _room_for(self, s: dict, store: Store, sha: str, context_bytes: int) -> bool:
+        """Whether the new snapshot may be kept: the account is under quota now, or would be with this session's
+        other checkpoints pruned and only the new one stored. Deletes nothing."""
+        from .fileops import dir_size
+        from .storage import account_usage_bytes
+        quota = self._quota(s)
+        if quota is None:
+            return True
+        uid, limit = quota
+        used = account_usage_bytes(self.cfg, uid)
+        return used < limit or used - dir_size(store.base) + store.size_of(sha) + context_bytes < limit
 
     def _within_quota(self, s: dict, store: Store, sid: str, keep: int) -> bool:
         """Members are capped; the owner is only measured. Prune this session's oldest checkpoints to make room,
         and report False when even that would not fit."""
         from .fileops import dir_size
-        from .principal import OWNER_USER_ID, session_user_id
         from .storage import account_usage_bytes
-        uid = session_user_id(s)
-        account = self.db.account_by_id(uid) if uid != OWNER_USER_ID else None
-        if account is None:
+        quota = self._quota(s)
+        if quota is None:
             return True
-        limit = int(account["disk_quota_bytes"])
+        uid, limit = quota
         used = account_usage_bytes(self.cfg, uid)
         if used < limit:
             return True

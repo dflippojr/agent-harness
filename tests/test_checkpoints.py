@@ -276,3 +276,110 @@ def test_fork_writes_through_the_writer_without_blocking_the_loop(tmp_path, monk
         await finished(m, fork["id"])
 
     asyncio.run(body())
+
+
+def test_rewind_restores_a_detached_head_without_moving_the_branch(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        sid, ws, branch = s["id"], Path(s["workspace"]), "agent/" + s["id"]
+        sh(ws, "checkout", "-q", "--detach")
+        (ws / "detached.txt").write_text("on a detached HEAD\n")
+        sh(ws, "add", "detached.txt")
+        sh(ws, "commit", "-qm", "detached work")
+        detached = sh(ws, "rev-parse", "HEAD")
+        event = await asyncio.to_thread(m.runner.checkpointer.take, sid)
+        ckpt = m.runner.checkpointer.checkpoint(sid, event["turn"])
+        assert ckpt["head"] == detached and ckpt["branch"] == ""          # detached: no branch, just the commit
+        sh(ws, "checkout", "-q", "-f", branch)
+        tip = sh(ws, "rev-parse", branch)
+
+        await m.rewind(sid, event["turn"])
+        assert sh(ws, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"       # detached again, at the recorded commit
+        assert sh(ws, "rev-parse", "HEAD") == detached
+        assert sh(ws, "rev-parse", branch) == tip                           # the session branch did not move
+        assert (ws / "detached.txt").read_text() == "on a detached HEAD\n"
+
+        await m.rewind(sid, 2)                                              # an attached checkpoint re-attaches
+        assert sh(ws, "rev-parse", "--abbrev-ref", "HEAD") == branch and not (ws / "detached.txt").exists()
+
+    asyncio.run(body())
+
+
+def test_over_quota_skip_leaves_the_rewound_past_checkpoints_redoable(tmp_path, monkeypatch):
+    async def body():
+        m, s = await started(tmp_path)
+        sid, ws = s["id"], Path(s["workspace"])
+        await m.rewind(sid, 1)
+        (ws / "after-rewind.txt").write_text("new work\n")
+        monkeypatch.setattr("harness.principal.OWNER_USER_ID", "nobody")      # measure this account like a member's
+        monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
+        monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: 10 ** 9)
+        event = await asyncio.to_thread(m.runner.checkpointer.take, sid)
+        monkeypatch.undo()
+        assert event["status"] == "skipped" and "quota" in event["reason"]
+        assert [c["turn"] for c in m.db.checkpoints(sid, hidden=True)] == [2]   # nothing existing was touched
+        assert m.db.get_session(sid)["turn_seq"] == 1
+        await m.rewind(sid, 2)                                                  # redo still works
+        assert (ws / "extra.txt").read_text() == "late\n"
+
+        await m.rewind(sid, 1)                                                  # with room, the new turn 2 replaces it
+        (ws / "after-rewind.txt").write_text("new work\n")
+        event = await asyncio.to_thread(m.runner.checkpointer.take, sid)
+        assert event["turn"] == 2 and not m.db.checkpoints(sid, hidden=True)
+        await m.rewind(sid, 1)
+        await m.rewind(sid, 2)
+        assert (ws / "after-rewind.txt").exists() and not (ws / "extra.txt").exists()
+
+    asyncio.run(body())
+
+
+def test_nested_repositories_are_checkpointed_as_files_and_rewound(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        sid, ws, cp = s["id"], Path(s["workspace"]), m.runner.checkpointer
+        make_repo(ws / "libs" / "clone")                                   # a clone with history
+        subprocess.run(["git", "init", "-q", str(ws / "fresh")], check=True)
+        (ws / "fresh" / "notes.txt").write_text("no commit yet\n")          # git add alone refuses this one
+        event = await asyncio.to_thread(cp.take, sid)
+        assert event["turn"] == 3
+        sha = cp.checkpoint(sid, 3)["sha"]
+        store = cp.store(s)
+        assert store._git(None, None, "show", f"{sha}:libs/clone/app.py").out == "VALUE = 1\n"
+        assert store._git(None, None, "show", f"{sha}:fresh/notes.txt").out == "no commit yet\n"
+
+        (ws / "libs" / "clone" / "app.py").write_text("edited\n")
+        await m.rewind(sid, 3)                                              # a file inside the clone is restored
+        assert (ws / "libs" / "clone" / "app.py").read_text() == "VALUE = 1\n"
+        assert (ws / "libs" / "clone" / ".git").is_dir()
+
+        await m.rewind(sid, 2)                                              # before the clone: it is gone
+        assert not (ws / "libs").exists() and not (ws / "fresh").exists()
+        assert (ws / "extra.txt").exists()
+
+        await m.rewind(sid, 3)                                              # after it: its files come back
+        assert (ws / "libs" / "clone" / "app.py").read_text() == "VALUE = 1\n"
+        assert (ws / "fresh" / "notes.txt").read_text() == "no commit yet\n"
+        fork = await m.fork(sid, 3, "carry on")
+        assert (Path(fork["workspace"]) / "libs" / "clone" / "app.py").read_text() == "VALUE = 1\n"
+        await finished(m, fork["id"])
+
+    asyncio.run(body())
+
+
+def test_a_turn_that_only_generates_an_image_is_checkpointed(tmp_path):
+    from test_phase6 import image_manager
+    steps = [Completion(tool_calls=[call("generate_image", 0, prompt="app icon", filename="assets/icon")]),
+             Completion(content="made the icon")]
+
+    async def body():
+        m, _, _ = image_manager(tmp_path, steps=steps)
+        await m.start(maintenance=False)
+        sid = m.create("make an icon")["id"]
+        await wait_status(m, sid, "done", timeout=20)
+        assert [c["turn"] for c in m.db.checkpoints(sid)] == [1]           # the PNG is in the workspace
+        store = m.runner.checkpointer.store(m.db.get_session(sid))
+        sha = m.db.checkpoints(sid)[0]["sha"]
+        assert "assets/icon.png" in store._git(None, None, "ls-tree", "-r", "--name-only", sha).out
+        await m.stop()
+
+    asyncio.run(body())

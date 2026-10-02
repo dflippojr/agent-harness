@@ -7,9 +7,12 @@ mechanism serves git projects and scratch workspaces. Commits sit on the hidden 
 `refs/harness/checkpoints/<session>/<turn>` and are never pushed (review pushes only the session branch).
 
 What a rewind restores: every file `git add -A` would see (tracked, untracked, deleted). Git-ignored files
-(virtualenvs, build output) are neither snapshotted nor removed. For git projects the session branch is also
-reset to the HEAD recorded with the checkpoint. Anything outside the workspace (installed packages, processes,
-images already written to artifacts) is not rewound.
+(virtualenvs, build output) are neither snapshotted nor removed. A repository nested in the workspace (a clone)
+is snapshotted as its plain files, never its own .git: restoring a checkpoint that has the clone brings its files
+back without their history, and rewinding to before the clone removes its directory, .git included. For git
+projects the session branch is also reset to the HEAD recorded with the checkpoint; a HEAD that was detached then
+is detached again at that commit, and no branch moves. Anything outside the workspace (installed packages,
+processes, images already written to artifacts) is not rewound.
 """
 
 from __future__ import annotations
@@ -28,30 +31,36 @@ from .projects import GitError
 log = logging.getLogger("harness.checkpoints")
 
 CAP = 50                      # visible checkpoints kept per session
-MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_delegated_edit")
+MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_delegated_edit", "generate_image")
 REF_PREFIX = "refs/harness/checkpoints"
+GITLINK = 0o160000           # index mode of a nested repository
 
 
-def index_stats(raw: bytes) -> tuple[int, int]:
-    """(entries, total file bytes) of a git index, read from the file itself rather than another git process.
-    Bytes are summed for the version 2/3 layout git writes by default; another version reports 0 bytes."""
-    if len(raw) < 12 or raw[:4] != b"DIRC":
-        return 0, 0
-    version, count = int.from_bytes(raw[4:8], "big"), int.from_bytes(raw[8:12], "big")
-    if version not in (2, 3):
-        return count, 0
-    total, pos = 0, 12
+def index_entries(raw: bytes):
+    """(mode, file bytes, path) of each entry of a git index, read from the file itself rather than another git
+    process. Only the version 2/3 layout git writes by default is parsed; another version yields nothing."""
+    if len(raw) < 12 or raw[:4] != b"DIRC" or int.from_bytes(raw[4:8], "big") not in (2, 3):
+        return
+    version, count, pos = int.from_bytes(raw[4:8], "big"), int.from_bytes(raw[8:12], "big"), 12
     for _ in range(count):       # fixed 62-byte header (+2 extended flags), the path, NUL padding to 8 bytes
         if pos + 62 > len(raw):
-            break
-        total += int.from_bytes(raw[pos + 36:pos + 40], "big")
+            return
+        mode, size = int.from_bytes(raw[pos + 24:pos + 28], "big"), int.from_bytes(raw[pos + 36:pos + 40], "big")
         flags = int.from_bytes(raw[pos + 60:pos + 62], "big")
         start = pos + 62 + (2 if version == 3 and flags & 0x4000 else 0)
         end = raw.find(b"\0", start)
         if end < 0:
-            break
+            return
+        yield mode, size, raw[start:end].decode("utf-8", "surrogateescape")
         pos += ((end - pos) // 8 + 1) * 8
-    return count, total
+
+
+def index_stats(raw: bytes) -> tuple[int, int]:
+    """(entries, total file bytes) of a git index. Bytes are summed for the version 2/3 layout git writes by
+    default; another version reports 0 bytes."""
+    if len(raw) < 12 or raw[:4] != b"DIRC":
+        return 0, 0
+    return int.from_bytes(raw[8:12], "big"), sum(size for _, size, _ in index_entries(raw))
 
 
 def ref_name(sid: str, turn: int) -> str:
@@ -97,21 +106,58 @@ class Store:
         projects._run(["init", "--bare", "-q", str(self.repo)], env=projects._isolate_env())
 
     def _tree_of(self, workspace: Path, index: Path) -> str:
-        self._git(workspace, index, "add", "-A", "--", ".")
-        return self._git(workspace, index, "write-tree").out.strip()
+        return self._build(workspace, index)[0]
+
+    def _build(self, workspace: Path, index: Path) -> tuple[str, int, int, list[str]]:
+        """Stage the workspace into `index` and write its tree: (tree, files, bytes, nested repository paths).
+        A repository nested in the workspace (a clone) is staged as its plain files, recursively, where git alone
+        records a gitlink or refuses one with no commit yet. The nested repository's own .git is never stored."""
+        added = self._git(workspace, index, "add", "-A", "--", ".", check=False)
+        raw = index.read_bytes() if added.code == 0 and index.is_file() else b""
+        if added.code == 0 and not any(mode == GITLINK for mode, _, _ in index_entries(raw)):
+            tree = self._git(workspace, index, "write-tree").out.strip()
+            return (tree, *index_stats(raw), [])
+        index.unlink(missing_ok=True)
+        listed = self._git(workspace, index, "ls-files", "-o", "-z", "--exclude-standard").out
+        top = [n[:-1] for n in self._names(listed) if n.endswith("/")]      # git lists a nested repository as "dir/"
+        if not top:
+            raise GitError(f"could not stage the workspace: {added.text[-300:]}")
+        spec = ".\0" + "".join(f":(exclude,literal){rel}\0" for rel in top)
+        self._git(workspace, index, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul", input_=spec)
+        nested_bytes, nested = 0, list(top)
+        for i, rel in enumerate(top):
+            tree, _, size, inner = self._build(workspace / rel, index.with_name(f"{index.name}.{i}"))
+            self._git(workspace, index, "read-tree", f"--prefix={rel}/", tree)
+            nested_bytes += size        # entries read from a tree carry no size; their own index had it
+            nested += [f"{rel}/{n}" for n in inner]
+        tree = self._git(workspace, index, "write-tree").out.strip()
+        files, size = index_stats(index.read_bytes())
+        return tree, files, size + nested_bytes, nested
 
     # snapshot ---------------------------------------------------------------------------------------------------
-    def snapshot(self, workspace: Path, sid: str, turn: int, head: str, branch: str) -> str:
-        """Commit the workspace's current files (ignored ones excluded) to the hidden ref; returns the commit sha."""
+    def snapshot(self, workspace: Path, sid: str, turn: int, head: str, branch: str, publish: bool = True) -> str:
+        """Commit the workspace's current files (ignored ones excluded) to the hidden ref; returns the commit sha.
+        With `publish` False no ref is written until `keep` names the commit, so a rewound-past checkpoint with the
+        same turn number survives a snapshot that is then dropped."""
         self.init()
         with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
-            index = Path(tmp) / "index"
-            tree = self._tree_of(workspace, index)
+            tree, self.files, self.bytes, _ = self._build(workspace, Path(tmp) / "index")
             message = f"checkpoint {turn}\n\nHarness-Session: {sid}\nHarness-Turn: {turn}\nHead: {head}\nBranch: {branch}\n"
             sha = self._git(None, None, "commit-tree", tree, input_=message).out.strip()
-            self.files, self.bytes = index_stats(index.read_bytes())
-        self._git(None, None, "update-ref", ref_name(sid, turn), sha)
+        if publish:
+            self._git(None, None, "update-ref", ref_name(sid, turn), sha)
         return sha
+
+    def keep(self, sid: str, turn: int, sha: str, context: bytes) -> None:
+        """Name a snapshot taken with `publish` False, with its `pack_context`ed model context."""
+        self._git(None, None, "update-ref", ref_name(sid, turn), sha)
+        self.contexts.mkdir(parents=True, exist_ok=True)
+        (self.contexts / f"{turn}.json.gz").write_bytes(context)
+
+    def size_of(self, sha: str) -> int:
+        """Bytes the objects of this snapshot would take on their own; 0 when git cannot tell."""
+        result = self._git(None, None, "rev-list", "--objects", "--disk-usage", sha, check=False)
+        return int(result.out.strip()) if result.code == 0 and result.out.strip().isdigit() else 0
 
     def tree_of_commit(self, sha: str) -> str:
         return self._git(None, None, "rev-parse", f"{sha}^{{tree}}", check=False).out.strip()
@@ -128,9 +174,13 @@ class Store:
             self._git(None, None, "gc", "--prune=now", "--quiet", check=False)
 
     # model context ----------------------------------------------------------------------------------------------
+    @staticmethod
+    def pack_context(context: list) -> bytes:
+        return gzip.compress(json.dumps(context).encode("utf-8"))
+
     def save_context(self, turn: int, context: list) -> None:
         self.contexts.mkdir(parents=True, exist_ok=True)
-        (self.contexts / f"{turn}.json.gz").write_bytes(gzip.compress(json.dumps(context).encode("utf-8")))
+        (self.contexts / f"{turn}.json.gz").write_bytes(self.pack_context(context))
 
     def load_context(self, turn: int) -> list:
         path = self.contexts / f"{turn}.json.gz"
@@ -145,12 +195,14 @@ class Store:
         failures: list[str] = []
         with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
             now_index, want_index = Path(tmp) / "now", Path(tmp) / "want"
-            current = self._tree_of(workspace, now_index)
+            current, _, _, nested = self._build(workspace, now_index)
             tree = self._git(None, None, "rev-parse", f"{sha}^{{tree}}").out.strip()
             extra = self._names(self._git(None, None, "diff-tree", "-r", "-z", "--no-renames", "--name-only",
                                           "--diff-filter=A", tree, current).out)
             changed = self._names(self._git(None, None, "diff-tree", "-r", "-z", "--no-renames", "--name-only",
                                             "--diff-filter=MDT", tree, current).out)
+            for rel in self._absent_dirs(tree, nested):     # a clone made after the checkpoint goes, .git and all
+                failures += self._remove_dir(workspace, rel)
             for rel in extra:
                 failures += self._remove(workspace, rel)
             if changed:
@@ -168,18 +220,40 @@ class Store:
     def _names(raw: str) -> list[str]:
         return [n for n in raw.split("\0") if n]
 
+    def _absent_dirs(self, tree: str, paths: list[str]) -> list[str]:
+        """Those of `paths` that are not a directory in `tree`."""
+        if not paths:
+            return []
+        listed = self._names(self._git(None, None, "ls-tree", "-z", tree, "--", *paths).out)
+        present = {entry.split("\t", 1)[1] for entry in listed if entry.split(" ")[1:2] == ["tree"]}
+        return [p for p in paths if p not in present]
+
     @staticmethod
     def _remove(workspace: Path, rel: str) -> list[str]:
         path = workspace / rel
         try:
             path.unlink(missing_ok=True)
-            parent = path.parent
-            while parent != workspace and parent.is_dir() and not any(parent.iterdir()):
-                parent.rmdir()
-                parent = parent.parent
+            Store._prune_empty(workspace, path.parent)
         except OSError as e:
             return [f"{rel}: {e}"]
         return []
+
+    @staticmethod
+    def _remove_dir(workspace: Path, rel: str) -> list[str]:
+        from .maintenance import remove_tree
+        path = workspace / rel
+        try:
+            remove_tree(path)
+            Store._prune_empty(workspace, path.parent)
+        except OSError as e:
+            return [f"{rel}: {e}"]
+        return []
+
+    @staticmethod
+    def _prune_empty(workspace: Path, parent: Path) -> None:
+        while parent != workspace and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
 
     # fork -------------------------------------------------------------------------------------------------------
     def import_from(self, other: "Store", sha: str, ref: str) -> None:
@@ -189,7 +263,8 @@ class Store:
 
 
 def reset_branch(workspace: Path, head: str, branch: str) -> None:
-    """Point the session branch (and its working tree) at the commit recorded with the checkpoint."""
+    """Point the session branch (and its working tree) at the commit recorded with the checkpoint. No branch means
+    HEAD was detached then: detach it at that commit again and leave every branch where it is."""
     if not head or not (workspace / ".git").exists():
         return
     if projects.git(workspace, "cat-file", "-e", f"{head}^{{commit}}", check=False).code != 0:
@@ -197,17 +272,19 @@ def reset_branch(workspace: Path, head: str, branch: str) -> None:
     if branch:
         projects.git(workspace, "checkout", "-q", "-f", "-B", branch, head)
     else:
-        projects.git(workspace, "reset", "-q", "--hard", head)
+        projects.git(workspace, "checkout", "-q", "-f", "--detach", head)
 
 
 def head_and_branch(workspace: Path) -> tuple[str, str]:
-    """HEAD's sha and branch name, ("", "") for a scratch workspace or an unborn branch. One isolated git call:
-    each sets up a throwaway GIT_DIR, which costs several processes."""
+    """HEAD's sha and branch name: ("", "") for a scratch workspace or an unborn branch, (sha, "") for a detached
+    HEAD. One isolated git call: each sets up a throwaway GIT_DIR, which costs several processes."""
     if not (workspace / ".git").exists():
         return "", ""
     result = projects.git(workspace, "rev-parse", "HEAD", "--abbrev-ref", "HEAD", check=False)
     lines = result.out.split()
-    return (lines[0], lines[1]) if result.code == 0 and len(lines) == 2 else ("", "")
+    if result.code != 0 or len(lines) != 2:
+        return "", ""
+    return lines[0], "" if lines[1] == "HEAD" else lines[1]     # git names a detached HEAD "HEAD", never a branch
 
 
 def remove_store(base: Path) -> None:
