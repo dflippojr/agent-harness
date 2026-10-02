@@ -304,6 +304,10 @@ class Manager:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self._scanner_boot is not None:
+            self.secret_scanner.cancelled.set()
+            self._scanner_boot.cancel()
+            await asyncio.gather(self._scanner_boot, return_exceptions=True)
         await self.snippets.stop()
         await self.notifier.stop()
         await self.maintenance.stop()
@@ -767,13 +771,36 @@ class Manager:
 
     # secret scanning before push/merge (issue #263)
     async def _bootstrap_scanner(self) -> None:
-        problem = await asyncio.to_thread(self.secret_scanner.ensure)
+        # A daemon thread, not the default executor: stop() cancels this task while a download may still be
+        # running, and the loop's shutdown must not wait for it. `cancelled` keeps that late fetch from installing.
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future = loop.create_future()
+
+        def settle(problem: str | None, error: BaseException | None) -> None:
+            if done.done():
+                return
+            if error is not None:
+                done.set_exception(error)
+            else:
+                done.set_result(problem)
+
+        def fetch() -> None:
+            try:
+                problem, error = self.secret_scanner.ensure(), None
+            except Exception as e:  # noqa: BLE001 - surfaced through the future
+                problem, error = None, e
+            with contextlib.suppress(RuntimeError):  # the loop already closed
+                loop.call_soon_threadsafe(settle, problem, error)
+
+        threading.Thread(target=fetch, name="secret-scanner-fetch", daemon=True).start()
+        problem = await done
         if problem:
             log.warning("secret scanner unavailable; push and merge stay blocked: %s", problem)
 
     async def _scanner_waited(self) -> None:
+        """Wait for the start-up fetch; a fetch that failed or was cancelled leaves the scan `unavailable`."""
         if self._scanner_boot is not None and not self._scanner_boot.done():
-            await asyncio.shield(self._scanner_boot)
+            await asyncio.wait({self._scanner_boot})
 
     def _public_scan(self, sid: str, result: dict) -> dict:
         """A scan result for the API: no diff positions, each finding marked dismissed or not."""

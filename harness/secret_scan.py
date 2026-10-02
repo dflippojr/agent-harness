@@ -46,6 +46,7 @@ TIMEOUT = 120
 CACHE_SIZE = 128
 MASK = "…"
 SHORT_SHA = 12
+CANCELLED = "the gitleaks install was cancelled (daemon stopping)"
 
 
 def rules_sha256(path: Path = RULES) -> str:
@@ -79,6 +80,7 @@ class Scanner:
         self._checked: tuple | None = None
         self._cache: OrderedDict = OrderedDict()
         self._lock = threading.Lock()
+        self.cancelled = threading.Event()  # daemon stop: a fetch still running afterwards writes nothing
 
     # ---------------------------------------------------------------- install / status
     def problem(self) -> str:
@@ -112,6 +114,8 @@ class Scanner:
             data = (fetch or _download)(PIN["url"].format(name=asset["name"]))
         except Exception as e:  # noqa: BLE001 - any fetch failure leaves push/merge blocked
             return self._record(f"could not download {asset['name']}: {type(e).__name__}: {e}")
+        if self.cancelled.is_set():
+            return CANCELLED
         got = hashlib.sha256(data).hexdigest()
         if got != asset["sha256"]:
             return self._record(f"checksum mismatch for {asset['name']}: got {got}, pinned {asset['sha256']}")
@@ -123,6 +127,9 @@ class Scanner:
         tmp = self.binary.with_name(f"{self.binary.name}.{os.getpid()}.part")
         tmp.write_bytes(binary)
         tmp.chmod(0o755)
+        if self.cancelled.is_set():
+            tmp.unlink(missing_ok=True)
+            return CANCELLED
         try:
             os.replace(tmp, self.binary)
         except OSError:  # another process installed it meanwhile and Windows locks a running .exe
@@ -147,6 +154,8 @@ class Scanner:
             return ""
 
     def _record(self, message: str) -> str:
+        if self.cancelled.is_set():
+            return message
         try:
             self.error_file.parent.mkdir(parents=True, exist_ok=True)
             self.error_file.write_text(message + "\n", encoding="utf-8")

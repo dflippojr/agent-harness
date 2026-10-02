@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -373,6 +375,39 @@ def test_daemon_start_fetches_a_missing_scanner(tmp_path, gitleaks_tools, monkey
         assert archive["url"].endswith(secret_scan.PIN["assets"][secret_scan.asset_key()]["name"])
         await m.stop()
     asyncio.run(body())
+
+
+def test_stop_during_the_start_up_fetch_returns_and_installs_nothing(tmp_path, gitleaks_tools, monkeypatch):
+    cfg = project_cfg(tmp_path, str(make_repo(tmp_path / "src")))
+    monkeypatch.setattr(secret_scan, "tools_dir", lambda cfg: tmp_path / "tools")
+    fetching, release = threading.Event(), threading.Event()
+
+    def fetch(url):
+        fetching.set()
+        release.wait(30)
+        return _real_archive(gitleaks_tools)
+    monkeypatch.setattr(secret_scan, "_download", fetch)
+
+    async def body():
+        m = Manager(cfg, chat=edit_steps())
+        await m.start(maintenance=False)
+        assert await asyncio.to_thread(fetching.wait, 10)
+        started = time.monotonic()
+        await asyncio.wait_for(m.stop(), 10)
+        assert time.monotonic() - started < 5
+        assert m._scanner_boot.done()
+        assert [t for t in asyncio.all_tasks() if t is not asyncio.current_task()] == []
+        return m
+
+    started = time.monotonic()
+    m = asyncio.run(body())
+    assert time.monotonic() - started < 15  # asyncio.run doesn't wait for the fetch either
+    release.set()
+    for t in [t for t in threading.enumerate() if t.name == "secret-scanner-fetch"]:
+        t.join(30)
+    # the fetch finished after stop(): nothing was installed or recorded
+    assert not m.secret_scanner.binary.exists() and not m.secret_scanner.error_file.exists()
+    assert not list((tmp_path / "tools").rglob("*.part"))
 
 
 def _real_archive(tools: Path) -> bytes:
