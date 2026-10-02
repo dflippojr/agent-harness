@@ -592,3 +592,34 @@ def test_a_mutating_call_the_policy_blocked_is_not_checkpointed(tmp_path, monkey
         assert m.db.checkpoints(s["id"], hidden=None) == [] and events(m, s["id"], "checkpoint") == []
 
     asyncio.run(body())
+
+
+def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoable(tmp_path, monkeypatch):
+    write_bytes = Path.write_bytes
+
+    def disk_full(self, data):
+        if self.name.endswith(".json.gz"):
+            raise OSError(28, "No space left on device", str(self))
+        return write_bytes(self, data)
+
+    async def body():
+        m, s = await started(tmp_path)
+        sid, ws = s["id"], Path(s["workspace"])
+        cp = m.runner.checkpointer
+        store = cp.store(s)
+        await m.rewind(sid, 1)
+        hidden = m.db.checkpoints(sid, hidden=True)
+        (ws / "after-rewind.txt").write_text("new work\n")
+        monkeypatch.setattr(Path, "write_bytes", disk_full)          # the new turn 2's context cannot be written
+        event = await asyncio.to_thread(cp.take, sid)
+        monkeypatch.undo()
+        assert event["status"] == "skipped"
+        assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
+        refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
+        assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
+        assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
+        (ws / "after-rewind.txt").unlink()
+        await m.rewind(sid, 2)                                       # redo still works
+        assert (ws / "extra.txt").read_text() == "late\n"
+
+    asyncio.run(body())

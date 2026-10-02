@@ -35,6 +35,7 @@ CAP = 50                      # visible checkpoints kept per session
 MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_delegated_edit", "generate_image")
 REF_PREFIX = "refs/harness/checkpoints"
 UNDO_PREFIX = "refs/harness/rewind-undo"     # the workspace as it was before a rewind, while that rewind runs
+STAGE_PREFIX = "refs/harness/staged"         # a new checkpoint until its database record commits
 GITLINK = 0o160000           # index mode of a nested repository
 
 
@@ -150,8 +151,8 @@ class Store:
     def snapshot(self, workspace: Path, sid: str, turn: int, head: str, branch: str, publish: bool = True,
                  unless_tree: str = "") -> str:
         """Commit the workspace's current files (ignored ones excluded) to the hidden ref; returns the commit sha.
-        With `publish` False no ref is written until `keep` names the commit, so a rewound-past checkpoint with the
-        same turn number survives a snapshot that is then dropped. Returns "" without committing when the files
+        With `publish` False no ref is written until `stage` and `Store.publish` name the commit, so a rewound-past
+        checkpoint with the same turn number survives a snapshot that is then dropped. Returns "" without committing when the files
         are exactly `unless_tree`: staging them then wrote no object the repository did not already hold."""
         self.init()
         with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
@@ -164,11 +165,22 @@ class Store:
             self._git(None, None, "update-ref", ref_name(sid, turn), sha)
         return sha
 
-    def keep(self, sid: str, turn: int, sha: str, context: bytes) -> None:
-        """Name a snapshot taken with `publish` False, with its `pack_context`ed model context."""
-        self._git(None, None, "update-ref", ref_name(sid, turn), sha)
+    def stage(self, sid: str, turn: int, sha: str, context: bytes) -> None:
+        """Hold a snapshot taken with `publish` False, with its `pack_context`ed model context, under temporary
+        names: a rewound-past checkpoint of the same turn stays untouched until `publish` renames them over it;
+        `unstage` drops them instead."""
+        self._git(None, None, "update-ref", f"{STAGE_PREFIX}/{sid}/{turn}", sha)
         self.contexts.mkdir(parents=True, exist_ok=True)
-        (self.contexts / f"{turn}.json.gz").write_bytes(context)
+        (self.contexts / f"staged-{turn}.json.gz").write_bytes(context)
+
+    def publish(self, sid: str, turn: int, sha: str) -> None:
+        self._git(None, None, "update-ref", ref_name(sid, turn), sha)
+        os.replace(self.contexts / f"staged-{turn}.json.gz", self.contexts / f"{turn}.json.gz")
+        self._git(None, None, "update-ref", "-d", f"{STAGE_PREFIX}/{sid}/{turn}", check=False)
+
+    def unstage(self, sid: str, turn: int) -> None:
+        self._git(None, None, "update-ref", "-d", f"{STAGE_PREFIX}/{sid}/{turn}", check=False)
+        (self.contexts / f"staged-{turn}.json.gz").unlink(missing_ok=True)
 
     def size_of(self, sha: str) -> int:
         """Bytes the objects of this snapshot would take on their own; 0 when git cannot tell."""

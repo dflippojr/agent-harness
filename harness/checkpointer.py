@@ -68,11 +68,15 @@ class Checkpointer:
             store.reclaim()                                 # drops the unnamed snapshot's objects
             stats["skipped"] = "over_quota"
             return self._skipped(sid, "the account is over its disk quota")
+        # All or nothing: the new ref and context are written under temporary names first, so until the record
+        # commits a failure leaves every existing checkpoint (row, ref, context) as it was.
+        made["staged"] = True
+        store.stage(sid, turn, sha, context)
         stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
         capped = self.db.write(self._record, sid, turn, sha, head, branch, stale)
         made["recorded"] = True
+        store.publish(sid, turn, sha)                       # replaces a rewound-past ref and context of this turn
         store.delete(sid, [t for t in stale + capped if t != turn])
-        store.keep(sid, turn, sha, context)                 # replaces a rewound-past ref and context of this turn
         if stale or capped:
             store.reclaim()
         if not self._within_quota(s, store, sid, turn):     # the account grew meanwhile; its quota check refuses writes
@@ -81,11 +85,14 @@ class Checkpointer:
 
     def _discard(self, sid: str, made: dict) -> None:
         """Remove what a failed `_take` left behind. Once recorded, the turn's row replaced any rewound-past one of
-        the same number, so its ref and context go too; before that nothing was named. Unnamed objects are pruned."""
+        the same number, so its ref and context go too; before that only the staged names exist. Unnamed objects
+        are pruned."""
         store = made.get("store")
         if store is None:
             return
         try:
+            if made.get("staged"):
+                store.unstage(sid, made["turn"])
             if made.get("recorded"):
                 self.db.write(self._unrecord, sid, made["turn"])
                 store.delete(sid, [made["turn"]])
