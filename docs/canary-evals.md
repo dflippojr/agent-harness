@@ -39,8 +39,7 @@ checkout's `HEAD`). There is no post-deploy trigger and no admin endpoint.
 
 `canary.at` is a time of day, `"HH:MM"`. Quote it: YAML 1.1 reads an unquoted `3:05` as the number 185, which
 the loader turns back into `"03:05"`. Anything else that isn't a time of day (or a canary number below its minimum,
-`min_prior_runs` above `baseline_runs`, or an enabled canary whose `suite` file is missing) is a config error at
-load, naming the key. If the nightly loop still can't schedule a run it logs the error and turns itself off; it never
+`min_prior_runs` above `baseline_runs`) is a config error at load, naming the key. If the nightly loop still can't schedule a run it logs the error and turns itself off; it never
 takes the daemon down.
 
 - A commit that already has a finished row (`complete`, `timeout`, `skipped`) is not run again: one row per SHA.
@@ -56,10 +55,23 @@ takes the daemon down.
   stopping a session that already ended is never an error. An attempt still waiting for the GPU when the run reaches
   its cap is cancelled and recorded as `suspended` (excluded, never a fail). An attempt's `seconds` (and the row's
   `wall_seconds`) are that GPU time.
-- A run with web tasks refuses to start if `canary.fixture_dir` has no `manifest.json`: replaying an empty web
-  would fail every web task and look like a regression. The row is left `blocked`.
-- Once a SHA's row is claimed it is always finished, whatever goes wrong: a crash or shutdown in the first run
-  leaves it `blocked`; one during the confirmation rerun keeps the first run's results with no alert.
+- A missing web fixture or suite file is a configuration problem, not a result (#316). With `canary.enabled: true`,
+  if `canary.suite` is not a file, or the suite has web tasks and `canary.fixture_dir` has no `manifest.json`, the
+  loader logs one error naming the key and path and disables only the canary for that process (the nightly loop
+  doesn't run); the daemon and all sessions stay up, and `harness doctor` reports it as FAIL with the same message.
+  If either goes missing after the daemon started, the run stops before any session (an
+  empty web replay would fail every web task and look like a regression) and the row is finished `skipped`, with
+  the reason in its `note` and one error in the log. That SHA is not retried; fix the fixture and the next deployed
+  commit runs normally.
+- Once a SHA's row is claimed it is always finished, whatever goes wrong: a shutdown in the first run leaves it
+  `blocked`; one during the confirmation rerun keeps the first run's results with no alert.
+- A crash or `kill -9` mid-canary (#316): canary sessions are never resumed as normal sessions. Their low-priority
+  mark and recorded web live only in memory, so a resumed one would hold the GPU at full priority and search the
+  live web. At start the daemon cancels every queued or running session in the `canary-hard` / `canary-web`
+  projects (whether or not the canary is still enabled), and finishes each row the crash left `running`. A row
+  whose first run had completed (the crash came during the confirmation rerun) is finished `complete` with the
+  first run's results and no alert; otherwise it is `blocked`, so the next slot may retry once as above. The
+  interrupted attempt itself is not evidence. Real sessions resume as before.
 
 ## Yielding
 
@@ -78,7 +90,8 @@ The canary session is registered as low priority (`GpuScheduler.low_priority`).
 ## Storage and metrics
 
 `canary_results`, one row per SHA: `sha, started_at, finished_at, status, tries, outcomes (JSON per attempt),
-passes, attempts, pass_rate, turns, prompt_tokens, wall_seconds, baseline_sha, baseline_rate, alerted`.
+passes, attempts, pass_rate, turns, prompt_tokens, wall_seconds, baseline_sha, baseline_rate, alerted, note`
+(`note`: why a run was skipped or finished at a restart, migration 0048).
 
 `/metrics` exports `harness_canary_pass_rate`, `harness_canary_turns`, `harness_canary_prompt_tokens` and
 `harness_canary_wall_seconds`, each labelled `sha` (first 8 characters), for the latest 30 results only.

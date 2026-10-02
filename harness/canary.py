@@ -27,6 +27,13 @@ log = logging.getLogger("harness.canary")
 REPO = "dflippojr/agent-harness"
 FINAL = ("complete", "timeout", "skipped")  # blocked is the only status the next nightly slot retries
 SHORT_SHA = 8
+# The canary's sessions live in these projects (bakeoff/canary.py). They are never resumed after a restart (#316).
+HARD_PROJECT, WEB_PROJECT = "canary-hard", "canary-web"
+PROJECTS = (HARD_PROJECT, WEB_PROJECT)
+
+
+class CanaryConfigError(Exception):
+    """The suite can't run on this config (a missing suite file or web fixture): the commit is skipped, not retried."""
 
 
 def deployed_sha(root: Path | None = None) -> str:
@@ -98,16 +105,36 @@ class CanaryStore:
                 (sha, now))
             return self.db.conn.execute("SELECT tries FROM canary_results WHERE sha = ?", (sha,)).fetchone()[0]
 
+    def first_run(self, sha: str, outcomes: list[dict]) -> None:
+        """Keep a completed first run while the confirmation reruns, so a restart can still finish the row with it."""
+        with self.db.lock:
+            self.db.conn.execute("UPDATE canary_results SET outcomes = ? WHERE sha = ? AND status = 'running'",
+                                 (json.dumps(outcomes), sha))
+
     def finish(self, sha: str, status: str, outcomes: list[dict], now: float, baseline_sha: str = "",
-               baseline_rate: float | None = None, alerted: bool = False) -> None:
+               baseline_rate: float | None = None, alerted: bool = False, note: str = "") -> None:
         t = totals(outcomes)
         rate = pass_rate(outcomes) if valid(outcomes) else None
         with self.db.lock:
             self.db.conn.execute(
                 "UPDATE canary_results SET status=?, finished_at=?, outcomes=?, passes=?, attempts=?, pass_rate=?, "
-                "turns=?, prompt_tokens=?, wall_seconds=?, baseline_sha=?, baseline_rate=?, alerted=? WHERE sha=?",
+                "turns=?, prompt_tokens=?, wall_seconds=?, baseline_sha=?, baseline_rate=?, alerted=?, note=? WHERE sha=?",
                 (status, now, json.dumps(outcomes), t["passes"], t["attempts"], rate, t["turns"], t["prompt_tokens"],
-                 t["wall_seconds"], baseline_sha, baseline_rate, int(alerted), sha))
+                 t["wall_seconds"], baseline_sha, baseline_rate, int(alerted), note, sha))
+
+    def interrupted(self, now: float) -> list[dict]:
+        """At daemon start, finish every row a crash left `running` (#316): with the first run's results if it had
+        completed (no alert: an alert is never sent unconfirmed), else `blocked`, so the next slot may retry."""
+        with self.db.lock:
+            rows = [_row(r) for r in self.db.conn.execute(
+                "SELECT * FROM canary_results WHERE status = 'running'").fetchall()]
+        for row in rows:
+            if row["outcomes"]:
+                self.finish(row["sha"], "complete", row["outcomes"], now,
+                            note="daemon restarted during the confirmation rerun: first-run results, no alert")
+            else:
+                self.finish(row["sha"], "blocked", [], now, note="daemon restarted mid-run")
+        return rows
 
     def completed_before(self, sha: str, limit: int) -> list[dict]:
         """The newest `limit` completed runs other than `sha`, newest first."""
@@ -195,7 +222,7 @@ class Canary:
         tries = self.store.begin(sha, self.clock())
         # Every way out after the claim finishes the row, with the best state reached so far: a crash or shutdown
         # in the first run leaves it blocked (the next slot may retry); after that, the first run's results stand.
-        status, outcomes, verdict = "blocked", [], Verdict(False)
+        status, outcomes, verdict, note = "blocked", [], Verdict(False), ""
         try:
             report = await self.run_suite(sha, None)
             if report.status == "blocked":
@@ -203,10 +230,15 @@ class Canary:
             else:
                 status, outcomes = report.status, report.outcomes
                 if report.status == "complete":
+                    self.store.first_run(sha, outcomes)
                     outcomes, verdict = await self._judge(sha, report)
+        except CanaryConfigError as e:
+            # the same config fails the same way every night: final for this commit, logged once (the row is final)
+            status, note = "skipped", str(e)
+            log.error("canary %s skipped: %s", sha[:SHORT_SHA], e)
         finally:
             self.store.finish(sha, status, outcomes, self.clock(), verdict.baseline_sha, verdict.baseline_rate,
-                              verdict.alert)
+                              verdict.alert, note)
         if verdict.alert:
             self._alert(sha, pass_rate(outcomes), verdict)
         return self.store.get(sha)

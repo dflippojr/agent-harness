@@ -344,10 +344,10 @@ def test_canary_at_is_normalised_or_rejected_when_the_config_loads(tmp_path):
     assert config._load_canary(yaml.safe_load("at: 23:59")).at == "23:59"
     assert config._load_canary({"at": "3:05"}).at == "03:05"
     assert config._load_canary(None).at == "03:00"
-    assert config._load_canary({"enabled": True}).suite == "bakeoff/canary.yaml"
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+    assert config._load_canary({"enabled": True, "fixture_dir": str(tmp_path)}).suite == "bakeoff/canary.yaml"
     for raw in ({"at": "25:00"}, {"at": 1440}, {"at": "noon"}, {"at": True}, {"repeats": 0},
-                {"min_prior_runs": 6, "baseline_runs": 5}, {"total_cap_seconds": "soon"}, {"drop_points": 0},
-                {"enabled": True, "suite": "bakeoff/nope.yaml"}):
+                {"min_prior_runs": 6, "baseline_runs": 5}, {"total_cap_seconds": "soon"}, {"drop_points": 0}):
         try:
             config._load_canary(raw)
             raise AssertionError(f"{raw} accepted")
@@ -676,7 +676,7 @@ def test_a_missing_web_fixture_stops_the_run_before_any_session(tmp_path):
     try:
         run(runner.run("sha"))
         raise AssertionError("every web task would fail against an empty replay")
-    except FileNotFoundError as e:
+    except canary.CanaryConfigError as e:
         assert "manifest.json" in str(e)
     assert not m.created and m.cfg.projects == {}
 
@@ -748,3 +748,138 @@ def test_migration_creates_canary_results_for_fresh_and_existing_databases(tmp_p
     cols = {r[1] for r in db.conn.execute("PRAGMA table_info(canary_results)")}
     assert {"sha", "started_at", "outcomes", "pass_rate", "turns", "prompt_tokens", "wall_seconds", "status"} <= cols
     db.close()
+
+
+# a crash mid-canary and a missing web fixture (#316)
+def _crashed_canary(tmp_path, outcomes: list[dict] | None = None):
+    """A database as `kill -9` leaves it mid-canary: one canary session running, one queued, a real one running,
+    and the commit's row claimed."""
+    from harness.manager import Manager
+    from test_daemon import make_cfg
+    cfg = make_cfg(tmp_path)
+
+    async def body():
+        m = Manager(cfg)
+        for sid, project, status in (("c-hard", "canary-hard", "running"), ("c-web", "canary-web", "queued"),
+                                     ("real", "scratch", "waiting_approval")):
+            m.db.insert_session({"id": sid, "title": sid, "project": project, "target": "t", "model": "fake",
+                                 "status": status, "workspace": str(tmp_path / sid), "created_at": 1.0,
+                                 "updated_at": 1.0, "context": []})
+        store = CanaryStore(m.db)
+        store.begin("f" * 40, 1.0)
+        if outcomes:
+            store.first_run("f" * 40, outcomes)
+        m.db.close()
+    run(body())
+    return cfg
+
+
+def _restart(cfg, chat):
+    from harness.manager import Manager
+
+    async def body():
+        m = Manager(cfg, chat=chat)
+        spawned = []
+        m._spawn = lambda sid, recovered=False: spawned.append(sid)  # what start resumes; nothing actually runs
+        await m.start()
+        try:
+            await asyncio.sleep(0.05)
+            return ({sid: m.db.get_session(sid)["status"] for sid in ("c-hard", "c-web", "real")}, spawned,
+                    CanaryStore(m.db).get("f" * 40), dict(m.runner.web_overrides))
+        finally:
+            await m.stop()
+            m.db.close()
+    return run(body())
+
+
+def test_a_restart_cancels_canary_sessions_instead_of_resuming_them_and_finishes_the_row(tmp_path):
+    async def chat(*a, **k):
+        raise AssertionError("a canary session was resumed")
+    status, spawned, row, overrides = _restart(_crashed_canary(tmp_path), chat)
+    assert status["c-hard"] == status["c-web"] == "cancelled"
+    assert spawned == ["real"]  # real sessions still resume
+    assert not overrides  # the web canary never ran again, so no WebTools of any kind, live or recorded
+    assert row["status"] == "blocked" and row["finished_at"] and "restarted" in row["note"]
+
+
+def test_a_restart_during_the_confirmation_finishes_the_row_with_the_first_run_and_no_alert(tmp_path):
+    async def chat(*a, **k):
+        raise AssertionError("a canary session was resumed")
+    _, _, row, _ = _restart(_crashed_canary(tmp_path, _outcomes(12)), chat)
+    assert row["status"] == "complete" and row["passes"] == 12 and row["attempts"] == 20
+    assert not row["alerted"] and "first-run" in row["note"]
+
+
+def test_an_empty_fixture_dir_skips_the_commit_once_with_one_error_log(tmp_path, caplog):
+    from bakeoff.canary import CanaryRunner
+    m = FakeManager()
+    empty = tmp_path / "fixture"
+    empty.mkdir()
+    suite = {"repeats": 1, "hard": [], "web": [__import__("bakeoff.web_suite", fromlist=["TASKS"]).TASKS[2]]}
+
+    async def run_suite(sha, only):
+        return await CanaryRunner(m, CanaryConfig(enabled=True), empty, suite).run(sha, only)
+    c = Canary(CanaryStore(_db(tmp_path)), run_suite, CanaryConfig(enabled=True), [].append, clock=Clock())
+    with caplog.at_level("ERROR", logger="harness.canary"):
+        row = run(c.run_for("a" * 40))
+        for _ in range(3):  # the following nights
+            assert run(c.run_for("a" * 40))["status"] == "skipped"
+    assert row["status"] == "skipped" and "manifest.json" in row["note"] and row["tries"] == 1
+    assert not m.created and m.cfg.projects == {}
+    assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 1
+
+
+def test_a_missing_suite_file_is_a_config_error_too(tmp_path):
+    from bakeoff.canary import load_suite
+    from harness.canary import CanaryConfigError
+    try:
+        load_suite(tmp_path / "nope.yaml")
+        raise AssertionError("loaded a missing suite")
+    except CanaryConfigError as e:
+        assert "nope.yaml" in str(e)
+
+
+def _doctor_lines(cfg):
+    from harness import doctor
+
+    class Rec(doctor.Report):
+        def __init__(self):
+            super().__init__()
+            self.lines = []
+
+        def ok(self, name, detail=""):
+            self.lines.append(("ok", name, detail))
+
+        def fail(self, name, detail):
+            super().fail(name, detail)
+            self.lines.append(("fail", name, detail))
+    r = Rec()
+    doctor.check_canary(r, cfg)
+    return r.lines
+
+
+def test_a_missing_web_fixture_disables_only_the_canary_and_doctor_fails(tmp_path, caplog):
+    from types import SimpleNamespace
+    from harness import config
+    with caplog.at_level("ERROR", logger="harness.config"):
+        cfg = config._load_canary({"enabled": True, "fixture_dir": str(tmp_path)})  # no raise: the daemon starts
+    assert cfg.enabled is False
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1 and "canary.fixture_dir" in errors[0] and "manifest.json" in errors[0]
+    lines = _doctor_lines(SimpleNamespace(canary=cfg))
+    assert lines[0][0] == "fail" and cfg.disabled_reason in lines[0][2]
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+    ok = config._load_canary({"enabled": True, "fixture_dir": str(tmp_path)})
+    assert ok.enabled is True and ok.fixture_dir == str(tmp_path) and not _doctor_lines(SimpleNamespace(canary=ok))
+    assert config._load_canary({"fixture_dir": str(tmp_path / "nope")}).enabled is False  # off: not checked
+
+
+def test_a_missing_suite_file_disables_only_the_canary_and_doctor_fails(tmp_path, caplog):
+    from types import SimpleNamespace
+    from harness import config
+    with caplog.at_level("ERROR", logger="harness.config"):
+        cfg = config._load_canary({"enabled": True, "suite": "nope/missing.yaml"})
+    assert cfg.enabled is False
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1 and "canary.suite" in errors[0] and "missing.yaml" in errors[0]
+    assert _doctor_lines(SimpleNamespace(canary=cfg))[0][0] == "fail"
