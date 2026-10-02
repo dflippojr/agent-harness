@@ -49,15 +49,24 @@ class Report:
     outcomes: list[dict] = field(default_factory=list)  # {task, repeat, ok, status, turns, prompt_tokens, seconds, restarts}
 
 
+EXCLUDED = "suspended"  # an attempt the GPU yielded on every restart: neither a pass nor a fail
+
+
+def valid(outcomes: list[dict]) -> list[dict]:
+    return [o for o in outcomes if o.get("status") != EXCLUDED]
+
+
 def totals(outcomes: list[dict]) -> dict:
-    return {"passes": sum(1 for o in outcomes if o["ok"]), "attempts": len(outcomes),
+    return {"passes": sum(1 for o in outcomes if o["ok"]), "attempts": len(valid(outcomes)),
+            "excluded": len(outcomes) - len(valid(outcomes)),
             "turns": sum(o.get("turns", 0) for o in outcomes),
             "prompt_tokens": sum(o.get("prompt_tokens", 0) for o in outcomes),
             "wall_seconds": round(sum(o.get("seconds", 0) for o in outcomes), 1)}
 
 
 def pass_rate(outcomes: list[dict]) -> float:
-    return sum(1 for o in outcomes if o["ok"]) / len(outcomes) if outcomes else 0.0
+    ok = valid(outcomes)
+    return sum(1 for o in ok if o["ok"]) / len(ok) if ok else 0.0
 
 
 def _row(row) -> dict | None:
@@ -89,7 +98,7 @@ class CanaryStore:
     def finish(self, sha: str, status: str, outcomes: list[dict], now: float, baseline_sha: str = "",
                baseline_rate: float | None = None, alerted: bool = False) -> None:
         t = totals(outcomes)
-        rate = pass_rate(outcomes) if outcomes else None
+        rate = pass_rate(outcomes) if valid(outcomes) else None
         with self.db.lock:
             self.db.conn.execute(
                 "UPDATE canary_results SET status=?, finished_at=?, outcomes=?, passes=?, attempts=?, pass_rate=?, "
@@ -101,7 +110,7 @@ class CanaryStore:
         """The newest `limit` completed runs other than `sha`, newest first."""
         with self.db.lock:
             rows = self.db.conn.execute(
-                "SELECT * FROM canary_results WHERE status = 'complete' AND sha != ? ORDER BY started_at DESC LIMIT ?",
+                "SELECT * FROM canary_results WHERE status = 'complete' AND pass_rate IS NOT NULL AND sha != ? ORDER BY started_at DESC LIMIT ?",
                 (sha, limit)).fetchall()
         return [_row(r) for r in rows]
 
@@ -138,10 +147,10 @@ def regressed_tasks(outcomes: list[dict], prior: list[dict]) -> list[str]:
     """Tasks that failed this run and did better in the previous runs (their mean pass rate is higher)."""
     out = []
     for task in dict.fromkeys(o["task"] for o in outcomes):
-        now = [o["ok"] for o in outcomes if o["task"] == task]
-        if all(now):
+        now = [o["ok"] for o in valid(outcomes) if o["task"] == task]
+        if not now or all(now):
             continue
-        before = [o["ok"] for r in prior for o in r["outcomes"] if o["task"] == task]
+        before = [o["ok"] for r in prior for o in valid(r["outcomes"]) if o["task"] == task]
         if before and sum(before) / len(before) > sum(now) / len(now):
             out.append(task)
     return out
@@ -192,14 +201,16 @@ class Canary:
         prior = self.store.completed_before(sha, self.cfg.baseline_runs)
         rule = {"min_prior": self.cfg.min_prior_runs, "drop_points": self.cfg.drop_points}
         outcomes = report.outcomes
+        if not valid(outcomes):
+            return outcomes, Verdict(False, reason="every attempt was suspended")
         verdict = judge(pass_rate(outcomes), prior, **rule)
         if not verdict.alert:
             return outcomes, verdict
         # confirmation: rerun only the regressed tasks; with none (e.g. a new task failing without history), every
         # task that failed this run. Their new results replace the old ones. An alert is never sent unconfirmed.
-        tasks = regressed_tasks(outcomes, prior) or list(dict.fromkeys(o["task"] for o in outcomes if not o["ok"]))
+        tasks = regressed_tasks(outcomes, prior) or list(dict.fromkeys(o["task"] for o in valid(outcomes) if not o["ok"]))
         again = await self.run_suite(sha, tasks) if tasks else None
-        if again is None or again.status == "blocked" or not again.outcomes:
+        if again is None or again.status == "blocked" or not valid(again.outcomes):
             return outcomes, Verdict(False, reason="confirmation rerun could not run")
         outcomes = [o for o in outcomes if o["task"] not in tasks] + [{**o, "confirm": True} for o in again.outcomes]
         return outcomes, judge(pass_rate(outcomes), prior, **rule)

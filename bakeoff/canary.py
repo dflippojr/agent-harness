@@ -116,6 +116,9 @@ class CanaryRunner:
             res["restarts"] = restart
             if not res.pop("suspended"):
                 break
+            if restart == MAX_RESTARTS:  # restart budget used and still suspended: not a valid pass or fail
+                res["status"], res["ok"], res["note"] = "suspended", False, "suspended on every attempt"
+                break
             if self.clock() >= cap or not await self._wait_until_free(cap):
                 res["status"], res["ok"] = "timeout", False
                 break

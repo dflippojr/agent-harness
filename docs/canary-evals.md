@@ -54,7 +54,9 @@ The canary session is registered as low priority (`GpuScheduler.low_priority`).
   session waits at most for the turn in flight.
 - If the guard pauses (a game or Plex transcode) or a real session took over mid-task, that task attempt restarts
   from scratch once the GPU is free (at most 2 restarts per attempt); its result is never taken from a suspended
-  attempt.
+  attempt. An attempt still suspended after the 2 restarts is recorded as `suspended` (not a pass or a fail): it is
+  left out of the pass rate, the per-task regression rule and the confirmation rerun, and counted as excluded. A
+  run with no valid attempt gets no pass rate, no verdict and is not a baseline.
 
 ## Storage and metrics
 

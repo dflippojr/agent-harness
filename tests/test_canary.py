@@ -333,6 +333,49 @@ def test_a_suspended_task_restarts_and_the_cap_records_timeout(tmp_path):
     run(body())
 
 
+def test_suspended_on_every_attempt_is_excluded_and_never_alerts(tmp_path):
+    async def body():
+        m = FakeManager()
+        runner, _ = _runner(m, tmp_path)
+        attempts = []
+
+        async def once(task, kind, repeat, web, cap):
+            attempts.append(1)
+            return {"task": task.id, "repeat": repeat, "ok": True, "status": "done", "note": "", "turns": 3,
+                    "prompt_tokens": 10, "seconds": 1, "suspended": True}
+        runner._once = once
+        report = await runner.run("sha")
+        o = report.outcomes[0]
+        assert len(attempts) == 3 and o["status"] == "suspended" and not o["ok"] and o["restarts"] == 2
+        assert report.status == "complete"
+        assert canary.pass_rate(report.outcomes) == 0.0 and canary.totals(report.outcomes)["attempts"] == 0
+        assert canary.totals(report.outcomes)["excluded"] == 1
+    run(body())
+
+
+def test_suspended_outcomes_do_not_move_the_rate_or_trigger_alerts(tmp_path):
+    ok = {"task": "a", "repeat": 0, "ok": True, "status": "done"}
+    sus = {"task": "b", "repeat": 0, "ok": False, "status": "suspended"}
+    assert canary.pass_rate([ok, sus]) == 1.0
+    assert canary.regressed_tasks([sus], [{"outcomes": [{"task": "b", "ok": True, "status": "done"}]}]) == []
+    store = CanaryStore(_db(tmp_path))
+    store.begin("s1", 1.0)
+    store.finish("s1", "complete", [sus], 2.0)
+    row = store.get("s1")
+    assert row["pass_rate"] is None and row["attempts"] == 0 and store.completed_before("x", 5) == []
+
+
+def test_run_where_every_attempt_was_suspended_raises_no_alert(tmp_path):
+    notes = []
+
+    async def suite(sha, only):
+        return Report("complete", [{"task": "a", "repeat": 0, "ok": False, "status": "suspended", "restarts": 2}])
+    c, _ = _canary(tmp_path, suite, notes)
+    _seed(c, [20, 20, 20])
+    row = run(c.run_for("zzz"))
+    assert not notes and row["pass_rate"] is None and not row["alerted"]
+
+
 # metrics and storage
 def test_metrics_export_latest_30_results_labelled_by_short_sha(tmp_path):
     db = _db(tmp_path)
