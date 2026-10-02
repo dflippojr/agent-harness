@@ -5,7 +5,7 @@ Runs in one process on one asyncio loop against a temp database, the way the dae
 and `search.search` on the loop, and a scraper renders `/metrics` in a worker thread (as `api.metrics` does).
 The always-on loop-lag probe and the per-method lock-hold histograms from `harness.telemetry` do the measuring.
 
-    python scripts/bench_event_loop.py [--sessions 4] [--seconds 20] [--large-every 10] [--markdown out.md]
+    python scripts/bench_event_loop.py [--sessions 4] [--seconds 20] [--large-every 10] [--no-scrape] > out.md
 
 Quantiles come from the histogram buckets, so they are bucket upper bounds (">2.5s" past the last bucket).
 """
@@ -164,28 +164,15 @@ def report(args, result: dict) -> str:
     return "\n".join(lines)
 
 
-def safe_output_path(raw: str) -> Path:
-    """Resolve `raw` and require it to sit inside the repo root or the system temp dir."""
-    path = Path(raw).resolve()
-    for base in (ROOT, Path(tempfile.gettempdir()).resolve()):
-        if path.is_relative_to(base):
-            return path
-    raise SystemExit(f"--markdown must be inside the repo ({ROOT}) or the temp dir; got {path}")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--sessions", type=int, default=4)
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--large-every", type=int, default=10, help="every Nth event per session is a ~1 MB tool result")
     ap.add_argument("--no-scrape", action="store_true", help="skip the /metrics scraper (attribution run)")
-    ap.add_argument("--markdown", help="also write the report to this file")
     args = ap.parse_args()
-    md_path = safe_output_path(args.markdown) if args.markdown else None
-    out = report(args, asyncio.run(run(args)))
-    print(out)
-    if md_path:
-        md_path.write_text(out + "\n", encoding="utf-8")
+    # The report goes to stdout only; redirect it to save it.
+    print(report(args, asyncio.run(run(args))))
 
 
 if __name__ == "__main__":

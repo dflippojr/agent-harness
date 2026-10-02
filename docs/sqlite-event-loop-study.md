@@ -28,7 +28,7 @@ Permanent instrumentation (always on, cheap) on `GET /metrics`:
   (`LoopLagProbe`, started in the app lifespan).
 - `HARNESS_ASYNCIO_DEBUG=1`: opt-in asyncio debug with `slow_callback_duration = 0.05`, so slow callbacks are logged.
 
-Benchmark: `python scripts/bench_event_loop.py [--sessions 4] [--seconds 30] [--large-every 10] [--no-scrape] [--markdown out.md]`.
+Benchmark: `python scripts/bench_event_loop.py [--sessions 4] [--seconds 30] [--large-every 10] [--no-scrape] > out.md` (the report goes to stdout).
 Four fake sessions write events on the loop (every 10th is a ~1 MB tool result), a searcher runs `search.search` and
 `session_search` every 50 ms on the loop, and a scraper renders `/metrics` in a thread every 250 ms. Quantiles are
 histogram bucket upper bounds, so "10 ms" means the 5-10 ms bucket. The loop-lag p50 is inflated because the loop is
