@@ -982,8 +982,8 @@ async def gpu_action(action: str, request: Request, body: GpuHoldRequest | None 
     if action == "load":
         await _load_now(m, body)
     elif action == "unload":
-        m.warmer.unpin()
-        if not await m.guard.unload():
+        # Unpinned only if the unload goes ahead: a refused one keeps "Load local model now" and its keepalive.
+        if not await m.guard.unload(before_stop=m.warmer.unpin):
             raise HarnessError(409, "a model turn is running or the GPU is held; try again when it's idle")
     elif action == "pause":
         duration = body.duration_seconds if body else None

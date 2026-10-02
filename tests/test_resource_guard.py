@@ -336,3 +336,106 @@ def test_metrics_export_resources(tmp_path):
     assert "harness_resource_memory_low 1" in text
     assert "harness_model_parked 1" in text
     assert "harness_model_pinned_until_seconds 0" in text
+
+
+# review round 1 (PR #342): races between Unload now, lazy loading, and model calls
+def test_refused_unload_keeps_the_pin_and_keepalive(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+
+    m = guarded_manager(tmp_path)
+    m.warmer.keepalive_seconds = 3600
+    with TestClient(create_app(m)) as client:
+        assert client.post("/resources/load", json={"duration_seconds": 3600}).status_code == 200
+        pinned_until, keepalive = m.warmer.pinned_until, m.warmer._keepalive
+        assert keepalive is not None and not keepalive.done()
+        m.runner.generating.add("busy")  # a local turn is generating
+        refused = client.post("/resources/unload")
+        assert refused.status_code == 409
+        assert m.warmer.pinned_until == pinned_until and m.warmer._keepalive is keepalive
+        assert not keepalive.done() and m.guard.control.stops == 0
+        m.runner.generating.discard("busy")
+        assert client.post("/resources/unload").status_code == 200
+        assert m.warmer.pinned_until is None and m.guard.control.flag
+
+
+def test_unload_while_a_turn_loads_the_model_is_refused(tmp_path):
+    from harness.llm import LLMError
+    unloads = []
+
+    async def body():
+        m = guarded_manager(tmp_path)
+        control = m.guard.control
+
+        def answer(messages):
+            if control.flag:  # llama-server is stopped
+                return LLMError("model server unreachable: ConnectError")
+            return Completion(content="done")
+        m.runner.chat = Script([answer])
+        healthy = control.healthy
+
+        async def healthy_then_unload():
+            unloads.append(await m.guard.unload())  # Unload now, between unparking and generating
+            return await healthy()
+        control.healthy = healthy_then_unload
+        await m.start(maintenance=False)
+        control.flag = True
+        s = m.create("hello")
+        await wait_status(m, s["id"], "done")
+        assert unloads and not any(unloads)
+        assert control.stops == 0
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_model_call_retries_when_the_server_was_parked_under_it(tmp_path):
+    from harness.llm import LLMError
+    calls = []
+
+    async def body():
+        m = guarded_manager(tmp_path)
+        control = m.guard.control
+
+        def answer(messages):
+            calls.append(control.flag)
+            if len(calls) == 1:
+                control.flag = True  # parked outside the guard (the logon park, a manual flag) mid-call
+                return LLMError("model server unreachable: ConnectError")
+            return Completion(content="done")
+        m.runner.chat = Script([answer])
+        await m.start(maintenance=False)
+        s = m.create("hello")
+        await wait_status(m, s["id"], "done")
+        assert calls == [False, False] and control.starts == 1
+        assert events(m, s["id"], "llm_retry")
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_count_tokens_wakes_a_parked_model_and_gets_503_during_a_hold(tmp_path):
+    import httpx
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+    from harness.config import EndpointConfig
+
+    m = guarded_manager(tmp_path)
+    m.cfg.endpoint = EndpointConfig(enabled=True)
+
+    def upstream(request):
+        if m.guard.control.flag:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(200, json={"input_tokens": 3})
+    m.endpoint_transport = httpx.MockTransport(upstream)
+    with TestClient(create_app(m)) as client:
+        key = client.post("/keys", json={"name": "script"}).json()["key"]
+        headers = {"Authorization": f"Bearer {key}"}
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        m.guard.control.flag = True  # parked: the logon park, or a hold that ended with nothing queued
+        ok = client.post("/v1/messages/count_tokens", json=body, headers=headers)
+        assert ok.status_code == 200 and ok.json()["input_tokens"] == 3
+        assert m.guard.control.starts == 1 and not m.guard.control.flag
+        m.guard.pause()
+        asyncio.run(m.guard.check())
+        asyncio.run(m.guard.check())
+        held = client.post("/v1/messages/count_tokens", json=body, headers=headers)
+        assert held.status_code == 503 and held.headers["Retry-After"] == "180"
