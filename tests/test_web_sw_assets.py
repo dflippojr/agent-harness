@@ -22,3 +22,10 @@ def test_sw_assets_list_every_module():
 def test_sw_assets_exist():
     absent = [a for a in _assets() if a != "/" and not (WEB / a.lstrip("/")).is_file()]
     assert not absent, f"ASSETS lists files that don't exist: {absent}"
+
+
+def test_index_preloads_every_module_but_app():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    preloaded = set(re.findall(r'<link rel="modulepreload" href="([^"]+)"', html))
+    modules = {"/" + p.relative_to(WEB).as_posix() for p in WEB.rglob("*.mjs")}
+    assert preloaded == modules, f"modulepreload mismatch in index.html: {sorted(preloaded ^ modules)}"
