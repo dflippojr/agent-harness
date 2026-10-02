@@ -111,6 +111,8 @@ async def run(args) -> dict:
         tasks = [asyncio.create_task(fake_session(db, f"bench-{n}", stop, args.large_every, stats))
                  for n in range(args.sessions)]
         tasks += [asyncio.create_task(searcher(db, stop, stats)), asyncio.create_task(scraper(m, stop, stats))]
+        if args.no_scrape:
+            tasks.pop().cancel()
         await asyncio.sleep(args.seconds)
         stop.set()
         await asyncio.gather(*tasks)
@@ -137,7 +139,7 @@ def report(args, result: dict) -> str:
     lines = [
         f"Machine: {machine()}",
         f"Config: {args.sessions} concurrent sessions, {args.seconds:g} s, one ~1 MB tool result every "
-        f"{args.large_every} events per session, search every 50 ms, /metrics render every 250 ms",
+        f"{args.large_every} events per session, search every 50 ms, /metrics render every 250 ms{' (disabled)' if args.no_scrape else ''}",
         f"Work done: {s['events']} event pairs ({s['large']} large), {s['searches']} search rounds, "
         f"{s['scrapes']} scrapes, database {result['db_bytes'] / 1e6:.0f} MB",
         "",
@@ -159,6 +161,7 @@ def main() -> None:
     ap.add_argument("--sessions", type=int, default=4)
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--large-every", type=int, default=10, help="every Nth event per session is a ~1 MB tool result")
+    ap.add_argument("--no-scrape", action="store_true", help="skip the /metrics scraper (attribution run)")
     ap.add_argument("--markdown", help="also write the report to this file")
     args = ap.parse_args()
     out = report(args, asyncio.run(run(args)))
