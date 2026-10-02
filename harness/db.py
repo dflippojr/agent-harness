@@ -457,12 +457,11 @@ READ_CONNECTIONS = 4
 
 
 def _writes(fn):
-    """A method that writes: it runs on the writer thread, inline when already there."""
+    """A method that writes: it runs on the writer thread as one transaction (joining the caller's when inside a
+    `write`), so a pooled reader never sees it half-done."""
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
-        if self._on_writer():
-            return fn(self, *args, **kwargs)
-        return self._submit(fn, self, *args, **kwargs).result()
+        return self.write(fn, self, *args, **kwargs)
     wrapper.db_kind = "write"
     return wrapper
 
@@ -532,7 +531,7 @@ class AsyncDatabase:
             inner = method.__wrapped__
 
             async def write(*args, **kwargs):
-                return await asyncio.wrap_future(db._submit(inner, db, *args, **kwargs))
+                return await db.awrite(inner, db, *args, **kwargs)
             return write
         bound = getattr(db, name)
 
@@ -936,19 +935,13 @@ class Database:
             row = self.conn.execute("SELECT value FROM meta WHERE key = 'search_index'").fetchone()
             if row and row["value"] == INDEX_VERSION:
                 return
-            self.conn.execute("BEGIN IMMEDIATE")
-            try:
-                self.conn.execute("DELETE FROM search_index")
-                owners = {r["id"]: (r["owner_id"] or "owner")
-                          for r in self.conn.execute("SELECT id, owner_id FROM sessions")}
-                for r in self.conn.execute("SELECT seq, session_id, ts, type, data FROM events ORDER BY seq").fetchall():
-                    self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]),
-                                      user_id=owners.get(r["session_id"], "owner"))
-                self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('search_index', ?)", (INDEX_VERSION,))
-            except BaseException:
-                self.conn.execute("ROLLBACK")
-                raise
-            self.conn.execute("COMMIT")
+            self.conn.execute("DELETE FROM search_index")
+            owners = {r["id"]: (r["owner_id"] or "owner")
+                      for r in self.conn.execute("SELECT id, owner_id FROM sessions")}
+            for r in self.conn.execute("SELECT seq, session_id, ts, type, data FROM events ORDER BY seq").fetchall():
+                self._index_event(r["session_id"], r["seq"], r["ts"], r["type"], json.loads(r["data"]),
+                                  user_id=owners.get(r["session_id"], "owner"))
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('search_index', ?)", (INDEX_VERSION,))
 
     @_reads
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600,

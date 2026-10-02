@@ -174,3 +174,39 @@ def test_metrics_aggregates_run_on_a_read_connection_and_are_cached(db, monkeypa
     with db.reading():
         assert metrics._cached_core_rows(db)["kinds"]["error"] == 1
     assert len(calls) == 2
+
+
+def _observe_between_statements(db, marker: str, look):
+    """Each time the writer starts a statement containing `marker`, run look() on a pooled reader in another
+    thread (as a concurrent API request would) and record what it saw. Earlier statements of the same write
+    have run by then; a reader must see none of them until the whole write commits."""
+    seen: list = []
+
+    def trace(sql: str) -> None:
+        if marker in sql:
+            t = threading.Thread(target=lambda: seen.append(db.read(look)))
+            t.start()
+            t.join(timeout=10)
+    db.write(lambda: db._wconn.set_trace_callback(trace))
+    return seen
+
+
+def test_a_reader_never_sees_an_event_without_its_search_index_row(db):
+    def look():
+        return (len(db.events("s1")),
+                db.conn.execute("SELECT COUNT(*) FROM search_index WHERE session_id = 's1'").fetchone()[0])
+    seen = _observe_between_statements(db, "INSERT INTO search_index", look)
+    db.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "needle"})
+    assert seen == [(0, 0)]  # not (1, 0): the event and its index row commit together
+    assert db.read(look) == (1, 1) and [h["seq"] for h in db.search_events("needle")]
+    asyncio.run(db.aio.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "haystack"}))
+    assert seen == [(0, 0), (1, 1)] and db.read(look) == (2, 2)  # the awaitable path is atomic too
+
+
+def test_a_reader_never_sees_an_empty_allowlist_mid_save(db):
+    db.set_skill_allowlist("commit-style", ["alpha", "beta"])
+    seen = _observe_between_statements(db, "INSERT INTO skill_project_allowlist",
+                                       lambda: db.skill_allowlist("commit-style"))
+    db.set_skill_allowlist("commit-style", ["alpha", "beta", "gamma"])
+    assert seen and all(s == ["alpha", "beta"] for s in seen)  # never [] or part-way between DELETE and INSERTs
+    assert db.skill_allowlist("commit-style") == ["alpha", "beta", "gamma"]
