@@ -54,7 +54,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest-cov pytest-xdist
+          python -m pip install -r requirements.txt -r requirements-repomap.txt pytest-cov pytest-xdist
 
       - name: Confirm hosted runner cores
         shell: powershell

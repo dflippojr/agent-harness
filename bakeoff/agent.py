@@ -249,6 +249,7 @@ class AgentResult:
     prompt_tps: list[float] = field(default_factory=list)
     gen_tps: list[float] = field(default_factory=list)
     messages: list[dict] = field(default_factory=list)
+    system_prompt_chars: int = 0  # size of the prompt actually sent, captured before the run edits the workspace
 
 
 class Agent:
@@ -261,6 +262,7 @@ class Agent:
         max_turns: int = 30,
         wall_limit: float = 900,
         max_tokens: int = 8192,
+        repo_map_budget: int | None = None,
     ):
         self.base_url = base_url
         self.model = model
@@ -269,11 +271,18 @@ class Agent:
         self.max_turns = max_turns
         self.wall_limit = wall_limit
         self.max_tokens = max_tokens
+        self.repo_map_budget = repo_map_budget  # None = off (#264): the system prompt is SYSTEM_PROMPT unchanged
         self.tools = copy.deepcopy(TOOLS)
         for tool in self.tools:
             if tool["function"]["name"] == "read_file":
                 tool["function"]["description"] = (f"Read a text file with line numbers. Returns at most "
                                                    f"{workspace.read_lines} lines per call.")
+
+    def system_prompt(self) -> str:
+        if self.repo_map_budget is None:
+            return SYSTEM_PROMPT
+        from harness import repomap  # lazy: tree-sitter is only needed for the experiment arm
+        return repomap.apply_to_prompt(SYSTEM_PROMPT, self.ws.root, self.repo_map_budget)
 
     def _chat(self, messages: list[dict], timeout: float) -> dict:
         payload = {
@@ -302,7 +311,9 @@ class Agent:
 
     def run(self, task_prompt: str) -> AgentResult:
         result = AgentResult()
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task_prompt}]
+        system = self.system_prompt()
+        result.system_prompt_chars = len(system)
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": task_prompt}]
         result.messages = messages
         started = time.monotonic()
         idle_turns = 0

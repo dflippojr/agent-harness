@@ -86,9 +86,9 @@ async def record(fixture: Path, fetch_top: int) -> None:
     await record_fixture(fixture, queries, urls, fetch_top, "http://127.0.0.1:8888")
 
 
-async def run_one(task: WebTask, fixture: Path, repeat: int) -> dict:
+async def run_one(task: WebTask, fixture: Path, repeat: int, repo_map: bool = False) -> dict:
     from harness import config as config_mod
-    from harness.config import Project, WebConfig
+    from harness.config import Project, RepoMapConfig, WebConfig
     from harness.manager import Manager
 
     base = config_mod.load()
@@ -97,6 +97,7 @@ async def run_one(task: WebTask, fixture: Path, repeat: int) -> dict:
         host="127.0.0.1", port=0, data_dir=tmp, repos_dir=tmp / "repos", default_model=base.default_model,
         models=base.models, sandbox=base.sandbox, projects={"scratch": Project(name="scratch")},
         web=WebConfig(enabled=True, page_chars=base.web.page_chars, fixture_dir=str(fixture)),
+        repo_map=RepoMapConfig(enabled=repo_map),  # regression check (#264): with no code to map, the prompt is unchanged
     )
     m = Manager(cfg)
     await m.start(maintenance=False)
@@ -117,7 +118,11 @@ async def run_one(task: WebTask, fixture: Path, repeat: int) -> dict:
         made_up = ungrounded_quotes(final["answer"], [r["output"] for r in results])
         if made_up:
             ok, note = False, f"{note}; quotes not in any fetched text: {made_up}"
+        map_in_prompt = "<repo-map>" in final["context"][0]["content"]
+        if map_in_prompt:
+            ok, note = False, f"{note}; repo map was added to a session with no repository"
         return {"task": task.id, "repeat": repeat, "ok": ok and final["status"] == "done", "note": note,
+                "repo_map_enabled": repo_map, "repo_map_in_prompt": map_in_prompt,
                 "ungrounded_quotes": made_up,
                 "status": final["status"], "stop_reason": final["stop_reason"],
                 "seconds": round(time.monotonic() - started, 1), "turns": final["totals"].get("turns", 0),
@@ -133,12 +138,12 @@ async def run_one(task: WebTask, fixture: Path, repeat: int) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-async def run(fixture: Path, task_ids: list[str], repeats: int) -> Path:
+async def run(fixture: Path, task_ids: list[str], repeats: int, repo_map: bool = False) -> Path:
     tasks = [t for t in TASKS if not task_ids or t.id in task_ids]
     results = []
     for task in tasks:
         for r in range(repeats):
-            res = await run_one(task, fixture, r)
+            res = await run_one(task, fixture, r, repo_map)
             results.append(res)
             print(f"{'PASS' if res['ok'] else 'FAIL'} {task.id:24} #{r} {res['seconds']:6.1f}s {res['turns']:2} turns "
                   f"{len(res['tool_calls']):2} calls  misses={len(res['fixture_misses'])}  {res['note']}")
@@ -160,11 +165,12 @@ def main(argv: list[str] | None = None) -> int:
     go.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     go.add_argument("--tasks", default="")
     go.add_argument("--repeats", type=int, default=1)
+    go.add_argument("--repo-map", action="store_true", help="enable the repo-map switch; the prompt must not change")
     args = parser.parse_args(argv)
     if args.command == "record":
         asyncio.run(record(args.fixture, args.fetch_top))
     else:
-        asyncio.run(run(args.fixture, [t for t in args.tasks.split(",") if t], args.repeats))
+        asyncio.run(run(args.fixture, [t for t in args.tasks.split(",") if t], args.repeats, args.repo_map))
     return 0
 
 
