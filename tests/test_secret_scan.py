@@ -281,6 +281,38 @@ def test_key_removed_by_a_later_commit_blocks_push_until_dismissed(tmp_path, cap
     asyncio.run(body())
 
 
+def test_key_moved_to_another_file_still_blocks_push_for_its_commit(tmp_path, caplog):
+    """dev.env gets the key and loses it again; prod.env has it at HEAD. Dismissing the prod.env finding
+    must not let the dev.env commit through, so the commit's finding is not folded into it."""
+    remote = make_repo(tmp_path / "remote.git", bare=True)
+    cfg = project_cfg(tmp_path, remote.as_uri())
+
+    async def body():
+        m = Manager(cfg, chat=edit_steps())
+        await m.start(maintenance=False)
+        s = await finished(m, m.create("bump", project="proj")["id"])
+        sid, ws = s["id"], Path(s["workspace"])
+        (ws / "dev.env").write_text(f"AWS_ACCESS_KEY_ID={KEY}\n")
+        sh(ws, "add", "dev.env")
+        sh(ws, "commit", "-qm", "dev key")
+        added = sh(ws, "rev-parse", "HEAD").strip()
+        (ws / "dev.env").write_text("AWS_ACCESS_KEY_ID=\n")
+        sh(ws, "commit", "-qam", "drop dev key")
+        (ws / "prod.env").write_text(f"AWS_ACCESS_KEY_ID={KEY}\n")
+
+        findings = (await m.changes(sid))["secret_scan"]["findings"]
+        assert sorted((f["file"], f.get("commit", "")) for f in findings) == [("dev.env", added[:12]), ("prod.env", "")]
+        prod = next(f for f in findings if f["file"] == "prod.env")
+        await m.dismiss_secret_finding(sid, prod["fingerprint"], "test fixture", "owner")
+        with pytest.raises(HarnessError) as e:
+            await m.review(sid, "push")
+        assert e.value.code == "secret_findings" and e.value.details["findings"] == 1
+        assert sh(remote, "branch", "--list", s["branch"]) == ""
+        assert _leaks(m, sid, caplog) == []
+        await m.stop()
+    asyncio.run(body())
+
+
 def _net_fingerprint(m: Manager, sid: str, ws: Path) -> str:
     """The fingerprint the same value would have in the working diff."""
     diffs = [{"path": ".", "head": "x", "diff": diff_of("settings.py", [f"AWS_ACCESS_KEY_ID = '{KEY}'"])}]

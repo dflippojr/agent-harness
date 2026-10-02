@@ -314,9 +314,10 @@ def _findings(report: list[dict], text: str, where: list, repos: list[dict], sal
                                      .encode()).hexdigest()
         finding = {"repo": repo, "file": file, "line": line, "rule": rule, "fingerprint": fingerprint[:20],
                    "preview": mask(value), "_spans": spans,
-                   "_value": hashlib.sha256("\0".join((salt, repo, rule, value)).encode()).hexdigest()}
+                   "_value": hashlib.sha256("\0".join((salt, repo, file, rule, value)).encode()).hexdigest()}
         out.append({**finding, "commit": commit} if commit else finding)
-    # A value still in the working diff is that finding; one only in commits is reported once, at its first commit.
+    # A value still in the same file of the working diff is that finding; one only in commits is reported once,
+    # at its first commit. Dismissals are per file, so a value in another file never stands in for this one.
     seen = {f["_value"] for f in out if "commit" not in f}
     kept = []
     for f in out:  # repos, then commits oldest first
