@@ -158,17 +158,16 @@ def test_cancelling_an_awrite_still_delivers_its_events_once(db):
         bus.emit("s1", "status", {"status": "done"})
 
     async def run():
-        delivered = asyncio.Event()
-        bus.add_listener(lambda e: delivered.set())
         write = asyncio.create_task(db.awrite(finish))
         await asyncio.sleep(0.05)  # the writer holds the transaction open
         write.cancel()
+        await asyncio.sleep(0.05)
+        assert not write.done()  # the cancel waits for the commit, as a blocking write would
+        release.set()
         with pytest.raises(asyncio.CancelledError):
             await write
-        release.set()
-        await asyncio.wait_for(delivered.wait(), 5)
-        await db.awrite(lambda: None)  # anything queued behind it has run too
-        await asyncio.sleep(0)
+        assert heard == [("status", "done")]  # delivered before the cancel surfaced
+        await db.awrite(lambda: None)
 
     asyncio.run(run())
     assert heard == [("status", "done")]
@@ -187,9 +186,8 @@ def test_cancelling_aemit_still_publishes_the_event(db):
         emit.cancel()
         release.set()
         await blocker
-        await db.awrite(lambda: None)
-        published = await asyncio.wait_for(sub.queue.get(), 5)
-        return emit.cancelled(), published
+        await asyncio.gather(emit, return_exceptions=True)
+        return emit.cancelled(), sub.queue.get_nowait()
 
     cancelled, published = asyncio.run(run())
     assert cancelled

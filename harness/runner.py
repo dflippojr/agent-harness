@@ -22,7 +22,7 @@ from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
 from .config import Config, resolve_tool_output, clamp_tool_limit
-from .db import Database
+from .db import Database, finish_then_cancel
 from .homelab import Homelab
 from .principal import OWNER_USER_ID, session_user_id
 from .policy import ALLOW, ASK, DENY, ChatPolicy, Policy
@@ -162,6 +162,7 @@ class Runner:
         self.chat = chat
         self.approval_events: dict[str, asyncio.Event] = {}
         self.user_cancelled: set[str] = set()
+        self._unended: set[str] = set()  # live runs whose _end_run has not started
         self._sandboxes: dict[str, Sandbox] = {}
         self._cli_sessions: dict[str, ClaudeSession | CodexSession | CursorSession] = {}
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
@@ -539,6 +540,7 @@ class Runner:
         return trace
 
     async def _run(self, sid: str, recovered: bool = False) -> None:
+        self._unended.add(sid)
         try:
             s = self.db.get_session(sid)
             if s.get("backend", "local") != "local":
@@ -575,6 +577,7 @@ class Runner:
             await asyncio.shield(self._stop_cli(sid))
             self.scheduler.release(sid)
             self.user_cancelled.discard(sid)
+            self._unended.discard(sid)
 
     async def _run_local(self, sid: str, s: dict, recovered: bool) -> None:
         if recovered:
@@ -2343,7 +2346,11 @@ class Runner:
             return False
         s = self.db.get_session(sid)
         if s["status"] in ("cancelled", "done"):
-            return False
+            if sid not in self._unended:
+                return False
+            # The final status committed, but the cancel came before the run ended: end it as it stands.
+            await self._end_run(sid)
+            return True
         await self._record_cancel(sid)
         await self._end_run(sid)
         return True
@@ -2360,8 +2367,11 @@ class Runner:
         await self.aset_status(sid, "cancelled", stop_reason="cancelled")
 
     async def _end_run(self, sid: str) -> None:
+        """Runs to the end even if the run is cancelled meanwhile (the cancel is raised after), so a run that
+        reached a final status always gets its run_finished, branch save and transcript."""
+        self._unended.discard(sid)
         with telemetry.span("run_end"):
-            await self._end_run_inner(sid)
+            await finish_then_cancel(self._end_run_inner(sid))
 
     async def _end_run_inner(self, sid: str) -> None:
         self._emit_turn_metrics(sid)

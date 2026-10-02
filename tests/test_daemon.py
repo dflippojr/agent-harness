@@ -341,6 +341,58 @@ def test_cancel_and_follow_up_message(tmp_path):
     asyncio.run(body())
 
 
+@pytest.mark.parametrize("final_write", ["status", "run_finished"])
+def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write):
+    """The cancel lands while the writer commits the run's last status (or its run_finished): the commit goes
+    through, so the run must still end once: run_finished, branch save and transcript (#294)."""
+    import threading
+    script = Script([Completion(content="all done", prompt_tokens=100, completion_tokens=5)])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        entered, release = threading.Event(), threading.Event()
+        update_session, insert_event = m.db.update_session, m.db.insert_event
+
+        def hold(name: str) -> None:
+            if name == final_write:
+                entered.set()
+                release.wait(scaled(10))
+
+        def slow_update(sid, **fields):
+            if fields.get("status") == "done":
+                hold("status")
+            return update_session(sid, **fields)
+
+        def slow_insert(sid, type_, data):
+            if type_ == "run_finished":
+                hold("run_finished")
+            return insert_event(sid, type_, data)
+        m.db.update_session, m.db.insert_event = slow_update, slow_insert
+        saved = []
+        save_branch = m.runner.save_branch
+
+        async def record_save(sid):
+            saved.append(sid)
+            await save_branch(sid)
+        m.runner.save_branch = record_save
+
+        s = m.create("say done")
+        await asyncio.to_thread(entered.wait, scaled(10))
+        task = m.tasks[s["id"]]
+        m.runner.user_cancelled.add(s["id"])
+        task.cancel()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        s = m.db.get_session(s["id"])
+        assert s["status"] == "done" and s["answer"] == "all done"
+        assert [e["status"] for e in events(m, s["id"], "run_finished")] == ["done"]
+        assert saved == [s["id"]]
+        assert (m.cfg.transcripts_dir / f"{s['id']}.md").exists()
+        await m.stop()
+    asyncio.run(body())
+
+
 def test_budget_and_finish_tool(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.max_turns = 2
