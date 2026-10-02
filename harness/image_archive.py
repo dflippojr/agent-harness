@@ -248,7 +248,7 @@ class ImageArchive:
         if not self.enabled:
             return {"enabled": False, "last_reconciliation": 0, "archived": 0, "missing": 0,
                     "errors": 0, "bytes": 0, "retained": 0}
-        with self.db.lock:
+        with self.db.reading(), self.db.lock:
             row = self.db.conn.execute(
                 "SELECT COUNT(*) AS total, "
                 "SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END) AS archived, "

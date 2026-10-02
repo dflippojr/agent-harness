@@ -1,17 +1,25 @@
 """Prometheus metrics (GET /metrics), scraped by the observability stack for the "Agent Harness" dashboard.
 
-Counters are computed from SQLite on each scrape (sessions and events are never deleted, so they only grow);
-gauges come from the live scheduler, guard, runners, and maintenance state.
+Counters are computed from SQLite (sessions and events are never deleted, so they only grow); gauges come from the
+live scheduler, guard, runners, and maintenance state. Every query runs on a pooled read-only connection, so a scrape
+never holds up the writer (#294). The heavy session/event aggregates are cached for `CORE_CACHE_SECONDS`, so scrapes
+closer together than that reuse one computation.
 """
 
 from __future__ import annotations
 
 import shutil
+import threading
 import time
+import weakref
 
 from . import telemetry
 from .manager import Manager
 from .runner import ACTIVE
+
+CORE_CACHE_SECONDS = 10.0
+_core_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()  # Database -> (computed_at, rows)
+_core_cache_lock = threading.Lock()
 
 STATUSES = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit",
             "done", "failed", "cancelled")
@@ -54,7 +62,8 @@ def _telemetry_metrics(out: _Out) -> None:
                      [({}, telemetry.loop_stall)])
 
 
-def _core_metrics(m: Manager, out: _Out, db) -> dict:
+def _core_rows(db) -> dict:
+    """The aggregate queries behind `_core_metrics`: whole-table scans of sessions, events and approvals."""
     with db.lock:
         by_status = dict(db.conn.execute("SELECT status, COUNT(*) FROM sessions GROUP BY status").fetchall())
         tokens = db.conn.execute(
@@ -99,7 +108,26 @@ def _core_metrics(m: Manager, out: _Out, db) -> dict:
         finished = db.conn.execute(
             "SELECT status, stop_reason, COUNT(*) FROM sessions WHERE status IN ('done', 'failed', 'cancelled') "
             "GROUP BY 1, 2").fetchall()
+    return {"by_status": by_status, "tokens": tokens, "tools": tools, "kinds": kinds, "round_resets": round_resets,
+            "dead_end": dead_end, "correlated": correlated, "cache_row": cache_row, "approvals": approvals,
+            "finished": finished}
 
+
+def _cached_core_rows(db) -> dict:
+    """`_core_rows`, reused for CORE_CACHE_SECONDS. One scrape computes while concurrent ones wait for its result."""
+    with _core_cache_lock:
+        hit = _core_cache.get(db)
+        if hit is None or time.monotonic() - hit[0] >= CORE_CACHE_SECONDS:
+            hit = (time.monotonic(), _core_rows(db))
+            _core_cache[db] = hit
+    return hit[1]
+
+
+def _core_metrics(m: Manager, out: _Out, db) -> dict:
+    rows = _cached_core_rows(db)
+    by_status, tokens, tools, kinds = rows["by_status"], rows["tokens"], rows["tools"], rows["kinds"]
+    round_resets, dead_end, correlated = rows["round_resets"], rows["dead_end"], rows["correlated"]
+    cache_row, approvals, finished = rows["cache_row"], rows["approvals"], rows["finished"]
     out.metric("harness_up", "gauge", "The harness daemon is answering.", [({}, 1)])
     out.metric("harness_sessions", "gauge", "Sessions by current status.",
                [({"status": s}, by_status.get(s, 0)) for s in STATUSES])
@@ -296,15 +324,17 @@ def _skill_metrics(out: _Out, db, by_status) -> None:
 
 
 def render(m: Manager) -> str:
+    """Blocking (SQLite on a pooled read connection): the endpoint runs it in a worker thread."""
     db, out = m.db, _Out()
-    by_status = _core_metrics(m, out, db)
-    _smart_review_metrics(out, db)
-    _backend_metrics(m, out, db)
-    _endpoint_metrics(m, out, db)
-    _image_metrics(m, out, db)
-    _runner_metrics(m, out)
-    _guard_metrics(m, out)
-    _maintenance_metrics(m, out)
-    _skill_metrics(out, db, by_status)
+    with db.reading():
+        by_status = _core_metrics(m, out, db)
+        _smart_review_metrics(out, db)
+        _backend_metrics(m, out, db)
+        _endpoint_metrics(m, out, db)
+        _image_metrics(m, out, db)
+        _runner_metrics(m, out)
+        _guard_metrics(m, out)
+        _maintenance_metrics(m, out)
+        _skill_metrics(out, db, by_status)
     _telemetry_metrics(out)
     return "\n".join(out.lines) + "\n"

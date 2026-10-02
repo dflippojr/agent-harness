@@ -3,12 +3,18 @@ from pathlib import Path
 
 import pytest
 
-from harness import secret_scan
+from harness import metrics, secret_scan
 from harness.warmup import READY, ModelWarmer
 
 # One pinned gitleaks per machine, fetched once and checked against harness/gitleaks/pin.json (issue #263).
 SCANNER_TOOLS = Path(tempfile.gettempdir()) / "agent-harness-test-tools"
 _real_download = secret_scan._download
+
+
+@pytest.fixture(autouse=True)
+def fresh_metrics(monkeypatch):
+    """Tests read /metrics right after changing the database; the 10 s aggregate cache would hide the change."""
+    monkeypatch.setattr(metrics, "CORE_CACHE_SECONDS", 0.0)
 
 
 @pytest.fixture(autouse=True)
