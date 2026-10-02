@@ -2578,10 +2578,11 @@ function viewInfo(s) {
 // ---------- images ----------
 const IMAGE_PHASE = {
   idle: "", waiting: "Waiting for the GPU (a game or transcode is using it)", switching: "Unloading the language model",
+  waiting_memory: "Waiting for memory (available RAM is under the threshold; Actions → Resources)",
   starting: "Starting ComfyUI", warm: "Image generator is ready", generating: "Generating",
   restoring: "Reloading the language model",
 };
-const IMAGE_BUSY = new Set(["waiting", "switching", "starting", "generating", "restoring"]);
+const IMAGE_BUSY = new Set(["waiting", "switching", "waiting_memory", "starting", "generating", "restoring"]);
 
 function imageCard(img) {
   const ready = img.status === "done";
