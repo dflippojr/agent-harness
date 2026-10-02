@@ -1051,6 +1051,29 @@ def test_backends_skip_auth_skips_docker_login_probe(tmp_path, monkeypatch):
         assert listed["claude"]["logged_in"] is True
 
 
+def test_waiting_limit_status_commits_with_its_limit_waiting_event(tmp_path):
+    """Whoever sees `waiting_limit` also sees when the limit resets: one commit, even with a slow writer (#294)."""
+    async def body():
+        m, _, _ = _claude_manager(tmp_path, "limit")
+        insert_event = m.db.insert_event
+
+        def slow_insert(sid, type_, data):
+            if type_ == "limit_waiting":
+                time.sleep(0.3)
+            return insert_event(sid, type_, data)
+        m.db.insert_event = slow_insert
+        await m.start()
+        sid = m.create("hit the limit", backend="claude")["id"]
+        sub = m.bus.subscribe(sid)
+        while (await asyncio.wait_for(sub.queue.get(), 30))["data"].get("status") != "waiting_limit":
+            pass
+        assert m.db.get_session(sid)["status"] == "waiting_limit"
+        assert [e["backend"] for e in events(m, sid, "limit_waiting")] == ["claude"]
+        await m.cancel(sid)
+        await m.stop()
+    asyncio.run(body())
+
+
 def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
     async def waiting():
         m, _, _ = _claude_manager(tmp_path / "waiting", "limit")

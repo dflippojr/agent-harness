@@ -483,8 +483,11 @@ class Runner:
                 if offline and waiting_since is None:
                     waiting_since = time.monotonic()
                     self.scheduler.release(sid)
-                    await self.aset_status(sid, "waiting_target")
-                    await self.bus.aemit(sid, "target_waiting", {"target": ws.target, "during": name})
+
+                    def wait_for_target() -> None:  # one commit, so nobody sees the status without its target
+                        self._status_writer(sid, "waiting_target", {})()
+                        self.bus.emit(sid, "target_waiting", {"target": ws.target, "during": name})
+                    await self.db.awrite(wait_for_target)
                 elif not offline and waiting_since is not None:
                     await self.bus.aemit(sid, "target_online", {"target": ws.target,
                                                          "seconds": round(time.monotonic() - waiting_since)})
@@ -787,9 +790,12 @@ class Runner:
             return
         reset = limit.reset_at or time.time() + 300
         run = {**s["run"], "limit_resets_at": reset}
-        self.db.update_session(sid, run=run)
-        await self.aset_status(sid, "waiting_limit")
-        await self.bus.aemit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
+
+        def wait_for_limit() -> None:  # one commit, so nobody sees waiting_limit without when it resets
+            self.db.update_session(sid, run=run)
+            self._status_writer(sid, "waiting_limit", {})()
+            self.bus.emit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
+        await self.db.awrite(wait_for_limit)
 
     @staticmethod
     def _secret_marker(path: str) -> tuple[int, int] | None:
