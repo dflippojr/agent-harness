@@ -355,17 +355,16 @@ class Runner:
             self.db.update_session(sid, status=status, **fields)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
+            # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
+            self.db.after_commit(self.scheduler.recheck)
         return set_status
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         self.db.write(self._status_writer(sid, status, fields))
-        # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
-        self.scheduler.recheck()
 
     async def aset_status(self, sid: str, status: str, **fields) -> None:
         """`set_status` for the event loop."""
         await self.db.awrite(self._status_writer(sid, status, fields))
-        self.scheduler.recheck()
 
     async def _acquire(self, sid: str, front: bool = False) -> None:
         if self.scheduler.holder == sid:

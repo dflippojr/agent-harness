@@ -34,10 +34,9 @@ class EventBus:
         return event
 
     async def aemit(self, sid: str, type_: str, data: dict) -> dict:
-        """`emit` for the event loop: the insert runs on the writer thread while the loop keeps going."""
-        event = await self.db.aio.insert_event(sid, type_, data)
-        self._deliver(sid, event)
-        return event
+        """`emit` for the event loop: the insert runs on the writer thread while the loop keeps going. Publishes
+        on the loop once committed, even if the caller is cancelled meanwhile."""
+        return await self.db.awrite(self.emit, sid, type_, data)
 
     def _deliver(self, sid: str, event: dict) -> None:
         self._publish(sid, event)

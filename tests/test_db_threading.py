@@ -145,6 +145,58 @@ def test_awrite_returns_the_callable_result(db):
     assert asyncio.run(run()) == db.last_event_seq("s1")
 
 
+def test_cancelling_an_awrite_still_delivers_its_events_once(db):
+    """The commit happens on the writer whether or not its awaiter is still there, so its events must too."""
+    bus = EventBus(db)
+    heard = []
+    bus.add_listener(lambda e: heard.append((e["type"], db.get_session("s1")["status"])))
+    release = threading.Event()
+
+    def finish():
+        release.wait(5)
+        db.update_session("s1", status="done")
+        bus.emit("s1", "status", {"status": "done"})
+
+    async def run():
+        delivered = asyncio.Event()
+        bus.add_listener(lambda e: delivered.set())
+        write = asyncio.create_task(db.awrite(finish))
+        await asyncio.sleep(0.05)  # the writer holds the transaction open
+        write.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await write
+        release.set()
+        await asyncio.wait_for(delivered.wait(), 5)
+        await db.awrite(lambda: None)  # anything queued behind it has run too
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert heard == [("status", "done")]
+    assert [e["type"] for e in db.events("s1")] == ["status"]
+
+
+def test_cancelling_aemit_still_publishes_the_event(db):
+    bus = EventBus(db)
+    sub = bus.subscribe("s1")
+    release = threading.Event()
+
+    async def run():
+        blocker = asyncio.create_task(db.awrite(lambda: release.wait(5)))
+        emit = asyncio.create_task(bus.aemit("s1", "run_finished", {"status": "done"}))
+        await asyncio.sleep(0.05)
+        emit.cancel()
+        release.set()
+        await blocker
+        await db.awrite(lambda: None)
+        published = await asyncio.wait_for(sub.queue.get(), 5)
+        return emit.cancelled(), published
+
+    cancelled, published = asyncio.run(run())
+    assert cancelled
+    assert published["type"] == "run_finished" and published["seq"] == db.last_event_seq("s1")
+    assert sub.queue.empty()
+
+
 def test_close_stops_the_writer_and_refuses_new_work(tmp_path):
     d = Database(tmp_path / "c.db")
     writer = d._writer

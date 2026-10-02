@@ -9,6 +9,7 @@ the writer has committed it). Event-loop code awaits instead: `await db.aio.<met
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import json
 import queue
@@ -673,10 +674,34 @@ class Database:
         return value
 
     async def awrite(self, fn, *args, **kwargs):
-        """`write` for the event loop: the loop stays free until the transaction has committed."""
-        value, callbacks = await asyncio.wrap_future(self._submit(self._run_tx, fn, args, kwargs))
-        _run_callbacks(callbacks)
-        return value
+        """`write` for the event loop: the loop stays free until the transaction has committed. Once submitted, the
+        write commits whether or not its awaiter is cancelled, so its after_commit callbacks run on the loop then
+        regardless, exactly once."""
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()
+        done = loop.create_future()
+
+        def deliver(job: Future) -> None:  # on the loop
+            if job.exception() is not None:
+                if not done.cancelled():
+                    done.set_exception(job.exception())
+                return
+            value, callbacks = job.result()
+            try:
+                _run_callbacks(callbacks)
+            except Exception as e:  # noqa: BLE001 - the awaiter's error, or the loop's if it has gone
+                if done.cancelled():
+                    raise
+                done.set_exception(e)
+                return
+            if not done.cancelled():
+                done.set_result(value)
+
+        def committed(job: Future) -> None:  # on the writer (or here, if it already finished)
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(deliver, job, context=context)
+        self._submit(self._run_tx, fn, args, kwargs).add_done_callback(committed)
+        return await done
 
     def _bootstrap(self) -> None:
         """Bring a pre-versioning (or empty) database to the frozen baseline; idempotent, so it also repairs."""
