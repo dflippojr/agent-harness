@@ -25,6 +25,7 @@ from . import efficiency
 from . import google_signin
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
+from .webgzip import WebGzipMiddleware
 
 NO_SUCH_JOB = "no such job"
 
@@ -1759,6 +1760,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     app = FastAPI(title="agent-harness", lifespan=lifespan)
     app.middleware("http")(guard)
+    app.add_middleware(WebGzipMiddleware, web=WEB)
     app.add_exception_handler(HarnessError, harness_error)
     web_router.install(app)
     app.mount("/static", StaticFiles(directory=WEB), name="static")
