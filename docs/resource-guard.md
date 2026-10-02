@@ -18,7 +18,7 @@ The model loads only on real demand or a clear signal:
 | Signal | What happens |
 | --- | --- |
 | A local-model turn needs it | `Runner._model_call` → `ModelWarmer.ensure_loaded` removes the flag and waits for `/health`. The session shows the usual "waking" note (about a minute). |
-| An endpoint request (`/v1/...`) | Same, before the request is relayed. Below the RAM threshold it gets a 503 with `Retry-After: 60`. |
+| An endpoint request (`/v1/...`) | Same, before the request is relayed, on every route that goes to llama-server (`/v1/messages/count_tokens` too, though it takes no GPU slot). Below the RAM threshold it gets a 503 with `Retry-After: 60`. A parked model that can't load because the GPU is held gets a 503 instead of a 502 from the stopped server (`Retry-After: 180`, or 60 for an image batch). |
 | Work was queued during a GPU hold | The hold's end reloads the model (`guard.want_model`), as before. |
 | The user picks the local model in the app | Choosing the local backend or a model, or typing a task with it selected, calls `POST /models/warm`. That is skipped (`low_memory`) when RAM is short. |
 | **Load local model now** (Actions → Resources) | Loads the model and pins it for the chosen window (default `load_now_default_minutes`, 60). A one-token request every `keepalive_seconds` (300) keeps llama-server's idle timer from firing. Under memory pressure it asks for confirmation first. |
@@ -41,7 +41,9 @@ These **don't** load the model:
 `lazy_load: false` in `config/harness.yaml` restores the old eager reload after holds and image batches.
 
 **Unload now** (Actions → Resources, `POST /resources/unload`) parks the model straight away without holding the queue.
-It refuses while a model turn is running. llama.cpp b10950 has no sleep endpoint: `--help` lists only
+It refuses (409) while a model turn is running or loading the model for one: the turn is in `Runner.generating` from
+before it unparks the model until its call ends, and that is the lease the unload checks. A refused unload leaves a
+*Load local model now* pin and its keepalive alone. llama.cpp b10950 has no sleep endpoint: `--help` lists only
 `--sleep-idle-seconds`. So unloading means stopping the process, the same way the hold does.
 
 ## Idle unload: 600 s

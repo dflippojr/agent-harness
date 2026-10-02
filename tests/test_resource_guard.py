@@ -439,3 +439,10 @@ def test_count_tokens_wakes_a_parked_model_and_gets_503_during_a_hold(tmp_path):
         asyncio.run(m.guard.check())
         held = client.post("/v1/messages/count_tokens", json=body, headers=headers)
         assert held.status_code == 503 and held.headers["Retry-After"] == "180"
+        m.guard.resume()
+        asyncio.run(m.guard.check())
+        assert m.guard.state == CLEAR and m.guard.control.flag  # lazy: still parked
+        m.warmer.blocked = lambda: True  # an image batch has the GPU
+        images = client.post("/v1/messages/count_tokens", json=body, headers=headers)
+        assert images.status_code == 503 and images.headers["Retry-After"] == "60"
+        assert "image generation" in images.text
