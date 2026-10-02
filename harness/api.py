@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import sqlite3
 import uuid
@@ -23,10 +24,17 @@ from . import compat
 from . import config as config_mod
 from . import efficiency
 from . import google_signin
+from . import telemetry
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
+from .webgzip import WebGzipMiddleware
 
 NO_SUCH_JOB = "no such job"
+
+# Static files get their type from `mimetypes`, which on Windows also reads the registry, where .js/.mjs can
+# be missing or mapped to text/plain. Browsers refuse a module script without a JavaScript type, so pin both.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
 
 log = logging.getLogger("harness.api")
 WEB = Path(__file__).parent / "web"
@@ -1772,12 +1780,17 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.manager = manager or Manager(config_mod.load())
+        telemetry.enable_asyncio_debug()
+        probe = telemetry.LoopLagProbe()
+        probe.start()
         await app.state.manager.start()
         yield
         await app.state.manager.stop()
+        await probe.stop()
 
     app = FastAPI(title="agent-harness", lifespan=lifespan)
     app.middleware("http")(guard)
+    app.add_middleware(WebGzipMiddleware, web=WEB)
     app.add_exception_handler(HarnessError, harness_error)
     web_router.install(app)
     app.mount("/static", StaticFiles(directory=WEB), name="static")

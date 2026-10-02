@@ -70,7 +70,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv\Scripts\python -m pip install --upgrade pip
-          .venv\Scripts\python -m pip install -r requirements.txt pytest-xdist
+          .venv\Scripts\python -m pip install -r requirements.txt -r requirements-repomap.txt pytest-xdist
 
       # Fixed -n (never auto): the tower shares RAM with llama-server and other
       # agent-harness-ci jobs. Started at -n 4; a 20-run soak median of 192 s was

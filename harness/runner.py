@@ -515,6 +515,7 @@ class Runner:
         s = self.db.get_session(sid)
         await self._prepare_repo(s)
         self._snapshot_git_baseline(sid)
+        self._repo_map_at_start(sid)
         if s["status"] != "waiting_approval":  # _resolve_calls waits without holding the GPU
             await self._acquire(sid)
         await self._loop(sid)
@@ -1964,6 +1965,27 @@ class Runner:
         """True when this session's run carries schema-valid state from a successful update_state."""
         return agent_state.is_valid_state((s.get("run") or {}).get("state"))
 
+    def _repo_map_eligible(self, s: dict) -> bool:
+        """Experiment (#264): only local-model agent sessions on the tower, with the switch on, get a map."""
+        return (self.cfg.repo_map.enabled and s.get("kind") != "chat" and s.get("target") == "tower"
+                and s.get("backend", "local") == "local" and not s.get("workspace_removed")
+                and bool(s.get("context")))
+
+    def _with_repo_map(self, s: dict, context: list) -> list:
+        """`context` with its system message carrying a fresh map (or none, if the map is empty)."""
+        from . import repomap
+        system = context[0]
+        content = repomap.apply_to_prompt(system["content"], Path(s["workspace"]), self.cfg.repo_map.budget_tokens)
+        return context if content == system["content"] else [{**system, "content": content}, *context[1:]]
+
+    def _repo_map_at_start(self, sid: str) -> None:
+        """Append the map once, the first time a session runs; later changes only come from a round reset."""
+        s = self.db.get_session(sid)
+        if not self._repo_map_eligible(s) or s["run"].get("repo_map_applied"):
+            return
+        context = self._with_repo_map(s, s["context"])
+        self.db.update_session(sid, context=context, run={**s["run"], "repo_map_applied": True})
+
     def _snapshot_git_baseline(self, sid: str) -> None:
         s = self.db.get_session(sid)
         if s.get("kind") == "chat" or s.get("target") != "tower" or s.get("workspace_removed"):
@@ -1996,6 +2018,8 @@ class Runner:
         payload = agent_state.inject_payload(s["run"].get("state"), self._files_modified(s),
                                              self.cfg.state_max_chars)
         new_context = compaction.apply_round_reset(context, payload)
+        if self._repo_map_eligible(s):  # the one place the map is refreshed after the start
+            new_context = self._with_repo_map(s, new_context)
         after = compaction.estimate_tokens(new_context, cpt) + overhead
         run = {**self.db.get_session(sid)["run"]}
         run.pop("pending_round_reset", None)

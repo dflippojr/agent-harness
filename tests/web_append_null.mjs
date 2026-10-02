@@ -1,13 +1,11 @@
 // UI harness: Profile, session Changes with no review card, and job details
 // must not render a text node "null" or stringify run links as a URL list (#183).
-import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
+import { createContext } from "node:vm";
+import { runApp } from "./web_app_loader.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appSrc = readFileSync(join(root, "harness/web/app.js"), "utf8")
-  .replace(/import \{[^}]+\} from "\.\/client\.mjs";\r?\n/, "");
 
 class Emitter {
   constructor() { this._l = {}; }
@@ -342,7 +340,7 @@ const sandbox = createContext({
   undefined,
 });
 
-runInContext(appSrc, sandbox);
+runApp(sandbox);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (pred, label, ms = 2000) => {

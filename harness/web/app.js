@@ -20,6 +20,15 @@
 //   #/signin[/failed]        Google sign-in for a household member on a Tailscale-admitted device (issue #64)
 
 import { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } from "./client.mjs";
+import { fmtElapsed, fmtTokens, readFraction, readingText, ago, fmtSpan, pluralize, holdRemainingText } from "./lib/format.mjs";
+import { TARGET_LABEL, compareTargets, runnerStateText, pickDefaultBackend } from "./lib/targets.mjs";
+import { toolSummaryText, approvalWhat } from "./lib/tools.mjs";
+import { approvalDiffClass, diffLineClass } from "./lib/diff.mjs";
+import { SNIPPET_LANGUAGES, snippetLanguage } from "./lib/snippets.mjs";
+import { escapeHtml, md } from "./lib/markdown.mjs";
+import { settingValueText, settingMeta, lastUpdateText, compatibilityText, lastSeenText, recoveryNote } from "./lib/settings-text.mjs";
+import { profileIconHidden, sessionJumpHidden } from "./lib/layout.mjs";
+import { protocolMismatch } from "./lib/compat.mjs";
 
 const $app = document.getElementById("app");
 const $title = document.getElementById("title");
@@ -34,13 +43,6 @@ const STATUS_LABEL = {
   queued: "queued", running: "running", waiting_approval: "needs approval", waiting_target: "waiting for Mac", waiting_app: "waiting for app", waiting_limit: "waiting for limit",
   done: "done", failed: "failed", cancelled: "cancelled",
 };
-const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };
-// The home machine sorts first, everything else alphabetically.
-function compareTargets(a, b) {
-  if (a === "tower") return -1;
-  if (b === "tower") return 1;
-  return a.localeCompare(b);
-}
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
@@ -49,21 +51,6 @@ const SESSION_EVENT_TYPES = [
   "quote_check", "ungrounded_quotes",
 ];
 const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
-const fmtElapsed = (ms) => {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
-};
-const fmtTokens = (n) => {
-  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
-  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
-  return `${n || 0}`;
-};
-// llama-server's prompt progress counts the cached prefix as processed; the bar covers only the part being read.
-const readFraction = (d) => (d.total > d.cached ? (d.processed - d.cached) / (d.total - d.cached) : null);
-const readingText = (what, d) => {
-  const cached = d.cached ? ` (${fmtTokens(d.cached)} cached)` : "";
-  return `${what} ${fmtTokens(Math.max(0, d.processed - d.cached))} of ${fmtTokens(d.total - d.cached)} new tokens${cached}`;
-};
 const progressBar = (fraction) => h("div", { class: `progress${fraction === null ? " indeterminate" : ""}` },
   h("span", { style: fraction === null ? "" : `width:${Math.max(2, Math.min(100, fraction * 100)).toFixed(1)}%` }));
 let cleanup = [];
@@ -102,12 +89,6 @@ function repaintPage() {
     const { y, viewH, pageH } = pageMetrics(); // the cross-engine measurements the jump buttons use
     if (y > pageH - viewH) scrollPage(pageH - viewH);
   });
-}
-
-function profileIconHidden(topLevel, page = false) {
-  // Show on Chat, Agents, Tasks, Images, and Actions. Hide on nested Back pages
-  // and on Profile (page: true). Guest chrome is unchanged; this flag is route-only.
-  return !topLevel || !!page;
 }
 
 function setHeader(feature, pageTitle = "", { page = false } = {}) {
@@ -175,17 +156,24 @@ function showFab(href, label) {
 }
 
 let currentMe = { role: "owner" };
-async function currentUser() {
+// Resolves (never rejects) to the caller's identity without touching app state, so boot can start it
+// speculatively beside /health and only adopt the result once compatibility has passed.
+async function fetchMe() {
   const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
   try {
-    currentMe = await api("/me", { surface: bootstrap });
+    return await api("/me", { surface: bootstrap });
   } catch (e) {
-    if (e.code === "sign_in_required") { currentMe = { role: "signin" }; return currentMe; }
-    try { currentMe = await api("/me", { surface: "app" }); }
-    catch (_) { currentMe = { role: "guest" }; }
+    if (e.code === "sign_in_required") return { role: "signin" };
+    try { return await api("/me", { surface: "app" }); }
+    catch (_) { return { role: "guest" }; }
   }
+}
+async function currentUser() {
+  currentMe = await fetchMe();
   return currentMe;
 }
+// Identity fetched during boot; the first route() adopts it instead of requesting /me a second time.
+let bootMe = null;
 
 // Issue #64: Google sign-in state for bundled, same-origin Web only. The CSRF value stays in memory.
 let webAuth = null;
@@ -332,224 +320,10 @@ async function downloadDaemonFile(path, filename) {
   } catch (e) { toast(e.message); }
 }
 
-// One-line summary of a tool call for its collapsed row.
-function toolSummaryText(fn, args) {
-  if (fn.name === "run_shell") return args.command;
-  if (fn.name === "git_clone" || fn.name === "web_fetch") return args.url;
-  if (fn.name === "prometheus_query") return args.query;
-  if (args.service) {
-    const since = args.since ? ` since ${args.since}` : "";
-    return `${args.service}${since}`;
-  }
-  if (args.path) {
-    const line = args.start_line ? ` :${args.start_line}` : "";
-    return `${args.path}${line}`;
-  }
-  return fn.arguments;
-}
-
-// What an approval card asks the owner to allow.
-function approvalWhat(a) {
-  if (a.tool === "run_shell" || a.tool === "Bash" || a.tool === "exec_command") {
-    const network = a.args.network ? "🌐 network · " : "";
-    return `${network}$ ${a.args.command}`;
-  }
-  if (a.tool === "git_clone") return `git clone ${a.args.url}`;
-  if (a.tool === "restart_service") return `restart ${a.args.service}`;
-  return JSON.stringify(a.args, null, 2);
-}
-
-function approvalDiffClass(line) {
-  if (line.startsWith("@@")) return "hunk";
-  if (line.startsWith("+")) return "add";
-  return line.startsWith("-") ? "del" : "";
-}
-
-function diffLineClass(line) {
-  if (line.startsWith("@@")) return "hunk";
-  if (line.startsWith("+") && !line.startsWith("+++")) return "add";
-  return line.startsWith("-") && !line.startsWith("---") ? "del" : "";
-}
-
 const reviewBadge = (review, label) => h("span", { class: `badge ${review === "discarded" ? "cancelled" : "done"}` }, label);
-
-function ago(ts) {
-  const s = Math.max(0, Date.now() / 1000 - ts);
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return new Date(ts * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
 
 function badge(status) {
   return h("span", { class: `badge ${status}` }, STATUS_LABEL[status] || status);
-}
-
-const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-const normalizeQuote = (text) => (text || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-const quoteParts = (q) => q.split(/\.\.\.|…/).map(normalizeQuote).filter((p) => p.length >= 12);
-const quoteIn = (q, text) => {
-  const parts = quoteParts(q);
-  return parts.length > 0 && parts.every((p) => normalizeQuote(text).includes(p));
-};
-function quoteHref(url, quote) {
-  const base = (url || "").split("#")[0];
-  const snippet = quote.replace(/\s+/g, " ").trim().slice(0, 80);
-  return `${base}#:~:text=${encodeURIComponent(snippet)}`;
-}
-function quoteLinks(answer, pages) {
-  const links = {};
-  const re = /["“]([^"”\n]{25,400})["”]/g;
-  let match;
-  while ((match = re.exec(answer || ""))) {
-    const q = match[1];
-    const page = (pages || []).find((p) => /^https?:\/\//i.test(p.url || "") && quoteIn(q, p.text));
-    if (page) links[q] = quoteHref(page.url, q);
-  }
-  return links;
-}
-function linkQuotes(html, answer, pages) {
-  const links = quoteLinks(answer, pages);
-  const quotes = Object.keys(links).sort((a, b) => b.length - a.length);
-  for (const q of quotes) {
-    const escaped = escapeHtml(q);
-    html = html.split(escaped).join(`<a class="quote-source" href="${escapeHtml(links[q])}" target="_blank" rel="noopener">${escaped}</a>`);
-  }
-  return html;
-}
-
-// Small, safe Markdown subset: everything is escaped first, then a few constructs are re-enabled.
-// A fenced block in a language the snippet runner supports is marked so Chat can add its Run button.
-const MD_BLOCK_MARK = "\u0000";   // brackets a fenced-block placeholder; escaped input never contains it as text we render
-const MD_BLOCK_LINE = new RegExp(String.raw`^${MD_BLOCK_MARK}\d+${MD_BLOCK_MARK}$`);
-const MD_BLOCK_REF = new RegExp(String.raw`${MD_BLOCK_MARK}(\d+)${MD_BLOCK_MARK}`, "g");
-const MD_TABLE_ROW = /^\s*\|.*\|\s*$/;
-const MD_LIST_ITEM = /^\s*([-*]|\d+\.) /;
-
-const isMdTagChar = (ch) => /[\w+#-]/.test(ch);
-
-// Replaces each ``` fence (escaped text in, language tag optional) with a placeholder; onBlock(tag, rest) makes the block's html.
-function replaceFences(text, onBlock) {
-  let out = "";
-  let pos = 0;
-  for (;;) {
-    const open = text.indexOf("```", pos);
-    const close = open < 0 ? -1 : text.indexOf("```", open + 3);
-    if (close < 0) break;
-    let tagEnd = open + 3;
-    while (tagEnd < close && isMdTagChar(text[tagEnd])) tagEnd++;
-    out += text.slice(pos, open) + onBlock(text.slice(open + 3, tagEnd), text.slice(tagEnd, close));
-    pos = close + 3;
-  }
-  return out + text.slice(pos);
-}
-
-// table[i] = nearest index >= i where stop(char) is true, or -1 if none remains. Built once per mdLinks() call so
-// every "[" can look up its own bounds in O(1) instead of rescanning the tail of the string.
-function nextStopTable(s, stop) {
-  const table = new Array(s.length + 1);
-  table[s.length] = -1;
-  for (let i = s.length - 1; i >= 0; i--) table[i] = stop(s[i]) ? i : table[i + 1];
-  return table;
-}
-
-// Tries to match a link starting at s[open] === "[", using the same bounds as the regex this replaced: the label
-// runs to the first "]" or newline, the url needs an http(s) prefix and runs to the first ")" or whitespace.
-function mdLinkAt(s, open, closeBracket, closeParen) {
-  const labelStart = open + 1;
-  const bracket = closeBracket[labelStart];
-  if (bracket < 0 || bracket === labelStart || s[bracket] !== "]" || s[bracket + 1] !== "(") return null;
-  const protoStart = bracket + 2;
-  const proto = s.startsWith("https://", protoStart) ? "https://" : s.startsWith("http://", protoStart) ? "http://" : null;
-  if (!proto) return null;
-  const urlStart = protoStart + proto.length;
-  const paren = closeParen[urlStart];
-  if (paren < 0 || paren === urlStart || s[paren] !== ")") return null;
-  return { html: `<a href="${s.slice(protoStart, paren)}" target="_blank" rel="noopener">${s.slice(labelStart, bracket)}</a>`, end: paren + 1 };
-}
-
-// Replaces markdown links in one linear pass instead of the backtracking regex this replaced (S8786), which was
-// quadratic both on nested-bracket labels and on a run of "[x](http://" with no closing ")" (#239).
-function mdLinks(s) {
-  if (!s.includes("[")) return s;
-  const closeBracket = nextStopTable(s, (c) => c === "]" || c === "\n");
-  const closeParen = nextStopTable(s, (c) => c === ")" || /\s/.test(c));
-  let out = "";
-  let pos = 0;
-  for (let open = s.indexOf("[", pos); open >= 0; open = s.indexOf("[", pos)) {
-    out += s.slice(pos, open);
-    const link = mdLinkAt(s, open, closeBracket, closeParen);
-    if (!link) { out += "["; pos = open + 1; continue; }
-    out += link.html;
-    pos = link.end;
-  }
-  return out + s.slice(pos);
-}
-
-const mdInline = (s) => mdLinks(s
-  .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-  .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-  .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>"));
-
-// Each block reader returns [html, index of the last line it used].
-function mdHeading(line, i) {
-  const level = Math.min(6, line.match(/^#+/)[0].length + 2);
-  return [`<h${level}>${mdInline(line.replace(/^#+ /, ""))}</h${level}>`, i];
-}
-
-function mdTable(lines, i) {
-  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => mdInline(c.trim()));
-  let html = "<table><thead><tr>" + cells(lines[i]).map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
-  i += 2;
-  while (i < lines.length && MD_TABLE_ROW.test(lines[i])) {
-    html += "<tr>" + cells(lines[i]).map((c) => `<td>${c}</td>`).join("") + "</tr>";
-    i++;
-  }
-  return [`<div class="md-table">${html}</tbody></table></div>`, i - 1];
-}
-
-function mdList(lines, i) {
-  const ordered = /^\s*\d+\./.test(lines[i]);
-  let html = ordered ? "<ol>" : "<ul>";
-  while (i < lines.length && MD_LIST_ITEM.test(lines[i])) {
-    html += `<li>${mdInline(lines[i].replace(MD_LIST_ITEM, ""))}</li>`;
-    i++;
-  }
-  return [html + (ordered ? "</ol>" : "</ul>"), i - 1];
-}
-
-const isMdTableStart = (lines, i) => MD_TABLE_ROW.test(lines[i]) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1]);
-
-function mdBlock(lines, i) {
-  const line = lines[i];
-  if (MD_BLOCK_LINE.test(line.trim())) return [line.trim(), i];
-  if (/^#{1,6} /.test(line)) return mdHeading(line, i);
-  if (isMdTableStart(lines, i)) return mdTable(lines, i);
-  if (MD_LIST_ITEM.test(line)) return mdList(lines, i);
-  if (/^&gt; ?/.test(line)) return [`<blockquote>${mdInline(line.replace(/^&gt; ?/, ""))}</blockquote>`, i];
-  if (!line.trim()) return ["", i];
-  return [`<p>${mdInline(line)}</p>`, i];
-}
-
-function md(src, pages) {
-  const blocks = [];
-  const text = replaceFences(escapeHtml(src || ""), (tag, rest) => {
-    const code = rest.replace(/^[^\S\n]*\n?/, "");
-    const lang = snippetLanguage(tag);
-    const langAttr = lang ? ` data-snippet-lang="${lang}"` : "";
-    blocks.push(`<pre${langAttr}><code>${code.replace(/\n$/, "")}</code></pre>`);
-    return `${MD_BLOCK_MARK}${blocks.length - 1}${MD_BLOCK_MARK}`;
-  });
-  const out = [];
-  const lines = text.split("\n");
-  let i = 0;
-  while (i < lines.length) {
-    const [html, last] = mdBlock(lines, i);
-    out.push(html);
-    i = last + 1;
-  }
-  return linkQuotes(out.join("\n").replace(MD_BLOCK_REF, (_, n) => blocks[Number(n)]), src, pages);
 }
 
 function setConnLive(on) {
@@ -762,8 +536,10 @@ async function route() {
   document.querySelector(".composer")?.remove();
   $fabHost.hidden = true;
   document.querySelectorAll(".jump").forEach((el) => el.remove());
-  await loadWebAuth();
-  await currentUser();
+  const prefetched = bootMe;
+  bootMe = null;
+  const [, me] = await Promise.all([loadWebAuth(), prefetched || fetchMe()]);
+  currentMe = me;
   paintGuestChrome();
   const parts = hashParts();
   if (needsSignIn()) {
@@ -805,7 +581,6 @@ $feature.addEventListener("change", () => {
   go(FEATURE_ROUTES[$feature.value] || "#/agents", true);
 });
 window.addEventListener("hashchange", route);
-
 
 // ---------- navigation drawer ----------
 const $menu = document.getElementById("menu-btn");
@@ -896,15 +671,6 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("hashchange", () => closeDrawer({ restoreFocus: false }));
 
 // ---------- chat snippets (#85) ----------
-// Mirrors harness/snippets.py LANGUAGES; the server validates every run. A fence tag only decides whether a block
-// gets a Run button, and the button names the language it runs as. Nothing runs unless the owner clicks.
-const SNIPPET_LANGUAGES = {
-  python: { label: "Python", aliases: ["python", "py", "python3"] },
-  javascript: { label: "JavaScript", aliases: ["javascript", "js", "node", "mjs", "cjs"] },
-  java: { label: "Java", aliases: ["java"] },
-  csharp: { label: "C#", aliases: ["csharp", "cs", "c#"] },
-  cpp: { label: "C++", aliases: ["cpp", "c++", "cxx", "cc"] },
-};
 const SNIPPET_STATUS = {
   completed: "Completed", failed: "Failed", compile_failed: "Compile failed", timeout: "Timed out",
   cancelled: "Cancelled", limit_exceeded: "Limit reached", error: "Sandbox error", interrupted: "Interrupted",
@@ -914,11 +680,6 @@ const SNIPPET_REASON = {
   pids_limit: "process limit (64)", temp_storage_limit: "temporary storage limit (128 MiB)",
   cancelled: "cancelled", daemon_restart: "the server restarted",
 };
-
-function snippetLanguage(tag) {
-  const t = String(tag || "").trim().toLowerCase();
-  return Object.keys(SNIPPET_LANGUAGES).find((id) => SNIPPET_LANGUAGES[id].aliases.includes(t)) || "";
-}
 
 function snippetRunRow(lang, getSource, run) {
   const label = SNIPPET_LANGUAGES[lang].label;
@@ -1438,17 +1199,9 @@ async function viewList() {
 }
 
 // ---------- new task ----------
-// "45 s" under 90 seconds, otherwise whole minutes.
-const fmtSpan = (seconds, toMinutes = Math.round) => (seconds >= 90 ? `${toMinutes(seconds / 60)} min` : `${seconds} s`);
-const pluralize = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const escalateSuffix = (row) => (row.escalate_reason ? ` (${row.escalate_reason})` : "");
 const originsSuffix = (k) => (k.origins?.length ? ` · ${k.origins.join(", ")}` : "");
 const usedSuffix = (k) => (k.last_used_at ? ` · used ${ago(k.last_used_at)}` : "");
-
-function holdRemainingText(seconds) {
-  if (seconds === null) return "until you turn it off";
-  return `for about ${fmtSpan(seconds, Math.ceil)}`;
-}
 
 async function confirmGpuQueue(label) {
   if (isMember()) return true;
@@ -1477,19 +1230,6 @@ function paintModelState(modelState, statuses, modelName, holdActive) {
   const holdPaused = current.state === "paused" && holdActive;
   modelState.textContent = holdPaused ? "" : (MODEL_STATE[current.state] || current.state);
   modelState.classList.toggle("dots", !holdPaused && (current.state === "waking" || current.state === "sleeping"));
-}
-
-function runnerStateText(targetName, runner) {
-  const label = TARGET_LABEL[targetName] || targetName;
-  if (!runner?.online) return `Runs on the ${label}, which is offline or asleep: the task will wait for it`;
-  const free = runner.info.free_gb !== undefined ? `, ${runner.info.free_gb} GB free` : "";
-  return `Runs on the ${label} (online${free})`;
-}
-
-// With the GPU held, prefer a hosted backend so the task is not stuck behind the hold.
-function pickDefaultBackend(available, holdActive) {
-  if (holdActive && available.some((b) => b.name === "claude")) return "claude";
-  return available[0]?.name || "local";
 }
 
 // localStorage can be unavailable (private mode), so a failed read or write just means "not remembered".
@@ -1930,14 +1670,6 @@ function scrollPage(top) {
   const se = document.scrollingElement || document.documentElement;
   se.scrollTop = y;
   if (document.body) document.body.scrollTop = y;
-}
-
-// 0.75*innerHeight on a tall desktop window is often larger than the whole
-// overflow, so both arrows stay hidden unless the transcript is >1.75 viewports.
-function sessionJumpHidden(y, viewH, pageH) {
-  const vh = Math.max(1, Number(viewH) || 0);
-  const far = Math.min(160, 0.75 * vh);
-  return { top: y <= far, bottom: pageH - vh - y <= far, far };
 }
 
 function bindSessionJumps() {
@@ -4343,42 +4075,6 @@ function settingInput(spec, draft) {
   return input;
 }
 
-function settingValueText(spec) {
-  const configured = spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "";
-  const inherited = spec.inherited != null ? ` · inherited ${spec.inherited}` : "";
-  return `effective ${spec.effective == null ? "—" : spec.effective}${configured}${inherited}`;
-}
-
-function settingMeta(spec) {
-  const bits = [];
-  bits.push({ live: "applies live", daemon_restart: "needs restart" }[spec.apply] || "file only");
-  if (spec.source) bits.push(`source: ${spec.source}`);
-  if (spec.pending != null && spec.apply === "daemon_restart") bits.push(`pending: ${spec.pending}`);
-  if (spec.capped_by) bits.push(`capped by ${spec.capped_by}`);
-  if (spec.file_only) bits.push(spec.guidance || "managed in local configuration");
-  return bits.join(" · ");
-}
-
-const lastUpdateText = (update) => `${update.ok ? "succeeded" : "failed"}: ${update.message}`;
-
-function compatibilityText(compatibility) {
-  const { supported } = compatibility;
-  const range = supported ? ` · Server supports ${supported.min}–${supported.max}` : "";
-  return `${compatibility.state || "not reported"}${range}`;
-}
-
-function lastSeenText(runner) {
-  if (runner.last_seen_seconds === null) return "not connected since Agent Harness Server started";
-  return `last seen ${Math.round(runner.last_seen_seconds / 60)} min ago`;
-}
-
-function recoveryNote(recovery) {
-  if (recovery?.recovery === "overlay_quarantined") {
-    return ` · ${recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`;
-  }
-  return recovery?.recovery ? ` · recovered from ${recovery.reason || "failed generation"}` : "";
-}
-
 async function daemonSettingsCard() {
   let view;
   try { view = await api("/config"); }
@@ -5248,13 +4944,6 @@ function blockingUpdate(meta, state) {
     h("p", { class: "muted small" }, `Web protocol ${WEB_PROTOCOL}; server supports ${meta.protocols?.admin?.min}–${meta.protocols?.admin?.max}.`)));
 }
 
-// Which side must update when the server's admin protocol range excludes this client (null = compatible).
-function protocolMismatch(range) {
-  if (!range) return null;
-  if (WEB_PROTOCOL < range.min) return "client_update_required";
-  return WEB_PROTOCOL > range.max ? "daemon_update_required" : null;
-}
-
 // Asks once per bundle whether to reload into the newer build; true when a reload was started.
 async function offerBundleUpdate(foreground) {
   try { await (await navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
@@ -5270,7 +4959,7 @@ async function checkCompatibility({ foreground = false } = {}) {
   let meta;
   try { meta = await agentHarnessWeb.compatibility(); }
   catch (_) { return !protocolBlocked; } // stay on the update card if health fails after a skew
-  const mismatch = protocolMismatch(meta.protocols?.admin);
+  const mismatch = protocolMismatch(meta.protocols?.admin, WEB_PROTOCOL);
   if (mismatch) {
     blockingUpdate(meta, mismatch);
     return false;
@@ -5294,17 +4983,19 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void checkCompatibility({ foreground: true });
 });
 
-void checkCompatibility().then((compatible) => compatible && currentUser()).then((user) => {
-  if (!user) return null;
+// /health and /me start together; /me is a read-only GET whose result is only adopted once /health passes.
+const bootCompatible = checkCompatibility();
+const bootIdentity = fetchMe();
+void bootCompatible.then((compatible) => (compatible ? bootIdentity : null)).then((me) => {
+  if (!me) return null;
+  currentMe = me;
+  bootMe = Promise.resolve(me);
   paintGuestChrome();
   if (!isGuest()) void warmModel();
-  return loadProfileIcon();
-}).then((ready) => {
-  if (ready === null) return null;
-  return applyAppIcon(readAppIcon());
-}).then((ready) => {
-  if (ready !== null) return route();
-  return null;
+  // The profile emoji paints when it arrives; route data never waits on it.
+  void loadProfileIcon().then(() => applyAppIcon(readAppIcon()));
+  applyAppIcon(readAppIcon());
+  return route();
 }).finally(() => {
   // Includes compatibility/login early exits and failures; route paints its existing error state.
   // Removal is instant, with no minimum time or fade-out, even during the icon's fade-in.

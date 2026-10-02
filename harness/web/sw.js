@@ -2,7 +2,20 @@
 // API responses are never cached: session state must always be live.
 const BUILD_ID = "2026.10.02.1";
 const SHELL = `harness-shell-${BUILD_ID}`;
-const ASSETS = ["/", "/style.css", "/app.js", "/client.mjs", "/icon-192.png", "/manifest.webmanifest"];
+// Every module app.js loads is listed explicitly (tests/test_web_sw_assets.py fails on an omission), so the whole
+// module graph is served network-first and cached together for offline use.
+const ASSETS = [
+  "/", "/style.css", "/app.js", "/client.mjs", "/icon-192.png", "/manifest.webmanifest",
+  "/lib/compat.mjs",
+  "/lib/diff.mjs",
+  "/lib/format.mjs",
+  "/lib/layout.mjs",
+  "/lib/markdown.mjs",
+  "/lib/settings-text.mjs",
+  "/lib/snippets.mjs",
+  "/lib/targets.mjs",
+  "/lib/tools.mjs",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

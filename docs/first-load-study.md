@@ -206,3 +206,44 @@ The harness was a short Playwright script outside the repository: per route it o
 run, reloads for the warm run, and for the update run installs a service worker from a rewritten `BUILD_ID` first. The
 in-page observers record `first-contentful-paint` and the time the route marker element first appears. Throttled runs go
 through a small local TLS proxy that delays each request by 150 ms and limits the downstream rate to 200 KB/s.
+
+## Follow-up: gzip for the web shell (#288)
+
+The daemon now gzips the shell at runtime (`harness/webgzip.py`): `/static/*`, root-mounted assets, `/` and `/sw.js`, text
+types only, for clients that send `Accept-Encoding: gzip`. API JSON, SSE, images and package downloads are untouched.
+Compressed responses carry `Vary: Accept-Encoding` and a weak ETag, so `If-None-Match` still returns 304 for both
+variants. Hosting `harness/web` from a plain static host at its root is out of scope; that host's own compression applies.
+
+Transferred bytes measured from the real app (identity vs gzip), with the slow-link model (200 KB/s) applied analytically:
+
+| Asset | Identity | gzip | Transfer time at 200 KB/s |
+| --- | --- | --- | --- |
+| `/static/app.js` | 268,244 | 72,746 | 1.34 s -> 0.36 s |
+| `/static/style.css` | 34,978 | 7,935 | 0.17 s -> 0.04 s |
+| `/` | 4,099 | 1,478 | 0.02 s -> 0.01 s |
+
+The shell drops by about 225 KB, i.e. roughly 1.1 s of transfer time on the modelled link; the per-request +150 ms RTT is
+unchanged. This is a byte-count model, **not** a re-run of the Playwright first-load script (that harness lives outside
+the repo), so the ~1 s first-load saving is supported by the arithmetic but not re-measured end to end.
+
+## Follow-up: app.js split into ES modules, stage (a) (#258)
+
+Stage (a) moved the pure helpers into nine `harness/web/lib/*.mjs` modules, so a cold load fetches 11 scripts instead of
+2 (`app.js`, `client.mjs`, `lib/`). Measured with `scripts/web-first-paint.mjs` (in repo; headless Chromium 153.0.8010.12
+over CDP, cold profile per run, 390x844 DPR 3, 4x CPU, +150 ms per request, 200 KB/s, gzip like `harness/webgzip.py`,
+`/api` answering 503 so the route renders its offline state). 5 runs, median (min-max) ms, route `#/agents`:
+
+| Bundle | FCP | Module graph executed (DOMContentLoaded end) | JS requests |
+| --- | --- | --- | --- |
+| `main` at `301e61f` (before) | 480 (476-496) | 957 (933-960) | 2 |
+| stage (a) | 488 (488-496) | 1142 (1123-1159) | 11 |
+| stage (a) + `<link rel=modulepreload>` for `lib/` and `client.mjs` (not shipped) | 480 (468-504) | 961 (940-993) | 11 |
+
+First paint (the shell and boot splash) does not regress: the module graph is deferred and does not block it. The app
+code starts about 185 ms later on the throttled cold model, because the `lib/` imports are only discovered after `app.js`
+arrives (one extra round trip; `markdown.mjs -> snippets.mjs` adds no visible second one). Preload hints in `index.html`
+recover it fully. Per the #258 decision (preload only if first paint regresses) they are not added; the numbers are here
+so the trade-off can be revisited as `pages/` modules land. Warm and update loads were not re-measured: the service
+worker is network-first and only falls back to its cache offline, so they make the same requests as a cold load. This
+is not the out-of-repo Playwright script
+used above, so compare the rows in this table with each other, not with the earlier tables.

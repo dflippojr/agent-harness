@@ -299,3 +299,8 @@ def test_web_assets_work_at_static_root_and_compatibility_alias(tmp_path):
         for path in ("/app.js", "/client.mjs", "/style.css", "/static/app.js"):
             response = client.get(path)
             assert response.status_code == 200
+        # browsers refuse a module script served without a JavaScript MIME type
+        for path in ("/lib/markdown.mjs", "/static/lib/markdown.mjs"):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert "javascript" in response.headers["content-type"]
