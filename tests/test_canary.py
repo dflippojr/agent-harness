@@ -144,6 +144,67 @@ def test_new_failing_task_that_recovers_on_rerun_does_not_alert(tmp_path):
     assert suite.calls == [None, ["brand-new"]] and notes == [] and not row["alerted"]
 
 
+def test_only_finished_graded_attempts_are_evidence():
+    out = [{"task": "a", "repeat": i, "ok": False, "status": st}
+           for i, st in enumerate(("timeout", "suspended", "blocked", "cancelled"))]
+    out += [{"task": "a", "repeat": 9, "ok": True, "status": "done"},
+            {"task": "b", "repeat": 0, "ok": False, "status": "failed"},
+            {"task": "c", "repeat": 0, "ok": False, "status": canary.WALL_LIMIT}]
+    assert [o["status"] for o in canary.valid(out)] == ["done", "failed", canary.WALL_LIMIT]
+    assert canary.pass_rate(out) == 1 / 3 and canary.totals(out)["excluded"] == 4
+    assert canary.regressed_tasks(out[:4], [{"outcomes": [{"task": "a", "ok": True, "status": "done"}]}]) == []
+
+
+class ConfirmSuite(ScriptedSuite):
+    """A confirmed-looking drop (17/20 vs 100%) whose confirmation rerun comes back as `again(only)`."""
+
+    def __init__(self, again):
+        super().__init__([17])
+        self.again = again
+
+    async def __call__(self, sha, only):
+        if only is None:
+            return await super().__call__(sha, only)
+        self.calls.append((sha, only))
+        return self.again(only)
+
+
+def test_a_confirmation_rerun_that_times_out_never_alerts(tmp_path):
+    notes: list[dict] = []
+    # the rerun hit total_cap_seconds: one failing attempt finished, the rest were recorded as timeout
+    suite = ConfirmSuite(lambda only: Report("timeout", [{**_outcomes(1)[0], "task": only[0], "ok": False}] + [
+        {**_outcomes(1)[0], "task": t, "ok": False, "status": "timeout"} for t in only]))
+    c, _ = _canary(tmp_path, suite, notes)
+    _seed(c, [20, 20, 20, 20, 20])
+    row = run(c.run_for("1" * 40))
+    assert suite.calls[1][1] == ["t7", "t8", "t9"]
+    assert notes == [] and not row["alerted"] and row["status"] == "complete"
+    assert not any(o.get("confirm") for o in row["outcomes"]) and row["pass_rate"] == 0.85
+
+
+def test_a_complete_confirmation_without_a_finished_attempt_of_every_task_never_alerts(tmp_path):
+    notes: list[dict] = []
+    suite = ConfirmSuite(lambda only: Report("complete", [
+        {**_outcomes(1)[0], "task": t, "ok": False, "status": "done" if t != only[-1] else "cancelled"}
+        for t in only]))
+    c, _ = _canary(tmp_path, suite, notes)
+    _seed(c, [20, 20, 20, 20, 20])
+    row = run(c.run_for("2" * 40))
+    assert notes == [] and not row["alerted"]
+
+
+def test_a_confirmation_with_valid_evidence_alerts_once_and_ignores_unfinished_attempts(tmp_path):
+    notes: list[dict] = []
+    suite = ConfirmSuite(lambda only: Report("complete", [
+        {**_outcomes(1)[0], "task": t, "ok": False, "status": st} for t in only for st in ("failed", "suspended")]))
+    c, _ = _canary(tmp_path, suite, notes)
+    _seed(c, [20, 20, 20, 20, 20])
+    row = run(c.run_for("3" * 40))
+    assert len(notes) == 1 and row["alerted"] == 1
+    # t7..t9's 6 first-run attempts are replaced by 3 failed + 3 suspended; the suspended ones are left out
+    assert len(row["outcomes"]) == 20 and row["attempts"] == 17 and row["pass_rate"] == 14 / 17
+
+
 def test_baseline_is_the_median_of_the_previous_five(tmp_path):
     prior = [{"pass_rate": r, "sha": str(i), "started_at": i} for i, r in enumerate([1.0, 0.9, 0.2, 0.95, 0.9])]
     v = canary.judge(0.75, prior, min_prior=3, drop_points=15)
@@ -406,6 +467,90 @@ def test_hard_setup_failure_stops_the_spawned_session_and_clears_low_priority(tm
             await m.stop()
             m.db.close()
     run(body())
+
+
+def _hard_night(tmp_path, chat, on_sleep, run_body):
+    """One hard task (no Docker: setup and checker stubbed) through a real Manager and Canary.run_for."""
+    from bakeoff.canary import CanaryRunner
+    from bakeoff.tasks_hard import HARD_TASKS
+    from harness.manager import Manager
+    from test_daemon import make_cfg
+    task = next(t for t in HARD_TASKS if t.id == "merge_conflict")
+
+    async def body():
+        cfg = make_cfg(tmp_path)
+        m = Manager(cfg, chat=chat)
+        await m.start(maintenance=False)
+        t = {"now": 0.0}
+
+        async def sleep(_):
+            await on_sleep(m)
+            t["now"] += task.wall_limit + 1  # every poll crosses the task's wall-clock limit
+        try:
+            runner = CanaryRunner(m, cfg.canary, tmp_path, {"repeats": 1, "hard": [task], "web": []},
+                                  clock=lambda: t["now"], sleep=sleep, prepare_hard=lambda tk, ws: {},
+                                  grade_hard=lambda tk, ws, answer, base: (answer == "done", "graded"))
+            c = Canary(CanaryStore(m.db), runner.run, cfg.canary, lambda n: None)
+            row = await c.run_for("f00d" * 10)
+            await run_body(m, row)
+            assert not m.tasks and m.scheduler.holder is None and not m.scheduler.low_priority
+        finally:
+            await m.stop()
+            m.db.close()
+    run(body())
+
+
+def test_a_task_that_finishes_in_the_expiry_window_is_recorded_and_the_night_completes(tmp_path):
+    from harness.llm import Completion
+    from test_daemon import Script
+
+    async def finish(m):  # the session ends during the poll sleep that crosses the limit
+        await asyncio.gather(*m.tasks.values(), return_exceptions=True)
+
+    async def check(m, row):
+        assert row["status"] == "complete" and row["attempts"] == 1 and row["pass_rate"] == 1.0
+        assert row["outcomes"][0]["status"] == "done" and row["outcomes"][0]["ok"]
+    _hard_night(tmp_path, Script([Completion(content="done")]), finish, check)
+
+
+def _blocked_chat(gate: asyncio.Event):
+    from harness.llm import Completion
+
+    async def chat(model, messages, tools, *args, **kw):
+        await gate.wait()
+        return Completion(content="done", prompt_tokens=10, completion_tokens=1)
+    return chat
+
+
+def test_a_cancel_that_races_the_finish_records_the_real_outcome(tmp_path):
+    gate, cancels = asyncio.Event(), []
+
+    async def nothing(m):
+        if not cancels:  # first poll: arm the race; Manager.cancel finds the session already done (409)
+            real = m.cancel
+
+            async def racing(sid):
+                cancels.append(sid)
+                gate.set()
+                await asyncio.gather(*m.tasks.values(), return_exceptions=True)
+                return await real(sid)
+            m.cancel = racing
+
+    async def check(m, row):
+        assert len(cancels) == 1 and row["status"] == "complete"
+        assert row["outcomes"][0]["status"] == "done" and row["outcomes"][0]["ok"]
+    _hard_night(tmp_path, _blocked_chat(gate), nothing, check)
+
+
+def test_an_attempt_stopped_at_the_wall_limit_is_a_graded_fail(tmp_path):
+    async def nothing(m):
+        await asyncio.sleep(0)
+
+    async def check(m, row):
+        o = row["outcomes"][0]
+        assert o["status"] == canary.WALL_LIMIT and not o["ok"] and "wall-clock limit" in o["note"]
+        assert row["status"] == "complete" and row["attempts"] == 1 and row["pass_rate"] == 0.0
+    _hard_night(tmp_path, _blocked_chat(asyncio.Event()), nothing, check)
 
 
 def test_suspended_on_every_attempt_is_excluded_and_never_alerts(tmp_path):

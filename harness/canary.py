@@ -49,11 +49,14 @@ class Report:
     outcomes: list[dict] = field(default_factory=list)  # {task, repeat, ok, status, turns, prompt_tokens, seconds, restarts}
 
 
-EXCLUDED = "suspended"  # an attempt the GPU yielded on every restart: neither a pass nor a fail
+WALL_LIMIT = "wall_limit"  # the canary stopped the attempt at the task's wall-clock limit: a graded fail
+# The only attempts that are evidence (pass rate, regression rule, confirmation): finished and graded. Everything else
+# (timeout, suspended, blocked, cancelled by someone other than the canary) is neither a pass nor a fail.
+EVIDENCE = ("done", "failed", WALL_LIMIT)
 
 
 def valid(outcomes: list[dict]) -> list[dict]:
-    return [o for o in outcomes if o.get("status") != EXCLUDED]
+    return [o for o in outcomes if o.get("status") in EVIDENCE]
 
 
 def totals(outcomes: list[dict]) -> dict:
@@ -156,6 +159,16 @@ def regressed_tasks(outcomes: list[dict], prior: list[dict]) -> list[str]:
     return out
 
 
+def _unconfirmed(again: Report | None, tasks: list[str]) -> str:
+    """Why a confirmation rerun is no evidence ("" if it is): it must complete and finish every rerun task."""
+    if again is None:
+        return "no task to rerun"
+    if again.status != "complete":
+        return f"confirmation rerun {again.status}"
+    missing = [t for t in tasks if not any(o["task"] == t for o in valid(again.outcomes))]
+    return f"confirmation rerun finished no attempt of {', '.join(missing)}" if missing else ""
+
+
 def compare_url(baseline_sha: str, sha: str) -> str:
     return f"https://github.com/{REPO}/compare/{baseline_sha}...{sha}"
 
@@ -202,7 +215,7 @@ class Canary:
         rule = {"min_prior": self.cfg.min_prior_runs, "drop_points": self.cfg.drop_points}
         outcomes = report.outcomes
         if not valid(outcomes):
-            return outcomes, Verdict(False, reason="every attempt was suspended")
+            return outcomes, Verdict(False, reason="no attempt finished")
         verdict = judge(pass_rate(outcomes), prior, **rule)
         if not verdict.alert:
             return outcomes, verdict
@@ -210,8 +223,10 @@ class Canary:
         # task that failed this run. Their new results replace the old ones. An alert is never sent unconfirmed.
         tasks = regressed_tasks(outcomes, prior) or list(dict.fromkeys(o["task"] for o in valid(outcomes) if not o["ok"]))
         again = await self.run_suite(sha, tasks) if tasks else None
-        if again is None or again.status == "blocked" or not valid(again.outcomes):
-            return outcomes, Verdict(False, reason="confirmation rerun could not run")
+        unusable = _unconfirmed(again, tasks)
+        if unusable:
+            log.warning("canary %s: %s, alert suppressed (%s)", sha[:SHORT_SHA], unusable, verdict.reason)
+            return outcomes, Verdict(False, reason=unusable)
         outcomes = [o for o in outcomes if o["task"] not in tasks] + [{**o, "confirm": True} for o in again.outcomes]
         return outcomes, judge(pass_rate(outcomes), prior, **rule)
 

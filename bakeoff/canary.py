@@ -28,7 +28,7 @@ from typing import Callable
 
 import yaml
 
-from harness.canary import Report
+from harness.canary import WALL_LIMIT, Report
 
 from .tasks import Context, hash_tree, materialize
 from .tasks_hard import HARD_TASKS
@@ -139,13 +139,14 @@ class CanaryRunner:
                 baseline = self._prepare_hard(task, Path(s["workspace"]))
                 run = dict(m.db.get_session(sid)["run"], max_turns=task.max_turns)
                 m.db.update_session(sid, run=run)
-            limit = task.wall_limit if kind == "hard" else 1500
+            limit, stopped = (task.wall_limit if kind == "hard" else 1500), False
             while m.db.get_session(sid)["status"] not in DONE:
                 await self.sleep(1 if self.poll > 1 else self.poll)
                 if self.clock() - started > limit:
-                    await m.cancel(sid)
+                    stopped = await self._stop(sid)  # False: it finished on its own in this poll window
                     break
             final = m.db.get_session(sid)
+            status = WALL_LIMIT if stopped else final["status"]
             suspended = bool(m.runner.yields.pop(sid, 0)) or any(
                 e["type"] == "gpu_paused" for e in m.db.events(sid))
             if kind == "hard":
@@ -157,9 +158,11 @@ class CanaryRunner:
                 made_up = ungrounded_quotes(final["answer"], [r["output"] for r in results])
                 if made_up:
                     ok, note = False, f"{note}; quotes not in any fetched text"
+            if stopped:
+                note = f"{note}; stopped at the {limit:.0f} s wall-clock limit"
             totals = final["totals"]
-            return {"task": task.id, "repeat": repeat, "ok": bool(ok and final["status"] == "done"), "note": note,
-                    "status": final["status"], "turns": totals.get("turns", 0),
+            return {"task": task.id, "repeat": repeat, "ok": bool(ok and status == "done"), "note": note,
+                    "status": status, "turns": totals.get("turns", 0),
                     "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(self.clock() - started, 1),
                     "suspended": suspended}
         except BaseException:  # setup failed (Docker down) or the run was cancelled: leave no canary on the GPU
@@ -169,13 +172,21 @@ class CanaryRunner:
             m.scheduler.low_priority.discard(sid)
             m.runner.web_overrides.pop(sid, None)
 
-    async def _stop(self, sid: str) -> None:
+    async def _stop(self, sid: str) -> bool:
+        """Cancel the canary session unless it already ended (safe to race its finish). True if this call ended it."""
+        from harness.manager import HarnessError
         m = self.m
         if m.db.get_session(sid)["status"] in DONE:
-            return
-        await m.cancel(sid)
+            return False
+        try:
+            await m.cancel(sid)
+        except HarnessError as e:
+            if e.status != 409:
+                raise
+            return False  # it ended between the read and the cancel
         if m.db.get_session(sid)["status"] not in DONE:  # cancelled before its task ever ran: nothing marked it
             m.runner.set_status(sid, "cancelled", stop_reason="cancelled")
+        return True
 
 
 def _missing(task_id: str, repeat: int, status: str) -> dict:
