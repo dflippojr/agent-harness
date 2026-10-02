@@ -29,6 +29,7 @@ import { escapeHtml, md } from "./lib/markdown.mjs";
 import { settingValueText, settingMeta, lastUpdateText, compatibilityText, lastSeenText, recoveryNote } from "./lib/settings-text.mjs";
 import { profileIconHidden, sessionJumpHidden } from "./lib/layout.mjs";
 import { protocolMismatch } from "./lib/compat.mjs";
+import { withTaint } from "./lib/taint.mjs";
 
 const $app = document.getElementById("app");
 const $title = document.getElementById("title");
@@ -1981,7 +1982,7 @@ async function viewSession(sid, tab, focusApproval) {
     user_message: (e) => { add(h("div", { class: "ev msg user" }, e.data.content)); },
     app_context: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Context from the app"), h("div", { class: "text" }, e.data.content))),
     taint_added: (e) => {
-      session = { ...session, taint: [...(session.taint || []), { origin: e.data.origin, kind: e.data.kind }] };
+      session = { ...session, taint: withTaint(session.taint, e.data) };
       renderActions();
       add(h("p", { class: "note" }, `Session read untrusted content from ${e.data.origin}: risky actions now ask for approval`));
     },
