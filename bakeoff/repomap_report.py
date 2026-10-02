@@ -20,7 +20,9 @@ def load(run_dir: Path, model: str | None = None) -> list[dict]:
     return [t for s in summaries if model in (None, s["model"]) for t in s["tasks"]]
 
 
-def arm_stats(tasks: list[dict]) -> dict:
+def arm_stats(tasks: list[dict], where: str = "") -> dict:
+    if not tasks:
+        raise SystemExit(f"no task results found{where}; check the run directory, --model spelling and suite")
     return {
         "runs": len(tasks),
         "pass_rate": sum(t["passed"] for t in tasks) / len(tasks),
@@ -60,7 +62,8 @@ def main() -> None:
         parser.add_argument(f"--{group}", nargs=2, type=Path, metavar=("OFF_DIR", "ON_DIR"), required=True)
     parser.add_argument("--model", help="restrict to one model name")
     args = parser.parse_args()
-    stats = {g: tuple(arm_stats(load(d, args.model)) for d in getattr(args, g)) for g in ("large", "hard")}
+    stats = {g: tuple(arm_stats(load(d, args.model), f" in {d} (model={args.model!r}, suite={g})")
+                      for d in getattr(args, g)) for g in ("large", "hard")}
     print("| Group | Map | Runs | Pass rate | Mean turns | Mean prompt tokens | Mean wall s |")
     print("| --- | --- | --- | --- | --- | --- | --- |")
     for group, label in (("large", "large-repo"), ("hard", "hard suite")):

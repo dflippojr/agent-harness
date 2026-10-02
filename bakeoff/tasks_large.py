@@ -24,13 +24,35 @@ VERIFY_NOTE = (" The sandbox has only Python and pytest (no third-party packages
                "included, so check your work by importing the module with `python -c`.")
 
 
+class PinnedCommitUnavailable(RuntimeError):
+    """The pinned commit is neither local nor fetchable; only the large-repo suite needs it."""
+
+
 def _git(*args: str) -> bytes:
     return subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, check=True).stdout
+
+
+def _ensure_pinned_commit() -> None:
+    """Shallow or fresh clones lack the pinned commit; fetch just that commit on demand."""
+    try:
+        _git("cat-file", "-e", f"{PINNED_SHA}^{{commit}}")
+        return
+    except subprocess.CalledProcessError:
+        pass
+    try:
+        _git("fetch", "--depth", "1", "origin", PINNED_SHA)
+        _git("cat-file", "-e", f"{PINNED_SHA}^{{commit}}")
+    except (subprocess.CalledProcessError, OSError) as e:
+        detail = (getattr(e, "stderr", b"") or b"").decode("utf-8", "replace").strip()
+        raise PinnedCommitUnavailable(
+            f"large-repo suite needs commit {PINNED_SHA}, which is not local and could not be fetched "
+            f"from origin ({detail or e}); run with a full clone or another --suite") from e
 
 
 @functools.lru_cache(maxsize=1)
 def checkout_files() -> tuple[tuple[str, str], ...]:
     """(path, text) for the pinned commit's text files, via git plumbing only (nothing is checked out or run)."""
+    _ensure_pinned_commit()
     names = _git("ls-tree", "-r", "-z", "--name-only", PINNED_SHA).decode("utf-8").split("\0")
     out = []
     for name in sorted(n for n in names if n):

@@ -90,10 +90,11 @@ def _load_parsers() -> dict | None:
         for lang, (_, module, func, _defs, _containers) in _LANGUAGES.items():
             grammar = getattr(importlib.import_module(module), func)()
             parsers[lang] = tree_sitter.Parser(tree_sitter.Language(grammar))
-    except ImportError as e:
+    except (ImportError, ValueError, RuntimeError, AttributeError, OSError) as e:
         if not _warned_missing:
             _warned_missing = True
-            log.warning("repo map disabled: tree-sitter packages missing (%s); install requirements-repomap.txt", e)
+            log.warning("repo map disabled: tree-sitter or a grammar failed to load (%s: %s); "
+                        "install requirements-repomap.txt", type(e).__name__, e)
         _parsers = {}
         return None
     _parsers = parsers
