@@ -69,7 +69,8 @@ SYNTHETIC = [(46, add_note_column), (47, backfill_note), (48, index_note)]
 
 
 def _seed_session(path: Path, sid: str = "s1") -> None:
-    db = Database(path)
+    """A database at the baseline (v45) holding one session; no numbered step has run yet."""
+    db = Database(path, migrations=[])
     db.insert_session({"id": sid, "title": "hello", "project": "p", "target": "t", "model": "m", "status": "idle",
                        "workspace": "w", "created_at": 1.0, "updated_at": 1.0, "context": []})
     db.close()
@@ -77,14 +78,14 @@ def _seed_session(path: Path, sid: str = "s1") -> None:
 
 def test_baseline_is_frozen_at_45():
     assert BASELINE_VERSION == 45 and len(LEGACY_COLUMNS) == 45
-    assert migrations.discover() == []  # no real 0046+ step ships with #256
+    assert [number for number, _ in migrations.discover()] == [46]  # 0046_session_taint (#262)
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):
     legacy, fresh = tmp_path / "legacy.db", tmp_path / "fresh.db"
     _legacy_db(legacy)
-    Database(legacy).close()
-    Database(fresh).close()
+    Database(legacy, migrations=[]).close()
+    Database(fresh, migrations=[]).close()
     assert _version(fresh) == BASELINE_VERSION
     assert _snapshot(fresh) == _snapshot(legacy)
     assert not (tmp_path / "pre-migration").exists()
@@ -98,7 +99,7 @@ def test_version_zero_database_is_stamped_and_repaired_without_backup(tmp_path):
                  " updated_at, context) VALUES ('s1', 'kept', 'p', 't', 'm', 'idle', 'w', 1, 1, '[]')")
     conn.commit()
     conn.close()
-    db = Database(path)
+    db = Database(path, migrations=[])
     assert db.get_session("s1")["title"] == "kept"
     cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(images)")}
     assert "provenance" in cols
@@ -184,7 +185,8 @@ def test_too_new_database_is_refused_untouched_and_doctor_reports(tmp_path, caps
 
     r = doctor.Report()
     doctor.check_schema_version(r, cfg)
-    assert (r.failed, r.warned) == (0, 0) and "v45" in capsys.readouterr().out
+    latest = migrations.latest_version(migrations.discover())
+    assert (r.failed, r.warned) == (0, 0) and f"v{latest}" in capsys.readouterr().out
 
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA user_version = 99")
@@ -192,7 +194,7 @@ def test_too_new_database_is_refused_untouched_and_doctor_reports(tmp_path, caps
     before = _digest(path)
     with pytest.raises(migrations.SchemaTooNewError) as err:
         Database(path)
-    expected = migrations.too_new_message(99, BASELINE_VERSION)
+    expected = migrations.too_new_message(99, latest)
     assert str(err.value) == expected
     assert _digest(path) == before
 
@@ -284,7 +286,7 @@ def test_baseline_plus_migrations_equals_fresh_build(tmp_path):
     Database(migrated, migrations=SYNTHETIC).close()
     Database(fresh, migrations=SYNTHETIC).close()
     assert _snapshot(migrated) == _snapshot(fresh)
-    # And with the real (empty) migration set, a baseline DB equals a fresh one.
+    # And with the real migration set, a migrated pre-versioning DB equals a fresh one.
     legacy, fresh_real = tmp_path / "legacy.db", tmp_path / "fresh_real.db"
     _legacy_db(legacy)
     Database(legacy).close()
@@ -302,3 +304,28 @@ def test_maintenance_backup_delegates_to_backup_sqlite(tmp_path):
     conn = sqlite3.connect(str(copy))
     assert conn.execute("SELECT title FROM sessions").fetchone()[0] == "hello"
     conn.close()
+
+
+def test_session_taint_migration_adds_column_to_existing_sessions(tmp_path):
+    path = tmp_path / "harness.db"
+    _seed_session(path)
+    assert _version(path) == BASELINE_VERSION
+    db = Database(path)
+    assert db.get_session("s1")["taint"] == []
+    assert db.conn.execute("SELECT taint FROM sessions WHERE id = 's1'").fetchone()[0] == "[]"
+    db.close()
+    assert _version(path) == 46
+    backups = list((tmp_path / "pre-migration").glob("harness-v45-*.sqlite3"))
+    assert len(backups) == 1
+    with closing(sqlite3.connect(str(backups[0]))) as conn:
+        assert "taint" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+
+
+def test_fresh_database_gets_session_taint_column(tmp_path):
+    path = tmp_path / "harness.db"
+    db = Database(path)
+    info = {r["name"]: r for r in db.conn.execute("PRAGMA table_info(sessions)")}
+    db.close()
+    assert _version(path) == 46
+    assert info["taint"]["notnull"] == 1 and info["taint"]["dflt_value"] == "'[]'"
+    assert not (tmp_path / "pre-migration").exists()
