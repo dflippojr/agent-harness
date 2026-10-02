@@ -179,7 +179,7 @@ def test_waits_for_offline_mac_then_resumes(tmp_path):
         m = Manager(cfg, chat=script)
         await m.start(maintenance=False)
         s = m.create("say hi", project="mac-scratch")
-        s = await wait_status(m, s["id"], "waiting_target", timeout=5)
+        s = await wait_status(m, s["id"], "waiting_target")
         assert m.scheduler.holder is None  # waiting doesn't hold the GPU
         waiting = [e for e in m.db.events(s["id"]) if e["type"] == "target_waiting"]
         note = Notifier(cfg, m.db).build(waiting[0])

@@ -21,6 +21,7 @@ from harness.manager import Manager
 from harness.policy import ALLOW, ASK, Policy
 from harness.runner import INTERRUPTED
 from harness.scheduler import GpuScheduler
+from waits import scaled
 
 
 def make_cfg(tmp: Path, context_tokens: int = 65536, rules: list | None = None) -> Config:
@@ -67,13 +68,25 @@ class Script:
 
 
 async def wait_status(m: Manager, sid: str, *statuses: str, timeout: float = 30) -> dict:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        s = m.db.get_session(sid)
-        if s["status"] in statuses:
-            return s
-        await asyncio.sleep(0.02)
-    raise AssertionError(f"session stayed {m.db.get_session(sid)['status']}, wanted {statuses}")
+    """Wake on the session's status events (and a slow poll, for writes that emit none) until it reaches one of
+    `statuses`. The last check and the failure message read the same row, so a late arrival can't fail the wait."""
+    deadline = time.monotonic() + scaled(timeout)
+    sub = m.bus.subscribe(sid)
+    try:
+        while True:
+            s = m.db.get_session(sid)
+            if s["status"] in statuses:
+                return s
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"session stayed {s['status']}, wanted {statuses} "
+                                     f"(waited {scaled(timeout):.0f}s)")
+            try:
+                await asyncio.wait_for(sub.queue.get(), min(remaining, 0.1))
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        m.bus.unsubscribe(sid, sub)
 
 
 def events(m: Manager, sid: str, type_: str) -> list[dict]:

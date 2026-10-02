@@ -14,6 +14,7 @@ from harness.llm import Completion
 from harness.manager import Manager
 from test_daemon import Script, make_cfg
 from test_phase8 import _claude_manager, _codex_manager, _cursor_manager
+from waits import scaled
 
 
 def local_manager(root):
@@ -28,14 +29,19 @@ BUILDERS = {
 }
 
 
-def wait_session(client, headers, sid, newer_than=0.0, timeout=30):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+def wait_session(client, headers, sid, timeout=30):
+    """Poll until the session ends. Callers only wait after the API showed the run queued or running, so any ended
+    row is that run's (an `updated_at` comparison can tie on a coarse Windows clock). The last check and the failure
+    message read the same row."""
+    deadline = time.monotonic() + scaled(timeout)
+    while True:
         row = client.get(f"/api/v1/sessions/{sid}", headers=headers).json()
-        if row["status"] in ("done", "failed", "cancelled") and row["updated_at"] > newer_than:
+        if row["status"] in ("done", "failed", "cancelled"):
             return row
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"session {sid} did not finish in {scaled(timeout):.0f}s: status {row['status']}, "
+                                 f"stop_reason {row.get('stop_reason')!r}, failure {row.get('failure')!r}")
         time.sleep(0.03)
-    raise AssertionError(f"session {sid} did not finish")
 
 
 def parse_sse(text):
@@ -68,7 +74,7 @@ def test_same_app_lifecycle_contract_across_providers(tmp_path, backend):
                            json={"context": [{"title": "Incremental", "content": "beta"}]})
         assert sent.status_code == 200
         assert sent.json()["status"] in ("queued", "running")
-        final = wait_session(client, headers, first["id"], newer_than=first["updated_at"])
+        final = wait_session(client, headers, first["id"])
         assert final["status"] == "done"
         assert final["answer"]
 
