@@ -63,6 +63,11 @@ MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the wor
 HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, ask to restart one with restart_service, and, after a code or Dockerfile change has been merged into a stack, ask to rebuild it with rebuild_service (the user approves restarts and rebuilds). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
 
 ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit")
+# Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
+# cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
+# that run's end from where it stopped (Manager.start).
+END_PENDING = "end_pending"
+RUN_FINISHED = "run_finished"
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
 QUOTA_CHECK_SECONDS = 30
@@ -354,11 +359,18 @@ class Runner:
     def _status_writer(self, sid: str, status: str, fields: dict):
         def set_status() -> None:
             self.db.update_session(sid, status=status, **fields)
+            self._flag_end_pending(sid, status)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
             # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
             self.db.after_commit(self.scheduler.recheck)
         return set_status
+
+    def _flag_end_pending(self, sid: str, status: str) -> None:
+        """Inside the write that sets `status`: mark a live run's final status as awaiting its _end_run."""
+        if status in ACTIVE or sid not in self._unended:
+            return
+        self.db.update_session(sid, run={**self.db.get_session(sid)["run"], END_PENDING: True})
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         self.db.write(self._status_writer(sid, status, fields))
@@ -553,7 +565,7 @@ class Runner:
                 raise CliBackendError("the local model is disabled in this service profile")
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
-            await self._take_pending_cancel(sid)
+            await self._take_pending_cancel(sid, cancelled=True)
             raise
         except CliBackendError as e:
             if await self._take_pending_cancel(sid):
@@ -1312,6 +1324,7 @@ class Runner:
 
         def finish_cli_result() -> None:
             self.db.update_session(sid, run=run, totals=totals, status=status, stop_reason=reason, answer=answer)
+            self._flag_end_pending(sid, status)
             self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
                                  str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
                                  str(run.get("credential_source") or "subscription"))
@@ -1437,6 +1450,7 @@ class Runner:
                 run["idle"] = 0
                 self.db.update_session(sid, context=context, run=run, totals=totals, status="done",
                                        stop_reason="final_message", answer=completion.content)
+                self._flag_end_pending(sid, "done")
                 self.bus.emit(sid, "assistant", event)
                 self.bus.emit(sid, "status", {"status": "done", "stop_reason": "final_message",
                                               "answer": completion.content})
@@ -2346,10 +2360,16 @@ class Runner:
         return quotes
 
     # run end
-    async def _take_pending_cancel(self, sid: str) -> bool:
-        """If the user cancelled, finalize as cancelled and skip any failure path. False if not pending."""
+    async def _take_pending_cancel(self, sid: str, cancelled: bool = False) -> bool:
+        """If the user cancelled, finalize as cancelled and skip any failure path. False if not pending.
+        `cancelled`: the run's task was cancelled, by anyone (daemon shutdown too); a final status that already
+        committed still gets its _end_run then."""
         if sid not in self.user_cancelled:
-            return False
+            s = self.db.get_session(sid)
+            if not cancelled or sid not in self._unended or not s or s["status"] in ACTIVE:
+                return False
+            await self._end_run(sid)
+            return True
         s = self.db.get_session(sid)
         if s["status"] in ("cancelled", "done"):
             if sid not in self._unended:
@@ -2357,9 +2377,17 @@ class Runner:
             # The final status committed, but the cancel came before the run ended: end it as it stands.
             await self._end_run(sid)
             return True
+        # One unit: a second cancel (daemon shutdown) during the cancelled status write must not skip the run's end.
+        await finish_then_cancel(self._record_cancel_and_end(sid))
+        return True
+
+    async def _record_cancel_and_end(self, sid: str) -> None:
         await self._record_cancel(sid)
         await self._end_run(sid)
-        return True
+
+    async def end_pending_run(self, sid: str) -> None:
+        """At daemon start: end a run whose final status committed but whose _end_run never finished."""
+        await self._end_run(sid)
 
     async def _record_cancel(self, sid: str) -> None:
         s = self.db.get_session(sid)
@@ -2380,6 +2408,23 @@ class Runner:
             await finish_then_cancel(self._end_run_inner(sid))
 
     async def _end_run_inner(self, sid: str) -> None:
+        s = self.db.get_session(sid)
+        if s["run"].get(END_PENDING) != RUN_FINISHED:  # else a restart after its run_finished: just the rest
+            s = await self._run_finished(sid)
+        if s.get("backend", "local") == "local":
+            await asyncio.shield(self.sandbox(s).stop())
+        else:
+            await asyncio.shield(self._stop_cli(sid))
+        await asyncio.shield(self.save_branch(sid))
+        self.write_transcript(sid)
+
+        def ended() -> None:
+            current = self.db.get_session(sid)
+            if current and current["run"].pop(END_PENDING, None) is not None:
+                self.db.update_session(sid, run=current["run"])
+        await self.db.awrite(ended)
+
+    async def _run_finished(self, sid: str) -> dict:
         self._emit_turn_metrics(sid)
         s = self.db.get_session(sid)
         extra, fields, quotes = {}, {}, []
@@ -2401,16 +2446,12 @@ class Runner:
             if quotes:
                 self.bus.emit(sid, "ungrounded_quotes", {"quotes": quotes})
             final = self.db.get_session(sid)
+            run = {k: v for k, v in final["run"].items() if k != END_PENDING}
+            self.db.update_session(sid, run={**run, END_PENDING: RUN_FINISHED})
             self.bus.emit(sid, "run_finished", {"status": final["status"], "stop_reason": final["stop_reason"],
-                                                "answer": final["answer"], "run": final["run"], **extra})
+                                                "answer": final["answer"], "run": run, **extra})
             return final
-        s = await self.db.awrite(run_finished)
-        if s.get("backend", "local") == "local":
-            await asyncio.shield(self.sandbox(s).stop())
-        else:
-            await asyncio.shield(self._stop_cli(sid))
-        await asyncio.shield(self.save_branch(sid))
-        self.write_transcript(sid)
+        return await self.db.awrite(run_finished)
 
     def write_transcript(self, sid: str) -> None:
         try:

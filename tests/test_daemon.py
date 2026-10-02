@@ -19,7 +19,7 @@ from harness.db import Database
 from harness.llm import Completion, LLMError
 from harness.manager import Manager
 from harness.policy import ALLOW, ASK, Policy
-from harness.runner import INTERRUPTED
+from harness.runner import END_PENDING, INTERRUPTED
 from harness.scheduler import GpuScheduler
 from waits import scaled
 
@@ -341,10 +341,12 @@ def test_cancel_and_follow_up_message(tmp_path):
     asyncio.run(body())
 
 
+@pytest.mark.parametrize("who", ["user", "daemon"])
 @pytest.mark.parametrize("final_write", ["status", "run_finished"])
-def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write):
+def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write, who):
     """The cancel lands while the writer commits the run's last status (or its run_finished): the commit goes
-    through, so the run must still end once: run_finished, branch save and transcript (#294)."""
+    through, so the run must still end once: run_finished, branch save and transcript (#294). Whoever cancelled:
+    a daemon shutdown cancels the task the same way, without marking a user cancel."""
     import threading
     script = Script([Completion(content="all done", prompt_tokens=100, completion_tokens=5)])
 
@@ -380,7 +382,8 @@ def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write
         s = m.create("say done")
         await asyncio.to_thread(entered.wait, scaled(10))
         task = m.tasks[s["id"]]
-        m.runner.user_cancelled.add(s["id"])
+        if who == "user":
+            m.runner.user_cancelled.add(s["id"])
         task.cancel()
         release.set()
         await asyncio.gather(task, return_exceptions=True)
@@ -389,6 +392,159 @@ def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write
         assert [e["status"] for e in events(m, s["id"], "run_finished")] == ["done"]
         assert saved == [s["id"]]
         assert (m.cfg.transcripts_dir / f"{s['id']}.md").exists()
+        assert END_PENDING not in s["run"] and END_PENDING not in events(m, s["id"], "run_finished")[0]["run"]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_daemon_stop_during_the_final_status_write_ends_the_run(tmp_path):
+    """Manager.stop() itself lands while the run's done status is committing: the run still ends, once (#294)."""
+    import threading
+    script = Script([Completion(content="all done", prompt_tokens=100, completion_tokens=5)])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        entered, release = threading.Event(), threading.Event()
+        update_session = m.db.update_session
+
+        def slow_update(sid, **fields):
+            if fields.get("status") == "done":
+                entered.set()
+                release.wait(scaled(10))
+            return update_session(sid, **fields)
+        m.db.update_session = slow_update
+        s = m.create("say done")
+        await asyncio.to_thread(entered.wait, scaled(10))
+        task = m.tasks[s["id"]]
+        stopping = asyncio.create_task(m.stop())
+        while not stopping.done() and task._fut_waiter is not None and not task._fut_waiter.cancelled():
+            await asyncio.sleep(0.01)  # until stop() has cancelled the run's task
+        release.set()
+        await stopping
+        assert task.done()
+        s = m.db.get_session(s["id"])
+        assert s["status"] == "done"
+        assert [e["status"] for e in events(m, s["id"], "run_finished")] == ["done"]
+        assert (m.cfg.transcripts_dir / f"{s['id']}.md").exists()
+        assert END_PENDING not in s["run"]
+    asyncio.run(body())
+
+
+def test_shutdown_during_a_user_cancel_still_ends_the_run(tmp_path):
+    """The daemon's cancel lands while a user cancel commits the cancelled status: the run still ends, once."""
+    import threading
+    cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "action": "ask"}])
+    script = Script([Completion(tool_calls=[call("write_file", 0, path="a", content="x")])])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        await m.start()
+        sid = m.create("x", project="guarded")["id"]
+        await wait_status(m, sid, "waiting_approval")
+        entered, release = threading.Event(), threading.Event()
+        update_session = m.db.update_session
+
+        def slow_update(sid_, **fields):
+            if fields.get("status") == "cancelled":
+                entered.set()
+                release.wait(scaled(10))
+            return update_session(sid_, **fields)
+        m.db.update_session = slow_update
+        task = m.tasks[sid]
+        cancelling = asyncio.create_task(m.cancel(sid))
+        await asyncio.to_thread(entered.wait, scaled(10))
+        task.cancel()  # Manager.stop()
+        release.set()
+        await cancelling
+        s = m.db.get_session(sid)
+        assert s["status"] == "cancelled"
+        assert [e["status"] for e in events(m, sid, "run_finished")] == ["cancelled"]
+        assert END_PENDING not in s["run"]
+        await m.stop()
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("died", ["before_run_finished", "before_branch_save"])
+def test_next_start_ends_a_run_the_daemon_stopped_before_its_end(tmp_path, died):
+    """The daemon died after a run's final status committed but before its _end_run finished: the next start
+    finishes that end (run_finished, branch save, transcript), each exactly once, and later starts leave it alone
+    (#294)."""
+    cfg = make_cfg(tmp_path)
+    script = Script([Completion(content="all done", prompt_tokens=100, completion_tokens=5)])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        await m.start()
+
+        async def killed(sid):  # the process went away while the run was ending
+            m.runner._unended.discard(sid)
+            raise asyncio.CancelledError
+        if died == "before_run_finished":
+            m.runner._end_run = killed
+        else:
+            m.runner.save_branch = killed
+        sid = m.create("say done")["id"]
+        await asyncio.gather(m.tasks[sid], return_exceptions=True)
+        await m.stop()
+        assert END_PENDING in m.db.get_session(sid)["run"]
+        assert len(events(m, sid, "run_finished")) == (died == "before_branch_save")
+        assert not (cfg.transcripts_dir / f"{sid}.md").exists()
+        m.db.close()
+
+        for _ in range(2):
+            m = Manager(cfg, chat=script)
+            saved = []
+            save_branch = m.runner.save_branch
+
+            async def record_save(sid, saved=saved, save_branch=save_branch):
+                saved.append(sid)
+                await save_branch(sid)
+            m.runner.save_branch = record_save
+            await m.start()
+            s = await wait_status(m, sid, "done")
+            assert [e["status"] for e in events(m, sid, "run_finished")] == ["done"]
+            assert END_PENDING not in s["run"] and s["answer"] == "all done"
+            assert (cfg.transcripts_dir / f"{sid}.md").exists()
+            await m.stop()
+            m.db.close()
+            if not saved:  # the second start: nothing left to end
+                break
+            assert saved == [sid]
+        assert saved == []
+    asyncio.run(body())
+
+
+def test_follow_up_cancelled_mid_write_still_runs(tmp_path):
+    """The request posting a follow-up is cancelled (client gone) while its write commits: the message is stored
+    and the session queued, so its run must start anyway, not wait for a restart (#294)."""
+    import threading
+    script = Script([Completion(content="first"), Completion(content="second")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        s = m.create("say first")
+        sid = s["id"]
+        await wait_status(m, sid, "done")
+        entered, release = threading.Event(), threading.Event()
+        update_session = m.db.update_session
+
+        def slow_update(sid_, **fields):
+            if fields.get("status") == "queued":
+                entered.set()
+                release.wait(scaled(10))
+            return update_session(sid_, **fields)
+        m.db.update_session = slow_update
+        request = asyncio.create_task(m.send(sid, "now say second"))
+        await asyncio.to_thread(entered.wait, scaled(10))
+        request.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        m.db.update_session = update_session
+        s = await wait_status(m, sid, "done", timeout=10)
+        assert s["answer"] == "second"
         await m.stop()
     asyncio.run(body())
 

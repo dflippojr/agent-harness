@@ -911,6 +911,15 @@ class Database:
         return [_row(r) for r in rows]
 
     @_reads
+    def sessions_with_run_flag(self, flag: str) -> list[dict]:
+        """Sessions whose current run carries `flag` (a key of the `run` JSON)."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM sessions WHERE json_extract(run, ?) IS NOT NULL ORDER BY updated_at",
+                (f"$.{flag}",)).fetchall()
+        return [_row(r) for r in rows]
+
+    @_reads
     def count_sessions(self, user_id: str, *statuses: str) -> int:
         marks = ",".join("?" * len(statuses))
         with self.lock:

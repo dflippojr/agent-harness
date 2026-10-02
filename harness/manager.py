@@ -27,8 +27,8 @@ from .config import Config
 from .db import Database
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .remote import RunnerError, RunnerHub, RunnerOffline
-from .runner import (ACTIVE, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner,
-                     new_run)
+from .runner import (ACTIVE, END_PENDING, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT,
+                     SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from . import llm, projects, secret_scan, telemetry
@@ -340,6 +340,10 @@ class Manager:
         if self.runner.memory is not None:
             self.runner.memory.refresh_soon()  # so the first session's profile is current
         self._end_interrupted_canary()
+        for s in self.db.sessions_with_run_flag(END_PENDING):
+            if s["status"] not in ACTIVE:
+                log.info("ending session %s (%s): the daemon stopped before its run ended", s["id"], s["status"])
+                self._spawn_task(s["id"], self.runner.end_pending_run(s["id"]))
         for s in self.db.sessions_with_status(*ACTIVE):
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
@@ -391,7 +395,10 @@ class Manager:
             await self.images.stop()
 
     def _spawn(self, sid: str, recovered: bool = False) -> None:
-        task = asyncio.create_task(self.runner.run(sid, recovered=recovered), name=f"session-{sid}")
+        self._spawn_task(sid, self.runner.run(sid, recovered=recovered))
+
+    def _spawn_task(self, sid: str, coro) -> None:
+        task = asyncio.create_task(coro, name=f"session-{sid}")
         self.tasks[sid] = task
         task.add_done_callback(lambda t, sid=sid: self.tasks.pop(sid, None) if self.tasks.get(sid) is t else None)
 
@@ -804,9 +811,9 @@ class Manager:
                 self.db.update_session(sid, context=s["context"] + [{"role": "user", "content": model_content}],
                                        run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
+            # With the commit, not after the await: a request cancelled mid-write still gets its run.
+            self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))
         await self.db.awrite(deliver)
-        if sid not in self.tasks:
-            self._spawn(sid)
         return self.db.get_session(sid)
 
     def original_prompt(self, sid: str) -> str:
