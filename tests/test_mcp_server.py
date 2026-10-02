@@ -13,7 +13,8 @@ import pytest
 from harness.cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
 from harness.config import BackendConfig, SandboxConfig
 from harness.manager import Manager
-from harness.mcp_server import RELAY_SCRIPT, TOKEN_ENV, McpRelay, McpServer, McpTokens, mcp_config
+from harness.mcp_server import (RELAY_PORT, RELAY_SCRIPT, TOKEN_ENV, McpRelay, McpServer, McpTokens, mcp_config,
+                                relay_node_args)
 from harness.search import SessionSearch
 from harness.policy import ALLOW, ASK, DENY, ChatPolicy, Policy, mcp_harness_tool
 from test_daemon import events, make_cfg, wait_status
@@ -265,6 +266,39 @@ class FakeWeb:
         return f"results for {args.get('query')}"
 
 
+def test_relay_runs_with_the_node_arguments_production_uses():
+    command = McpRelay(session_id="abc", backend=_backend(), server=None).command()
+    assert command[command.index(_backend().image) + 1:] == relay_node_args(RELAY_PORT)
+
+
+def _start_relay(*args):
+    import subprocess
+    return subprocess.run([NODE, *args], input="", capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the relay")
+@pytest.mark.parametrize("launch", ["eval", "file"])
+def test_relay_reads_its_port_from_the_last_argument(launch):
+    import subprocess
+    port = _free_port()
+    args = relay_node_args(port) if launch == "eval" else [str(RELAY_SCRIPT), str(port)]
+    process = subprocess.Popen([NODE, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert json.loads(process.stdout.readline()) == {"ready": port}
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the relay")
+@pytest.mark.parametrize("bad", ["abc", "0", "65536", "80.5"])
+def test_relay_refuses_a_bad_port_loudly(bad):
+    result = _start_relay(str(RELAY_SCRIPT), bad)
+    assert result.returncode != 0
+    assert f"invalid port {bad!r}".replace("'", '"') in result.stderr
+    assert result.stdout == ""
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -301,7 +335,7 @@ def _mcp_manager(tmp_path, plan, rules=None):
 
     manager.runner.cli_factory = factory
     manager.runner.mcp_relay_factory = lambda **kw: McpRelay(
-        **kw, command=[NODE, "-e", RELAY_SCRIPT.read_text(encoding="utf-8"), str(port)])
+        **kw, command=[NODE, *relay_node_args(port)])
     return manager, made, state, web
 
 

@@ -167,6 +167,11 @@ class McpServer:
         return {"content": [{"type": "text", "text": text}], "isError": not ok}
 
 
+def relay_node_args(port: int = RELAY_PORT) -> list[str]:
+    """The arguments the relay's `node` runs with; tests launch the relay with exactly these."""
+    return ["-e", RELAY_SCRIPT.read_text(encoding="utf-8"), str(port)]
+
+
 class McpRelay:
     """The per-session relay sidecar: an unprivileged node process in the CLI image, driven over stdio."""
 
@@ -194,8 +199,7 @@ class McpRelay:
                 "--network", self.backend.network,
                 "--memory", "128m", "--cpus", "0.25", "--pids-limit", "64",
                 "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
-                "--entrypoint", "node", self.backend.image,
-                "-e", RELAY_SCRIPT.read_text(encoding="utf-8"), str(RELAY_PORT)]
+                "--entrypoint", "node", self.backend.image, *relay_node_args()]
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()

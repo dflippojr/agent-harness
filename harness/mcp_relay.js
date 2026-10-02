@@ -1,10 +1,16 @@
 // MCP relay sidecar (#300). Listens on loopback inside the session's network namespace and hands each HTTP request
 // to the daemon as one JSON line on stdout; the daemon answers with one JSON line on stdin. Run as
-// `node -e <this file> <port>`. It holds no token and makes no decisions: the daemon checks everything.
+// `node -e <this file> <port>` (the port is the last argument, so `node mcp_relay.js <port>` works too). It holds no
+// token and makes no decisions: the daemon checks everything.
 const http = require("http");
 const readline = require("readline");
 
-const port = Number(process.argv[1] || 8790);
+const rawPort = process.argv.at(-1);
+const port = /^[0-9]+$/.test(rawPort) ? Number(rawPort) : NaN;
+if (!(port >= 1 && port <= 65535)) {
+  process.stderr.write(`mcp relay: invalid port ${JSON.stringify(rawPort)}; expected an integer 1-65535\n`);
+  process.exit(2);
+}
 const MAX_BODY = 4 * 1024 * 1024;
 const waiting = new Map();
 let next = 0;
