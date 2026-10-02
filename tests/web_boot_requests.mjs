@@ -290,7 +290,8 @@ if (scenario === "client-update" || scenario === "daemon-update") {
   if (scenario === "member" && !warm) fail("member must warm");
   if (scenario === "owner" && !(first("/gpu") && warm)) fail("owner must request /gpu and warm");
   // Round trips before route data: waves of requests that had to finish before the next began.
-  const waves = new Set(before.filter((e) => ["/health", "/me", "/auth/session"].includes(e.path)).map((e) => Math.round(e.start / LATENCY)));
+  const starts = before.filter((e) => ["/health", "/me", "/auth/session"].includes(e.path)).map((e) => e.start).sort((x, y) => x - y);
+  const waves = { size: starts.filter((t, i) => i === 0 || t - starts[i - 1] > LATENCY / 2).length };
   if (scenario === "owner" && waves.size > 2) fail(`expected <=2 round trips before route data, got ${waves.size}`);
   console.log("ok");
 }

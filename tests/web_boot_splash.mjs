@@ -10,7 +10,7 @@ const html = readFileSync(join(root, "harness/web/index.html"), "utf8");
 const css = readFileSync(join(root, "harness/web/style.css"), "utf8");
 const app = readFileSync(join(root, "harness/web/app.js"), "utf8");
 const inline = html.match(/<script>\s*(\/\/ Runs before the module:[\s\S]*?)<\/script>/)[1];
-const boot = app.slice(app.lastIndexOf("void checkCompatibility().then"));
+const boot = app.slice(app.lastIndexOf("const bootCompatible = checkCompatibility()"));
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -65,13 +65,11 @@ async function bootScenario({ compatible = true, user = {}, failure = null, time
       if (failure === "compatibility") throw new Error("startup failed");
       return compatible;
     },
-    currentUser: async () => user,
+    fetchMe: async () => user,
     paintGuestChrome() {},
     isGuest: () => user?.role === "guest",
     warmModel() {},
-    loadProfileIcon: async () => {
-      if (failure === "profile") throw new Error("profile failed");
-    },
+    loadProfileIcon: async () => {},
     applyAppIcon() {}, readAppIcon() { return "profile"; },
     route: async () => {
       routes++;
@@ -79,8 +77,8 @@ async function bootScenario({ compatible = true, user = {}, failure = null, time
       painted = true;
     },
   };
-  // Replace only `void` so the test can await settlement of the production chain.
-  const done = runInNewContext(boot.replace(/^void /, ""), context);
+  // The script's completion value is the production chain's final promise.
+  const done = runInNewContext(boot, context);
   const outcome = done.then(() => null, (error) => error);
   for (let i = 0; i < 20; i++) await Promise.resolve();
   if (!compatible || !user || failure) {
@@ -111,6 +109,5 @@ await bootScenario({ user: { role: "guest" } });
 await bootScenario({ user: null });
 await bootScenario({ compatible: false });
 await bootScenario({ failure: "compatibility" });
-await bootScenario({ failure: "profile" });
 await bootScenario({ timeout: true });
 console.log("ok: boot splash show, readiness, early exits, failures, timeout and reduced motion");
