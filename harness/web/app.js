@@ -7,7 +7,7 @@
 //   #/s/<id>/approval/<aid>  same, focused on one approval (notification deep link)
 //   #/s/<id>/changes         diff viewer
 //   #/s/<id>/info            session details
-//   #/actions[/<tab>]        owner actions: gpu, accounts, remote-control, disk
+//   #/actions[/<tab>]        owner actions: resources, accounts, remote-control, disk
 //   #/profile                identity plus Settings menu
 //   #/profile/account        icon picker, account info, connection details
 //   #/profile/<section>      a Settings page (appearance, notifications, backends, …)
@@ -52,7 +52,7 @@ const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "state", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
-  "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "app_context", "app_tool_call", "app_tool_result",
+  "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "waiting_memory", "memory_recovered", "app_context", "app_tool_call", "app_tool_result",
   "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared",
 ];
 const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
@@ -1161,7 +1161,7 @@ async function viewList() {
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     fill(queueNote,
-      paused ? h("a", { href: "#/actions/gpu" }, `⏸ ${gpuText(gpu)}`) : "",
+      paused ? h("a", { href: "#/actions/resources" }, `⏸ ${gpuText(gpu)}`) : "",
       paused && waiting ? " · " : "",
       waiting ? `${waiting} waiting for the GPU` : "");
     renderTargetSwitch();
@@ -1223,10 +1223,11 @@ async function confirmGpuQueue(label) {
 
 const MODEL_STATE = {
   ready: "✓ Model loaded",
-  sleeping: "Model is asleep; loading it now (about a minute)",
+  sleeping: "Model is unloaded; it loads when you type or start the task (about a minute)",
+  unloaded: "Model is unloaded; it loads when you type or start the task (about a minute)",
   waking: "Model is loading (about a minute); you can start the task anyway",
   unreachable: "Model server isn't answering",
-  paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → GPU)",
+  paused: "⏸ Model unloaded while something else uses the GPU; tasks wait (Actions → Resources)",
 };
 
 function paintModelState(modelState, statuses, modelName, holdActive) {
@@ -1276,7 +1277,6 @@ async function saveTemplate({ prompt, project, backend, model }) {
   try {
     await api("/templates", { method: "POST", body: { name, project, backend, model, prompt } });
     toast("Template saved");
-    void warmModel();
     void route();
   } catch (err) { toast(err.message); }
 }
@@ -1290,7 +1290,6 @@ function templateManager(templates) {
           onclick: async () => {
             if (!confirm(`Delete template “${t.name}”?`)) return;
             await api(`/templates/${t.id}`, { method: "DELETE" });
-            void warmModel();
             void route();
           },
         }, "Delete")),
@@ -1431,7 +1430,10 @@ async function viewNew() {
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   let localModel = model.value;
-  model.addEventListener("change", () => { localModel = model.value; });
+  model.addEventListener("change", () => {
+    localModel = model.value;
+    if (backend.value === "local") void warmModel(true);
+  });
   const gpuHold = () => !!(gpu && (gpu.manual || gpu.state !== "clear"));
   const availableBackends = backends.filter((b) => b.available);
   const defaultBackend = pickDefaultBackend(availableBackends, gpuHold());
@@ -1441,7 +1443,7 @@ async function viewNew() {
   const backendState = h("div", { class: "muted small", style: "margin-top:6px" });
   const holdNotice = h("div", { class: "muted small gpu-hold-note", style: "margin-top:6px" },
     "Model unloaded while something else uses the GPU; tasks wait (",
-    h("a", { href: "#/actions/gpu" }, "Actions → GPU"),
+    h("a", { href: "#/actions/resources" }, "Actions → Resources"),
     ")");
   const modelState = h("div", { class: "muted small", style: "margin-top:6px" });
   const start = h("button", { class: "btn primary", type: "submit" }, "Start");
@@ -1467,7 +1469,10 @@ async function viewNew() {
     backendState.classList.toggle("bad", !!b?.billing_warning);
     syncHoldUi();
   };
-  backend.addEventListener("change", showBackend);
+  backend.addEventListener("change", () => {
+    showBackend();
+    if (backend.value === "local") void warmModel(true);
+  });
   showBackend();
   const prompt = h("textarea", { placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
   const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
@@ -1538,13 +1543,15 @@ async function viewNew() {
       paintModelState(modelState, await api("/models/status"), model.value, gpuHold());
     } catch (_) { /* offline: the form's own errors cover it */ }
   };
-  void warmModel(true);
   void pollModel();
   const modelTimer = setInterval(pollModel, 3000);
   onLeave(() => clearInterval(modelTimer));
   const draftKey = "harness.draft";
   prompt.value = storeGet(draftKey) || "";
-  prompt.addEventListener("input", () => storeSet(draftKey, prompt.value));
+  prompt.addEventListener("input", () => {
+    storeSet(draftKey, prompt.value);
+    if (backend.value === "local" && prompt.value.trim()) void warmModel();
+  });
 
   tplSelect.addEventListener("change", () => {
     const t = templates.find((x) => x.id === tplSelect.value);
@@ -1878,6 +1885,7 @@ async function viewSession(sid, tab, focusApproval) {
   let lastContent = "";
   let wakingNote = null;
   let gpuNote = null;
+  let memoryNote = null;
   let targetNote = null;
   let compactNote = null;    // {el, label, bar, detail, elapsed, start} while older context is being summarized
   let lastEventAt = Date.now();  // server time of the latest persisted event: when the current step began
@@ -2161,13 +2169,23 @@ async function viewSession(sid, tab, focusApproval) {
     },
     gpu_paused: (e) => {
       gpuNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
-        `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Actions → GPU to resume now)`)));
+        `Paused: ${e.data.reason} needs the GPU, so the model was unloaded. The task continues ${Math.round(e.data.resume_after_seconds / 60)} min after that ends (Actions → Resources to resume now)`)));
     },
     gpu_resumed: (e) => {
       const text = `GPU free again after ${fmtSpan(e.data.seconds)}; reloading the model`;
       if (gpuNote) fill(gpuNote, text);
       else add(h("p", { class: "note" }, text));
       gpuNote = null;
+    },
+    waiting_memory: (e) => {
+      memoryNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
+        `Waiting for memory: ${e.data.reason}, so the ${e.data.waiting_for || "work"} doesn't start yet (Actions → Resources)`)));
+    },
+    memory_recovered: (e) => {
+      const text = `Memory recovered after ${fmtSpan(e.data.seconds)}; continuing`;
+      if (memoryNote) fill(memoryNote, text);
+      else add(h("p", { class: "note" }, text));
+      memoryNote = null;
     },
     target_waiting: (e) => {
       targetNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
@@ -4028,7 +4046,9 @@ function appsCard(me) {
 }
 
 // ---------- model warm-up ----------
-// Loading the model takes about a minute after it has slept, so start as soon as the app is opened.
+// Loading the model takes about a minute after it has been unloaded. Only an explicit local-model selection (choosing
+// the local backend or a model, or typing a task with it selected) starts a load; the server skips it when RAM is
+// short. Opening a page never does (#311).
 let lastWarm = 0;
 async function warmModel(force = false) {
   if (protocolBlocked || isGuest()) return;
@@ -4042,7 +4062,6 @@ async function warmModel(force = false) {
     await api("/models/warm", { method: "POST" });
   } catch (_) { /* offline */ }
 }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") void warmModel(); });
 
 // ---------- boot ----------
 const UPDATE_GUARD = "harness.webUpdateAttempt";
@@ -4141,7 +4160,6 @@ void bootCompatible.then((compatible) => (compatible ? bootIdentity : null)).the
   currentMe = me;
   bootMe = Promise.resolve(me);
   paintGuestChrome();
-  if (!isGuest()) void warmModel();
   // The profile emoji paints when it arrives; route data never waits on it.
   void loadProfileIcon().then(() => applyAppIcon(readAppIcon()));
   applyAppIcon(readAppIcon());
