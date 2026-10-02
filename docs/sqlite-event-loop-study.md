@@ -1,12 +1,15 @@
-# SQLite blocking of the daemon event loop (#257)
+# SQLite blocking of the daemon event loop (#257, #294)
 
-Phase 1 (measure) of the question "does synchronous SQLite work stall the asyncio loop enough to need a refactor?".
+Phase 1 (measure, #257) of the question "does synchronous SQLite work stall the asyncio loop enough to need a refactor?".
 Decision rule (owner, 2026-10-01): refactor if the p99 event-loop stall under the benchmark load exceeds **50 ms**.
 
 ## Verdict
 
 **p99 stall exceeds 50 ms in both runs** (about 1 s with `/metrics` scraping, about 100 ms without it), so a refactor
 is warranted. Follow-up issue #294 carries these numbers and the Phase 2 design. No refactor lands with #257.
+
+**Phase 2 (#294) brings p99 under 50 ms in both runs** (0.5 ms with scraping, 10 ms without), while doing 6-9x the
+work; see [Phase 2 results](#phase-2-results-294).
 
 Two distinct causes show up:
 
@@ -23,7 +26,9 @@ Two distinct causes show up:
 Permanent instrumentation (always on, cheap) on `GET /metrics`:
 
 - `harness_db_lock_held_seconds{method}`: histogram of how long each outermost `with db.lock:` block held the lock,
-  labelled by the calling method (`harness/telemetry.py` `TimedLock`).
+  labelled by the calling method (`harness/telemetry.py` `TimedLock`). Since #294 each connection (the writer and
+  every pooled reader) has its own lock, so this is the time a method kept its connection busy, not time others
+  waited; a `db.write(fn)` transaction is labelled by `fn`'s name.
 - `harness_event_loop_stall_seconds`: histogram of how much later than scheduled a 10 ms probe sleep wakes up
   (`LoopLagProbe`, started in the app lifespan).
 - `HARNESS_ASYNCIO_DEBUG=1`: opt-in asyncio debug with `slow_callback_duration = 0.05`, so slow callbacks are logged.
@@ -86,3 +91,89 @@ Lock hold per Database method (sorted by total time held)
 Single writer thread draining a queue over one connection (an awaited write returns only after commit, which keeps
 commit-before-act ordering); reads from a small pool of read-only WAL connections via `asyncio.to_thread`. The
 `/metrics` aggregates should move to the read pool first, since they are the largest stall.
+
+## Phase 2 results (#294)
+
+What landed (owner decisions of 2026-10-02, one PR):
+
+- `harness/db.py`: one writer thread owns the read-write connection and runs queued jobs in order; reads use up to
+  `READ_CONNECTIONS` (4) read-only WAL connections (`PRAGMA query_only`). Every `Database` method is marked `@_writes`
+  or `@_reads`, so the sync API still works from any thread (a write blocks its caller until committed). Event-loop
+  code awaits `db.aio.<method>(...)`, `db.awrite(fn)` or `db.aread(fn)`.
+- `Database.tx()` is gone: each former `with db.tx():` block is a callable run whole on the writer thread by
+  `db.write(fn)` / `await db.awrite(fn)`, so it stays atomic and cannot await. An event emitted inside one is
+  published to subscribers only after the commit, in the caller's thread (`db.after_commit`).
+- The runner's per-turn writes (`_commit_completion`, `_record_result`, status changes, events emitted from async
+  code) are awaited, so the loop keeps running while the writer commits. The end of a run commits the job status,
+  the quote check and `run_finished` in one transaction.
+- `/metrics` renders on a pooled read connection, and the heavy session/event aggregates (`_core_rows`) are cached
+  for `CORE_CACHE_SECONDS` (10 s), so frequent scrapes don't repeat them. No counters were added to write paths.
+
+The benchmark now drives the same paths as the daemon: sessions await `db.aio.insert_event` (as `EventBus.aemit`
+does), and the searcher runs `search.search` and the `session_search` tool in worker threads (as `api.search` and
+`SessionSearch.call` already did; in Phase 1 it called them on the loop). With the loop no longer blocked, the fake
+sessions write much faster (the 5 ms "model latency" sleep is the only throttle), so the after runs push 6-9x more
+events and a database several GB in size, a harsher load than the before runs.
+
+Before (`origin/main` at 8ee0aae, re-run 2026-10-02 with the Phase 1 benchmark) and after, 30 s each, same machine:
+
+| run | event pairs | DB size | loop-stall p50 | p99 | max bucket |
+|---|---|---|---|---|---|
+| before, with scraping | 2684 | 302 MB | 10 ms | **1000 ms** | 2500 ms |
+| after, with scraping | 23395 | 4066 MB | 0.5 ms | **0.5 ms** | 25 ms |
+| before, no scraping | 6580 | 733 MB | 10 ms | **100 ms** | 100 ms |
+| after, no scraping | 17519 | 1974 MB | 0.5 ms | **10 ms** | 25 ms |
+
+After, with scraping:
+
+```
+Machine: Windows 10 (AMD64), 28 logical CPUs, Python 3.10.11, SQLite 3.40.1
+Config: 4 concurrent sessions, 30 s, one ~1 MB tool result every 10 events per session, search every 50 ms, /metrics render every 250 ms
+Work done: 23395 event pairs (2336 large), 376 search rounds, 67 scrapes, database 4066 MB
+
+Event-loop stall (10 ms probe overshoot, bucket upper bounds)
+- samples: 47496, p50: 0.5 ms, p99: 0.5 ms, max bucket: 25 ms
+- p99 is within the 50 ms threshold
+
+Lock hold per Database method (sorted by total time held)
+| method | count | p50 | p99 | total (s) |
+|---|---|---|---|---|
+| insert_event | 46790 | 0.5 ms | 10 ms | 26.04 |
+| _core_rows | 3 | >2.5 s | >2.5 s | 13.34 |
+| search_events | 1880 | 0.5 ms | 100 ms | 12.71 |
+| session_brief | 752 | 0.5 ms | 0.5 ms | 0.05 |
+| _smart_review_metrics | 67 | 0.5 ms | 5 ms | 0.02 |
+| _endpoint_metrics | 67 | 0.5 ms | 5 ms | 0.01 |
+| _skill_metrics | 67 | 0.5 ms | 0.5 ms | 0.00 |
+| insert_session | 4 | 0.5 ms | 0.5 ms | 0.00 |
+```
+
+After, no scraping:
+
+```
+Machine: Windows 10 (AMD64), 28 logical CPUs, Python 3.10.11, SQLite 3.40.1
+Config: 4 concurrent sessions, 30 s, one ~1 MB tool result every 10 events per session, search every 50 ms, /metrics render every 250 ms (disabled)
+Work done: 17519 event pairs (1751 large), 400 search rounds, 0 scrapes, database 1974 MB
+
+Event-loop stall (10 ms probe overshoot, bucket upper bounds)
+- samples: 36037, p50: 0.5 ms, p99: 10 ms, max bucket: 25 ms
+- p99 is within the 50 ms threshold
+
+Lock hold per Database method (sorted by total time held)
+| method | count | p50 | p99 | total (s) |
+|---|---|---|---|---|
+| insert_event | 35038 | 0.5 ms | 25 ms | 27.20 |
+| search_events | 2000 | 0.5 ms | 50 ms | 11.44 |
+| session_brief | 800 | 0.5 ms | 0.5 ms | 0.04 |
+| insert_session | 4 | 0.5 ms | 0.5 ms | 0.00 |
+```
+
+Reading the after numbers:
+
+- `_core_rows` ran 3 times in 67 scrapes (the 10 s cache) and each run took several seconds over a 4 GB database, but on
+  a reader connection: it no longer delays a single write or the loop.
+- The writer is the bottleneck now (`insert_event` holds its connection about 26 of the 30 s), which is what throttles
+  the fake sessions. The loop stays free while they wait.
+- The remaining no-scrape p99 of 10 ms is most likely GIL contention: the writer thread's `json.dumps` and search-text
+  extraction for 1 MB results are Python code that holds the GIL while the loop wants to run. This was not measured
+  separately; the loop no longer waits on SQLite itself.

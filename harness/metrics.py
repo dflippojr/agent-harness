@@ -55,7 +55,7 @@ def _histogram_lines(out: _Out, name: str, help_: str, series: list[tuple[dict, 
 
 def _telemetry_metrics(out: _Out) -> None:
     _histogram_lines(out, "harness_db_lock_held_seconds",
-                     "Time the SQLite lock was held per outermost acquisition, by calling method.",
+                     "Time a SQLite connection was held per outermost acquisition of its lock, by calling method.",
                      [({"method": method}, h) for method, h in telemetry.lock_held.items()])
     _histogram_lines(out, "harness_event_loop_stall_seconds",
                      "Event-loop lag: how much later than scheduled a 10 ms probe sleep woke up.",
