@@ -1661,3 +1661,24 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     header = " ".join(line.lstrip("# ") for line in text.split("\non:", 1)[0].splitlines())
     assert "Consumers trigger it only by workflow_dispatch, never pull_request" in header
     assert "The job refuses pull requests from forks" in header
+
+
+def test_adoption_docs_caller_matches_reusable_workflow():
+    import yaml
+
+    docs = CI_DOCS.read_text(encoding="utf-8")
+    section = docs.split("### Adopting the review workflow", 1)[1].split("\n## ", 1)[0]
+    caller = yaml.safe_load(section.split("```yaml\n", 1)[1].split("```", 1)[0])
+    assert list(caller[True]) == ["workflow_dispatch"]
+    assert caller["permissions"] == {"contents": "read", "pull-requests": "write", "checks": "write"}
+    job = caller["jobs"]["review"]
+    assert job["uses"] == "dflippojr/agent-harness/.github/workflows/review.yml@review-v1"
+    assert job["secrets"] == "inherit"
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    call_inputs = workflow[True]["workflow_call"]["inputs"]
+    assert set(job["with"]) <= set(call_inputs)
+    assert {name for name, spec in call_inputs.items() if spec.get("required")} <= set(job["with"])
+    assert json.loads(job["with"]["runs_on"])[-1] == "financial-planner-review"
+    assert "dflippojr/agent-harness/.github/workflows/review.yml@*" in section
+    assert '"context": "Automated Code Review", "integration_id": 15368' in section
+    assert "git tag -f review-v1" in section
