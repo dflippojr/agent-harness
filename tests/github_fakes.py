@@ -24,6 +24,8 @@ import sys
 import time
 from pathlib import Path
 
+from waits import scaled
+
 FAKE_GCM = r'''
 import json, os, secrets, subprocess, sys, time
 from pathlib import Path
@@ -357,11 +359,17 @@ def _lines(path: Path) -> list[dict]:
     return rows
 
 
-def wait_for(predicate, timeout: float = 20.0, interval: float = 0.05):
-    end = time.monotonic() + timeout
+def wait_for(predicate, timeout: float = 20.0, interval: float = 0.05, describe=None):
+    """Poll until `predicate` is truthy; the deadline scales on slow runners (issue #312).
+
+    On timeout, `describe()` (when given) is printed to stderr so the failure shows the last observed state."""
+    end = time.monotonic() + scaled(timeout)
     while time.monotonic() < end:
         value = predicate()
         if value:
             return value
         time.sleep(interval)
-    return predicate()
+    value = predicate()
+    if not value and describe is not None:
+        print(f"wait_for timed out; last observed: {describe()!r}", file=sys.stderr)
+    return value

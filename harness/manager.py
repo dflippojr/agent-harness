@@ -154,6 +154,7 @@ class Manager:
         self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
         from .member_github import MemberGitHub
         self.github_auth = MemberGitHub(cfg, self.db)
+        self._github_reconcile: threading.Thread | None = None
         self.secret_scanner = secret_scan.Scanner(secret_scan.tools_dir(cfg))
         self._scanner_boot: asyncio.Task | None = None
         from .google_signin import GoogleSignin
@@ -344,7 +345,9 @@ class Manager:
             # Off the loop: retry erases that failed earlier (even with the feature disabled now), and
             # move `connected` rows whose credential is gone (restored backup) to reconnect_required.
             # A disabled feature with nothing owed never touches the store at startup.
-            threading.Thread(target=self.github_auth.reconcile, daemon=True, name="github-reconcile").start()
+            self._github_reconcile = threading.Thread(target=self.github_auth.reconcile, daemon=True,
+                                                      name="github-reconcile")
+            self._github_reconcile.start()
         orphans = self.snippets.recover()
         if orphans:
             from .snippets import remove_orphans

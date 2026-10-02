@@ -20,6 +20,7 @@ from harness.clone import isolated_clone_env
 from harness.github_auth import GitHubAuthError, canonical_github_url
 
 from github_fakes import FakeGitHub, wait_for
+from waits import scaled
 from test_household import ALICE, BOB, OWNER, H, create_member, household
 
 CODE = "WDJB-MJHT"
@@ -888,8 +889,15 @@ def test_startup_retries_owed_erase_even_with_the_feature_disabled(tmp_path, fak
     from test_daemon import Script
     m2 = Manager(m.cfg, db=m.db, chat=Script([]))
     with TestClient(create_app(m2)):
-        assert wait_for(lambda: fake.namespaces() == set())
-        assert wait_for(lambda: m.db.get_github_connection(a)["last_error"] == "")
+        # the startup retry is a background thread: wait for its completion, then check what it did
+        reconcile = m2._github_reconcile
+        reconcile.join(scaled(60))
+        row = m.db.get_github_connection(a)
+        state = {"alive": reconcile.is_alive(), "namespaces": fake.namespaces(), "row": row,
+                 "preflight": m2.github_auth.cached_preflight()}
+        assert not reconcile.is_alive(), state
+        assert fake.namespaces() == set(), state
+        assert row["last_error"] == "", state
 
 
 def test_failed_erase_after_a_rejected_credential_is_owed(tmp_path, fake, monkeypatch):
