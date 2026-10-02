@@ -796,12 +796,13 @@ class Manager:
             raise HarnessError(503, f"{action} is blocked: the secret scan could not run ({result['message']}). "
                                     "Fix the gitleaks install (python -m harness.doctor) and retry.",
                                code="secret_scan_unavailable")
-        if result["open"]:
+        # A push sends every commit since the base; a merge squashes, so only the net diff reaches the base branch.
+        blocking = [f for f in result["findings"] if not f["dismissed"] and (action == "push" or "commit" not in f)]
+        if blocking:
             rules: dict[str, int] = {}
-            for f in result["findings"]:
-                if not f["dismissed"]:
-                    rules[f["rule"]] = rules.get(f["rule"], 0) + 1
-            n = result["open"]
+            for f in blocking:
+                rules[f["rule"]] = rules.get(f["rule"], 0) + 1
+            n = len(blocking)
             counts = ", ".join(f"{k}: {v}" for k, v in sorted(rules.items()))
             raise HarnessError(409, f"{action} is blocked: the secret scan found {n} possible secret"
                                     f"{'' if n == 1 else 's'} ({counts}). On the Changes tab, ask the agent to "
@@ -809,7 +810,7 @@ class Manager:
                                code="secret_findings", details={"findings": n, "rules": rules})
 
     async def secret_findings_fix(self, ref: str) -> list[dict]:
-        """Ask agent to fix: one draft review comment per open finding, naming the rule and place, never the value."""
+        """Ask agent to fix: one draft review comment per open finding in the diff (rule and place, never the value)."""
         sid = self.resolve_id(ref)
         data = await self.changes(sid)
         scan = data.get("secret_scan")
@@ -818,7 +819,8 @@ class Manager:
         drafts = self.db.list_review_comments(sid)
         made = []
         for f in scan["findings"]:
-            if f["dismissed"] or any(d["repo"] == f["repo"] and d["path"] == f["file"] and d["side"] == "new"
+            # A value a later commit removed has no line in the diff to comment on: dismiss it or rewrite the branch.
+            if f["dismissed"] or "commit" in f or any(d["repo"] == f["repo"] and d["path"] == f["file"] and d["side"] == "new"
                                      and d["start_line"] == f["line"] and d["comment"].startswith(SECRET_FIX)
                                      for d in drafts):
                 continue

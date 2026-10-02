@@ -2600,8 +2600,9 @@ function secretScanCard(sid, scan, state, canComment, render) {
   };
   const row = (f) => h("div", { class: "secret-finding" },
     h("div", { class: "row", style: "justify-content:space-between" },
-      h("span", { class: "small" }, `${f.repo === "." ? "" : f.repo + "/"}${f.file}:${f.line} · ${f.rule} · `, h("code", {}, f.preview)),
+      h("span", { class: "small" }, `${f.repo === "." ? "" : f.repo + "/"}${f.file}:${f.line}${f.commit ? ` @ ${f.commit}` : ""} · ${f.rule} · `, h("code", {}, f.preview)),
       f.dismissed ? h("span", { class: "badge cancelled" }, "dismissed") : null),
+    f.commit && !f.dismissed ? h("div", { class: "muted small" }, `Removed by a later commit but still in commit ${f.commit}, so it blocks Push (not Merge). Dismiss it, or rewrite the branch.`) : null,
     f.dismissed && f.dismissal ? h("div", { class: "muted small" }, `Reason: ${f.dismissal.reason}`) : null,
     !f.dismissed && isOwner() ? h("div", { class: "row end secret-actions" },
       h("button", { class: "btn small", type: "button", onclick: dismiss(f) }, "Dismiss…")) : null);

@@ -6,9 +6,11 @@ directory, with `--config` explicit, `--ignore-gitleaks-allow`, no baseline, GIT
 `--redact` so the value never reaches its output.
 
 A finding is `{repo, file, line, rule, fingerprint, preview}`. `preview` keeps at most the first and last two
-characters; `fingerprint` is a salted hash so a dismissal follows the same value to later heads. The raw value
+characters; `fingerprint` is a salted hash so a dismissal follows the same value to later heads. Each commit since
+the base is scanned too (a push sends them all): a value only found in a commit's own diff, i.e. one a later commit
+removed, adds a finding with that commit's short SHA in `commit` and in its fingerprint. The raw value
 only exists inside `_findings` while a finding is built; the scanner's own output is dropped after masking.
-Results are cached per (salt, head, diff hash, pin) and hold diff positions (for masking the Changes diff), never
+Results are cached per (salt, head, diff hash, commit range, pin) and hold diff positions (for masking the Changes diff), never
 values.
 
     python -m harness.secret_scan install [--config-dir DIR]   fetch + verify the pinned binary (installers)
@@ -43,6 +45,7 @@ SCANNER = f"gitleaks {VERSION}"
 TIMEOUT = 120
 CACHE_SIZE = 128
 MASK = "…"
+SHORT_SHA = 12
 
 
 def rules_sha256(path: Path = RULES) -> str:
@@ -153,13 +156,15 @@ class Scanner:
 
     # ---------------------------------------------------------------- scanning
     def scan(self, repos: list[dict], salt: str) -> dict:
-        """Scan the added lines of each repo's diff: repos = [{path, head, diff}].
+        """Scan the added lines of each repo's diff and of each of its commits: repos = [{path, head, diff,
+        commits: [{sha, diff}]}].
 
         Returns {status: ok|unavailable|error, message, scanner, findings, cached, elapsed_ms}. Each finding
         carries a private `_spans` list [(diff line index, byte start, byte end)] for `redact`."""
         started = time.perf_counter()
         key = (salt, VERSION, PIN["rules"]["sha256"],
-               tuple((r["path"], r.get("head", ""), hashlib.sha256(r["diff"].encode()).hexdigest()) for r in repos))
+               tuple((r["path"], r.get("head", ""), hashlib.sha256(r["diff"].encode()).hexdigest(),
+                      tuple(c["sha"] for c in r.get("commits", ()))) for r in repos))
         with self._lock:
             hit = self._cache.get(key)
             if hit is not None:
@@ -169,10 +174,13 @@ class Scanner:
         result = {"status": "ok", "message": "", "scanner": SCANNER, "findings": []}
         if problem := self.problem():
             return {**result, "status": "unavailable", "message": problem, "cached": False, "elapsed_ms": 0}
-        text, where = scan_input(repos)
+        # Commits come after the repos, so a commit finding's spans never match a repo index in `redact`.
+        entries = [*repos, *({"path": r["path"], "diff": c["diff"], "commit": c["sha"][:SHORT_SHA]}
+                             for r in repos for c in r.get("commits", ()))]
+        text, where = scan_input(entries)
         if len(where) > 1:
             try:
-                result["findings"] = _findings(self._run(text), text, where, repos, salt)
+                result["findings"] = _findings(self._run(text), text, where, entries, salt)
             except ScannerUnavailable as e:
                 return {**result, "status": "error", "message": str(e), "cached": False, "elapsed_ms": 0}
         with self._lock:
@@ -288,11 +296,22 @@ def _findings(report: list[dict], text: str, where: list, repos: list[dict], sal
             col0, col1 = col0 + head, col1 - tail
         spans = _spans(text_lines, where, start, end, col0, max(col1, 0))
         ri, file, line = origin[0], origin[1], origin[2]
-        fingerprint = hashlib.sha256("\0".join((salt, repos[ri]["path"], file, rule, value)).encode()).hexdigest()
-        out.append({"repo": repos[ri]["path"], "file": file, "line": line, "rule": rule,
-                    "fingerprint": fingerprint[:20], "preview": mask(value), "_spans": spans})
-    out.sort(key=lambda f: (f["repo"], f["file"], f["line"], f["rule"]))
-    return out
+        repo, commit = repos[ri]["path"], repos[ri].get("commit", "")
+        fingerprint = hashlib.sha256("\0".join((salt, repo, file, rule, value) + ((commit,) if commit else ()))
+                                     .encode()).hexdigest()
+        finding = {"repo": repo, "file": file, "line": line, "rule": rule, "fingerprint": fingerprint[:20],
+                   "preview": mask(value), "_spans": spans,
+                   "_value": hashlib.sha256("\0".join((salt, repo, rule, value)).encode()).hexdigest()}
+        out.append({**finding, "commit": commit} if commit else finding)
+    # A value still in the working diff is that finding; one only in commits is reported once, at its first commit.
+    seen = {f["_value"] for f in out if "commit" not in f}
+    kept = []
+    for f in out:  # repos, then commits oldest first
+        if "commit" not in f or f["_value"] not in seen:
+            seen.add(f["_value"])
+            kept.append({k: v for k, v in f.items() if k != "_value"})
+    kept.sort(key=lambda f: (f["repo"], "commit" in f, f["file"], f["line"], f["rule"]))
+    return kept
 
 
 def public(result: dict) -> dict:

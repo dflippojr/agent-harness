@@ -236,6 +236,104 @@ def test_uncommitted_key_blocks_push(tmp_path, caplog):
     asyncio.run(body())
 
 
+def _commit_then_remove_key(ws: Path) -> str:
+    """Commit a key, then a commit that removes it: the net diff is clean, the first commit is not."""
+    (ws / "settings.py").write_text(f"AWS_ACCESS_KEY_ID = '{KEY}'\n")
+    sh(ws, "add", "settings.py")
+    sh(ws, "commit", "-qm", "add key")
+    added = sh(ws, "rev-parse", "HEAD").strip()
+    (ws / "settings.py").write_text("import os\nAWS_ACCESS_KEY_ID = os.environ['AWS_ACCESS_KEY_ID']\n")
+    sh(ws, "commit", "-qam", "read it from the environment")
+    return added
+
+
+def test_key_removed_by_a_later_commit_blocks_push_until_dismissed(tmp_path, caplog):
+    remote = make_repo(tmp_path / "remote.git", bare=True)
+    cfg = project_cfg(tmp_path, remote.as_uri())
+
+    async def body():
+        m = Manager(cfg, chat=edit_steps())
+        await m.start(maintenance=False)
+        s = await finished(m, m.create("bump", project="proj")["id"])
+        sid, ws = s["id"], Path(s["workspace"])
+        added = _commit_then_remove_key(ws)
+
+        with pytest.raises(HarnessError) as e:
+            await m.review(sid, "push")
+        assert e.value.status == 409 and e.value.code == "secret_findings"
+        assert e.value.details == {"findings": 1, "rules": {"aws-access-token": 1}}
+        assert sh(remote, "branch", "--list", s["branch"]) == ""  # nothing pushed
+
+        data = await m.changes(sid)
+        assert KEY not in json.dumps(data)
+        [finding] = data["secret_scan"]["findings"]
+        assert (finding["file"], finding["line"], finding["commit"]) == ("settings.py", 1, added[:12])
+        assert finding["fingerprint"] != _net_fingerprint(m, sid, ws)  # the commit is part of the fingerprint
+        assert await m.secret_findings_fix(sid) == []  # no diff line to comment on
+
+        await m.dismiss_secret_finding(sid, finding["fingerprint"], "rotated; history is fine", "owner")
+        s = await m.review(sid, "push")
+        assert s["review"] == "pushed"
+        assert _leaks(m, sid, caplog) == []
+        await m.stop()
+    asyncio.run(body())
+
+
+def _net_fingerprint(m: Manager, sid: str, ws: Path) -> str:
+    """The fingerprint the same value would have in the working diff."""
+    diffs = [{"path": ".", "head": "x", "diff": diff_of("settings.py", [f"AWS_ACCESS_KEY_ID = '{KEY}'"])}]
+    return m.secret_scanner.scan(diffs, sid)["findings"][0]["fingerprint"]
+
+
+def test_key_removed_by_a_later_commit_does_not_block_merge(tmp_path):
+    src = make_repo(tmp_path / "src")
+    cfg = project_cfg(tmp_path, str(src))
+
+    async def body():
+        m = Manager(cfg, chat=edit_steps())
+        await m.start(maintenance=False)
+        s = await finished(m, m.create("bump", project="proj")["id"])
+        _commit_then_remove_key(Path(s["workspace"]))
+        assert (await m.changes(s["id"]))["secret_scan"]["open"] == 1  # shown, but a squash merge drops it
+        s = await m.review(s["id"], "merge")
+        assert s["review"] == "merged"
+        assert KEY not in (src / "settings.py").read_text()
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_clean_multi_commit_push_passes(tmp_path):
+    remote = make_repo(tmp_path / "remote.git", bare=True)
+    cfg = project_cfg(tmp_path, remote.as_uri())
+
+    async def body():
+        m = Manager(cfg, chat=edit_steps())
+        await m.start(maintenance=False)
+        s = await finished(m, m.create("bump", project="proj")["id"])
+        ws = Path(s["workspace"])
+        for n in range(3):
+            (ws / f"step{n}.py").write_text(f"STEP = {n}\n")
+            sh(ws, "add", ".")
+            sh(ws, "commit", "-qm", f"step {n}")
+        scan = (await m.changes(s["id"]))["secret_scan"]
+        assert scan["status"] == "ok" and scan["findings"] == []
+        s = await m.review(s["id"], "push")
+        assert s["review"] == "pushed"
+        assert sh(remote, "branch", "--list", s["branch"]).strip()
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_cache_covers_the_commit_range(gitleaks_tools):
+    sc = scanner(gitleaks_tools)
+    clean = {"path": ".", "head": "h", "diff": diff_of("a.py", ["x = 1"])}
+    first = sc.scan([{**clean, "commits": [{"sha": "a" * 40, "diff": diff_of("a.py", ["x = 1"])}]}], "salt")
+    assert first["findings"] == [] and not first["cached"]
+    leaky = {"sha": "b" * 40, "diff": diff_of("k.py", [f"key = '{KEY}'"])}
+    second = sc.scan([{**clean, "commits": [{"sha": "a" * 40, "diff": diff_of("a.py", ["x = 1"])}, leaky]}], "salt")
+    assert not second["cached"] and [f["commit"] for f in second["findings"]] == ["b" * 12]
+
+
 def test_scanner_failure_blocks_push_and_merge(tmp_path):
     src = make_repo(tmp_path / "src")
     cfg = project_cfg(tmp_path, str(src))

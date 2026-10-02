@@ -12,6 +12,7 @@ from .projects import git
 from .review_comments import parse_diff
 
 MAX_DIFF_CHARS = 400_000
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # the parent of a root commit
 SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 
 
@@ -65,8 +66,19 @@ def _repo_diff(repo: Path, base: str, untracked: list[str]) -> str:
     return diff
 
 
+def commit_diffs(repo: Path, base: str) -> list[dict]:
+    """Each commit in base..HEAD, oldest first, with its own diff against its first parent: what a push sends."""
+    out = []
+    for sha in _git(repo, "rev-list", "--reverse", f"{base}..HEAD").split() if base else ():
+        parent = _git(repo, "rev-parse", "--verify", "-q", f"{sha}^").strip() or EMPTY_TREE
+        out.append({"sha": sha, "diff": _git(repo, "diff", parent, sha, "--no-color", "--no-ext-diff",
+                                             "--no-textconv")})
+    return out
+
+
 def repo_diffs(workspace: Path, base_commit: str | None = None) -> list[dict]:
-    """Each repository's full (untruncated) diff from its base to the working tree, untracked files included."""
+    """Each repository's full (untruncated) diff from its base to the working tree, untracked files included,
+    and each commit since the base with its own diff (`commits`)."""
     workspace = workspace.resolve()
     out = []
     for repo in find_repos(workspace):
@@ -76,7 +88,8 @@ def repo_diffs(workspace: Path, base_commit: str | None = None) -> list[dict]:
         base = _base_commit(repo, workspace, base_commit)
         out.append({"repo": repo, "path": repo.relative_to(workspace).as_posix() or ".", "files": files,
                     "base": base, "diff": _repo_diff(repo, base, untracked),
-                    "head": _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip()})
+                    "head": _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip(),
+                    "commits": commit_diffs(repo, base)})
     return out
 
 
