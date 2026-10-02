@@ -1338,7 +1338,7 @@ class Runner:
             chars = sum(compaction.message_chars(m) for m in s["context"]) + len(json.dumps(tools))
             run["chars_per_token"] = min(6.0, max(1.5, chars / completion.prompt_tokens))
             run["context_tokens"] = completion.prompt_tokens + completion.completion_tokens
-        ended = self._commit_completion(s, run, completion, model, tools)
+        ended = await self._commit_completion(s, run, completion, model, tools)
         if ended or not completion.tool_calls:
             self._emit_turn_metrics(sid)
         return ended
@@ -1385,7 +1385,7 @@ class Runner:
             self.bus.emit(sid, "turn_metrics", payload)
         self.db.write(emit_turn_metrics)
 
-    def _commit_completion(self, s: dict, run: dict, completion, model, tools: list) -> bool:
+    async def _commit_completion(self, s: dict, run: dict, completion, model, tools: list) -> bool:
         """Record one model reply: the context, totals and events, and whether the run is over."""
         sid = s["id"]
         run["pending_turn_metrics"] = self._turn_metrics_payload(s, run, completion, tools)
@@ -1422,7 +1422,7 @@ class Runner:
             self.db.update_session(sid, context=context, run=run, totals=totals)
             self.bus.emit(sid, "assistant", event)
             return False
-        if self.db.write(commit_completion):
+        if await self.db.awrite(commit_completion):
             return True
         if run["idle"] >= 3:
             self.set_status(sid, "done", stop_reason="empty_replies")
@@ -1478,7 +1478,7 @@ class Runner:
         fn = call.get("function") or {}
         name = fn.get("name", "")
         if executing.get("id") == call["id"]:
-            self._record_result(sid, call, name, INTERRUPTED, ok=False)
+            await self._record_result(sid, call, name, INTERRUPTED, ok=False)
             return None, None
         try:
             args = json.loads(fn.get("arguments") or "{}")
@@ -1486,31 +1486,31 @@ class Runner:
                 raise ValueError("arguments must be a JSON object")
         except ValueError as e:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, name, f"Error: tool arguments were not a valid JSON object ({e}).",
+            await self._record_result(sid, call, name, f"Error: tool arguments were not a valid JSON object ({e}).",
                                 ok=False)
             return None, None
 
         if name == "finish":
-            return self._finish_call(s, call, args, rest), None
+            return await self._finish_call(s, call, args, rest), None
         if name == "update_notes" and isinstance(args.get("notes"), str):
-            return self._update_notes_call(sid, call, args), None
+            return await self._update_notes_call(sid, call, args), None
         if name == "update_state":
-            return self._update_state_call(sid, call, args), None
+            return await self._update_state_call(sid, call, args), None
         if name == "reset_round":
-            return self._reset_round_call(sid, call, args), None
+            return await self._reset_round_call(sid, call, args), None
 
         ws = self.workspace(s)
         schemas = {t["function"]["name"]: t for t in self.tool_schemas(s, ws)}
         if name not in schemas:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
+            await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
                                                  f"{', '.join(schemas)}.", ok=False)
             return None, None
         try:
             args = validate_args(schemas[name], args)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)
+            await self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)
             return None, None
 
         with telemetry.tool_span(name, call["id"]) as span:
@@ -1521,15 +1521,15 @@ class Runner:
             span.set({"harness.ok": executed, "harness.output_chars": len(output)})
         if executed and name in ("run_shell", "git_clone", "write_file", "generate_image") \
                 and await self._over_quota(sid):
-            self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
+            await self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
             return True, None
         return None, len(output)
 
-    def _skip_rest(self, sid: str, rest: list[dict], reason: str) -> None:
+    async def _skip_rest(self, sid: str, rest: list[dict], reason: str) -> None:
         for call in rest:
-            self._record_result(sid, call, call["function"].get("name", ""), reason, ok=False)
+            await self._record_result(sid, call, call["function"].get("name", ""), reason, ok=False)
 
-    def _finish_call(self, s: dict, call: dict, args: dict, rest: list[dict]) -> bool:
+    async def _finish_call(self, s: dict, call: dict, args: dict, rest: list[dict]) -> bool:
         """The agent called `finish`: True when the task is done, False when its quotes need fixing first."""
         sid = s["id"]
         answer = str(args.get("answer", ""))
@@ -1539,12 +1539,12 @@ class Runner:
             def quote_check() -> None:
                 self.db.update_session(sid, run=run)
                 self.bus.emit(sid, "quote_check", {"quotes": quotes})
-            self.db.write(quote_check)
-            self._record_result(sid, call, "finish", "Not finished yet. " + grounding.nudge(quotes), ok=False)
-            self._skip_rest(sid, rest, "Not run: fix the quotes first.")
+            await self.db.awrite(quote_check)
+            await self._record_result(sid, call, "finish", "Not finished yet. " + grounding.nudge(quotes), ok=False)
+            await self._skip_rest(sid, rest, "Not run: fix the quotes first.")
             return False
-        self._record_result(sid, call, "finish", "Task finished.", ok=True)
-        self._skip_rest(sid, rest, "Not run: the task was already finished.")
+        await self._record_result(sid, call, "finish", "Task finished.", ok=True)
+        await self._skip_rest(sid, rest, "Not run: the task was already finished.")
         self.set_status(sid, "done", stop_reason="finished", answer=answer)
         return True
 
@@ -1694,11 +1694,11 @@ class Runner:
                 return None
             if decision.action != ASK:
                 output = f"Error: blocked by policy ({decision.reason or 'not allowed'}). Don't retry this."
-                self._record_result(sid, call, name, output, ok=False)
+                await self._record_result(sid, call, name, output, ok=False)
                 return output
             detail, reason, error = await self._ask_details(s, name, args, ws, decision.reason)
             if error is not None:
-                self._record_result(sid, call, name, error, ok=False)
+                await self._record_result(sid, call, name, error, ok=False)
                 return error
             existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call["id"],
                         "tool": name, "args": args, "reason": reason, "detail": detail}
@@ -1713,10 +1713,10 @@ class Runner:
                 span.set({"harness.approval_status": existing["status"]})
             await self._acquire(sid)
         if existing["status"] == "approved":
-            return self._member_tool_block(s, call, name, ws)
+            return await self._member_tool_block(s, call, name, ws)
         note = f" Their note: {existing['note']}" if existing.get("note") else ""
         output = f"Error: the user denied this {name} call.{note} Don't retry it; choose another approach or explain."
-        self._record_result(sid, call, name, output, ok=False)
+        await self._record_result(sid, call, name, output, ok=False)
         return output
 
     def _decide(self, s: dict, name: str, args: dict):
@@ -1777,14 +1777,14 @@ class Runner:
         if source is not None:
             self._add_taint(s["id"], *source)
 
-    def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
+    async def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
         """An approved call still can't run for a household member without the tool; the recorded error, else None."""
         if session_user_id(s) == OWNER_USER_ID:
             return None
         if name in {t["function"]["name"] for t in self.tool_schemas(s, ws)}:
             return None
         output = "Error: this account cannot use that tool."
-        self._record_result(s["id"], call, name, output, ok=False)
+        await self._record_result(s["id"], call, name, output, ok=False)
         return output
 
     async def _ask_details(self, s: dict, name: str, args: dict, ws: Workspace,
@@ -1887,7 +1887,7 @@ class Runner:
         if len(output) > max_chars:
             output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
-        self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
+        await self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content, extra=extra, output_chars=output_chars)
         return output
 
@@ -2035,7 +2035,7 @@ class Runner:
         run[counter] = run.get(counter, 0) + 1
         self.db.update_session(sid, run=run)
 
-    def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
+    async def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
                        artifact_content: str | None = None, extra: dict | None = None,
                        output_chars: int | None = None) -> None:
         def record_result() -> None:
@@ -2065,7 +2065,7 @@ class Runner:
                 payload.update(extra)
             self.db.update_session(sid, context=context, run=run)
             self.bus.emit(sid, "tool_result", payload)
-        self.db.write(record_result)
+        await self.db.awrite(record_result)
 
     def _progress_reporter(self, sid: str, event: str, base: dict):
         """on_progress callback that sends throttled ephemeral progress events for long prompts."""
@@ -2084,7 +2084,7 @@ class Runner:
                                             "cached": state["first"]})
         return report
 
-    def _update_notes_call(self, sid: str, call: dict, args: dict) -> None:
+    async def _update_notes_call(self, sid: str, call: dict, args: dict) -> None:
         """Deprecated alias: set notes only and preserve every other state field."""
         notes = args["notes"]
 
@@ -2095,15 +2095,15 @@ class Runner:
                 self.bus.emit(sid, "state", {"state": run["state"]})
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "notes", {"notes": notes})
-        self.db.write(update_notes)
-        self._record_result(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).", ok=True)
+        await self.db.awrite(update_notes)
+        await self._record_result(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).", ok=True)
 
-    def _update_state_call(self, sid: str, call: dict, args: dict) -> None:
+    async def _update_state_call(self, sid: str, call: dict, args: dict) -> None:
         try:
             payload = agent_state.validate_state(args, self.cfg.state_max_chars)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, "update_state", f"Error: {e}", ok=False)
+            await self._record_result(sid, call, "update_state", f"Error: {e}", ok=False)
             return
 
         def update_state() -> None:
@@ -2112,26 +2112,26 @@ class Runner:
             self.bus.emit(sid, "state", {"state": payload})
             if payload["notes"]:
                 self.bus.emit(sid, "notes", {"notes": payload["notes"]})
-        self.db.write(update_state)
-        self._record_result(sid, call, "update_state",
+        await self.db.awrite(update_state)
+        await self._record_result(sid, call, "update_state",
                             f"State saved ({len(agent_state.dump_state(payload))} characters).", ok=True)
 
-    def _reset_round_call(self, sid: str, call: dict, args: dict) -> None:
+    async def _reset_round_call(self, sid: str, call: dict, args: dict) -> None:
         if args:
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, "reset_round",
+            await self._record_result(sid, call, "reset_round",
                                 "Error: reset_round takes no arguments.", ok=False)
             return
         s = self.db.get_session(sid)
         if not self.has_valid_saved_state(s):
             self._bump(sid, "invalid_tool_calls")
-            self._record_result(sid, call, "reset_round",
+            await self._record_result(sid, call, "reset_round",
                                 "Error: call update_state first so a valid saved state exists before reset_round.",
                                 ok=False)
             return
         run = {**s["run"], "pending_round_reset": True}
         self.db.update_session(sid, run=run)
-        self._record_result(sid, call, "reset_round", "Round reset scheduled.", ok=True)
+        await self._record_result(sid, call, "reset_round", "Round reset scheduled.", ok=True)
 
     @staticmethod
     def has_valid_saved_state(s: dict) -> bool:
@@ -2330,17 +2330,17 @@ class Runner:
         s = self.db.get_session(sid)
         if s["status"] in ("cancelled", "done"):
             return False
-        self._record_cancel(sid)
+        await self._record_cancel(sid)
         await self._end_run(sid)
         return True
 
-    def _record_cancel(self, sid: str) -> None:
+    async def _record_cancel(self, sid: str) -> None:
         s = self.db.get_session(sid)
         executing = (s["run"].get("executing") or {}).get("id")
         for call in unresolved_calls(s["context"]):
             text = ("Cancelled by the user while running." if call["id"] == executing
                     else "Not run: the user cancelled the task.")
-            self._record_result(sid, call, call["function"].get("name", ""), text, ok=False)
+            await self._record_result(sid, call, call["function"].get("name", ""), text, ok=False)
         for approval in self.db.pending_approvals(sid):
             self.db.decide_approval(approval["id"], "cancelled")
         self.set_status(sid, "cancelled", stop_reason="cancelled")

@@ -367,8 +367,8 @@ def test_compaction_summarizes_long_context(tmp_path):
         # Stand-in tool so the test doesn't need Docker: unknown tools return an error of known size.
         orig = m.runner._record_result
 
-        def padded(sid, c, name, output, ok, seconds=0.0):
-            orig(sid, c, name, output + big, ok, seconds)
+        async def padded(sid, c, name, output, ok, seconds=0.0):
+            await orig(sid, c, name, output + big, ok, seconds)
         m.runner._record_result = padded
         await m.start()
         s = await wait_status(m, m.create("long task")["id"], "done", timeout=20)

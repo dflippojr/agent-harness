@@ -716,9 +716,9 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         recorded = []
         original = runner._record_cancel
 
-        def wrapped(sid):
+        async def wrapped(sid):
             recorded.append(sid)
-            original(sid)
+            await original(sid)
 
         runner._record_cancel = wrapped
         return recorded
