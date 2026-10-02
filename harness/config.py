@@ -290,6 +290,22 @@ class RepoMapConfig:
 
 
 @dataclass
+class CanaryConfig:
+    """Nightly agent regression canary (#265, docs/canary-evals.md): a pinned task set through the production path."""
+    enabled: bool = False
+    at: str = "03:00"                    # tower-local time of the one nightly run
+    repeats: int = 2
+    total_cap_seconds: int = 2700        # remaining tasks are recorded as `timeout` past this
+    start_wait_seconds: int = 600        # how long a run waits for the GPU to be free before it gives up for the night
+    baseline_runs: int = 5
+    min_prior_runs: int = 3
+    drop_points: float = 15.0
+    metrics_limit: int = 30
+    suite: str = "bakeoff/canary.yaml"
+    fixture_dir: str = "D:/Agents/harness/web-fixture"  # the recorded web for the web tasks (bakeoff/web_suite.py)
+
+
+@dataclass
 class EndpointConfig:
     """OpenAI/Anthropic-compatible inference endpoint for other tools (endpoint.py)."""
     enabled: bool = False
@@ -458,6 +474,7 @@ class Config:
     mask_min_chars: int = 2000
     state_max_chars: int = 8000
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
+    canary: CanaryConfig = field(default_factory=CanaryConfig)
     tool_output: ToolOutputConfig = field(default_factory=ToolOutputConfig)
 
     @property
@@ -568,6 +585,35 @@ def _load_google_signin(raw) -> GoogleSigninConfig:
     raw = dict(raw or {})
     raw["admitted_logins"] = [str(x).strip() for x in (raw.get("admitted_logins") or []) if str(x).strip()]
     return GoogleSigninConfig(**raw)
+
+
+def _load_canary(raw) -> CanaryConfig:
+    """`at` comes back as "HH:MM"; anything the nightly can't use is a config error here, not a dead loop at night."""
+    from .canary import parse_at
+    raw = dict(raw or {})
+    at = raw.get("at", CanaryConfig.at)
+    if isinstance(at, int) and not isinstance(at, bool):  # YAML 1.1 reads an unquoted 3:05 as 3 * 60 + 5
+        at = f"{at // 60}:{at % 60}" if 0 <= at < 24 * 60 else str(at)
+    hour, minute = parse_at(at)
+    raw["at"] = f"{hour:02d}:{minute:02d}"
+    for key, kind, low in (("repeats", int, 1), ("total_cap_seconds", int, 1), ("start_wait_seconds", int, 0),
+                           ("baseline_runs", int, 1), ("min_prior_runs", int, 1), ("drop_points", float, 1),
+                           ("metrics_limit", int, 1)):
+        value = raw.get(key, getattr(CanaryConfig, key))
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            raw[key] = kind(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"canary.{key} must be a number, got {value!r}") from None
+        if raw[key] < low:
+            raise ValueError(f"canary.{key} must be at least {low}, got {value!r}")
+    if raw["min_prior_runs"] > raw["baseline_runs"]:
+        raise ValueError("canary.min_prior_runs can't be more than canary.baseline_runs (no run would ever be judged)")
+    suite = raw.get("suite", CanaryConfig.suite)
+    if raw.get("enabled") and suite and not (ROOT / suite).is_file():
+        raise ValueError(f"canary.suite {suite!r} is not a file")
+    return CanaryConfig(**raw)
 
 
 def _load_guests(raw) -> list[GuestAccess]:
@@ -839,6 +885,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         images=images,
         search=search,
         repo_map=RepoMapConfig(**(raw.get("repo_map") or {})),
+        canary=_load_canary(raw.get("canary")),
         jobs=jobs,
         skills=skills,
         remote_control=remote_control,

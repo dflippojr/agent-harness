@@ -24,12 +24,28 @@ class GpuScheduler:
         self._change_waiters: set[asyncio.Future] = set()
         self._on_change = on_change
         self._eligible = eligible
+        self.low_priority: set[str] = set()  # background sessions (the canary, #265): a real session never waits behind one
 
     def positions(self) -> dict[str, int]:
         """Queue position per session: the holder is at 0, the next waiter at 1, and so on."""
         out = {self.holder: 0} if self.holder else {}
         out.update({sid: i + 1 for i, sid in enumerate(self._waiters)})
         return out
+
+    def real_waiting(self) -> bool:
+        """True while a session that isn't low priority is queued and would be granted the slot. A waiter that
+        isn't eligible (a member at their running cap) can't use the slot, so the canary doesn't step aside for it."""
+        return any(self._real_grantable(sid, fut) for sid, fut in self._waiters.items())
+
+    def _grantable(self, sid: str) -> bool:
+        return self._eligible is None or self._eligible(sid)
+
+    def _real_grantable(self, sid: str, fut: asyncio.Future) -> bool:
+        return sid not in self.low_priority and not fut.done() and self._grantable(sid)
+
+    def idle(self) -> bool:
+        """Slot free, nobody queued, queue open."""
+        return self.holder is None and not self._waiters and not self.paused
 
     def _changed(self) -> None:
         for waiter in self._change_waiters:
@@ -98,8 +114,11 @@ class GpuScheduler:
             nxt, fut = self._waiters.popitem(last=False)
             if fut.done():
                 continue
-            if self._eligible is not None and not self._eligible(nxt):
+            if not self._grantable(nxt):
                 skipped[nxt] = fut
+                continue
+            if nxt in self.low_priority and any(self._real_grantable(w, f) for w, f in self._waiters.items()):
+                skipped[nxt] = fut  # a real session that can run is queued behind it: it goes first
                 continue
             self.holder = nxt
             fut.set_result(None)
