@@ -110,6 +110,8 @@ class Manager:
         self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
         from .member_github import MemberGitHub
         self.github_auth = MemberGitHub(cfg, self.db)
+        from .google_signin import GoogleSignin
+        self.google_signin = GoogleSignin(self)
         self.runner.github_auth = self.github_auth
         from .apps import AppToolBroker
         self.app_tools = AppToolBroker(self.db, self.bus)
@@ -1324,6 +1326,7 @@ class Manager:
         """
         self.revoke_member_streams(user_id)
         self.github_auth.member_disabled(user_id)
+        self.google_signin.member_disabled(user_id)
         from .runner import ACTIVE
         waiting = []
         for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):

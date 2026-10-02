@@ -17,6 +17,7 @@
 //   #/images/<id>/edit       masked inpainting / photo edit
 //   #/images/<id>/full       in-app fullscreen viewer
 //   #/jobs[/new|/<id>]       scheduled jobs
+//   #/signin[/failed]        Google sign-in for a household member on a Tailscale-admitted device (issue #64)
 
 import { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } from "./client.mjs";
 
@@ -178,11 +179,65 @@ async function currentUser() {
   const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
   try {
     currentMe = await api("/me", { surface: bootstrap });
-  } catch (_) {
+  } catch (e) {
+    if (e.code === "sign_in_required") { currentMe = { role: "signin" }; return currentMe; }
     try { currentMe = await api("/me", { surface: "app" }); }
     catch (_) { currentMe = { role: "guest" }; }
   }
   return currentMe;
+}
+
+// Issue #64: Google sign-in state for bundled, same-origin Web only. The CSRF value stays in memory.
+let webAuth = null;
+async function loadWebAuth() {
+  webAuth = null;
+  agentHarnessWeb.csrf = "";
+  if (agentHarnessWeb.independent || agentHarnessWeb.token) return null;
+  try { webAuth = await agentHarnessWeb.request("/auth/session", { surface: "app" }); }
+  catch (_) { return null; }
+  agentHarnessWeb.csrf = webAuth.csrf || "";
+  return webAuth;
+}
+function needsSignIn() { return currentMe.role === "signin"; }
+
+const GOOGLE_FAILED = "Google sign-in did not complete. Try again, or ask the owner for a new link code.";
+
+async function startGoogle(mode, code) {
+  const body = { mode };
+  if (code) body.code = code;
+  const started = await api("/auth/google/start", { method: "POST", surface: "app", body });
+  location.assign(started.authorization_url);
+}
+
+function linkCodeForm(label) {
+  const input = h("input", { type: "password", autocomplete: "off", spellcheck: "false",
+    placeholder: "Link code from the owner", required: true });
+  const submit = h("button", { class: "btn", type: "submit" }, label);
+  return h("form", { onsubmit: async (e) => {
+    e.preventDefault();
+    submit.disabled = true;
+    try { await startGoogle("invite", input.value.trim()); }
+    catch (err) { toast(err.message, 6000); submit.disabled = false; }
+    input.value = "";
+  } }, input, h("div", { class: "row", style: "margin-top:8px" }, submit));
+}
+
+function viewSignIn(failed) {
+  $title.textContent = "Sign in";
+  const available = !!webAuth?.google?.available;
+  const button = h("button", { class: "btn primary", type: "button", onclick: async () => {
+    button.disabled = true;
+    try { await startGoogle("signin"); } catch (e) { toast(e.message, 6000); button.disabled = false; }
+  } }, "Sign in with Google");
+  fill($app, h("div", { class: "card" },
+    h("h3", {}, "Household sign-in"),
+    failed ? h("p", { class: "note bad" }, GOOGLE_FAILED) : null,
+    available ? h("p", { class: "muted small" }, webAuth.google.explanation) : null,
+    available ? h("div", { class: "row" }, button)
+      : h("p", { class: "muted small" }, "Google sign-in is not available on this server. Ask the owner."),
+    available ? h("p", { class: "muted small", style: "margin-top:16px" },
+      "First time on this device? Enter the one-time link code the owner gave you.") : null,
+    available ? linkCodeForm("Link with Google") : null));
 }
 function isGuest() { return currentMe.role === "guest"; }
 function isMember() { return currentMe.role === "member"; }
@@ -691,6 +746,10 @@ async function routeView(parts) {
   else if (parts[0] === "images") await routeImages(parts);
   else if (parts[0] === "jobs") await (parts[1] ? viewJob(parts[1]) : viewJobs());
   else if (parts[0] === "s" && parts[1]) await viewSession(parts[1], parts[2] || "transcript", parts[3]);
+  else if (parts[0] === "signin" && parts[1] === "failed") {
+    toast(GOOGLE_FAILED, 6000);
+    go(isMember() ? "#/profile/account" : "#/", true);
+  }
   else go("#/", true);
 }
 
@@ -703,9 +762,16 @@ async function route() {
   document.querySelector(".composer")?.remove();
   $fabHost.hidden = true;
   document.querySelectorAll(".jump").forEach((el) => el.remove());
+  await loadWebAuth();
   await currentUser();
   paintGuestChrome();
   const parts = hashParts();
+  if (needsSignIn()) {
+    $back.hidden = true;
+    viewSignIn(parts[0] === "signin" && parts[1] === "failed");
+    repaintPage();
+    return;
+  }
   const images = parts[0] === "images";
   if (!isGuest() && !images && route.onImages && route.imageWarmupStarted) {
     route.imageWarmupStarted = false;
@@ -3468,6 +3534,7 @@ function accountCard(me, profile) {
       isGuest() ? h("p", { class: "muted small" }, "Demo access — look around only.") : null,
       isMember() && usage.disk_note ? h("p", { class: "muted small" }, usage.disk_note) : null,
       isMember() ? h("p", { class: "muted small" }, `${usage.running || 0} running · ${usage.queued || 0} queued`) : null),
+    isMember() ? googleSignInCard() : null,
     isMember() ? githubConnectionCard() : null,
     h("div", { class: "card" },
       h("h3", {}, "Connection"),
@@ -3475,6 +3542,51 @@ function accountCard(me, profile) {
       h("p", { class: "muted small" }, live
         ? `Agent Harness Web is connected to Agent Harness Server at ${me.public_url || location.origin}.`
         : `Agent Harness Web is not receiving the live stream from Agent Harness Server at ${me.public_url || location.origin}.`)));
+}
+
+// Issue #64: this member's linked Google identity, Web sessions, logout, and unlink. Never shows tokens or `sub`.
+function googleSignInCard() {
+  const card = h("div", { class: "card" }, h("h3", {}, "Google sign-in"), h("p", { class: "muted small" }, "Loading…"));
+  const render = async () => {
+    let view;
+    try { view = await api("/me/google", { surface: "app" }); }
+    catch (e) { fill(card, h("h3", {}, "Google sign-in"), h("p", { class: "note bad" }, e.message)); return; }
+    if (!view.linked && !view.available) { card.remove(); return; }
+    const logout = h("button", { class: "btn small", type: "button", onclick: async () => {
+      try { await api("/auth/logout", { method: "POST", surface: "app" }); }
+      catch (e) { toast(e.message, 6000); return; }
+      agentHarnessWeb.csrf = "";
+      go("#/", true);
+      await route();
+    } }, "Log out");
+    const unlink = h("button", { class: "btn small danger", type: "button", onclick: async () => {
+      const warning = view.unlink_removes_this_device
+        ? " You signed in here with Google, so this device will no longer open your account. You can still use a device signed in to your own Tailscale login, or ask the owner for a new link code."
+        : "";
+      if (!confirm(`Unlink Google from your household account?${warning} Your data stays.`)) return;
+      try { await api("/me/google", { method: "DELETE", surface: "app", body: { confirm: true } }); }
+      catch (e) { toast(e.message, 6000); return; }
+      toast("Google unlinked");
+      await route();
+    } }, "Unlink Google");
+    const link = h("button", { class: "btn small", type: "button", onclick: async () => {
+      link.disabled = true;
+      try { await startGoogle("link"); } catch (e) { toast(e.message, 6000); link.disabled = false; }
+    } }, "Link Google account");
+    fill(card, h("h3", {}, "Google sign-in"),
+      h("p", { class: "muted small" }, view.explanation),
+      view.linked ? h("p", {}, view.email) : h("p", { class: "muted small" }, "No Google account linked."),
+      view.linked ? h("p", { class: "muted small" }, `Linked ${ago(view.linked_at)}`
+        + (view.last_sign_in_at ? ` · last sign-in ${ago(view.last_sign_in_at)}` : "")
+        + ` · ${view.active_web_sessions} active Web session${view.active_web_sessions === 1 ? "" : "s"}`) : null,
+      view.linked ? h("p", { class: "muted small" }, "To use a different Google account, unlink first, then link again.") : null,
+      h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
+        webAuth?.signed_in ? logout : null,
+        view.linked ? unlink : null,
+        !view.linked && view.available ? link : null));
+  };
+  void render();
+  return card;
 }
 
 const GITHUB_DEVICE_URL = "https://github.com/login/device";
@@ -3586,9 +3698,11 @@ async function accountsCard() {
   const render = async () => {
     let rows = [];
     let github = null;
+    let google = null;
     try {
-      [rows, github] = await Promise.all([api("/accounts", { surface: "admin" }),
-        api("/github-member-auth", { surface: "admin" }).catch(() => null)]);
+      [rows, github, google] = await Promise.all([api("/accounts", { surface: "admin" }),
+        api("/github-member-auth", { surface: "admin" }).catch(() => null),
+        api("/google-signin", { surface: "admin" }).catch(() => null)]);
     } catch (e) { fill(wrap, h("p", { class: "note bad" }, e.message)); return; }
     const githubState = Object.fromEntries((github?.members || []).map((row) => [row.user_id, row]));
     const login = h("input", { type: "email", placeholder: "member@example.com", required: true });
@@ -3608,6 +3722,7 @@ async function accountsCard() {
         } catch (err) { toast(err.message, 5000); create.disabled = false; }
       } }, h("h3", {}, "New member"), login, name, h("div", { class: "row", style: "margin-top:12px" }, create)),
       githubOwnerCard(github, render),
+      googleOwnerCard(google),
       rows.length ? rows.map((a) => {
         const gh = githubState[a.user_id];
         const resetGithub = async () => {
@@ -3661,11 +3776,74 @@ async function accountsCard() {
               a.enabled ? `Disable ${a.display_name}? Running work will be cancelled.` : `Re-enable ${a.display_name}?`,
             ) }, a.enabled ? "Disable" : "Re-enable"),
             gh && github?.configured && gh.status !== "disconnected"
-              ? h("button", { class: "btn small", type: "button", onclick: resetGithub }, "Erase GitHub credential") : null));
+              ? h("button", { class: "btn small", type: "button", onclick: resetGithub }, "Erase GitHub credential") : null,
+            ...googleMemberButtons(a, google, render, wrap)),
+          googleMemberLine(a, google));
       }) : h("p", { class: "muted small" }, "No household members yet."));
   };
   await render();
   return wrap;
+}
+
+// Issue #64: coarse Google sign-in state for the owner. Never tokens, `sub`, claims, or invitation hashes.
+function googleOwnerCard(view) {
+  if (!view || !view.enabled) return null;
+  const problems = view.preflight?.problems || [];
+  return h("div", { class: "card" },
+    h("h3", {}, "Google sign-in"),
+    h("p", { class: "muted small" }, view.ready
+      ? "Ready. Members on admitted devices can sign in with their linked Google account."
+      : "Not ready. Google sign-in stays off until these are fixed:"),
+    problems.length ? h("ul", { class: "muted small" }, problems.map((p) => h("li", {}, p))) : null,
+    view.redirect_uri ? h("p", { class: "muted small" }, "Authorized redirect URI for Google Cloud Console:") : null,
+    view.redirect_uri ? copyBox(view.redirect_uri) : null);
+}
+
+function googleMemberLine(a, google) {
+  const g = a.google;
+  if (!g || !google?.enabled) return null;
+  const parts = [g.linked ? `Google: ${g.email}` : "Google: not linked"];
+  if (g.last_sign_in_at) parts.push(`last sign-in ${ago(g.last_sign_in_at)}`);
+  if (g.active_web_sessions) parts.push(`${g.active_web_sessions} Web session${g.active_web_sessions === 1 ? "" : "s"}`);
+  if (g.invitation_expires_at) parts.push(`link code pending until ${new Date(g.invitation_expires_at * 1000).toLocaleTimeString()}`);
+  return h("p", { class: "muted small" }, parts.join(" · "));
+}
+
+function googleMemberButtons(a, google, rerender, wrap) {
+  const g = a.google;
+  if (!g || !google?.enabled) return [];
+  const call = async (path, method, body, confirmText, done) => {
+    if (confirmText && !confirm(confirmText)) return;
+    try {
+      const out = await api(`/accounts/${a.user_id}/google${path}`, { method, surface: "admin", body });
+      if (done) done(out);
+      else await rerender();
+    } catch (err) { toast(err.message, 6000); }
+  };
+  // Shown once, in this page only: never in a URL, QR code, or the audit log.
+  const showCode = (out) => fill(wrap, h("div", { class: "card" },
+    h("h3", {}, `Link code for ${a.display_name}`),
+    h("p", { class: "muted small" }, `Give this to ${a.display_name} privately. It works once, until ${new Date(out.expires_at * 1000).toLocaleTimeString()}, and is not shown again.`),
+    copyBox(out.code),
+    h("div", { class: "row" }, h("button", { class: "btn small", type: "button", onclick: () => rerender() }, "Done"))));
+  const buttons = [];
+  if (!g.linked && a.enabled) {
+    buttons.push(h("button", { class: "btn small", type: "button", onclick: () => call("/invitation", "POST", undefined,
+      g.invitation_expires_at ? "Replace the pending link code? The old code stops working." : null, showCode) },
+    "Google link code"));
+  }
+  if (g.invitation_expires_at) {
+    buttons.push(h("button", { class: "btn small", type: "button", onclick: () => call("/invitation", "DELETE") }, "Cancel link code"));
+  }
+  if (g.active_web_sessions) {
+    buttons.push(h("button", { class: "btn small", type: "button", onclick: () => call("/revoke-sessions", "POST", undefined,
+      `Sign ${a.display_name} out of every Google Web session?`) }, "Revoke Web sessions"));
+  }
+  if (g.linked) {
+    buttons.push(h("button", { class: "btn small", type: "button", onclick: () => call("", "DELETE", { confirm: true },
+      `Unlink Google from ${a.display_name}? Their data and Tailscale login stay; their Google Web sessions end.`) }, "Unlink Google"));
+  }
+  return buttons;
 }
 
 const ACTION_TABS = [

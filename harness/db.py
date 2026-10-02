@@ -357,6 +357,31 @@ CREATE TABLE IF NOT EXISTS github_connections (
     last_error TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL
 );
+-- Issue #64: a household member's linked Google identity. `sub` is the identity key; email is display metadata.
+CREATE TABLE IF NOT EXISTS google_identities (
+    user_id TEXT PRIMARY KEY,
+    sub TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL DEFAULT '',
+    linked_at REAL NOT NULL,
+    last_sign_in_at REAL
+);
+-- At most one pending owner-created link invitation per member. Only the code's SHA-256 is stored.
+CREATE TABLE IF NOT EXISTS google_link_invitations (
+    user_id TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+-- Agent Harness Web member sessions. Only the cookie value's SHA-256 is stored.
+CREATE TABLE IF NOT EXISTS web_sessions (
+    id_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    last_seen_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    revoked_at REAL
+);
+CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(user_id);
 """
 
 AND_OWNER = " AND owner_id = ?"
@@ -1690,3 +1715,114 @@ class Database:
             return self.conn.execute(
                 "DELETE FROM member_projects WHERE user_id = ? AND slug = ?", (user_id, slug)
             ).rowcount == 1
+
+    # Issue #64: Google identities, link invitations, and Agent Harness Web sessions (hashes only).
+    def google_identity(self, user_id: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM google_identities WHERE user_id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def google_identity_by_sub(self, sub: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM google_identities WHERE sub = ?", (sub,)).fetchone()
+        return dict(row) if row else None
+
+    def link_google_identity(self, user_id: str, sub: str, email: str, now: float) -> bool:
+        """Insert the link unless the member or the `sub` is already linked. Callers hold `tx()` when combining."""
+        with self.lock:
+            try:
+                self.conn.execute(
+                    "INSERT INTO google_identities (user_id, sub, email, linked_at, last_sign_in_at) "
+                    "VALUES (?, ?, ?, ?, ?)", (user_id, sub, email, now, now))
+            except sqlite3.IntegrityError:
+                return False
+        return True
+
+    def unlink_google_identity(self, user_id: str) -> bool:
+        with self.lock:
+            return self.conn.execute("DELETE FROM google_identities WHERE user_id = ?", (user_id,)).rowcount == 1
+
+    def touch_google_sign_in(self, user_id: str, email: str, now: float) -> None:
+        with self.lock:
+            self.conn.execute("UPDATE google_identities SET email = ?, last_sign_in_at = ? WHERE user_id = ?",
+                              (email, now, user_id))
+
+    def put_google_invitation(self, user_id: str, code_hash: str, now: float, expires_at: float) -> None:
+        """Replace any pending invitation for this member."""
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO google_link_invitations (user_id, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET code_hash = excluded.code_hash, "
+                "created_at = excluded.created_at, expires_at = excluded.expires_at",
+                (user_id, code_hash, now, expires_at))
+
+    def google_invitation(self, user_id: str, now: float) -> dict | None:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT user_id, created_at, expires_at FROM google_link_invitations "
+                "WHERE user_id = ? AND expires_at > ?", (user_id, now)).fetchone()
+        return dict(row) if row else None
+
+    def google_invitation_user(self, code_hash: str, now: float) -> str | None:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT user_id FROM google_link_invitations WHERE code_hash = ? AND expires_at > ?",
+                (code_hash, now)).fetchone()
+        return row["user_id"] if row else None
+
+    def consume_google_invitation(self, user_id: str, code_hash: str, now: float) -> bool:
+        with self.lock:
+            return self.conn.execute(
+                "DELETE FROM google_link_invitations WHERE user_id = ? AND code_hash = ? AND expires_at > ?",
+                (user_id, code_hash, now)).rowcount == 1
+
+    def cancel_google_invitation(self, user_id: str) -> bool:
+        with self.lock:
+            return self.conn.execute(
+                "DELETE FROM google_link_invitations WHERE user_id = ?", (user_id,)).rowcount == 1
+
+    def insert_web_session(self, id_hash: str, user_id: str, now: float, expires_at: float) -> None:
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO web_sessions (id_hash, user_id, created_at, last_seen_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)", (id_hash, user_id, now, now, expires_at))
+
+    def web_session(self, id_hash: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM web_sessions WHERE id_hash = ?", (id_hash,)).fetchone()
+        return dict(row) if row else None
+
+    def touch_web_session(self, id_hash: str, now: float) -> None:
+        with self.lock:
+            self.conn.execute("UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ? AND revoked_at IS NULL",
+                              (now, id_hash))
+
+    def revoke_web_session(self, id_hash: str, now: float) -> str | None:
+        """Revoke one session; returns its member `user_id` when it was active."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT user_id FROM web_sessions WHERE id_hash = ? AND revoked_at IS NULL", (id_hash,)).fetchone()
+            if row is None:
+                return None
+            self.conn.execute("UPDATE web_sessions SET revoked_at = ? WHERE id_hash = ?", (now, id_hash))
+        return row["user_id"]
+
+    def revoke_web_sessions(self, user_id: str, now: float) -> int:
+        with self.lock:
+            return self.conn.execute(
+                "UPDATE web_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id)).rowcount
+
+    def count_web_sessions(self, user_id: str, now: float, idle_seconds: float) -> int:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM web_sessions WHERE user_id = ? AND revoked_at IS NULL "
+                "AND expires_at > ? AND last_seen_at > ?", (user_id, now, now - idle_seconds)).fetchone()
+        return int(row["n"])
+
+    def purge_web_sessions(self, before: float) -> int:
+        """Drop rows that expired or were revoked before `before`."""
+        with self.lock:
+            return self.conn.execute(
+                "DELETE FROM web_sessions WHERE expires_at < ? OR (revoked_at IS NOT NULL AND revoked_at < ?)",
+                (before, before)).rowcount

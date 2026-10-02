@@ -217,6 +217,21 @@ class GitHubMemberAuthConfig:
 
 
 @dataclass
+class GoogleSigninConfig:
+    """`google_signin` in harness.yaml (issue #64): Google OpenID Connect for pre-provisioned household members.
+
+    Off by default. Local file configuration only: the client secret stays in an owner-managed file and is never
+    copied into SQLite, settings APIs, or the browser. `admitted_logins` are tailnet logins (for example a shared
+    household device) that Tailscale admits only to use a linked Google member session; they hold no role of their
+    own and must not be an owner, guest, or member login.
+    """
+    enabled: bool = False
+    client_id: str = ""             # non-secret OAuth client ID (*.apps.googleusercontent.com)
+    client_secret_file: str = ""    # absolute path; plain secret or Google's downloaded client JSON
+    admitted_logins: list[str] = field(default_factory=list)
+
+
+@dataclass
 class RemoteControlConfig:
     """`remote_control` in harness.yaml."""
     enabled: bool = False
@@ -409,6 +424,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     github_member_auth: GitHubMemberAuthConfig = field(default_factory=GitHubMemberAuthConfig)
+    google_signin: GoogleSigninConfig = field(default_factory=GoogleSigninConfig)
     endpoint: EndpointConfig = field(default_factory=EndpointConfig)
     images: ImagesConfig = field(default_factory=ImagesConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
@@ -528,6 +544,12 @@ def add_project(cfg: Config, project: Project) -> Project:
         tmp.replace(path)
         cfg.projects[project.name] = project
     return project
+
+
+def _load_google_signin(raw) -> GoogleSigninConfig:
+    raw = dict(raw or {})
+    raw["admitted_logins"] = [str(x).strip() for x in (raw.get("admitted_logins") or []) if str(x).strip()]
+    return GoogleSigninConfig(**raw)
 
 
 def _load_guests(raw) -> list[GuestAccess]:
@@ -793,6 +815,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         web=web,
         github=GitHubConfig(**(raw.get("github") or {})),
         github_member_auth=GitHubMemberAuthConfig(**(raw.get("github_member_auth") or {})),
+        google_signin=_load_google_signin(raw.get("google_signin")),
         endpoint=endpoint,
         images=images,
         search=search,

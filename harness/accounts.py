@@ -78,6 +78,9 @@ class AccountService:
         if any(g.login == login for g in self._cfg().guests):
             self._db().insert_audit(actor_id, "", "create", "denied", "login is a guest")
             raise HarnessError(400, ONE_ROLE_ONLY)
+        if login in self._cfg().google_signin.admitted_logins:
+            self._db().insert_audit(actor_id, "", "create", "denied", "login is a Google-admitted device")
+            raise HarnessError(400, ONE_ROLE_ONLY)
         if self._db().account_by_login(login) is not None:
             self._db().insert_audit(actor_id, "", "create", "denied", "login already a member")
             raise HarnessError(409, "a household account already uses that login")
@@ -118,7 +121,8 @@ class AccountService:
         login = validate_login(login)
         if login == account["login"]:
             return self.public_account(account)
-        if login in self._cfg().allowed_logins or any(g.login == login for g in self._cfg().guests):
+        if (login in self._cfg().allowed_logins or any(g.login == login for g in self._cfg().guests)
+                or login in self._cfg().google_signin.admitted_logins):
             self._db().insert_audit(actor_id, user_id, "rebind", "denied", "login occupies another role")
             raise HarnessError(400, ONE_ROLE_ONLY)
         existing = self._db().account_by_login(login)
@@ -127,6 +131,7 @@ class AccountService:
             raise HarnessError(409, "a household account already uses that login")
         self._db().update_account(user_id, login=login)
         self._db().insert_audit(actor_id, user_id, "rebind", "ok")
+        self.m.google_signin.member_rebound(user_id)
         self.m.revoke_member_streams(user_id)
         return self.public_account(self._db().account_by_id(user_id))
 
@@ -193,6 +198,7 @@ class AccountService:
             "last_activity_at": row.get("last_activity_at"),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
+            "google": self.m.google_signin.owner_member_view(user_id),
         }
 
     def list_public(self) -> list[dict]:

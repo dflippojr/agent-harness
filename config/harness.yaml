@@ -31,6 +31,14 @@ provider_secret_files: {}
 # github_member_auth:
 #   gcm_path: C:/Program Files/Git/mingw64/bin/git-credential-manager.exe
 #   credential_store: wincredman
+# Household members' Google sign-in for bundled Agent Harness Web (docs/google-signin.md). Off by default. Requires
+# public_url on the HTTPS Tailscale Serve origin and allowed_logins. The secret stays in an owner-only file outside
+# the repo. admitted_logins are shared-device tailnet logins with no role of their own.
+# google_signin:
+#   enabled: true
+#   client_id: 1234567890-abc.apps.googleusercontent.com
+#   client_secret_file: D:/Agents/harness/secrets/google-client.json
+#   admitted_logins: [kitchen-tablet@example.com]
 # provider_secret_files:
 #   invoice-automation: D:/Agents/harness/secrets/invoice-automation.key
 

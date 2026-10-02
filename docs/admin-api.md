@@ -85,6 +85,13 @@ with `{"enabled": true|false}` switches the feature (default off; disabling stop
 credentialed Git without erasing). `POST /api/admin/v1/accounts/{user_id}/github-connection/reset` with
 `{"confirm": true}` erases that member's stored GitHub credential. The owner cannot connect, test, or use it.
 
+Member Google sign-in ([`google-signin.md`](google-signin.md)): `GET /api/admin/v1/google-signin` returns readiness,
+the last preflight, and the exact redirect URI (`?refresh=true` reruns preflight). Per member,
+`POST`/`DELETE /api/admin/v1/accounts/{user_id}/google/invitation` creates (shown once) or cancels a one-time link
+code, `POST .../google/revoke-sessions` ends every Google Web session, and `DELETE .../google` with
+`{"confirm": true}` unlinks. Account rows carry a coarse `google` object; never the `sub`, claims, or tokens. The
+owner cannot start a Google authorization as a member.
+
 `GET /api/admin/v1/accounts` returns aggregate metadata only: display name, login, account-id hint, enabled flag,
 disk used/quota, running/queued counts, last activity, and limits. It never includes prompts, answers, filenames,
 repo URLs, diffs, or transcript excerpts. `GET /api/admin/v1/accounts/audit` is owner-only (365-day retention) and
