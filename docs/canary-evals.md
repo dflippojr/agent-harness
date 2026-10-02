@@ -56,10 +56,21 @@ takes the daemon down.
   stopping a session that already ended is never an error. An attempt still waiting for the GPU when the run reaches
   its cap is cancelled and recorded as `suspended` (excluded, never a fail). An attempt's `seconds` (and the row's
   `wall_seconds`) are that GPU time.
-- A run with web tasks refuses to start if `canary.fixture_dir` has no `manifest.json`: replaying an empty web
-  would fail every web task and look like a regression. The row is left `blocked`.
-- Once a SHA's row is claimed it is always finished, whatever goes wrong: a crash or shutdown in the first run
-  leaves it `blocked`; one during the confirmation rerun keeps the first run's results with no alert.
+- A missing web fixture or suite file is a configuration problem, not a result (#316). With `canary.enabled: true`,
+  the config refuses to load if `canary.suite` is not a file, or if the suite has web tasks and `canary.fixture_dir`
+  has no `manifest.json`. If either goes missing after the daemon started, the run stops before any session (an
+  empty web replay would fail every web task and look like a regression) and the row is finished `skipped`, with
+  the reason in its `note` and one error in the log. That SHA is not retried; fix the fixture and the next deployed
+  commit runs normally.
+- Once a SHA's row is claimed it is always finished, whatever goes wrong: a shutdown in the first run leaves it
+  `blocked`; one during the confirmation rerun keeps the first run's results with no alert.
+- A crash or `kill -9` mid-canary (#316): canary sessions are never resumed as normal sessions. Their low-priority
+  mark and recorded web live only in memory, so a resumed one would hold the GPU at full priority and search the
+  live web. At start the daemon cancels every queued or running session in the `canary-hard` / `canary-web`
+  projects (whether or not the canary is still enabled), and finishes each row the crash left `running`. A row
+  whose first run had completed (the crash came during the confirmation rerun) is finished `complete` with the
+  first run's results and no alert; otherwise it is `blocked`, so the next slot may retry once as above. The
+  interrupted attempt itself is not evidence. Real sessions resume as before.
 
 ## Yielding
 
@@ -78,7 +89,8 @@ The canary session is registered as low priority (`GpuScheduler.low_priority`).
 ## Storage and metrics
 
 `canary_results`, one row per SHA: `sha, started_at, finished_at, status, tries, outcomes (JSON per attempt),
-passes, attempts, pass_rate, turns, prompt_tokens, wall_seconds, baseline_sha, baseline_rate, alerted`.
+passes, attempts, pass_rate, turns, prompt_tokens, wall_seconds, baseline_sha, baseline_rate, alerted, note`
+(`note`: why a run was skipped or finished at a restart, migration 0048).
 
 `/metrics` exports `harness_canary_pass_rate`, `harness_canary_turns`, `harness_canary_prompt_tokens` and
 `harness_canary_wall_seconds`, each labelled `sha` (first 8 characters), for the latest 30 results only.
