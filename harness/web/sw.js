@@ -1,6 +1,6 @@
 // Service worker: caches the app shell so the app opens instantly (and shows a clear offline state).
 // API responses are never cached: session state must always be live.
-const BUILD_ID = "2026.09.17.1";
+const BUILD_ID = "2026.10.02.1";
 const SHELL = `harness-shell-${BUILD_ID}`;
 const ASSETS = ["/", "/style.css", "/app.js", "/client.mjs", "/icon-192.png", "/manifest.webmanifest"];
 

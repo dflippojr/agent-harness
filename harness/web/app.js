@@ -2579,9 +2579,11 @@ function secretScanCard(sid, scan, state, canComment, render) {
   const askFix = async (e) => {
     e.currentTarget.disabled = true;
     try {
-      const made = await api(`/sessions/${sid}/secret-findings/fix`, { method: "POST" });
-      state.comments.push(...made);
-      toast(made.length ? "Drafted a comment per finding; send them below." : "Those findings already have drafts.");
+      // Drafts for lines in the diff; a history-rewrite request for values only in earlier commits; commits
+      // already on the remote can only be dismissed. The server's message says which happened.
+      const result = await api(`/sessions/${sid}/secret-findings/fix`, { method: "POST" });
+      state.comments.push(...result.drafts);
+      toast(result.message, 6000);
     } catch (err) { toast(err.message, 6000); }
     render();
   };

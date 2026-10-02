@@ -283,8 +283,17 @@ finding; `merge` squashes, so it ignores findings with a `"commit"` (values no l
 fixed (`python -m harness.doctor` reports it; the daemon fetches the pinned release at start).
 
 - `POST /api/v1/sessions/{id}/secret-findings/fix` adds one draft review comment per open finding in the diff, naming
-  the rule and line and never the value (a finding with a `"commit"` has no diff line, so it gets no draft). It returns the drafts. Send them with `review-comments/send`. Same access as line
-  comments: the owner, or a member in their own session, never an app token.
+  the rule and line and never the value. Send them with `review-comments/send`. A finding with a `"commit"` has no
+  diff line: instead the session gets a message at once (a follow-up turn, or the inbox of a running one) naming each
+  such commit's short SHA, file, line and rule, asking the agent to rewrite only the branch's own commits
+  (`base..HEAD`, non-interactively, keeping the rest of each commit's changes) so that no commit contains the value,
+  and not to push. The next push or merge scans again as usual, so Push stays blocked until no commit in the range
+  has it. A commit at or before the remote branch's tip (its remote-tracking ref, or a head the harness pushed) is
+  never rewritten, since that would need a force-push: dismiss that finding instead. The response is
+  `{"drafts": [...], "already_drafted": n, "rewrite": [findings], "pushed": [findings], "message": "..."}`, where
+  `rewrite` lists the findings the agent was asked to remove from history, `pushed` the ones only a dismissal can
+  clear, and `message` says which of these happened. Same access as line comments: the owner, or a member in their
+  own session, never an app token.
 - `POST /api/v1/sessions/{id}/secret-findings/{fingerprint}/dismiss` takes `{"reason": "..."}`. Only the owner can
   call it, and the reason is required. It writes an audit row (`secret_finding_dismiss`: session, rule, file, line,
   fingerprint, reason).
