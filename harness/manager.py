@@ -762,7 +762,7 @@ class Manager:
             masked = [secret_scan.redact(d["diff"], i, result["findings"]) for i, d in enumerate(diffs)]
             return self._public_scan(sid, result), masked
 
-        await self._scanner_waited()
+        # No wait for the start-up fetch here: the diff shows at once, with the scan `unavailable` until it lands.
         return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None, scan)
 
     # secret scanning before push/merge (issue #263)
