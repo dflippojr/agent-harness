@@ -5,12 +5,15 @@ $ErrorActionPreference = 'Stop'
 
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $venv = Join-Path $root '.venv'
+. (Join-Path $PSScriptRoot 'deploy-commit.ps1')
+$buildCommit = ''
 $venvPointer = Join-Path $root '.venv-path'
 if (Test-Path -LiteralPath $venvPointer) {
     $pointerValue = Get-Content -Raw -LiteralPath $venvPointer
     if ($null -eq $pointerValue) { throw "empty deployment virtual environment pointer: $venvPointer" }
     $venv = ([string]$pointerValue).Trim()
     if (-not [System.IO.Path]::IsPathRooted($venv)) { throw "invalid deployment virtual environment pointer: $venvPointer" }
+    $buildCommit = Get-DeployedCommit $venv
 }
 $python = Join-Path $venv 'Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) { throw "harness Python is missing: $python" }
@@ -30,7 +33,7 @@ while ($true) {
     if ((Test-Path $daemonLog) -and (Get-Item $daemonLog).Length -gt 20MB) { Move-Item $daemonLog "$daemonLog.prev" -Force }
     Log 'starting daemon'
     # cmd handles the append redirect so both streams land in one log without PowerShell wrapping stderr.
-    $proc = Start-Process cmd.exe -ArgumentList "/c `"set HARNESS_SUPERVISED=1&& `"$python`" -u -m harness >> `"$daemonLog`" 2>&1`"" `
+    $proc = Start-Process cmd.exe -ArgumentList "/c `"set HARNESS_SUPERVISED=1&& set HARNESS_BUILD_COMMIT=$buildCommit&& `"$python`" -u -m harness >> `"$daemonLog`" 2>&1`"" `
         -WorkingDirectory $root -WindowStyle Hidden -PassThru
     $proc.WaitForExit()
     Log "daemon exited with code $($proc.ExitCode); restarting in 10s"

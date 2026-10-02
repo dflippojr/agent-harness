@@ -142,29 +142,30 @@ def test_web_app_and_guard(tmp_path):
         assert 'showFab("#/jobs/new", "+ New job")' in jobs_page
         assert 'api("/backends?auth=skip")' in jobs_page
         assert 'if (images && !route.onImages) api("/images/warmup"' not in js
-        assert "function imageModeEntries" in js
-        assert "function installedImageModeEntries" in js
-        assert "spec.available !== false" in js
-        assert "quality-fast" in js
-        assert 'if (prompt.value.trim()) startWarmup()' in js
-        assert 'await startWarmup().catch(() => {})' in js
-        assert "updateImageStatusView(phase, d.status)" in js
-        assert "IMAGE_MODELS_EMPTY" in js
-        assert "Queue Generation" in js
-        assert "not installed" in js
-        assert "ops/images-models.ps1" in js
-        assert "grid.dataset.keys" in js
-        assert 'upscaling ? "Upscaling"' in js
-        assert 'editing ? "Editing"' in js
-        assert "function maskEditor" in js
-        assert "viewImageEdit" in js
-        assert "canvas.width / r.width" in js
-        assert "Independent backups are not changed" in js
+        images_page = client.get("/static/pages/images.mjs").text
+        assert "function imageModeEntries" in images_page
+        assert "function installedImageModeEntries" in images_page
+        assert "spec.available !== false" in images_page
+        assert "quality-fast" in images_page
+        assert 'if (prompt.value.trim()) startWarmup()' in images_page
+        assert 'await startWarmup().catch(() => {})' in images_page
+        assert "updateImageStatusView(phase, d.status)" in images_page
+        assert "IMAGE_MODELS_EMPTY" in images_page
+        assert "Queue Generation" in images_page
+        assert "not installed" in images_page
+        assert "ops/images-models.ps1" in images_page
+        assert "grid.dataset.keys" in images_page
+        assert 'upscaling ? "Upscaling"' in images_page
+        assert 'editing ? "Editing"' in images_page
+        assert "function maskEditor" in images_page
+        assert "viewImageEdit" in images_page
+        assert "canvas.width / r.width" in images_page
+        assert "Independent backups are not changed" in images_page
         assert ".mask-stage" in css
         assert "touch-action: none" in css
-        assert '"Upscale 2×"' in js
-        assert '"Upscale 4×"' in js
-        assert "upscale: upscale.value" in js
+        assert '"Upscale 2×"' in images_page
+        assert '"Upscale 4×"' in images_page
+        assert "upscale: upscale.value" in images_page
         assert 'href: "#/profile/account"' in js
         assert "gpuActionRow(model.render)" in actions_js
         assert "function diagnosticsCard()" in actions_js and "setInterval" not in actions_js.split(
