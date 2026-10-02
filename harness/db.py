@@ -506,11 +506,10 @@ class _Writer(threading.Thread):
                     result = fn(*args, **kwargs)
                 except BaseException as exc:  # handed to the waiting caller
                     future.set_exception(exc)
-                    del exc
                 else:
                     future.set_result(result)
                     del result
-            del future, fn, args, kwargs
+            del future, fn, args, kwargs  # an idle writer keeps nothing alive
 
     def stop(self) -> None:
         if self.is_alive():
