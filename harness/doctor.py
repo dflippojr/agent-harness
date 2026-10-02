@@ -92,7 +92,12 @@ def check_schema_version(r: Report, cfg) -> None:
         r.ok(SCHEMA_CHECK, "skipped: no database yet (created on first start)")
         return
     try:
-        latest = migrations.latest_version(migrations.discover())
+        steps = migrations.discover()
+    except Exception as e:  # a broken NNNN_*.py can raise anything at import; report it, don't abort the doctor run
+        r.fail(SCHEMA_CHECK, f"could not load migrations: {type(e).__name__}: {e}")
+        return
+    try:
+        latest = migrations.latest_version(steps)
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         try:
             current = migrations.user_version(conn)

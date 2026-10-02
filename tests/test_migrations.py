@@ -209,6 +209,20 @@ def test_too_new_database_is_refused_untouched_and_doctor_reports(tmp_path, caps
     assert (r.failed, r.warned) == (0, 1) and "will migrate" in capsys.readouterr().out
 
 
+def test_doctor_reports_a_broken_migration_module_instead_of_crashing(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "harness.db"
+    Database(path).close()
+
+    def broken():
+        raise NameError("name 'oops' is not defined")  # what a typo in a NNNN_*.py raises at import
+
+    monkeypatch.setattr(migrations, "discover", broken)
+    r = doctor.Report()
+    doctor.check_schema_version(r, SimpleNamespace(db_path=path))
+    out = capsys.readouterr().out
+    assert r.failed == 1 and "could not load migrations: NameError" in out
+
+
 def test_doctor_skips_missing_database(tmp_path, capsys):
     r = doctor.Report()
     doctor.check_schema_version(r, SimpleNamespace(db_path=tmp_path / "none.db"))
