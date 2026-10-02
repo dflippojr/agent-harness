@@ -19,7 +19,7 @@ from .bus import EventBus
 from . import review_comments
 from . import review_comments
 from .changes import published, repo_diffs, workspace_changes
-from .maintenance import Maintenance
+from .maintenance import Maintenance, remove_tree
 from .image_archive import ImageArchive
 from .notify import Notifier
 from .warmup import ModelWarmer
@@ -824,6 +824,96 @@ class Manager:
             if e["type"] == "user_message":
                 return e["data"]["content"]
         return self.db.get_session(sid)["context"][1]["content"]
+
+    # checkpoints (issue #261): rewind and fork
+    def checkpoints(self, ref: str) -> dict:
+        s = self.get(ref)
+        items = [{"turn": c["turn"], "head": c["head"][:12], "created_at": c["created_at"]}
+                 for c in self.db.checkpoints(s["id"], hidden=False)]
+        hosted = s.get("backend", "local") != "local"
+        return {"checkpoints": items, "can_rewind": not hosted, "can_fork": True, "hosted": hosted,
+                "parent_id": s.get("parent_id", ""), "fork_turn": s.get("fork_turn", 0)}
+
+    async def _idle_for_checkpoint(self, sid: str) -> dict:
+        s = self.db.get_session(sid)
+        if s["target"] != "tower" or s.get("kind", "agent") != "agent":
+            raise HarnessError(409, "checkpoints are only kept for tower agent sessions")
+        if s["workspace_removed"]:
+            raise HarnessError(409, "this session's workspace was cleaned up or discarded")
+        task = self.tasks.get(sid)
+        if task and s["status"] not in ACTIVE:
+            await asyncio.gather(task, return_exceptions=True)
+            s = self.db.get_session(sid)
+        if s["status"] in ACTIVE:
+            raise HarnessError(409, "stop the session first; rewind and fork need it to be idle")
+        return s
+
+    async def rewind(self, ref: str, turn: int) -> dict:
+        sid = self.resolve_id(ref)
+        s = await self._idle_for_checkpoint(sid)
+        if s.get("backend", "local") != "local":
+            raise HarnessError(409, "hosted CLI sessions cannot be rewound (their own state cannot be truncated); "
+                                    "fork from a checkpoint instead")
+        cp = self.runner.checkpointer
+        try:
+            context = await asyncio.to_thread(cp.restore, sid, int(turn))
+        except projects.GitError as e:
+            raise HarnessError(e.status, str(e)) from e
+        await self.db.awrite(cp.commit_rewind, sid, int(turn), context)
+        return self.db.get_session(sid)
+
+    async def fork(self, ref: str, turn: int, prompt: str) -> dict:
+        """A new session that starts from a checkpoint: its own workspace, branch and model context."""
+        sid = self.resolve_id(ref)
+        parent = await self._idle_for_checkpoint(sid)
+        if not prompt.strip():
+            raise HarnessError(400, "prompt is empty")
+        owner_id = session_user_id(parent)
+        if owner_id != OWNER_USER_ID:
+            self._require_member_start(self.db.account_by_id(owner_id), "session")
+        self._check_free_space(False, owner_id != OWNER_USER_ID, "tower", owner_id)
+        cp = self.runner.checkpointer
+        new_sid = uuid.uuid4().hex[:10]
+        workspace = self._new_workspace(False, "tower", owner_id, new_sid)
+        hosted = parent.get("backend", "local") != "local"
+        try:
+            git_fields = await asyncio.to_thread(cp.prepare_fork, parent, int(turn), new_sid, workspace)
+            if hosted:
+                digest = await asyncio.to_thread(cp.summary, parent, int(turn))
+                context = [parent["context"][0], {"role": "user", "content": (
+                    "You are continuing earlier work from a checkpoint. The workspace is exactly as it was then. "
+                    f"Summary of the earlier conversation:\n\n{digest}\n\nNew instruction:\n{prompt}")}]
+                base_context = context[:1]
+            else:
+                base_context = await asyncio.to_thread(cp.store(parent).load_context, int(turn))
+                context = base_context + [{"role": "user", "content": prompt}]
+        except (projects.GitError, OSError) as e:
+            remove_tree(workspace)
+            remove_tree(cp.store({**parent, "id": new_sid}).base)
+            raise HarnessError(getattr(e, "status", 500), str(e)) from e
+        now = time.time()
+        run = new_run(carry={k: v for k, v in parent["run"].items() if k != "backend_session_id"})
+        for key in ("max_turns", "max_completion_tokens"):
+            if key in parent["run"]:
+                run[key] = parent["run"][key]
+        session = {**parent, **git_fields, "id": new_sid, "workspace": str(workspace), "created_at": now,
+                   "updated_at": now, "status": "queued", "stop_reason": "", "answer": "", "context": context,
+                   "run": run, "totals": {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                                          "total_cost_usd": 0.0},
+                   "inbox": [], "review": "", "review_detail": "", "workspace_removed": 0, "job_id": "",
+                   "job_status": "", "compare_group": "", "title": "Fork: " + parent["title"][:70],
+                   "parent_id": sid, "fork_turn": int(turn), "turn_seq": int(turn)}
+        if not git_fields:
+            session["branch"] = ""
+        self._insert_created(session, None, [], "", prompt)
+        ckpt = cp.checkpoint(sid, int(turn))
+        cp.store(session).save_context(int(turn), base_context)
+        self.db.add_checkpoint(new_sid, int(turn), ckpt["sha"], ckpt["head"], session["branch"])
+        self.bus.emit(new_sid, "forked", {"parent": sid, "turn": int(turn), **(
+            {"summary_note": "hosted session: a fresh CLI session started from a transcript digest, no model call"}
+            if hosted else {})})
+        self._spawn(new_sid)
+        return self.db.get_session(new_sid)
 
     def rerun(self, ref: str) -> dict:
         """Start a fresh session with the same task, project, and model."""

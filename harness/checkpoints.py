@@ -28,7 +28,7 @@ from .projects import GitError
 log = logging.getLogger("harness.checkpoints")
 
 CAP = 50                      # visible checkpoints kept per session
-MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "delegate_apply")
+MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_delegated_edit")
 REF_PREFIX = "refs/harness/checkpoints"
 
 
@@ -88,6 +88,9 @@ class Store:
             sha = self._git(None, None, "commit-tree", tree, input_=message).out.strip()
         self._git(None, None, "update-ref", ref_name(sid, turn), sha)
         return sha
+
+    def tree_of_commit(self, sha: str) -> str:
+        return self._git(None, None, "rev-parse", f"{sha}^{{tree}}", check=False).out.strip()
 
     def delete(self, sid: str, turns: list[int]) -> None:
         for turn in turns:

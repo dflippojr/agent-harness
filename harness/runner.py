@@ -20,6 +20,8 @@ from pathlib import Path
 from . import compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, taint, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
+from .checkpointer import Checkpointer
+from .checkpoints import MUTATING_TOOLS
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
 from .config import Config, resolve_tool_output, clamp_tool_limit
 from .db import Database, finish_then_cancel
@@ -176,6 +178,7 @@ class Runner:
         self.codex_factory = CodexSession
         self.cursor_factory = CursorSession
         self._quota_checked: dict[str, float] = {}
+        self.checkpointer = Checkpointer(cfg, db, bus)
         self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
         self.generating: set[str] = set()       # sessions with a model call in flight (the guard waits for them)
         self.gpu_paused_sessions: set[str] = set()
@@ -1498,14 +1501,26 @@ class Runner:
         model = self.cfg.models[s["model"]]
         # Parallel reads can overflow the window in one turn, so all results of a turn share one budget.
         budget = int(0.35 * model.context_tokens * s["run"].get("chars_per_token", 3.0))
-        for i, call in enumerate(pending):
-            done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget)
-            if done is not None:
-                return done
-            if used is not None:
-                budget -= used
-                s = self.db.get_session(sid)
-        return False
+        mutated = False
+        try:
+            for i, call in enumerate(pending):
+                done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget)
+                mutated = mutated or (used is not None and call["function"].get("name") in MUTATING_TOOLS)
+                if done is not None:
+                    return done
+                if used is not None:
+                    budget -= used
+                    s = self.db.get_session(sid)
+            return False
+        finally:
+            if mutated:
+                await asyncio.shield(self._checkpoint(sid))
+
+    async def _checkpoint(self, sid: str, only_if_changed: bool = False) -> None:
+        """Snapshot the workspace off the loop (git can take seconds), then report it on the loop."""
+        event = await asyncio.to_thread(self.checkpointer.take, sid, only_if_changed)
+        if event:
+            await self.bus.aemit(sid, "checkpoint", event)
 
     async def _resolve_call(self, s: dict, call: dict, rest: list[dict], executing: dict,
                             budget: int) -> tuple[bool | None, int | None]:
@@ -2416,6 +2431,8 @@ class Runner:
         else:
             await asyncio.shield(self._stop_cli(sid))
         await asyncio.shield(self.save_branch(sid))
+        if s.get("backend", "local") != "local":    # hosted runs are checkpointed once per run (Fork only)
+            await asyncio.shield(self._checkpoint(sid, only_if_changed=True))
         self.write_transcript(sid)
 
         def ended() -> None:
