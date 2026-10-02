@@ -250,7 +250,7 @@ class Manager:
         guard.on_change = warmer.notify
         guard.park = warmer.park
         # Work held by the pause (or a pinned model) reloads at the end of the hold; anything else loads on demand.
-        guard.want_model = lambda: warmer.pinned() or bool(self.runner.gpu_paused_sessions)
+        guard.want_model = lambda: warmer.pinned() or self.runner.gpu_paused_waiting()
         self.runner.ram = guard.memory
         if self.images is not None:
             self.images.memory_low = lambda: guard.memory.low()

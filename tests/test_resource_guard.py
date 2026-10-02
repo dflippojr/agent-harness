@@ -817,3 +817,33 @@ def test_unload_during_the_health_wait_stops_the_load(tmp_path, monkeypatch):
         assert m.warmer.waking_for(model) is None
         await m.stop()
     asyncio.run(body())
+
+
+@pytest.mark.parametrize("end", ["cancel", "delete"])
+def test_hold_ending_after_the_paused_session_ended_leaves_model_unloaded(tmp_path, end):
+    """A session held by the pause that is cancelled or deleted before the hold ends no longer wants the model."""
+    async def body():
+        m = guarded_manager(tmp_path)
+        await m.start(maintenance=False)
+        m.guard.detector.signals = [GAME]
+        await m.guard.check()
+        await m.guard.check()
+        assert m.guard.state == PAUSED
+        s = m.create("hello")
+        await wait_status(m, s["id"], "queued")
+        await asyncio.sleep(0.05)
+        assert s["id"] in m.runner.gpu_paused_sessions and m.guard.want_model()
+        if end == "cancel":
+            await m.cancel(s["id"])
+            await wait_status(m, s["id"], "cancelled")
+        else:
+            await m.cancel(s["id"])
+            await wait_status(m, s["id"], "cancelled")
+            m.db.delete_session(s["id"])
+        assert not m.guard.want_model()
+        m.guard.detector.signals = []
+        await m.guard.check()
+        await m.guard.check()
+        assert m.guard.state == CLEAR and m.guard.control.flag and m.guard.control.starts == 0
+        await m.stop()
+    asyncio.run(body())

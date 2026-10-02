@@ -402,6 +402,15 @@ class Runner:
         self.bus.emit(sid, "gpu_paused", {"reason": describe(self.guard.reasons), "reasons": self.guard.reasons,
                                           "resume_after_seconds": self.guard.cfg.resume_after_seconds})
 
+    def gpu_paused_waiting(self) -> bool:
+        """A session the pause held is still active: it will want the model when the hold ends. Checked live, since
+        the set is cleared only on resume and a held session may be cancelled, fail or be deleted meanwhile."""
+        for sid in self.gpu_paused_sessions:
+            s = self.db.get_session(sid)
+            if s is not None and s["status"] in ACTIVE:
+                return True
+        return False
+
     def gpu_resumed(self, seconds: float) -> None:
         for sid in sorted(self.gpu_paused_sessions):
             self.bus.emit(sid, "gpu_resumed", {"seconds": round(seconds)})
