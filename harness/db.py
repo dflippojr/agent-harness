@@ -436,13 +436,14 @@ class Database:
         self.conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         try:
             # Refuse a database from a newer harness before anything writes to it.
-            migrations_mod.check_not_too_new(migrations_mod.user_version(self.conn), steps)
+            version = migrations_mod.user_version(self.conn)
+            migrations_mod.check_not_too_new(version, steps)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
-            if migrations_mod.user_version(self.conn) < BASELINE_VERSION:
+            if version < BASELINE_VERSION:
                 self._bootstrap()
-            migrations_mod.apply_pending(self.conn, path, steps)
+            migrations_mod.apply_pending(self.conn, path, steps, backup=version >= BASELINE_VERSION)
         except BaseException:
             self.conn.close()
             raise

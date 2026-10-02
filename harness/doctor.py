@@ -78,6 +78,37 @@ def check_data_dir(r: Report, cfg) -> None:
         r.fail("Data directory", str(e))
 
 
+SCHEMA_CHECK = "Database schema"
+
+
+def check_schema_version(r: Report, cfg) -> None:
+    """Compare the database's `user_version` with the migrations this code ships. Read-only; never migrates."""
+    import sqlite3
+
+    from . import migrations
+
+    path = Path(cfg.db_path)
+    if not path.is_file():
+        r.ok(SCHEMA_CHECK, "skipped: no database yet (created on first start)")
+        return
+    try:
+        latest = migrations.latest_version(migrations.discover())
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            current = migrations.user_version(conn)
+        finally:
+            conn.close()
+    except (sqlite3.Error, migrations.MigrationError) as e:
+        r.fail(SCHEMA_CHECK, f"{path}: {e}")
+        return
+    if current > latest:
+        r.fail(SCHEMA_CHECK, migrations.too_new_message(current, latest))
+    elif current < latest:
+        r.warn(SCHEMA_CHECK, f"v{current}, will migrate to v{latest} on the next daemon start")
+    else:
+        r.ok(SCHEMA_CHECK, f"v{current} (current)")
+
+
 def check_github_token(r: Report, cfg) -> None:
     """Never print the token or its path."""
     if not cfg.github.token_file:
@@ -333,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
 
     check_gpu(r, cfg)
     check_data_dir(r, cfg)
+    check_schema_version(r, cfg)
     check_github_token(r, cfg)
     check_docker(r, cfg)
     check_model_server(r, cfg)

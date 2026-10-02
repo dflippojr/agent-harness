@@ -95,23 +95,24 @@ def backup_path(db_path: Path, version: int) -> Path:
     return db_path.parent / "pre-migration" / f"harness-v{version}-{stamp}.sqlite3"
 
 
-def apply_pending(conn: sqlite3.Connection, db_path: Path, steps: Sequence[Step]) -> Path | None:
+def apply_pending(conn: sqlite3.Connection, db_path: Path, steps: Sequence[Step], *,
+                  backup: bool = True) -> Path | None:
     """Apply every step above the current `user_version`, one transaction each.
 
-    `conn` must be in autocommit mode (`isolation_level=None`). Databases already at or past the baseline get
-    a snapshot under `<db dir>/pre-migration/` before the first step; a database that was just bootstrapped
-    from version 0 holds nothing worth restoring, so it gets none. Returns the backup path, if any.
+    `conn` must be in autocommit mode (`isolation_level=None`). With `backup`, a database at or past the
+    baseline gets a snapshot under `<db dir>/pre-migration/` before the first step; the caller passes
+    `backup=False` for a database it just bootstrapped from version 0. Returns the backup path, if any.
     """
     current = user_version(conn)
     check_not_too_new(current, steps)
     pending = [(number, up) for number, up in steps if number > current]
     if not pending:
         return None
-    backup = None
-    if current >= BASELINE_VERSION:
-        backup = backup_path(db_path, current)
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        backup_sqlite(db_path, backup)
+    snapshot = None
+    if backup and current >= BASELINE_VERSION:
+        snapshot = backup_path(db_path, current)
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        backup_sqlite(db_path, snapshot)
     for number, up in pending:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -123,7 +124,7 @@ def apply_pending(conn: sqlite3.Connection, db_path: Path, steps: Sequence[Step]
                 conn.execute("ROLLBACK")
             if not isinstance(e, Exception):
                 raise
-            where = backup or "none (database was bootstrapped in this start)"
+            where = snapshot or "none (database was bootstrapped in this start)"
             raise MigrationError(f"schema migration {number:04d} failed ({type(e).__name__}: {e});"
                                  f" database left at v{user_version(conn)}; pre-migration backup: {where}") from e
-    return backup
+    return snapshot
