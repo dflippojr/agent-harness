@@ -43,6 +43,9 @@ checkout's `HEAD`). There is no post-deploy trigger and no admin endpoint.
   `skipped`.
 - A run past `canary.total_cap_seconds` (45 min) stops; the remaining tasks are recorded as `timeout`. Timed-out
   runs do not count towards baselines or alerts.
+- A task attempt still running at its wall-clock limit (the hard task's `wall_limit`, 1500 s for web tasks) is
+  cancelled and recorded as `wall_limit`, a graded fail. One that finishes in the same poll as the limit keeps its
+  real outcome; stopping a session that already ended is never an error.
 
 ## Yielding
 
@@ -78,12 +81,19 @@ Because the label is the commit, plot it as a table or bar gauge sorted by time,
 
 ## Regression rule
 
+Only finished, graded attempts are evidence: status `done`, `failed` or `wall_limit` (`harness.canary.valid`).
+`timeout`, `suspended`, `blocked` and `cancelled` attempts are neither a pass nor a fail, in the first run and in the
+confirmation rerun.
+
 - Baseline: median pass rate of the previous 5 `complete` runs.
 - No alert with fewer than 3 prior results.
 - Alert when the new pass rate is at least 15 points below the baseline, **and** a confirmation rerun still leaves
   it that far below. The rerun covers only the tasks that failed this time and did better in the earlier runs (or, if
   there are none, such as a newly added task with no history, every task that failed this time); its results replace
-  theirs in the row (marked `confirm`). An alert is never sent without a confirmation rerun.
+  theirs in the row (marked `confirm`). An alert is never sent without a confirmation rerun, and the rerun counts
+  only if it is `complete` and finished at least one attempt of every rerun task. Otherwise (it timed out, could not
+  start, or a task was only suspended or cancelled) the row keeps the first run's results, no alert is sent and the
+  daemon logs why.
 - One ntfy notification (through `Notifier.send`) with the SHA, baseline, new rate and
   `https://github.com/dflippojr/agent-harness/compare/<baseline_sha>...<new_sha>`. `baseline_sha` is the earlier run
   closest to the median.
