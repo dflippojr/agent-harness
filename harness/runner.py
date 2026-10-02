@@ -26,7 +26,7 @@ from .db import Database, finish_then_cancel
 from .homelab import Homelab
 from .mcp_server import McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
-from .policy import ALLOW, ASK, DENY, ChatPolicy, Policy, mcp_harness_tool
+from .policy import ALLOW, ASK, DENY, ChatPolicy, Decision, Policy, mcp_harness_tool
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
@@ -1344,6 +1344,8 @@ class Runner:
         sid = s["id"]
         bare = mcp_harness_tool(name)  # a harness tool over MCP is taint-checked and previewed as the native tool
         decision = self._taint_layer(s, bare or name, args, self.policy(s).decide(name, args))
+        if bare is not None and bare not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
+            decision = Decision(DENY, f"{bare} is not a harness tool this session can use over MCP")
         await self.bus.aemit(sid, "tool_call", {"id": call_id, "name": name, "args": args,
                                          "decision": decision.action, "reason": decision.reason})
         if decision.action == ALLOW:
@@ -1355,9 +1357,6 @@ class Runner:
                                          f"Blocked by harness policy: {reason}. Don't retry this.")
             return None
         detail, reason = str(request.get("description") or ""), decision.reason
-        if bare is not None and bare not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
-            await cli.respond_permission(request_id, "deny", args, f"{bare} is not a harness MCP tool.")
-            return None
         if bare is not None:
             # The memory library only applies a change whose approved detail carries its exact diff.
             detail, reason, error = await self._ask_details(s, bare, args, None, decision.reason)
