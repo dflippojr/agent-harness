@@ -152,12 +152,31 @@ def _text(node, src: bytes) -> str:
     return src[node.start_byte:node.end_byte].decode("utf-8", "replace")
 
 
+def _without_comments(node, src: bytes, end: int) -> str:
+    """The source from `node` up to `end` minus comment nodes, so `#` or `//` inside a string is left alone."""
+    spans = []
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if "comment" in cur.type:
+            spans.append((cur.start_byte, cur.end_byte))
+        else:
+            stack.extend(c for c in cur.children if c.start_byte < end)
+    out, pos = [], node.start_byte
+    for a, b in sorted(spans):
+        if a >= end:
+            break
+        out.append(src[pos:a])
+        pos = max(pos, min(b, end))
+    out.append(src[pos:end])
+    return b"".join(out).decode("utf-8", "replace")
+
+
 def _signature(node, src: bytes) -> str:
     body = node.child_by_field_name("body")
     end = body.start_byte if body is not None else node.end_byte
-    lines = src[node.start_byte:end].decode("utf-8", "replace").rstrip().splitlines() or [""]
-    lines[-1] = re.sub(r"\s*(#|//).*$", "", lines[-1])  # a trailing comment after the colon or brace
-    sig = " ".join(" ".join(lines).split())
+    text = _without_comments(node, src, end)
+    sig = " ".join(text.split())
     sig = sig.rstrip(":{ ").strip()
     if node.type == "type_spec":  # Go: the `type` keyword belongs to the enclosing type_declaration
         sig = "type " + sig
@@ -282,11 +301,14 @@ def render(ranked: list[ParsedFile], budget_tokens: int) -> str:
             used += cost
             continue
         # a partial block is only worth emitting when the header and at least one symbol fit
+        fit = []
         for line in block:
             if used + len(line) + 1 > budget_chars:
                 break
-            lines.append(line)
+            fit.append(line)
             used += len(line) + 1
+        if len(fit) > 1:
+            lines.extend(fit)
         break
     return "\n".join(lines)
 

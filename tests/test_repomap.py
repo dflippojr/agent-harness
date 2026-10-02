@@ -180,3 +180,25 @@ def test_apply_to_prompt_adds_one_section_and_replaces_on_refresh(tmp_path):
 
 def test_empty_workspace_leaves_prompt_unchanged(tmp_path):
     assert repomap.apply_to_prompt("p", tmp_path) == "p"
+
+
+def test_signature_keeps_comment_markers_inside_strings(tmp_path):
+    write(tmp_path, {
+        "p.py": 'def parse(sep="#", url="http://x"):  # trailing comment\n    return sep\n',
+        "q.ts": 'export function load(base: string = "//cdn", tag = "#t") { // note\n  return base;\n}\n'
+                'const url = (u = "http://h") => u; // arrow\n',
+    })
+    text = repomap.build_map(tmp_path)
+    assert 'def parse(sep="#", url="http://x")' in text
+    assert "trailing comment" not in text and "note" not in text
+    assert 'function load(base: string = "//cdn", tag = "#t")' in text
+
+
+def test_render_never_emits_an_orphan_file_header():
+    sym = repomap.Symbol("function", "def " + "x" * 40, 0)
+    ranked = [repomap.ParsedFile("a.py", [sym]), repomap.ParsedFile("b.py", [sym])]
+    first = len("a.py:") + 1 + len("  " + sym.signature) + 1
+    # budget fits a.py fully and the "b.py:" header, but not b.py's first symbol line
+    budget_tokens = (first + len("b.py:") + 1 + 3 + 3) // repomap.CHARS_PER_TOKEN
+    out = repomap.render(ranked, budget_tokens)
+    assert out.startswith("a.py:") and "b.py" not in out
