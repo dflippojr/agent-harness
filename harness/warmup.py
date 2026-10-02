@@ -41,6 +41,7 @@ class ModelWarmer:
         self.keepalive_seconds = 300.0
         self.pinned_until: float | None = None  # epoch seconds; "Load local model now" keeps it loaded until then
         self._keepalive: asyncio.Task | None = None
+        self._changed = asyncio.Event()  # set by notify(): the guard changed state, so re-check a load in progress
 
     def _control_for(self, model: ModelConfig):
         return self.control() if model.name == self.managed_model else None
@@ -97,6 +98,10 @@ class ModelWarmer:
             self._keepalive = asyncio.create_task(self._keep_loaded(model), name=f"keepalive-{model.name}")
         return state
 
+    def notify(self) -> None:
+        """The guard's state or the pause flag changed; a load waiting on /health re-checks now."""
+        self._changed.set()
+
     def unpin(self) -> None:
         self.pinned_until = None
         if self._keepalive is not None:
@@ -128,14 +133,19 @@ class ModelWarmer:
         started = time.monotonic()
         log.info("loading %s (removing the pause flag)", model.name)
         await ctl.start()
-        while time.monotonic() - started < HEALTH_TIMEOUT_SECONDS:
+        deadline = started + HEALTH_TIMEOUT_SECONDS
+        while (remaining := deadline - time.monotonic()) > 0:
+            self._changed.clear()
             if self.blocked() or ctl.flagged():
                 log.info("loading %s stopped: the guard holds the GPU again", model.name)
                 return
             if await ctl.healthy():
                 log.info("loaded %s in %.0f s", model.name, time.monotonic() - started)
                 return
-            await asyncio.sleep(HEALTH_POLL_SECONDS)
+            try:  # /health has no push; a guard change (notify) cuts the wait short
+                await asyncio.wait_for(self._changed.wait(), min(HEALTH_POLL_SECONDS, remaining))
+            except asyncio.TimeoutError:
+                pass
         log.warning("%s did not answer /health within %d s", model.name, HEALTH_TIMEOUT_SECONDS)
 
     async def _ping(self, model: ModelConfig, verb: str) -> None:

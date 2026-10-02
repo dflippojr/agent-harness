@@ -446,3 +446,35 @@ def test_count_tokens_wakes_a_parked_model_and_gets_503_during_a_hold(tmp_path):
         images = client.post("/v1/messages/count_tokens", json=body, headers=headers)
         assert images.status_code == 503 and images.headers["Retry-After"] == "60"
         assert "image generation" in images.text
+
+
+def test_a_hold_stops_a_load_waiting_on_health_without_polling(tmp_path, monkeypatch):
+    import harness.warmup as warmup
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)  # only the guard's notify can end the wait
+
+    async def body():
+        m = guarded_manager(tmp_path)
+        model = m.cfg.models[m.cfg.default_model]
+        control = m.guard.control
+        control.flag, control.health = True, False  # loading: /health not OK yet
+        load = asyncio.create_task(m.warmer.ensure_loaded(model))
+        await asyncio.sleep(0.05)
+        assert control.starts == 1 and not load.done()
+        m.guard.detector.signals = [GAME]
+        await m.guard.check()  # PAUSING: the warmer hears about it
+        await asyncio.wait_for(load, 2)
+    asyncio.run(body())
+
+
+def test_load_gives_up_when_health_never_answers(tmp_path, monkeypatch):
+    import harness.warmup as warmup
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(warmup, "HEALTH_TIMEOUT_SECONDS", 0.05)
+
+    async def body():
+        m = guarded_manager(tmp_path)
+        model = m.cfg.models[m.cfg.default_model]
+        m.guard.control.flag, m.guard.control.health = True, False
+        await asyncio.wait_for(m.warmer.ensure_loaded(model), 2)
+        assert m.guard.control.starts == 1
+    asyncio.run(body())

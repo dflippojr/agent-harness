@@ -318,6 +318,7 @@ class GpuGuard:
         self.on_resume = on_resume
         self.memory = memory or MemoryWatch(cfg.min_available_ram_gb)
         self.want_model: Callable[[], bool] = lambda: False  # lazy_load: reload at the end of a hold anyway (queued work)
+        self.on_change: Callable[[], None] = lambda: None  # the state or the pause flag changed (ModelWarmer.notify)
         self._state_path = Path(data_dir) / MANUAL_HOLD_FILE if data_dir is not None else None
         self.state = CLEAR
         self.signals: list[dict] = []
@@ -484,6 +485,7 @@ class GpuGuard:
             log.info("GPU guard: %s -> %s %s", self.state, state, [s["detail"] for s in self.reasons])
             self.state = state
             self.changed_at = time.time()
+            self.on_change()
 
     async def check(self, startup: bool = False) -> None:
         if self.manual and self.manual_until is not None and time.time() >= self.manual_until:
@@ -549,6 +551,7 @@ class GpuGuard:
         if before_stop is not None:
             before_stop()
         await self.control.stop()
+        self.on_change()
         return True
 
     def _finish_resume(self) -> None:
