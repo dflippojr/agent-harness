@@ -46,14 +46,22 @@ for (const input of corpus) {
 if (bad) process.exit(1);
 
 // Previously quadratic: many "[x](http://" starts, none with a closing ")", so every "[" used to rescan to the
-// end of the string. Growth-based, not an absolute bound, so a loaded CI runner cannot flake it (#217).
+// end of the string. Growth-based, not an absolute bound, so a loaded CI runner cannot flake it (#217). Each time
+// is the median of several runs, so one GC or JIT pause on a shared runner can't pass for quadratic growth (#312).
+const medianMs = (run, runs = 5) => {
+  const times = [];
+  for (let i = 0; i < runs; i++) {
+    const t0 = performance.now();
+    run();
+    times.push(performance.now() - t0);
+  }
+  return times.sort((a, b) => a - b)[Math.floor(runs / 2)];
+};
 const timeUnclosedLinks = (n) => {
   const input = "[x](http://".repeat(n);
-  const t0 = performance.now();
-  mdInline(input);
-  return performance.now() - t0;
+  return medianMs(() => mdInline(input));
 };
-timeUnclosedLinks(100); // warm up
+timeUnclosedLinks(1000); // warm up
 const baseline = Math.max(timeUnclosedLinks(1000), 5);
 const scaled = timeUnclosedLinks(10000);
 if (scaled > baseline * 40 + 300) fail(`mdInline() backtracks super-linearly on unclosed links: ${baseline.toFixed(1)}ms at 1000, ${scaled.toFixed(1)}ms at 10000`);
@@ -61,11 +69,9 @@ if (scaled > baseline * 40 + 300) fail(`mdInline() backtracks super-linearly on 
 // Previously quadratic the other way: many nested-bracket labels with no closing "]" for the outer "[" either.
 const timeUnclosedBrackets = (n) => {
   const input = "[a[b".repeat(n);
-  const t0 = performance.now();
-  mdInline(input);
-  return performance.now() - t0;
+  return medianMs(() => mdInline(input));
 };
-timeUnclosedBrackets(100); // warm up
+timeUnclosedBrackets(1000); // warm up
 const bracketBaseline = Math.max(timeUnclosedBrackets(1000), 5);
 const bracketScaled = timeUnclosedBrackets(10000);
 if (bracketScaled > bracketBaseline * 40 + 300) fail(`mdInline() backtracks super-linearly on unclosed brackets: ${bracketBaseline.toFixed(1)}ms at 1000, ${bracketScaled.toFixed(1)}ms at 10000`);
@@ -73,9 +79,7 @@ if (bracketScaled > bracketBaseline * 40 + 300) fail(`mdInline() backtracks supe
 // Acceptance: no 100,000-character input takes more than a small fixed time, whichever pathological shape it is.
 for (const make of [(n) => "[x](http://".repeat(Math.ceil(n / 11)), (n) => "[a[b".repeat(Math.ceil(n / 4))]) {
   const input = make(100000).slice(0, 100000);
-  const t0 = performance.now();
-  mdInline(input);
-  const elapsed = performance.now() - t0;
+  const elapsed = medianMs(() => mdInline(input), 3);
   if (elapsed > 1000) fail(`mdInline() on a 100,000-char input took ${elapsed.toFixed(1)}ms`);
 }
 
