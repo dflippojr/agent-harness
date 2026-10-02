@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import projects
@@ -33,7 +34,18 @@ log = logging.getLogger("harness.checkpoints")
 CAP = 50                      # visible checkpoints kept per session
 MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_delegated_edit", "generate_image")
 REF_PREFIX = "refs/harness/checkpoints"
+UNDO_PREFIX = "refs/harness/rewind-undo"     # the workspace as it was before a rewind, while that rewind runs
 GITLINK = 0o160000           # index mode of a nested repository
+
+
+@dataclass
+class Plan:
+    """The file operations of one restore: `tree` to reach from `current`."""
+    tree: str
+    current: str
+    dirs: list[str]          # nested repositories to remove whole
+    extra: list[str]         # files to remove
+    changed: list[str]       # files to write
 
 
 def index_entries(raw: bytes):
@@ -189,32 +201,64 @@ class Store:
         return json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
 
     # restore ----------------------------------------------------------------------------------------------------
-    def restore(self, workspace: Path, sha: str) -> list[str]:
-        """Make the workspace's files match the checkpoint. Returns the paths that could not be fixed (locked
-        files on Windows, for instance); an empty list means a verified exact restore."""
+    def plan(self, workspace: Path, sha: str, tmp: Path) -> Plan:
+        """What restoring `sha` (a commit or tree) must change in the workspace, without changing anything."""
+        current, _, _, nested = self._build(workspace, tmp / "now")
+        tree = self._git(None, None, "rev-parse", f"{sha}^{{tree}}").out.strip()
+        extra = self._names(self._git(None, None, "diff-tree", "-r", "-z", "--no-renames", "--name-only",
+                                      "--diff-filter=A", tree, current).out)
+        changed = self._names(self._git(None, None, "diff-tree", "-r", "-z", "--no-renames", "--name-only",
+                                        "--diff-filter=MDT", tree, current).out)
+        return Plan(tree, current, self._absent_dirs(tree, nested), extra, changed)
+
+    @staticmethod
+    def busy(workspace: Path, plan: Plan) -> list[str]:
+        """The paths `plan` must remove or replace that another process holds open. Windows refuses to rename a
+        file (or a folder holding one) opened without delete sharing, as it refuses to remove or replace it, so
+        each is renamed aside and straight back: nothing changes, and nothing is half done when one is locked."""
+        locked: list[str] = []
+        for rel in [*plan.dirs, *plan.extra, *plan.changed]:
+            path = workspace / rel
+            if not os.path.lexists(path):
+                continue
+            aside = path.with_name(f"{path.name}.harness-probe")
+            try:
+                os.rename(path, aside)
+            except OSError as e:
+                locked.append(f"{rel}: {e.strerror or e}")
+                continue
+            os.rename(aside, path)
+        return locked
+
+    def restore(self, workspace: Path, sha: str, plan: Plan | None = None) -> list[str]:
+        """Make the workspace's files match the checkpoint (`plan`, when given, is this restore's own `plan`).
+        Returns the paths that could not be fixed (locked files on Windows, for instance); an empty list means a
+        verified exact restore."""
         failures: list[str] = []
         with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
-            now_index, want_index = Path(tmp) / "now", Path(tmp) / "want"
-            current, _, _, nested = self._build(workspace, now_index)
-            tree = self._git(None, None, "rev-parse", f"{sha}^{{tree}}").out.strip()
-            extra = self._names(self._git(None, None, "diff-tree", "-r", "-z", "--no-renames", "--name-only",
-                                          "--diff-filter=A", tree, current).out)
-            changed = self._names(self._git(None, None, "diff-tree", "-r", "-z", "--no-renames", "--name-only",
-                                            "--diff-filter=MDT", tree, current).out)
-            for rel in self._absent_dirs(tree, nested):     # a clone made after the checkpoint goes, .git and all
+            plan = plan or self.plan(workspace, sha, Path(tmp))
+            for rel in plan.dirs:                           # a clone made after the checkpoint goes, .git and all
                 failures += self._remove_dir(workspace, rel)
-            for rel in extra:
+            for rel in plan.extra:
                 failures += self._remove(workspace, rel)
-            if changed:
-                self._git(workspace, want_index, "read-tree", tree)
+            if plan.changed:
+                want_index = Path(tmp) / "want"
+                self._git(workspace, want_index, "read-tree", plan.tree)
                 result = self._git(workspace, want_index, "checkout-index", "-f", "-z", "--stdin",
-                                   input_="\0".join(changed) + "\0", check=False)
+                                   input_="\0".join(plan.changed) + "\0", check=False)
                 if result.code != 0:
                     failures.append(result.text[-300:])
             after = self._tree_of(workspace, Path(tmp) / "after")
-            if after != tree and not failures:
+            if after != plan.tree and not failures:
                 failures.append("the workspace still differs from the checkpoint after restoring")
         return failures
+
+    def hold(self, sid: str, tree: str) -> None:
+        """Keep a tree (the workspace just before a rewind) from `reclaim` until `release`."""
+        self._git(None, None, "update-ref", f"{UNDO_PREFIX}/{sid}", tree)
+
+    def release(self, sid: str) -> None:
+        self._git(None, None, "update-ref", "-d", f"{UNDO_PREFIX}/{sid}", check=False)
 
     @staticmethod
     def _names(raw: str) -> list[str]:
@@ -263,16 +307,46 @@ class Store:
 
 
 def reset_branch(workspace: Path, head: str, branch: str) -> None:
-    """Point the session branch (and its working tree) at the commit recorded with the checkpoint. No branch means
-    HEAD was detached then: detach it at that commit again and leave every branch where it is."""
+    """Point the session branch and the index at the commit recorded with the checkpoint, leaving the files to
+    `Store.restore` (so every file change of a rewind is planned and probed first). No branch means HEAD was
+    detached then: detach it at that commit again and leave every branch where it is."""
     if not head or not (workspace / ".git").exists():
         return
     if projects.git(workspace, "cat-file", "-e", f"{head}^{{commit}}", check=False).code != 0:
         raise GitError(f"commit {head[:12]} recorded with this checkpoint is no longer in the workspace", 410)
     if branch:
-        projects.git(workspace, "checkout", "-q", "-f", "-B", branch, head)
+        projects.git(workspace, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
     else:
-        projects.git(workspace, "checkout", "-q", "-f", "--detach", head)
+        projects.git(workspace, "update-ref", "--no-deref", "HEAD", head)
+    projects.git(workspace, "reset", "-q", head)         # moves the branch (or detached HEAD) and the index only
+
+
+def git_state(workspace: Path, branch: str) -> dict | None:
+    """What `reset_branch` changes, for `put_git_state` to undo: HEAD, the index, and the branch's tip."""
+    if not (workspace / ".git").exists():
+        return None
+    index_dir, metadata, _ = projects._resolve_workspace_git(workspace)
+    index = index_dir / "index"
+    tip = projects.git(workspace, "rev-parse", "-q", "--verify", f"refs/heads/{branch}^{{commit}}",
+                       check=False).out.strip() if branch else ""
+    return {"head": (metadata / "HEAD").read_bytes(), "index": index.read_bytes() if index.is_file() else None,
+            "branch": branch, "tip": tip}
+
+
+def put_git_state(workspace: Path, state: dict | None) -> None:
+    if state is None:
+        return
+    index_dir, metadata, _ = projects._resolve_workspace_git(workspace)
+    if state["branch"]:
+        if state["tip"]:
+            projects.git(workspace, "update-ref", f"refs/heads/{state['branch']}", state["tip"])
+        else:
+            projects.git(workspace, "update-ref", "-d", f"refs/heads/{state['branch']}", check=False)
+    (metadata / "HEAD").write_bytes(state["head"])
+    if state["index"] is None:
+        (index_dir / "index").unlink(missing_ok=True)
+    else:
+        (index_dir / "index").write_bytes(state["index"])
 
 
 def head_and_branch(workspace: Path) -> tuple[str, str]:

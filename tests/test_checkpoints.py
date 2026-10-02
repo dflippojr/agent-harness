@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -381,5 +382,75 @@ def test_a_turn_that_only_generates_an_image_is_checkpointed(tmp_path):
         sha = m.db.checkpoints(sid)[0]["sha"]
         assert "assets/icon.png" in store._git(None, None, "ls-tree", "-r", "--name-only", sha).out
         await m.stop()
+
+    asyncio.run(body())
+
+
+async def later_work(tmp_path):
+    """A session two turns in, then a commit, an edit, a new file and a staged one: everything a rewind to
+    checkpoint 1 must change, and must leave exactly as it was when it fails."""
+    m, s = await started(tmp_path)
+    sid, ws = s["id"], Path(s["workspace"])
+    (ws / "committed.txt").write_text("committed later\n")
+    sh(ws, "add", "committed.txt")
+    sh(ws, "commit", "-qm", "later commit")                             # the branch moved past checkpoint 1
+    (ws / "app.py").write_text("VALUE = 3\n")
+    (ws / "b.txt").write_text("later\n")
+    sh(ws, "add", "b.txt")
+
+    def state():
+        files = {p.relative_to(ws).as_posix(): p.read_text() for p in ws.rglob("*")
+                 if p.is_file() and ".git" not in p.relative_to(ws).parts}
+        row = m.db.get_session(sid)
+        return (files, sh(ws, "symbolic-ref", "HEAD"), sh(ws, "rev-parse", "HEAD"),
+                sh(ws, "diff", "--cached", "--name-only"), sh(ws, "status", "--porcelain"), row["context"],
+                row["turn_seq"], [c["turn"] for c in m.db.checkpoints(sid)], len(events(m, sid, "rewound")))
+    return m, sid, ws, state
+
+
+def test_rewind_that_fails_midway_puts_everything_back(tmp_path, monkeypatch):
+    async def body():
+        m, sid, ws, state = await later_work(tmp_path)
+        before = state()
+        unlink = Path.unlink
+
+        def locked_unlink(self, *args, **kwargs):                       # passes the probe, then cannot be removed
+            if self.name == "extra.txt":
+                raise PermissionError(13, "The process cannot access the file", str(self))
+            return unlink(self, *args, **kwargs)
+        monkeypatch.setattr(Path, "unlink", locked_unlink)
+
+        with pytest.raises(HarnessError) as e:
+            await m.rewind(sid, 1)
+        assert e.value.status == 409
+        assert "extra.txt" in str(e.value) and "nothing was rewound" in str(e.value)
+        assert state() == before                                         # files, branch, index, context, turn_seq
+        store = m.runner.checkpointer.store(m.db.get_session(sid))
+        assert checkpoints.UNDO_PREFIX not in store._git(None, None, "for-each-ref").out
+
+        monkeypatch.setattr(Path, "unlink", unlink)                      # unlocked: the same rewind goes through
+        await m.rewind(sid, 1)
+        assert not (ws / "extra.txt").exists() and m.db.get_session(sid)["turn_seq"] == 1
+
+    asyncio.run(body())
+
+
+def test_rewind_refuses_up_front_when_a_file_is_locked(tmp_path, monkeypatch):
+    async def body():
+        m, sid, ws, state = await later_work(tmp_path)
+        before = state()
+        rename, touched = os.rename, []
+
+        def locked_rename(src, dst, *args, **kwargs):                   # Windows: open without delete sharing
+            if Path(src).name == "extra.txt":
+                raise PermissionError(13, "The process cannot access the file", str(src))
+            return rename(src, dst, *args, **kwargs)
+        monkeypatch.setattr(os, "rename", locked_rename)
+        monkeypatch.setattr(checkpoints, "reset_branch", lambda *a: touched.append(a))
+
+        with pytest.raises(HarnessError) as e:
+            await m.rewind(sid, 1)
+        assert e.value.status == 409 and "extra.txt" in str(e.value)
+        assert touched == [] and state() == before                       # refused before touching anything
 
     asyncio.run(body())

@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 
 from . import projects
-from .checkpoints import CAP, Store, eligible, head_and_branch, ref_name, reset_branch
+from .checkpoints import (CAP, Store, eligible, git_state, head_and_branch, put_git_state, ref_name,
+                          reset_branch)
 from .projects import GitError
 
 log = logging.getLogger("harness.checkpointer")
@@ -141,17 +143,48 @@ class Checkpointer:
 
     def restore(self, sid: str, turn: int) -> list:
         """Restore the workspace to a checkpoint and return the model context saved with it; `commit_rewind`
-        then records the rewind. The caller has checked that the session is idle and local."""
+        then records the rewind. The caller has checked that the session is idle and local.
+
+        All or nothing: every file the restore must remove or replace is probed first, and a step that still
+        fails puts the branch, index and files back as they were before raising (409, naming the files)."""
         s = self.db.get_session(sid)
         ckpt = self.checkpoint(sid, turn)
         store, workspace = self.store(s), Path(s["workspace"])
         context = store.load_context(turn)
-        reset_branch(workspace, ckpt["head"], ckpt["branch"])
-        failures = store.restore(workspace, ckpt["sha"])
-        if failures:
-            raise GitError("the workspace could only be partly restored (files may be locked): "
-                           + "; ".join(failures)[:600], 500)
+        with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
+            plan = store.plan(workspace, ckpt["sha"], Path(tmp))
+            locked = store.busy(workspace, plan)
+            if locked:
+                raise GitError("nothing was rewound: files another program has open (close them and retry): "
+                               + "; ".join(locked)[:600], 409)
+            before = git_state(workspace, ckpt["branch"])
+            store.hold(sid, plan.current)
+            try:
+                reset_branch(workspace, ckpt["head"], ckpt["branch"])
+                failures = store.restore(workspace, ckpt["sha"], plan)
+                if failures:
+                    raise GitError("; ".join(failures)[:600], 409)
+            except (GitError, OSError, subprocess.SubprocessError) as e:
+                status = e.status if isinstance(e, GitError) and e.status != 500 else 409
+                raise self._undo(sid, store, workspace, plan.current, before, e, status) from e
+            finally:
+                store.release(sid)
         return context
+
+    @staticmethod
+    def _undo(sid: str, store: Store, workspace: Path, tree: str, before: dict | None, error: Exception,
+              status: int) -> GitError:
+        """Put the workspace back as it was before a failed rewind; returns the error to raise."""
+        try:
+            put_git_state(workspace, before)
+            failures = store.restore(workspace, tree)
+        except (GitError, OSError, subprocess.SubprocessError) as e:
+            failures = [str(e)]
+        if failures:
+            log.error("rewind of %s failed and could not be undone: %s; %s", sid, error, failures)
+            return GitError(f"the rewind failed ({str(error)[:300]}) and the workspace could not be put back "
+                            f"({'; '.join(failures)[:300]})", 500)
+        return GitError(f"nothing was rewound: {str(error)[:600]}", status)
 
     def commit_rewind(self, sid: str, turn: int, context: list) -> None:
         """One transaction (pass to `db.write`/`awrite`): truncate the context, hide later checkpoints, and mark the
