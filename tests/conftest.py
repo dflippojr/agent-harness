@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import metrics, secret_scan
+from harness import gpu_guard, metrics, secret_scan
 from harness.warmup import READY, ModelWarmer
 
 # One pinned gitleaks per machine, fetched once and checked against harness/gitleaks/pin.json (issue #263).
@@ -15,6 +15,14 @@ _real_download = secret_scan._download
 def fresh_metrics(monkeypatch):
     """Tests read /metrics right after changing the database; the 10 s aggregate cache would hide the change."""
     monkeypatch.setattr(metrics, "CORE_CACHE_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def plenty_of_ram(monkeypatch):
+    """The resource guard's RAM check must not depend on how busy the test machine is."""
+    gib = 1024 ** 3
+    monkeypatch.setattr(gpu_guard, "memory_reading", lambda: {"available": 64 * gib, "total": 128 * gib,
+                                                              "commit": 32 * gib, "commit_limit": 160 * gib})
 
 
 @pytest.fixture(autouse=True)

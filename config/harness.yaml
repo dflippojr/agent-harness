@@ -172,15 +172,21 @@ tool_output:
   run_shell_chars_max: 100000
   verify_summary_chars: 4000
 
-# GPU contention guard (harness/gpu_guard.py). While a game runs (Steam/Epic/GOG/Xbox library folders, or Sunshine's
-# Steam Big Picture app) or Plex hardware-transcodes, the queue pauses after the current model turn, llama-server is
-# stopped, and it's restarted once the GPU has been clear for resume_after_seconds. Desktop streaming alone is fine.
+# Resource guard (harness/gpu_guard.py, Actions -> Resources; docs/resource-guard.md). While a game runs (Steam/Epic/
+# GOG/Xbox library folders, or Sunshine's Steam Big Picture app) or Plex hardware-transcodes, the queue pauses after the
+# current model turn and llama-server is stopped; the hold ends once the GPU has been clear for resume_after_seconds.
+# Desktop streaming alone is fine. The model then stays unloaded until something needs it (lazy_load). Below
+# min_available_ram_gb of available RAM, model loads, worker containers and ComfyUI jobs wait (waiting_memory).
 gpu_guard:
   enabled: true
   poll_seconds: 10
   resume_after_seconds: 180
   drain_timeout_seconds: 300
   pause_flag: C:/AI/llama-server.paused   # also in ops/llama-server/run-qwen.ps1
+  lazy_load: true
+  min_available_ram_gb: 4          # 0 turns the RAM check off
+  load_now_default_minutes: 60     # "Load local model now" window; idle unload is suspended during it
+  keepalive_seconds: 300           # keep under llama-server's --sleep-idle-seconds (600)
 
 # Nightly online copy of the session database, transcripts, and project config (harness/maintenance.py).
 # Also on demand: POST /maintenance/backup.

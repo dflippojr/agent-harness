@@ -117,6 +117,7 @@ GAME = {"key": "game:hades.exe", "kind": "game", "detail": "Hades.exe"}
 def make_guard(busy=lambda: False, **cfg):
     detect, control, scheduler = FakeDetect(), FakeControl(), GpuScheduler()
     log = []
+    cfg = {"lazy_load": False, **cfg}  # the eager reload path; the lazy one has its own tests below
     guard = GpuGuard(GpuGuardConfig(enabled=True, **cfg), None, scheduler, busy, detect=detect, control=control,
                      on_pause=lambda r: log.append(("pause", r)), on_resume=lambda s: log.append(("resume", s)))
     return guard, detect, control, scheduler, log
@@ -385,7 +386,7 @@ def test_expired_timed_hold_resumes_normally_on_restart(tmp_path):
                     break
                 await asyncio.sleep(0.02)
             assert guard2.state == CLEAR
-            assert not control.flag
+            assert control.flag  # lazy_load: parked until something needs the model
             assert not scheduler2.paused
         finally:
             await guard2.stop()

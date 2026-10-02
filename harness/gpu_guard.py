@@ -1,12 +1,17 @@
-"""GPU contention guard.
+"""Resource guard (formerly the GPU contention guard; docs/resource-guard.md).
 
 The tower's 16 GB GPU is shared by the agent model (Qwen holds ~14.7 GB), games streamed with Sunshine or played
 locally, and Plex hardware transcodes. When a game or a transcode shows up, the guard:
 
 1. pauses the queue: the model turn in progress finishes (up to `drain_timeout_seconds`), no new turn starts;
 2. stops llama-server and leaves a pause flag, so its supervisor (ops/llama-server/run-qwen.ps1) doesn't restart it;
-3. once the GPU has been clear for `resume_after_seconds`, removes the flag (the supervisor starts the server and it
-   loads the model) and reopens the queue when the server answers /health.
+3. once the GPU has been clear for `resume_after_seconds`, reopens the queue. With `lazy_load` (the default) the flag
+   stays and the model stays unloaded until something needs it (warmup.ModelWarmer.ensure_loaded removes the flag);
+   otherwise it removes the flag (the supervisor starts the server and it loads the model) and reopens the queue
+   when the server answers /health.
+
+It also watches RAM: below `min_available_ram_gb` of available physical memory, model loads, new worker containers
+and ComfyUI jobs wait (MemoryWatch; the runner and the image service check it before adding load).
 
 Windows doesn't report VRAM per process, so the triggers are what's running, not memory numbers: an executable
 under a game library folder, a Steam Big Picture window (Sunshine's Big Picture app), or a Plex transcode with
@@ -46,6 +51,8 @@ def _manual_reason() -> dict:
     return {"key": "manual", "kind": "manual", "detail": "paused from the app"}
 
 
+GIB = 1024 ** 3
+MEMORY_POLL_SECONDS = 5  # how often work waiting for memory looks again
 HEALTH_TIMEOUT_SECONDS = 300  # reopen the queue anyway after this; model calls then report their own errors
 MANUAL_HOLD_FILE = "gpu-guard-hold.json"  # survives a daemon restart; the pause_flag file alone does not
 
@@ -191,6 +198,70 @@ class Detector:
             return []
 
 
+# ---------- memory ----------
+def memory_reading() -> dict | None:
+    """Available and total physical memory, and commit charge, in bytes. None when it can't be read."""
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+    except Exception:  # noqa: BLE001 - diagnostics only
+        return None
+    out = {"available": int(vm.available), "total": int(vm.total), "commit": None, "commit_limit": None}
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(MemoryStatusEx)
+        if ctypes.WinDLL("kernel32").GlobalMemoryStatusEx(ctypes.byref(status)):
+            out["commit_limit"] = int(status.ullTotalPageFile)  # "page file" here is the whole commit limit
+            out["commit"] = int(status.ullTotalPageFile - status.ullAvailPageFile)
+    return out
+
+
+class MemoryWatch:
+    """Is available RAM under the guard's threshold? Readings are cached for a couple of seconds."""
+
+    def __init__(self, min_available_gb: float, read: Callable[[], dict | None] | None = None, ttl: float = 2.0):
+        self.threshold = int(max(0.0, min_available_gb) * GIB)
+        self.read = read or (lambda: memory_reading())  # looked up per call so tests can patch the module function
+        self.ttl = ttl
+        self._at = -math.inf
+        self._last: dict | None = None
+
+    def reading(self) -> dict | None:
+        now = time.monotonic()
+        if now - self._at >= self.ttl:
+            self._last, self._at = self.read(), now
+        return self._last
+
+    def low(self) -> bool:
+        if not self.threshold:
+            return False
+        r = self.reading()
+        return r is not None and r["available"] < self.threshold
+
+    def status(self) -> dict:
+        r = self.reading() or {}
+        return {"available_bytes": r.get("available"), "total_bytes": r.get("total"),
+                "commit_bytes": r.get("commit"), "commit_limit_bytes": r.get("commit_limit"),
+                "threshold_bytes": self.threshold, "low": self.low()}
+
+
+def describe_memory(status: dict) -> str:
+    avail, threshold = status.get("available_bytes"), status.get("threshold_bytes")
+    if avail is None:
+        return "low memory"
+    return f"{avail / GIB:.1f} GB RAM available, needs {threshold / GIB:.0f} GB"
+
+
 # ---------- model server control ----------
 class ServerControl:
     """Stops and restarts the supervised llama-server through its pause flag."""
@@ -237,7 +308,7 @@ class GpuGuard:
                  detect: Callable[[], Awaitable[list[dict]]] | None = None, control: ServerControl | None = None,
                  on_pause: Callable[[list[dict]], None] | None = None,
                  on_resume: Callable[[float], None] | None = None,
-                 data_dir: Path | str | None = None):
+                 data_dir: Path | str | None = None, memory: MemoryWatch | None = None):
         self.cfg = cfg
         self.scheduler = scheduler
         self.busy = busy
@@ -245,6 +316,8 @@ class GpuGuard:
         self.control = control or ServerControl(cfg, model)
         self.on_pause = on_pause
         self.on_resume = on_resume
+        self.memory = memory or MemoryWatch(cfg.min_available_ram_gb)
+        self.want_model: Callable[[], bool] = lambda: False  # lazy_load: reload at the end of a hold anyway (queued work)
         self._state_path = Path(data_dir) / MANUAL_HOLD_FILE if data_dir is not None else None
         self.state = CLEAR
         self.signals: list[dict] = []
@@ -280,13 +353,17 @@ class GpuGuard:
                 "last_check": self.last_check, "resume_after_seconds": self.cfg.resume_after_seconds,
                 "clear_for_seconds": (round(time.monotonic() - self._clear_since)
                                       if self._clear_since is not None else None),
-                "plex_error": getattr(self.detector, "plex_error", "")}
+                "plex_error": getattr(self.detector, "plex_error", ""),
+                "lazy_load": self.cfg.lazy_load, "parked": self.state == CLEAR and self.control.flagged(),
+                "memory": self.memory.status()}
 
     def start(self) -> None:
         if not self.cfg.enabled or self._task is not None:
             return
         self._restore_manual_hold()
-        if self.control.flagged():  # the daemon stopped while paused: the server is down until we decide
+        # The daemon stopped while paused: the server is down until we decide. With lazy_load a flag without a hold
+        # just means the model was parked (unloaded until needed); the first check holds again if a game is running.
+        if self.control.flagged() and (self.manual or not self.cfg.lazy_load):
             self._set(PAUSED)
             self.scheduler.set_paused(True)
             self._paused_at = time.time()
@@ -433,6 +510,9 @@ class GpuGuard:
         elif (self.state == PAUSED and not self.busy()
               and (startup or self._resume_now or now - self._clear_since >= self.cfg.resume_after_seconds)):
             self._resume_now = False
+            if self.cfg.lazy_load and not self.want_model():
+                self._finish_resume()  # the flag stays: the model loads when something needs it
+                return
             await self.control.start()
             self._resume_started = now
             self._set(RESUMING)
@@ -459,6 +539,13 @@ class GpuGuard:
         if self.state == PAUSING and (not self.busy() or now >= self._drain_deadline):
             await self.control.stop()
             self._set(PAUSED)
+
+    async def unload(self) -> bool:
+        """Unload the model now (park it) without holding the queue. False while a model turn is running."""
+        if self.state != CLEAR or self.busy():
+            return False
+        await self.control.stop()
+        return True
 
     def _finish_resume(self) -> None:
         seconds = time.time() - self._paused_at if self._paused_at else 0.0

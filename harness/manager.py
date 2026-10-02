@@ -236,8 +236,23 @@ class Manager:
                                   data_dir=cfg.data_dir)
             self.runner.guard = self.guard
             self.warmer.blocked = lambda: self.guard.active or self.guard.manual or bool(self.images and self.images.gpu_taken)
+            self._wire_resources(cfg)
         elif self.images is not None:
             self.warmer.blocked = lambda: self.images.gpu_taken
+
+    def _wire_resources(self, cfg: Config) -> None:
+        """Lazy model loading and the RAM check (resource guard, docs/resource-guard.md)."""
+        guard, warmer = self.guard, self.warmer
+        warmer.control = lambda: guard.control  # tests swap the guard's control after construction
+        warmer.managed_model = cfg.models[cfg.default_model].name
+        warmer.memory_low = lambda: guard.memory.low()
+        warmer.keepalive_seconds = cfg.gpu_guard.keepalive_seconds
+        # Work held by the pause (or a pinned model) reloads at the end of the hold; anything else loads on demand.
+        guard.want_model = lambda: warmer.pinned() or bool(self.runner.gpu_paused_sessions)
+        self.runner.ram = guard.memory
+        if self.images is not None:
+            self.images.memory_low = lambda: guard.memory.low()
+            self.images.want_model = lambda: not cfg.gpu_guard.lazy_load or warmer.pinned()
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
         if self.images is not None:
