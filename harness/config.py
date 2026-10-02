@@ -93,6 +93,8 @@ class BackendConfig:
     network: str = "harness-cli-claude"
     api_key_file: str = "D:/Agents/harness/secrets/claude-api-key"
     stop_at_utilization: float = 0.0
+    # Claude Code only: expose the daemon's tools over MCP through a per-session relay sidecar (#300).
+    mcp: bool = True
 
 
 @dataclass
