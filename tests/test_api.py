@@ -89,6 +89,7 @@ def test_web_app_and_guard(tmp_path):
     with client:
         assert "<title>Agent Harness Web</title>" in client.get("/").text
         js = client.get("/static/app.js").text
+        actions_js = client.get("/static/pages/actions.mjs").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
         assert "session-chrome" in js
         assert "jump-top" in js
@@ -106,7 +107,7 @@ def test_web_app_and_guard(tmp_path):
         assert "Scratch is a fresh empty folder" in js
         assert '"＋ New project"' in js
         assert 'api("/projects", { method: "POST"' in js
-        assert "Only tower projects with a local folder appear" in js
+        assert "Only tower projects with a local folder appear" in actions_js
         assert 'id="guest-banner"' in client.get("/").text
         assert 'id="bar"' in client.get("/").text
         assert 'id="feature-nav"' in client.get("/").text
@@ -165,7 +166,6 @@ def test_web_app_and_guard(tmp_path):
         assert '"Upscale 4×"' in js
         assert "upscale: upscale.value" in js
         assert 'href: "#/profile/account"' in js
-        actions_js = client.get("/static/pages/actions.mjs").text
         assert "gpuActionRow()" in actions_js
         assert "function gpuCard()" not in js
         assert 'h("span", {}, "Duration:")' in actions_js
