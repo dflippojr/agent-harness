@@ -282,6 +282,21 @@ class RepoMapConfig:
 
 
 @dataclass
+class CanaryConfig:
+    """Nightly agent regression canary (#265, docs/canary-evals.md): a pinned task set through the production path."""
+    enabled: bool = False
+    at: str = "03:00"                    # tower-local time of the one nightly run
+    repeats: int = 2
+    total_cap_seconds: int = 2700        # remaining tasks are recorded as `timeout` past this
+    start_wait_seconds: int = 600        # how long a run waits for the GPU to be free before it gives up for the night
+    baseline_runs: int = 5
+    min_prior_runs: int = 3
+    drop_points: float = 15.0
+    metrics_limit: int = 30
+    suite: str = "bakeoff/canary.yaml"
+
+
+@dataclass
 class EndpointConfig:
     """OpenAI/Anthropic-compatible inference endpoint for other tools (endpoint.py)."""
     enabled: bool = False
@@ -449,6 +464,7 @@ class Config:
     mask_min_chars: int = 2000
     state_max_chars: int = 8000
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
+    canary: CanaryConfig = field(default_factory=CanaryConfig)
     tool_output: ToolOutputConfig = field(default_factory=ToolOutputConfig)
 
     @property
@@ -829,6 +845,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         images=images,
         search=search,
         repo_map=RepoMapConfig(**(raw.get("repo_map") or {})),
+        canary=CanaryConfig(**(raw.get("canary") or {})),
         jobs=jobs,
         skills=skills,
         remote_control=remote_control,

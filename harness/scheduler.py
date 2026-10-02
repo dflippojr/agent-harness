@@ -24,12 +24,21 @@ class GpuScheduler:
         self._change_waiters: set[asyncio.Future] = set()
         self._on_change = on_change
         self._eligible = eligible
+        self.low_priority: set[str] = set()  # background sessions (the canary, #265): a real session never waits behind one
 
     def positions(self) -> dict[str, int]:
         """Queue position per session: the holder is at 0, the next waiter at 1, and so on."""
         out = {self.holder: 0} if self.holder else {}
         out.update({sid: i + 1 for i, sid in enumerate(self._waiters)})
         return out
+
+    def real_waiting(self) -> bool:
+        """True while a session that isn't low priority is queued for the slot."""
+        return any(sid not in self.low_priority for sid in self._waiters)
+
+    def idle(self) -> bool:
+        """Slot free, nobody queued, queue open."""
+        return self.holder is None and not self._waiters and not self.paused
 
     def _changed(self) -> None:
         for waiter in self._change_waiters:
@@ -100,6 +109,9 @@ class GpuScheduler:
                 continue
             if self._eligible is not None and not self._eligible(nxt):
                 skipped[nxt] = fut
+                continue
+            if nxt in self.low_priority and any(w not in self.low_priority for w in self._waiters):
+                skipped[nxt] = fut  # a real session is queued behind it: it goes first
                 continue
             self.holder = nxt
             fut.set_result(None)

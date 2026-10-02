@@ -175,6 +175,8 @@ class Runner:
         self.gpu_paused_sessions: set[str] = set()
         self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
+        self.web_overrides: dict = {}           # session id -> WebTools (the canary replays a recorded web, #265)
+        self.yields: dict[str, int] = {}        # low-priority session id -> times it stepped aside (guard or a real session)
         self.images = None                      # images.ImageService, set by the manager when enabled
         self.sessions = None                    # search.SessionSearch, set by the manager when enabled
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
@@ -232,8 +234,9 @@ class Runner:
         kits = []
         if not member and self.memory is not None and self._kit_allowed(project, "memory_library", defaults, "memory_library"):
             kits.append(self.memory)
-        if self.web is not None and self._kit_allowed(project, "web", defaults, "web"):
-            kits.append(self.web)
+        web = self.web_overrides.get(s["id"], self.web)
+        if web is not None and self._kit_allowed(project, "web", defaults, "web"):
+            kits.append(web)
         if not member and self.images is not None and self._kit_allowed(project, "images", defaults, "images"):
             kits.append(self.images)
         if self.sessions is not None and self._kit_allowed(project, "session_search", defaults, "search"):
@@ -381,9 +384,12 @@ class Runner:
 
     async def _gpu_gate(self, sid: str) -> None:
         """Before a model call: while the guard has the GPU paused, step aside and wait first in line."""
-        while self.guard is not None and self.guard.active:
+        low = sid in self.scheduler.low_priority
+        while (self.guard is not None and self.guard.active) or (low and self.scheduler.real_waiting()):
+            if low:
+                self.yields[sid] = self.yields.get(sid, 0) + 1  # the canary restarts a task it was suspended in
             self.scheduler.release(sid)
-            await self._acquire(sid, front=True)
+            await self._acquire(sid, front=not low)
 
     async def _model_call(self, sid: str, *args, **kwargs) -> llm.Completion:
         """self.chat, gated on the GPU guard. A call cut off because the guard stopped the model server (a game
