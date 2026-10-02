@@ -8,6 +8,7 @@ approved network command temporarily attaches an egress network.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import subprocess
 import threading
@@ -35,20 +36,29 @@ else:
 def _spawn(args: list[str], has_input: bool, env: dict | None) -> subprocess.Popen:
     return subprocess.Popen(
         args, stdin=subprocess.PIPE if has_input else subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env={**os.environ, **env} if env else None,
     )
 
 
 def _pump_stream(stream, cap: CappedStream) -> None:
+    """Drain `stream` (binary) into `cap`. read1 returns whatever the OS has already delivered instead of waiting to
+    fill a buffer, so output the parent wrote before exiting is fed even if a detached child keeps the pipe open and
+    the blocked read is later cancelled (#315)."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     try:
         while True:
-            block = stream.read(65536)
+            block = stream.read1(65536)
             if not block:
                 break
-            cap.feed(block)
+            text = decoder.decode(block)
+            if text:
+                cap.feed(text)
     except (ValueError, OSError):
         pass
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        cap.feed(tail)
 
 
 def _read_end(stream) -> tuple[int | None, int | None]:
@@ -107,7 +117,7 @@ def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict
     if input_ is not None and proc.stdin is not None:
         def _write_stdin() -> None:
             try:
-                proc.stdin.write(input_)
+                proc.stdin.write(input_.encode("utf-8", errors="replace"))
                 proc.stdin.close()
             except (BrokenPipeError, OSError):
                 pass
