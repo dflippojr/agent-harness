@@ -465,8 +465,8 @@ class Runner:
             except llm.LLMError as e:
                 if self.guard is not None and self.guard.active:
                     reason = "model server paused for the GPU"
-                elif model is not None and self.warmer.parked(model):
-                    reason = "model server was unloaded"  # the next pass loads it again
+                elif model is not None and self.warmer.parked(model) and not self.warmer.blocked():
+                    reason = "model server was unloaded"  # the next pass loads it again (it can: nothing blocks it)
                 else:
                     raise
                 await self.bus.aemit(sid, "llm_retry", {"attempt": 0, "error": f"{reason}: {e}"[:500]})

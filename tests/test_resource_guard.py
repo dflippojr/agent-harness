@@ -639,3 +639,25 @@ def test_memory_recovered_notification(tmp_path):
                                                  "Memory recovered after 20 s; the task continues."]
         assert notes[0]["title"].startswith("Resumed:") and notes[0]["sequence_id"] == f"mem-{s['id']}"
     asyncio.run(body())
+
+
+def test_model_call_fails_rather_than_spins_when_the_parked_model_cannot_load(tmp_path):
+    from harness.llm import LLMError
+    calls = []
+
+    async def body():
+        m = guarded_manager(tmp_path)
+        control = m.guard.control
+
+        def answer(messages):
+            calls.append(1)
+            control.flag = True  # parked while an image batch has the GPU: nothing may load it
+            m.warmer.blocked = lambda: True
+            return LLMError("model server unreachable: ConnectError")
+        m.runner.chat = Script([answer])
+        await m.start(maintenance=False)
+        s = m.create("hello")
+        await wait_status(m, s["id"], "failed", timeout=10)
+        assert len(calls) == 1 and control.starts == 0
+        await m.stop()
+    asyncio.run(body())
