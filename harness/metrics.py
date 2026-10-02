@@ -279,6 +279,17 @@ def _guard_metrics(m: Manager, out: _Out) -> None:
                    [({}, g.paused_seconds_total + extra)])
 
 
+def _canary_metrics(m: Manager, out: _Out) -> None:
+    """Latest results only (cfg.canary.metrics_limit), labelled by short SHA, to bound label cardinality (#265)."""
+    from .canary import CanaryStore, SHORT_SHA
+    rows = CanaryStore(m.db).latest(m.cfg.canary.metrics_limit)
+    for name, key, help_ in (("harness_canary_pass_rate", "pass_rate", "Canary pass rate (0-1) per commit."),
+                             ("harness_canary_turns", "turns", "Agent turns used by the canary run."),
+                             ("harness_canary_prompt_tokens", "prompt_tokens", "Prompt tokens used by the canary run."),
+                             ("harness_canary_wall_seconds", "wall_seconds", "Seconds the canary run's attempts had the GPU.")):
+        out.metric(name, "gauge", help_, [({"sha": r["sha"][:SHORT_SHA]}, r[key]) for r in rows])
+
+
 def _maintenance_metrics(m: Manager, out: _Out) -> None:
     backup = m.maintenance.last_backup
     if backup.get("ok_at"):
@@ -334,6 +345,7 @@ def render(m: Manager) -> str:
         _image_metrics(m, out, db)
         _runner_metrics(m, out)
         _guard_metrics(m, out)
+        _canary_metrics(m, out)
         _maintenance_metrics(m, out)
         _skill_metrics(out, db, by_status)
     _telemetry_metrics(out)

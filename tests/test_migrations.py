@@ -15,6 +15,15 @@ from harness.db import APP_SETTINGS_SCHEMA, SCHEMA, Database
 from harness.maintenance import Maintenance
 from harness.migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
 
+_REAL_DISCOVER = migrations.discover
+
+
+@pytest.fixture(autouse=True)
+def _no_shipped_steps(monkeypatch):
+    """These tests exercise the runner against the frozen baseline; shipped steps (0046+) have their own tests."""
+    monkeypatch.setattr(migrations, "discover",
+                        lambda package=migrations.__name__: [] if package == migrations.__name__ else _REAL_DISCOVER(package))
+
 
 def _legacy_db(path: Path, skip: set[tuple[str, str]] = frozenset()) -> None:
     """What the pre-#256 `Database` built: SCHEMA plus every add-column entry, user_version left at 0."""
@@ -78,7 +87,8 @@ def _seed_session(path: Path, sid: str = "s1") -> None:
 
 def test_baseline_is_frozen_at_45():
     assert BASELINE_VERSION == 45 and len(LEGACY_COLUMNS) == 45
-    assert [number for number, _ in migrations.discover()] == [46]  # 0046_session_taint (#262)
+    # the real steps are valid and gap-free from 0046: 0046_session_taint (#262), 0047_canary_results (#265)
+    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47]
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):
@@ -289,9 +299,10 @@ def test_baseline_plus_migrations_equals_fresh_build(tmp_path):
     # And with the real migration set, a migrated pre-versioning DB equals a fresh one.
     legacy, fresh_real = tmp_path / "legacy.db", tmp_path / "fresh_real.db"
     _legacy_db(legacy)
-    Database(legacy).close()
-    Database(fresh_real).close()
+    Database(legacy, migrations=_REAL_DISCOVER()).close()  # the autouse fixture hides shipped steps
+    Database(fresh_real, migrations=_REAL_DISCOVER()).close()
     assert _snapshot(legacy) == _snapshot(fresh_real)
+    assert _version(legacy) == _version(fresh_real) == migrations.latest_version(_REAL_DISCOVER())
 
 
 def test_maintenance_backup_delegates_to_backup_sqlite(tmp_path):
@@ -310,11 +321,12 @@ def test_session_taint_migration_adds_column_to_existing_sessions(tmp_path):
     path = tmp_path / "harness.db"
     _seed_session(path)
     assert _version(path) == BASELINE_VERSION
-    db = Database(path)
+    shipped = _REAL_DISCOVER()  # the autouse fixture hides shipped steps; this test needs them
+    db = Database(path, migrations=shipped)
     assert db.get_session("s1")["taint"] == []
     assert db.conn.execute("SELECT taint FROM sessions WHERE id = 's1'").fetchone()[0] == "[]"
     db.close()
-    assert _version(path) == 46
+    assert _version(path) == migrations.latest_version(shipped)
     backups = list((tmp_path / "pre-migration").glob("harness-v45-*.sqlite3"))
     assert len(backups) == 1
     with closing(sqlite3.connect(str(backups[0]))) as conn:
@@ -323,9 +335,10 @@ def test_session_taint_migration_adds_column_to_existing_sessions(tmp_path):
 
 def test_fresh_database_gets_session_taint_column(tmp_path):
     path = tmp_path / "harness.db"
-    db = Database(path)
+    shipped = _REAL_DISCOVER()
+    db = Database(path, migrations=shipped)
     info = {r["name"]: r for r in db.conn.execute("PRAGMA table_info(sessions)")}
     db.close()
-    assert _version(path) == 46
+    assert _version(path) == migrations.latest_version(shipped)
     assert info["taint"]["notnull"] == 1 and info["taint"]["dflt_value"] == "'[]'"
     assert not (tmp_path / "pre-migration").exists()

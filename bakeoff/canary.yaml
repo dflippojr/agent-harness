@@ -1,0 +1,14 @@
+# Nightly canary set (#265). Selection rule and evidence: docs/canary-evals.md.
+# Ids refer to bakeoff/tasks_hard.py HARD_TASKS and bakeoff/web_suite.py TASKS.
+repeats: 2
+hard:
+  - sqlite_report        # Qwen 1/2 in phase 0 (the only hard task it missed)
+  - merge_conflict       # gpt-oss 1/2: git, follow-up commits
+  - cli_json_output      # gpt-oss 1/2: writes and runs its own tests
+  - log_correlation      # compaction failure under OpenCode: exercises compaction and masking
+  - duration_parser      # OpenHands miss ("1hm" accepted): edge-case discipline
+  - multi_bug_inventory  # three independent bugs: multi-step edits
+web:
+  - pdf_transformer
+  - llama_sleep_endpoints
+  - searxng_license
