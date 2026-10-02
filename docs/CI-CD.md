@@ -449,7 +449,8 @@ registry over the staging overlay, and creating or listing sessions, which fail 
 
 After the slot reports healthy, the deployer reads `/health` and refuses to leave staging up if any module or hosted
 backend is enabled. `/health` also carries `build.commit` (from `HARNESS_BUILD_COMMIT`, set by the staging
-supervisor), which is how you confirm the resolved SHA is the one running.
+supervisor, and by the production supervisor from the 40-hex SHA in the `.venv-path` target; unset for a dev
+checkout), which is how you confirm the resolved SHA is the one running.
 
 ### Dispatch
 

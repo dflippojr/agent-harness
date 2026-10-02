@@ -594,3 +594,28 @@ def test_pull_request_number_must_be_ascii_digits_before_any_api_call():
         with pytest.raises(RefRejected, match="must be a number"):
             resolve(pr_number=bad, api=lambda path: calls.append(path) or {})
     assert calls == []
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell not available")
+@pytest.mark.parametrize(
+    ("venv_path", "expected"),
+    [
+        (r"D:\Projects\.agent-harness.venv.deploy-" + "AB" * 20, "ab" * 20),
+        (r"D:\Projects\.agent-harness.venv.deploy-" + "ab" * 20 + "\\", "ab" * 20),
+        (r"D:\Projects\agent-harness\.venv", ""),
+        (r"D:\Projects\.agent-harness.venv.deploy-" + "ab" * 19, ""),
+        (r"D:\Projects\.agent-harness.venv.deploy-" + "ab" * 20 + "&calc", ""),
+        ("", ""),
+    ],
+)
+def test_production_supervisor_derives_build_commit_from_venv_pointer(venv_path, expected):
+    script = OPS / "deploy-commit.ps1"
+    cmd = f". '{script}'; Write-Output ('[' + (Get-DeployedCommit '{venv_path}') + ']')"
+    out = subprocess.run([POWERSHELL, "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=60)
+    assert out.stdout.strip() == f"[{expected}]", out.stderr
+
+
+def test_production_supervisor_exports_the_derived_commit():
+    prod = (OPS / "run-daemon.ps1").read_text(encoding="utf-8")
+    assert "Get-DeployedCommit $venv" in prod
+    assert "set HARNESS_BUILD_COMMIT=$buildCommit" in prod
