@@ -28,6 +28,7 @@ from harness.storage import (ContainmentError, account_usage_bytes, contained, e
 from harness.tools import ToolError, Workspace
 
 from test_daemon import Script, make_cfg
+from waits import scaled
 
 OWNER = "me@example.com"
 ALICE = "alice@example.com"
@@ -740,6 +741,7 @@ def test_scheduler_skips_ineligible_without_reordering_eligible(tmp_path):
     async def body():
         eligible = {"a": False, "b": True, "c": True}
         order = []
+        released = {sid: asyncio.Event() for sid in "abc"}
         s = GpuScheduler(eligible=lambda sid: eligible.get(sid, True))
         await s.acquire("holder")
 
@@ -748,12 +750,19 @@ def test_scheduler_skips_ineligible_without_reordering_eligible(tmp_path):
             order.append(sid)
             await asyncio.sleep(0.01)
             s.release(sid)
+            released[sid].set()
 
+        async def queued():
+            while not {"a", "b", "c"} <= s.positions().keys():
+                await asyncio.sleep(0)
+
+        # Wait on the grants themselves, not a fixed sleep: a stalled runner can still be inside b's turn (#327).
         tasks = [asyncio.create_task(worker(x)) for x in "abc"]
-        await asyncio.sleep(0.02)
+        await asyncio.wait_for(queued(), timeout=scaled(5))
         s.release("holder")
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(released["c"].wait(), timeout=scaled(5))
         assert order == ["b", "c"]
+        assert s.holder is None and "a" in s.positions()
         tasks[0].cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         eligible["a"] = True
