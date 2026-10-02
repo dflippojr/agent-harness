@@ -559,7 +559,7 @@ $commands = @(
 )
 $runner = {{
     param($command)
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $command.Model }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $command.Model }}
 }}
 $result = Invoke-ReviewFallback -Backends @('claude') -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -Runner $runner
 Write-ReviewResult -Result $result -OutputPath '{output_path}' -CoverageLine 'Reviewed the full diff' -HeadSha '{HEAD_SHA}' -Mode full
@@ -637,7 +637,7 @@ $runner = {{
     if ($command.Backend -eq 'codex') {{
         return [pscustomobject]@{{ ExitCode = 17; Stdout = ''; Stderr = 'RESOURCE_EXHAUSTED'; Model = $null }}
     }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = "- src/app.py:12: real bug`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "- src/app.py:12: real bug`nREVIEW_VERDICT: FINDINGS 1`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $backends = @(Resolve-ReviewBackends -RequestedBackend auto -ConfiguredBackends 'codex,claude,cursor')
 $result = Invoke-ReviewFallback -Backends $backends -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
@@ -666,7 +666,7 @@ $runner = {{
     if ($command.Backend -eq 'codex') {{
         return [pscustomobject]@{{ ExitCode = 0; Stdout = 'plausible but unverified review'; Stderr = ''; Model = $null }}
     }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
 [ordered]@{{ backend = $result.Backend; calls = @($script:calls); body = $result.Output }} | ConvertTo-Json -Compress
@@ -715,7 +715,7 @@ $runner = {{
     if ($command.Backend -eq 'codex') {{
         return [pscustomobject]@{{ ExitCode = 0; Stdout = 'Unable to review: environment policy blocked the diff.'; Stderr = ''; Model = $null }}
     }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
 [ordered]@{{ backend = $result.Backend; calls = @($script:calls); body = $result.Output }} | ConvertTo-Json -Compress
@@ -841,7 +841,7 @@ def test_process_launcher_round_trips_unicode_review_and_posts_it(tmp_path):
     prompt_path = tmp_path / "prompt.md"
     prompt = (
         "- src/caf\u00e9.py:7: \u6f22\u5b57 identifier changed from na\u00efve "
-        "to \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac \u2014 regression.\nREVIEW_STATUS: COMPLETE"
+        "to \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac \u2014 regression.\nREVIEW_VERDICT: FINDINGS 1\nREVIEW_STATUS: COMPLETE"
     )
     prompt_path.write_text(prompt, encoding="utf-8")
     output_path = tmp_path / "posted-review.md"
@@ -1062,7 +1062,7 @@ $runner = {{
     $script:index++
     if ($script:index -eq 1) {{ return [pscustomobject]@{{ ExitCode = 0; Stdout = '   '; Stderr = ''; Model = $null }} }}
     if ($script:index -eq 2) {{ return [pscustomobject]@{{ ExitCode = 0; Stdout = 'quota exceeded'; Stderr = ''; Model = $null }} }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude','cursor') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner -CursorBase '{tmp_path}'
 $result | ConvertTo-Json -Compress
@@ -1095,6 +1095,7 @@ $runner = {{
     param($command)
     $script:calls.Add($command.Backend)
     return [pscustomobject]@{{ ExitCode = 0; Stdout = '{escaped_review}
+REVIEW_VERDICT: FINDINGS 1
 REVIEW_STATUS: COMPLETE'; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
@@ -1132,7 +1133,7 @@ $runner = {{
     if ($script:index -eq 1) {{
         return [pscustomobject]@{{ ExitCode = 0; Stdout = '{first_stdout}'; Stderr = '{first_stderr}'; Model = $null }}
     }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
 $result | ConvertTo-Json -Compress
@@ -1176,7 +1177,7 @@ $runner = {{
     if ($script:index -eq 1) {{
         return [pscustomobject]@{{ ExitCode = 9; Stdout = ''; Stderr = 'backend diagnostic detail'; Model = $null }}
     }}
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "clean review`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
 }}
 $result = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
 $result | ConvertTo-Json -Compress
@@ -1331,7 +1332,7 @@ $env:REVIEW_EFFORT_CODEX = 'high'
 {build}
 $runner = {{
     param($command)
-    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $command.Model; Effort = $command.Effort }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings.`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $command.Model; Effort = $command.Effort }}
 }}
 $result = Invoke-ReviewFallback -Backends @('claude') -Workspace '{workspace}' -Prompt p -ScratchDirectory '{scratch}' -Runner $runner
 Write-ReviewResult -Result $result -OutputPath '{output_path}' -CoverageLine 'Reviewed the full diff' -HeadSha '{HEAD_SHA}' -Mode full
@@ -1474,3 +1475,56 @@ Write-ReviewResult -Result $r -OutputPath '{str(out).replace("'", "''")}' -Cover
 def test_workflow_and_docs_cover_max_diff_bytes():
     assert "REVIEW_MAX_DIFF_BYTES: ${{ vars.REVIEW_MAX_DIFF_BYTES }}" in WORKFLOW.read_text(encoding="utf-8")
     assert "REVIEW_MAX_DIFF_BYTES" in CI_DOCS.read_text(encoding="utf-8")
+
+
+def test_review_verdict_must_be_last_line_and_is_stripped(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        r"""
+function Show($text) {
+    $v = Get-ReviewVerdict -Text $text
+    if ($null -eq $v) { return $null }
+    return [ordered]@{ verdict = $v.Verdict; count = $v.FindingCount; review = $v.Review }
+}
+[ordered]@{
+    clean = Show "No significant findings.`nREVIEW_VERDICT: CLEAN"
+    findings = Show "- a.py:1: bug`r`n- b.py:2: bug`r`nREVIEW_VERDICT: FINDINGS 2"
+    backticked = Show "- a.py:1: bug`n``REVIEW_VERDICT: FINDINGS 1``"
+    missing = Show "No significant findings."
+    not_last = Show "REVIEW_VERDICT: CLEAN`nNo significant findings."
+    zero = Show "nothing`nREVIEW_VERDICT: FINDINGS 0"
+    garbage = Show "nothing`nREVIEW_VERDICT: MAYBE"
+    verdict_only = Show "REVIEW_VERDICT: CLEAN"
+} | ConvertTo-Json -Compress -Depth 3
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip())
+    assert value["clean"] == {"verdict": "clean", "count": 0, "review": "No significant findings."}
+    assert value["findings"]["verdict"] == "findings"
+    assert value["findings"]["count"] == 2
+    assert "REVIEW_VERDICT" not in value["findings"]["review"]
+    assert value["backticked"]["count"] == 1
+    for key in ("missing", "not_last", "zero", "garbage", "verdict_only"):
+        assert value[key] is None, key
+
+
+def test_missing_verdict_falls_through_and_result_carries_verdict(tmp_path):
+    result = run_powershell(
+        tmp_path,
+        f"""
+$runner = {{
+    param($command)
+    if ($command.Backend -eq 'codex') {{
+        return [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant correctness bugs found.`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+    }}
+    return [pscustomobject]@{{ ExitCode = 0; Stdout = "- a.py:1: bug`n- b.py:2: bug`nREVIEW_VERDICT: FINDINGS 2`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+}}
+$r = Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Prompt prompt -ScratchDirectory '{tmp_path}' -Runner $runner
+[ordered]@{{ backend = $r.Backend; verdict = $r.Verdict; count = $r.FindingCount; body = $r.Output }} | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    value = json.loads(result.stdout.strip().splitlines()[-1])
+    assert value == {"backend": "claude", "verdict": "findings", "count": 2, "body": "- a.py:1: bug\n- b.py:2: bug"}
+    assert "codex failed (missing or invalid review verdict)" in result.stdout

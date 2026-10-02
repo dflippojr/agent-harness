@@ -25,6 +25,7 @@ $script:DefaultMaxDiffBytes = 204800
 $script:MinMaxDiffBytes = 20480
 $script:MaxMaxDiffBytes = 2097152
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
+$script:ReviewVerdictPattern = '^`?REVIEW_VERDICT:\s*(?:(CLEAN)|FINDINGS\s+([1-9][0-9]{0,3}))\s*`?$'
 $script:ReviewMarkerPattern = '(?i)<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental)(?: base=([A-Za-z0-9._/\-]+))? -->'
 $script:UntrustedAgentConfigDirectories = @('.claude', '.cursor', '.codex', '.agents')
 $script:UntrustedAgentConfigFiles = @('.mcp.json', '.cursorrules', 'CLAUDE.md', 'AGENTS.md')
@@ -407,6 +408,28 @@ function Get-CompletedReviewText {
     return $review
 }
 
+function Get-ReviewVerdict {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text)
+
+    # The verdict must be the last line of the completed review (the line just above
+    # REVIEW_STATUS: COMPLETE), so verdict-like text quoted from the diff cannot count.
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $trimmed = $Text.Trim()
+    $split = $trimmed.LastIndexOf("`n")
+    $lastLine = if ($split -ge 0) { $trimmed.Substring($split + 1) } else { $trimmed }
+    $match = [regex]::Match($lastLine.Trim(), $script:ReviewVerdictPattern)
+    if (-not $match.Success) { return $null }
+    $review = if ($split -ge 0) { $trimmed.Substring(0, $split).Trim() } else { '' }
+    if ([string]::IsNullOrWhiteSpace($review)) { return $null }
+    $count = if ($match.Groups[1].Success) { 0 } else { [int]$match.Groups[2].Value }
+    return [pscustomobject]@{
+        Verdict = $(if ($count -eq 0) { 'clean' } else { 'findings' })
+        FindingCount = $count
+        Review = $review
+    }
+}
+
 function Get-CursorAgentEntrypoint {
     [CmdletBinding()]
     param([string]$CursorBase = (Join-Path $env:LOCALAPPDATA 'cursor-agent'))
@@ -659,10 +682,14 @@ function Invoke-ReviewFallback {
             $attempt = & $Runner $command
             $reason = $null
             $completedReview = $null
+            $verdict = $null
             if ([int]$attempt.ExitCode -eq 0) {
                 $completedReview = Get-CompletedReviewText -Text ([string]$attempt.Stdout)
+                $verdict = Get-ReviewVerdict -Text ([string]$completedReview)
             }
-            if ([string]::IsNullOrWhiteSpace([string]$completedReview)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$completedReview) -and $null -eq $verdict) {
+                $reason = 'missing or invalid review verdict'
+            } elseif ([string]::IsNullOrWhiteSpace([string]$completedReview)) {
                 $rateLimited = Test-ReviewAttemptRateLimit -Stdout ([string]$attempt.Stdout) -Stderr ([string]$attempt.Stderr)
                 if ($rateLimited) {
                     $reason = 'rate limit or quota response'
@@ -688,7 +715,9 @@ function Invoke-ReviewFallback {
                 Backend = $backend
                 Model = $attempt.Model
                 Effort = $(if ($attempt.PSObject.Properties['Effort']) { $attempt.Effort } else { $null })
-                Output = $completedReview
+                Output = $verdict.Review
+                Verdict = $verdict.Verdict
+                FindingCount = $verdict.FindingCount
             }
         } catch {
             $failures.Add("$backend`: $($_.Exception.Message)")
@@ -1143,6 +1172,9 @@ function Invoke-ReviewMain {
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        "verdict=$($result.Verdict)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        "findings=$($result.FindingCount)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        "omitted_files=$(@($embedding.OmittedFiles).Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         if (-not [string]::IsNullOrWhiteSpace([string]$result.Model)) {
             "model=$($result.Model)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         }
