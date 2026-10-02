@@ -117,10 +117,13 @@ class Scanner:
         except (OSError, KeyError, tarfile.TarError, zipfile.BadZipFile) as e:
             return self._record(f"could not extract {asset['name']}: {e}")
         self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.binary.with_name(self.binary.name + ".part")
+        tmp = self.binary.with_name(f"{self.binary.name}.{os.getpid()}.part")
         tmp.write_bytes(binary)
         tmp.chmod(0o755)
-        os.replace(tmp, self.binary)
+        try:
+            os.replace(tmp, self.binary)
+        except OSError:  # another process installed it meanwhile and Windows locks a running .exe
+            tmp.unlink(missing_ok=True)
         self._checked = None
         problem = self.problem()
         if not problem:
