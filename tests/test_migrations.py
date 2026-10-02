@@ -87,8 +87,9 @@ def _seed_session(path: Path, sid: str = "s1") -> None:
 
 def test_baseline_is_frozen_at_45():
     assert BASELINE_VERSION == 45 and len(LEGACY_COLUMNS) == 45
-    # the real steps are valid and gap-free from 0046: 0046_session_taint (#262), 0047_canary_results (#265)
-    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47]
+    # the real steps are valid and gap-free from 0046: 0046_session_taint (#262), 0047_canary_results (#265),
+    # 0048_canary_note (#316)
+    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48]
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):

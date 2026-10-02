@@ -613,6 +613,14 @@ def _load_canary(raw) -> CanaryConfig:
     suite = raw.get("suite", CanaryConfig.suite)
     if raw.get("enabled") and suite and not (ROOT / suite).is_file():
         raise ValueError(f"canary.suite {suite!r} is not a file")
+    if raw.get("enabled") and suite:
+        try:
+            web = (yaml.safe_load((ROOT / suite).read_text(encoding="utf-8")) or {}).get("web")
+        except (OSError, yaml.YAMLError, AttributeError) as e:
+            raise ValueError(f"canary.suite {suite!r} can't be read: {e}") from None
+        fixture = Path(raw.get("fixture_dir", CanaryConfig.fixture_dir))
+        if web and not (fixture / "manifest.json").is_file():  # every web task would fail against an empty replay
+            raise ValueError(f"canary.fixture_dir {str(fixture)!r} has no manifest.json (the suite has web tasks)")
     return CanaryConfig(**raw)
 
 
