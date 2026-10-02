@@ -9,10 +9,10 @@
 //   scripts number of JS requests (app.js, client.mjs, lib/, pages/)
 // The browser defaults to Edge; set CHROME to another Chromium (the #188 study used Playwright's Chromium 153).
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { extname, join, normalize } from "node:path";
+import { extname, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 
 const BROWSER = process.env.CHROME || String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`;
@@ -23,14 +23,23 @@ const TYPES = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/ja
   ".png": "image/png", ".webmanifest": "application/manifest+json" };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Index every file under webDir once, keyed by its URL path. Requests are only looked up in this index, so no
+// request-derived string ever reaches the filesystem.
+const root = resolve(webDir);
+const FILES = new Map();
+for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+  if (!entry.isFile()) continue;
+  const full = join(entry.parentPath ?? entry.path, entry.name);
+  FILES.set("/" + relative(root, full).split(sep).join("/"), full);
+}
+
 const server = createServer((req, res) => {
-  const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
+  let path;
+  try { path = decodeURIComponent(req.url.split("?")[0].split("#")[0]); } catch (_) { path = ""; }
   if (path.startsWith("/api/")) { res.writeHead(503, { "content-type": "application/json" }); res.end("{}"); return; }
-  const file = normalize(join(webDir, path === "/" ? "index.html" : path));
-  let body;
-  try { if (!file.startsWith(normalize(webDir)) || !statSync(file).isFile()) throw new Error(); body = readFileSync(file); } catch (_) {
-    res.writeHead(404); res.end(); return;
-  }
+  const file = FILES.get(path === "/" ? "/index.html" : path);
+  if (!file) { res.writeHead(404); res.end(); return; }
+  let body = readFileSync(file);
   const type = TYPES[extname(file)] || "application/octet-stream";
   const headers = { "content-type": type, "cache-control": "no-cache" };
   if (type.startsWith("text/") && /\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
