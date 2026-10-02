@@ -6,6 +6,7 @@ import asyncio
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from harness import telemetry
@@ -90,6 +91,47 @@ def test_loop_probe_sees_a_blocked_loop():
 
     asyncio.run(run())
     assert hist.quantile(1.0) >= 0.1
+
+
+def test_loop_probe_task_ends_cancelled_and_stop_is_clean():
+    async def run():
+        probe = telemetry.LoopLagProbe(telemetry.Histogram(), interval=0.005)
+        probe.start()
+        task = probe._task
+        await asyncio.sleep(0.02)
+        await asyncio.wait_for(probe.stop(), 1)
+        assert task.cancelled()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await probe.stop()  # idempotent
+
+    asyncio.run(run())
+
+
+def test_loop_probe_stop_propagates_its_own_cancellation():
+    async def run():
+        probe = telemetry.LoopLagProbe(telemetry.Histogram(), interval=0.005)
+        probe.start()
+        stopper = asyncio.ensure_future(probe.stop())
+        await asyncio.sleep(0)  # let stop() reach its await
+        stopper.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopper
+
+    asyncio.run(run())
+
+
+def test_daemon_lifespan_shutdown_does_not_hang(tmp_path):
+    from fastapi.testclient import TestClient
+    from harness.api import create_app
+    from harness.manager import Manager
+    from test_daemon import Script, make_cfg
+
+    m = Manager(make_cfg(tmp_path), chat=Script([]))
+    start = time.monotonic()
+    with TestClient(create_app(m)):
+        pass
+    assert time.monotonic() - start < 10
 
 
 def test_asyncio_debug_is_opt_in(monkeypatch):

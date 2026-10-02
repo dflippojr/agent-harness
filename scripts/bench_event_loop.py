@@ -43,14 +43,14 @@ def _text(n_words: int, salt: int) -> str:
     return " ".join(WORDS[(salt * 7 + i * 13) % len(WORDS)] + str((salt + i) % 97) for i in range(n_words))
 
 
-def _session(sid: str) -> dict:
+def _session(sid: str, workspace: str) -> dict:
     now = time.time()
     return {"id": sid, "project": "scratch", "target": "local", "model": "fake", "title": f"bench {sid}",
-            "status": "running", "workspace": "/tmp/ws", "created_at": now, "updated_at": now, "context": "[]"}
+            "status": "running", "workspace": workspace, "created_at": now, "updated_at": now, "context": "[]"}
 
 
-async def fake_session(db: Database, sid: str, stop: asyncio.Event, large_every: int, stats: dict) -> None:
-    db.insert_session(_session(sid))
+async def fake_session(db: Database, sid: str, stop: asyncio.Event, large_every: int, stats: dict, workspace: str) -> None:
+    db.insert_session(_session(sid, workspace))
     blob = ("x" * 63 + "\n") * (LARGE_BYTES // 64)
     i = 0
     while not stop.is_set():
@@ -108,11 +108,19 @@ async def run(args) -> dict:
         stop = asyncio.Event()
         probe = telemetry.LoopLagProbe()
         probe.start()
-        tasks = [asyncio.create_task(fake_session(db, f"bench-{n}", stop, args.large_every, stats))
-                 for n in range(args.sessions)]
-        tasks += [asyncio.create_task(searcher(db, stop, stats)), asyncio.create_task(scraper(m, stop, stats))]
-        if args.no_scrape:
-            tasks.pop().cancel()
+        workspace = str(Path(tmpdir) / "ws")
+        tasks: set[asyncio.Task] = set()
+
+        def spawn(coro) -> None:
+            task = asyncio.create_task(coro)
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+
+        for n in range(args.sessions):
+            spawn(fake_session(db, f"bench-{n}", stop, args.large_every, stats, workspace))
+        spawn(searcher(db, stop, stats))
+        if not args.no_scrape:
+            spawn(scraper(m, stop, stats))
         await asyncio.sleep(args.seconds)
         stop.set()
         await asyncio.gather(*tasks)
@@ -156,6 +164,15 @@ def report(args, result: dict) -> str:
     return "\n".join(lines)
 
 
+def safe_output_path(raw: str) -> Path:
+    """Resolve `raw` and require it to sit inside the repo root or the system temp dir."""
+    path = Path(raw).resolve()
+    for base in (ROOT, Path(tempfile.gettempdir()).resolve()):
+        if path.is_relative_to(base):
+            return path
+    raise SystemExit(f"--markdown must be inside the repo ({ROOT}) or the temp dir; got {path}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--sessions", type=int, default=4)
@@ -164,10 +181,11 @@ def main() -> None:
     ap.add_argument("--no-scrape", action="store_true", help="skip the /metrics scraper (attribution run)")
     ap.add_argument("--markdown", help="also write the report to this file")
     args = ap.parse_args()
+    md_path = safe_output_path(args.markdown) if args.markdown else None
     out = report(args, asyncio.run(run(args)))
     print(out)
-    if args.markdown:
-        Path(args.markdown).write_text(out + "\n", encoding="utf-8")
+    if md_path:
+        md_path.write_text(out + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

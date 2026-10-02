@@ -132,10 +132,8 @@ class LoopLagProbe:
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            # wait() never raises the task's CancelledError, but still propagates ours if stop() itself is cancelled
+            await asyncio.wait({task})
 
     async def _run(self) -> None:
         while True:
