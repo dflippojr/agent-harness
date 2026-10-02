@@ -15,13 +15,30 @@ import copy
 import random
 from typing import Any
 
+import pytest
+
 from harness.managed_config import OverlayCrash
 from harness.overlay import OverlayRequest, OverlayState, effective_candidate, next_overlay
 from harness.settings import RESET
+from harness import settings_service
 from harness.settings_service import SettingsError, SettingsService
 from harness.config import ModelConfig
 
 from test_daemon import make_cfg
+
+
+@pytest.fixture(autouse=True)
+def yaml_parsed_once(monkeypatch):
+    """Every service here reads the same unchanged config/*.yaml, and pure-Python YAML parsing was three quarters
+    of the property test's time (minutes on a hosted runner with coverage, #312). Parse once; hand each service its
+    own copy."""
+    load, cache = settings_service._load_yaml_files, {}
+
+    def cached(config_dir):
+        if config_dir not in cache:
+            cache[config_dir] = load(config_dir)
+        return copy.deepcopy(cache[config_dir])
+    monkeypatch.setattr(settings_service, "_load_yaml_files", cached)
 
 LIVE_KEYS = ("sessions.max_turns", "backup.keep_days", "backends.local.model")
 RESTART_KEYS = ("web.enabled", "search.enabled")
