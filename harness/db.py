@@ -418,7 +418,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "app_defaults", "data",
                 "origins", "models", "smart", "risk_flags", "skills", "references", "examples", "manifest",
-                "static_findings", "findings", "provenance"}
+                "static_findings", "findings", "provenance", "taint"}
 # skill_proposals.review is JSON; sessions.review is a plain merge/push/discard string.
 SKILL_JSON_COLUMNS = JSON_COLUMNS | {"review"}
 
