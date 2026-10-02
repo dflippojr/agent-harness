@@ -44,33 +44,40 @@ def _traced_manager(cfg, chat):
     return m, exporter
 
 
-def _covered(parent, children) -> float:
-    """Fraction of `parent`'s duration covered by the union of `children`."""
-    spans = sorted((max(c.start_time, parent.start_time), min(c.end_time, parent.end_time)) for c in children)
-    covered, cursor = 0, parent.start_time
-    for start, end in spans:
-        start = max(start, cursor)
-        if end > start:
-            covered += end - start
-            cursor = end
-    return covered / (parent.end_time - parent.start_time)
+# The longest un-spanned stretch a parent may have. Real work in these tests (a 150 ms model call, 200-300 ms waits)
+# is far longer, so leaving any of it outside a child span fails; the few-ms bookkeeping between spans doesn't,
+# however slow the runner. A summed-coverage ratio did fail there: many sub-5 ms gaps added up (#312).
+MAX_GAP_NS = 50_000_000
+# Some span edges come from float-second timestamps (about 256 ns of precision at today's epoch), so a shared edge
+# can land a few hundred ns either way.
+EDGE_NS = 1_000
 
 
 def _gaps(parent, children) -> list[tuple[str, str, int]]:
-    """Uncovered stretches over 5 ms as (before, after, ms), for assertion messages."""
+    """Every uncovered stretch of `parent` as (before, after, ms)."""
     out, cursor, prev = [], parent.start_time, "start"
     for c in sorted(children, key=lambda c: c.start_time):
-        if c.start_time - cursor > 5_000_000:
-            out.append((prev, c.name, (c.start_time - cursor) // 1_000_000))
+        if c.start_time > cursor:
+            out.append((prev, c.name, (c.start_time - cursor) / 1_000_000))
         if c.end_time > cursor:
             cursor, prev = c.end_time, c.name
-    if parent.end_time - cursor > 5_000_000:
-        out.append((prev, "end", (parent.end_time - cursor) // 1_000_000))
+    if parent.end_time > cursor:
+        out.append((prev, "end", (parent.end_time - cursor) / 1_000_000))
     return out
 
 
-def _sum_ratio(parent, children) -> float:
-    return sum(c.end_time - c.start_time for c in children) / (parent.end_time - parent.start_time)
+def _assert_tiled(parent, children) -> None:
+    """`children` account for all of `parent`'s time: each lies inside it, siblings don't overlap, and no gap
+    between them is longer than MAX_GAP_NS."""
+    assert children, f"{parent.name} has no child spans"
+    ordered = sorted(children, key=lambda c: c.start_time)
+    for c in ordered:
+        assert c.start_time <= c.end_time, f"{c.name} ends before it starts"
+        assert parent.start_time - EDGE_NS <= c.start_time and c.end_time <= parent.end_time + EDGE_NS,             f"{c.name} outside {parent.name}"
+    for a, b in zip(ordered, ordered[1:]):
+        assert a.end_time <= b.start_time + EDGE_NS, f"{a.name} overlaps {b.name} under {parent.name}"
+    gaps = _gaps(parent, ordered)
+    assert all(ms * 1_000_000 <= MAX_GAP_NS for _, _, ms in gaps), (parent.name, gaps)
 
 
 # --- off by default ---
@@ -262,12 +269,10 @@ def test_scripted_session_produces_one_covering_trace(tmp_path):
 
     children = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == root.context.span_id]
     assert {c.name for c in children} >= {"turn", "idle", "gpu_slot_wait"}
-    assert _covered(root, children) >= 0.95, _gaps(root, children)
-    assert _sum_ratio(root, children) <= 1.05
+    _assert_tiled(root, children)
     for turn in (sp for sp in spans if sp.name == "turn"):
         kids = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == turn.context.span_id]
-        assert _covered(turn, kids) >= 0.95, _gaps(turn, kids)
-        assert _sum_ratio(turn, kids) <= 1.05
+        _assert_tiled(turn, kids)
 
     chat = next(sp for sp in spans if sp.name == "chat" and sp.attributes.get("gen_ai.usage.input_tokens") == 50)
     assert chat.attributes["gen_ai.request.model"] == "fake"
@@ -333,13 +338,11 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path):
     assert resumed.attributes["harness.resumed"] is True
     for turn in (sp for sp in spans if sp.name == "turn"):
         kids = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == turn.context.span_id]
-        assert _covered(turn, kids) >= 0.95, _gaps(turn, kids)
-        assert _sum_ratio(turn, kids) <= 1.05
+        _assert_tiled(turn, kids)
     root = next(sp for sp in after if sp.name == "session")
     children = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == root.context.span_id]
     assert not {c.name for c in children} & {"execute_tool", "approval_wait", "sandbox_exec"}
-    assert _covered(root, children) >= 0.95, _gaps(root, children)
-    assert _sum_ratio(root, children) <= 1.05
+    _assert_tiled(root, children)
 
 
 def test_sentinel_never_reaches_a_span(tmp_path):

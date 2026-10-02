@@ -126,11 +126,18 @@ def test_cancelling_while_the_process_is_still_being_spawned_still_kills_it(spaw
     assert _wait_until(lambda: spawned[0].poll() is not None), "a command cancelled mid-spawn was left running"
 
 
-def test_run_cmd_returns_when_detached_child_holds_the_pipe(tmp_path):
+def test_run_cmd_returns_when_detached_child_holds_the_pipe(tmp_path, monkeypatch):
     """Parent exits while a grandchild still holds stdout; pumps must not wait out the join timeout."""
     sh = shutil.which("sh")
     if not sh:
         pytest.skip("sh is required to background a child that keeps the pipe open")
+    finished = []
+    pump = sandbox._pump_stream
+
+    def watched_pump(stream, cap):
+        pump(stream, cap)
+        finished.append(stream)
+    monkeypatch.setattr(sandbox, "_pump_stream", watched_pump)
     pidfile = tmp_path / "child.pid"
     posix = str(pidfile).replace("\\", "/")
     inner = f"sleep 67 & echo $! > '{posix}'; echo parent-done"
@@ -142,7 +149,10 @@ def test_run_cmd_returns_when_detached_child_holds_the_pipe(tmp_path):
         assert pidfile.exists(), "background child never wrote its pid"
         pid = int(pidfile.read_text().strip())
         assert code == 0, err
-        assert elapsed < 5, f"pump join leaked; run_cmd took {elapsed:.2f}s"
+        # The mechanism: both pumps returned before run_cmd did, though the grandchild still holds the pipe. Without
+        # the unblock they stay in read() and run_cmd gives up on them after two 10 s joins.
+        assert len(finished) == 2, f"pump join leaked: {2 - len(finished)} pump(s) still reading"
+        assert elapsed < 15, f"run_cmd took {elapsed:.2f}s, as long as a leaked pump join"
     finally:
         if pid:
             subprocess.run([sh, "-c", f"kill {pid} 2>/dev/null; kill -9 {pid} 2>/dev/null"],
