@@ -178,7 +178,7 @@ class Runner:
         self._quota_checked: dict[str, float] = {}
         self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
         self.ram = None                         # gpu_guard.MemoryWatch (the guard's RAM check), set with the guard
-        self.generating: set[str] = set()       # sessions with a model call in flight (the guard waits for them)
+        self.generating: set[str] = set()       # sessions loading the model or calling it (the guard waits for them)
         self.gpu_paused_sessions: set[str] = set()
         self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
@@ -434,37 +434,46 @@ class Runner:
             await asyncio.sleep(MEMORY_POLL_SECONDS)
         await self.bus.aemit(sid, "memory_recovered", {"seconds": round(time.monotonic() - started)})
 
-    async def _ensure_model(self, sid: str, model) -> None:
-        """Load a parked model before the call; a parked or sleeping one waits for memory first."""
+    async def _memory_wait(self, sid: str, model) -> None:
+        """A parked or sleeping model waits for memory before it loads."""
         if self.memory_low() and await self.warmer.state(model) in (SLEEPING, UNLOADED):
             await self._memory_gate(sid, "local model")
-        await self.warmer.ensure_loaded(model)
 
     async def _model_call(self, sid: str, *args, **kwargs) -> llm.Completion:
         """self.chat, gated on the GPU guard. A call cut off because the guard stopped the model server (a game
-        started and the turn outlasted the drain timeout) is retried after the pause instead of failing."""
+        started and the turn outlasted the drain timeout, or the server was parked under it) is retried instead of
+        failing. The session is in `generating` (the guard's lease: it won't unload the model) from before a parked
+        model is loaded until the call ends."""
+        model = args[0] if args and isinstance(args[0], ModelConfig) else None
         while True:
             await self._gpu_gate(sid)
-            if args and isinstance(args[0], ModelConfig):
-                await self._ensure_model(sid, args[0])
-                if self.guard is not None and self.guard.active:
-                    continue  # a hold began while the model was loading
-            turn = await self.gate.agent_turn()  # endpoint requests (an editor, a script) go first
+            if model is not None:
+                await self._memory_wait(sid, model)
             self.generating.add(sid)
+            turn = None
             try:
+                if model is not None:
+                    await self.warmer.ensure_loaded(model)
+                    if self.guard is not None and self.guard.active:
+                        continue  # a hold began while the model was loading
+                turn = await self.gate.agent_turn()  # endpoint requests (an editor, a script) go first
                 with telemetry.span("chat", {"gen_ai.operation.name": "chat",
                                              "gen_ai.request.model": getattr(args[0], "name", "") if args else ""}):
                     completion = await self.chat(*args, **kwargs)
                     telemetry.annotate(self._chat_attributes(completion))
                 return completion
             except llm.LLMError as e:
-                if self.guard is None or not self.guard.active:
+                if self.guard is not None and self.guard.active:
+                    reason = "model server paused for the GPU"
+                elif model is not None and self.warmer.parked(model):
+                    reason = "model server was unloaded"  # the next pass loads it again
+                else:
                     raise
-                await self.bus.aemit(sid, "llm_retry",
-                                     {"attempt": 0, "error": f"model server paused for the GPU: {e}"[:500]})
+                await self.bus.aemit(sid, "llm_retry", {"attempt": 0, "error": f"{reason}: {e}"[:500]})
             finally:
                 self.generating.discard(sid)
-                await turn.release()
+                if turn is not None:
+                    await turn.release()
 
     @staticmethod
     def _chat_attributes(c: llm.Completion) -> dict:
