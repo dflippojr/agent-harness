@@ -810,6 +810,13 @@ class Database:
             ).fetchall()
         return [_row(r) for r in rows]
 
+    def pushed_heads(self, sid: str) -> list[str]:
+        """The short heads a session's branch was pushed at, from its `review` events (issue #263)."""
+        with self.lock:
+            rows = self.conn.execute("SELECT data FROM events WHERE session_id = ? AND type = 'review'",
+                                     (sid,)).fetchall()
+        return [d["head"] for d in (json.loads(r["data"]) for r in rows) if d.get("action") == "push" and d.get("head")]
+
     def snippet_events(self) -> list[dict]:
         """Every chat's snippet run events, oldest first (snippets.py restart recovery)."""
         with self.lock:

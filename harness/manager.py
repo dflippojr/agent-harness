@@ -18,7 +18,7 @@ from pathlib import Path
 from .bus import EventBus
 from . import review_comments
 from . import review_comments
-from .changes import repo_diffs, workspace_changes
+from .changes import published, repo_diffs, workspace_changes
 from .maintenance import Maintenance
 from .image_archive import ImageArchive
 from .notify import Notifier
@@ -80,6 +80,45 @@ SEARCH_PROMPT = ("Past work: session_search finds earlier agent sessions on this
 
 def public_approval(a: dict | None) -> dict | None:
     return a and {k: v for k, v in a.items() if k != "token"}
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _secret_rewrite_message(findings: list[dict], bases: dict[str, str]) -> str:
+    """Ask agent to fix for values a later commit removed: rewrite the branch's own commits (issue #263)."""
+    places = "\n".join(f"- commit {f['commit']}{'' if f['repo'] == '.' else ' in ' + f['repo']}: {f['file']} line "
+                       f"{f['line']}, rule {f['rule']}" for f in findings)
+    ranges = ", ".join(sorted({f"{bases.get(f['repo']) or '<base>'}..HEAD"
+                               + ('' if f['repo'] == '.' else f" in {f['repo']}") for f in findings}))
+    return (f"{SECRET_FIX} earlier commits on this branch add a possible credential that a later commit removed, "
+            "so the working tree is clean but the branch history still has it and Push stays blocked (the values "
+            f"are not shown):\n{places}\n\nRewrite only this branch's own commits ({ranges}) so that no commit in "
+            "that range contains the value, keeping the rest of each commit's changes. Do it non-interactively, "
+            "for example `git rebase -i <base>` with a GIT_SEQUENCE_EDITOR script that marks each listed commit "
+            "`edit` (remove the value, `git commit --amend --no-edit`, `git rebase --continue`, resolving the "
+            "conflict with the commit that removed it) or with fixup commits and `--autosquash`. Never rewrite the "
+            "base commit or anything before it, never touch the base branch, and do not push. Read the value "
+            "from the environment or an untracked secret store instead, then check that no commit in the range "
+            "still adds it.")
+
+
+def _secret_fix_summary(drafted: int, already: int, rewrite: int, pushed: int) -> str:
+    """What Ask agent to fix did, for the toast and API clients."""
+    parts = []
+    if drafted:
+        parts.append(f"Drafted {_plural(drafted, 'review comment')}; send them to the agent.")
+    elif already:
+        parts.append("The findings in the diff already have draft comments; send them to the agent.")
+    if rewrite:
+        parts.append(f"Asked the agent to remove {_plural(rewrite, 'finding')} from the branch's earlier commits; "
+                     "Push stays blocked until no commit since the base contains them.")
+    if pushed:
+        parts.append(f"{_plural(pushed, 'finding')} {'is' if pushed == 1 else 'are'} in commits already on the "
+                     "remote branch: removing them would need a force-push, which the harness does not do, so "
+                     "dismiss them with a reason (and rotate the credential).")
+    return " ".join(parts) or "There are no open findings to fix."
 
 
 class HarnessError(Exception):
@@ -841,20 +880,33 @@ class Manager:
                                     "fix them or dismiss each with a reason.",
                                code="secret_findings", details={"findings": n, "rules": rules})
 
-    async def secret_findings_fix(self, ref: str) -> list[dict]:
-        """Ask agent to fix: one draft review comment per open finding in the diff (rule and place, never the value)."""
+    async def secret_findings_fix(self, ref: str) -> dict:
+        """Ask agent to fix (rule and place, never the value): one draft review comment per open finding in the diff;
+        for a value only in the branch's earlier commits, a message now asking the agent to rewrite base..HEAD. A
+        commit already on the remote would need a force-push, so that finding can only be dismissed."""
         sid = self.resolve_id(ref)
+        s = self.get(sid)
         data = await self.changes(sid)
         scan = data.get("secret_scan")
         if not scan or scan["status"] != "ok":
             raise HarnessError(409, "there is no secret scan result for this session")
         drafts = self.db.list_review_comments(sid)
-        made = []
+        made, rewrite, pushed, already = [], [], [], 0
         for f in scan["findings"]:
-            # A value a later commit removed has no line in the diff to comment on: dismiss it or rewrite the branch.
-            if f["dismissed"] or "commit" in f or any(d["repo"] == f["repo"] and d["path"] == f["file"] and d["side"] == "new"
-                                     and d["start_line"] == f["line"] and d["comment"].startswith(SECRET_FIX)
-                                     for d in drafts):
+            if f["dismissed"]:
+                continue
+            if "commit" in f:  # no line in the diff to comment on: the branch history has to change
+                repo = next((r for r in data["repos"] if r["path"] == f["repo"]), {})
+                branch = s["branch"] if f["repo"] == "." else repo.get("branch", "")
+                tips = [f"refs/remotes/origin/{branch}"] if branch and branch != "HEAD" else []
+                if f["repo"] == ".":
+                    tips += self.db.pushed_heads(sid)
+                on_remote = await asyncio.to_thread(published, Path(s["workspace"]) / f["repo"], f["commit"], tips)
+                (pushed if on_remote else rewrite).append(f)
+                continue
+            if any(d["repo"] == f["repo"] and d["path"] == f["file"] and d["side"] == "new"
+                   and d["start_line"] == f["line"] and d["comment"].startswith(SECRET_FIX) for d in drafts):
+                already += 1
                 continue
             repo = next((r for r in data["repos"] if r["path"] == f["repo"]), None)
             lines = review_comments.side_lines(repo["parsed"], f["file"], "new") if repo else {}
@@ -865,7 +917,10 @@ class Manager:
                 "repo": f["repo"], "path": f["file"], "side": "new", "start_line": f["line"],
                 "end_line": f["line"], "quoted": [lines.get(f["line"], "")], "comment": comment,
                 "base": repo["base"] if repo else "", "head": repo["head"] if repo else ""}))
-        return made
+        if rewrite:
+            await self.send(sid, _secret_rewrite_message(rewrite, {r["path"]: r["base"] for r in data["repos"]}))
+        return {"drafts": made, "already_drafted": already, "rewrite": rewrite, "pushed": pushed,
+                "message": _secret_fix_summary(len(made), already, len(rewrite), len(pushed))}
 
     async def dismiss_secret_finding(self, ref: str, fingerprint: str, reason: str, actor_id: str) -> dict:
         """Owner-only (the callers check): dismiss one finding by fingerprint for this session, with a reason."""

@@ -19,7 +19,7 @@ from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 
 from test_api import make_client, wait_for
-from test_daemon import call
+from test_daemon import Script, call
 from test_phase3 import edit_steps, finished, make_repo, project_cfg, sh
 
 # Built at runtime so the repository itself holds no credential-shaped string. Not EXAMPLE-suffixed:
@@ -271,12 +271,84 @@ def test_key_removed_by_a_later_commit_blocks_push_until_dismissed(tmp_path, cap
         [finding] = data["secret_scan"]["findings"]
         assert (finding["file"], finding["line"], finding["commit"]) == ("settings.py", 1, added[:12])
         assert finding["fingerprint"] != _net_fingerprint(m, sid, ws)  # the commit is part of the fingerprint
-        assert await m.secret_findings_fix(sid) == []  # no diff line to comment on
 
         await m.dismiss_secret_finding(sid, finding["fingerprint"], "rotated; history is fine", "owner")
         s = await m.review(sid, "push")
         assert s["review"] == "pushed"
         assert _leaks(m, sid, caplog) == []
+        await m.stop()
+    asyncio.run(body())
+
+
+def _user_messages(m: Manager, sid: str) -> list[str]:
+    return [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"]
+
+
+def test_ask_fix_on_a_commit_only_finding_asks_for_a_history_rewrite(tmp_path, caplog):
+    """Owner decision on #263: a value only in an earlier commit is not skipped; the agent is asked to rewrite
+    the branch's own commits, and Push is allowed once no commit since the base has it."""
+    remote = make_repo(tmp_path / "remote.git", bare=True)
+    cfg = project_cfg(tmp_path, remote.as_uri())
+
+    async def body():
+        m = Manager(cfg, chat=Script([*edit_steps().steps, Completion(content="Rewrote the branch.")]))
+        await m.start(maintenance=False)
+        s = await finished(m, m.create("bump", project="proj")["id"])
+        sid, ws, base = s["id"], Path(s["workspace"]), s["base_commit"]
+        added = _commit_then_remove_key(ws)
+        before = _user_messages(m, sid)
+
+        result = await m.secret_findings_fix(sid)
+        assert result["drafts"] == [] and result["already_drafted"] == 0 and result["pushed"] == []
+        assert [f["commit"] for f in result["rewrite"]] == [added[:12]]
+        assert result["message"].startswith("Asked the agent to remove 1 finding from the branch's earlier commits")
+        assert "already have draft" not in result["message"]
+        [sent] = _user_messages(m, sid)[len(before):]
+        assert f"commit {added[:12]}: settings.py line 1, rule aws-access-token" in sent
+        assert f"{base[:12]}..HEAD" in sent and "do not push" in sent and KEY not in sent
+        await finished(m, sid)
+
+        # The agent's rewrite: the same changes, with no commit since the base adding the value.
+        sh(ws, "reset", "-q", "--soft", base)
+        sh(ws, "commit", "-qm", "bump, reading the key from the environment")
+        assert KEY not in sh(ws, "log", "-p", f"{base}..HEAD")
+        assert (await m.changes(sid))["secret_scan"]["findings"] == []
+        assert (await m.review(sid, "push"))["review"] == "pushed"
+        assert _leaks(m, sid, caplog) == []
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_ask_fix_on_a_commit_already_pushed_says_dismiss_instead(tmp_path):
+    """Nothing at or before the remote branch's tip is rewritten: that needs a force-push, so only dismiss is left."""
+    remote = make_repo(tmp_path / "remote.git", bare=True)
+    cfg = project_cfg(tmp_path, remote.as_uri())
+
+    async def body():
+        m = Manager(cfg, chat=edit_steps())
+        await m.start(maintenance=False)
+        s = await finished(m, m.create("bump", project="proj")["id"])
+        sid, ws, branch = s["id"], Path(s["workspace"]), s["branch"]
+        _commit_then_remove_key(ws)
+        sh(ws, "push", "-q", "origin", f"{branch}:refs/heads/{branch}")  # pushed outside the gate
+        sent = _user_messages(m, sid)
+
+        result = await m.secret_findings_fix(sid)
+        assert result["rewrite"] == [] and len(result["pushed"]) == 1 and result["drafts"] == []
+        assert "force-push" in result["message"] and "dismiss them with a reason" in result["message"]
+        assert _user_messages(m, sid) == sent  # nothing asked of the agent
+
+        # A push the harness recorded counts too (a member GitHub push leaves no remote-tracking ref here).
+        sh(ws, "update-ref", "-d", f"refs/remotes/origin/{branch}")
+        assert (await m.secret_findings_fix(sid))["rewrite"] != []  # the remote-tracking ref was the evidence
+        await finished(m, sid)
+        m.bus.emit(sid, "review", {"action": "push", "state": "pushed", "detail": "",
+                                   "head": sh(ws, "rev-parse", "HEAD")[:12]})
+        result = await m.secret_findings_fix(sid)
+        assert result["rewrite"] == [] and len(result["pushed"]) == 1
+        with pytest.raises(HarnessError) as e:
+            await m.review(sid, "push")
+        assert e.value.code == "secret_findings"
         await m.stop()
     asyncio.run(body())
 
@@ -474,11 +546,14 @@ def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
         assert KEY not in merge.text
 
         made = client.post(f"/sessions/{sid}/secret-findings/fix")
-        assert made.status_code == 201 and len(made.json()) == 1
-        draft = made.json()[0]
+        assert made.status_code == 201 and len(made.json()["drafts"]) == 1
+        assert made.json()["message"].startswith("Drafted 1 review comment;")
+        draft = made.json()["drafts"][0]
         assert (draft["path"], draft["start_line"], draft["side"]) == ("deploy.sh", 2, "new")
         assert "aws-access-token" in draft["comment"] and KEY not in made.text
-        assert client.post(f"/sessions/{sid}/secret-findings/fix").json() == []  # no duplicate drafts
+        again = client.post(f"/sessions/{sid}/secret-findings/fix").json()
+        assert again["drafts"] == [] and again["already_drafted"] == 1  # no duplicate drafts
+        assert again["message"].startswith("The findings in the diff already have draft comments")
         assert client.post(f"/sessions/{sid}/review-comments/send").status_code == 200
         wait_for(lambda: m.db.get_session(sid)["status"] == "done")
         sent = [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"][-1]

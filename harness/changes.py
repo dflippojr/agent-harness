@@ -76,6 +76,19 @@ def commit_diffs(repo: Path, base: str) -> list[dict]:
     return out
 
 
+def published(repo: Path, commit: str, tips: list[str]) -> bool:
+    """Whether `commit` is at or before one of `tips` (remote-tracking refs, pushed heads): already on the remote,
+    so rewriting it would need a force-push. A pushed head that no longer resolves counts as covering it."""
+    for tip in tips:
+        if not _git(repo, "rev-parse", "--verify", "-q", f"{tip}^{{commit}}").strip():
+            if tip.startswith("refs/"):
+                continue  # no such remote branch
+            return True
+        if git(repo, "merge-base", "--is-ancestor", commit, tip, timeout=60, check=False).code == 0:
+            return True
+    return False
+
+
 def repo_diffs(workspace: Path, base_commit: str | None = None) -> list[dict]:
     """Each repository's full (untruncated) diff from its base to the working tree, untracked files included,
     and each commit since the base with its own diff (`commits`)."""
