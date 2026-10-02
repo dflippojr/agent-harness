@@ -112,6 +112,38 @@ def test_confirmation_rerun_that_recovers_cancels_the_alert(tmp_path):
     assert notes == [] and row["pass_rate"] == 1.0 and not row["alerted"]
 
 
+class NewTaskSuite:
+    """First run: 17 attempts pass on known tasks, 3 attempts fail on a task with no history. Reruns use `rerun_ok`."""
+
+    def __init__(self, rerun_ok: bool):
+        self.rerun_ok, self.calls = rerun_ok, []
+
+    async def __call__(self, sha, only):
+        self.calls.append(only)
+        if only is None:
+            return Report("complete", _outcomes(17) [:17] + [{**_outcomes(1)[0], "task": "brand-new", "ok": False}] * 3)
+        return Report("complete", [{**_outcomes(1)[0], "task": t, "ok": self.rerun_ok} for t in only for _ in range(3)])
+
+
+def test_new_failing_task_without_history_is_confirmed_before_alerting(tmp_path):
+    notes: list[dict] = []
+    suite = NewTaskSuite(rerun_ok=False)
+    c, _ = _canary(tmp_path, suite, notes)
+    _seed(c, [20, 20, 20])
+    run(c.run_for("d" * 40))
+    assert suite.calls == [None, ["brand-new"]]  # no regressed task, so the failed one is the confirmation rerun
+    assert len(notes) == 1 and c.store.get("d" * 40)["alerted"] == 1
+
+
+def test_new_failing_task_that_recovers_on_rerun_does_not_alert(tmp_path):
+    notes: list[dict] = []
+    suite = NewTaskSuite(rerun_ok=True)
+    c, _ = _canary(tmp_path, suite, notes)
+    _seed(c, [20, 20, 20])
+    row = run(c.run_for("e" * 40))
+    assert suite.calls == [None, ["brand-new"]] and notes == [] and not row["alerted"]
+
+
 def test_baseline_is_the_median_of_the_previous_five(tmp_path):
     prior = [{"pass_rate": r, "sha": str(i), "started_at": i} for i, r in enumerate([1.0, 0.9, 0.2, 0.95, 0.9])]
     v = canary.judge(0.75, prior, min_prior=3, drop_points=15)

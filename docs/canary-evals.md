@@ -79,8 +79,9 @@ Because the label is the commit, plot it as a table or bar gauge sorted by time,
 - Baseline: median pass rate of the previous 5 `complete` runs.
 - No alert with fewer than 3 prior results.
 - Alert when the new pass rate is at least 15 points below the baseline, **and** a confirmation rerun still leaves
-  it that far below. The rerun covers only the tasks that failed this time and did better in the earlier runs; its
-  results replace theirs in the row (marked `confirm`).
+  it that far below. The rerun covers only the tasks that failed this time and did better in the earlier runs (or, if
+  there are none, such as a newly added task with no history, every task that failed this time); its results replace
+  theirs in the row (marked `confirm`). An alert is never sent without a confirmation rerun.
 - One ntfy notification (through `Notifier.send`) with the SHA, baseline, new rate and
   `https://github.com/dflippojr/agent-harness/compare/<baseline_sha>...<new_sha>`. `baseline_sha` is the earlier run
   closest to the median.

@@ -195,14 +195,14 @@ class Canary:
         verdict = judge(pass_rate(outcomes), prior, **rule)
         if not verdict.alert:
             return outcomes, verdict
-        tasks = regressed_tasks(outcomes, prior)
-        if tasks:  # confirmation: rerun only the regressed tasks; their new results replace the old ones
-            again = await self.run_suite(sha, tasks)
-            if again.status == "blocked" or not again.outcomes:
-                return outcomes, Verdict(False, reason="confirmation rerun could not run")
-            outcomes = [o for o in outcomes if o["task"] not in tasks] + [{**o, "confirm": True} for o in again.outcomes]
-            verdict = judge(pass_rate(outcomes), prior, **rule)
-        return outcomes, verdict
+        # confirmation: rerun only the regressed tasks; with none (e.g. a new task failing without history), every
+        # task that failed this run. Their new results replace the old ones. An alert is never sent unconfirmed.
+        tasks = regressed_tasks(outcomes, prior) or list(dict.fromkeys(o["task"] for o in outcomes if not o["ok"]))
+        again = await self.run_suite(sha, tasks) if tasks else None
+        if again is None or again.status == "blocked" or not again.outcomes:
+            return outcomes, Verdict(False, reason="confirmation rerun could not run")
+        outcomes = [o for o in outcomes if o["task"] not in tasks] + [{**o, "confirm": True} for o in again.outcomes]
+        return outcomes, judge(pass_rate(outcomes), prior, **rule)
 
     def _alert(self, sha: str, rate: float, verdict: Verdict) -> None:
         url = compare_url(verdict.baseline_sha, sha)
