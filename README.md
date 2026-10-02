@@ -245,7 +245,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | **One suite for everything** ([`tests/`](tests)) | The web UI's JavaScript runs under Node harnesses driven by pytest. The CI and deploy workflows, the installers, and the docs' product naming have their own tests too. |
 | **Fail-closed deployment** ([`ci-cd.yml`](.github/workflows/ci-cd.yml), [docs](docs/CI-CD.md)) | Deployment triggers from `workflow_run` on the exact tested SHA and pulls immutable `sha-` images. It builds a new venv side by side and switches a pointer, so rollback is instant, then waits for `/health`. |
 | **Trusted-code staging slot** ([`resolve_staging_ref.py`](scripts/resolve_staging_ref.py)) | A GitHub-hosted job resolves a branch or PR to one commit and rejects fork refs before anything reaches the server. Staging gets its own database and freshly minted tokens, never production credentials. |
-| **Multi-provider AI code review** ([`review.yml`](.github/workflows/review.yml)) | Pull requests are reviewed by Codex, Claude, or Cursor on a self-hosted runner pool, with incremental re-review when a prior review marker makes that safe. |
+| **Multi-provider AI code review** ([`review.yml`](.github/workflows/review.yml)) | Pull requests are reviewed by Codex, Claude, or Cursor on a self-hosted runner pool, with incremental re-review when a prior review marker makes that safe. The `Automated Code Review` check fails when the review has findings, and other projects call the same workflow through a thin caller pinned to `review-v1`. |
 
 ---
 

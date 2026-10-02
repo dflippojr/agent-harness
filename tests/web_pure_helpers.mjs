@@ -3,9 +3,12 @@
 // directly, so no DOM is needed (#258).
 import { approvalDiffClass, diffLineClass } from "../harness/web/lib/diff.mjs";
 import { protocolMismatch } from "../harness/web/lib/compat.mjs";
-import { fmtSpan, fmtTokens, holdRemainingText, pluralize } from "../harness/web/lib/format.mjs";
+import { fmtBytes, fmtSpan, fmtTokens, gpuText, holdRemainingText, pluralize } from "../harness/web/lib/format.mjs";
 import { compatibilityText, lastSeenText, recoveryNote, settingValueText } from "../harness/web/lib/settings-text.mjs";
 import { compareTargets, pickDefaultBackend, runnerStateText } from "../harness/web/lib/targets.mjs";
+import { CRON_PRESETS, cronLabel, newJobDefaults, whenText } from "../harness/web/lib/jobs.mjs";
+import { mountActions } from "../harness/web/pages/actions.mjs";
+import { mountJobs } from "../harness/web/pages/jobs.mjs";
 import { approvalWhat, toolSummaryText } from "../harness/web/lib/tools.mjs";
 import { traceInfo } from "../harness/web/lib/trace.mjs";
 
@@ -105,6 +108,14 @@ const eq = (label, got, want) => {
 }
 
 {
+  eq("cronLabel preset", cronLabel(CRON_PRESETS[0][0]), CRON_PRESETS[0][1]);
+  eq("cronLabel custom", cronLabel("5 4 * * *"), "5 4 * * *");
+  eq("whenText none", whenText(0), "—");
+  eq("whenText due", whenText(Date.now() / 1000 - 10).endsWith("(due)"), true);
+  eq("whenText minutes", whenText(Date.now() / 1000 + 600).endsWith("(in 10 min)"), true);
+  eq("newJobDefaults homelab", newJobDefaults([{ name: "homelab" }]).project, "homelab");
+  eq("newJobDefaults scratch", newJobDefaults([]).project, "scratch");
+  eq("mountJobs views", Object.keys(mountJobs({})).sort(), ["viewJob", "viewJobs"]);
   const id = "0af7651916cd43dd8448eb211c80319c";
   eq("trace off", traceInfo({ trace_id: "" }), null);
   eq("trace missing", traceInfo({}), null);
@@ -112,6 +123,17 @@ const eq = (label, got, want) => {
   eq("trace link", traceInfo({ trace_id: id, trace_url: `https://grafana.tail/explore?t=${id}` }),
     { id, url: `https://grafana.tail/explore?t=${id}` });
   eq("trace unsafe link", traceInfo({ trace_id: id, trace_url: "javascript:alert(1)" }), { id, url: "" });
+}
+
+{
+  eq("fmtBytes missing", fmtBytes(null), "—");
+  eq("fmtBytes zero", fmtBytes(0), "0 B");
+  eq("fmtBytes MiB", fmtBytes(3 * 2 ** 20), "3.0 MiB");
+  eq("fmtBytes GiB", fmtBytes(1.5 * 2 ** 30), "1.5 GiB");
+  eq("gpuText clear", gpuText({ state: "clear", reasons: [] }), "Agents have the GPU");
+  eq("gpuText paused", gpuText({ state: "paused", reasons: [{ detail: "chat" }, { detail: "chat" }] }), "Paused for chat");
+  eq("gpuText manual indefinite", gpuText({ manual: true, manual_remaining_seconds: null }), "Local models held until you turn this off");
+  eq("actions page mounts without a DOM", Object.keys(mountActions({})).sort().join(), "folderDiscoveryPanel,remoteControlCard,viewActions");
 }
 
 if (failures.length) {

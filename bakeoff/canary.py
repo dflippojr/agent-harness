@@ -28,7 +28,7 @@ from typing import Callable
 
 import yaml
 
-from harness.canary import WALL_LIMIT, Report
+from harness.canary import HARD_PROJECT, WALL_LIMIT, WEB_PROJECT, CanaryConfigError, Report
 
 from .tasks import Context, hash_tree, materialize
 from .tasks_hard import HARD_TASKS
@@ -36,18 +36,19 @@ from .web_suite import DEFAULT_FIXTURE, TASKS as WEB_TASKS, ungrounded_quotes
 
 ROOT = Path(__file__).resolve().parent.parent
 SUITE = Path(__file__).with_name("canary.yaml")
-HARD_PROJECT, WEB_PROJECT = "canary-hard", "canary-web"
 MAX_RESTARTS = 2  # a task attempt that was suspended mid-way restarts, up to this many times
 DONE = ("done", "failed", "cancelled")
 
 
 def load_suite(path: Path = SUITE) -> dict:
+    if not path.is_file():
+        raise CanaryConfigError(f"canary suite {path} is not a file")
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     hard = {t.id: t for t in HARD_TASKS}
     web = {t.id: t for t in WEB_TASKS}
     unknown = [i for i in raw.get("hard", []) if i not in hard] + [i for i in raw.get("web", []) if i not in web]
     if unknown:
-        raise ValueError(f"{path.name}: unknown task ids {unknown}")
+        raise CanaryConfigError(f"{path.name}: unknown task ids {unknown}")
     return {"repeats": int(raw.get("repeats", 2)), "hard": [hard[i] for i in raw.get("hard", [])],
             "web": [web[i] for i in raw.get("web", [])]}
 
@@ -89,7 +90,7 @@ class CanaryRunner:
         plan += [(t, "web") for t in self.suite["web"] if not only or t.id in only]
         if any(kind == "web" for _, kind in plan) and not (self.fixture / "manifest.json").is_file():
             # without it every search misses and each web task fails: a false regression, not a result
-            raise FileNotFoundError(f"canary web fixture {self.fixture} has no manifest.json")
+            raise CanaryConfigError(f"canary web fixture {self.fixture} has no manifest.json")
         projects = self.m.cfg.projects
         projects[HARD_PROJECT] = Project(name=HARD_PROJECT, web=False, memory_library=False, images=False,
                                          session_search=False)

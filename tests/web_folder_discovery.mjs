@@ -1,15 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { runInNewContext } from 'node:vm';
+import { mountActions } from '../harness/web/pages/actions.mjs';
+import { settingInput } from '../harness/web/lib/setting-input.mjs';
 
-const source = readFileSync(new URL('../harness/web/app.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../harness/web/style.css', import.meta.url), 'utf8');
-const functions = ['settingInput', 'discoveryLimitsText', 'folderDiscoveryPanel', 'remoteControlCard'];
-const code = functions.map(name => {
-  const match = source.match(new RegExp(`function ${name}\\([^]*?\\n\\}`));
-  assert.ok(match, `${name} exists`);
-  return match[0];
-}).join('\n');
 
 class Element {
   constructor(tag, attrs, children) {
@@ -38,12 +32,15 @@ for (const width of [390, 1440]) {
   const calls = [], confirms = [], timers = [], leave = [];
   let supported = true, enabled = false, reloads = 0, projects = [];
   let scan = { id: 'scan', status: 'running', visited: 10, candidates: [], errors: [], expires_in: 900, truncated: false };
-  const context = {
-    h, window: { innerWidth: width }, fill: (node, ...children) => { node.children = children.flat(Infinity).filter(x => x != null); },
-    onLeave: fn => leave.push(fn), toast: () => {}, confirm: prompt => { confirms.push(prompt); return true; },
-    clearTimeout: () => {}, clearInterval: () => {}, setInterval: () => 1,
-    setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
-    isGuest: () => false, isMember: () => false, ago: () => 'now', pluralize: () => 'sessions',
+  globalThis.setTimeout = (fn, ms) => { timers.push({fn, ms}); return timers.length; };
+  globalThis.clearTimeout = () => {}; globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+  globalThis.window = { innerWidth: width };
+  globalThis.confirm = prompt => { confirms.push(prompt); return true; };
+  const deps = {
+    h, fill: (node, ...children) => { node.children = children.flat(Infinity).filter(x => x != null); },
+    onLeave: fn => leave.push(fn), toast: () => {},
+    $app: null, append: () => {}, setHeader: () => {}, go: () => {}, copyBox: () => null, progressBar: () => null,
+    isGuest: () => false, isMember: () => false,
     api: async (path, options = {}) => {
       calls.push({path, ...options});
       if (path === '/remote-control') return { enabled: true, projects, discovery: { supported, enabled, limits } };
@@ -54,10 +51,9 @@ for (const width of [390, 1440]) {
       return scan;
     },
   };
-  runInNewContext(`${code}\nthis.exposed = {settingInput, folderDiscoveryPanel, remoteControlCard};`, context);
-  const {settingInput, folderDiscoveryPanel, remoteControlCard} = context.exposed;
+  const { folderDiscoveryPanel, remoteControlCard } = mountActions(deps);
   const draft = {};
-  const roots = settingInput({key: 'remote_control.discovery.roots', type: 'discovery_root_list', writable: true,
+  const roots = settingInput(h, {key: 'remote_control.discovery.roots', type: 'discovery_root_list', writable: true,
     effective: ['C:\\Projects']}, draft);
   assert.equal(roots.tag, 'textarea');
   roots.value = 'C:\\Projects\nD:\\Code'; roots.listeners.change();

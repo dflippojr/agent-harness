@@ -3,7 +3,7 @@
 
 const BASE_KEY = "harness.daemonUrl";
 const TOKEN_KEY = "harness.ownerToken";
-export const WEB_BUILD_ID = "2026.10.02.3";
+export const WEB_BUILD_ID = "2026.10.02.5";
 export const WEB_PROTOCOL = 2;
 
 function stripTrailingSlashes(text) {

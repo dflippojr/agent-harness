@@ -78,8 +78,25 @@ local-only. CI does not depend on it.
 `.github/workflows/review.yml` reviews a pull request once when it is opened and supports explicit re-reviews through
 `workflow_dispatch`. Re-review a PR with `gh workflow run review.yml -f pr_number=N` (optional `-f backend=…`).
 `workflow_dispatch` always uses the workflow file on `main`, so unmerged `review.yml` changes are not exercised by
-dispatch. Dispatch publishes a Check Run on the PR head SHA (#120/#124); `pull_request` opened already has the native
-workflow check.
+dispatch. Every run publishes an `Automated Code Review` Check Run on the reviewed PR head SHA (#120/#124/#313), whose
+conclusion follows the review verdict:
+
+| Review result | Check conclusion | Check title |
+|---|---|---|
+| `REVIEW_VERDICT: CLEAN`, full diff reviewed | `success` | `Clean review by <backend>` |
+| `REVIEW_VERDICT: FINDINGS n` | `failure` | `n findings` (plus the partial note when files were omitted) |
+| `CLEAN`, but the diff exceeded `REVIEW_MAX_DIFF_BYTES` | `neutral` | `Partial review: n files not reviewed` |
+| Every backend failed or gave no valid verdict, or the comment was not posted | `failure` | `Review did not complete` |
+| Run cancelled | `cancelled` | `Automated review cancelled` |
+
+The check summary carries the posted comment, so findings are readable from the Checks tab. The workflow run itself
+stays green when the review merely has findings: a red run means the review machinery broke, a red check means the
+code has findings. The prompt requires the reviewer to end with exactly two lines, `REVIEW_VERDICT: CLEAN` or
+`REVIEW_VERDICT: FINDINGS <n>`, then `REVIEW_STATUS: COMPLETE`. The verdict only counts as the line directly above the
+status marker, so verdict-like text quoted from the diff cannot spoof it; a missing or malformed verdict is treated like
+a missing marker. Both lines are removed before posting. The check is created on the head commit that the job checked
+out, and `pull_request` only fires on `opened`, so a PR that gains commits needs a dispatched re-review before its head
+commit carries the check again.
 
 The optional `backend` dispatch input accepts `auto`, `cursor`, `codex`, or `claude`. An explicit
 provider runs only that provider, which is useful for verification and deliberate quota steering. Omitting the input
@@ -87,8 +104,8 @@ or selecting `auto` tries the comma-separated `REVIEW_BACKENDS` repository varia
 the order defaults to `codex,claude,cursor`.
 
 The runner falls through that ordered list when a CLI exits non-zero, returns no review, reports a recognizable
-rate-limit or quota error, or omits the required completion marker after inspecting the diff. The marker is removed
-before posting. The successful backend is included in the PR comment footer and the manually created Check Run. Invalid
+rate-limit or quota error, or omits the required completion marker or verdict line after inspecting the diff. Both are
+removed before posting. The successful backend is included in the PR comment footer and the manually created Check Run. Invalid
 backend names fail closed instead of silently changing provider.
 
 The optional `mode` dispatch input accepts `auto` or `full` (default `auto`). `auto` reviews only the commits since
@@ -151,6 +168,117 @@ event except a successful `CI` run caused by a push whose head branch is `main`.
 reported `head_sha`; they never check out or execute pull-request code. Third-party actions are pinned to exact
 commits, main deployments serialize rather than being canceled midway, and the GitHub `tower-production` environment
 accepts deployments from `main` only.
+
+### Adopting the review workflow
+
+Other projects call this repository's `review.yml` as a reusable workflow (`on: workflow_call`) instead of carrying a
+copy, so a fix here reaches every project. The job checks out `ops/review/run-review.ps1` from
+`dflippojr/agent-harness` at the `tooling_ref` input (default `review-v1`) into `.review-tooling`; the consumer repo
+needs no `ops/review` directory.
+
+**Caller file.** Add `.github/workflows/review.yml` to the consumer repo, with that repo's runner label in `runs_on`:
+
+```yaml
+name: Automated Code Review
+
+# Dispatch only, never pull_request: the reviewer reads untrusted PR content with shell access on the self-hosted
+# runner, and a fork's pull_request run would execute the fork's copy of this file. The shared job also refuses
+# pull requests from forks.
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+      backend:
+        description: "Review backend (auto uses REVIEW_BACKENDS)"
+        required: false
+        default: auto
+        type: choice
+        options: [auto, cursor, codex, claude]
+      mode:
+        description: "Review coverage (auto = incremental when safe)"
+        required: false
+        default: auto
+        type: choice
+        options: [auto, full]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  review:
+    uses: dflippojr/agent-harness/.github/workflows/review.yml@review-v1
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      backend: ${{ inputs.backend }}
+      mode: ${{ inputs.mode }}
+      runs_on: '["self-hosted","Windows","X64","financial-planner-review"]'
+    secrets: inherit
+```
+
+Do not add a workflow-level `concurrency` group to the caller; the shared job already serializes per repository and
+PR. Optional inputs: `max_diff_bytes` (otherwise the consumer's `REVIEW_MAX_DIFF_BYTES` variable, then `204800`) and
+`tooling_ref` (keep it equal to the `@ref` in `uses:`). The `REVIEW_*` repository variables are read from the consumer
+repository.
+
+**Runner label.** Register a self-hosted Windows runner for the consumer repo with
+`ops/github/install-runner.ps1 -Labels <project>-review` under a service user whose Codex, Claude, and Cursor CLIs are
+logged in, and pass that label in `runs_on`.
+
+**Permissions.** The caller's `permissions` block must grant `contents: read`, `pull-requests: write` (PR comment), and
+`checks: write` (the `Automated Code Review` check). A called workflow can only narrow these.
+
+**Actions allowlist.** A consumer whose Actions policy allows only selected actions (for example GitHub-owned plus
+`SonarSource/sonarqube-scan-action@*`) must also allow `dflippojr/agent-harness/.github/workflows/review.yml@*`
+(Settings -> Actions -> General -> "Allow or block specified actions and reusable workflows").
+
+**Version pin.** Consumers pin the moving tag `review-v1`, so a change on `main` does not reach every project at once.
+After a change has been verified here, the owner moves the tag deliberately:
+
+```powershell
+git tag -f review-v1 <verified commit on main>
+git push -f origin refs/tags/review-v1
+```
+
+A breaking change to the caller contract (renamed or new required inputs) gets a new tag such as `review-v2`.
+
+**Required check on pull requests.** The review does not run on pushes to `main`; it is a required check for PRs into
+`main`, so a PR cannot merge without a clean (or partial, `neutral`) review of its head commit. A runner outage then
+blocks merging until a re-run or an admin bypass. Apply it per repository with a branch ruleset (`15368` is the GitHub
+Actions app, which owns checks created with `GITHUB_TOKEN`):
+
+```powershell
+@'
+{
+  "name": "Require automated code review",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "bypass_actors": [ { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" } ],
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "required_status_checks": [ { "context": "Automated Code Review", "integration_id": 15368 } ]
+      }
+    }
+  ]
+}
+'@ | Set-Content -Encoding ascii ruleset.json
+gh api --method POST repos/dflippojr/<repo>/rulesets --input ruleset.json
+```
+
+The `bypass_actors` entry (repository role 5, admin) keeps the admin bypass for outages and for direct pushes to `main`,
+which a required status check otherwise blocks.
+
+**Migrating a copy.** For a repository that carries a copied `review.yml` and `ops/review/run-review.ps1` (as
+`financial-planner` does): add the allowlist entry, replace its `review.yml` with the caller above (its runner label is
+`financial-planner-review`), delete `ops/review/`, and dispatch a review against a disposable PR to confirm the comment,
+the check conclusion, and the check summary.
 
 ## Retired CI runner pool
 

@@ -89,6 +89,7 @@ def test_web_app_and_guard(tmp_path):
     with client:
         assert "<title>Agent Harness Web</title>" in client.get("/").text
         js = client.get("/static/app.js").text
+        actions_js = client.get("/static/pages/actions.mjs").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
         assert "session-chrome" in js
         assert "jump-top" in js
@@ -106,7 +107,7 @@ def test_web_app_and_guard(tmp_path):
         assert "Scratch is a fresh empty folder" in js
         assert '"＋ New project"' in js
         assert 'api("/projects", { method: "POST"' in js
-        assert "Only tower projects with a local folder appear" in js
+        assert "Only tower projects with a local folder appear" in actions_js
         assert 'id="guest-banner"' in client.get("/").text
         assert 'id="bar"' in client.get("/").text
         assert 'id="feature-nav"' in client.get("/").text
@@ -137,8 +138,9 @@ def test_web_app_and_guard(tmp_path):
         assert "prefers-reduced-motion: reduce" in css
         assert ".image-status .progress.indeterminate > span" in css
         assert 'showFab("#/new", "+ New task")' in js
-        assert 'showFab("#/jobs/new", "+ New job")' in js
-        assert 'api("/backends?auth=skip")' in js
+        jobs_page = client.get("/static/pages/jobs.mjs").text
+        assert 'showFab("#/jobs/new", "+ New job")' in jobs_page
+        assert 'api("/backends?auth=skip")' in jobs_page
         assert 'if (images && !route.onImages) api("/images/warmup"' not in js
         assert "function imageModeEntries" in js
         assert "function installedImageModeEntries" in js
@@ -164,15 +166,15 @@ def test_web_app_and_guard(tmp_path):
         assert '"Upscale 4×"' in js
         assert "upscale: upscale.value" in js
         assert 'href: "#/profile/account"' in js
-        assert "gpuActionRow()" in js
+        assert "gpuActionRow()" in actions_js
         assert "function gpuCard()" not in js
-        assert 'h("span", {}, "Duration:")' in js
-        assert 'duration.disabled = isGuest() || !g.manual' in js
-        assert "function viewActions" in js
+        assert 'h("span", {}, "Duration:")' in actions_js
+        assert 'duration.disabled = isGuest() || !g.manual' in actions_js
+        assert "function viewActions" in actions_js
         assert 'go(`#/actions/${parts[1]}`, true)' in js
-        assert js.index('["gpu", "GPU"]') < js.index('["accounts", "Accounts"]')
-        assert js.index('["accounts", "Accounts"]') < js.index('["remote-control", "Claude Remote Control"]')
-        assert js.index('["remote-control", "Claude Remote Control"]') < js.index('["disk", "Disk"]')
+        assert actions_js.index('["gpu", "GPU"]') < actions_js.index('["accounts", "Accounts"]')
+        assert actions_js.index('["accounts", "Accounts"]') < actions_js.index('["remote-control", "Claude Remote Control"]')
+        assert actions_js.index('["remote-control", "Claude Remote Control"]') < actions_js.index('["disk", "Disk"]')
         assert 'nav === "actions" && !isOwner()' in js
         assert 'href: "#/profile/remote-control"' not in js
         assert 'href: "#/profile/disk"' not in js

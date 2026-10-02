@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -303,6 +304,7 @@ class CanaryConfig:
     metrics_limit: int = 30
     suite: str = "bakeoff/canary.yaml"
     fixture_dir: str = "D:/Agents/harness/web-fixture"  # the recorded web for the web tasks (bakeoff/web_suite.py)
+    disabled_reason: str = ""            # set by the loader when `enabled` was turned off for a bad suite/fixture (doctor reports it)
 
 
 @dataclass
@@ -587,6 +589,23 @@ def _load_google_signin(raw) -> GoogleSigninConfig:
     return GoogleSigninConfig(**raw)
 
 
+def _canary_fixture_problem(raw: dict) -> str:
+    """Why an enabled canary can't run (missing suite file, or web tasks without a fixture manifest); "" if fine."""
+    suite = raw.get("suite", CanaryConfig.suite)
+    if not (raw.get("enabled") and suite):
+        return ""
+    if not (ROOT / suite).is_file():
+        return f"canary.suite {suite!r} is not a file"
+    try:
+        web = (yaml.safe_load((ROOT / suite).read_text(encoding="utf-8")) or {}).get("web")
+    except (OSError, yaml.YAMLError, AttributeError) as e:
+        return f"canary.suite {suite!r} can't be read: {e}"
+    fixture = Path(raw.get("fixture_dir", CanaryConfig.fixture_dir))
+    if web and not (fixture / "manifest.json").is_file():  # every web task would fail against an empty replay
+        return f"canary.fixture_dir {str(fixture)!r} has no manifest.json (the suite has web tasks)"
+    return ""
+
+
 def _load_canary(raw) -> CanaryConfig:
     """`at` comes back as "HH:MM"; anything the nightly can't use is a config error here, not a dead loop at night."""
     from .canary import parse_at
@@ -610,9 +629,10 @@ def _load_canary(raw) -> CanaryConfig:
             raise ValueError(f"canary.{key} must be at least {low}, got {value!r}")
     if raw["min_prior_runs"] > raw["baseline_runs"]:
         raise ValueError("canary.min_prior_runs can't be more than canary.baseline_runs (no run would ever be judged)")
-    suite = raw.get("suite", CanaryConfig.suite)
-    if raw.get("enabled") and suite and not (ROOT / suite).is_file():
-        raise ValueError(f"canary.suite {suite!r} is not a file")
+    problem = _canary_fixture_problem(raw)
+    if problem:  # a misconfigured canary must never stop the daemon: log it, turn only the canary off
+        logging.getLogger(__name__).error("canary disabled: %s", problem)
+        raw["enabled"], raw["disabled_reason"] = False, problem
     return CanaryConfig(**raw)
 
 

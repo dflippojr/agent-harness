@@ -272,6 +272,18 @@ class Manager:
         runner = canary.Canary(store, run_suite, self.cfg.canary, self.notifier.send, self.cfg.notify.topic)
         return canary.Nightly(runner, self.cfg.canary)
 
+    def _end_interrupted_canary(self) -> None:
+        """A crash mid-canary (#316): its low-priority mark and recorded web lived only in memory, so resuming its
+        sessions would hold the GPU at full priority on the live web. Cancel them and finish the claimed row instead.
+        Runs whether or not the canary is still enabled."""
+        from . import canary
+        for s in self.db.sessions_with_status(*ACTIVE):
+            if s["project"] in canary.PROJECTS:
+                log.warning("cancelling canary session %s (%s) left by a restart", s["id"], s["status"])
+                self.runner.set_status(s["id"], "cancelled", stop_reason="cancelled: daemon restarted mid-canary")
+        for row in canary.CanaryStore(self.db).interrupted(time.time()):
+            log.warning("canary %s was running at a restart; finished from what it had", row["sha"][:canary.SHORT_SHA])
+
     def _is_active(self, sid: str) -> bool:
         s = self.db.get_session(sid)
         return bool(s) and s["status"] in ACTIVE
@@ -327,6 +339,7 @@ class Manager:
             self.images.start()
         if self.runner.memory is not None:
             self.runner.memory.refresh_soon()  # so the first session's profile is current
+        self._end_interrupted_canary()
         for s in self.db.sessions_with_status(*ACTIVE):
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
