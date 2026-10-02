@@ -4,6 +4,7 @@
     python -m bakeoff.run                            # all models, all tasks, with perf
     python -m bakeoff.run --models gpt-oss-20b --tasks repo_qa,fix_failing_test --skip-perf
     python -m bakeoff.run --suite hard --models qwen3.6-35b-a3b --skip-perf
+    python -m bakeoff.run --suite large --repo-map --repeats 3 --skip-perf   # repo-map study arm (#264)
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from .sandbox import Sandbox, build_image
 from .server import GpuSampler, LlamaServer, load_config
 from .tasks import TASKS, Context, Task, hash_tree, materialize
 from .tasks_hard import HARD_TASKS
+from .tasks_large import LARGE_TASKS
 from .tasks_memory import MEMORY_TASKS
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,7 +61,7 @@ def selftest(tasks: list[Task], out_dir: Path) -> bool:
 
 
 def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir: Path, skip_perf: bool,
-              read_lines: int = 400, read_chars: int = 20000) -> dict:
+              read_lines: int = 400, read_chars: int = 20000, repo_map_budget: int | None = None) -> dict:
     model_dir = out_dir / name
     profile = config["models"][name]
     summary: dict = {"model": name, "tasks": []}
@@ -78,7 +80,8 @@ def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir:
                 try:
                     workspace = Workspace(run_dir / "workspace", sandbox, read_lines, read_chars)
                     agent = Agent(server.base_url, name, workspace, profile.get("sampling"),
-                                  max_turns=task.max_turns, wall_limit=task.wall_limit)
+                                  max_turns=task.max_turns, wall_limit=task.wall_limit,
+                                  repo_map_budget=repo_map_budget)
                     result = agent.run(task.prompt)
                     try:
                         passed, note = task.check(Context(run_dir / "workspace", sandbox, result.answer, baseline))
@@ -87,7 +90,8 @@ def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir:
                 finally:
                     sandbox.stop()
                 record = {
-                    "task": task.id, "category": task.category, "repeat": r, "passed": passed, "note": note,
+                    "task": task.id, "category": task.category, "repeat": r, "repo_map": repo_map_budget is not None,
+                    "system_prompt_chars": len(agent.system_prompt()), "passed": passed, "note": note,
                     "finished": result.finished, "stop_reason": result.stop_reason, "turns": result.turns,
                     "tool_calls": result.tool_calls, "invalid_tool_calls": result.invalid_tool_calls,
                     "tool_errors": result.tool_errors, "prompt_tokens": result.prompt_tokens,
@@ -144,7 +148,8 @@ def write_report(summaries: list[dict], out_dir: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", default="all")
-    parser.add_argument("--suite", choices=["core", "hard", "memory", "all"], default="core")
+    parser.add_argument("--suite", choices=["core", "hard", "memory", "large", "all"], default="core",
+                        help="'large' is the repo-map study's pinned-checkout group (not part of 'all')")
     parser.add_argument("--tasks", default="all", help="comma-separated task ids within the suite")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--skip-perf", action="store_true")
@@ -153,13 +158,16 @@ def main() -> None:
     parser.add_argument("--ctx-size", type=int, help="override ctx_size from models.yaml")
     parser.add_argument("--read-lines", type=int, default=400, help="read_file line limit per call")
     parser.add_argument("--read-chars", type=int, default=20000, help="read_file character limit per call")
+    parser.add_argument("--repo-map", action="store_true",
+                        help="experiment (#264): append a ranked repository map to the system prompt (off by default)")
+    parser.add_argument("--repo-map-budget", type=int, default=1500, help="repo map size in tokens (chars/4)")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     config = load_config()
     if args.ctx_size:
         config["ctx_size"] = args.ctx_size
-    suite = {"core": TASKS, "hard": HARD_TASKS, "memory": MEMORY_TASKS,
+    suite = {"core": TASKS, "hard": HARD_TASKS, "memory": MEMORY_TASKS, "large": LARGE_TASKS,
              "all": TASKS + HARD_TASKS + MEMORY_TASKS}[args.suite]
     tasks = suite if args.tasks == "all" else [t for t in suite if t.id in args.tasks.split(",")]
     models = list(config["models"]) if args.models == "all" else args.models.split(",")
@@ -168,7 +176,8 @@ def main() -> None:
 
     out_dir = RUNS / (("selftest-" if args.selftest else "") + datetime.now().strftime("%Y%m%d-%H%M%S")
                       + (f"-ctx{config['ctx_size'] // 1024}k" if args.ctx_size else "")
-                      + (f"-read{args.read_lines}" if args.read_lines != 400 else ""))
+                      + (f"-read{args.read_lines}" if args.read_lines != 400 else "")
+                      + ("-repomap" if args.repo_map else ""))
     out_dir.mkdir(parents=True)
     if args.selftest:
         raise SystemExit(0 if selftest(tasks, out_dir) else 1)
@@ -177,7 +186,8 @@ def main() -> None:
     for name in models:
         started = time.monotonic()
         summaries.append(run_model(name, config, tasks, args.repeats, out_dir, args.skip_perf,
-                                   args.read_lines, args.read_chars))
+                                   args.read_lines, args.read_chars,
+                                   args.repo_map_budget if args.repo_map else None))
         (out_dir / "summaries.json").write_text(json.dumps(summaries, indent=2), encoding="utf-8")
         write_report(summaries, out_dir)
         print(f"[{name}] done in {(time.monotonic() - started) / 60:.1f} min")
