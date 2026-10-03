@@ -7,14 +7,27 @@ from __future__ import annotations
 import logging
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import projects
-from .checkpoints import (CAP, TURN_RUN_KEYS, Store, eligible, git_state, head_and_branch, put_git_state,
-                          ref_name, reset_branch)
+from .checkpoints import (CAP, TURN_RUN_KEYS, UNSETTLED, Store, eligible, git_state, head_and_branch,
+                          put_git_state, ref_name, reset_branch)
 from .projects import GitError
 
 log = logging.getLogger("harness.checkpointer")
+
+
+@dataclass
+class Restored:
+    """A rewind whose files are restored but not yet recorded: `saved` is the checkpoint's (context, run fields);
+    `tree` (held from `reclaim`) and `before` are the workspace, branch and index as they were before."""
+    sid: str
+    saved: tuple[list, dict]
+    store: Store
+    workspace: Path
+    tree: str
+    before: dict | None
 
 
 class Checkpointer:
@@ -178,9 +191,10 @@ class Checkpointer:
                 return c
         raise GitError(f"session {sid} has no checkpoint {turn}", 404)
 
-    def restore(self, sid: str, turn: int) -> tuple[list, dict]:
+    def restore(self, sid: str, turn: int) -> Restored:
         """Restore the workspace to a checkpoint and return the model context and run fields saved with it;
-        `commit_rewind` then records the rewind. The caller has checked that the session is idle and local.
+        `commit_rewind` then records the rewind, and the caller ends it with `release`, or with `undo_rewind`
+        if the record fails. The caller has checked that the session is idle and local.
 
         All or nothing: every file the restore must remove or replace is probed first, and a step that still
         fails puts the branch, index and files back as they were before raising (409, naming the files)."""
@@ -196,22 +210,39 @@ class Checkpointer:
                                + "; ".join(locked)[:600], 409)
             before = git_state(workspace, ckpt["branch"])
             store.hold(sid, plan.current)
+            restored = False
             try:
                 reset_branch(workspace, ckpt["head"], ckpt["branch"])
                 failures = store.restore(workspace, ckpt["sha"], plan)
                 if failures:
                     raise GitError("; ".join(failures)[:600], 409)
+                restored = True
             except (GitError, OSError, subprocess.SubprocessError) as e:
                 status = e.status if isinstance(e, GitError) and e.status != 500 else 409
-                raise self._undo(sid, store, workspace, plan.current, before, e, status) from e
+                raise self._undo(sid, store, workspace, plan.current, before, e, status)[0] from e
             finally:
-                store.release(sid)
-        return saved
+                if not restored:
+                    store.release(sid)
+        return Restored(sid, saved, store, workspace, plan.current, before)
+
+    def undo_rewind(self, done: Restored, error: Exception) -> tuple[GitError, bool]:
+        """After `restore`, when its rewind could not be recorded: put the workspace back as it was before and
+        release it. Returns the error to raise and whether the workspace was put back."""
+        try:
+            return self._undo(done.sid, done.store, done.workspace, done.tree, done.before, error, 500)
+        finally:
+            done.store.release(done.sid)
+
+    @staticmethod
+    def release(done: Restored) -> None:
+        """End a recorded rewind: the workspace as it was before may now be reclaimed."""
+        done.store.release(done.sid)
 
     @staticmethod
     def _undo(sid: str, store: Store, workspace: Path, tree: str, before: dict | None, error: Exception,
-              status: int) -> GitError:
-        """Put the workspace back as it was before a failed rewind; returns the error to raise."""
+              status: int) -> tuple[GitError, bool]:
+        """Put the workspace back as it was before a failed rewind; returns the error to raise and whether the
+        workspace was put back."""
         try:
             put_git_state(workspace, before)
             failures = store.restore(workspace, tree)
@@ -220,8 +251,8 @@ class Checkpointer:
         if failures:
             log.error("rewind of %s failed and could not be undone: %s; %s", sid, error, failures)
             return GitError(f"the rewind failed ({str(error)[:300]}) and the workspace could not be put back "
-                            f"({'; '.join(failures)[:300]})", 500)
-        return GitError(f"nothing was rewound: {str(error)[:600]}", status)
+                            f"({'; '.join(failures)[:300]})", 500), False
+        return GitError(f"nothing was rewound: {str(error)[:600]}", status), True
 
     def commit_rewind(self, sid: str, turn: int, saved: tuple[list, dict]) -> None:
         """One transaction (pass to `db.write`/`awrite`): put back the context and run fields `restore` returned,
@@ -229,7 +260,7 @@ class Checkpointer:
         event log. The log itself keeps the full history."""
         ckpt = self.checkpoint(sid, turn)
         context, carried = saved
-        run = {k: v for k, v in self.db.get_session(sid)["run"].items() if k not in TURN_RUN_KEYS}
+        run = {k: v for k, v in self.db.get_session(sid)["run"].items() if k not in (*TURN_RUN_KEYS, UNSETTLED)}
         self.db.update_session(sid, context=context, run={**run, **carried}, inbox=[], turn_seq=turn, review="",
                                review_detail="", answer="", stop_reason="")
         self.db.show_checkpoints_through(sid, turn)

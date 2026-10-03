@@ -39,6 +39,8 @@ TARGETS = ("tower", "macbook")
 SECRET_FIX = "Secret scan:"  # opens each Ask agent to fix draft (issue #263)
 MAX_DISMISS_REASON = 500
 CHECKPOINT_IDLE = "stop the session first; rewind and fork need it to be idle"
+UNSETTLED_SEND = ("the last rewind of this session failed and its files could not be put back, so they may not "
+                  "match the conversation; rewind to a checkpoint (or fork from one) before sending")
 REVIEW_BUSY = "the agent is still working; wait for the run to end or cancel it"
 ACCOUNT_DISABLED = "this household account is disabled"
 
@@ -152,6 +154,9 @@ class Manager:
         # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
         # with the idle check, released when they end. In memory, so a daemon restart clears a stale claim.
         self.operations: dict[str, str] = {}
+        # Sessions whose rewind restored the files but could neither record itself nor put them back (the run field
+        # `checkpoints.UNSETTLED` keeps it across a restart, when its write succeeds): a send is refused meanwhile.
+        self.unsettled: set[str] = set()
         self.compare_busy: set[tuple[str, str]] = set()  # (owner, group) with a pick or discard in progress
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
@@ -798,6 +803,7 @@ class Manager:
             await asyncio.gather(task, return_exceptions=True)  # a finished run still wrapping up
             s = self.db.get_session(sid)
         self._refuse_during_operation(sid)
+        self._refuse_unsettled(s)
         if s["status"] not in ACTIVE:
             user_id = session_user_id(s)
             if user_id != OWNER_USER_ID:
@@ -808,6 +814,7 @@ class Manager:
 
         def deliver() -> None:
             self._refuse_during_operation(sid)      # in the write: a rewind claims the session in one too
+            self._refuse_unsettled(self.db.get_session(sid))
             self.bus.emit(sid, kind, {"content": content})
             if s["status"] in ACTIVE:
                 # Delivered before the agent's next model call.
@@ -850,6 +857,10 @@ class Manager:
         op = self.operations.get(sid)
         if op:
             raise HarnessError(409, f"{self.OPERATIONS[op]} of this session is in progress; retry when it finishes")
+
+    def _refuse_unsettled(self, s: dict) -> None:
+        if s["id"] in self.unsettled or s["run"].get(checkpoints.UNSETTLED):
+            raise HarnessError(409, UNSETTLED_SEND)
 
     @contextlib.asynccontextmanager
     async def _exclusive(self, sid: str, op: str, busy: str):
@@ -895,11 +906,37 @@ class Manager:
         cp = self.runner.checkpointer
         async with self._exclusive(sid, "rewind", CHECKPOINT_IDLE):
             try:
-                saved = await asyncio.to_thread(cp.restore, sid, int(turn))
+                done = await asyncio.to_thread(cp.restore, sid, int(turn))
             except projects.GitError as e:
                 raise HarnessError(e.status, str(e)) from e
-            await self.db.awrite(cp.commit_rewind, sid, int(turn), saved)
+            # All or nothing: the files are restored; if recording that fails, they are put back before the hold
+            # ends, so the next send never runs the later conversation against the earlier files.
+            def record() -> None:
+                cp.commit_rewind(sid, int(turn), done.saved)
+                self.db.after_commit(lambda: self.unsettled.discard(sid))
+            try:
+                await self.db.awrite(record)
+            except Exception as e:  # noqa: BLE001 - any failure to record is undone, then raised
+                error, undone = await asyncio.to_thread(cp.undo_rewind, done, e)
+                if not undone:
+                    await self._unsettle(sid)
+                raise HarnessError(error.status, str(error)) from e
+            finally:
+                await asyncio.to_thread(cp.release, done)
         return self.db.get_session(sid)
+
+    async def _unsettle(self, sid: str) -> None:
+        """A rewind left files that match neither the recorded conversation nor the checkpoint: refuse sends
+        until a rewind succeeds. Kept in memory first, so a failing database cannot lose it while the daemon runs."""
+        self.unsettled.add(sid)
+
+        def mark() -> None:
+            run = self.db.get_session(sid)["run"]
+            self.db.update_session(sid, run={**run, checkpoints.UNSETTLED: time.time()})
+        try:
+            await self.db.awrite(mark)
+        except Exception:  # noqa: BLE001 - the in-memory mark still refuses sends
+            log.exception("could not record the failed rewind of %s", sid)
 
     async def fork(self, ref: str, turn: int, prompt: str) -> dict:
         """A new session that starts from a checkpoint: its own workspace, branch and model context."""
@@ -955,7 +992,6 @@ class Manager:
                    "parent_id": sid, "fork_turn": int(turn), "turn_seq": int(turn)}
         if not git_fields:
             session["branch"] = ""
-        await asyncio.to_thread(cp.store(session).save_context, int(turn), base_context, carried)
 
         def insert_fork() -> None:     # one transaction on the writer thread (#294): the row, its checkpoint, events
             self._insert_created(session, None, [], "", prompt)
@@ -964,7 +1000,13 @@ class Manager:
             self.bus.emit(new_sid, "forked", {"parent": sid, "turn": int(turn), **(
                 {"summary_note": "hosted session: a fresh CLI session started from a transcript digest, no model call"}
                 if hosted else {})})
-        await self.db.awrite(insert_fork)
+        try:
+            await asyncio.to_thread(cp.store(session).save_context, int(turn), base_context, carried)
+            await self.db.awrite(insert_fork)
+        except Exception:              # nothing recorded (the write is one transaction): leave no half-made fork
+            remove_tree(workspace)
+            remove_tree(cp.store(session).base)
+            raise
         return new_sid
 
     def rerun(self, ref: str) -> dict:

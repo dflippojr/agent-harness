@@ -436,6 +436,106 @@ def test_rewind_that_fails_midway_puts_everything_back(tmp_path, monkeypatch):
     asyncio.run(body())
 
 
+def test_rewind_whose_record_fails_puts_the_files_back(tmp_path, monkeypatch):
+    async def body():
+        m, sid, ws, state = await later_work(tmp_path)
+        before = state()
+        cp = m.runner.checkpointer
+
+        def failing_commit(*args):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(cp, "commit_rewind", failing_commit)
+
+        with pytest.raises(HarnessError) as e:
+            await m.rewind(sid, 1)
+        assert e.value.status == 500
+        assert "nothing was rewound" in str(e.value) and "disk I/O error" in str(e.value)
+        assert state() == before                                         # files, branch, index, context, turn_seq
+        assert checkpoints.UNDO_PREFIX not in cp.store(m.db.get_session(sid))._git(None, None, "for-each-ref").out
+        assert not m.operations and not m.unsettled                      # the hold ended; nothing to settle
+
+        monkeypatch.undo()
+        context = m.db.get_session(sid)["context"]
+        await m.send(sid, "after the failed rewind")                     # the later conversation, the later files
+        s = await finished(m, sid)
+        assert s["context"][:len(context)] == context
+        assert {"role": "user", "content": "after the failed rewind"} in s["context"][len(context):]
+        assert (ws / "b.txt").read_text() == "later\n" and (ws / "committed.txt").exists()
+
+    asyncio.run(body())
+
+
+def test_rewind_that_can_neither_record_nor_undo_blocks_sends_until_a_rewind(tmp_path, monkeypatch):
+    from harness import checkpointer
+
+    async def body():
+        m, sid, ws, _ = await later_work(tmp_path)
+        cp = m.runner.checkpointer
+
+        def failing_commit(*args):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        def failing_put_back(*args):
+            raise checkpoints.GitError("index.lock exists", 500)
+        monkeypatch.setattr(cp, "commit_rewind", failing_commit)
+        monkeypatch.setattr(checkpointer, "put_git_state", failing_put_back)
+
+        with pytest.raises(HarnessError) as e:
+            await m.rewind(sid, 1)
+        assert e.value.status == 500 and "could not be put back" in str(e.value)
+        assert not m.operations
+        monkeypatch.undo()
+
+        with pytest.raises(HarnessError) as e:
+            await m.send(sid, "on mismatched files")
+        assert e.value.status == 409 and "rewind" in str(e.value)
+        m.unsettled.clear()                                              # as after a restart: the row still says so
+        with pytest.raises(HarnessError) as e:
+            await m.send(sid, "on mismatched files")
+        assert e.value.status == 409
+        assert sid not in m.tasks and all(x["content"] != "on mismatched files" for x in
+                                          m.db.get_session(sid)["context"] if x["role"] == "user")
+
+        rewound = await m.rewind(sid, 1)                                 # a rewind that succeeds settles it
+        assert checkpoints.UNSETTLED not in rewound["run"] and not m.unsettled
+        assert not (ws / "b.txt").exists() and (ws / "app.py").read_text() == "VALUE = 2\n"
+        await m.send(sid, "after the rewind")
+        s = await finished(m, sid)
+        assert {"role": "user", "content": "after the rewind"} in s["context"]
+
+    asyncio.run(body())
+
+
+def test_fork_whose_record_fails_leaves_no_child(tmp_path, monkeypatch):
+    async def body():
+        m, s = await started(tmp_path)
+        sid = s["id"]
+        made, new_workspace = [], m._new_workspace
+
+        def recorded_workspace(*args):
+            made.append((args[-1], new_workspace(*args)))
+            return made[-1][1]
+        monkeypatch.setattr(m, "_new_workspace", recorded_workspace)
+
+        def failing_add(*args):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(m.db, "add_checkpoint", failing_add)
+        sessions = {x["id"] for x in m.db.list_sessions()}
+
+        with pytest.raises(sqlite3.OperationalError):
+            await m.fork(sid, 1, "a fork that cannot be recorded")
+        child, workspace = made[0]
+        assert not Path(workspace).exists()
+        assert not m.runner.checkpointer.store({**s, "id": child}).base.exists()
+        assert {x["id"] for x in m.db.list_sessions()} == sessions and not m.operations
+
+        monkeypatch.undo()
+        fork = await m.fork(sid, 1, "a fork that works")
+        await finished(m, fork["id"])
+
+    asyncio.run(body())
+
+
 def test_rewind_refuses_up_front_when_a_file_is_locked(tmp_path, monkeypatch):
     async def body():
         m, sid, ws, state = await later_work(tmp_path)

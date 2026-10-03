@@ -37,6 +37,9 @@ MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_de
 # The run fields a turn writes (update_state, update_notes) that the next turn reads (`new_run` carries them, and
 # compaction re-injects them): a checkpoint keeps them with its context, and rewind and fork restore them.
 TURN_RUN_KEYS = ("state", "notes")
+# A run field set when a rewind restored the files but could neither record itself nor put the files back: the
+# workspace no longer matches the context, so a send is refused until a rewind succeeds (which clears it).
+UNSETTLED = "rewind_unsettled"
 REF_PREFIX = "refs/harness/checkpoints"
 UNDO_PREFIX = "refs/harness/rewind-undo"     # the workspace as it was before a rewind, while that rewind runs
 STAGE_PREFIX = "refs/harness/staged"         # a new checkpoint until its database record commits
