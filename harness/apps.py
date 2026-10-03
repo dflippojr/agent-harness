@@ -40,7 +40,7 @@ NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.14"
+API_VERSION = "1.15"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -498,26 +498,35 @@ def auth(request: Request, scope: str) -> dict:
 
 
 def _owned_session(request: Request, key: dict, ref: str) -> dict:
-    """Session visible to this principal's account, or 404. Members stop here. An App-tools-only session exists only
-    for the App that started it (#329): every other token, the owner's included, gets a 404."""
+    """Session visible to this principal's account, or 404. Members stop here. An App's session exists only for the
+    App that started it (#330 decision 3), and so does an App-tools-only one (#329): every other token, the owner's
+    and a `sessions:all` App's included, gets a 404."""
     m = mgr(request)
     user_id = key["user_id"] if key.get("kind") == "member" else "owner"
     app = key.get("kind") == "app"
+    mine = calling_app(key)
     try:
-        s = m.get(ref, user_id=user_id, kind=None if app else "agent")
+        s = m.db.get_session(m.resolve_id(ref, user_id=user_id, kind=None if app else "agent", app=mine))
     except HarnessError as e:
         if e.status in (400, 404):
             raise HarnessError(404, NO_SUCH_SESSION) from e
         raise
     kind = s.get("kind") or "agent"
     if (s.get("owner_id", "owner") != user_id or kind not in ("agent", TOOLS_ONLY)
+            or (s.get("app_id") or "") not in ("", mine)
             or (kind == TOOLS_ONLY and not (app and s.get("app_id") == key["id"]))):
         raise HarnessError(404, NO_SUCH_SESSION)
     return s
 
 
+def calling_app(key: dict) -> str:
+    """The App whose own sessions (and store) this principal reaches: an App or device token's id; "" for the owner
+    and household members, who reach no App's sessions (#330 decision 3)."""
+    return "" if key.get("kind") == "member" or owner_key(key) else key["id"]
+
+
 def visible_session(request: Request, key: dict, ref: str) -> dict:
-    """Owner token, the creating app, or sessions:all may read a session."""
+    """The owner token or sessions:all may read the owner's sessions; an App reads its own."""
     s = _owned_session(request, key, ref)
     if key.get("kind") == "member":
         return s
@@ -528,7 +537,7 @@ def visible_session(request: Request, key: dict, ref: str) -> dict:
 
 
 def own_session(request: Request, key: dict, ref: str) -> dict:
-    """Mutations require the owner token or the creating app; sessions:all is not enough."""
+    """Mutations require the owner token (the owner's sessions) or the creating app; sessions:all is not enough."""
     s = _owned_session(request, key, ref)
     if key.get("kind") == "member":
         return s
@@ -855,7 +864,7 @@ async def api_search(request: Request, q: str = "", project: str = "", limit: in
     if not m.cfg.search.enabled:
         raise HarnessError(400, "session search is disabled in config/harness.yaml")
     return await asyncio.to_thread(
-        search_mod.search, m.db, q, project, max(1, min(limit, 50)), "", user_id, app_id)
+        search_mod.search, m.db, q, project, max(1, min(limit, 50)), "", user_id, app_id, with_app=calling_app(key))
 
 
 @route_table.get("/api/v1/queue")
@@ -866,6 +875,8 @@ async def api_queue(request: Request):
     positions = m.scheduler.positions()
     out = []
     for sid, pos in sorted(positions.items(), key=lambda x: x[1]):
+        if m.db.app_of(sid) not in ("", calling_app(key)):  # another App's session (#330 decision 3)
+            continue
         session = m.db.get_session(sid) or {}
         if session.get("owner_id", "owner") != user_id or (session.get("kind") or "agent") != "agent":
             continue
@@ -877,6 +888,8 @@ def _global_event_visible(e: dict, session: dict | None, user_id: str, key: dict
     if not (e["type"] in global_types and session and session.get("owner_id", "owner") == user_id
             and (session.get("kind") or "agent") == "agent"):
         return False
+    if session.get("app_id"):  # an App's session: that App's alone (#330 decision 3)
+        return session["app_id"] == calling_app(key)
     return not (key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"]
                 and session.get("app_id") != key["id"])
 
@@ -895,6 +908,8 @@ async def _global_events_stream(request: Request, m, user_id: str, key: dict, ep
                 if await request.is_disconnected():
                     return
                 yield ": keepalive\n\n"
+                continue
+            if m.db.app_of(e["session_id"]) not in ("", calling_app(key)):  # another App's: its store stays unread
                 continue
             if _global_event_visible(e, m.db.get_session(e["session_id"]), user_id, key, global_types):
                 # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
@@ -1028,8 +1043,8 @@ async def list_sessions(request: Request, limit: int = 50):
     key = auth(request, "sessions")
     if key.get("kind") == "member":
         return [m.list_summary(r) for r in m.db.list_sessions(limit, owner_id=key["user_id"])]
-    if owner_key(key) or SESSIONS_ALL in key["scope_set"]:  # every store's (#330)
-        mine = m.db.list_sessions(limit * 5, owner_id="owner")
+    if owner_key(key) or SESSIONS_ALL in key["scope_set"]:  # the owner's sessions, and an App's own (#330)
+        mine = m.db.scope(calling_app(key)).list_sessions(limit * 5, owner_id="owner")
     else:  # this App's own store only
         mine = m.db.for_app(key["id"]).list_sessions(limit * 5, owner_id="owner") if key.get("kind") == "app" else []
     if key.get("kind") == "app":  # an App's tools-only sessions are listed to that App alone (#329)

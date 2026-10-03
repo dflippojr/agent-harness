@@ -10,7 +10,9 @@ are not part of this App contract. App tokens cannot call them.
 First-party [Agent Harness Web](web.md) also uses this surface for ordinary session operations. A same-origin bundled
 Web UI may use its Tailscale/localhost owner identity; a separately hosted copy uses an origin-bound owner token.
 Owner-created sessions are not assigned to an Agent Harness App. This first-party privilege does not change App-token
-scoping: App tokens still see only their own sessions unless granted read-only `sessions:all`.
+scoping: App tokens still see only their own sessions unless granted read-only `sessions:all`, which adds the owner's
+sessions. The owner never sees an App's sessions, and no App sees another App's (see
+[Where an App's data lives](#where-an-apps-data-lives)).
 
 A one-file Agent Harness SDK lives in [`sdk/harness_client.py`](../sdk/harness_client.py) (requires `httpx`), with an
 example in [`sdk/examples/shopping_list_app.py`](../sdk/examples/shopping_list_app.py).
@@ -39,7 +41,7 @@ Create an Agent Harness App token in **Settings → Apps** (or `POST /keys` from
 | Scope | Allows |
 | --- | --- |
 | `sessions` | create sessions, send messages and context, answer tool calls, cancel; read the app's own sessions and events |
-| `sessions:all` | read every session visible to that app's owner scope (never other household accounts) |
+| `sessions:all` | also read the owner's sessions (never another App's, nor other household accounts') |
 | `approvals` | approve or deny tool calls in the app's own sessions (normally the user approves from the phone) |
 | `images` | generate and download images |
 | `inference` | use the OpenAI/Anthropic-compatible endpoint under `/v1` |
@@ -48,8 +50,9 @@ Create an Agent Harness App token in **Settings → Apps** (or `POST /keys` from
 
 Apps see only the sessions they created, unless they hold `sessions:all`. That scope expands reads only:
 sending messages, adding context, cancelling, and answering tool calls still require owning the session.
-`sessions:all` means all sessions in the machine-owner scope (`user_id = owner`), never household member
-accounts. Cross-user object ids return an indistinguishable 404. Errors are `{"detail": "..."}`, with 401
+`sessions:all` means the owner's own sessions (`user_id = owner`, started by the owner rather than by an App), never
+another App's sessions and never household member accounts. Cross-user and cross-App object ids return an
+indistinguishable 404. Errors are `{"detail": "..."}`, with 401
 (bad token), 403 (missing scope), 404 (not found or not yours), 400/409/413 as usual. Harness-generated errors also
 include `error: {code, message, retryable}`; `detail` remains for compatibility. The SDK exposes these as
 `HarnessError.code`, `.detail`, and `.retryable`.
@@ -81,8 +84,23 @@ members' sessions. Session ids stay unique across all stores. The `/api/v1` resp
   make no backup.
 - **Not moved yet.** The files of an App session (its working directory, transcript and checkpoint snapshots) stay
   under the owner's data folders for now. So do usage rows and short-lived event-stream tickets, which are metadata.
-- **Owner view unchanged for now.** Owner lists and search still cover every store in this release. Narrowing the
-  owner's view of other Apps to metadata (#330), plus delete, retention, revoke and per-App backups, come later.
+- **Your App alone.** Only your App's token reaches your sessions. The owner's session lists, session pages
+  (a 404, even by id or id prefix), transcript and session search, `session_search` and `session_read`, pending
+  approvals, the queue and the live session list never read your store. Neither do other Apps, including ones with
+  `sessions:all`, nor memory or skill extraction. Decide approvals in your sessions with the `approvals` scope: the
+  owner's Web no longer shows them.
+- **What the owner sees instead.** Metadata only, on the Apps card (`GET /keys`, a `store` object per App): your
+  sessions counted by status, your hosted-backend usage (requests, tokens, cost) and how many of your sessions
+  failed, with the last failure's kind (the stop reason up to its first colon, without its details) and time.
+- **Owner totals.** `/metrics`, the smart-approval stats and Control Center's counts cover the owner's and members'
+  sessions only (the main store); App sessions are counted only in the per-App metadata above.
+- **Backups.** The nightly backup copies every App's store into the dated backup folder as `apps/<app_id>.sqlite3`,
+  one file per App, next to the main store's `harness.sqlite3`. A session deleted from a store stays in the older
+  backups that hold it until they rotate out (`backup.keep_days`, 14 days by default).
+- **Logs and telemetry.** Your tools' arguments and results stay in your store: logs, traces and the audit log get
+  only tool names, call ids, sizes and timings.
+- **Still to come (#330).** `DELETE` of a session, `retention_days`, erasure of a revoked App's store after a grace
+  period, and moving the session files above into your App's folder.
 
 ## Household members on `/api/v1`
 
@@ -112,7 +130,7 @@ member. Device and runner tokens gain no member authority.
 
 | Capability | owner | member | guest | app token | device/runner |
 | --- | --- | --- | --- | --- | --- |
-| Own sessions (create/list/steer/cancel/review) | yes | yes (local tower only) | read-only look around | own sessions, or owner-scope `sessions:all` | inference only; no member sessions |
+| Own sessions (create/list/steer/cancel/review) | yes | yes (local tower only) | read-only look around | own sessions, plus the owner's with `sessions:all` | inference only; no member sessions |
 | `/api/v1/me`, scoped projects/search/events | yes | own account | no | owner scope | no |
 | Create projects | yes | empty or public HTTPS allowlist | no | no | no |
 | `/api/admin/v1`, `ho-` owner tokens | yes | 403 | 403 | 403 | 403 |
@@ -256,7 +274,7 @@ What the server guarantees, enforced rather than prompted:
   under the harness's workspaces folder, removed when each run ends (made again, empty, for a follow-up message).
 - **Visible to your App alone.** Only the App that started the session can read it, list it, stream its events or
   send to it. It is hidden from the owner's session lists, from session search, and from other Apps (including ones
-  with `sessions:all`). It is stored in the main store tagged with your App's id until per-App stores (#330) land.
+  with `sessions:all`). Like your other sessions it lives in your App's own store.
 - **Untrusted results.** Your tools' results count as untrusted content for the session's taint (they may carry
   free text such as bank transaction descriptions). It changes nothing today, since the session has no risky tools.
 - It can't be rerun (`POST .../rerun` is a 409); start a new session with its tools instead.
@@ -324,11 +342,11 @@ call not answered within its `timeout_seconds` fails with an error the agent see
 
 ### `POST /api/v1/sessions/{id}/messages`
 `{"content": "..."}`. Delivered before the agent's next step, or starts a new run if the session had finished.
-Requires owning the session (or an owner token); `sessions:all` does not authorize this.
+Requires owning the session (or an owner token, for the owner's own sessions); `sessions:all` does not authorize this.
 
 ### `POST /api/v1/sessions/{id}/context`
 `{"context": [{"title": "...", "content": "..."}]}`. Same as a message, but marked as context from the app.
-Requires owning the session (or an owner token); `sessions:all` does not authorize this.
+Requires owning the session (or an owner token, for the owner's own sessions); `sessions:all` does not authorize this.
 
 ### Secret scan before push and merge
 
@@ -378,10 +396,11 @@ fixed (`python -m harness.doctor` reports it; the daemon fetches the pinned rele
   fingerprint, reason).
 
 ### `POST /api/v1/sessions/{id}/cancel`
-Requires owning the session (or an owner token); `sessions:all` does not authorize this.
+Requires owning the session (or an owner token, for the owner's own sessions); `sessions:all` does not authorize this.
 
 ### `GET /api/v1/sessions/{id}/approvals`, `POST /api/v1/sessions/{id}/approvals/{approval_id}`  (scope `approvals` to decide)
-`{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name.
+`{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name. The owner's Web doesn't
+list your sessions' approvals (#330), so an App whose sessions can ask for approval needs this scope.
 
 ### `POST /api/v1/images`, `GET /api/v1/images/{id}`, `GET /api/v1/images/{id}.png`, `POST /api/v1/images/{id}/upscale`  (scope `images`)
 `{"prompt": "...", "model": "fast" | "quality" | "quality-fast" | "flux-fast", "aspect_ratio": "1:1", "upscale": "none" | "2x" | "4x"}`
@@ -511,3 +530,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.12 | 2026-09-19 | Optional `flux-fast` FLUX.2 klein 4B mode discovery, pinned-asset preflight, and provenance |
 | 1.13 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
+| 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |

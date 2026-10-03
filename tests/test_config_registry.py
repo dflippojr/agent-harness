@@ -438,8 +438,9 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         deadline = time.time() + 10
         while time.time() < deadline and manager.db.get_session(sid)["status"] in ACTIVE:
             time.sleep(0.05)
-        follow = client.post(f"/sessions/{sid}/messages", json={"content": "continue"})
-        assert follow.status_code == 200, follow.text
+        # The owner can't reach an App's session (#330 decision 3); a run the daemon continues stays narrowed.
+        assert client.post(f"/sessions/{sid}/messages", json={"content": "continue"}).status_code == 404
+        client.portal.call(manager.send, sid, "continue")
         assert manager.db.get_session(sid)["run"]["max_turns"] == 10
 
         note = Notifier(manager.cfg, manager.db).build({

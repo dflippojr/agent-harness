@@ -9,12 +9,18 @@ sessions.
 ...)`, ...) runs on that session's store; anything else runs on the main store. A transaction (`write`/`awrite`) that
 touches a session must run on that session's writer: `db.for_session(sid).write(fn)`, or `db.for_app(app_id)` for a
 session not created yet. An App store opens on first use and closes after `APP_STORE_IDLE_SECONDS` without one.
+
+The owner and members never read an App store (#330 decision 3): their lists, searches and id lookups cover the main
+store only, and an App's cover the main store plus its own (`db.scope(app_id)`). The owner sees per-App metadata
+instead (`app_metadata`): session counts by status from the index, usage and the last error from the main store.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import itertools
+import json
 import logging
 import re
 import sqlite3
@@ -51,6 +57,12 @@ _BY_SESSION = frozenset({
 _INDEXED = ("app_id", "owner_id", "kind", "status")
 _SEQ = itertools.count(1)  # orders the index updates staged by transactions, in the order they ran
 _ENDED = ("done", "failed", "cancelled")
+# `with_app` for the daemon's own lookups, which reach every App's sessions. Callers acting for a person or an App
+# pass "" (the owner and members: the main store only) or the App's id (the main store plus that App's own).
+EVERY_APP = "*"
+# Lists, searches and id lookups that take `with_app`; `scope(app_id)` fills it in.
+_SCOPED = frozenset({"list_sessions", "search_events", "find_session_ids", "pending_approvals"})
+_APP_ERROR = "app_error:"  # meta key prefix: an App's failed-session count and last error (metadata, main store)
 
 
 def app_dir(data_dir: Path, app_id: str) -> Path:
@@ -130,6 +142,26 @@ class _AppStore:
         return call
 
 
+class _Scoped:
+    """`SessionStores.scope(app_id)`: lists, searches and id lookups as one App (or, for "", the owner) may see
+    them; everything else as `SessionStores`."""
+
+    def __init__(self, stores: SessionStores, app_id: str):
+        self._stores, self.app_id = stores, app_id
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        method = getattr(self._stores, name)
+        return functools.partial(method, with_app=self.app_id) if name in _SCOPED else method
+
+
+def scoped(db, app_id: str):
+    """`db` as App `app_id` (or, for "", the owner) may see it. A lone Database has no App stores: it is returned."""
+    scope = getattr(db, "scope", None)
+    return scope(app_id) if scope is not None else db
+
+
 def _reap(ref: weakref.ref, stop: threading.Event, every: float) -> None:
     while not stop.wait(every):
         stores = ref()
@@ -151,11 +183,13 @@ class SessionStores:
     (its writer is waited for), never the reverse and never another App's store, so two writers can never wait on
     each other: such a write raises instead of deadlocking.
 
-    Lists, searches and sweeps that span sessions (list_sessions, search_events, find_session_ids,
-    sessions_with_status, sessions_with_run_flag, count_sessions, pending_approvals) cover the main store plus the
-    App stores the index says hold a match, so what the owner sees is unchanged in this stage; narrowing the owner's
-    view to metadata (#330 decision 3) comes later. Group, job and chat lists and the metrics read the main store
-    only: App sessions have none of those.
+    Lists and searches (list_sessions, search_events, pending_approvals) read the main store, plus the App stores
+    named by `app_id` (a filter on one App) or `with_app` (an App's own view); never every App's, so nothing the
+    owner or a member asks for reads an App store (#330 decision 3). `find_session_ids` reads only the index for App
+    sessions; it reaches every App unless `with_app` narrows it, since the daemon resolves its own full ids with it.
+    The daemon's sweeps (sessions_with_status, sessions_with_run_flag, count_sessions) cover every store. Group, job
+    and chat lists, the metrics and the smart-review stats read the main store only: App sessions are counted in
+    `app_metadata` instead.
     """
 
     def __init__(self, main: Database, apps_dir: Path, idle_seconds: float = APP_STORE_IDLE_SECONDS):
@@ -283,6 +317,11 @@ class SessionStores:
             entry = self._sessions.get(sid)
         return self.for_app(entry["app_id"]) if entry else self.main
 
+    def scope(self, app_id: str) -> _Scoped:
+        """Lists, searches and id lookups as App `app_id` sees them: the main store plus its own; "" for the
+        owner's and members' view, the main store alone."""
+        return _Scoped(self, app_id)
+
     def app_of(self, sid: str) -> str:
         with self._lock:
             entry = self._sessions.get(sid)
@@ -303,6 +342,14 @@ class SessionStores:
 
     def _apps(self, pred=lambda e: True) -> list[str]:
         return sorted({e["app_id"] for _, e in self._indexed(pred)})
+
+    def _reach(self, app_id: str | None, with_app: str | None, pred=lambda e: True) -> list[str]:
+        """The App stores a list or search reads besides the main store, among those the index says hold a match:
+        `app_id`'s and `with_app`'s, or every App's for `with_app=EVERY_APP`."""
+        if with_app == EVERY_APP:
+            return self._apps(pred)
+        wanted = {a for a in (app_id, with_app) if a}
+        return self._apps(lambda e: e["app_id"] in wanted and pred(e)) if wanted else []
 
     # transactions -----------------------------------------------------------------------------------------------------
     def in_transaction(self) -> bool:
@@ -347,8 +394,44 @@ class SessionStores:
             db.update_session(sid, **fields)
             if any(k in fields for k in _INDEXED):
                 self._stage(db, sid)
+            if fields.get("status") == "failed":
+                reason = str(fields.get("stop_reason") or "")
+                db.after_commit(lambda: self._record_error(app_id, reason))
         with self._using(app_id, write=True) as db:
             db.write(update, db)
+
+    def _record_error(self, app_id: str, reason: str) -> None:
+        """Count a failed session of App `app_id` in the main store, with the kind of error: its stop reason up to the
+        first colon, where details that could hold the App's data begin."""
+        key, kind = _APP_ERROR + app_id, reason.split(":", 1)[0].strip()[:80] or "failed"
+
+        def bump() -> None:
+            old = json.loads(self.main.get_meta(key) or "{}")
+            self.main.set_meta(key, json.dumps({"errors": int(old.get("errors") or 0) + 1, "last_error": kind,
+                                                "last_error_at": time.time()}))
+        try:
+            self.main.write(bump)
+        except Exception:  # noqa: BLE001 - metadata only: the session's own write has committed
+            log.exception("could not count a failed session of App %s", app_id)
+
+    # owner metadata ---------------------------------------------------------------------------------------------------
+    def app_metadata(self, app_id: str) -> dict:
+        """What the owner may know about App `app_id`'s store (#330 decision 3): its sessions counted by status (from
+        the index), its usage and its failed sessions (from the main store). Reads nothing in the App's store."""
+        sessions: dict[str, int] = {}
+        for _, e in self._indexed(lambda e: e["app_id"] == app_id):
+            sessions[e["status"]] = sessions.get(e["status"], 0) + 1
+        error = json.loads(self.main.get_meta(_APP_ERROR + app_id) or "{}")
+        return {"sessions": sessions, "usage": self.main.app_usage(app_id), "errors": int(error.get("errors") or 0),
+                "last_error": error.get("last_error") or "", "last_error_at": error.get("last_error_at")}
+
+    def list_api_keys(self) -> list[dict]:
+        """The key list (Settings → Apps), each App's and device's with its store's metadata."""
+        keys = self.main.list_api_keys()
+        for k in keys:
+            if k.get("kind") != "owner":
+                k["store"] = self.app_metadata(k["id"])
+        return keys
 
     def delete_session(self, sid: str) -> None:
         app_id = self.app_of(sid)
@@ -384,12 +467,13 @@ class SessionStores:
                 del self._sessions[sid]
 
     def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None,
-                         kind: str | None = None) -> list[str]:
+                         kind: str | None = None, with_app: str | None = EVERY_APP) -> list[str]:
         ids = self.main.find_session_ids(prefix, user_id=user_id, app_id=app_id, kind=kind)
+        apps = set(self._reach(app_id, with_app))
         like = _like(prefix)
         return ids + [sid for sid, _ in self._indexed(
-            lambda e: (app_id is None or e["app_id"] == app_id) and (user_id is None or e["owner_id"] == user_id)
-            and (kind is None or e["kind"] == kind))
+            lambda e: e["app_id"] in apps and (app_id is None or e["app_id"] == app_id)
+            and (user_id is None or e["owner_id"] == user_id) and (kind is None or e["kind"] == kind))
             if like.fullmatch(sid)]
 
     def sessions_with_status(self, *statuses: str, user_id: str | None = None) -> list[dict]:
@@ -414,9 +498,11 @@ class SessionStores:
         return self.main.count_sessions(user_id, *statuses) + len(
             self._indexed(lambda e: e["owner_id"] == user_id and e["status"] in statuses))
 
-    def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent") -> list[dict]:
+    def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent",
+                      with_app: str | None = None) -> list[dict]:
         rows = self.main.list_sessions(limit, owner_id=owner_id, kind=kind)
-        apps = self._apps(lambda e: e["kind"] == kind and (owner_id is None or e["owner_id"] == owner_id))
+        apps = self._reach(None, with_app, lambda e: e["kind"] == kind
+                           and (owner_id is None or e["owner_id"] == owner_id))
         if not apps:
             return rows
         for app_id in apps:
@@ -424,13 +510,13 @@ class SessionStores:
         return sorted(rows, key=lambda r: r["created_at"], reverse=True)[:limit]
 
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600, user_id: str | None = None,
-                      app_id: str | None = None, session_kind: str | None = "agent") -> list[dict]:
-        """One App's store when `app_id` is given, every store otherwise."""
+                      app_id: str | None = None, session_kind: str | None = "agent",
+                      with_app: str | None = None) -> list[dict]:
         rows = self.main.search_events(fts_query, exclude, max_rows, user_id=user_id, app_id=app_id,
                                        session_kind=session_kind)
-        apps = self._apps(lambda e: (app_id is None or e["app_id"] == app_id)
-                          and (user_id is None or e["owner_id"] == user_id)
-                          and (session_kind is None or e["kind"] == session_kind))
+        apps = self._reach(app_id, with_app, lambda e: (app_id is None or e["app_id"] == app_id)
+                           and (user_id is None or e["owner_id"] == user_id)
+                           and (session_kind is None or e["kind"] == session_kind))
         if not apps:
             return rows
         for app in apps:
@@ -478,11 +564,13 @@ class SessionStores:
         return self._call(app_id, "decide_approval", aid, status, note) if app_id else \
             self.main.decide_approval(aid, status, note)
 
-    def pending_approvals(self, sid: str | None = None, user_id: str | None = None) -> list[dict]:
+    def pending_approvals(self, sid: str | None = None, user_id: str | None = None,
+                          with_app: str | None = None) -> list[dict]:
         if sid:
             return self.for_session(sid).pending_approvals(sid, user_id=user_id)
         rows = self.main.pending_approvals(user_id=user_id)
-        apps = self._apps(lambda e: e["status"] not in _ENDED and (user_id is None or e["owner_id"] == user_id))
+        apps = self._reach(None, with_app, lambda e: e["status"] not in _ENDED
+                           and (user_id is None or e["owner_id"] == user_id))
         if not apps:
             return rows
         for app_id in apps:

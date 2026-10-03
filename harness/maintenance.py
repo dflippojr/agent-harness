@@ -154,6 +154,7 @@ class Maintenance:
         tmp.mkdir(parents=True)
         db_copy = tmp / "harness.sqlite3"
         self._backup_db(db_copy)
+        app_stores = self._backup_app_stores(tmp / "apps")
         with zipfile.ZipFile(tmp / "transcripts.zip", "w", zipfile.ZIP_DEFLATED) as z:
             if self.cfg.transcripts_dir.is_dir():
                 for f in sorted(self.cfg.transcripts_dir.rglob("*")):
@@ -173,10 +174,26 @@ class Maintenance:
 
         removed = self._prune_old_backups(root, dest, now - self.cfg.backup.keep_days * 86400)
         size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
-        return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": ""}
+        return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": "",
+                "app_stores": app_stores}
 
     def _backup_db(self, db_copy: Path) -> None:
         backup_sqlite(self.cfg.db_path, db_copy)
+
+    def _backup_app_stores(self, dest: Path) -> int:
+        """Every App's store, one file per App: `apps/<app_id>.sqlite3` (#330 decision 6). Returns how many."""
+        from .app_stores import APP_STORE_FILE, app_dir
+        root, count = Path(self.cfg.data_dir) / "apps", 0
+        for folder in sorted(root.iterdir()) if root.is_dir() else ():
+            try:
+                store = app_dir(self.cfg.data_dir, folder.name) / APP_STORE_FILE
+            except ValueError:  # not an App's folder
+                continue
+            if store.is_file():
+                dest.mkdir(exist_ok=True)
+                backup_sqlite(store, dest / f"{folder.name}.sqlite3")
+                count += 1
+        return count
 
     @staticmethod
     def _prune_old_backups(root: Path, dest: Path, cutoff: float) -> list:

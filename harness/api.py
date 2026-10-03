@@ -285,10 +285,10 @@ def owned_session(request: Request, ref: str, *, kind: str = "agent") -> tuple[M
     if ident.role == "guest":
         raise HarnessError(404, "no session matches that id")
     scope = owner_id(request)
-    sid = m.resolve_id(ref, user_id=scope, kind=kind)
+    sid = m.resolve_id(ref, user_id=scope, kind=kind, app="")  # never an App's session (#330 decision 3)
     session = m.db.get_session(sid)
     if (session is None or session.get("owner_id", "owner") != scope
-            or (session.get("kind") or "agent") != kind):
+            or (session.get("kind") or "agent") != kind or session.get("app_id")):
         m.db.insert_audit(scope, scope, "cross_user", "denied")
         raise HarnessError(404, "no chat matches that id" if kind == "chat" else "no session matches that id")
     return m, sid, session
@@ -1068,6 +1068,8 @@ async def queue(request: Request):
     positions = m.scheduler.positions()
     out = []
     for sid, pos in sorted(positions.items(), key=lambda x: x[1]):
+        if m.db.app_of(sid):  # an App's session (#330 decision 3)
+            continue
         session = m.db.get_session(sid) or {}
         if session.get("owner_id", "owner") != scope or (session.get("kind") or "agent") != "agent":
             continue
@@ -1566,9 +1568,9 @@ async def get_transcript(ref: str, request: Request):
 async def session_metrics(ref: str, request: Request):
     """Owner-only per-turn context-efficiency metrics for one agent session (#159)."""
     m = require_owner(request)
-    sid = m.resolve_id(ref, kind="agent")
+    sid = m.resolve_id(ref, kind="agent", app="")
     session = m.db.get_session(sid)
-    if session is None:
+    if session is None or session.get("app_id"):
         raise HarnessError(404, "no session matches that id")
     return efficiency.session_payload(sid, m.db.events(sid))
 
@@ -1743,10 +1745,13 @@ async def _next_bus_event(sub, request: Request) -> tuple[dict | None, bool]:
 
 
 def _session_list_payload(m: Manager, scope: str, e: dict) -> str | None:
-    """SSE frame for a status-level event of one of this scope's agent sessions, else None."""
+    """SSE frame for a status-level event of one of this scope's agent sessions, else None. An App's session is never
+    one (#330 decision 3): its store is not even read."""
+    if m.db.app_of(e["session_id"]):
+        return None
     session = m.db.get_session(e["session_id"])
     if not (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope
-            and (session.get("kind") or "agent") == "agent"):
+            and (session.get("kind") or "agent") == "agent" and not session.get("app_id")):
         return None
     if e["type"] == "run_finished":
         e = {**e, "data": {k: v for k, v in e["data"].items() if k != "run"}}

@@ -1208,6 +1208,17 @@ class Database:
                                credential_source, time.time()))
 
     @_reads
+    def app_usage(self, app_id: str) -> dict:
+        """What App `app_id`'s sessions used, from the usage log (metadata the main store keeps, #330)."""
+        with self.lock:
+            row = self.conn.execute("SELECT COALESCE(SUM(requests),0) requests, "
+                                    "COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
+                                    "COALESCE(SUM(completion_tokens),0) completion_tokens, "
+                                    "COALESCE(SUM(cost_usd),0) cost_usd FROM usage WHERE app_id = ?",
+                                    (app_id,)).fetchone()
+        return dict(row)
+
+    @_reads
     def usage_tally(self, backend: str, since: float, app_id: str | None = None) -> dict:
         app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
         with self.lock:

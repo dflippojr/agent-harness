@@ -755,7 +755,7 @@ def test_app_root_lists_quality_fast_without_enabling_it(tmp_path):
     m, _, _ = image_manager(tmp_path)
     with TestClient(create_app(m)) as client:
         root = client.get("/api/v1").json()
-        assert root["api_version"] == "1.14"
+        assert root["api_version"] == "1.15"
         assert root["image_modes"]["fast"]["available"] is True
         assert root["image_modes"]["quality-fast"]["available"] is False
         assert root["image_modes"]["quality-fast"]["label"] == "Qwen quality (fast, 4-step)"
@@ -1057,7 +1057,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
         b_sid = client.post("/api/v1/sessions", headers=H(b), json={"prompt": "b task"}).json()["id"]
         sessions = {"owner": owner_sid, "a": a_sid, "b": b_sid}
         for sid in sessions.values():
-            wait_for(lambda sid=sid: client.get(f"/sessions/{sid}").json()["status"] == "done")
+            wait_for(lambda sid=sid: m.db.get_session(sid)["status"] == "done")
 
         def event_count(sid, type_):
             return sum(1 for e in m.db.events(sid) if e["type"] == type_)
@@ -1065,9 +1065,10 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
         read_rows = [
             ("a", a, {"owner": 404, "a": 200, "b": 404}, {a_sid}),
             ("b", b, {"owner": 404, "a": 404, "b": 200}, {b_sid}),
-            ("reader", reader, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
-            ("broad", broad, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
-            ("owner", owner, {"owner": 200, "a": 200, "b": 200}, {owner_sid, a_sid, b_sid}),
+            # sessions:all reads the owner's sessions, never another App's; nor does the owner (#330 decision 3).
+            ("reader", reader, {"owner": 200, "a": 404, "b": 404}, {owner_sid}),
+            ("broad", broad, {"owner": 200, "a": 404, "b": 404}, {owner_sid}),
+            ("owner", owner, {"owner": 200, "a": 404, "b": 404}, {owner_sid}),
         ]
         read_paths = (
             "/api/v1/sessions/{sid}",
@@ -1082,7 +1083,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
                     assert r.status_code == expected[label], (name, path, label, r.status_code, r.text)
             assert {s["id"] for s in client.get("/api/v1/sessions", headers=H(token)).json()} == listed
 
-        mutate_rows = ((a, {a_sid}), (b, {b_sid}), (broad, set()), (owner, {owner_sid, a_sid, b_sid}))
+        mutate_rows = ((a, {a_sid}), (b, {b_sid}), (broad, set()), (owner, {owner_sid}))
         for token, allowed_sids in mutate_rows:
             for label, sid in sessions.items():
                 payload = f"injected-{token[-8:]}-{label}"
@@ -1117,15 +1118,14 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
             assert event_count(sid, "user_message") == before
 
         m.db.insert_app_tool_call(a_sid, "call-a", "lookup", {"x": 1})
-        assert client.get(f"/api/v1/sessions/{a_sid}/tool_calls", headers=H(broad)).status_code == 200
+        assert client.get(f"/api/v1/sessions/{a_sid}/tool_calls", headers=H(broad)).status_code == 404
         assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(broad),
                            json={"output": "nope"}).status_code == 404
         assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(b),
                            json={"output": "nope"}).status_code == 404
         owner_tool = client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(owner),
                                  json={"output": "nope"})
-        assert owner_tool.status_code == 403
-        assert "only the app that registered" in owner_tool.json()["detail"]
+        assert owner_tool.status_code == 404
         assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(a),
                            json={"output": "yes"}).status_code == 200
 
@@ -1133,7 +1133,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
                               "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
         m.db.insert_approval({"id": "appr-o", "session_id": owner_sid, "tool_call_id": "native-2",
                               "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
-        assert client.get(f"/api/v1/sessions/{a_sid}/approvals", headers=H(broad)).status_code == 200
+        assert client.get(f"/api/v1/sessions/{a_sid}/approvals", headers=H(broad)).status_code == 404
         assert client.post(f"/api/v1/sessions/{a_sid}/approvals/appr-a", headers=H(wide),
                            json={"decision": "approve"}).status_code == 404
         assert client.post(f"/api/v1/sessions/{owner_sid}/approvals/appr-o", headers=H(wide),

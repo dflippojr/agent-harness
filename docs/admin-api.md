@@ -226,6 +226,9 @@ Failed outputs count. `largest_tool_output_by_tool` is session-API only (never a
 
 Counters, bounded labels, no session id or tool name. Aggregates sum precomputed `turn_metrics` fields (sessions
 without those fields contribute nothing). `harness_round_resets_total` is unchanged and is not duplicated here.
+Every series covers the owner's and members' sessions only: an App's sessions live in its own store, which the owner
+surfaces never read (#330); `GET /keys` carries each App's counts instead. The smart-approval stats
+(`GET /smart-approvals`) and Control Center's counts follow the same rule.
 
 | Metric | Type | Unit | Labels | PromQL |
 | --- | --- | --- | --- | --- |
@@ -250,6 +253,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.16 | 2026-10-03 | Owner surfaces never reach an App's sessions (#330 decision 3): `/sessions` (404 by id or prefix), `/search`, `/queue`, `/events`, approvals and transcripts leave them out. `GET /keys` adds a `store` object per App and device key: `sessions` (counts by status), `usage` (`requests`, `prompt_tokens`, `completion_tokens`, `cost_usd`), `errors`, `last_error` (the stop reason's kind only), `last_error_at`. `/metrics`, smart-approval stats and Control Center counts cover the owner's and members' sessions only. Backups add `apps/<app_id>.sqlite3` per App and `app_stores` (a count) to the backup result |
 | 1.15 | 2026-10-01 | Secret scan of a session's added lines on `changes`; Review `merge`/`push` on tower sessions return 409 `secret_findings` (or 503 `secret_scan_unavailable`) until findings are fixed or dismissed; fix and dismiss endpoints |
 | 1.14 | 2026-09-28 | Owner session context-efficiency metrics and Prometheus retry/cache counters |
 | 1.12 | 2026-09-19 | Owner masked inpainting: upload, edit, cancel, and delete |

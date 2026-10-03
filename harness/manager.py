@@ -24,7 +24,7 @@ from .image_archive import ImageArchive
 from .notify import Notifier
 from .warmup import ModelWarmer
 from .config import Config
-from .app_stores import SessionStores
+from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .remote import RunnerError, RunnerHub, RunnerOffline
@@ -440,8 +440,11 @@ class Manager:
         self.tasks[sid] = task
         task.add_done_callback(lambda t, sid=sid: self.tasks.pop(sid, None) if self.tasks.get(sid) is t else None)
 
-    def resolve_id(self, ref: str, user_id: str | None = None, kind: str | None = None) -> str:
-        ids = self.db.find_session_ids(ref, user_id=user_id, kind=kind)
+    def resolve_id(self, ref: str, user_id: str | None = None, kind: str | None = None,
+                   app: str = EVERY_APP) -> str:
+        """The one session `ref` (an id or its prefix) names. `app` is whose App sessions it may name: "" for the
+        owner and members (none: #330 decision 3), an App's id for that App (its own), every App's for the daemon."""
+        ids = self.db.find_session_ids(ref, user_id=user_id, kind=kind, with_app=app)
         if ref in ids:
             return ref
         if len(ids) != 1:
@@ -1542,7 +1545,9 @@ class Manager:
 
     def decide_by_token(self, token: str, approve: bool) -> dict:
         approval = self.db.approval_by_token(token)
-        if approval is None:
+        session = self.db.get_session(approval["session_id"]) if approval else None
+        if approval is None or (session and session.get("app_id")):
+            # The link is the owner's credential from an owner notification; an App decides its own approvals (#330).
             raise HarnessError(404, "unknown approval link")
         if approval["status"] != "pending":
             return public_approval(approval)  # a repeated button press is harmless
