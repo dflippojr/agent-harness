@@ -24,8 +24,9 @@ from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSe
 from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit
 from .db import Database, finish_then_cancel
 from .homelab import Homelab
+from .mcp_server import McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
-from .policy import ALLOW, ASK, DENY, ChatPolicy, Policy
+from .policy import ALLOW, ASK, DENY, ChatPolicy, Decision, Policy, mcp_harness_tool
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
@@ -193,6 +194,11 @@ class Runner:
         self.settings = None                    # settings_service.SettingsService, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
+        # Harness tools for hosted Claude Code over MCP (#300): tokens in memory only, one-use grants per allowed call.
+        self.mcp_tokens = McpTokens()
+        self.mcp_server = McpServer(self.mcp_tokens, self.mcp_tool_schemas, self.mcp_call)
+        self.mcp_relay_factory = McpRelay
+        self._mcp_grants: dict[str, list[dict]] = {}
 
     # helpers
     def sandbox(self, s: dict) -> Sandbox | RemoteSandbox:
@@ -292,6 +298,67 @@ class Runner:
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
             schemas = schemas + self.app_tools.schemas(s)
         return schemas
+
+    def mcp_tool_schemas(self, sid: str) -> list[dict]:
+        """The daemon tools a hosted Claude Code session may call over MCP: web, session search, memory library and
+        images as enabled for its project and app, plus app-registered tools. Never remote control or skills."""
+        s = self.db.get_session(sid)
+        if s is None or s.get("kind") == "chat" or s.get("backend") != "claude":
+            return []
+        served = [k for k in (self.memory, self.web_overrides.get(sid, self.web), self.images, self.sessions)
+                  if k is not None]
+        schemas = [schema for kit in self.daemon_toolkits(s) if kit in served for schema in kit.schemas()]
+        if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
+            schemas = schemas + self.app_tools.schemas(s)
+        return schemas
+
+    def _grant_mcp(self, sid: str, name: str, args: dict, call_id: str, approval_call_id: str = "") -> None:
+        """Record that the policy allowed this mcp__harness__ call, so the MCP endpoint runs it exactly once. A call
+        Claude regenerated after --resume keeps the call id its approval was recorded under (the memory library
+        looks the approval up by it)."""
+        bare = mcp_harness_tool(name)
+        if bare is not None:
+            self._mcp_grants.setdefault(sid, []).append(
+                {"tool": bare, "args": json.dumps(args, sort_keys=True), "call_id": call_id,
+                 "approval_call_id": approval_call_id or call_id})
+
+    def _take_mcp_grant(self, sid: str, name: str, args: dict, tool_use_id: str) -> dict | None:
+        grants = self._mcp_grants.get(sid) or []
+        wanted = json.dumps(args, sort_keys=True)
+        for grant in grants:
+            if grant["tool"] == name and grant["args"] == wanted and (not tool_use_id
+                                                                      or grant["call_id"] == tool_use_id):
+                grants.remove(grant)
+                return grant
+        return None
+
+    async def mcp_call(self, sid: str, name: str, args: dict, tool_use_id: str = "") -> tuple[str, bool]:
+        """Run one MCP tools/call for a hosted session. Only a call the policy already allowed (or the user approved)
+        through can_use_tool runs; Claude Code records the result in the transcript as an ordinary tool_result."""
+        grant = self._take_mcp_grant(sid, name, args, tool_use_id)
+        if grant is None:
+            return ("Error: this call was not allowed through the harness approval policy. Call the tool normally "
+                    "so the harness can decide it."), False
+        s = self.db.get_session(sid)
+        if name not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
+            return f"Error: unknown tool {name!r}", False
+        try:
+            with telemetry.span("mcp_tool_call", {"gen_ai.tool.name": name, "harness.backend": s["backend"]}):
+                output = await self._dispatch_mcp(s, grant["approval_call_id"], name, args)
+        except (ToolError, OSError, UnicodeError) as e:
+            return f"Error: {e}", False
+        self._taint_from_result(s, name, args)  # MCP results are untrusted content like the native tools' (#262)
+        return (output.text if isinstance(output, ToolOutput) else str(output)), True
+
+    async def _dispatch_mcp(self, s: dict, call_id: str, name: str, args: dict):
+        if self.app_tools is not None and name in self.app_tools.names(s):
+            return await self.app_tools.call(s, call_id, name, args)
+        kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
+        if kit is self.images:
+            return await self._call_images(s["id"], s, None, kit, name, args)
+        if getattr(kit, "wants_session", False):
+            return await kit.call(name, args, session=s, call_id=call_id)
+        return await kit.call(name, args)
 
     def policy(self, s: dict) -> Policy | ChatPolicy:
         if s.get("kind") == "chat":
@@ -802,9 +869,13 @@ class Runner:
                    "cursor": self.cursor_factory}[backend_name]
         from dataclasses import replace
         frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
+        extra = {}
+        if backend_name == "claude" and backend.mcp and self.mcp_tool_schemas(sid):
+            extra = {"mcp": self.mcp_relay_factory(session_id=sid, backend=frozen, server=self.mcp_server),
+                     "mcp_token": self.mcp_tokens.mint(sid)}
         cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=frozen,
                       sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
-                      model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
+                      model=s["model"], backend_session_id=backend_session_id, api_key=api_key, **extra)
         self._cli_sessions[sid] = cli
         await cli.start()
         prompt = ("The harness restarted; continue the task." if recovered else
@@ -1309,8 +1380,7 @@ class Runner:
             existing = await self._wait_approval(existing["id"])
         if existing["status"] == "approved":
             await self.aset_status(sid, "running")
-            self._taint_allowed_cli_request(sid, name, args)
-            await cli.respond_permission(request_id, "allow", args)
+            await self._allow_cli(sid, cli, request_id, name, args, call_id, existing.get("tool_call_id") or "")
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
         await self.aset_status(sid, "running")
@@ -1320,23 +1390,37 @@ class Runner:
                               call_id: str) -> dict | None:
         """Apply the policy to a new CLI tool request: answer it now (None) or persist an approval to wait on."""
         sid = s["id"]
-        decision = self._taint_layer(s, name, args, self.policy(s).decide(name, args))
+        bare = mcp_harness_tool(name)  # a harness tool over MCP is taint-checked and previewed as the native tool
+        decision = self._taint_layer(s, bare or name, args, self.policy(s).decide(name, args))
+        if bare is not None and bare not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
+            decision = Decision(DENY, f"{bare} is not a harness tool this session can use over MCP")
         await self.bus.aemit(sid, "tool_call", {"id": call_id, "name": name, "args": args,
                                          "decision": decision.action, "reason": decision.reason})
         if decision.action == ALLOW:
-            self._taint_allowed_cli_request(sid, name, args)
-            await cli.respond_permission(request_id, "allow", args)
+            await self._allow_cli(sid, cli, request_id, name, args, call_id)
             return None
         if decision.action != ASK:
             reason = decision.reason or "not allowed"
             await cli.respond_permission(request_id, "deny", args,
                                          f"Blocked by harness policy: {reason}. Don't retry this.")
             return None
+        detail, reason = str(request.get("description") or ""), decision.reason
+        if bare is not None:
+            # The memory library only applies a change whose approved detail carries its exact diff.
+            detail, reason, error = await self._ask_details(s, bare, args, None, decision.reason)
+            if error is not None:
+                await cli.respond_permission(request_id, "deny", args, error)
+                return None
         existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call_id,
-                    "tool": name, "args": args, "reason": decision.reason,
-                    "detail": str(request.get("description") or "")}
+                    "tool": name, "args": args, "reason": reason, "detail": detail}
         extra = await self._review_ask(s, name, args, decision)
         return self._persist_ask(sid, existing, extra)
+
+    async def _allow_cli(self, sid: str, cli, request_id, name: str, args: dict, call_id: str,
+                         approval_call_id: str = "") -> None:
+        self._taint_allowed_cli_request(sid, name, args)
+        self._grant_mcp(sid, name, args, call_id, approval_call_id)
+        await cli.respond_permission(request_id, "allow", args)
 
     def _taint_allowed_cli_request(self, sid: str, name: str, args: dict) -> None:
         """Taint for a hosted CLI web request at the moment it is allowed to run. The CLI's tool_result only carries
@@ -1382,6 +1466,8 @@ class Runner:
         self.db.write(finish_cli_result)
 
     async def _stop_cli(self, sid: str) -> None:
+        self.mcp_tokens.revoke(sid)
+        self._mcp_grants.pop(sid, None)
         cli = self._cli_sessions.pop(sid, None)
         if cli is not None:
             await cli.stop()
