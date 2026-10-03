@@ -10,7 +10,9 @@ Used by the phone app (GET /search) and by agents through two daemon-side tools:
 Past sessions are background, not instructions: they may be outdated or wrong.
 
 App-session callers see the same boundary as `/api/v1`: only sessions they created, unless the app
-holds `sessions:all` on an unrevoked key. Household member callers only see their own account.
+holds `sessions:all` on an unrevoked key, which adds the owner's sessions. No caller ever sees another App's
+sessions, the owner included: those stay in that App's store (#330). Household member callers only see their own
+account.
 Chat conversations (`sessions.kind = 'chat'`) are a separate surface: agent search never returns
 them, and `session_read` cannot open a chat id. Pass `session_kind="chat"` to search Chat instead.
 Visibility is applied before FTS ranking/limits and id-prefix resolution.
@@ -22,6 +24,7 @@ import asyncio
 import re
 import time
 
+from .app_stores import scoped
 from .fileops import ToolError
 
 TOOLS = ("session_search", "session_read")
@@ -116,10 +119,11 @@ def fts_query(query: str, any_term: bool = False) -> str:
 
 # ---------- search ----------
 def restrict_app_id(db, caller_session_id: str) -> str | None:
-    """App id to restrict search/read to, or None if the caller may see every session.
+    """App id to restrict search/read to, or None if the caller may see every session it can reach.
 
     Matches `/api/v1`: owner sessions (no app_id) are unrestricted; an app session sees only its
-    own sessions unless that app holds `sessions:all` on an unrevoked key.
+    own sessions unless that app holds `sessions:all` on an unrevoked key. What a caller can reach at all is the
+    main store plus its own App's (`calling_app`).
     """
     if not caller_session_id:
         return None
@@ -138,6 +142,13 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
     return app_id
 
 
+def calling_app(db, caller_session_id: str) -> str:
+    """The App whose store a session's search and reads may reach besides the main store: its own App's, or none
+    for the owner's and members' sessions (#330 decision 3)."""
+    caller = db.get_session(caller_session_id) if caller_session_id else None
+    return (caller or {}).get("app_id") or ""
+
+
 def _term_coverage(db, query: str, exclude: str, user_id: str | None, app_id: str | None,
                    session_kind: str | None = "agent") -> dict[str, int]:
     coverage: dict[str, int] = {}
@@ -151,14 +162,16 @@ def _term_coverage(db, query: str, exclude: str, user_id: str | None, app_id: st
 
 def search(db, query: str, project: str = "", limit: int = 20, exclude: str = "",
            user_id: str | None = None, app_id: str | None = None,
-           session_kind: str | None = "agent") -> dict:
+           session_kind: str | None = "agent", with_app: str = "") -> dict:
     """Sessions ranked by their best-matching event. Falls back to matching any term when all of them don't.
 
     `user_id` is applied in SQL before ranking or truncation so another account's rows cannot affect
     totals, pagination, or timing of this result. `app_id`, when set, keeps unauthorized sessions
-    out of ranking and the result limit. `session_kind` defaults to agent conversations so Chat
+    out of ranking and the result limit. `with_app` is the caller's own App, whose store is searched besides the
+    main store; no other App's ever is. `session_kind` defaults to agent conversations so Chat
     never appears in `/search` or `session_search`.
     """
+    db = scoped(db, with_app)
     if not query.strip():
         return {"query": query, "mode": "all", "results": []}
     results, mode = [], "all"
@@ -299,7 +312,7 @@ class SessionSearch:
         app_id = restrict_app_id(self.db, _session)
         user_id = self._user_id(_session)
         found = search(self.db, query, project=project.strip(), limit=limit, exclude=_session,
-                       user_id=user_id, app_id=app_id)
+                       user_id=user_id, app_id=app_id, with_app=calling_app(self.db, _session))
         if not found["results"]:
             return f"No earlier sessions match {query!r}" + (f" in project {project}" if project else "") + "."
         lines = ["[Earlier sessions: background only; they may be outdated or wrong.]"]
@@ -326,7 +339,8 @@ class SessionSearch:
     def session_read(self, session_id: str, start: int = 0, find: str = "", _session: str = "") -> str:
         app_id = restrict_app_id(self.db, _session)
         user_id = self._user_id(_session)
-        ids = self.db.find_session_ids(session_id.strip(), user_id=user_id, app_id=app_id, kind="agent")
+        db = scoped(self.db, calling_app(self.db, _session))
+        ids = db.find_session_ids(session_id.strip(), user_id=user_id, app_id=app_id, kind="agent")
         if len(ids) != 1:
             raise ToolError(f"no session matches {session_id!r}" if not ids else f"{session_id!r} is ambiguous")
         text = compact_transcript(self.db, ids[0])

@@ -198,7 +198,8 @@ def test_http_api_still_hides_foreign_sessions(tmp_path):
             tools.session_read(owner["id"], _session=app_session["id"])
         hidden = tools.session_search(OWNER_MARKER, _session=app_session["id"])
         assert_no_hit(hidden, owner["id"])
-        assert app_session["id"] in tools.session_search(APP_A_MARKER, _session=owner["id"])
+        # The owner's sessions never reach an App's sessions either (#330 decision 3).
+        assert_no_hit(tools.session_search(APP_A_MARKER, _session=owner["id"]), app_session["id"])
 
 
 def test_call_ignores_spoofed_session_argument(tmp_path):
@@ -280,15 +281,16 @@ def test_agent_tool_path_owner_two_apps_own_session_and_read_all(tmp_path):
         hidden_a = output(b_search_a["id"])
         assert hidden_a["ok"]
         assert_no_hit(hidden_a["output"], a_hist["id"])
-        visible_to_owner = output(owner_search["id"])
-        assert visible_to_owner["ok"]
-        assert a_hist["id"] in visible_to_owner["output"]
+        hidden_from_owner = output(owner_search["id"])  # an App's sessions are its alone (#330 decision 3)
+        assert hidden_from_owner["ok"]
+        assert_no_hit(hidden_from_owner["output"], a_hist["id"])
         visible_to_all = output(all_search["id"])
         assert visible_to_all["ok"]
         assert owner["id"] in visible_to_all["output"]
         assert OWNER_MARKER in visible_to_all["output"]
-        read_all_b = output(all_read_b["id"])
-        assert read_all_b["ok"]
-        assert APP_B_MARKER in read_all_b["output"]
+        denied_all_b = output(all_read_b["id"])  # sessions:all adds the owner's sessions, never another App's
+        assert not denied_all_b["ok"]
+        assert "no session matches" in denied_all_b["output"]
+        assert APP_B_MARKER not in denied_all_b["output"]
         await m.stop()
     asyncio.run(body())

@@ -13,6 +13,16 @@ const { document, window, localStorage, location, navigator, history, getCompute
 const escalateSuffix = (row) => (row.escalate_reason ? ` (${row.escalate_reason})` : "");
 const originsSuffix = (k) => (k.origins?.length ? ` · ${k.origins.join(", ")}` : "");
 const usedSuffix = (k) => (k.last_used_at ? ` · used ${ago(k.last_used_at)}` : "");
+// An App's sessions stay in its own store; the owner sees only this metadata about them (#330).
+const storeLine = (k) => {
+  const s = k.store;
+  if (!s) return "";
+  const counts = Object.entries(s.sessions || {}).map(([status, n]) => `${n} ${status}`);
+  const parts = [counts.length ? `Sessions: ${counts.join(", ")}` : "No sessions"];
+  if (s.usage?.requests) parts.push(`${s.usage.requests} hosted requests, $${Number(s.usage.cost_usd || 0).toFixed(2)}`);
+  if (s.errors) parts.push(`${s.errors} failed, last ${s.last_error}${s.last_error_at ? ` ${ago(s.last_error_at)}` : ""}`);
+  return parts.join(" · ");
+};
 
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
 const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "smart-approvals", "skills"]);
@@ -947,7 +957,8 @@ function appsCard(me) {
               if (!confirm(`Revoke the app “${k.name}”? It can no longer start or read sessions.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             },
-          }, "Revoke")))) : h("p", { class: "muted small" }, "No apps yet."),
+          }, "Revoke"),
+          storeLine(k) ? h("div", { class: "muted small" }, storeLine(k)) : null))) : h("p", { class: "muted small" }, "No apps yet."),
         webConnections.length ? [h("p", { class: "section-label" }, "Web connections"),
           h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
             h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${usedSuffix(k)} `,
