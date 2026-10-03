@@ -185,6 +185,7 @@ def test_an_idle_app_store_closes_and_reopens_on_use(tmp_path):
     assert first._writer.is_alive()
 
     wait_for(lambda: stores.open_apps() == [], timeout=10)                  # the reaper closed it
+    wait_for(lambda: not first._writer.is_alive() and first._readers == [], timeout=10)  # closed after let go
     assert not first._writer.is_alive() and first._readers == []
 
     stores.update_session("a1", status="running")                           # first use reopens it
