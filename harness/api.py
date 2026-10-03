@@ -88,6 +88,10 @@ class SendMessage(BaseModel):
     content: str
 
 
+class ForkRequest(BaseModel):
+    prompt: str
+
+
 class ReviewComment(BaseModel):
     repo: str = "."
     path: str
@@ -1328,6 +1332,24 @@ async def send_message(ref: str, body: SendMessage, request: Request):
 async def rerun(ref: str, request: Request):
     m, sid, _ = owned_session(request, ref)
     return m.summary(m.rerun(sid))
+
+
+@api_router.get("/sessions/{ref}/checkpoints")
+async def session_checkpoints(ref: str, request: Request):
+    m, sid, _ = owned_session(request, ref)
+    return m.checkpoints(sid)
+
+
+@api_router.post("/sessions/{ref}/checkpoints/{turn}/rewind")
+async def rewind_checkpoint(ref: str, turn: int, request: Request):
+    m, sid, _ = owned_session(request, ref)
+    return m.summary(await m.rewind(sid, turn))
+
+
+@api_router.post("/sessions/{ref}/checkpoints/{turn}/fork", status_code=201)
+async def fork_checkpoint(ref: str, turn: int, body: ForkRequest, request: Request):
+    m, sid, _ = owned_session(request, ref)
+    return m.summary(await m.fork(sid, turn, body.prompt))
 
 
 @api_router.get("/sessions/{ref}/changes")

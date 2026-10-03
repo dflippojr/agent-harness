@@ -202,6 +202,21 @@ def _r_state(at: str, d: dict, last_content: str) -> list[str]:
     return [f"#### {at} · Agent saved state", "", _block(json.dumps(payload, ensure_ascii=False, indent=2)), ""]
 
 
+def _r_checkpoint(at: str, d: dict, last_content: str) -> list[str]:
+    if d.get("status") == "skipped":
+        return [f"> {at} · turn not checkpointed: {d.get('reason', '')}", ""]
+    return [f"> {at} · checkpoint {d['turn']} saved", ""]
+
+
+def _r_rewound(at: str, d: dict, last_content: str) -> list[str]:
+    return [f"## {at} · Rewound to checkpoint {d['turn']} (everything above this line from later turns was undone)", ""]
+
+
+def _r_forked(at: str, d: dict, last_content: str) -> list[str]:
+    return [f"> {at} · forked from session `{d['parent']}` at checkpoint {d['turn']}"
+            + (f" ({d['summary_note']})" if d.get("summary_note") else ""), ""]
+
+
 _RENDERERS = {
     "user_message": _r_user_message, "assistant": _r_assistant, "tool_call": _r_tool_call,
     "approval_requested": _r_approval_requested, "approval_decided": _r_approval_decided,
@@ -215,6 +230,7 @@ _RENDERERS = {
     "gpu_resumed": _r_gpu_resumed, "workspace_ready": _r_workspace_ready, "branch_saved": _r_branch_saved,
     "review": _r_review, "resumed": _r_resumed, "status": _r_status,
     "notes": _r_notes, "state": _r_state,
+    "checkpoint": _r_checkpoint, "rewound": _r_rewound, "forked": _r_forked,
 }
 
 

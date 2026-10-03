@@ -106,11 +106,11 @@ def _safe_config_key(key: str, value: str) -> bool:
 
 
 def _run(git_args: list[str], timeout: float = 600, check: bool = True, input_: str | None = None,
-         env: dict | None = None) -> GitResult:
+         env: dict | None = None, cwd: str | None = None) -> GitResult:
     proc = subprocess.run(
         ["git", *git_args], input=input_, capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout, stdin=None if input_ is not None else subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=env, cwd=cwd,
     )
     result = GitResult(proc.returncode, proc.stdout, proc.stderr)
     if check and proc.returncode != 0:

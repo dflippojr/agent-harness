@@ -20,6 +20,8 @@ from pathlib import Path
 from . import compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, taint, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
+from .checkpointer import Checkpointer
+from .checkpoints import MUTATING_TOOLS
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
 from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit
 from .db import Database, finish_then_cancel
@@ -177,6 +179,7 @@ class Runner:
         self.codex_factory = CodexSession
         self.cursor_factory = CursorSession
         self._quota_checked: dict[str, float] = {}
+        self.checkpointer = Checkpointer(cfg, db, bus)
         self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
         self.ram = None                         # gpu_guard.MemoryWatch (the guard's RAM check), set with the guard
         self.generating: set[str] = set()       # sessions loading the model or calling it (the guard waits for them)
@@ -1632,23 +1635,43 @@ class Runner:
         model = self.cfg.models[s["model"]]
         # Parallel reads can overflow the window in one turn, so all results of a turn share one budget.
         budget = int(0.35 * model.context_tokens * s["run"].get("chars_per_token", 3.0))
-        for i, call in enumerate(pending):
-            done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget)
-            if done is not None:
-                return done
-            if used is not None:
-                budget -= used
-                s = self.db.get_session(sid)
-        return False
+        mutated: list[str] = []     # mutating tools that ran this turn (or started to), whatever their outcome
+        try:
+            for i, call in enumerate(pending):
+                done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget, mutated)
+                if done is not None:
+                    return done
+                if used is not None:
+                    budget -= used
+                    s = self.db.get_session(sid)
+            return False
+        finally:
+            if mutated:
+                await asyncio.shield(self._checkpoint(sid))
+
+    async def _checkpoint(self, sid: str, only_if_changed: bool = False) -> None:
+        """Snapshot the workspace off the loop (git can take seconds), then report it on the loop."""
+        stats: dict = {}
+        with telemetry.span("checkpoint") as span:
+            try:
+                event = await asyncio.to_thread(self.checkpointer.take, sid, only_if_changed, stats)
+            finally:
+                span.set({"harness.turn": stats.get("turn"), "harness.files": stats.get("files"),
+                          "harness.bytes": stats.get("bytes"), "harness.skipped_reason": stats.get("skipped")})
+            if event:
+                await self.bus.aemit(sid, "checkpoint", event)
 
     async def _resolve_call(self, s: dict, call: dict, rest: list[dict], executing: dict,
-                            budget: int) -> tuple[bool | None, int | None]:
+                            budget: int, mutated: list[str]) -> tuple[bool | None, int | None]:
         """Run one tool call. Returns (done, used): done is True/False when the turn ends there (None to go on),
-        used is the output length that counts against the turn's budget (None when nothing ran)."""
+        used is the output length that counts against the turn's budget (None when nothing ran). A mutating tool
+        is added to `mutated` as it starts, so a quota stop, an error or a cancel after it still checkpoints."""
         sid = s["id"]
         fn = call.get("function") or {}
         name = fn.get("name", "")
         if executing.get("id") == call["id"]:
+            if name in MUTATING_TOOLS:                          # it may have changed files before it was cut off
+                mutated.append(name)
             await self._record_result(sid, call, name, INTERRUPTED, ok=False)
             return None, None
         try:
@@ -1688,6 +1711,8 @@ class Runner:
             output = await self._authorize(s, call, name, args, ws)
             executed = output is None
             if executed:
+                if name in MUTATING_TOOLS:
+                    mutated.append(name)
                 output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
             span.set({"harness.ok": executed, "harness.output_chars": len(output)})
         if executed and name in ("run_shell", "git_clone", "write_file", "generate_image") \
@@ -2550,6 +2575,8 @@ class Runner:
         else:
             await asyncio.shield(self._stop_cli(sid))
         await asyncio.shield(self.save_branch(sid))
+        if s.get("backend", "local") != "local":    # hosted runs are checkpointed once per run (Fork only)
+            await asyncio.shield(self._checkpoint(sid, only_if_changed=True))
         self.write_transcript(sid)
 
         def ended() -> None:

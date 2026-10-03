@@ -25,6 +25,8 @@ from pathlib import Path
 from . import projects
 from .config import Config
 from .db import Database
+from .principal import OWNER_USER_ID
+from .storage import checkpoints_dir
 from .remote import RunnerError
 from .runner import ACTIVE, Runner, dir_size
 from .sandbox import run_cmd
@@ -50,6 +52,7 @@ class Maintenance:
         self.image_archive = image_archive
         self._task: asyncio.Task | None = None
         self.last_report: dict = {}
+        self.operations: dict[str, str] = {}    # the manager's sessions held by a rewind, fork or review
         self.last_backup: dict = self._read_backup_status()
         if self.image_archive and isinstance(self.last_backup.get("image_archive"), dict):
             self.image_archive.last_reconciliation = self.last_backup["image_archive"]
@@ -262,7 +265,8 @@ class Maintenance:
                 remove_tree(path)
                 report["orphans_removed"].append(path.name)
             return
-        if s["status"] in ACTIVE or s["workspace_removed"] or now - s["updated_at"] < retention:
+        if (s["status"] in ACTIVE or s["id"] in self.operations or s["workspace_removed"]
+                or now - s["updated_at"] < retention):
             return
         reason = self.unsaved_work(s)
         if reason:
@@ -334,6 +338,8 @@ class Maintenance:
             log.warning("refusing to delete workspace for %s: path escapes the account root", sid)
             return
         remove_tree(path)
+        remove_tree(storage.checkpoints_dir(self.cfg, session_user_id(s)) / sid)
+        self.db.delete_checkpoints(sid, [c["turn"] for c in self.db.checkpoints(sid, hidden=None)])
         self.db.update_session(sid, workspace_removed=1)
 
     # reporting
@@ -345,9 +351,17 @@ class Maintenance:
                 for path in root.iterdir():
                     if path.is_dir():
                         sizes.append({"session": path.name, "mb": round(dir_size(path) / 2**20, 1)})
+            ckpt_root = checkpoints_dir(self.cfg, OWNER_USER_ID)
+            checkpoints = []
+            if ckpt_root.is_dir():
+                for path in ckpt_root.iterdir():
+                    if path.is_dir():
+                        checkpoints.append({"session": path.name, "mb": round(dir_size(path) / 2**20, 1)})
             disk = shutil.disk_usage(self.cfg.data_dir)
             return {"workspaces": sorted(sizes, key=lambda x: -x["mb"]),
                     "workspaces_mb": round(sum(x["mb"] for x in sizes), 1),
+                    "checkpoints": sorted(checkpoints, key=lambda x: -x["mb"]),
+                    "checkpoints_mb": round(sum(x["mb"] for x in checkpoints), 1),
                     "free_gb": round(disk.free / 2**30, 1), "total_gb": round(disk.total / 2**30, 1)}
 
         out = await asyncio.to_thread(measure)

@@ -99,7 +99,7 @@ def test_masking_skips_fresh_and_small_results(tmp_path):
 def test_read_artifact_tool_ranges_missing_and_other_session(tmp_path):
     async def read(m, sid, idx, **args):
         c = call("read_artifact", idx, **args)
-        await m.runner._resolve_call(m.db.get_session(sid), c, [], {}, 10**9)
+        await m.runner._resolve_call(m.db.get_session(sid), c, [], {}, 10**9, [])
         ok = [e["data"]["ok"] for e in m.db.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == c["id"]]
         # The context holds the full text the model sees; the event's copy is shortened for the UI.
         text = next(x["content"] for x in m.db.get_session(sid)["context"] if x.get("tool_call_id") == c["id"])
@@ -179,9 +179,9 @@ def test_read_artifact_output_counts_as_used_and_refreshes_the_turn(tmp_path):
         digest = _digest(BIG)
         m.db.put_artifact(sid, digest, BIG)
         c = call("read_artifact", 1, artifact_id=digest, start=0, end=100)
-        assert await m.runner._resolve_call(s, c, [], {}, 10**9) == (None, 100)
+        assert await m.runner._resolve_call(s, c, [], {}, 10**9, []) == (None, 100)
         c = call("read_artifact", 2, artifact_id="f" * 64)  # errors are counted too, like any tool's
-        done, used = await m.runner._resolve_call(m.db.get_session(sid), c, [], {}, 10**9)
+        done, used = await m.runner._resolve_call(m.db.get_session(sid), c, [], {}, 10**9, [])
         assert (done, used) == (None, len("Error: artifact not found"))
         await m.stop()
     asyncio.run(body())
