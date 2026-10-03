@@ -52,6 +52,7 @@ class Maintenance:
         self.image_archive = image_archive
         self._task: asyncio.Task | None = None
         self.last_report: dict = {}
+        self.operations: dict[str, str] = {}    # the manager's sessions held by a rewind, fork or review
         self.last_backup: dict = self._read_backup_status()
         if self.image_archive and isinstance(self.last_backup.get("image_archive"), dict):
             self.image_archive.last_reconciliation = self.last_backup["image_archive"]
@@ -264,7 +265,8 @@ class Maintenance:
                 remove_tree(path)
                 report["orphans_removed"].append(path.name)
             return
-        if s["status"] in ACTIVE or s["workspace_removed"] or now - s["updated_at"] < retention:
+        if (s["status"] in ACTIVE or s["id"] in self.operations or s["workspace_removed"]
+                or now - s["updated_at"] < retention):
             return
         reason = self.unsaved_work(s)
         if reason:

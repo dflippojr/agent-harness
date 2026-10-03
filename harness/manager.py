@@ -38,6 +38,8 @@ log = logging.getLogger("harness.manager")
 TARGETS = ("tower", "macbook")
 SECRET_FIX = "Secret scan:"  # opens each Ask agent to fix draft (issue #263)
 MAX_DISMISS_REASON = 500
+CHECKPOINT_IDLE = "stop the session first; rewind and fork need it to be idle"
+REVIEW_BUSY = "the agent is still working; wait for the run to end or cancel it"
 ACCOUNT_DISABLED = "this household account is disabled"
 
 
@@ -147,11 +149,15 @@ class Manager:
         self.hub = RunnerHub(cfg.runners, keep_awake=self._keep_awake)
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
+        # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
+        # with the idle check, released when they end. In memory, so a daemon restart clears a stale claim.
+        self.operations: dict[str, str] = {}
         self.compare_busy: set[tuple[str, str]] = set()  # (owner, group) with a pick or discard in progress
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
         self.image_archive = ImageArchive(cfg, self.db)
         self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
+        self.maintenance.operations = self.operations
         from .member_github import MemberGitHub
         self.github_auth = MemberGitHub(cfg, self.db)
         self._github_reconcile: threading.Thread | None = None
@@ -791,6 +797,7 @@ class Manager:
         if task and s["status"] not in ACTIVE:
             await asyncio.gather(task, return_exceptions=True)  # a finished run still wrapping up
             s = self.db.get_session(sid)
+        self._refuse_during_operation(sid)
         if s["status"] not in ACTIVE:
             user_id = session_user_id(s)
             if user_id != OWNER_USER_ID:
@@ -800,6 +807,7 @@ class Manager:
         model_content = self.snippets.context_for(sid) + content if s.get("kind") == "chat" else content
 
         def deliver() -> None:
+            self._refuse_during_operation(sid)      # in the write: a rewind claims the session in one too
             self.bus.emit(sid, kind, {"content": content})
             if s["status"] in ACTIVE:
                 # Delivered before the agent's next model call.
@@ -836,6 +844,34 @@ class Manager:
         return {"checkpoints": items, "can_rewind": supported and not hosted, "can_fork": supported, "hosted": hosted,
                 "parent_id": s.get("parent_id", ""), "fork_turn": s.get("fork_turn", 0)}
 
+    OPERATIONS = {"rewind": "a rewind", "fork": "a fork", "review": "a merge, push or discard"}
+
+    def _refuse_during_operation(self, sid: str) -> None:
+        op = self.operations.get(sid)
+        if op:
+            raise HarnessError(409, f"{self.OPERATIONS[op]} of this session is in progress; retry when it finishes")
+
+    @contextlib.asynccontextmanager
+    async def _exclusive(self, sid: str, op: str, busy: str):
+        """Hold `op` on an idle session for the block: refused (409, `busy`) while the session runs, and while it
+        holds another operation; `send` refuses while it is held. Claimed in one write with the status check, so a
+        send's write lands wholly before it (the claim then sees the run) or after it (the send sees the claim)."""
+        claimed = False
+
+        def claim() -> None:
+            nonlocal claimed
+            if self.db.get_session(sid)["status"] in ACTIVE:
+                raise HarnessError(409, busy)
+            self._refuse_during_operation(sid)
+            self.operations[sid] = op
+            claimed = True
+        try:
+            await self.db.awrite(claim)
+            yield
+        finally:
+            if claimed:
+                self.operations.pop(sid, None)
+
     async def _idle_for_checkpoint(self, sid: str) -> dict:
         s = self.db.get_session(sid)
         if s["target"] != "tower" or s.get("kind", "agent") != "agent":
@@ -847,7 +883,7 @@ class Manager:
             await asyncio.gather(task, return_exceptions=True)
             s = self.db.get_session(sid)
         if s["status"] in ACTIVE:
-            raise HarnessError(409, "stop the session first; rewind and fork need it to be idle")
+            raise HarnessError(409, CHECKPOINT_IDLE)
         return s
 
     async def rewind(self, ref: str, turn: int) -> dict:
@@ -857,19 +893,28 @@ class Manager:
             raise HarnessError(409, "hosted CLI sessions cannot be rewound (their own state cannot be truncated); "
                                     "fork from a checkpoint instead")
         cp = self.runner.checkpointer
-        try:
-            saved = await asyncio.to_thread(cp.restore, sid, int(turn))
-        except projects.GitError as e:
-            raise HarnessError(e.status, str(e)) from e
-        await self.db.awrite(cp.commit_rewind, sid, int(turn), saved)
+        async with self._exclusive(sid, "rewind", CHECKPOINT_IDLE):
+            try:
+                saved = await asyncio.to_thread(cp.restore, sid, int(turn))
+            except projects.GitError as e:
+                raise HarnessError(e.status, str(e)) from e
+            await self.db.awrite(cp.commit_rewind, sid, int(turn), saved)
         return self.db.get_session(sid)
 
     async def fork(self, ref: str, turn: int, prompt: str) -> dict:
         """A new session that starts from a checkpoint: its own workspace, branch and model context."""
         sid = self.resolve_id(ref)
-        parent = await self._idle_for_checkpoint(sid)
+        await self._idle_for_checkpoint(sid)
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
+        async with self._exclusive(sid, "fork", CHECKPOINT_IDLE):
+            new_sid = await self._fork(sid, int(turn), prompt)
+        self._spawn(new_sid)
+        return self.db.get_session(new_sid)
+
+    async def _fork(self, sid: str, turn: int, prompt: str) -> str:
+        """`fork` while it holds the parent; returns the new session's id, recorded but not yet started."""
+        parent = self.db.get_session(sid)
         owner_id = session_user_id(parent)
         if owner_id != OWNER_USER_ID:
             self._require_member_start(self.db.account_by_id(owner_id), "session")
@@ -920,8 +965,7 @@ class Manager:
                 {"summary_note": "hosted session: a fresh CLI session started from a transcript digest, no model call"}
                 if hosted else {})})
         await self.db.awrite(insert_fork)
-        self._spawn(new_sid)
-        return self.db.get_session(new_sid)
+        return new_sid
 
     def rerun(self, ref: str) -> dict:
         """Start a fresh session with the same task, project, and model."""
@@ -1301,12 +1345,16 @@ class Manager:
     async def review(self, ref: str, action: str) -> dict:
         """merge (local projects), push (URL projects), or discard. Runs host-side with the user's git setup."""
         sid = self.resolve_id(ref)
+        async with self._exclusive(sid, "review", REVIEW_BUSY):
+            return await self._review(sid, action)
+
+    async def _review(self, sid: str, action: str) -> dict:
         s = self.db.get_session(sid)
         project = self.project_for_session(s)
         if not project or not project.repo or not s["branch"]:
             raise HarnessError(400, "this session isn't on a git project branch")
         if s["status"] in ACTIVE:
-            raise HarnessError(409, "the agent is still working; wait for the run to end or cancel it")
+            raise HarnessError(409, REVIEW_BUSY)
         if sid in self.tasks:  # the run ended and is still saving its branch
             await asyncio.gather(self.tasks[sid], return_exceptions=True)
             s = self.db.get_session(sid)

@@ -692,6 +692,46 @@ def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(
     asyncio.run(body())
 
 
+@pytest.mark.parametrize("outcome", ["restored", "failed"])
+def test_a_send_or_review_during_a_rewind_is_refused_until_it_ends(tmp_path, outcome):
+    async def body():
+        m, s = await started(tmp_path)
+        sid, ws = s["id"], Path(s["workspace"])
+        cp = m.runner.checkpointer
+        restore, entered, release = cp.restore, threading.Event(), threading.Event()
+
+        def slow_restore(*args):
+            entered.set()
+            assert release.wait(30)
+            if outcome == "failed":
+                raise checkpoints.GitError("nothing was rewound: test", 409)
+            return restore(*args)
+        cp.restore = slow_restore
+        rewinding = asyncio.create_task(m.rewind(sid, 1))
+        assert await asyncio.to_thread(entered.wait, 30)
+        for attempt in (m.send(sid, "a follow-up mid-rewind"), m.review(sid, "discard"),
+                        m.rewind(sid, 2), m.fork(sid, 1, "a fork mid-rewind")):
+            with pytest.raises(HarnessError) as e:
+                await attempt
+            assert e.value.status == 409 and "rewind" in str(e.value)
+        assert sid not in m.tasks and m.db.get_session(sid)["status"] == "done"
+        release.set()
+        if outcome == "failed":
+            with pytest.raises(HarnessError):
+                await rewinding
+            assert (ws / "extra.txt").exists()
+        else:
+            await rewinding
+            assert not (ws / "extra.txt").exists()
+        assert not m.operations                                      # released either way: a send works again
+        before = len(m.db.get_session(sid)["context"])
+        await m.send(sid, "after the rewind")
+        s = await finished(m, sid)
+        assert {"role": "user", "content": "after the rewind"} in s["context"][before:]
+
+    asyncio.run(body())
+
+
 def test_redo_shows_the_restored_checkpoints_again(tmp_path):
     async def body():
         m, s = await started(tmp_path)
