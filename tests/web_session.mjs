@@ -26,16 +26,15 @@ const rendered = [];
 const headers = [];
 const streams = [];
 const body = [];
-const pageMetrics = () => ({ y: 0, viewH: 1, pageH: 1 });
 const page = mountSession({
   $app: "APP", h: el, fill: (_t, ...n) => rendered.push(...n.flat(Infinity)), append: (_t, ...n) => rendered.push(...n.flat(Infinity)), api,
   setHeader: (...a) => headers.push(a), toast() {}, go() {}, route() {}, validId: () => true, isGuest: () => false, isMember: () => false, isOwner: () => true,
   onLeave() {}, badge: (s) => el("badge", {}, s), reviewBadge: () => el("rb"), progressBar: () => el("bar"),
   openStream: (_url, handlers) => { streams.push(handlers); return () => {}; },
-  sessionTitle: (s) => el("h2", {}, s.title), bindSessionJumps: () => ({ updateJumps() {}, pageHeight: () => 0 }), pageMetrics, scrollPage() {},
-  viewInfo() {}, TERMINAL: new Set(["done", "failed", "cancelled"]), agentHarnessWeb: { url: (p) => p, token: "", sessionStreamUrl: (id, n) => `/s/${id}?${n}` },
-  browser: { window: { addEventListener() {}, removeEventListener() {} }, document: { body: { append: (...n) => body.push(...n) } },
-    location: {}, confirm: () => true, setInterval: () => 0, clearInterval() {}, setTimeout: () => 0 },
+  layoutBar() {}, viewInfo() {}, TERMINAL: new Set(["done", "failed", "cancelled"]), agentHarnessWeb: { url: (p) => p, token: "", sessionStreamUrl: (id, n) => `/s/${id}?${n}` },
+  browser: { window: { addEventListener() {}, removeEventListener() {}, scrollTo() {} },
+    document: { body: { append: (...n) => body.push(...n) }, documentElement: {}, addEventListener() {}, removeEventListener() {} },
+    requestAnimationFrame() {}, location: {}, confirm: () => true, setInterval: () => 0, clearInterval() {}, setTimeout: () => 0 },
 });
 assert.equal(typeof page.viewSession, "function");
 
