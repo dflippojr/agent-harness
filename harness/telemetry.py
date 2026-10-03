@@ -193,7 +193,8 @@ def enable_asyncio_debug() -> bool:
 # --- OpenTelemetry traces (#259) ---
 
 SPAN_NAMES = frozenset({"session", "idle", "turn", "chat", "execute_tool", "approval_wait", "sandbox_exec",
-                        "gpu_slot_wait", "compaction", "image_job", "hosted_cli_turn", "run_setup", "run_end"})
+                        "gpu_slot_wait", "compaction", "image_job", "hosted_cli_turn", "run_setup", "run_end",
+                        "checkpoint"})
 # The privacy allowlist: any other key is dropped. Never prompts, arguments, outputs, paths or error text.
 ALLOWED_ATTRIBUTES = frozenset({
     "harness.session_id", "harness.backend", "harness.status", "harness.recovered", "harness.turn",
@@ -203,6 +204,7 @@ ALLOWED_ATTRIBUTES = frozenset({
     "gen_ai.tool.name", "gen_ai.tool.call.id", "harness.policy_decision", "harness.parallel", "harness.ok",
     "harness.output_chars", "harness.approval_status", "harness.queue_front",
     "harness.compaction_tier", "harness.tokens_before", "harness.tokens_after",
+    "harness.files", "harness.bytes", "harness.skipped_reason",
     "error.type",
 })
 _MAX_STRING = 200

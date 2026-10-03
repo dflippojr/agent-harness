@@ -13,6 +13,7 @@ from harness.manager import Manager
 from harness.scheduler import GpuScheduler
 
 from test_daemon import Script, call, events, make_cfg, wait_status
+from waits import scaled
 
 
 # detection
@@ -482,7 +483,7 @@ def test_gpu_pause_notification_points_at_actions_resources(tmp_path):
 def test_session_pauses_before_next_turn_and_continues(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.gpu_guard = GpuGuardConfig(enabled=True, resume_after_seconds=0, poll_seconds=3600)
-    gate = asyncio.Event()
+    gate, waiting = asyncio.Event(), asyncio.Event()
 
     async def body():
         steps = Script([Completion(tool_calls=[call("write_file", 0, path="a.txt", content="x")]),
@@ -491,6 +492,7 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
 
         async def chat(*args, **kwargs):
             if sum(1 for m in args[1] if m["role"] == "assistant") == 1:
+                waiting.set()
                 await gate.wait()  # second turn: wait until the test has paused the GPU
             return await steps(*args, **kwargs)
 
@@ -499,10 +501,9 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
         await m.start(maintenance=False)
         s = m.create("write a file")
         sid = s["id"]
-        for _ in range(200):
-            if sid in m.runner.generating and events(m, sid, "tool_result"):
-                break
-            await asyncio.sleep(0.01)
+        # after the first turn's checkpoint, which can take a while on a slow box
+        await asyncio.wait_for(waiting.wait(), scaled(30))
+        assert sid in m.runner.generating
         detect.signals = [GAME]
         await m.guard.check()  # the second turn is already waiting on `gate`, so it counts as busy
         assert m.guard.state == PAUSING

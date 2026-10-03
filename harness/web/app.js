@@ -55,7 +55,7 @@ const SESSION_EVENT_TYPES = [
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "state", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
   "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "waiting_memory", "memory_recovered", "app_context", "app_tool_call", "app_tool_result",
-  "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared",
+  "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared", "checkpoint", "rewound", "forked",
 ];
 const REVIEW_LABEL = { merged: "merged", pushed: "pushed", discarded: "discarded" };
 const progressBar = (fraction) => h("div", { class: `progress${fraction === null ? " indeterminate" : ""}` },
@@ -2157,6 +2157,32 @@ async function viewSession(sid, tab, focusApproval) {
       class: "btn small", type: "button", onclick: () => go(`#/s/${sid}/changes`, true),
     }, `Branch saved: ${e.data.commits.length} commit${e.data.commits.length === 1 ? "" : "s"} to review${e.data.auto_commit ? " (leftover edits committed)" : ""}`))),
     review: (e) => add(h("p", { class: "note" }, `Review: ${e.data.detail}`)),
+    checkpoint: (e) => {
+      if (e.data.status === "skipped") { add(h("p", { class: "note" }, `Turn not checkpointed: ${e.data.reason}`)); return; }
+      const turn = e.data.turn;
+      const act = async (btn, path, body) => {
+        btn.disabled = true;
+        try {
+          const s = await api(`/sessions/${sid}/checkpoints/${turn}/${path}`, { method: "POST", body });
+          if (path === "fork") go(`#/s/${s.id}`, true); else await viewSession(sid);
+        } catch (err) { toast(err.message, 8000); btn.disabled = false; }
+      };
+      // Hosted CLI sessions keep their own state, which can't be truncated: Fork (with a transcript digest) only.
+      const local = !session.backend || session.backend === "local";
+      if (isMember()) { add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved`)); return; } // owner API only
+      add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved `,
+        local ? h("button", {
+          class: "btn small", type: "button", title: "Restore the workspace and the agent's context to this point. Packages, processes and files outside the workspace are not undone.",
+          onclick: (ev) => confirm(`Rewind to checkpoint ${turn}? Later file changes are undone (the transcript keeps them).`) && void act(ev.target, "rewind"),
+        }, "Rewind here") : null, " ",
+        h("button", {
+          class: "btn small", type: "button", title: "Start a new session from this point, on its own branch",
+          onclick: (ev) => { const prompt = window.prompt("Instruction for the forked session"); if (prompt?.trim()) void act(ev.target, "fork", { prompt }); },
+        }, "Fork from here")));
+    },
+    rewound: (e) => add(h("p", { class: "note" }, `Rewound to checkpoint ${e.data.turn}: the workspace and context are as they were then; later turns above are kept for the record`)),
+    forked: (e) => add(h("p", { class: "note" }, "Forked from ", h("a", { href: `#/s/${e.data.parent}` }, e.data.parent),
+      ` at checkpoint ${e.data.turn}${e.data.summary_note ? ` (${e.data.summary_note})` : ""}`)),
     model_waking: (e) => {
       wakingNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
         `The model was asleep. Waking it (about ${Math.round(e.data.expected_seconds / 60) || 1} min)`)));

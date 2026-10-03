@@ -51,6 +51,13 @@ def transcripts_dir(cfg, user_id: str) -> Path:
     return user_root(cfg, user_id) / "transcripts"
 
 
+def checkpoints_dir(cfg, user_id: str) -> Path:
+    """Host-side checkpoint stores, one directory per session. Never mounted into a sandbox."""
+    if user_id == OWNER_USER_ID:
+        return Path(cfg.data_dir) / "checkpoints"
+    return user_root(cfg, user_id) / "checkpoints"
+
+
 def artifacts_dir(cfg, user_id: str) -> Path:
     if user_id == OWNER_USER_ID:
         return Path(cfg.data_dir) / "artifacts"
@@ -190,7 +197,7 @@ def account_usage_bytes(cfg, user_id: str) -> int:
     if user_id == OWNER_USER_ID:
         total = 0
         for path in (workspaces_dir(cfg, user_id), transcripts_dir(cfg, user_id),
-                     artifacts_dir(cfg, user_id), repos_dir(cfg, user_id)):
+                     artifacts_dir(cfg, user_id), repos_dir(cfg, user_id), checkpoints_dir(cfg, user_id)):
             if path.is_dir() and not is_reparse_point(path):
                 total += dir_size(path)
         return total

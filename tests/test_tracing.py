@@ -289,6 +289,11 @@ def test_scripted_session_produces_one_covering_trace(tmp_path):
     assert {"approval_wait", "sandbox_exec"} <= tool_kids
     wait = next(sp for sp in spans if sp.name == "approval_wait")
     assert wait.attributes["harness.approval_status"] == "approved"
+    ckpt = next(sp for sp in spans if sp.name == "checkpoint")   # the snapshot after write_file, inside its turn
+    turn_ids = {sp.context.span_id for sp in spans if sp.name == "turn"}
+    assert ckpt.parent.span_id in turn_ids
+    assert ckpt.attributes["harness.turn"] == 1 and ckpt.attributes["harness.files"] >= 1
+    assert ckpt.attributes["harness.bytes"] >= 1 and "harness.skipped_reason" not in ckpt.attributes
 
 
 def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path):

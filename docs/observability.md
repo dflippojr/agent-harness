@@ -47,13 +47,15 @@ session                      created → end of the latest run
 │   ├── compaction           elide / summarize / round reset (a summary adds its own `chat` child)
 │   ├── gpu_slot_wait        re-queued after the GPU guard paused the model
 │   ├── chat                 one model request
-│   └── execute_tool         one tool call
-│       ├── approval_wait    waiting for the user to approve or deny
-│       ├── gpu_slot_wait    re-queued after the approval
-│       └── sandbox_exec     the tool itself (sandbox, daemon toolkit, app, runner)
-│           or image_job     an image tool on the image service
+│   ├── execute_tool         one tool call
+│   │   ├── approval_wait    waiting for the user to approve or deny
+│   │   ├── gpu_slot_wait    re-queued after the approval
+│   │   └── sandbox_exec     the tool itself (sandbox, daemon toolkit, app, runner)
+│   │       or image_job     an image tool on the image service
+│   └── checkpoint           workspace snapshot after a turn that ran a mutating tool (#261)
 ├── hosted_cli_turn          a Claude / Codex / Cursor CLI session, from start to its result
 └── run_end                  transcript, branch save, sandbox stop
+    └── checkpoint           the one per-run snapshot of a hosted (CLI) session
 ```
 
 Sibling spans under a `turn` don't overlap. Tools run one at a time today. A tool source that runs calls in
@@ -80,6 +82,7 @@ Work outside a session isn't traced, for example image jobs started from the Ima
 | `gpu_slot_wait` | `harness.queue_front` |
 | `compaction` | `harness.compaction_tier`, `harness.tokens_before`, `harness.tokens_after` |
 | `hosted_cli_turn` | `harness.backend`, `gen_ai.request.model` |
+| `checkpoint` | `harness.turn` (the checkpoint's turn number), `harness.files` and `harness.bytes` (index entries and file bytes in the snapshot), `harness.skipped_reason` (`ineligible`, `unchanged`, `snapshot_failed`, `over_quota`; never the reason text, which can hold paths) |
 | any failed span | `error.type` (the exception class) and status ERROR |
 
 `harness.prompt_ms` and `harness.decode_ms` come from llama.cpp's `timings`. They're missing when the server

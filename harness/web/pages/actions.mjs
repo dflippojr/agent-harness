@@ -614,6 +614,7 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
         const top = u.workspaces.slice(0, 5);
         const towerExtra = h("div", { class: "disk-facts" },
           fact("Workspaces", `${mb(u.workspaces_mb)} · ${u.workspaces.length} session${u.workspaces.length === 1 ? "" : "s"} · ${u.quota_mb} MB quota each`),
+          u.checkpoints ? fact("Checkpoints", `${mb(u.checkpoints_mb)} · ${u.checkpoints.length} session${u.checkpoints.length === 1 ? "" : "s"} · rewind/fork history, removed with the workspace`) : null,
           fact("Sandboxes", `${u.containers.length} container${u.containers.length === 1 ? "" : "s"}`),
           backupLine(u.backup),
           isGuest() ? null : imageArchiveBlock(u.image_archive, load),
