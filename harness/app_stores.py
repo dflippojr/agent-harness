@@ -14,6 +14,7 @@ session not created yet. An App store opens on first use and closes after `APP_S
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import re
 import sqlite3
@@ -48,6 +49,7 @@ _BY_SESSION = frozenset({
 })
 # Session columns the in-memory index of App sessions mirrors.
 _INDEXED = ("app_id", "owner_id", "kind", "status")
+_SEQ = itertools.count(1)  # orders the index updates staged by transactions, in the order they ran
 _ENDED = ("done", "failed", "cancelled")
 
 
@@ -142,7 +144,10 @@ class SessionStores:
 
     Session calls route by session id through an in-memory index of App sessions (id -> App, owner, kind, status),
     read from the App stores at startup and kept current by `insert_session`, `update_session` and `delete_session`.
-    Ids not in the index belong to the main store. Inside an App store's transaction the main store may be called
+    Ids not in the index belong to the main store. The index never runs ahead of what has committed: a new session
+    routes to its App from the insert on (so the transaction creating it can use it) but counts nowhere until it
+    commits, and is dropped if it rolls back; owner, kind and status change, and a deleted session leaves, only once
+    the transaction that did it commits. Inside an App store's transaction the main store may be called
     (its writer is waited for), never the reverse and never another App's store, so two writers can never wait on
     each other: such a write raises instead of deadlocking.
 
@@ -294,7 +299,7 @@ class SessionStores:
 
     def _indexed(self, pred) -> list[tuple[str, dict]]:
         with self._lock:
-            return [(sid, e) for sid, e in self._sessions.items() if pred(e)]
+            return [(sid, e) for sid, e in self._sessions.items() if e["committed"] and pred(e)]
 
     def _apps(self, pred=lambda e: True) -> list[str]:
         return sorted({e["app_id"] for _, e in self._indexed(pred)})
@@ -312,43 +317,71 @@ class SessionStores:
         sid, app_id = s["id"], s.get("app_id") or ""
         with self._lock:
             taken = sid in self._sessions
-            if app_id and not taken:
-                self._sessions[sid] = {k: s.get(k) or "" for k in _INDEXED} | {"app_id": app_id}
+            if app_id and not taken:  # routes the id from here on, counts once committed
+                self._sessions[sid] = {k: s.get(k) or "" for k in _INDEXED} | {"app_id": app_id, "seq": 0,
+                                                                                "committed": False}
         if taken or (app_id and self.main.get_session(sid) is not None):
             if app_id and not taken:
-                with self._lock:
-                    self._sessions.pop(sid, None)
+                self._forget(sid)
             raise sqlite3.IntegrityError(f"session id {sid} is already in use")
         if not app_id:
             return self.main.insert_session(s)
+
+        def insert(db: Database) -> None:
+            db.after_rollback(lambda: self._forget(sid))
+            db.insert_session(s)
+            self._stage(db, sid)
         try:
             with self._using(app_id, write=True) as db:
-                db.insert_session(s)
-                row = db.get_session(sid)
+                db.write(insert, db)
         except BaseException:
-            with self._lock:
-                self._sessions.pop(sid, None)
+            self._forget(sid)
             raise
-        with self._lock:  # the stored values, column defaults included
-            self._sessions[sid].update({k: (row or s).get(k) or "" for k in _INDEXED if k != "app_id"})
 
     def update_session(self, sid: str, **fields) -> None:
-        with self._lock:
-            entry = self._sessions.get(sid)
-        if entry is None:
+        app_id = self.app_of(sid)
+        if not app_id:
             return self.main.update_session(sid, **fields)
-        self._call(entry["app_id"], "update_session", sid, **fields)
-        with self._lock:
-            entry.update({k: fields[k] for k in _INDEXED if k in fields and k != "app_id"})
+
+        def update(db: Database) -> None:
+            db.update_session(sid, **fields)
+            if any(k in fields for k in _INDEXED):
+                self._stage(db, sid)
+        with self._using(app_id, write=True) as db:
+            db.write(update, db)
 
     def delete_session(self, sid: str) -> None:
+        app_id = self.app_of(sid)
+        if not app_id:
+            return self.main.delete_session(sid)
+
+        def delete(db: Database) -> None:
+            db.delete_session(sid)
+            db.after_commit(lambda: self._forget(sid, committed=True))
+        with self._using(app_id, write=True) as db:
+            db.write(delete, db)
+
+    def _stage(self, db: Database, sid: str) -> None:
+        """In `db`'s transaction: once it commits, the index holds the session's row as this transaction left it.
+        A transaction that ran later wins, whichever of their callbacks runs first."""
+        row, seq = db.get_session(sid) or {}, next(_SEQ)
+
+        def apply() -> None:
+            with self._lock:
+                entry = self._sessions.get(sid)
+                if entry is None:  # deleted meanwhile
+                    return
+                if seq > entry["seq"]:
+                    entry.update({k: row.get(k) or "" for k in _INDEXED if k != "app_id"}, seq=seq)
+                entry["committed"] = True
+        db.after_commit(apply)
+
+    def _forget(self, sid: str, committed: bool = False) -> None:
+        """Drop `sid` from the index: a session deleted (`committed`), or one whose insert did not commit."""
         with self._lock:
             entry = self._sessions.get(sid)
-        if entry is None:
-            return self.main.delete_session(sid)
-        self._call(entry["app_id"], "delete_session", sid)
-        with self._lock:
-            self._sessions.pop(sid, None)
+            if entry is not None and (committed or not entry["committed"]):
+                del self._sessions[sid]
 
     def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None,
                          kind: str | None = None) -> list[str]:
@@ -410,13 +443,21 @@ class SessionStores:
         app_id = self.app_of(a["session_id"])
         if not app_id:
             return self.main.insert_approval(a)
-        with self._using(app_id, write=True) as db:
+        def insert(db: Database) -> None:
             db.insert_approval(a)
-            row = db.get_approval(a["id"])
+            token = (db.get_approval(a["id"]) or {}).get("token")
+            with self._lock:  # routes from here on, like a new session's id; dropped if the insert rolls back
+                self._approvals[a["id"]] = app_id
+                if token:
+                    self._tokens[token] = app_id
+            db.after_rollback(lambda: self._forget_approval(a["id"], token))
+        with self._using(app_id, write=True) as db:
+            db.write(insert, db)
+
+    def _forget_approval(self, aid: str, token: str | None) -> None:
         with self._lock:
-            self._approvals[a["id"]] = app_id
-            if row:
-                self._tokens[row["token"]] = app_id
+            self._approvals.pop(aid, None)
+            self._tokens.pop(token, None)
 
     def insert_smart_review(self, rid: str, sid: str, approval_id: str, record: dict) -> None:
         return self.for_session(sid).insert_smart_review(rid, sid, approval_id, record)
@@ -469,7 +510,8 @@ class SessionStores:
             with self._lock:
                 for r in sessions:
                     self._sessions[r["id"]] = {"app_id": folder.name, "owner_id": r["owner_id"] or "",
-                                               "kind": r["kind"] or "", "status": r["status"] or ""}
+                                               "kind": r["kind"] or "", "status": r["status"] or "",
+                                               "seq": 0, "committed": True}
                 for r in approvals:
                     self._approvals[r["id"]] = folder.name
                     self._tokens[r["token"]] = folder.name

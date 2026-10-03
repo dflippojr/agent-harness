@@ -254,3 +254,83 @@ def test_session_ids_stay_unique_across_stores(tmp_path):
     assert stores.find_session_ids("a") == ["a1"]
     stores.close()
     assert session_ids(tmp_path / "apps" / "k-aaaa" / APP_STORE_FILE) == {"a1"}
+
+
+def test_an_app_session_create_that_rolls_back_leaves_no_trace_in_the_index(tmp_path, monkeypatch):
+    stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
+    real = Database.insert_event
+
+    def failing(self, sid, type_, data):
+        if type_ == "session_created":
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(self, sid, type_, data)
+    monkeypatch.setattr(Database, "insert_event", failing)
+    seen = []
+
+    def insert_created(status="queued"):  # as Manager._insert_created: the session, then its events
+        stores.insert_session(_session("a1", "k-aaaa", status=status))
+        seen.append((stores.app_of("a1"), stores.count_sessions("owner", status)))
+        stores.insert_event("a1", "session_created", {})
+    with pytest.raises(sqlite3.OperationalError):
+        stores.for_app("k-aaaa").write(insert_created)
+    assert seen == [("k-aaaa", 0)]                            # routed inside its transaction, not counted yet
+    assert stores.app_of("a1") == "" and stores.get_session("a1") is None
+    assert stores.count_sessions("owner", "queued") == 0
+    assert stores.sessions_with_status("queued") == [] and stores.find_session_ids("a") == []
+
+    monkeypatch.setattr(Database, "insert_event", real)
+    stores.for_app("k-aaaa").write(insert_created)            # the same id again
+    assert stores.get_session("a1")["status"] == "queued"
+    assert [e["type"] for e in stores.events("a1")] == ["session_created"]
+    assert stores.count_sessions("owner", "queued") == 1
+    stores.close()
+    assert session_ids(tmp_path / "apps" / "k-aaaa" / APP_STORE_FILE) == {"a1"}
+
+
+def test_a_status_write_that_rolls_back_leaves_the_index_as_committed(tmp_path):
+    stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
+    stores.insert_session(_session("a1", "k-aaaa", status="queued"))
+    stores.insert_session(_session("a2", "k-aaaa", status="running"))
+    seen = []
+
+    def status_write(sid, status):  # as Manager._status_writer: the status, then its event
+        stores.update_session(sid, status=status)
+        seen.append(stores.count_sessions("owner", status))
+        raise sqlite3.OperationalError("disk I/O error")
+    for sid in ("a1", "a2"):
+        with pytest.raises(sqlite3.OperationalError):
+            stores.for_session(sid).write(status_write, sid, "done")
+    assert seen == [0, 0]                                     # not ahead of the commit, even inside it
+    assert {sid: stores.get_session(sid)["status"] for sid in ("a1", "a2")} == {"a1": "queued", "a2": "running"}
+    assert {sid: e["status"] for sid, e in stores._indexed(lambda e: True)} == {"a1": "queued", "a2": "running"}
+    assert stores.count_sessions("owner", "queued", "running") == 2 and stores.count_sessions("owner", "done") == 0
+    # what startup resume asks for
+    assert {s["id"] for s in stores.sessions_with_status("queued", "running", "waiting_approval")} == {"a1", "a2"}
+
+    with pytest.raises(sqlite3.OperationalError):             # nor does a delete count before it commits
+        stores.for_session("a1").write(lambda: (stores.delete_session("a1"), status_write("a2", "done")))
+    assert stores.app_of("a1") == "k-aaaa" and stores.get_session("a1")["status"] == "queued"
+
+    stores.for_session("a1").write(lambda: stores.update_session("a1", status="running"))
+    assert stores.count_sessions("owner", "running") == 2
+    stores.delete_session("a2")
+    assert stores.app_of("a2") == "" and stores.count_sessions("owner", "running") == 1
+    stores.close()
+
+
+def test_an_app_approval_insert_that_rolls_back_is_not_routed(tmp_path):
+    stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
+    stores.insert_session(_session("a1", "k-aaaa", status="running"))
+    approval = {"id": "ap1", "session_id": "a1", "tool_call_id": "c1", "tool": "write_file", "args": {}, "reason": "", "status": "pending",
+                "created_at": time.time()}
+
+    def persist_ask():
+        stores.insert_approval(dict(approval))
+        assert stores.get_approval("ap1") is not None         # routed inside its transaction
+        raise sqlite3.OperationalError("disk I/O error")
+    with pytest.raises(sqlite3.OperationalError):
+        stores.for_session("a1").write(persist_ask)
+    assert "ap1" not in stores._approvals and stores._tokens == {}
+    stores.insert_approval(dict(approval))
+    assert stores.get_approval("ap1")["session_id"] == "a1" and stores.pending_approvals("a1")
+    stores.close()
