@@ -28,7 +28,8 @@ from .db import Database, finish_then_cancel
 from .homelab import Homelab
 from .mcp_server import McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
-from .policy import ALLOW, ASK, DENY, ChatPolicy, Decision, Policy, mcp_harness_tool
+from .policy import (ALLOW, ASK, DENY, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED, AppToolsPolicy,
+                     ChatPolicy, Decision, Policy, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
@@ -40,6 +41,10 @@ from .verify import ToolOutput, bound_rendered, render_verify
 from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, UNLOADED, WAKING, ModelWarmer
 
 log = logging.getLogger("harness.runner")
+
+
+class ToolsOnlyUnsupported(CliBackendError):
+    """This backend can't be limited to an App's tools, so an App-tools-only session refuses to run on it (#329)."""
 
 
 class CliLimitError(Exception):
@@ -244,6 +249,8 @@ class Runner:
         project and narrowed by app.capabilities."""
         if s.get("kind") == "chat":  # Chat gets search/fetch only, never the agent toolkits
             return [self.web] if self.web is not None else []
+        if s.get("kind") == TOOLS_ONLY:  # the App's own tools only (#329)
+            return []
         project = self.project_for(s)
         defaults = self._app_defaults_for_session(s)
         member = session_user_id(s) != OWNER_USER_ID
@@ -277,7 +284,7 @@ class Runner:
     def artifact_tool_available(self, s: dict) -> bool:
         """Whether this session can call read_artifact. The one source of truth for offering the tool, running it,
         storing artifacts and masking results: a receipt may only point at a tool the model can actually use."""
-        if s.get("kind") == "chat" or s.get("backend", "local") != "local":
+        if s.get("kind", "agent") != "agent" or s.get("backend", "local") != "local":
             return False
         return self.policy(s).decide("read_artifact", {"artifact_id": "0" * 64}).action != DENY
 
@@ -285,12 +292,14 @@ class Runner:
     def delegate_edit_available(s: dict) -> bool:
         """Whether this session is offered, and may run, delegate_edit and apply_delegated_edit: harness-managed
         local-model agent sessions on the tower with a workspace (#157). Runner targets, hosted CLIs and chat never."""
-        return (s.get("kind") != "chat" and s.get("backend", "local") == "local" and s.get("target") == "tower"
-                and bool(s.get("workspace")) and not s.get("workspace_removed"))
+        return (s.get("kind", "agent") == "agent" and s.get("backend", "local") == "local"
+                and s.get("target") == "tower" and bool(s.get("workspace")) and not s.get("workspace_removed"))
 
     def tool_schemas(self, s: dict, ws) -> list[dict]:
         if s.get("kind") == "chat":
             return self.web.schemas() if self.web is not None else []
+        if s.get("kind") == TOOLS_ONLY:
+            return self.app_tools.schemas(s) if self.app_tools is not None else []
         schemas = ws.schemas()
         if self.artifact_tool_available(s):
             schemas = schemas + [READ_ARTIFACT_SCHEMA]
@@ -363,9 +372,11 @@ class Runner:
             return await kit.call(name, args, session=s, call_id=call_id)
         return await kit.call(name, args)
 
-    def policy(self, s: dict) -> Policy | ChatPolicy:
+    def policy(self, s: dict) -> Policy | ChatPolicy | AppToolsPolicy:
         if s.get("kind") == "chat":
             return ChatPolicy()
+        if s.get("kind") == TOOLS_ONLY:
+            return AppToolsPolicy(t["name"] for t in (s.get("app_tools") or []))
         project = self.project_for(s)
         return Policy(project.rules if project else [], repo=bool(project and project.repo))
 
@@ -675,6 +686,8 @@ class Runner:
         self._unended.add(sid)
         try:
             s = self.db.get_session(sid)
+            if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
+                raise ToolsOnlyUnsupported(f"backend {s['backend']!r} can't run App-tools-only sessions")
             if s.get("backend", "local") != "local":
                 await self._run_cli(sid, recovered=recovered)
                 return
@@ -688,7 +701,8 @@ class Runner:
             if await self._take_pending_cancel(sid):
                 return
             message = str(e)
-            code = self._cli_failure_code(self.db.get_session(sid), message)
+            code = (TOOLS_ONLY_UNSUPPORTED if isinstance(e, ToolsOnlyUnsupported)
+                    else self._cli_failure_code(self.db.get_session(sid), message))
             self._record_failure(sid, code, message, code in ("model_unavailable", "provider_unavailable"),
                                  f"{code}: {message}")
             await self._end_run(sid)
@@ -876,6 +890,13 @@ class Runner:
         if backend_name == "claude" and backend.mcp and self.mcp_tool_schemas(sid):
             extra = {"mcp": self.mcp_relay_factory(session_id=sid, backend=frozen, server=self.mcp_server),
                      "mcp_token": self.mcp_tokens.mint(sid)}
+        if s.get("kind") == TOOLS_ONLY:
+            # Never run a hosted CLI with its built-in tools here: Claude Code gets --tools "" and only the App's tools
+            # over MCP (can_use_tool still denies anything else); a CLI without both refuses (#329).
+            if backend_name != "claude" or not extra:
+                raise ToolsOnlyUnsupported(f"{backend_name} can't reach App tools without its built-in tools")
+            extra["tools_only"] = True
+            Path(s["workspace"]).mkdir(parents=True, exist_ok=True)  # emptied at the end of every run
         cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=frozen,
                       sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
                       model=s["model"], backend_session_id=backend_session_id, api_key=api_key, **extra)
@@ -1684,17 +1705,26 @@ class Runner:
                                 ok=False)
             return None, None
 
-        if name == "finish":
+        tools_only = s.get("kind") == TOOLS_ONLY  # not even the loop's own tools: only the App's (#329)
+        if name == "finish" and not tools_only:
             return await self._finish_call(s, call, args, rest), None
-        if name == "update_notes" and isinstance(args.get("notes"), str):
+        if name == "update_notes" and isinstance(args.get("notes"), str) and not tools_only:
             return await self._update_notes_call(sid, call, args), None
-        if name == "update_state":
+        if name == "update_state" and not tools_only:
             return await self._update_state_call(sid, call, args), None
-        if name == "reset_round":
+        if name == "reset_round" and not tools_only:
             return await self._reset_round_call(sid, call, args), None
 
         ws = self.workspace(s)
         schemas = {t["function"]["name"]: t for t in self.tool_schemas(s, ws)}
+        if name not in schemas and tools_only:  # recorded as a policy denial; never run
+            self._bump(sid, "invalid_tool_calls")
+            if await self._authorize(s, call, name, args, ws) is None:
+                # The policy allows the hosted alias (mcp__harness__<tool>), but it is no local tool name: answer it
+                # so the call is resolved instead of left pending.
+                await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
+                                                     f"{', '.join(schemas)}.", ok=False)
+            return None, None
         if name not in schemas:
             self._bump(sid, "invalid_tool_calls")
             await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
@@ -1923,7 +1953,7 @@ class Runner:
 
     def _taint_layer(self, s: dict, name: str, args: dict, decision):
         sources = self._taint_of(s)
-        if not sources:
+        if not sources or s.get("kind") == TOOLS_ONLY:  # AppToolsPolicy is final: no owner is there to approve
             return decision
         app_names = self.app_tools.names(s) if self.app_tools is not None else set()
         return taint.escalate(decision, name, args, sources, app_names)
@@ -1964,6 +1994,8 @@ class Runner:
 
     def _taint_from_result(self, s: dict, name: str, args: dict) -> None:
         source = taint.source_for(name, args)
+        if source is None and s.get("kind") == TOOLS_ONLY and name in {t["name"] for t in s.get("app_tools") or []}:
+            source = ("app_tool", f"app tool {name}")  # free text from the App's data, e.g. bank descriptions (#329)
         if source is None and name == "session_read":
             ref = str(args.get("session_id", "")).strip()
             ids = self.db.find_session_ids(ref, kind="agent") if ref else []
@@ -2336,7 +2368,7 @@ class Runner:
 
     def _repo_map_eligible(self, s: dict) -> bool:
         """Experiment (#264): only local-model agent sessions on the tower, with the switch on, get a map."""
-        return (self.cfg.repo_map.enabled and s.get("kind") != "chat" and s.get("target") == "tower"
+        return (self.cfg.repo_map.enabled and s.get("kind", "agent") == "agent" and s.get("target") == "tower"
                 and s.get("backend", "local") == "local" and not s.get("workspace_removed")
                 and bool(s.get("context")))
 
@@ -2357,7 +2389,7 @@ class Runner:
 
     def _snapshot_git_baseline(self, sid: str) -> None:
         s = self.db.get_session(sid)
-        if s.get("kind") == "chat" or s.get("target") != "tower" or s.get("workspace_removed"):
+        if s.get("kind", "agent") != "agent" or s.get("target") != "tower" or s.get("workspace_removed"):
             return
         run = s["run"]
         if "git_baseline" in run:
@@ -2371,7 +2403,7 @@ class Runner:
     def _files_modified(self, s: dict) -> list[str]:
         """Git changes since the run-start HEAD on tower agent sessions; otherwise write/edit paths."""
         touched = list(s["run"].get("files_touched") or [])[:agent_state.FILES_MODIFIED_MAX]
-        if s.get("kind") == "chat" or s.get("target") != "tower" or s.get("backend", "local") != "local":
+        if s.get("kind", "agent") != "agent" or s.get("target") != "tower" or s.get("backend", "local") != "local":
             return touched
         if s.get("workspace_removed"):
             return touched
@@ -2575,7 +2607,9 @@ class Runner:
         else:
             await asyncio.shield(self._stop_cli(sid))
         await asyncio.shield(self.save_branch(sid))
-        if s.get("backend", "local") != "local":    # hosted runs are checkpointed once per run (Fork only)
+        if s.get("kind") == TOOLS_ONLY:
+            await asyncio.to_thread(self._clear_tools_only_workspace, s)
+        elif s.get("backend", "local") != "local":    # hosted runs are checkpointed once per run (Fork only)
             await asyncio.shield(self._checkpoint(sid, only_if_changed=True))
         self.write_transcript(sid)
 
@@ -2584,6 +2618,19 @@ class Runner:
             if current and current["run"].pop(END_PENDING, None) is not None:
                 self.db.update_session(sid, run=current["run"])
         await self.db.awrite(ended)
+
+    def _clear_tools_only_workspace(self, s: dict) -> None:
+        """An App-tools-only session's working directory is a throwaway the hosted CLI needed; it goes when the run
+        ends (and is made again, empty, if the App sends another message)."""
+        from . import storage
+        from .maintenance import remove_tree
+        path = Path(s["workspace"])
+        try:
+            storage.require_contained(path, storage.workspaces_dir(self.cfg, session_user_id(s)), allow_missing=True)
+        except storage.ContainmentError:
+            log.warning("not removing the working directory of %s: it is outside the workspaces root", s["id"])
+            return
+        remove_tree(path)
 
     async def _run_finished(self, sid: str) -> dict:
         self._emit_turn_metrics(sid)

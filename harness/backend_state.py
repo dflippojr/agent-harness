@@ -100,8 +100,18 @@ def local_view(manager) -> dict:
         "name": "local", "available": available, "logged_in": available, "auth": "local", "billing": "local",
         "model": manager.cfg.default_model, "effort": "",
         "limits": {}, "today": {}, "week": {}, "notice": "Runs the local model on this server.",
-        "billing_warning": "", "api_key_available": False,
+        "billing_warning": "", "api_key_available": False, "app_tools_only": tools_only_supported(manager, "local"),
     }
+
+
+def tools_only_supported(manager, name: str) -> bool:
+    """Whether this backend can run an App-tools-only session (#329): the local loop, or Claude Code with its MCP
+    server on. The rest refuse with app_tools_only_unsupported."""
+    from .policy import TOOLS_ONLY_BACKENDS
+    if name == "local":
+        return bool(manager.cfg.modules.local_model and manager.cfg.models)
+    backend = manager.cfg.backends.get(name)
+    return name in TOOLS_ONLY_BACKENDS and backend is not None and bool(backend.mcp)
 
 
 def _credential_state(cfg, provider_policy: dict | None, check_auth: bool) -> tuple[bool, str, bool]:
@@ -145,7 +155,7 @@ def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
         "provider_policy": provider_policy,
         "notice": notice(name, cfg, limits),
         "billing_warning": billing_warning(cfg, limits, effective_auth == "api_key"),
-        "api_key_available": key_ready,
+        "api_key_available": key_ready, "app_tools_only": tools_only_supported(manager, name),
         "popular_models": [{"id": model_id, "label": label} for model_id, label in POPULAR_MODELS.get(name, ())],
     }
 

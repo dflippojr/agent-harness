@@ -44,6 +44,7 @@ Create an Agent Harness App token in **Settings → Apps** (or `POST /keys` from
 | `images` | generate and download images |
 | `inference` | use the OpenAI/Anthropic-compatible endpoint under `/v1` |
 | `remote_control` | start and stop Claude Code Remote Control servers in project folders |
+| `models:warm` | start loading the local model ahead of a chat (`POST /api/v1/models/warm`); request it at pairing |
 
 Apps see only the sessions they created, unless they hold `sessions:all`. That scope expands reads only:
 sending messages, adding context, cancelling, and answering tool calls still require owning the session.
@@ -91,6 +92,7 @@ member. Device and runner tokens gain no member authority.
 | `/api/v1/me`, scoped projects/search/events | yes | own account | no | owner scope | no |
 | Create projects | yes | empty or public HTTPS allowlist | no | no | no |
 | `/api/admin/v1`, `ho-` owner tokens | yes | 403 | 403 | 403 | 403 |
+| App-tools-only sessions (`tools_only`) | no | no | no | own only, never `sessions:all` | no |
 | Hosted backends, images, jobs, runners, Remote Control | yes | no | no | scopes for images/remote_control only | no |
 | Homelab, memory library, notifications, backups, keys | yes | no | no | no | no |
 | Member prompts, transcripts, diffs, repo contents | no (aggregate metadata only) | own only | no | no | no |
@@ -195,9 +197,60 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
 - **Tools:** up to 16. Names match `^[a-zA-Z][a-zA-Z0-9_]{2,48}$` and can't reuse a built-in name. `parameters` is
   a JSON Schema object; the agent's arguments are validated against its property types before your app sees them.
   App tools don't need approval.
-- `project` must exist in the harness's `projects.yaml` (`GET /api/v1` lists them).
+- `project` must exist in the harness's `projects.yaml` (`GET /api/v1` lists them). Omitted, it is `scratch`.
+- `tools_only: true` starts an [App-tools-only session](#app-tools-only-sessions) instead of an agent session.
 - `backend` is `local` (the tower model) or a hosted CLI id such as `claude`, `codex`, or `cursor`
   (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login.
+
+### App-tools-only sessions
+
+An App-tools-only session is a conversation on the chosen backend whose only tools are the ones your App sent with
+it: a read-only Q&A bot over your App's data, not a coding agent. Start one with `"tools_only": true`:
+
+```json
+{"prompt": "How much is in checking?", "backend": "local", "tools_only": true,
+ "tools": [{"name": "get_balance", "description": "Balance of one account",
+            "parameters": {"type": "object", "properties": {"account": {"type": "string"}}}}]}
+```
+
+Requirements: an App token, at least one tool, and no `project` (sending one is a 400). Nothing in `projects.yaml`
+is needed or used: no project instructions, rules, skills, or repository.
+
+What the server guarantees, enforced rather than prompted:
+
+- **Only your tools.** The model is offered your tools and nothing else. On `local` the schemas sent to the model are
+  exactly your tools; the harness's file, shell, edit, web, memory, image, session-search, skill and loop-control
+  tools are absent. On `claude`, Claude Code starts with `--tools ""` (no built-in tools: no Bash, Read, Edit,
+  WebFetch, Task, ...), slash commands and skills off, and only your tools on its harness MCP server.
+- **Everything else is denied, never asked about.** The session's policy allows exactly your tool names (natively,
+  or as `mcp__harness__<name>` from Claude Code) and denies every other call outright. A model that tries a built-in
+  tool anyway gets an error result, the call shows in the events as a `tool_call` with `decision: "deny"`, and it
+  never runs. There are no approval prompts in these sessions.
+- **No workspace.** There is no repository. Where a hosted CLI insists on a working directory it gets an empty one
+  under the harness's workspaces folder, removed when each run ends (made again, empty, for a follow-up message).
+- **Visible to your App alone.** Only the App that started the session can read it, list it, stream its events or
+  send to it. It is hidden from the owner's session lists, from session search, and from other Apps (including ones
+  with `sessions:all`). It is stored in the main store tagged with your App's id until per-App stores (#330) land.
+- **Untrusted results.** Your tools' results count as untrusted content for the session's taint (they may carry
+  free text such as bank transaction descriptions). It changes nothing today, since the session has no risky tools.
+- It can't be rerun (`POST .../rerun` is a 409); start a new session with its tools instead.
+
+Backends: `local` and `claude` (with its MCP server on, the default). `GET /api/v1` lists them in
+`features.app_tools_only_backends`, and each `GET /api/v1/backends` entry has `app_tools_only: true|false`, so your
+App can show which backends can run its bot. Any other backend (`codex`, `cursor`) refuses at create time with a 400
+whose `error.code` is `app_tools_only_unsupported`; it never runs with its built-in tools. A session that can't get
+its tools to the CLI at run time fails with `failure.code` `app_tools_only_unsupported`.
+
+Local model state:
+
+- `GET /api/v1/models/status` (scope `sessions`) returns each model's `state` (`ready`, `sleeping`, `waking`,
+  `unloaded`, `paused`, `unreachable`) and `waking_seconds`. Use it to show "loading" during a live chat.
+- `POST /api/v1/models/warm` (scope `models:warm`) starts loading the local model, for example when your user starts
+  typing. It respects the server's guards and is refused, not queued: `409 gpu_held` while the GPU guard has the GPU,
+  `409 low_memory` when RAM is short. Otherwise it returns `{"name", "state"}` with the state before warming.
+- **Background work:** check `/models/status` first and run only when the model is already `ready` (or in your own
+  quiet window). Don't call `/models/warm` or start a local session from a background job: that wakes the model and
+  takes RAM and GPU from whatever the owner is doing.
 
 ### `GET /api/v1/sessions`, `GET /api/v1/sessions/{id}`
 List (newest first, `?limit=`) or read. Statuses: `queued`, `running`, `waiting_approval`, `waiting_target`,
@@ -431,3 +484,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.11 | 2026-09-18 | Image mode discovery (`image_modes`) including optional `quality-fast` Lightning LoRA |
 | 1.12 | 2026-09-19 | Optional `flux-fast` FLUX.2 klein 4B mode discovery, pinned-asset preflight, and provenance |
 | 1.13 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |
+| 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |

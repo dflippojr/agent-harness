@@ -215,3 +215,30 @@ class ChatPolicy:
         if name in CHAT_ALLOWED_TOOLS:
             return Decision(ALLOW)
         return Decision(DENY, "not available in Chat; use Agents for that")
+
+
+# The session kind of an App-tools-only session (#329) and the backends that can run one: the local loop sends only the
+# App's schemas, and Claude Code runs with --tools "" plus the harness MCP server. Codex and Cursor have no verified
+# way to drop their built-in tools yet, so they refuse.
+TOOLS_ONLY = "tools_only"
+TOOLS_ONLY_BACKENDS = ("local", "claude")
+TOOLS_ONLY_UNSUPPORTED = "app_tools_only_unsupported"
+APP_TOOLS_ONLY_DENY = "not available in an App-tools-only session; only the App's own tools are"
+
+
+class AppToolsPolicy:
+    """App-tools-only sessions (#329) may call exactly the App's registered tools, natively or as
+    mcp__harness__<tool> from hosted Claude Code. Everything else is denied outright: no owner is present to approve."""
+
+    def __init__(self, names) -> None:
+        self.names = frozenset(names)
+        self.rules: list[dict] = [{"tool": sorted(self.names), "action": ALLOW},
+                                  {"tool": "*", "action": DENY, "reason": APP_TOOLS_ONLY_DENY}]
+
+    def fingerprint(self) -> str:
+        return "app-tools-only:" + hashlib.sha256(",".join(sorted(self.names)).encode()).hexdigest()[:16]
+
+    def decide(self, name: str, _args: dict | None = None) -> Decision:
+        if (mcp_harness_tool(name) or name) in self.names:
+            return Decision(ALLOW)
+        return Decision(DENY, APP_TOOLS_ONLY_DENY)
