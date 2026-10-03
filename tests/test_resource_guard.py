@@ -880,7 +880,10 @@ def test_server_port_reads_the_command_line():
     from harness.gpu_guard import server_port
     assert server_port(["llama-server.exe", "-m", "x.gguf", "--port", "8090"]) == 8090
     assert server_port(["llama-server", "--port=8091"]) == 8091
-    assert server_port(["llama-server", "-p", "8092"]) == 8092
+    # -p is --prompt in llama-server, never the port, and a prompt never hides a later --port
+    assert server_port(["llama-server", "-p", "8092"]) == 8080
+    assert server_port(["llama-server.exe", "-p", "YouAreQwen", "-m", "q.gguf", "--port", "8090"]) == 8090
+    assert server_port(["llama-server", "--port", "8090", "--port=8093"]) == 8093
     assert server_port(["llama-server", "-m", "x.gguf"]) == 8080
     assert server_port(["llama-server", "--port", "abc"]) == -1
     assert server_port(None) == 8080

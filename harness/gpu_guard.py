@@ -267,17 +267,19 @@ LLAMA_DEFAULT_PORT = 8080  # llama-server's own default when the command line ha
 
 
 def server_port(cmdline: list[str] | None) -> int:
-    """The port a llama-server command line serves on (`--port N`, `--port=N` or `-p N`)."""
+    """The port a llama-server command line serves on (`--port N` or `--port=N`; the last one wins, as in llama.cpp's
+    argument parser). llama-server has no short form for the port: `-p` is `--prompt`."""
     args = cmdline or []
+    port = LLAMA_DEFAULT_PORT
     for i, arg in enumerate(args):
         value = None
-        if arg in ("--port", "-p") and i + 1 < len(args):
+        if arg == "--port" and i + 1 < len(args):
             value = args[i + 1]
         elif arg.startswith("--port="):
             value = arg.split("=", 1)[1]
         if value is not None:
-            return int(value) if value.isdigit() else -1
-    return LLAMA_DEFAULT_PORT
+            port = int(value) if value.isdigit() else -1
+    return port
 
 
 class ServerControl:
