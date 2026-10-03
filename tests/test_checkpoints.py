@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import subprocess
 import threading
 from pathlib import Path
@@ -542,7 +543,7 @@ def test_a_failed_checkpoint_record_does_not_fail_the_turn(tmp_path, monkeypatch
     asyncio.run(body())
 
 
-def test_a_failed_quota_check_after_keeping_does_not_fail_the_turn(tmp_path, monkeypatch):
+def test_a_failed_quota_check_after_keeping_keeps_the_turn(tmp_path, monkeypatch):
     from harness.checkpointer import Checkpointer
 
     def broken(*args):
@@ -550,8 +551,14 @@ def test_a_failed_quota_check_after_keeping_does_not_fail_the_turn(tmp_path, mon
     monkeypatch.setattr(Checkpointer, "_within_quota", broken)
 
     async def body():
-        m, s = await started(tmp_path)
-        assert_not_checkpointed(m, s)
+        m, s = await started(tmp_path)                               # recorded: a later failure only warns
+        sid = s["id"]
+        assert s["status"] == "done"
+        assert [e.get("turn") for e in events(m, sid, "checkpoint")] == [1, 2]
+        assert [c["turn"] for c in m.db.checkpoints(sid, hidden=None)] == [1, 2]
+        refs = m.runner.checkpointer.store(s)._git(None, None, "for-each-ref", "--format=%(refname)").out
+        assert "/staged/" not in refs and "/replaced/" not in refs
+        await m.rewind(sid, 1)
 
     asyncio.run(body())
 
@@ -621,6 +628,66 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
         (ws / "after-rewind.txt").unlink()
         await m.rewind(sid, 2)                                       # redo still works
         assert (ws / "extra.txt").read_text() == "late\n"
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("failing", ["publish", "record"])
+def test_a_take_that_fails_naming_or_recording_after_a_rewind_keeps_the_rewound_past_checkpoint(
+        tmp_path, monkeypatch, failing):
+    replace = os.replace
+
+    def rename_fails(src, dst):
+        if Path(src).name.startswith("staged-"):                     # the last step: the old turn 2 is set aside
+            raise PermissionError(13, "Access is denied", str(src))
+        return replace(src, dst)
+
+    async def body():
+        m, s = await started(tmp_path)
+        sid, ws = s["id"], Path(s["workspace"])
+        cp = m.runner.checkpointer
+        store = cp.store(s)
+        await m.rewind(sid, 1)
+        hidden = m.db.checkpoints(sid, hidden=True)
+        (ws / "after-rewind.txt").write_text("new work\n")
+        if failing == "publish":                                     # the new turn 2 cannot be named
+            monkeypatch.setattr(checkpoints.os, "replace", rename_fails)
+        else:                                                        # or its row cannot be committed
+            def record_fails(*args):
+                raise sqlite3.OperationalError("database is locked")
+            monkeypatch.setattr(cp, "_record", record_fails)
+        event = await asyncio.to_thread(cp.take, sid)
+        monkeypatch.undo()
+        assert event["status"] == "skipped"
+        assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
+        refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
+        assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
+        assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
+        assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
+        (ws / "after-rewind.txt").unlink()
+        await m.rewind(sid, 2)                                       # redo still works
+        assert (ws / "extra.txt").read_text() == "late\n"
+
+    asyncio.run(body())
+
+
+def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        sid, ws = s["id"], Path(s["workspace"])
+        cp = m.runner.checkpointer
+        store = cp.store(s)
+        await m.rewind(sid, 1)
+        hidden = m.db.checkpoints(sid, hidden=True)
+        (ws / "after-rewind.txt").write_text("new work\n")
+        event = await asyncio.to_thread(cp.take, sid)
+        assert event["turn"] == 2 and not m.db.checkpoints(sid, hidden=True)
+        new = m.db.checkpoints(sid, hidden=False)[-1]
+        assert new["turn"] == 2 and new["sha"] != hidden[0]["sha"]
+        refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
+        assert f"{checkpoints.ref_name(sid, 2)} {new['sha']}" in refs
+        assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
+        assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
 
     asyncio.run(body())
 

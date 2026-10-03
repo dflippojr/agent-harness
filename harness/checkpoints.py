@@ -40,6 +40,7 @@ TURN_RUN_KEYS = ("state", "notes")
 REF_PREFIX = "refs/harness/checkpoints"
 UNDO_PREFIX = "refs/harness/rewind-undo"     # the workspace as it was before a rewind, while that rewind runs
 STAGE_PREFIX = "refs/harness/staged"         # a new checkpoint until its database record commits
+REPLACED_PREFIX = "refs/harness/replaced"    # a rewound-past checkpoint a new one of its turn replaces, until then
 GITLINK = 0o160000           # index mode of a nested repository
 
 
@@ -177,9 +178,46 @@ class Store:
         self.contexts.mkdir(parents=True, exist_ok=True)
         (self.contexts / f"staged-{turn}.json.gz").write_bytes(context)
 
-    def publish(self, sid: str, turn: int, sha: str) -> None:
-        self._git(None, None, "update-ref", ref_name(sid, turn), sha)
-        os.replace(self.contexts / f"staged-{turn}.json.gz", self.contexts / f"{turn}.json.gz")
+    def publish(self, sid: str, turn: int, sha: str, done: set) -> None:
+        """Name a staged snapshot as checkpoint `turn`. A rewound-past checkpoint of that number is set aside, not
+        overwritten, so until `drop_replaced` removes it `unpublish` can put it back. Each step taken is added to
+        `done`, which `unpublish` reads."""
+        ref, aside = ref_name(sid, turn), f"{REPLACED_PREFIX}/{sid}/{turn}"
+        context, staged = self.contexts / f"{turn}.json.gz", self.contexts / f"staged-{turn}.json.gz"
+        old = self._git(None, None, "rev-parse", "--verify", "-q", ref, check=False).out.strip()
+        if old:
+            self._git(None, None, "update-ref", aside, old)
+            done.add("ref_aside")
+        if context.exists():
+            os.replace(context, self.contexts / f"replaced-{turn}.json.gz")
+            done.add("context_aside")
+        self._git(None, None, "update-ref", ref, sha)
+        done.add("ref")
+        os.replace(staged, context)
+        done.add("context")
+
+    def unpublish(self, sid: str, turn: int, done: set) -> None:
+        """Undo the steps of `publish` in `done` (putting back what it set aside) and drop the staged names."""
+        ref, aside = ref_name(sid, turn), f"{REPLACED_PREFIX}/{sid}/{turn}"
+        context = self.contexts / f"{turn}.json.gz"
+        if "context" in done:
+            context.unlink(missing_ok=True)
+        if "context_aside" in done:
+            os.replace(self.contexts / f"replaced-{turn}.json.gz", context)
+        if "ref" in done:
+            if "ref_aside" in done:
+                old = self._git(None, None, "rev-parse", "--verify", "-q", aside).out.strip()
+                self._git(None, None, "update-ref", ref, old)
+            else:
+                self._git(None, None, "update-ref", "-d", ref)
+        if "ref_aside" in done:
+            self._git(None, None, "update-ref", "-d", aside, check=False)
+        self.unstage(sid, turn)
+
+    def drop_replaced(self, sid: str, turn: int) -> None:
+        """Once the new checkpoint's record has committed: delete what `publish` set aside and the staged ref."""
+        self._git(None, None, "update-ref", "-d", f"{REPLACED_PREFIX}/{sid}/{turn}", check=False)
+        (self.contexts / f"replaced-{turn}.json.gz").unlink(missing_ok=True)
         self._git(None, None, "update-ref", "-d", f"{STAGE_PREFIX}/{sid}/{turn}", check=False)
 
     def unstage(self, sid: str, turn: int) -> None:

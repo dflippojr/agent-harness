@@ -68,45 +68,44 @@ class Checkpointer:
             store.reclaim()                                 # drops the unnamed snapshot's objects
             stats["skipped"] = "over_quota"
             return self._skipped(sid, "the account is over its disk quota")
-        # All or nothing: the new ref and context are written under temporary names first, so until the record
-        # commits a failure leaves every existing checkpoint (row, ref, context) as it was.
+        # All or nothing: the new ref and context are staged under temporary names, then named over any rewound-past
+        # checkpoint of this turn, which is set aside rather than overwritten. Until the record commits, a failure
+        # puts back every existing checkpoint (row, ref, context) as it was; after it, nothing can undo the turn.
         made["staged"] = True
         store.stage(sid, turn, sha, context)
+        made["published"] = set()
+        store.publish(sid, turn, sha, made["published"])
         stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
         capped = self.db.write(self._record, sid, turn, sha, head, branch, stale)
-        made["recorded"] = True
-        store.publish(sid, turn, sha)                       # replaces a rewound-past ref and context of this turn
-        store.delete(sid, [t for t in stale + capped if t != turn])
-        if stale or capped:
-            store.reclaim()
-        if not self._within_quota(s, store, sid, turn):     # the account grew meanwhile; its quota check refuses writes
-            log.warning("checkpoint %s/%s kept although the account is still over its quota", sid, turn)
+        self._tidy(s, store, sid, turn, [t for t in stale + capped if t != turn])
         return {"turn": turn, "head": head[:12]}
 
+    def _tidy(self, s: dict, store: Store, sid: str, turn: int, superseded: list[int]) -> None:
+        """After the record commits: delete what it superseded and keep within quota. Best effort, never raising,
+        and never undoing the new turn: a failure here only costs disk."""
+        try:
+            store.drop_replaced(sid, turn)
+            store.delete(sid, superseded)
+            store.reclaim()
+            if not self._within_quota(s, store, sid, turn):     # the account grew meanwhile; its quota check refuses writes
+                log.warning("checkpoint %s/%s kept although the account is still over its quota", sid, turn)
+        except Exception as e:      # noqa: BLE001 (the turn is recorded; what is left costs disk, not correctness)
+            log.warning("checkpoint %s/%s kept, but tidying after it failed: %s", sid, turn, e,
+                        exc_info=not isinstance(e, (GitError, OSError, subprocess.SubprocessError)))
+
     def _discard(self, sid: str, made: dict) -> None:
-        """Remove what a failed `_take` left behind. Once recorded, the turn's row replaced any rewound-past one of
-        the same number, so its ref and context go too; before that only the staged names exist. Unnamed objects
-        are pruned."""
+        """Remove what a failed `_take` left behind, before its record committed: the staged names, and whatever
+        `publish` did (putting back a rewound-past checkpoint it set aside). Unnamed objects are pruned."""
         store = made.get("store")
         if store is None:
             return
         try:
             if made.get("staged"):
-                store.unstage(sid, made["turn"])
-            if made.get("recorded"):
-                self.db.write(self._unrecord, sid, made["turn"])
-                store.delete(sid, [made["turn"]])
+                store.unpublish(sid, made["turn"], made.get("published", set()))
             if made.get("sha"):
                 store.reclaim()
         except Exception as e:      # noqa: BLE001 (best effort: what is left costs disk, not correctness of take)
             log.error("could not clean up the failed checkpoint %s/%s: %s", sid, made.get("turn"), e)
-
-    def _unrecord(self, sid: str, turn: int) -> None:
-        """One transaction (pass to `db.write`): undo `_record`'s row and turn number."""
-        self.db.delete_checkpoints(sid, [turn])
-        s = self.db.get_session(sid)
-        if s is not None and s.get("turn_seq") == turn:
-            self.db.update_session(sid, turn_seq=turn - 1)
 
     @staticmethod
     def _skipped(sid: str, reason: str) -> dict:
