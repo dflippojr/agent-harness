@@ -115,6 +115,24 @@ def test_local_session_sends_only_app_tools_and_denies_a_builtin_the_model_tries
         wait_for(lambda: client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["answer"] == "Still $120.")
 
 
+def test_local_session_answers_the_hosted_alias_instead_of_leaving_it_pending(tmp_path):
+    """The policy allows mcp__harness__<tool>, but locally it is no tool name: the call must still get a result."""
+    steps = [Completion(tool_calls=[call("mcp__harness__get_balance", 0, account="checking")]),
+             Completion(content="I could not check the balance.")]
+    client, m, _ = _client(tmp_path, steps)
+    with client:
+        auth, _ = _app(client)
+        sid = client.post("/api/v1/sessions", headers=auth, json={
+            "prompt": "How much is in checking?", "tools_only": True, "tools": [BALANCE]}).json()["id"]
+        done = wait_for(lambda: (lambda d: d if d["status"] == "done" else None)(
+            client.get(f"/api/v1/sessions/{sid}", headers=auth).json()))
+        assert done["answer"] == "I could not check the balance."
+        assert client.get(f"/api/v1/sessions/{sid}/tool_calls", headers=auth).json() == []
+        result = next(c for c in m.db.get_session(sid)["context"]
+                      if c.get("tool_call_id") == "c0-mcp__harness__get_balance")
+        assert "unknown tool 'mcp__harness__get_balance'" in result["content"]
+
+
 def test_tools_only_sessions_are_the_creating_apps_alone(tmp_path):
     client, m, _ = _client(tmp_path, [Completion(content="hi")])
     with client:

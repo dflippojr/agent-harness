@@ -1719,7 +1719,11 @@ class Runner:
         schemas = {t["function"]["name"]: t for t in self.tool_schemas(s, ws)}
         if name not in schemas and tools_only:  # recorded as a policy denial; never run
             self._bump(sid, "invalid_tool_calls")
-            await self._authorize(s, call, name, args, ws)
+            if await self._authorize(s, call, name, args, ws) is None:
+                # The policy allows the hosted alias (mcp__harness__<tool>), but it is no local tool name: answer it
+                # so the call is resolved instead of left pending.
+                await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
+                                                     f"{', '.join(schemas)}.", ok=False)
             return None, None
         if name not in schemas:
             self._bump(sid, "invalid_tool_calls")
