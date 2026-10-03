@@ -841,14 +841,14 @@ def test_scheduler_gpu_hold_preserves_global_fifo(tmp_path):
 def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
     client, _ = household(tmp_path)
     with client:
-        js = client.get("/static/app.js").text
-        assert "function isMember()" in js
+        session_js = client.get("/static/lib/session.mjs").text
+        assert "const isMember = " in session_js
         actions_js = client.get("/static/pages/actions.mjs").text
         assert "accountsCard" in actions_js
         assert "Household member" in client.get("/static/pages/profile.mjs").text
-        assert "function ownerSurface()" in js
-        assert 'if (isMember()) return "app";' in js
-        assert 'agentHarnessWeb.url("/events", ownerSurface())' in js
+        assert "function ownerSurface()" in session_js
+        assert 'if (isMember()) return "app";' in session_js
+        assert 'agentHarnessWeb.url("/events", ownerSurface())' in client.get("/static/lib/stream.mjs").text
         accounts_js = actions_js.split("async function accountsCard")[1].split("async function viewActions")[0]
         assert "Delete" not in accounts_js
         create_member(client, ALICE, "Alice")

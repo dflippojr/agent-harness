@@ -253,7 +253,7 @@ const sandbox = createContext({
   decodeURIComponent, undefined,
 });
 
-runApp(sandbox);
+await runApp(sandbox);
 
 process.on("unhandledRejection", (err) => {
   console.error(err);

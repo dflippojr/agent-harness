@@ -250,7 +250,7 @@ const sandbox = createContext({
   undefined,
 });
 
-runApp(sandbox);
+await runApp(sandbox);
 
 const waitForCard = async () => {
   for (let i = 0; i < 40; i++) {

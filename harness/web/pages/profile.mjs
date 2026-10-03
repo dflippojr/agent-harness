@@ -3,6 +3,7 @@
 // imports under plain Node and never reaches into another page.
 import { ago, pluralize } from "../lib/format.mjs";
 import { md } from "../lib/markdown.mjs";
+import { showSecretOnce as showSecret } from "../lib/secret.mjs";
 
 export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, toast, go, route,
   daemonSettingsCard, browser }) {
@@ -788,14 +789,8 @@ function memoryCard() {
   return h("div", { class: "card" }, body);
 }
 
-// Shows a secret exactly once, with a Copy button and a Done button that reloads the card.
-function showSecretOnce(form, load, intro, secret, copyLabel) {
-  const field = h("input", { type: "text", readonly: true, value: secret, onclick: (e) => e.target.select() });
-  fill(form, h("p", { class: "small" }, intro), field,
-    h("div", { class: "row", style: "margin-top:8px" },
-      h("button", { class: "btn", onclick: () => copyToClipboard(secret, () => field.select()) }, copyLabel),
-      h("button", { class: "btn", onclick: load }, "Done")));
-}
+// Shows a secret exactly once (lib/secret.mjs), copying through this page's clipboard helper.
+const showSecretOnce = (form, load, intro, secret, copyLabel) => showSecret(form, load, intro, secret, copyLabel, copyToClipboard);
 
 function endpointCard(me) {
   const base = me.public_url || location.origin;

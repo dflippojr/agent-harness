@@ -253,7 +253,7 @@ const sandbox = createContext({
   undefined,
 });
 
-runApp(sandbox);
+await runApp(sandbox);
 await sleep(400);
 const paths = log.map((e) => `${e.method} ${e.path}`);
 const first = (p) => log.find((e) => e.path === p);

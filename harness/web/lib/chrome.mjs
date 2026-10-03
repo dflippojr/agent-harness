@@ -1,0 +1,110 @@
+// The app's persistent chrome (#258): header bar, floating action button, toast, connection dot, guest banner and the
+// repaint hooks for the installed iOS app. mountChrome() takes the shell elements and browser globals as arguments and
+// registers the window/document listeners when called, so importing this module touches nothing and works under plain Node.
+import { profileIconHidden } from "./layout.mjs";
+import { pageMetrics, scrollPage } from "./session-ui.mjs";
+
+export function mountChrome({ els, browser, session }) {
+  const { $app, $title, $back, $conn, $feature, $profileIcon, $fabHost, $fab } = els;
+  const { window, document } = browser;
+  const { isGuest, isMember } = session;
+  let barPaintFrame = 0;
+  let barPaintPhase = false;
+  let pagePaintFrame = 0;
+  let pagePaintPhase = false;
+
+  function layoutBar() {
+    const bar = document.getElementById("bar");
+    const chrome = document.querySelector(".session-chrome");
+    if (bar) document.documentElement.style.setProperty("--bar-h", `${bar.offsetHeight}px`);
+    document.documentElement.style.setProperty("--session-chrome-h", `${chrome ? chrome.offsetHeight : 0}px`);
+  }
+
+  function repaintBar() {
+    cancelAnimationFrame(barPaintFrame);
+    barPaintFrame = requestAnimationFrame(() => {
+      const bar = document.getElementById("bar");
+      barPaintPhase = !barPaintPhase;
+      bar.classList.toggle("paint-refresh", barPaintPhase);
+      layoutBar();
+    });
+  }
+
+  // #81: after back navigation the installed iOS app can leave the upper part of the page unpainted until a scroll
+  // invalidates it. Like repaintBar(), alternate a sub-pixel transform on the page content (and re-clamp the scroll
+  // position, since a long subpage's restored offset can exceed the shorter page's height) once a route has rendered.
+  function repaintPage() {
+    cancelAnimationFrame(pagePaintFrame);
+    pagePaintFrame = requestAnimationFrame(() => {
+      pagePaintPhase = !pagePaintPhase;
+      $app.classList.toggle("paint-refresh", pagePaintPhase);
+      const { y, viewH, pageH } = pageMetrics(browser); // the cross-engine measurements the jump buttons use
+      if (y > pageH - viewH) scrollPage(pageH - viewH, browser);
+    });
+  }
+
+  function setHeader(feature, pageTitle = "", { page = false } = {}) {
+    if ([...$feature.options].some((o) => o.value === feature)) $feature.value = feature;
+    $feature.hidden = true;
+    $profileIcon.hidden = profileIconHidden($back.hidden, page);
+    $title.textContent = pageTitle;
+    $title.hidden = !pageTitle;
+    document.getElementById("bar").classList.toggle("page", page);
+    repaintBar();
+  }
+
+  function showFab(href, label) {
+    if (isGuest()) return;
+    $fab.href = href;
+    $fab.textContent = label;
+    $fabHost.hidden = false;
+  }
+
+  function toast(text, ms = 2600) {
+    const t = document.getElementById("toast");
+    t.textContent = text;
+    t.hidden = false;
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => { t.hidden = true; }, ms);
+  }
+
+  function setConnLive(on) {
+    $conn.classList.toggle("live", !!on);
+  }
+
+  function paintGuestChrome() {
+    const banner = document.getElementById("guest-banner");
+    const guest = isGuest();
+    const member = isMember();
+    document.documentElement.classList.toggle("guest", guest);
+    document.documentElement.classList.toggle("member", member);
+    if ($feature) {
+      for (const opt of $feature.options) {
+        if (opt.value === "jobs" || opt.value === "images") opt.hidden = member || guest;
+      }
+      if (member && ($feature.value === "jobs" || $feature.value === "images")) $feature.value = "agents";
+    }
+    if (!banner) return;
+    if (!guest) {
+      banner.hidden = true;
+      banner.textContent = "";
+      return;
+    }
+    const until = session.getMe().guest_until;
+    const when = until ? new Date(until) : null;
+    const ends = when && !Number.isNaN(when.getTime())
+      ? ` Ends ${when.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}.`
+      : "";
+    banner.textContent = `Demo access — look around only.${ends}`;
+    banner.hidden = false;
+  }
+
+  window.addEventListener("resize", repaintBar);
+  window.addEventListener("orientationchange", repaintBar);
+  window.addEventListener("pageshow", repaintBar);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintBar(); });
+  window.addEventListener("pageshow", repaintPage);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintPage(); });
+
+  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnLive, paintGuestChrome };
+}

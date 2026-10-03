@@ -264,7 +264,7 @@ const sandbox = createContext({
   agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL, Node, Event, JSON, Date, Math, Number, String, Boolean, Array, Object,
   Set, Map, Promise, Error, parseInt, encodeURIComponent, decodeURIComponent, undefined,
 });
-runApp(sandbox);
+await runApp(sandbox);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (pred, label, ms = 2000) => {

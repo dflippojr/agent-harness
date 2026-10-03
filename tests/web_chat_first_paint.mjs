@@ -239,7 +239,7 @@ const sandbox = createContext({
   undefined,
 });
 
-runApp(sandbox);
+await runApp(sandbox);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

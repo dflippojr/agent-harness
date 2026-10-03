@@ -89,6 +89,10 @@ def test_web_app_and_guard(tmp_path):
     with client:
         assert "<title>Agent Harness Web</title>" in client.get("/").text
         js = client.get("/static/app.js").text
+        chrome_js = client.get("/static/lib/chrome.mjs").text
+        router_js = client.get("/static/lib/router.mjs").text
+        drawer_js = client.get("/static/lib/drawer.mjs").text
+        warm_js = client.get("/static/lib/warm-model.mjs").text
         actions_js = client.get("/static/pages/actions.mjs").text
         profile_js = client.get("/static/pages/profile.mjs").text
         new_task_js = client.get("/static/pages/new-task.mjs").text
@@ -117,16 +121,16 @@ def test_web_app_and_guard(tmp_path):
         assert 'id="bar"' in client.get("/").text
         assert 'id="feature-nav"' in client.get("/").text
         assert "harness.textSize" in client.get("/").text
-        assert "paintGuestChrome" in js
-        assert "isGuest()" in js
+        assert "paintGuestChrome" in chrome_js
+        assert "isGuest()" in chrome_js
         css = client.get("/static/style.css").text
         assert "safe-area-inset-top, 0px) + 18px" in css
         assert "-webkit-transform: translate3d(0, 0, 0)" in css
         assert "#bar.paint-refresh" in css
         assert "#bar > *" in css
-        assert 'window.addEventListener("pageshow", repaintBar)' in js
-        assert 'window.addEventListener("orientationchange", repaintBar)' in js
-        assert "if (!document.hidden) repaintBar()" in js
+        assert 'window.addEventListener("pageshow", repaintBar)' in chrome_js
+        assert 'window.addEventListener("orientationchange", repaintBar)' in chrome_js
+        assert "if (!document.hidden) repaintBar()" in chrome_js
         assert ".session-chrome" in css
         assert ".jump-top" in css
         assert ".swatch.split" in css
@@ -179,11 +183,11 @@ def test_web_app_and_guard(tmp_path):
         assert 'h("span", {}, "Duration:")' in actions_js
         assert 'duration.disabled = isGuest() || !g.manual' in actions_js
         assert "function viewActions" in actions_js
-        assert 'go(`#/actions/${parts[1]}`, true)' in js
+        assert 'go(`#/actions/${parts[1]}`, true)' in router_js
         assert actions_js.index('["resources", "Resources"]') < actions_js.index('["accounts", "Accounts"]')
         assert actions_js.index('["accounts", "Accounts"]') < actions_js.index('["remote-control", "Claude Remote Control"]')
         assert actions_js.index('["remote-control", "Claude Remote Control"]') < actions_js.index('["disk", "Disk"]')
-        assert 'nav === "actions" && !isOwner()' in js
+        assert 'nav === "actions" && !isOwner()' in drawer_js
         assert 'href: "#/profile/remote-control"' not in js
         assert 'href: "#/profile/disk"' not in js
         assert 'data-nav="actions"' in client.get("/").text
@@ -197,7 +201,7 @@ def test_web_app_and_guard(tmp_path):
         assert 'api("/skills/enabled")' in new_task_js
         assert "Install hash" in profile_js
         assert "confirmGpuQueue" in js
-        assert "gpu.manual" in js
+        assert "gpu.manual" in warm_js
         assert "picker.hidden = !picker.hidden" not in js
         assert "if (holding)" in sessions_js
         assert 'id="fab-host"' in client.get("/").text

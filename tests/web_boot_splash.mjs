@@ -4,13 +4,12 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import { startBoot } from "../harness/web/lib/boot.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const html = readFileSync(join(root, "harness/web/index.html"), "utf8");
 const css = readFileSync(join(root, "harness/web/style.css"), "utf8");
-const app = readFileSync(join(root, "harness/web/app.js"), "utf8");
 const inline = html.match(/<script>\s*(\/\/ Runs before the module:[\s\S]*?)<\/script>/)[1];
-const boot = app.slice(app.lastIndexOf("const bootCompatible = checkCompatibility()"));
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -66,9 +65,8 @@ async function bootScenario({ compatible = true, user = {}, failure = null, time
       return compatible;
     },
     fetchMe: async () => user,
+    adoptMe() {},
     paintGuestChrome() {},
-    isGuest: () => user?.role === "guest",
-    warmModel() {},
     loadProfileIcon: async () => {},
     applyAppIcon() {}, readAppIcon() { return "profile"; },
     route: async () => {
@@ -77,8 +75,7 @@ async function bootScenario({ compatible = true, user = {}, failure = null, time
       painted = true;
     },
   };
-  // Drop only the chain's `void` so the script's completion value is the production chain's final promise.
-  const done = runInNewContext(boot.replace("void bootCompatible.then", "bootCompatible.then"), context);
+  const done = startBoot(context);
   const outcome = done.then(() => null, (error) => error);
   for (let i = 0; i < 20; i++) await Promise.resolve();
   if (!compatible || !user || failure) {
