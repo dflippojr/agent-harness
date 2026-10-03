@@ -18,6 +18,7 @@ import httpx
 
 from .config import Config
 from .db import Database
+from .policy import TOOLS_ONLY
 from .settings import frozen_app_defaults, use_live_app_settings
 
 log = logging.getLogger("harness.notify")
@@ -75,6 +76,8 @@ class Notifier:
             session = self.db.get_session(sid)
             if session and session.get("kind") == "chat":
                 return  # Chat replies are read live, not pushed
+            if session and session.get("kind") == TOOLS_ONLY:
+                return  # an App-tools-only session belongs to its App alone: none of it reaches the owner (#329)
             if session and (session.get("owner_id") or "owner") != "owner":
                 return  # household members do not receive owner ntfy notifications
         try:

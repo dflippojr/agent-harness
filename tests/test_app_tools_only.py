@@ -133,6 +133,25 @@ def test_local_session_answers_the_hosted_alias_instead_of_leaving_it_pending(tm
         assert "unknown tool 'mcp__harness__get_balance'" in result["content"]
 
 
+def test_owner_phone_never_gets_a_tools_only_sessions_events(tmp_path):
+    """run_finished carries the title and answer: a tools-only session's must not reach the owner's ntfy."""
+    from harness.notify import Notifier
+    client, m, _ = _client(tmp_path, [Completion(content="Checking has $120."), Completion(content="hi")])
+    with client:
+        auth, _ = _app(client)
+        sid = client.post("/api/v1/sessions", headers=auth, json={
+            "prompt": "How much is in checking?", "tools_only": True, "tools": [BALANCE]}).json()["id"]
+        wait_for(lambda: client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["status"] == "done")
+        owner = client.post("/sessions", json={"prompt": "hello", "project": "scratch"}).json()
+        wait_for(lambda: client.get(f"/sessions/{owner['id']}").json()["status"] == "done")
+    m.cfg.notify.enabled = True
+    notifier = Notifier(m.cfg, m.db)
+    notifier.listener({"type": "run_finished", "session_id": sid, "data": {"answer": "$120"}})
+    assert notifier.queue.empty()
+    notifier.listener({"type": "run_finished", "session_id": owner["id"], "data": {"answer": "hi"}})
+    assert notifier.queue.qsize() == 1
+
+
 def test_tools_only_sessions_are_the_creating_apps_alone(tmp_path):
     client, m, _ = _client(tmp_path, [Completion(content="hi")])
     with client:
