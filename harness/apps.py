@@ -32,6 +32,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from .api import RouteTable, mgr, sse
 from .fileops import ToolError
 from .manager import HarnessError, public_approval
+from .policy import TOOLS_ONLY
+from .warmup import LOW_MEMORY, PAUSED
 from . import compat
 
 NO_SUCH_SESSION = "no session matches that id"
@@ -40,6 +42,7 @@ log = logging.getLogger("harness.apps")
 
 API_VERSION = "1.13"
 SESSIONS_ALL = "sessions:all"
+MODELS_WARM = "models:warm"
 SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     SESSIONS_ALL: "read every session, not only the app's own",
@@ -47,6 +50,7 @@ SCOPES = {
     "images": "generate images, upscale them, and read them",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
     "remote_control": "start and stop Claude Code Remote Control servers in project folders",
+    MODELS_WARM: "start loading the local model ahead of a chat (refused while the GPU or RAM guard says no)",
 }
 NO_SUCH_IMAGE = "no such image"
 TOOL_NAME = re.compile(r"^[a-zA-Z]\w{2,48}$", re.ASCII)
@@ -127,13 +131,17 @@ class AppTool(BaseModel):
 
 class CreateAppSession(BaseModel):
     prompt: str
-    project: str = "scratch"
+    project: str | None = None
     backend: str | None = None
     model: str | None = None
     title: str | None = None
     context: list[ContextBlock] = []
     tools: list[AppTool] = []
     metadata: dict = {}
+    tools_only: bool = Field(default=False, description=(
+        "Start an App-tools-only session: only the tools sent here, no workspace, project, built-in or CLI tools. "
+        "Needs an App token, at least one tool and no project; backends without support refuse with "
+        "app_tools_only_unsupported."))
 
 
 class AppSessionUpdate(BaseModel):
@@ -230,6 +238,7 @@ class BackendResponse(BaseModel):
     billing_warning: str = ""
     usage_by_source: dict[str, dict] = Field(default_factory=dict)
     provider_policy: dict | None = None
+    app_tools_only: bool = False
 
 
 class ProjectResponse(BaseModel):
@@ -477,16 +486,20 @@ def auth(request: Request, scope: str) -> dict:
 
 
 def _owned_session(request: Request, key: dict, ref: str) -> dict:
-    """Session visible to this principal's account, or 404. Members stop here."""
+    """Session visible to this principal's account, or 404. Members stop here. An App-tools-only session exists only
+    for the App that started it (#329): every other token, the owner's included, gets a 404."""
     m = mgr(request)
     user_id = key["user_id"] if key.get("kind") == "member" else "owner"
+    app = key.get("kind") == "app"
     try:
-        s = m.get(ref, user_id=user_id, kind="agent")
+        s = m.get(ref, user_id=user_id, kind=None if app else "agent")
     except HarnessError as e:
         if e.status in (400, 404):
             raise HarnessError(404, NO_SUCH_SESSION) from e
         raise
-    if s.get("owner_id", "owner") != user_id or (s.get("kind") or "agent") != "agent":
+    kind = s.get("kind") or "agent"
+    if (s.get("owner_id", "owner") != user_id or kind not in ("agent", TOOLS_ONLY)
+            or (kind == TOOLS_ONLY and not (app and s.get("app_id") == key["id"]))):
         raise HarnessError(404, NO_SUCH_SESSION)
     return s
 
@@ -604,7 +617,7 @@ async def pair_runner(body: RunnerPairRequest, request: Request):
 @route_table.get("/api/v1", response_model=AppRootResponse)
 async def api_root(request: Request):
     m = mgr(request)
-    from .backend_state import view as backend_view
+    from .backend_state import local_view, view as backend_view
     from .config import module_effective
     backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, False, None, False)
                                            for name in m.cfg.backends]))
@@ -612,7 +625,8 @@ async def api_root(request: Request):
             **compat.metadata(m.cfg.capabilities()),
             "projects": [],
             "models": list(m.cfg.models), "backends": backends, "features": {
-                "app_tools": True, "context": True, "events": "sse", "images": m.images is not None,
+                "app_tools": True, "app_tools_only": True,
+                "app_tools_only_backends": [b["name"] for b in (local_view(m), *backends) if b["app_tools_only"]], "context": True, "events": "sse", "images": m.images is not None,
                 "image_upscale": bool(m.images is not None),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                 "runner_pairing": bool(m.cfg.runners),
@@ -795,12 +809,19 @@ async def api_models_status(request: Request):
 async def api_models_warm(request: Request):
     m = mgr(request)
     key = auth(request, "sessions")
-    if key.get("kind") == "app":
-        raise HarnessError(403, "app tokens cannot warm the local model")
+    app = key.get("kind") == "app"
+    if app and MODELS_WARM not in key["scope_set"]:
+        raise HarnessError(403, f"this token lacks the {MODELS_WARM!r} scope")
     if not m.cfg.modules.local_model:
         raise HarnessError(400, "the local model is disabled by this service profile")
     model = m.cfg.models[m.cfg.default_model]
-    return {"name": model.name, "state": await m.warmer.warm(model)}
+    state = await m.warmer.warm(model)
+    # An App is refused, never queued, while a guard holds the model back (#329); the owner's app shows the state.
+    if app and state == PAUSED:
+        raise HarnessError(409, "the GPU guard has the GPU for other work; the local model can't load now", "gpu_held")
+    if app and state == LOW_MEMORY:
+        raise HarnessError(409, "RAM on the server is low; the local model won't load now", "low_memory")
+    return {"name": model.name, "state": state}
 
 
 @route_table.get("/api/v1/profile")
@@ -977,9 +998,15 @@ async def create_session(body: CreateAppSession, request: Request):
     blocks = [b.model_dump() for b in body.context]
     if sum(len(b["content"]) for b in blocks) > MAX_CONTEXT_CHARS:
         raise HarnessError(413, f"context is larger than {MAX_CONTEXT_CHARS} characters")
-    s = m.create(body.prompt, project=body.project, backend=backend, model=body.model, title=body.title,
-                 app=app, app_context=context_text(key["name"], blocks) if blocks else "", app_tools=body.tools,
-                 app_metadata=body.metadata, owner_id=user_id)
+    if body.tools_only:
+        if app is None:
+            raise HarnessError(403, "only an App token can start an App-tools-only session")
+        if body.project:
+            raise HarnessError(400, "an App-tools-only session has no project; leave project out")
+    s = m.create(body.prompt, project=body.project or "scratch", backend=backend, model=body.model,
+                 title=body.title, app=app, app_context=context_text(key["name"], blocks) if blocks else "",
+                 app_tools=body.tools, app_metadata=body.metadata, owner_id=user_id,
+                 kind=TOOLS_ONLY if body.tools_only else "agent")
     return view(m, s)
 
 
@@ -991,8 +1018,12 @@ async def list_sessions(request: Request, limit: int = 50):
         return [m.list_summary(r) for r in m.db.list_sessions(limit, owner_id=key["user_id"])]
     rows = m.db.list_sessions(limit * 5, owner_id="owner")
     mine = [r for r in rows if owner_key(key) or SESSIONS_ALL in key["scope_set"]
-            or r.get("app_id") == key["id"]][:limit]
-    return [m.list_summary(r) for r in mine]
+            or r.get("app_id") == key["id"]]
+    if key.get("kind") == "app":  # an App's tools-only sessions are listed to that App alone (#329)
+        mine += [r for r in m.db.list_sessions(limit * 5, owner_id="owner", kind=TOOLS_ONLY)
+                 if r.get("app_id") == key["id"]]
+        mine.sort(key=lambda r: r["created_at"], reverse=True)
+    return [m.list_summary(r) for r in mine[:limit]]
 
 
 @route_table.get("/api/v1/sessions/{ref}", response_model=SessionResponse)

@@ -37,9 +37,10 @@ class ClaudeSession:
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = ""):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False):
         self.session_id = session_id
         self.workspace = workspace.resolve()
+        self.tools_only = tools_only  # an App-tools-only session (#329): no built-in tools, only the MCP server's
         self.backend = backend
         self.sandbox = sandbox
         self.system_prompt = system_prompt
@@ -82,9 +83,13 @@ class ClaudeSession:
             self.backend.image,
             "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
-            "--permission-mode", self.backend.permission_mode, "--model", self.model,
-            "--append-system-prompt", self.system_prompt,
+            "--permission-mode", "default" if self.tools_only else self.backend.permission_mode, "--model", self.model,
+            "--system-prompt" if self.tools_only else "--append-system-prompt", self.system_prompt,
         ]
+        if self.tools_only:
+            # "" turns off every built-in tool (Bash, Read, Edit, WebFetch, Task...); MCP tools stay. Skills and slash
+            # commands go too. can_use_tool still sees every call and denies anything but the App's tools.
+            args += ["--tools", "", "--disable-slash-commands"]
         if self.backend_session_id:
             args += ["--resume", self.backend_session_id]
         if self.mcp:
