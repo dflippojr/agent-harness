@@ -949,7 +949,7 @@ def test_explicit_empty_skills_excludes_allowlisted(tmp_path):
         enabled = client.get("/skills/enabled", headers=headers).json()
         assert enabled[0]["slug"] == "commit-style"
         assert "scratch" in enabled[0]["projects"]
-        js = client.get("/static/app.js").text
+        js = client.get("/static/pages/new-task.mjs").text
         assert "skill-opt" in js
         assert "Checked skills are injected" in js
 
