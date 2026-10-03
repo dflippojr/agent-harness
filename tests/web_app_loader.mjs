@@ -7,6 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const web = join(dirname(fileURLToPath(import.meta.url)), "..", "harness", "web");
 
 export async function runApp(sandbox) {
+  // Properties of the global object are free identifiers in ES modules too, so app.js and lib/ code that reads
+  // `document`, `window` or `location` as bare names sees these stubs (no vm context needed).
   for (const [key, value] of Object.entries(sandbox)) {
     if (globalThis[key] === value) continue;
     Object.defineProperty(globalThis, key, { value, configurable: true, writable: true, enumerable: true });
