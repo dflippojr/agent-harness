@@ -89,7 +89,7 @@ class Checkpointer:
         made["published"] = set()
         store.publish(sid, turn, sha, made["published"])
         stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
-        capped = self.db.write(self._record, sid, turn, sha, head, branch, stale)
+        capped = self.db.for_session(sid).write(self._record, sid, turn, sha, head, branch, stale)
         self._tidy(s, store, sid, turn, [t for t in stale + capped if t != turn])
         return {"turn": turn, "head": head[:12]}
 

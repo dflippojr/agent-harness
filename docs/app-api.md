@@ -60,6 +60,30 @@ include `error: {code, message, retryable}`; `detail` remains for compatibility.
 only that app's registered settings and effective caps. Owner, device, runner, guest, and anonymous credentials
 cannot impersonate this surface. The allowlist and cap rules are in [`config-registry.md`](config-registry.md).
 
+## Where an App's data lives
+
+Each App has its own SQLite store and data folder, `<data_dir>/apps/<app_id>/harness.sqlite3`, created the first time
+the App's token starts or reads a session. An App's sessions (agent and App-tools-only), their events, tool calls and
+results, approvals, artifacts, checkpoints, review drafts and search index are written only to that store. The main
+store (`<data_dir>/harness.sqlite3`) has no row of them. Another App's store has none either. The main store keeps
+the App registry (ids, token hashes, scopes), the per-App usage counters, provider credentials, and the owner's and
+members' sessions. Session ids stay unique across all stores. The `/api/v1` responses are the same as before.
+
+- **Same schema.** Every store runs the same versioned migrations as the main store
+  ([`migrations.md`](migrations.md)) and has its own writer thread and read pool (#294).
+- **Opened lazily, closed when idle.** A store opens on first use and closes after 5 minutes without one
+  (`APP_STORE_IDLE_SECONDS` in `harness/app_stores.py`): its writer thread stops and its read connections close. The
+  next call opens it again. At startup the daemon reads only the session ids from each store, without opening it.
+- **Moving older App sessions.** App sessions written before the per-App stores existed are moved at the first start
+  after the upgrade. The daemon first copies the main store to
+  `<data_dir>/pre-migration/harness-app-stores-<time>.sqlite3`. It then copies each App's sessions, with everything
+  tied to them, into that App's store and deletes them from the main store. Later starts find nothing to move and
+  make no backup.
+- **Not moved yet.** The files of an App session (its working directory, transcript and checkpoint snapshots) stay
+  under the owner's data folders for now. So do usage rows and short-lived event-stream tickets, which are metadata.
+- **Owner view unchanged for now.** Owner lists and search still cover every store in this release. Narrowing the
+  owner's view of other Apps to metadata (#330), plus delete, retention, revoke and per-App backups, come later.
+
 ## Household members on `/api/v1`
 
 An enabled Tailscale member is a human principal on the same-origin `/api/v1` surface. `GET /api/v1/me` returns

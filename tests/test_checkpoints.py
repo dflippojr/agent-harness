@@ -263,13 +263,13 @@ def test_fork_writes_through_the_writer_without_blocking_the_loop(tmp_path, monk
     async def body():
         m, s = await started(tmp_path)
         loop_thread, blocking = threading.current_thread(), []
-        real = type(m.db).write
+        real = type(m.db.main).write                                         # the Database behind the stores (#330)
 
         def spy(db, fn, *args, **kwargs):
             if threading.current_thread() is loop_thread:
                 blocking.append(getattr(fn, "__name__", repr(fn)))
             return real(db, fn, *args, **kwargs)
-        monkeypatch.setattr(type(m.db), "write", spy)
+        monkeypatch.setattr(type(m.db.main), "write", spy)
         fork = await m.fork(s["id"], 1, "carry on")
         monkeypatch.undo()
         assert blocking == []                                               # #294: awrite from async code

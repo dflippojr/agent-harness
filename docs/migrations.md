@@ -68,3 +68,11 @@ and restarting resumes from the failed step.
 
 There are no down-migrations. To roll back a release: stop the daemon, move `harness.sqlite3`, `harness.sqlite3-wal`
 and `harness.sqlite3-shm` aside, copy the `pre-migration` file to `harness.sqlite3`, and start the older harness.
+
+## Per-App stores
+
+Each App's store (`<data dir>/apps/<app_id>/harness.sqlite3`, see [App API](app-api.md#where-an-apps-data-lives))
+is a `Database` too. It runs the same steps when it opens, and a store that needs a numbered step gets its own
+`<data dir>/apps/<app_id>/pre-migration/` backup. The one-time move of older App sessions out of the main store
+backs up the main store to `<data dir>/pre-migration/harness-app-stores-<YYYYmmddTHHMMSS>.sqlite3` first. To roll
+that move back, restore that file as above and delete `<data dir>/apps/`.

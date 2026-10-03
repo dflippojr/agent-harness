@@ -24,6 +24,7 @@ from .image_archive import ImageArchive
 from .notify import Notifier
 from .warmup import ModelWarmer
 from .config import Config
+from .app_stores import SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .remote import RunnerError, RunnerHub, RunnerOffline
@@ -143,10 +144,12 @@ class HarnessError(Exception):
 
 
 class Manager:
-    def __init__(self, cfg: Config, db: Database | None = None, chat=llm.chat):
+    def __init__(self, cfg: Config, db: Database | SessionStores | None = None, chat=llm.chat):
         self.cfg = cfg
         telemetry.configure(cfg.telemetry)
-        self.db = db or Database(cfg.db_path)
+        db = db or Database(cfg.db_path)
+        # App sessions live in per-App stores under data_dir/apps (#330); everything else in the main store.
+        self.db = db if isinstance(db, SessionStores) else SessionStores(db, Path(cfg.data_dir) / "apps")
         require_owner_allowlist(cfg, self.db.member_count())
         self.bus = EventBus(self.db)
         self.scheduler = GpuScheduler(self._queue_changed, eligible=self._scheduler_eligible)
@@ -579,7 +582,7 @@ class Manager:
                                                       if app else {}), **({"job_id": job_id} if job_id else {}),
                                                    **({"skills": session["skills"]} if session["skills"] else {})})
             self.bus.emit(sid, "user_message", {"content": prompt})
-        self.db.write(insert_created)
+        self.db.for_app(session["app_id"]).write(insert_created)
 
     @staticmethod
     def _create_scope(opts: CreateOptions, prompt: str, project: str, target: str | None) -> tuple:
@@ -873,7 +876,7 @@ class Manager:
                 self.bus.emit(sid, "status", {"status": "queued"})
             # With the commit, not after the await: a request cancelled mid-write still gets its run.
             self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))
-        await self.db.awrite(deliver)
+        await self.db.for_session(sid).awrite(deliver)
         return self.db.get_session(sid)
 
     def original_prompt(self, sid: str) -> str:
@@ -919,7 +922,7 @@ class Manager:
             self.operations[sid] = op
             claimed = True
         try:
-            await self.db.awrite(claim)
+            await self.db.for_session(sid).awrite(claim)
             yield
         finally:
             if claimed:
@@ -957,7 +960,7 @@ class Manager:
                 cp.commit_rewind(sid, int(turn), done.saved)
                 self.db.after_commit(lambda: self.unsettled.discard(sid))
             try:
-                await self.db.awrite(record)
+                await self.db.for_session(sid).awrite(record)
             except Exception as e:  # noqa: BLE001 - any failure to record is undone, then raised
                 error, undone = await asyncio.to_thread(cp.undo_rewind, done, e)
                 if not undone:
@@ -976,7 +979,7 @@ class Manager:
             run = self.db.get_session(sid)["run"]
             self.db.update_session(sid, run={**run, checkpoints.UNSETTLED: time.time()})
         try:
-            await self.db.awrite(mark)
+            await self.db.for_session(sid).awrite(mark)
         except Exception:  # noqa: BLE001 - the in-memory mark still refuses sends
             log.exception("could not record the failed rewind of %s", sid)
 
@@ -1044,7 +1047,7 @@ class Manager:
                 if hosted else {})})
         try:
             await asyncio.to_thread(cp.store(session).save_context, int(turn), base_context, carried)
-            await self.db.awrite(insert_fork)
+            await self.db.for_session(sid).awrite(insert_fork)
         except Exception:              # nothing recorded (the write is one transaction): leave no half-made fork
             remove_tree(workspace)
             remove_tree(cp.store(session).base)
@@ -1462,7 +1465,7 @@ class Manager:
             self.db.update_session(sid, review=state, review_detail=detail)
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail, "head": head[:12]})
             self.db.after_commit(lambda: self.runner.write_transcript(sid))  # even if the request is cancelled
-        await self.db.awrite(record_review)
+        await self.db.for_session(sid).awrite(record_review)
         return self.db.get_session(sid)
 
     async def _review_local(self, sid: str, s: dict, project, ws: Path, action: str) -> tuple[str, str]:
@@ -1534,7 +1537,7 @@ class Manager:
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail,
                                           "head": result.get("head", "")[:12]})
             self.db.after_commit(lambda: self.runner.write_transcript(sid))  # even if the request is cancelled
-        await self.db.awrite(record_review)
+        await self.db.for_session(sid).awrite(record_review)
         return self.db.get_session(sid)
 
     def decide_by_token(self, token: str, approve: bool) -> dict:
@@ -1562,7 +1565,7 @@ class Manager:
             if not self.db.decide_approval(approval_id, status, note):
                 raise HarnessError(409, f"approval is already {self.db.get_approval(approval_id)['status']}")
             self.bus.emit(sid, "approval_decided", {"id": approval_id, "status": status, "note": note})
-        self.db.write(decide)
+        self.db.for_session(sid).write(decide)
         event = self.runner.approval_events.get(approval_id)
         if event:
             event.set()
@@ -1577,7 +1580,7 @@ class Manager:
         def clear_taint() -> None:
             self.db.update_session(sid, taint=[])
             self.bus.emit(sid, "taint_cleared", {"cleared": [t["origin"] for t in cleared]})
-        self.db.write(clear_taint)
+        self.db.for_session(sid).write(clear_taint)
         return self.db.get_session(sid)
 
     async def cancel(self, ref: str) -> dict:

@@ -425,7 +425,7 @@ class Runner:
                 self.bus.emit(sid, "approval_auto_approved", {"id": existing["id"], **(record or {})})
             else:
                 self.bus.emit(sid, "approval_requested", public)
-        self.db.write(persist_ask)
+        self.db.for_session(sid).write(persist_ask)
         return existing
 
     def _member_clone_budget(self, user_id: str) -> int | None:
@@ -455,11 +455,11 @@ class Runner:
         self.db.update_session(sid, run={**self.db.get_session(sid)["run"], END_PENDING: True})
 
     def set_status(self, sid: str, status: str, **fields) -> None:
-        self.db.write(self._status_writer(sid, status, fields))
+        self.db.for_session(sid).write(self._status_writer(sid, status, fields))
 
     async def aset_status(self, sid: str, status: str, **fields) -> None:
         """`set_status` for the event loop."""
-        await self.db.awrite(self._status_writer(sid, status, fields))
+        await self.db.for_session(sid).awrite(self._status_writer(sid, status, fields))
 
     async def _acquire(self, sid: str, front: bool = False) -> None:
         if self.scheduler.holder == sid:
@@ -594,7 +594,7 @@ class Runner:
             self.db.update_session(sid, status="waiting_target")
             self.bus.emit(sid, "status", {"status": "waiting_target"})
             self.bus.emit(sid, "target_waiting", {"target": target})
-        await self.db.awrite(waiting)
+        await self.db.for_session(sid).awrite(waiting)
         await self.hub.wait_online(target)
         status = "waiting_approval" if previous == "waiting_approval" else "queued"
 
@@ -602,7 +602,7 @@ class Runner:
             self.db.update_session(sid, status=status)
             self.bus.emit(sid, "status", {"status": status})
             self.bus.emit(sid, "target_online", {"target": target, "seconds": round(time.monotonic() - since)})
-        await self.db.awrite(online)
+        await self.db.for_session(sid).awrite(online)
         if held:
             await self._acquire(sid)
 
@@ -627,7 +627,7 @@ class Runner:
                     def wait_for_target() -> None:  # one commit, so nobody sees the status without its target
                         self._status_writer(sid, "waiting_target", {})()
                         self.bus.emit(sid, "target_waiting", {"target": ws.target, "during": name})
-                    await self.db.awrite(wait_for_target)
+                    await self.db.for_session(sid).awrite(wait_for_target)
                 elif not offline and waiting_since is not None:
                     await self.bus.aemit(sid, "target_online", {"target": ws.target,
                                                          "seconds": round(time.monotonic() - waiting_since)})
@@ -950,7 +950,7 @@ class Runner:
             self.db.update_session(sid, run=run)
             self._status_writer(sid, "waiting_limit", {})()
             self.bus.emit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
-        await self.db.awrite(wait_for_limit)
+        await self.db.for_session(sid).awrite(wait_for_limit)
 
     @staticmethod
     def _secret_marker(path: str) -> tuple[int, int] | None:
@@ -995,7 +995,7 @@ class Runner:
             current = self.db.get_session(sid)["inbox"]
             remaining = current[len(queued):] if current[:len(queued)] == queued else current
             self.db.update_session(sid, inbox=remaining)
-        await self.db.awrite(drain_inbox)
+        await self.db.for_session(sid).awrite(drain_inbox)
 
     @staticmethod
     def _cli_text(content) -> str:
@@ -1086,7 +1086,7 @@ class Runner:
             self.bus.emit(sid, "tool_result", {"id": call_id, "name": name, "ok": ok, "seconds": seconds,
                                                "output_chars": len(output),
                                                "output": truncate_middle(output, 20000)})
-        self.db.write(record_cli_tool_result)
+        self.db.for_session(sid).write(record_cli_tool_result)
 
     def _claude_delta(self, sid: str, event: dict, _tool_names: dict[str, str] | None = None) -> None:
         delta = (event.get("event") or {}).get("delta") or {}
@@ -1487,7 +1487,7 @@ class Runner:
             if failed:
                 self.bus.emit(sid, "error", failure)
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})
-        self.db.write(finish_cli_result)
+        self.db.for_session(sid).write(finish_cli_result)
 
     async def _stop_cli(self, sid: str) -> None:
         self.mcp_tokens.revoke(sid)
@@ -1577,7 +1577,7 @@ class Runner:
         def emit_turn_metrics() -> None:
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "turn_metrics", payload)
-        self.db.write(emit_turn_metrics)
+        self.db.for_session(sid).write(emit_turn_metrics)
 
     async def _commit_completion(self, s: dict, run: dict, completion, model, tools: list) -> bool:
         """Record one model reply: the context, totals and events, and whether the run is over."""
@@ -1617,7 +1617,7 @@ class Runner:
             self.db.update_session(sid, context=context, run=run, totals=totals)
             self.bus.emit(sid, "assistant", event)
             return False
-        if await self.db.awrite(commit_completion):
+        if await self.db.for_session(s["id"]).awrite(commit_completion):
             return True
         if run["idle"] >= 3:
             await self.aset_status(sid, "done", stop_reason="empty_replies")
@@ -1765,7 +1765,7 @@ class Runner:
             def quote_check() -> None:
                 self.db.update_session(sid, run=run)
                 self.bus.emit(sid, "quote_check", {"quotes": quotes})
-            await self.db.awrite(quote_check)
+            await self.db.for_session(s["id"]).awrite(quote_check)
             await self._record_result(sid, call, "finish", "Not finished yet. " + grounding.nudge(quotes), ok=False)
             await self._skip_rest(sid, rest, "Not run: fix the quotes first.")
             return False
@@ -1838,7 +1838,7 @@ class Runner:
             def workspace_ready() -> None:
                 self.db.update_session(s["id"], context=context, **info)
                 self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
-            await self.db.awrite(workspace_ready)
+            await self.db.for_session(s["id"]).awrite(workspace_ready)
         elif not s["run"].get("origin_refreshed"):
             error = await self._refresh_origin(s, ws, remote, member)
             if error:
@@ -1976,7 +1976,7 @@ class Runner:
         def add_taint() -> None:
             self.db.update_session(sid, taint=updated)
             self.bus.emit(sid, "taint_added", {"kind": kind, "origin": origin, "sources": len(updated)})
-        self.db.write(add_taint)
+        self.db.for_session(sid).write(add_taint)
 
     def _decide_rules(self, s: dict, name: str, args: dict):
         policy = self.policy(s)
@@ -2293,7 +2293,7 @@ class Runner:
                 payload.update(extra)
             self.db.update_session(sid, context=context, run=run)
             self.bus.emit(sid, "tool_result", payload)
-        await self.db.awrite(record_result)
+        await self.db.for_session(sid).awrite(record_result)
 
     def _progress_reporter(self, sid: str, event: str, base: dict):
         """on_progress callback that sends throttled ephemeral progress events for long prompts."""
@@ -2323,7 +2323,7 @@ class Runner:
                 self.bus.emit(sid, "state", {"state": run["state"]})
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "notes", {"notes": notes})
-        await self.db.awrite(update_notes)
+        await self.db.for_session(sid).awrite(update_notes)
         await self._record_result(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).", ok=True)
 
     async def _update_state_call(self, sid: str, call: dict, args: dict) -> None:
@@ -2340,7 +2340,7 @@ class Runner:
             self.bus.emit(sid, "state", {"state": payload})
             if payload["notes"]:
                 self.bus.emit(sid, "notes", {"notes": payload["notes"]})
-        await self.db.awrite(update_state)
+        await self.db.for_session(sid).awrite(update_state)
         await self._record_result(sid, call, "update_state",
                             f"State saved ({len(agent_state.dump_state(payload))} characters).", ok=True)
 
@@ -2429,7 +2429,7 @@ class Runner:
             self.db.update_session(sid, context=new_context, run=run)
             self.bus.emit(sid, "compaction", {"tier": "round_reset", "tokens_before": before,
                                               "tokens_after": after, "context_tokens": model.context_tokens})
-        self.db.write(round_reset)
+        self.db.for_session(s["id"]).write(round_reset)
         return self.db.get_session(sid)
 
     # compaction
@@ -2452,7 +2452,7 @@ class Runner:
                 if masked_chars > 0:
                     self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
                                                        "characters_saved": masked_chars})
-            await self.db.awrite(mask_results)
+            await self.db.for_session(s["id"]).awrite(mask_results)
         s = self.db.get_session(sid)
         explicit = bool(s["run"].get("pending_round_reset"))
         valid = self.has_valid_saved_state(s)
@@ -2481,7 +2481,7 @@ class Runner:
             def compact() -> None:
                 self.db.update_session(sid, context=context)
                 self.bus.emit(sid, "compaction", data)
-            await self.db.awrite(compact)
+            await self.db.for_session(s["id"]).awrite(compact)
         return self.db.get_session(sid)
 
     def _mask_used_results(self, s: dict) -> tuple[list, dict, int]:
@@ -2617,7 +2617,7 @@ class Runner:
             current = self.db.get_session(sid)
             if current and current["run"].pop(END_PENDING, None) is not None:
                 self.db.update_session(sid, run=current["run"])
-        await self.db.awrite(ended)
+        await self.db.for_session(sid).awrite(ended)
 
     def _clear_tools_only_workspace(self, s: dict) -> None:
         """An App-tools-only session's working directory is a throwaway the hosted CLI needed; it goes when the run
@@ -2659,7 +2659,7 @@ class Runner:
             self.bus.emit(sid, "run_finished", {"status": final["status"], "stop_reason": final["stop_reason"],
                                                 "answer": final["answer"], "run": run, **extra})
             return final
-        return await self.db.awrite(run_finished)
+        return await self.db.for_session(sid).awrite(run_finished)
 
     def write_transcript(self, sid: str) -> None:
         try:
@@ -2706,4 +2706,4 @@ class Runner:
             if s["review"] and reviewed and reviewed.get("head") != info["head"]:
                 self.db.update_session(sid, review="", review_detail="")  # new work since the last review action
             self.bus.emit(sid, "branch_saved", {"branch": s["branch"], **info})
-        await self.db.awrite(branch_saved)
+        await self.db.for_session(sid).awrite(branch_saved)

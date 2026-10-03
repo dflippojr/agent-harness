@@ -610,6 +610,14 @@ class Database:
     def _on_writer(self) -> bool:
         return getattr(self._local, "conn", None) is self._wconn
 
+    def for_session(self, sid: str) -> Database:
+        """The store that holds session `sid`. A lone Database holds them all; `SessionStores` routes (#330)."""
+        return self
+
+    def for_app(self, app_id: str) -> Database:
+        """The store that holds App `app_id`'s sessions: this one, unless `SessionStores` routes (#330)."""
+        return self
+
     def _submit(self, fn, *args, **kwargs) -> Future:
         if self._closed:
             raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
