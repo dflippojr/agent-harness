@@ -305,11 +305,12 @@ def _iter_comfy_python(comfy_root: Path):
 
 
 def scan_node_classes(comfy_root: Path) -> set[str]:
-    """Find `class Foo(` definitions under a portable ComfyUI tree without starting it."""
+    """Find `class Foo:` / `class Foo(Base):` definitions under a portable ComfyUI tree without starting it.
+    Core nodes (KSampler, SaveImage, UNETLoader...) are plain `class Foo:` in nodes.py."""
     found: set[str] = set()
     if not comfy_root.exists():
         return found
-    pattern = re.compile(r"^class\s+([A-Za-z_]\w*)\s*\(", re.M | re.A)
+    pattern = re.compile(r"^class\s+([A-Za-z_]\w*)\s*[(:]", re.M | re.A)
     for path in _iter_comfy_python(comfy_root):
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -696,6 +697,19 @@ def preflight_graphs(object_info: dict, *, modes: tuple[str, ...] = ("fast", "qu
     return {"ok": not missing, "missing": missing}
 
 
+def _flatten_portable(staged: Path) -> None:
+    """The official portable .7z wraps everything in one top-level folder (ComfyUI_windows_portable).
+    Lift its contents so the staged tree has production's layout."""
+    if (staged / "python_embeded").exists():
+        return
+    wrappers = [p for p in staged.iterdir() if p.is_dir() and (p / "python_embeded").is_dir()]
+    if len(wrappers) != 1:
+        return
+    for child in wrappers[0].iterdir():
+        _swap_dirs(child, staged / child.name)
+    wrappers[0].rmdir()
+
+
 def stage_comfyui(cfg, *, manifest: dict | None = None, client: httpx.Client | None = None,
                   extract=None, free_bytes=None) -> dict:
     """Download the pinned portable into <comfy>.staged without touching the production path."""
@@ -721,6 +735,7 @@ def stage_comfyui(cfg, *, manifest: dict | None = None, client: httpx.Client | N
             "Production ComfyUI was not changed."
         )
     extract(archive, staged)
+    _flatten_portable(staged)
     (staged / "harness-comfyui-release.json").write_text(
         json.dumps({"tag": pin["tag"], "sha256": pin["sha256"], "filename": pin["filename"]}, indent=2) + "\n",
         encoding="utf-8")

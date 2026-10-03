@@ -839,6 +839,128 @@ def test_staged_comfyui_validation_and_rollback(tmp_path):
     assert "flux-fast" in bad["missing"]
 
 
+def test_static_scan_finds_plain_and_subclassed_node_classes(tmp_path):
+    # Real ComfyUI core nodes are `class KSampler:` in nodes.py; newer ones subclass io.ComfyNode.
+    root = tmp_path / "ComfyUI_portable"
+    plant_comfy(root, nodes=[])
+    graphs = {n for g in ("fast", "quality", "flux-fast") for n in preflight_graphs({})["missing"][g]}
+    core = "\n".join(f"class {n}:\n    pass\n" for n in sorted(graphs) if n != "Flux2Scheduler")
+    (root / "ComfyUI" / "nodes.py").write_text(core, encoding="utf-8")
+    extras = root / "ComfyUI" / "comfy_extras"
+    extras.mkdir()
+    (extras / "nodes_flux.py").write_text("class Flux2Scheduler(io.ComfyNode):\n    pass\n", encoding="utf-8")
+    checked = validate_comfyui(cfg_for(tmp_path), root=root)
+    assert checked["graphs"]["ok"], checked["graphs"]["missing"]
+    assert checked["ok"]
+
+
+def test_stage_flattens_the_portable_archive_wrapper_folder(tmp_path):
+    # The official .7z extracts to <dest>/ComfyUI_windows_portable/{python_embeded,ComfyUI,...}.
+    cfg = cfg_for(tmp_path)
+    prod = Path(cfg.comfy_dir)
+    plant_comfy(prod)
+    (prod / "ComfyUI" / "extra_model_paths.yaml").write_text("models:\n", encoding="utf-8")
+    payload = b"fake portable archive"
+    manifest = json.loads(json.dumps(load_manifest()))
+    pin = manifest["comfyui"]["pinned_portable"]
+    pin.update(sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload))
+    staged = Path(str(prod.resolve()) + ".staged")
+    (staged.parent / pin["filename"]).write_bytes(payload)
+
+    def wrapped_extract(src, dest):
+        plant_comfy(Path(dest) / "ComfyUI_windows_portable")
+
+    stage_comfyui(cfg, manifest=manifest, extract=wrapped_extract, free_bytes=lambda p: 10 ** 12)
+    assert (staged / "python_embeded" / "python.exe").is_file()
+    assert (staged / "ComfyUI" / "main.py").is_file()
+    assert (staged / "ComfyUI" / "extra_model_paths.yaml").is_file()
+    assert not (staged / "ComfyUI_windows_portable").exists()
+    checked = validate_comfyui(cfg, root=staged)
+    assert checked["python"] and checked["main"]
+
+
+def test_flatten_leaves_flat_and_ambiguous_trees_alone(tmp_path):
+    flat = tmp_path / "flat"
+    plant_comfy(flat)
+    images_models_mod._flatten_portable(flat)
+    assert sorted(p.name for p in flat.iterdir()) == ["ComfyUI", "python_embeded"]
+
+    # Two candidate wrappers: nothing is moved, and validation then refuses the tree.
+    ambiguous = tmp_path / "ambiguous"
+    plant_comfy(ambiguous / "a")
+    plant_comfy(ambiguous / "b")
+    images_models_mod._flatten_portable(ambiguous)
+    assert sorted(p.name for p in ambiguous.iterdir()) == ["a", "b"]
+    assert not validate_comfyui(cfg_for(tmp_path), root=ambiguous)["python"]
+
+
+def test_flatten_lifts_extra_top_level_wrapper_files(tmp_path):
+    staged = tmp_path / "staged"
+    plant_comfy(staged / "ComfyUI_windows_portable")
+    (staged / "ComfyUI_windows_portable" / "run_nvidia_gpu.bat").write_text("@echo off\n", encoding="utf-8")
+    images_models_mod._flatten_portable(staged)
+    assert sorted(p.name for p in staged.iterdir()) == ["ComfyUI", "python_embeded", "run_nvidia_gpu.bat"]
+
+
+def test_flatten_refuses_to_overwrite_on_name_clash(tmp_path):
+    staged = tmp_path / "staged"
+    plant_comfy(staged / "wrapper")
+    (staged / "ComfyUI").mkdir()
+    (staged / "ComfyUI" / "keep.txt").write_text("mine", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="destination exists"):
+        images_models_mod._flatten_portable(staged)
+    assert (staged / "ComfyUI" / "keep.txt").read_text(encoding="utf-8") == "mine"
+    assert (staged / "wrapper" / "python_embeded").is_dir()
+
+
+def test_stage_extraction_error_propagates_and_leaves_production_alone(tmp_path):
+    cfg = cfg_for(tmp_path)
+    prod = Path(cfg.comfy_dir)
+    plant_comfy(prod)
+    payload = b"fake portable archive"
+    manifest = json.loads(json.dumps(load_manifest()))
+    pin = manifest["comfyui"]["pinned_portable"]
+    pin.update(sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload))
+    (Path(str(prod.resolve()) + ".staged").parent / pin["filename"]).write_bytes(payload)
+
+    def broken_extract(src, dest):
+        raise RuntimeError("7z failed")
+
+    with pytest.raises(RuntimeError, match="7z failed"):
+        stage_comfyui(cfg, manifest=manifest, extract=broken_extract, free_bytes=lambda p: 10 ** 12)
+    assert (prod / "python_embeded" / "python.exe").is_file()
+
+
+def test_flatten_ignores_a_missing_wrapper_python_folder(tmp_path):
+    staged = tmp_path / "staged"
+    (staged / "wrapper" / "ComfyUI").mkdir(parents=True)
+    images_models_mod._flatten_portable(staged)
+    assert (staged / "wrapper" / "ComfyUI").is_dir()
+
+
+def test_scan_node_classes_matches_plain_and_derived_classes_only(tmp_path):
+    root = tmp_path / "comfy"
+    (root / "ComfyUI").mkdir(parents=True)
+    source = [
+        "class KSampler:", "    pass", "",
+        "class SaveImage  :", "    pass", "",
+        "class Derived(Base):",
+        "    class Inner:", "        pass",
+        "    class InnerDerived(Other):", "        pass", "",
+        "@register", "class Decorated:", "    pass", "",
+        "# class Commented:",
+        "x = 'class Stringy:'",
+    ]
+    (root / "ComfyUI" / "nodes.py").write_text(chr(10).join(source) + chr(10), encoding="utf-8")
+    found = images_models_mod.scan_node_classes(root)
+    assert {"KSampler", "SaveImage", "Derived", "Decorated"} <= found
+    assert not found & {"Inner", "InnerDerived", "Commented", "Stringy"}
+
+
+def test_scan_node_classes_missing_root_is_empty(tmp_path):
+    assert images_models_mod.scan_node_classes(tmp_path / "nope") == set()
+
+
 # --- queue / GPU handoff ---
 
 def hanging_comfy():
@@ -1139,6 +1261,22 @@ def test_manifest_pins_public_apache_artifacts():
     assert ckpt["bytes"] == 4070624520
     assert m["steps"] == 4
     assert m["guidance"] == 1.0
-    assert m["comfyui"]["pinned_portable"]["tag"] == "v0.36.0"
+    assert m["comfyui"]["pinned_portable"]["tag"] == "v0.38.0"
     assert "latest" not in m["comfyui"]["pinned_portable"]["url"]
     assert RESERVE_BYTES == 5 * 1024 ** 3
+
+
+def test_scan_node_classes_skips_unreadable_files(tmp_path, monkeypatch):
+    root = tmp_path / "comfy"
+    (root / "ComfyUI").mkdir(parents=True)
+    (root / "ComfyUI" / "nodes.py").write_text("class Good:\n    pass\n", encoding="utf-8")
+    (root / "ComfyUI" / "nodes_flux.py").write_text("class Bad:\n    pass\n", encoding="utf-8")
+    real = Path.read_text
+
+    def flaky(self, *a, **k):
+        if self.name == "nodes_flux.py":
+            raise PermissionError("locked")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    assert images_models_mod.scan_node_classes(root) == {"Good"}
