@@ -854,6 +854,7 @@ const APP_SCOPES = {
   images: "Generate images",
   inference: "Use the inference endpoint",
   remote_control: "Start and stop Claude Remote Control in a project folder",
+  "models:warm": "Start loading the local model ahead of a chat",
 };
 
 function appsCard(me) {

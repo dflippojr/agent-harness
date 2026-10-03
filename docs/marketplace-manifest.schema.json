@@ -50,7 +50,8 @@
         "approvals",
         "images",
         "inference",
-        "remote_control"
+        "remote_control",
+        "models:warm"
       ],
       "description": "Current harness.apps.SCOPES. admin is an owner scope and is not permitted here."
     },
