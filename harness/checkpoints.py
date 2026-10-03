@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -231,19 +232,26 @@ class Store:
     def busy(workspace: Path, plan: Plan) -> list[str]:
         """The paths `plan` must remove or replace that another process holds open. Windows refuses to rename a
         file (or a folder holding one) opened without delete sharing, as it refuses to remove or replace it, so
-        each is renamed aside and straight back: nothing changes, and nothing is half done when one is locked."""
+        each is renamed aside and straight back: nothing changes, and nothing is half done when one is locked. The
+        aside name is a fresh one that does not exist (POSIX rename would replace it), so no other file is touched."""
         locked: list[str] = []
         for rel in [*plan.dirs, *plan.extra, *plan.changed]:
             path = workspace / rel
             if not os.path.lexists(path):
                 continue
-            aside = path.with_name(f"{path.name}.harness-probe")
+            aside = path.with_name(f".{path.name}.{uuid.uuid4().hex}.harness-probe")
+            while os.path.lexists(aside):
+                aside = path.with_name(f".{path.name}.{uuid.uuid4().hex}.harness-probe")
             try:
                 os.rename(path, aside)
             except OSError as e:
                 locked.append(f"{rel}: {e.strerror or e}")
                 continue
-            os.rename(aside, path)
+            try:
+                os.rename(aside, path)
+            except OSError as e:
+                raise GitError(f"could not put {rel} back after probing it (it is at {aside.name}): "
+                               f"{e.strerror or e}", 500) from e
         return locked
 
     def restore(self, workspace: Path, sha: str, plan: Plan | None = None) -> list[str]:

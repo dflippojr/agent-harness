@@ -145,3 +145,29 @@ def test_index_stats_tolerates_junk():
     assert checkpoints.index_stats(b"") == (0, 0)
     assert checkpoints.index_stats(b"not an index at all") == (0, 0)
     assert checkpoints.index_stats(b"DIRC" + (4).to_bytes(4, "big") + (3).to_bytes(4, "big")) == (3, 0)
+
+
+def test_busy_probe_leaves_the_workspace_byte_identical(tmp_path, monkeypatch):
+    """The lock probe never touches another name: a sibling called like the old probe name survives, and a probe
+    that ends in a locked file leaves every name and byte as it was."""
+    import os
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "app.py").write_bytes(b"app\n")
+    (ws / "app.py.harness-probe").write_bytes(b"mine\n")
+    (ws / "locked.txt").write_bytes(b"locked\n")
+    rename = os.rename
+
+    def locked_rename(src, dst, *args, **kwargs):                       # Windows: open without delete sharing
+        if Path(src).name == "locked.txt":
+            raise PermissionError(13, "The process cannot access the file", str(src))
+        return rename(src, dst, *args, **kwargs)
+    monkeypatch.setattr(os, "rename", locked_rename)
+
+    def files():
+        return {p.name: p.read_bytes() for p in ws.iterdir()}
+    before = files()
+    plan = checkpoints.Plan("", "", [], [], ["app.py", "locked.txt"])
+    locked = checkpoints.Store.busy(ws, plan)
+    assert [x.split(":")[0] for x in locked] == ["locked.txt"]
+    assert files() == before
