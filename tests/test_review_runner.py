@@ -1539,7 +1539,13 @@ def _workflow_step(name: str) -> dict:
     return next(step for step in workflow["jobs"]["review"]["steps"] if step.get("name") == name)
 
 
-def _complete_check(tmp_path: Path, env: dict[str, str], review: str = "Reviewed the full diff\n\n- a.py:1: bug") -> dict:
+def _complete_check(
+    tmp_path: Path,
+    env: dict[str, str],
+    review: str = "Reviewed the full diff\n\n- a.py:1: bug",
+    diff_files: str = "",
+    all_calls: bool = False,
+):
     """Run the workflow's real "Complete PR check" script against a fake gh."""
     if not POWERSHELL:
         pytest.skip("Windows PowerShell is not installed")
@@ -1549,7 +1555,16 @@ def _complete_check(tmp_path: Path, env: dict[str, str], review: str = "Reviewed
     calls_path = str(calls).replace("'", "''")
     fake_gh = (
         "function gh {\n"
+        "    if ($args[0] -eq 'api' -and $args -contains '--paginate') {\n"
+        "        $env:FAKE_DIFF_FILES -split ','\n"
+        "        $global:LASTEXITCODE = 0\n"
+        "        return\n"
+        "    }\n"
         "    $fields = [ordered]@{}\n"
+        "    $ix = [array]::IndexOf($args, '--input')\n"
+        "    if ($ix -ge 0) {\n"
+        "        $fields = [System.IO.File]::ReadAllText($args[$ix + 1]) | ConvertFrom-Json\n"
+        "    }\n"
         "    for ($i = 0; $i -lt $args.Count; $i++) {\n"
         "        if ($args[$i] -in @('-f', '-F')) {\n"
         "            $pair = [string]$args[$i + 1]; $eq = $pair.IndexOf('=')\n"
@@ -1560,7 +1575,7 @@ def _complete_check(tmp_path: Path, env: dict[str, str], review: str = "Reviewed
         "            $fields[$pair.Substring(0, $eq)] = $value\n"
         "        }\n"
         "    }\n"
-        f"    $fields | ConvertTo-Json -Compress | Set-Content -LiteralPath '{calls_path}' -Encoding utf8\n"
+        f"    $fields | ConvertTo-Json -Compress -Depth 8 | Add-Content -LiteralPath '{calls_path}' -Encoding utf8\n"
         "    $global:LASTEXITCODE = 0\n"
         "}\n"
     )
@@ -1577,6 +1592,10 @@ def _complete_check(tmp_path: Path, env: dict[str, str], review: str = "Reviewed
         "REVIEW_VERDICT": "",
         "REVIEW_FINDINGS": "",
         "REVIEW_OMITTED_FILES": "0",
+        "PR_NUMBER": "7",
+        "FAKE_DIFF_FILES": diff_files,
+        "PR_NUMBER": "7",
+        "FAKE_DIFF_FILES": diff_files,
         **env,
     }
     result = subprocess.run(
@@ -1589,7 +1608,8 @@ def _complete_check(tmp_path: Path, env: dict[str, str], review: str = "Reviewed
         check=False,
     )
     assert result.returncode == 0, output(result)
-    return json.loads(calls.read_text(encoding="utf-8-sig"))
+    recorded = [json.loads(line) for line in calls.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+    return recorded if all_calls else recorded[-1]
 
 
 @pytest.mark.parametrize(
@@ -1625,6 +1645,38 @@ def test_complete_check_conclusion_follows_review_verdict(tmp_path, env, conclus
     else:
         assert fields["output[summary]"].startswith("Reviewed the full diff")
         assert "- a.py:1: bug" in fields["output[summary]"]
+
+
+FINDINGS_ENV = {"REVIEW_VERDICT": "findings", "REVIEW_FINDINGS": "3"}
+
+
+def test_complete_check_annotates_findings_in_the_diff(tmp_path):
+    review = (
+        "Reviewed\n\n- `src/a.py:12`: bad index\n- **b/c.py:7-9** - off by one\n"
+        "- other.py:3: not in the diff\n- src/a.py:x: no line number\n"
+    )
+    fields = _complete_check(tmp_path, FINDINGS_ENV, review=review, diff_files="src/a.py,b/c.py")
+    assert fields["conclusion"] == "failure"
+    notes = fields["output"]["annotations"]
+    assert [(n["path"], n["start_line"], n["end_line"]) for n in notes] == [("src/a.py", 12, 12), ("b/c.py", 7, 9)]
+    assert all(n["annotation_level"] == "failure" for n in notes)
+    assert notes[0]["message"] == "bad index"
+    assert fields["output"]["summary"].startswith("Reviewed")
+
+
+def test_complete_check_batches_annotations_by_fifty(tmp_path):
+    review = "\n".join(f"- a.py:{n}: bug {n}" for n in range(1, 121))
+    calls = _complete_check(tmp_path, FINDINGS_ENV, review=review, all_calls=True, diff_files="a.py")
+    assert [len(c["output"]["annotations"]) for c in calls] == [50, 50, 20]
+    assert calls[0]["status"] == "completed"
+    assert "status" not in calls[1]
+
+
+def test_complete_check_without_parseable_locations_matches_plain_completion(tmp_path):
+    fields = _complete_check(tmp_path, FINDINGS_ENV, review="Reviewed\n\n- other.py:3: outside\n- vague finding")
+    assert fields["conclusion"] == "failure"
+    assert fields["output[title]"] == "3 findings"
+    assert "output" not in fields
 
 
 def test_complete_check_truncates_long_review_summary(tmp_path):

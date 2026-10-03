@@ -187,7 +187,7 @@ jobs:
           REVIEW_EFFORT_CODEX: ${{ vars.REVIEW_EFFORT_CODEX }}
           REVIEW_MAX_DIFF_BYTES: ${{ inputs.max_diff_bytes || vars.REVIEW_MAX_DIFF_BYTES }}
           REVIEW_PROMPT: |
-            Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list: file:line, the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
+            Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list, one item per finding, each starting with `path/to/file:line` (repo-relative path, a single line number), then the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
 
             The embedded diff is authoritative for what changed. The workspace is the pull request head and is available only for surrounding code, history, and blame context.
 
@@ -217,6 +217,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHECK_ID: ${{ steps.check.outputs.id }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           AGENT_CONCLUSION: ${{ steps.agent.conclusion }}
           POST_CONCLUSION: ${{ steps.post.conclusion }}
           REVIEW_BACKEND: ${{ steps.agent.outputs.backend }}
@@ -260,12 +261,58 @@ jobs:
           # Pass the summary through a file: a long review would exceed the command-line limit.
           $summaryPath = Join-Path $env:RUNNER_TEMP 'review-check-summary.md'
           [System.IO.File]::WriteAllText($summaryPath, $summary, (New-Object System.Text.UTF8Encoding($false)))
+          # Inline annotations: one per finding line that starts with a path:line in the PR diff.
+          $annotations = @()
+          if ($conclusion -eq 'failure' -and $title -ne 'Review did not complete') {
+            try {
+              $diffFiles = @(gh api "repos/$env:GITHUB_REPOSITORY/pulls/$env:PR_NUMBER/files" --paginate --jq '.[].filename')
+              if ($LASTEXITCODE -ne 0) { throw "could not list the PR files" }
+              $inDiff = @{}
+              foreach ($f in $diffFiles) { if ($f) { $inDiff[([string]$f).Trim()] = $true } }
+              foreach ($line in (Get-Content -Encoding utf8 -LiteralPath 'review-output.md')) {
+                if ($line -match '^\s*(?:[-*+]|\d+[.)])?\s*[`*_]*([^\s:`*]+):(\d+)(?:-(\d+))?[`*_]*[:\s)-]*(.*)$') {
+                  $path = ([string]$Matches[1]).Replace('\', '/')
+                  if ($path.StartsWith('./')) { $path = $path.Substring(2) }
+                  if (-not $inDiff.ContainsKey($path)) { continue }
+                  $start = [int]$Matches[2]
+                  $end = $start
+                  if ($Matches[3]) { $end = [int]$Matches[3] }
+                  if ($start -lt 1 -or $end -lt $start) { $end = $start }
+                  $message = $Matches[4].Trim()
+                  if (-not $message) { $message = $line.Trim() }
+                  if ($message.Length -gt 60000) { $message = $message.Substring(0, 60000) }
+                  $annotations += [ordered]@{ path = $path; start_line = $start; end_line = $end; annotation_level = 'failure'; title = 'Review finding'; message = $message }
+                }
+              }
+            } catch {
+              Write-Host "Skipping annotations: $($_.Exception.Message)"
+              $annotations = @()
+            }
+          }
           $completed = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/check-runs/$env:CHECK_ID" `
-            -f status="completed" `
-            -f conclusion="$conclusion" `
-            -f completed_at="$completed" `
-            -f "output[title]=$title" `
-            -F "output[summary]=@$summaryPath"
-          if ($LASTEXITCODE -ne 0) { throw "failed to complete check run $($env:CHECK_ID)" }
+          $endpoint = "repos/$env:GITHUB_REPOSITORY/check-runs/$env:CHECK_ID"
+          if ($annotations.Count -eq 0) {
+            gh api --method PATCH $endpoint `
+              -f status="completed" `
+              -f conclusion="$conclusion" `
+              -f completed_at="$completed" `
+              -f "output[title]=$title" `
+              -F "output[summary]=@$summaryPath"
+            if ($LASTEXITCODE -ne 0) { throw "failed to complete check run $($env:CHECK_ID)" }
+          } else {
+            # The API takes 50 annotations per request; extra batches are appended by further PATCHes.
+            # The body goes through a JSON file (UTF-8, no BOM) because of the command-line length limit.
+            $bodyPath = Join-Path $env:RUNNER_TEMP 'review-check-body.json'
+            for ($i = 0; $i -lt $annotations.Count; $i += 50) {
+              $batch = @($annotations[$i..([Math]::Min($i + 49, $annotations.Count - 1))])
+              $output = [ordered]@{ title = [string]$title; summary = [string]$summary; annotations = $batch }
+              $body = [ordered]@{ output = $output }
+              if ($i -eq 0) {
+                $body = [ordered]@{ status = 'completed'; conclusion = $conclusion; completed_at = $completed; output = $output }
+              }
+              [System.IO.File]::WriteAllText($bodyPath, (ConvertTo-Json -InputObject $body -Depth 6 -Compress), (New-Object System.Text.UTF8Encoding($false)))
+              gh api --method PATCH $endpoint --input $bodyPath
+              if ($LASTEXITCODE -ne 0) { throw "failed to complete check run $($env:CHECK_ID)" }
+            }
+          }
           Write-Host "Check run $($env:CHECK_ID): $conclusion ($title)"
