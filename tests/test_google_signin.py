@@ -1020,8 +1020,8 @@ def test_web_bundle_keeps_csrf_in_memory_only():
     from pathlib import Path
     web = Path(gs.__file__).parent / "web"
     client_js = (web / "client.mjs").read_text(encoding="utf-8")
-    app_js = (web / "app.js").read_text(encoding="utf-8")
-    for source in (client_js, app_js):
+    session_js = (web / "lib" / "session.mjs").read_text(encoding="utf-8")
+    for source in (client_js, session_js):
         for line in source.splitlines():
             if "csrf" in line.lower():
                 assert "localStorage" not in line and "sessionStorage" not in line and "setItem" not in line

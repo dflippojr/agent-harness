@@ -135,7 +135,8 @@ def test_web_shell_has_chat_home_and_drawer(tmp_path):
     client, _, _ = make_client(tmp_path, [Completion(content="ok")])
     with client:
         html = client.get("/").text
-        js = client.get("/static/app.js").text
+        js = client.get("/static/lib/router.mjs").text
+        drawer_js = client.get("/static/lib/drawer.mjs").text
         chat_js = client.get("/static/pages/chat.mjs").text
         css = client.get("/static/style.css").text
     order = [html.index(f'data-nav="{n}"') for n in ("chat", "agents", "jobs", "images", "actions")]
@@ -146,7 +147,7 @@ def test_web_shell_has_chat_home_and_drawer(tmp_path):
     assert html.index('id="drawer-profile"') > html.index('id="drawer-chats"')
     assert 'go(canChat() ? "#/chat" : "#/agents", true)' in js
     assert 'parts[0] === "chat"' in js
-    assert 'event.key === "Escape"' in js
+    assert 'event.key === "Escape"' in drawer_js
     assert "visualViewport" in chat_js
     assert "`/chats/${encodeURIComponent(id)}/events?after=${lastSeq}`" in chat_js
     assert "safe-area-inset-bottom" in css
