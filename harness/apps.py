@@ -999,7 +999,7 @@ async def create_session(body: CreateAppSession, request: Request):
     if sum(len(b["content"]) for b in blocks) > MAX_CONTEXT_CHARS:
         raise HarnessError(413, f"context is larger than {MAX_CONTEXT_CHARS} characters")
     if body.tools_only:
-        if app is None:
+        if app is None or key.get("kind") != "app":  # a device key is no App: it could never see the session
             raise HarnessError(403, "only an App token can start an App-tools-only session")
         if body.project:
             raise HarnessError(400, "an App-tools-only session has no project; leave project out")

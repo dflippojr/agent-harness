@@ -163,6 +163,19 @@ def test_owner_token_cannot_start_one(tmp_path):
         assert r.status_code == 403
 
 
+def test_device_token_cannot_start_one(tmp_path):
+    """Only an App can see a tools-only session, so a device key must not create one it could never read."""
+    client, m, _ = _client(tmp_path, [Completion(content="hi")])
+    with client:
+        key = client.post("/keys", json={"name": "phone", "kind": "device", "scopes": ["sessions"]}).json()
+        headers = {"Authorization": f"Bearer {key['key']}"}
+        assert client.get("/api/v1/sessions", headers=headers).status_code == 200  # a working device key
+        r = client.post("/api/v1/sessions", json={"prompt": "hi", "tools_only": True, "tools": [BALANCE]},
+                        headers=headers)
+        assert r.status_code == 403
+        assert m.db.list_sessions(50, kind=TOOLS_ONLY) == []
+
+
 def test_capability_discovery_lists_supporting_backends(tmp_path):
     backends = {"claude": BackendConfig(enabled=True, model="opus"), "codex": BackendConfig(enabled=True, model="g")}
     client, m, _ = _client(tmp_path, [Completion(content="hi")], **backends)
