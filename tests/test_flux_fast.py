@@ -1139,6 +1139,6 @@ def test_manifest_pins_public_apache_artifacts():
     assert ckpt["bytes"] == 4070624520
     assert m["steps"] == 4
     assert m["guidance"] == 1.0
-    assert m["comfyui"]["pinned_portable"]["tag"] == "v0.36.0"
+    assert m["comfyui"]["pinned_portable"]["tag"] == "v0.38.0"
     assert "latest" not in m["comfyui"]["pinned_portable"]["url"]
     assert RESERVE_BYTES == 5 * 1024 ** 3

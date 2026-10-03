@@ -39,12 +39,12 @@
     "first_stable_note": "Comfy-Org/ComfyUI v0.26.0 (2026) is the earliest stable portable release whose notes mention FLUX.2 klein text-encoder support. EmptyFlux2LatentImage and Flux2Scheduler are core nodes; availability is still confirmed by scanning the installed tree / object-info, not the version string alone.",
     "current_tower": "v0.35.0",
     "pinned_portable": {
-      "tag": "v0.36.0",
-      "reason": "First stable portable published after the tower's recorded v0.35.0. Not latest/nightly. Stage beside C:/AI/ComfyUI and promote only after startup plus fast/quality/flux-fast node preflight succeed.",
+      "tag": "v0.38.0",
+      "reason": "Stable portable needed for Qwen-Image-2.1 core nodes (TextEncodeQwenImage21, int8_convrot weights), which v0.35/v0.36 lack; owner-requested 2026-10-03. Pinned by tag and SHA-256, not latest/nightly. Stage beside C:/AI/ComfyUI and promote only after startup plus fast/quality/flux-fast node preflight succeed.",
       "filename": "ComfyUI_windows_portable_nvidia.7z",
-      "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.36.0/ComfyUI_windows_portable_nvidia.7z",
-      "sha256": "c3c60192840f8b68c9a47cf3e8161ecb108e5ffdf5ea236c1c72a402e442695d",
-      "bytes": 1917442353,
+      "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.38.0/ComfyUI_windows_portable_nvidia.7z",
+      "sha256": "8f137eac345707fd7e42bcf8e29377415243011ca15522a86aed6c77331fbd56",
+      "bytes": 1994326521,
       "license": "GPL-3.0"
     }
   },
