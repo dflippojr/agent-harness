@@ -94,17 +94,18 @@ def test_web_app_and_guard(tmp_path):
         new_task_js = client.get("/static/pages/new-task.mjs").text
         sessions_js = client.get("/static/pages/sessions.mjs").text
         session_js = client.get("/static/pages/session.mjs").text
+        session_ui_js = client.get("/static/lib/session-ui.mjs").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in session_js
         assert "session-chrome" in session_js
-        assert "jump-top" in js
-        assert 'method: "PATCH"' in js
-        assert "session-title" in js
+        assert "jump-top" in session_ui_js
+        assert 'method: "PATCH"' in session_ui_js
+        assert "session-title" in session_ui_js
         assert "harness.theme" in profile_js
         assert "harness.textSize" in profile_js
         assert "TEXT_SIZES" in profile_js
         assert "applyTextSize" in js
         assert 'setHeader("agents", "New task", { page: true })' in new_task_js
-        assert "sessionJumpHidden" in js
+        assert "sessionJumpHidden" in session_ui_js
         assert "Math.min(160, 0.75 * vh)" in client.get("/static/lib/layout.mjs").text
         assert 'type: "color"' not in js
         assert "swatch split" in profile_js

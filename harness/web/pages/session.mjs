@@ -1,12 +1,13 @@
 // Session page (#258): the live transcript with composer, approvals and checkpoints, plus the Changes tab (review card,
-// secret scan, inline review comments). The shell (DOM builder, router hooks, event stream, session chrome shared with
-// chat) is injected by app.js so this module imports under plain Node and never reaches into another page.
+// secret scan, inline review comments). The shell (DOM builder, router hooks, event stream) is injected by app.js and the
+// session chrome helpers come from lib/session-ui.mjs, so this module imports under plain Node and never reaches into another page.
 import { TARGET_LABEL } from "../lib/targets.mjs";
 import { fmtElapsed, fmtTokens, readFraction, readingText, fmtSpan, pluralize } from "../lib/format.mjs";
 import { toolSummaryText, approvalWhat } from "../lib/tools.mjs";
 import { approvalDiffClass, diffLineClass } from "../lib/diff.mjs";
 import { md } from "../lib/markdown.mjs";
 import { withTaint } from "../lib/taint.mjs";
+import { mountSessionUi, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
 
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
@@ -17,9 +18,12 @@ const SESSION_EVENT_TYPES = [
 ];
 
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, sessionTitle, bindSessionJumps, pageMetrics, scrollPage, viewInfo, TERMINAL, agentHarnessWeb, browser }) {
+  progressBar, openStream, layoutBar, viewInfo, TERMINAL, agentHarnessWeb, browser }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, location, confirm, setInterval, clearInterval, setTimeout } = browser;
+const { sessionTitle, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser });
+const pageMetrics = () => measurePage(browser);
+const scrollPage = (top) => scrollPageOf(top, browser);
 
 async function viewSession(sid, tab, focusApproval) {
   if (!validId(sid)) { go("#/agents", true); return; }
