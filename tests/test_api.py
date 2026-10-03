@@ -92,6 +92,7 @@ def test_web_app_and_guard(tmp_path):
         actions_js = client.get("/static/pages/actions.mjs").text
         profile_js = client.get("/static/pages/profile.mjs").text
         new_task_js = client.get("/static/pages/new-task.mjs").text
+        sessions_js = client.get("/static/pages/sessions.mjs").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
         assert "session-chrome" in js
         assert "jump-top" in js
@@ -139,7 +140,7 @@ def test_web_app_and_guard(tmp_path):
         assert ".switch:checked" in css
         assert "prefers-reduced-motion: reduce" in css
         assert ".image-status .progress.indeterminate > span" in css
-        assert 'showFab("#/new", "+ New task")' in js
+        assert 'showFab("#/new", "+ New task")' in sessions_js
         jobs_page = client.get("/static/pages/jobs.mjs").text
         assert 'showFab("#/jobs/new", "+ New job")' in jobs_page
         assert 'api("/backends?auth=skip")' in jobs_page
@@ -196,7 +197,7 @@ def test_web_app_and_guard(tmp_path):
         assert "confirmGpuQueue" in js
         assert "gpu.manual" in js
         assert "picker.hidden = !picker.hidden" not in js
-        assert "if (holding)" in js
+        assert "if (holding)" in sessions_js
         assert 'id="fab-host"' in client.get("/").text
         assert client.get("/static/app.js").status_code == 200
         profile = client.get("/profile").json()
