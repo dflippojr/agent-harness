@@ -20,7 +20,8 @@ Existing installs with no managed overlay behave exactly as before. YAML files a
 by the registry.
 
 App settings are per `ha-` app id in SQLite (`app_settings`). They never alter host configuration
-and are deleted when that app token is revoked.
+and stop applying when that app token is revoked. They are kept through the revoke's erasure grace, so an undo
+restores them, and are deleted with the App's store when the grace ends.
 
 ## Envelope
 

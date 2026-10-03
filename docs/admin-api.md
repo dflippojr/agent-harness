@@ -162,10 +162,10 @@ Each App's sessions live in its own store and folder (`<data_dir>/apps/<app_id>/
 - **Pending erasures.** `GET /api/admin/v1/apps/erasures` lists them, soonest first:
   `[{"id", "name", "kind", "revoked_at", "erase_after"}]`.
 - **Undo.** `POST /api/admin/v1/apps/{app_id}/restore` during the grace keeps the App's id, store, folder, scopes,
-  origins and retention, and returns the key row with a new token in `key`, shown once (`Cache-Control: no-store`);
-  the revoked token stays dead. The App's own settings (`/api/v1/config`) were dropped at the revoke and must be
-  set again. `404` when nothing is pending for that id (never revoked, already restored, or erased). The Apps card's
-  **Undo** button does this.
+  origins, retention and its own settings (`/api/v1/config`, kept but unused while it is revoked), and returns the
+  key row with a new token in `key`, shown once (`Cache-Control: no-store`); the revoked token stays dead. `404`
+  when nothing is pending for that id (never revoked, already restored, or erased). The Apps card's **Undo** button
+  does this.
 - **After the grace.** The sweep stops the App's running sessions, then erases its store and folder. The registry
   keeps a tombstone: the key row with `erased_at` set and no scopes, origins or retention. The App's settings,
   provider credentials and error counts are deleted with it; usage rows stay as the owner's metadata. Older nightly

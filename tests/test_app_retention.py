@@ -328,6 +328,29 @@ def test_undo_during_the_grace_keeps_everything_and_issues_a_new_token(tmp_path)
         wait_for(lambda: _done(client, sid2, new))
 
 
+def test_the_apps_own_settings_survive_an_undone_revoke_and_go_with_the_erasure(tmp_path):
+    cfg = make_cfg(tmp_path)
+    m = Manager(cfg, chat=Script([Completion(content="ok")]))
+    client = TestClient(create_app(m))
+    with client:
+        a_id, a = _key(client, "app-a", "sessions")
+        patched = client.patch("/api/v1/config", headers=a, json={"revision": 0,
+                                                                  "changes": {"app.sessions.max_turns": 10}})
+        assert patched.status_code == 200, patched.text
+        saved = m.db.get_app_settings(a_id)
+        assert client.delete(f"/keys/{a_id}").status_code == 204
+        assert m.db.get_app_settings(a_id) == saved                               # kept through the grace
+
+        new = {"Authorization": f"Bearer {client.post(f'/api/admin/v1/apps/{a_id}/restore').json()['key']}"}
+        assert m.db.get_app_settings(a_id) == saved
+        live = {k: v for k, v in patched.json().items() if k != "changes"}
+        assert client.get("/api/v1/config", headers=new).json() == live
+
+        assert client.delete(f"/keys/{a_id}").status_code == 204
+        assert asyncio.run(m.sweep_app_data(time.time() + APP_ERASE_GRACE_SECONDS + 60))["apps_erased"] == [a_id]
+        assert m.db.get_app_settings(a_id) is None
+
+
 def test_owner_keys_have_no_erasure_and_member_storage_and_quota_are_unchanged(tmp_path):
     from harness.storage import account_usage_bytes, ensure_user_dirs
 

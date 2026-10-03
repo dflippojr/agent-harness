@@ -1705,14 +1705,16 @@ class Database:
     @_writes
     def revoke_api_key(self, kid: str) -> bool:
         """Revoke a key at once. An App's or device's store and folder are scheduled for erasure after
-        `APP_ERASE_GRACE_SECONDS` (#330); `restore_api_key` undoes that during the grace."""
+        `APP_ERASE_GRACE_SECONDS` (#330); `restore_api_key` undoes that during the grace. The App's own settings stay
+        until that erasure (unused while revoked), so an undone revoke gets them back."""
         now = time.time()
         with self.lock:
             ok = self.conn.execute("UPDATE api_keys SET revoked_at = ?, erase_after = CASE WHEN kind = 'owner' "
                                    "THEN NULL ELSE ? END WHERE id = ? AND revoked_at IS NULL",
                                    (now, now + APP_ERASE_GRACE_SECONDS, kid)).rowcount == 1
-            if ok:
-                self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
+            if ok:  # an owner key has no erasure to take its settings later
+                self.conn.execute("DELETE FROM app_settings WHERE app_id = ? AND app_id IN "
+                                  "(SELECT id FROM api_keys WHERE kind = 'owner')", (kid,))
             return ok
 
     @_writes
