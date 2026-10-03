@@ -44,6 +44,13 @@ These **don't** load the model:
   until it is done, so the supervisor can't start llama-server while ComfyUI or a game owns the card or after an
   unload. (`run-qwen.ps1` writes the flag at logon, before the daemon runs; llama-server's own idle sleep doesn't
   touch the flag.)
+- **A llama-server that is starting but not listening yet (#344).** `ServerControl.stop()` writes the flag, then stops
+  every process that holds the port *and* every `llama-server` process whose command line says `--port <our port>`
+  (psutil name and command-line match; no `--port` means llama-server's default, 8080). So a server `run-qwen.ps1`
+  launched while the flag was briefly missing, and that is still loading, dies with the rest instead of finishing its
+  load while ComfyUI owns the GPU. *Decision:* match by process in the daemon rather than have the supervisor re-check
+  the flag after launching; the supervisor is unchanged. The flag is written first, so it won't start another. A
+  server started in the instant between the process listing and the supervisor's flag check is the only window left.
 
 `lazy_load: false` in `config/harness.yaml` restores the old eager reload after holds and image batches.
 
