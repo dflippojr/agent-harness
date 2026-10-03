@@ -310,6 +310,8 @@ jobs:
             # check is completed without them; a rejected later batch only loses those annotations.
             $bodyPath = Join-Path $env:RUNNER_TEMP 'review-check-body.json'
             for ($i = 0; $i -lt $annotations.Count; $i += 50) {
+              # @() keeps a batch of one an array: PowerShell does not enumerate an IDictionary into its entries
+              # (tested: test_complete_check_sends_a_single_finding_as_a_one_element_array).
               $batch = @($annotations[$i..([Math]::Min($i + 49, $annotations.Count - 1))])
               $output = [ordered]@{ title = [string]$title; summary = [string]$summary; annotations = $batch }
               $body = [ordered]@{ output = $output }

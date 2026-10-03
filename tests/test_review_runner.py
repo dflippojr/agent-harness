@@ -1691,12 +1691,28 @@ def test_complete_check_falls_back_to_plain_completion_when_annotations_are_reje
     assert "- a.py:3: bug" in fields["output[summary]"]
 
 
+def test_complete_check_sends_a_single_finding_as_a_one_element_array(tmp_path):
+    """Windows PowerShell must not unwrap a lone annotation into a dictionary (the usual `1 finding` case)."""
+    env = {"REVIEW_VERDICT": "findings", "REVIEW_FINDINGS": "1"}
+    fields = _complete_check(tmp_path, env, review="Reviewed\n\n- src/a.py:12: bad index\n", diff_files="src/a.py")
+    notes = fields["output"]["annotations"]
+    assert isinstance(notes, list) and len(notes) == 1
+    assert (notes[0]["path"], notes[0]["start_line"], notes[0]["message"]) == ("src/a.py", 12, "bad index")
+
+
 def test_complete_check_batches_annotations_by_fifty(tmp_path):
     review = "\n".join(f"- a.py:{n}: bug {n}" for n in range(1, 121))
     calls = _complete_check(tmp_path, FINDINGS_ENV, review=review, all_calls=True, diff_files="a.py")
     assert [len(c["output"]["annotations"]) for c in calls] == [50, 50, 20]
     assert calls[0]["status"] == "completed"
     assert "status" not in calls[1]
+
+
+def test_complete_check_keeps_a_last_batch_of_one_as_an_array(tmp_path):
+    review = "\n".join(f"- a.py:{n}: bug {n}" for n in range(1, 52))
+    calls = _complete_check(tmp_path, FINDINGS_ENV, review=review, all_calls=True, diff_files="a.py")
+    assert [len(c["output"]["annotations"]) for c in calls] == [50, 1]
+    assert isinstance(calls[1]["output"]["annotations"], list)
 
 
 def test_complete_check_without_parseable_locations_matches_plain_completion(tmp_path):
