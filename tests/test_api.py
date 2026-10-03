@@ -91,6 +91,7 @@ def test_web_app_and_guard(tmp_path):
         js = client.get("/static/app.js").text
         actions_js = client.get("/static/pages/actions.mjs").text
         profile_js = client.get("/static/pages/profile.mjs").text
+        new_task_js = client.get("/static/pages/new-task.mjs").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
         assert "session-chrome" in js
         assert "jump-top" in js
@@ -100,14 +101,14 @@ def test_web_app_and_guard(tmp_path):
         assert "harness.textSize" in profile_js
         assert "TEXT_SIZES" in profile_js
         assert "applyTextSize" in js
-        assert 'setHeader("agents", "New task", { page: true })' in js
+        assert 'setHeader("agents", "New task", { page: true })' in new_task_js
         assert "sessionJumpHidden" in js
         assert "Math.min(160, 0.75 * vh)" in client.get("/static/lib/layout.mjs").text
         assert 'type: "color"' not in js
         assert "swatch split" in profile_js
-        assert "Scratch is a fresh empty folder" in js
-        assert '"＋ New project"' in js
-        assert 'api("/projects", { method: "POST"' in js
+        assert "Scratch is a fresh empty folder" in new_task_js
+        assert '"＋ New project"' in new_task_js
+        assert 'api("/projects", { method: "POST"' in new_task_js
         assert "Only tower projects with a local folder appear" in actions_js
         assert 'id="guest-banner"' in client.get("/").text
         assert 'id="bar"' in client.get("/").text
@@ -190,7 +191,7 @@ def test_web_app_and_guard(tmp_path):
         assert '"smart-approvals": "Smart approvals"' in profile_js
         assert "function smartApprovalsCard()" in profile_js
         assert 'skills: "Skills"' in profile_js
-        assert 'api("/skills/enabled")' in js
+        assert 'api("/skills/enabled")' in new_task_js
         assert "Install hash" in profile_js
         assert "confirmGpuQueue" in js
         assert "gpu.manual" in js

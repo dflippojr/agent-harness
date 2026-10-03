@@ -750,6 +750,7 @@ def _assert_no_secrets(m, fake, tmp_path):
 
 def test_web_ui_member_card_owner_controls_and_no_browser_storage():
     js = (Path(__file__).resolve().parents[1] / "harness" / "web" / "app.js").read_text(encoding="utf-8")
+    new_task = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "new-task.mjs").read_text(encoding="utf-8")
     profile = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "profile.mjs").read_text(encoding="utf-8")
     start = profile.index("function githubConnectionCard(")
     card = profile[start:profile.index("\n// Each profile subpage", start)]
@@ -758,7 +759,7 @@ def test_web_ui_member_card_owner_controls_and_no_browser_storage():
         assert needed in card, needed
     for forbidden in ("localStorage", "sessionStorage", "storeSet", "window.open"):
         assert forbidden not in card, forbidden  # no browser automation, nothing persisted in the browser
-    form = js[js.index('const githubConnect = h("div");'):js.index("const model = h(\"select\"")]
+    form = new_task[new_task.index('const githubConnect = h("div");'):new_task.index("const model = h(\"select\"")]
     assert "localStorage" not in form and "sessionStorage" not in form
     assert not [line for line in form.splitlines() if "storeSet(" in line and "repo" in line.lower()]
     assert "form.requestSubmit()" in form
