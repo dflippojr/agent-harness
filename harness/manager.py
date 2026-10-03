@@ -31,7 +31,7 @@ from .runner import (ACTIVE, END_PENDING, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_S
                      SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
-from . import llm, projects, secret_scan, telemetry
+from . import checkpoints, llm, projects, secret_scan, telemetry
 
 log = logging.getLogger("harness.manager")
 
@@ -858,10 +858,10 @@ class Manager:
                                     "fork from a checkpoint instead")
         cp = self.runner.checkpointer
         try:
-            context = await asyncio.to_thread(cp.restore, sid, int(turn))
+            saved = await asyncio.to_thread(cp.restore, sid, int(turn))
         except projects.GitError as e:
             raise HarnessError(e.status, str(e)) from e
-        await self.db.awrite(cp.commit_rewind, sid, int(turn), context)
+        await self.db.awrite(cp.commit_rewind, sid, int(turn), saved)
         return self.db.get_session(sid)
 
     async def fork(self, ref: str, turn: int, prompt: str) -> dict:
@@ -880,6 +880,7 @@ class Manager:
         hosted = parent.get("backend", "local") != "local"
         try:
             git_fields = await asyncio.to_thread(cp.prepare_fork, parent, int(turn), new_sid, workspace)
+            saved_context, carried = await asyncio.to_thread(cp.store(parent).load_turn, int(turn))
             if hosted:
                 digest = await asyncio.to_thread(cp.summary, parent, int(turn))
                 context = [parent["context"][0], {"role": "user", "content": (
@@ -887,14 +888,16 @@ class Manager:
                     f"Summary of the earlier conversation:\n\n{digest}\n\nNew instruction:\n{prompt}")}]
                 base_context = context[:1]
             else:
-                base_context = await asyncio.to_thread(cp.store(parent).load_context, int(turn))
+                base_context = saved_context
                 context = base_context + [{"role": "user", "content": prompt}]
         except (projects.GitError, OSError) as e:
             remove_tree(workspace)
             remove_tree(cp.store({**parent, "id": new_sid}).base)
             raise HarnessError(getattr(e, "status", 500), str(e)) from e
         now = time.time()
-        run = new_run(carry={k: v for k, v in parent["run"].items() if k != "backend_session_id"})
+        run = new_run(carry={k: v for k, v in parent["run"].items()
+                             if k != "backend_session_id" and k not in checkpoints.TURN_RUN_KEYS})
+        run.update(carried)                                 # the agent's state and notes as of the checkpoint
         for key in ("max_turns", "max_completion_tokens"):
             if key in parent["run"]:
                 run[key] = parent["run"][key]
@@ -907,7 +910,7 @@ class Manager:
                    "parent_id": sid, "fork_turn": int(turn), "turn_seq": int(turn)}
         if not git_fields:
             session["branch"] = ""
-        await asyncio.to_thread(cp.store(session).save_context, int(turn), base_context)
+        await asyncio.to_thread(cp.store(session).save_context, int(turn), base_context, carried)
 
         def insert_fork() -> None:     # one transaction on the writer thread (#294): the row, its checkpoint, events
             self._insert_created(session, None, [], "", prompt)

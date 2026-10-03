@@ -34,6 +34,9 @@ log = logging.getLogger("harness.checkpoints")
 
 CAP = 50                      # visible checkpoints kept per session
 MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_delegated_edit", "generate_image")
+# The run fields a turn writes (update_state, update_notes) that the next turn reads (`new_run` carries them, and
+# compaction re-injects them): a checkpoint keeps them with its context, and rewind and fork restore them.
+TURN_RUN_KEYS = ("state", "notes")
 REF_PREFIX = "refs/harness/checkpoints"
 UNDO_PREFIX = "refs/harness/rewind-undo"     # the workspace as it was before a rewind, while that rewind runs
 STAGE_PREFIX = "refs/harness/staged"         # a new checkpoint until its database record commits
@@ -204,18 +207,28 @@ class Store:
 
     # model context ----------------------------------------------------------------------------------------------
     @staticmethod
-    def pack_context(context: list) -> bytes:
-        return gzip.compress(json.dumps(context).encode("utf-8"))
+    def pack_context(context: list, run: dict | None = None) -> bytes:
+        """The model context and the `TURN_RUN_KEYS` of the session's run, as one file."""
+        carried = {k: run[k] for k in TURN_RUN_KEYS if k in (run or {})}
+        return gzip.compress(json.dumps({"context": context, "run": carried}).encode("utf-8"))
 
-    def save_context(self, turn: int, context: list) -> None:
+    def save_context(self, turn: int, context: list, run: dict | None = None) -> None:
         self.contexts.mkdir(parents=True, exist_ok=True)
-        (self.contexts / f"{turn}.json.gz").write_bytes(self.pack_context(context))
+        (self.contexts / f"{turn}.json.gz").write_bytes(self.pack_context(context, run))
 
-    def load_context(self, turn: int) -> list:
+    def load_turn(self, turn: int) -> tuple[list, dict]:
+        """The model context and the run fields (`TURN_RUN_KEYS`) saved with a checkpoint. A checkpoint saved
+        before the run fields were kept gives none, so a rewind clears them rather than keep later ones."""
         path = self.contexts / f"{turn}.json.gz"
         if not path.is_file():
             raise GitError(f"checkpoint {turn} has no saved context", 410)
-        return json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
+        saved = json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
+        if isinstance(saved, list):
+            return saved, {}
+        return saved["context"], {k: v for k, v in (saved.get("run") or {}).items() if k in TURN_RUN_KEYS}
+
+    def load_context(self, turn: int) -> list:
+        return self.load_turn(turn)[0]
 
     # restore ----------------------------------------------------------------------------------------------------
     def plan(self, workspace: Path, sha: str, tmp: Path) -> Plan:

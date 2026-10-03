@@ -10,8 +10,8 @@ import tempfile
 from pathlib import Path
 
 from . import projects
-from .checkpoints import (CAP, Store, eligible, git_state, head_and_branch, put_git_state, ref_name,
-                          reset_branch)
+from .checkpoints import (CAP, TURN_RUN_KEYS, Store, eligible, git_state, head_and_branch, put_git_state,
+                          ref_name, reset_branch)
 from .projects import GitError
 
 log = logging.getLogger("harness.checkpointer")
@@ -61,7 +61,7 @@ class Checkpointer:
         if not sha:                                         # the same files as the last checkpoint: nothing written
             stats["skipped"] = "unchanged"
             return None
-        context = store.pack_context(s["context"])
+        context = store.pack_context(s["context"], s["run"])
         # Quota is decided before anything existing is touched: a skipped snapshot leaves every checkpoint,
         # including the rewound-past ones a later rewind can still redo (one may share this turn's number).
         if not self._room_for(s, store, sha, len(context)):
@@ -179,16 +179,16 @@ class Checkpointer:
                 return c
         raise GitError(f"session {sid} has no checkpoint {turn}", 404)
 
-    def restore(self, sid: str, turn: int) -> list:
-        """Restore the workspace to a checkpoint and return the model context saved with it; `commit_rewind`
-        then records the rewind. The caller has checked that the session is idle and local.
+    def restore(self, sid: str, turn: int) -> tuple[list, dict]:
+        """Restore the workspace to a checkpoint and return the model context and run fields saved with it;
+        `commit_rewind` then records the rewind. The caller has checked that the session is idle and local.
 
         All or nothing: every file the restore must remove or replace is probed first, and a step that still
         fails puts the branch, index and files back as they were before raising (409, naming the files)."""
         s = self.db.get_session(sid)
         ckpt = self.checkpoint(sid, turn)
         store, workspace = self.store(s), Path(s["workspace"])
-        context = store.load_context(turn)
+        saved = store.load_turn(turn)
         with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
             plan = store.plan(workspace, ckpt["sha"], Path(tmp))
             locked = store.busy(workspace, plan)
@@ -207,7 +207,7 @@ class Checkpointer:
                 raise self._undo(sid, store, workspace, plan.current, before, e, status) from e
             finally:
                 store.release(sid)
-        return context
+        return saved
 
     @staticmethod
     def _undo(sid: str, store: Store, workspace: Path, tree: str, before: dict | None, error: Exception,
@@ -224,13 +224,16 @@ class Checkpointer:
                             f"({'; '.join(failures)[:300]})", 500)
         return GitError(f"nothing was rewound: {str(error)[:600]}", status)
 
-    def commit_rewind(self, sid: str, turn: int, context: list) -> None:
-        """One transaction (pass to `db.write`/`awrite`): truncate the context, hide later checkpoints, and mark the
+    def commit_rewind(self, sid: str, turn: int, saved: tuple[list, dict]) -> None:
+        """One transaction (pass to `db.write`/`awrite`): put back the context and run fields `restore` returned,
+        show exactly the checkpoints up to `turn` (a redo shows the ones an earlier rewind hid), and mark the
         event log. The log itself keeps the full history."""
         ckpt = self.checkpoint(sid, turn)
-        self.db.update_session(sid, context=context, inbox=[], turn_seq=turn, review="", review_detail="",
-                               answer="", stop_reason="")
-        self.db.hide_checkpoints_after(sid, turn)
+        context, carried = saved
+        run = {k: v for k, v in self.db.get_session(sid)["run"].items() if k not in TURN_RUN_KEYS}
+        self.db.update_session(sid, context=context, run={**run, **carried}, inbox=[], turn_seq=turn, review="",
+                               review_detail="", answer="", stop_reason="")
+        self.db.show_checkpoints_through(sid, turn)
         self.bus.emit(sid, "rewound", {"turn": turn, "head": ckpt["head"][:12]})
 
     # fork -------------------------------------------------------------------------------------------------------

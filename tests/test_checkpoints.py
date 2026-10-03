@@ -623,3 +623,79 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
         assert (ws / "extra.txt").read_text() == "late\n"
 
     asyncio.run(body())
+
+
+def test_redo_shows_the_restored_checkpoints_again(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        sid = s["id"]
+        await m.rewind(sid, 1)
+        assert [c["turn"] for c in m.checkpoints(sid)["checkpoints"]] == [1]
+        await m.rewind(sid, 2)                                             # redo: turn 2 is listed again
+        assert [c["turn"] for c in m.checkpoints(sid)["checkpoints"]] == [1, 2]
+        assert not m.db.checkpoints(sid, hidden=True)
+        await m.rewind(sid, 1)                                             # and can be left again
+        await m.rewind(sid, 2)
+        fork = await m.fork(sid, 2, "from the redone turn")
+        await finished(m, fork["id"])
+        assert (Path(fork["workspace"]) / "extra.txt").exists()
+
+    asyncio.run(body())
+
+
+def stateful_edits() -> Script:
+    return Script([
+        Completion(tool_calls=[call("write_file", 0, path="app.py", content="VALUE = 2\n"),
+                               call("update_state", 1, goal="goal one", plan="plan one", notes="notes one")]),
+        Completion(tool_calls=[call("write_file", 0, path="extra.txt", content="late\n"),
+                               call("update_state", 1, goal="goal two", plan="plan two", notes="notes two")]),
+        Completion(content="All done."),
+    ])
+
+
+def test_rewind_restores_the_agent_state_of_the_checkpoint(tmp_path):
+    from harness.runner import new_run
+
+    async def body():
+        m, s = await started(tmp_path, script=stateful_edits())
+        sid = s["id"]
+        assert s["run"]["state"]["goal"] == "goal two" and s["run"]["notes"] == "notes two"
+        rewound = await m.rewind(sid, 1)
+        assert rewound["run"]["state"]["goal"] == "goal one" and rewound["run"]["notes"] == "notes one"
+        carried = new_run(carry=rewound["run"])                             # what the next turn starts from
+        assert carried["state"]["plan"] == "plan one" and carried["notes"] == "notes one"
+        redone = await m.rewind(sid, 2)
+        assert redone["run"]["state"]["goal"] == "goal two" and redone["run"]["notes"] == "notes two"
+
+    asyncio.run(body())
+
+
+def test_fork_starts_from_the_agent_state_of_the_checkpoint(tmp_path):
+    async def body():
+        m, s = await started(tmp_path, script=stateful_edits())
+        fork = await m.fork(s["id"], 1, "do something else")
+        assert fork["run"]["state"]["goal"] == "goal one" and fork["run"]["notes"] == "notes one"
+        _, carried = m.runner.checkpointer.store(fork).load_turn(1)         # the fork's own checkpoint keeps it too
+        assert carried["state"]["goal"] == "goal one" and carried["notes"] == "notes one"
+        await finished(m, fork["id"])
+
+    asyncio.run(body())
+
+
+def test_rewind_to_a_checkpoint_without_saved_state_clears_it(tmp_path):
+    import gzip
+    import json
+
+    async def body():
+        m, s = await started(tmp_path, script=stateful_edits())
+        sid = s["id"]
+        store = m.runner.checkpointer.store(s)
+        old = store.contexts / "1.json.gz"                                  # saved before run fields were kept
+        old.write_bytes(gzip.compress(json.dumps(store.load_context(1)).encode("utf-8")))
+        rewound = await m.rewind(sid, 1)
+        assert "state" not in rewound["run"] and "notes" not in rewound["run"]
+        fork = await m.fork(sid, 1, "do something else")
+        assert "state" not in fork["run"] and "notes" not in fork["run"]
+        await finished(m, fork["id"])
+
+    asyncio.run(body())

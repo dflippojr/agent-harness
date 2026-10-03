@@ -837,9 +837,10 @@ class Database:
             return [dict(r) for r in self.conn.execute(sql + " ORDER BY turn", params).fetchall()]
 
     @_writes
-    def hide_checkpoints_after(self, sid: str, turn: int) -> None:
+    def show_checkpoints_through(self, sid: str, turn: int) -> None:
+        """After a rewind to `turn`: the checkpoints up to it are visible, the later ones hidden."""
         with self.lock:
-            self.conn.execute("UPDATE checkpoints SET hidden = 1 WHERE session_id = ? AND turn > ?", (sid, turn))
+            self.conn.execute("UPDATE checkpoints SET hidden = (turn > ?) WHERE session_id = ?", (turn, sid))
 
     @_writes
     def delete_checkpoints(self, sid: str, turns: list[int]) -> None:
