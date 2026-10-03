@@ -21,11 +21,12 @@ from . import compaction, delegate_edit, efficiency, grounding, llm, projects, s
 from .backend_state import billing_warning
 from .bus import EventBus
 from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
-from .config import Config, resolve_tool_output, clamp_tool_limit
+from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit
 from .db import Database, finish_then_cancel
 from .homelab import Homelab
+from .mcp_server import McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
-from .policy import ALLOW, ASK, DENY, ChatPolicy, Policy
+from .policy import ALLOW, ASK, DENY, ChatPolicy, Decision, Policy, mcp_harness_tool
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
@@ -34,7 +35,7 @@ from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
 from .tools import ToolError, Workspace, bound_shell_text, truncate_middle, validate_args
 from .verify import ToolOutput, bound_rendered, render_verify
-from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, WAKING, ModelWarmer
+from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, UNLOADED, WAKING, ModelWarmer
 
 log = logging.getLogger("harness.runner")
 
@@ -177,7 +178,8 @@ class Runner:
         self.cursor_factory = CursorSession
         self._quota_checked: dict[str, float] = {}
         self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
-        self.generating: set[str] = set()       # sessions with a model call in flight (the guard waits for them)
+        self.ram = None                         # gpu_guard.MemoryWatch (the guard's RAM check), set with the guard
+        self.generating: set[str] = set()       # sessions loading the model or calling it (the guard waits for them)
         self.gpu_paused_sessions: set[str] = set()
         self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
@@ -192,6 +194,11 @@ class Runner:
         self.settings = None                    # settings_service.SettingsService, set by the manager
         self.last_completion: dict = {}         # tok/s of the latest model turn, for /metrics
         self.gate = InferenceGate()             # shared with the inference endpoint (endpoint.py)
+        # Harness tools for hosted Claude Code over MCP (#300): tokens in memory only, one-use grants per allowed call.
+        self.mcp_tokens = McpTokens()
+        self.mcp_server = McpServer(self.mcp_tokens, self.mcp_tool_schemas, self.mcp_call)
+        self.mcp_relay_factory = McpRelay
+        self._mcp_grants: dict[str, list[dict]] = {}
 
     # helpers
     def sandbox(self, s: dict) -> Sandbox | RemoteSandbox:
@@ -291,6 +298,67 @@ class Runner:
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
             schemas = schemas + self.app_tools.schemas(s)
         return schemas
+
+    def mcp_tool_schemas(self, sid: str) -> list[dict]:
+        """The daemon tools a hosted Claude Code session may call over MCP: web, session search, memory library and
+        images as enabled for its project and app, plus app-registered tools. Never remote control or skills."""
+        s = self.db.get_session(sid)
+        if s is None or s.get("kind") == "chat" or s.get("backend") != "claude":
+            return []
+        served = [k for k in (self.memory, self.web_overrides.get(sid, self.web), self.images, self.sessions)
+                  if k is not None]
+        schemas = [schema for kit in self.daemon_toolkits(s) if kit in served for schema in kit.schemas()]
+        if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
+            schemas = schemas + self.app_tools.schemas(s)
+        return schemas
+
+    def _grant_mcp(self, sid: str, name: str, args: dict, call_id: str, approval_call_id: str = "") -> None:
+        """Record that the policy allowed this mcp__harness__ call, so the MCP endpoint runs it exactly once. A call
+        Claude regenerated after --resume keeps the call id its approval was recorded under (the memory library
+        looks the approval up by it)."""
+        bare = mcp_harness_tool(name)
+        if bare is not None:
+            self._mcp_grants.setdefault(sid, []).append(
+                {"tool": bare, "args": json.dumps(args, sort_keys=True), "call_id": call_id,
+                 "approval_call_id": approval_call_id or call_id})
+
+    def _take_mcp_grant(self, sid: str, name: str, args: dict, tool_use_id: str) -> dict | None:
+        grants = self._mcp_grants.get(sid) or []
+        wanted = json.dumps(args, sort_keys=True)
+        for grant in grants:
+            if grant["tool"] == name and grant["args"] == wanted and (not tool_use_id
+                                                                      or grant["call_id"] == tool_use_id):
+                grants.remove(grant)
+                return grant
+        return None
+
+    async def mcp_call(self, sid: str, name: str, args: dict, tool_use_id: str = "") -> tuple[str, bool]:
+        """Run one MCP tools/call for a hosted session. Only a call the policy already allowed (or the user approved)
+        through can_use_tool runs; Claude Code records the result in the transcript as an ordinary tool_result."""
+        grant = self._take_mcp_grant(sid, name, args, tool_use_id)
+        if grant is None:
+            return ("Error: this call was not allowed through the harness approval policy. Call the tool normally "
+                    "so the harness can decide it."), False
+        s = self.db.get_session(sid)
+        if name not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
+            return f"Error: unknown tool {name!r}", False
+        try:
+            with telemetry.span("mcp_tool_call", {"gen_ai.tool.name": name, "harness.backend": s["backend"]}):
+                output = await self._dispatch_mcp(s, grant["approval_call_id"], name, args)
+        except (ToolError, OSError, UnicodeError) as e:
+            return f"Error: {e}", False
+        self._taint_from_result(s, name, args)  # MCP results are untrusted content like the native tools' (#262)
+        return (output.text if isinstance(output, ToolOutput) else str(output)), True
+
+    async def _dispatch_mcp(self, s: dict, call_id: str, name: str, args: dict):
+        if self.app_tools is not None and name in self.app_tools.names(s):
+            return await self.app_tools.call(s, call_id, name, args)
+        kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
+        if kit is self.images:
+            return await self._call_images(s["id"], s, None, kit, name, args)
+        if getattr(kit, "wants_session", False):
+            return await kit.call(name, args, session=s, call_id=call_id)
+        return await kit.call(name, args)
 
     def policy(self, s: dict) -> Policy | ChatPolicy:
         if s.get("kind") == "chat":
@@ -401,6 +469,15 @@ class Runner:
         self.bus.emit(sid, "gpu_paused", {"reason": describe(self.guard.reasons), "reasons": self.guard.reasons,
                                           "resume_after_seconds": self.guard.cfg.resume_after_seconds})
 
+    def gpu_paused_waiting(self) -> bool:
+        """A session the pause held is still active: it will want the model when the hold ends. Checked live, since
+        the set is cleared only on resume and a held session may be cancelled, fail or be deleted meanwhile."""
+        for sid in self.gpu_paused_sessions:
+            s = self.db.get_session(sid)
+            if s is not None and s["status"] in ACTIVE:
+                return True
+        return False
+
     def gpu_resumed(self, seconds: float) -> None:
         for sid in sorted(self.gpu_paused_sessions):
             self.bus.emit(sid, "gpu_resumed", {"seconds": round(seconds)})
@@ -415,27 +492,64 @@ class Runner:
             self.scheduler.release(sid)
             await self._acquire(sid, front=not low)
 
+    def memory_low(self) -> bool:
+        return self.ram is not None and self.ram.low()
+
+    async def _memory_gate(self, sid: str, what: str) -> None:
+        """Before adding load (loading the model, starting a worker container): wait while available RAM is under
+        the resource guard's threshold. The session and the phone hear about it once per wait."""
+        if not self.memory_low():
+            return
+        from .gpu_guard import MEMORY_POLL_SECONDS, describe_memory
+        started = time.monotonic()
+        status = self.ram.status()
+        await self.bus.aemit(sid, "waiting_memory", {"reason": describe_memory(status), "waiting_for": what,
+                                                     "available_bytes": status["available_bytes"],
+                                                     "threshold_bytes": status["threshold_bytes"]})
+        while self.memory_low():
+            await asyncio.sleep(MEMORY_POLL_SECONDS)
+        await self.bus.aemit(sid, "memory_recovered", {"seconds": round(time.monotonic() - started)})
+
+    async def _memory_wait(self, sid: str, model) -> None:
+        """A parked or sleeping model waits for memory before it loads."""
+        if self.memory_low() and await self.warmer.state(model) in (SLEEPING, UNLOADED):
+            await self._memory_gate(sid, "local model")
+
     async def _model_call(self, sid: str, *args, **kwargs) -> llm.Completion:
         """self.chat, gated on the GPU guard. A call cut off because the guard stopped the model server (a game
-        started and the turn outlasted the drain timeout) is retried after the pause instead of failing."""
+        started and the turn outlasted the drain timeout, or the server was parked under it) is retried instead of
+        failing. The session is in `generating` (the guard's lease: it won't unload the model) from before a parked
+        model is loaded until the call ends."""
+        model = args[0] if args and isinstance(args[0], ModelConfig) else None
         while True:
             await self._gpu_gate(sid)
-            turn = await self.gate.agent_turn()  # endpoint requests (an editor, a script) go first
+            if model is not None:
+                await self._memory_wait(sid, model)
             self.generating.add(sid)
+            turn = None
             try:
+                if model is not None:
+                    await self.warmer.ensure_loaded(model)
+                    if self.guard is not None and self.guard.active:
+                        continue  # a hold began while the model was loading
+                turn = await self.gate.agent_turn()  # endpoint requests (an editor, a script) go first
                 with telemetry.span("chat", {"gen_ai.operation.name": "chat",
                                              "gen_ai.request.model": getattr(args[0], "name", "") if args else ""}):
                     completion = await self.chat(*args, **kwargs)
                     telemetry.annotate(self._chat_attributes(completion))
                 return completion
             except llm.LLMError as e:
-                if self.guard is None or not self.guard.active:
+                if self.guard is not None and self.guard.active:
+                    reason = "model server paused for the GPU"
+                elif model is not None and self.warmer.parked(model) and not self.warmer.blocked():
+                    reason = "model server was unloaded"  # the next pass loads it again (it can: nothing blocks it)
+                else:
                     raise
-                await self.bus.aemit(sid, "llm_retry",
-                                     {"attempt": 0, "error": f"model server paused for the GPU: {e}"[:500]})
+                await self.bus.aemit(sid, "llm_retry", {"attempt": 0, "error": f"{reason}: {e}"[:500]})
             finally:
                 self.generating.discard(sid)
-                await turn.release()
+                if turn is not None:
+                    await turn.release()
 
     @staticmethod
     def _chat_attributes(c: llm.Completion) -> dict:
@@ -710,6 +824,7 @@ class Runner:
                 await self.aset_status(sid, "queued")
             backend_session_id = str(s["run"].get("backend_session_id") or "")
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
+            await self._memory_gate(sid, f"{backend_name} worker container")
             try:
                 async with slot:
                     with telemetry.span("hosted_cli_turn", {"harness.backend": backend_name,
@@ -754,9 +869,13 @@ class Runner:
                    "cursor": self.cursor_factory}[backend_name]
         from dataclasses import replace
         frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
+        extra = {}
+        if backend_name == "claude" and backend.mcp and self.mcp_tool_schemas(sid):
+            extra = {"mcp": self.mcp_relay_factory(session_id=sid, backend=frozen, server=self.mcp_server),
+                     "mcp_token": self.mcp_tokens.mint(sid)}
         cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=frozen,
                       sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
-                      model=s["model"], backend_session_id=backend_session_id, api_key=api_key)
+                      model=s["model"], backend_session_id=backend_session_id, api_key=api_key, **extra)
         self._cli_sessions[sid] = cli
         await cli.start()
         prompt = ("The harness restarted; continue the task." if recovered else
@@ -1261,8 +1380,7 @@ class Runner:
             existing = await self._wait_approval(existing["id"])
         if existing["status"] == "approved":
             await self.aset_status(sid, "running")
-            self._taint_allowed_cli_request(sid, name, args)
-            await cli.respond_permission(request_id, "allow", args)
+            await self._allow_cli(sid, cli, request_id, name, args, call_id, existing.get("tool_call_id") or "")
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
         await self.aset_status(sid, "running")
@@ -1272,23 +1390,37 @@ class Runner:
                               call_id: str) -> dict | None:
         """Apply the policy to a new CLI tool request: answer it now (None) or persist an approval to wait on."""
         sid = s["id"]
-        decision = self._taint_layer(s, name, args, self.policy(s).decide(name, args))
+        bare = mcp_harness_tool(name)  # a harness tool over MCP is taint-checked and previewed as the native tool
+        decision = self._taint_layer(s, bare or name, args, self.policy(s).decide(name, args))
+        if bare is not None and bare not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
+            decision = Decision(DENY, f"{bare} is not a harness tool this session can use over MCP")
         await self.bus.aemit(sid, "tool_call", {"id": call_id, "name": name, "args": args,
                                          "decision": decision.action, "reason": decision.reason})
         if decision.action == ALLOW:
-            self._taint_allowed_cli_request(sid, name, args)
-            await cli.respond_permission(request_id, "allow", args)
+            await self._allow_cli(sid, cli, request_id, name, args, call_id)
             return None
         if decision.action != ASK:
             reason = decision.reason or "not allowed"
             await cli.respond_permission(request_id, "deny", args,
                                          f"Blocked by harness policy: {reason}. Don't retry this.")
             return None
+        detail, reason = str(request.get("description") or ""), decision.reason
+        if bare is not None:
+            # The memory library only applies a change whose approved detail carries its exact diff.
+            detail, reason, error = await self._ask_details(s, bare, args, None, decision.reason)
+            if error is not None:
+                await cli.respond_permission(request_id, "deny", args, error)
+                return None
         existing = {"id": "a-" + uuid.uuid4().hex[:8], "session_id": sid, "tool_call_id": call_id,
-                    "tool": name, "args": args, "reason": decision.reason,
-                    "detail": str(request.get("description") or "")}
+                    "tool": name, "args": args, "reason": reason, "detail": detail}
         extra = await self._review_ask(s, name, args, decision)
         return self._persist_ask(sid, existing, extra)
+
+    async def _allow_cli(self, sid: str, cli, request_id, name: str, args: dict, call_id: str,
+                         approval_call_id: str = "") -> None:
+        self._taint_allowed_cli_request(sid, name, args)
+        self._grant_mcp(sid, name, args, call_id, approval_call_id)
+        await cli.respond_permission(request_id, "allow", args)
 
     def _taint_allowed_cli_request(self, sid: str, name: str, args: dict) -> None:
         """Taint for a hosted CLI web request at the moment it is allowed to run. The CLI's tool_result only carries
@@ -1334,6 +1466,8 @@ class Runner:
         self.db.write(finish_cli_result)
 
     async def _stop_cli(self, sid: str) -> None:
+        self.mcp_tokens.revoke(sid)
+        self._mcp_grants.pop(sid, None)
         cli = self._cli_sessions.pop(sid, None)
         if cli is not None:
             await cli.stop()
@@ -1346,7 +1480,7 @@ class Runner:
         ws = self.workspace(s)
         stream = _DeltaStream(self.bus, sid, model.name)
         # A sleeping model takes about a minute to reload; tell the user instead of looking stuck.
-        if await self.warmer.state(model) in (SLEEPING, WAKING):
+        if await self.warmer.state(model) in (SLEEPING, WAKING, UNLOADED):
             stream.waking_since = time.monotonic()
             await self.bus.aemit(sid, "model_waking", {"model": model.name, "expected_seconds": EXPECTED_WAKE_SECONDS})
 

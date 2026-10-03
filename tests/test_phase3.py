@@ -132,22 +132,29 @@ def test_review_cancelled_mid_write_still_rewrites_the_transcript(tmp_path):
         m = Manager(cfg, chat=edit_steps())
         await m.start(maintenance=False)
         s = await finished(m, m.create("bump", project="proj")["id"])
-        entered, release = threading.Event(), threading.Event()
+        entered, release, rewritten = threading.Event(), threading.Event(), threading.Event()
         update_session, written = m.db.update_session, []
 
         def slow_update(sid, **fields):
             if "review" in fields:
                 entered.set()
-                release.wait(scaled(10))
+                release.wait(scaled(60))
             return update_session(sid, **fields)
         m.db.update_session = slow_update
-        m.runner.write_transcript = written.append
+
+        def record_write(sid):
+            written.append(sid)
+            rewritten.set()
+        m.runner.write_transcript = record_write
         request = asyncio.create_task(m.review(s["id"], "merge"))
-        await asyncio.to_thread(entered.wait, scaled(10))
+        # the merge itself (git subprocesses) runs before the commit, so under load it can outlast a short deadline
+        assert await asyncio.to_thread(entered.wait, scaled(60)), "review never reached its commit"
         request.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await request
+        # the rewrite is an after-commit callback on the writer's caller thread: it can land after the cancel surfaces
+        assert await asyncio.to_thread(rewritten.wait, scaled(60)), "transcript was never rewritten"
         assert m.db.get_session(s["id"])["review"] == "merged"
         assert written == [s["id"]]
         await m.stop()

@@ -6,10 +6,11 @@ import { ago } from "../lib/format.mjs";
 
 export const IMAGE_PHASE = {
   idle: "", waiting: "Waiting for the GPU (a game or transcode is using it)", switching: "Unloading the language model",
+  waiting_memory: "Waiting for memory (available RAM is under the threshold; Actions → Resources)",
   starting: "Starting ComfyUI", warm: "Image generator is ready", generating: "Generating",
   restoring: "Reloading the language model",
 };
-export const IMAGE_BUSY = new Set(["waiting", "switching", "starting", "generating", "restoring"]);
+export const IMAGE_BUSY = new Set(["waiting", "switching", "waiting_memory", "starting", "generating", "restoring"]);
 
 export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave, progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location, confirm }) {
   function imageCard(img) {

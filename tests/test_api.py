@@ -168,20 +168,22 @@ def test_web_app_and_guard(tmp_path):
         assert '"Upscale 4×"' in images_page
         assert "upscale: upscale.value" in images_page
         assert 'href: "#/profile/account"' in profile_js
-        assert "gpuActionRow()" in actions_js
+        assert "gpuActionRow(model.render)" in actions_js
+        assert "function diagnosticsCard()" in actions_js and "setInterval" not in actions_js.split(
+            "function diagnosticsCard()")[1].split("function gpuActionRow")[0]  # one reading, no polling (#311)
         assert "function gpuCard()" not in js
         assert 'h("span", {}, "Duration:")' in actions_js
         assert 'duration.disabled = isGuest() || !g.manual' in actions_js
         assert "function viewActions" in actions_js
         assert 'go(`#/actions/${parts[1]}`, true)' in js
-        assert actions_js.index('["gpu", "GPU"]') < actions_js.index('["accounts", "Accounts"]')
+        assert actions_js.index('["resources", "Resources"]') < actions_js.index('["accounts", "Accounts"]')
         assert actions_js.index('["accounts", "Accounts"]') < actions_js.index('["remote-control", "Claude Remote Control"]')
         assert actions_js.index('["remote-control", "Claude Remote Control"]') < actions_js.index('["disk", "Disk"]')
         assert 'nav === "actions" && !isOwner()' in js
         assert 'href: "#/profile/remote-control"' not in js
         assert 'href: "#/profile/disk"' not in js
         assert 'data-nav="actions"' in client.get("/").text
-        assert 'href="#/actions/gpu" data-nav="actions"' in client.get("/").text
+        assert 'href="#/actions/resources" data-nav="actions"' in client.get("/").text
         view_profile_js = profile_js.split("async function viewProfile")[1].split("function connectionCard")[0]
         assert "gpuActionRow()" not in view_profile_js
         assert "Claude Remote Control" not in view_profile_js

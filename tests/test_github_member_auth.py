@@ -606,19 +606,22 @@ def test_racing_disconnect_stops_inflight_git(tmp_path, fake):
         connect(client, fake, ALICE, a)
         fake.add_repo("alice/slow", allowed=["alice"])
         from harness.storage import repos_dir
-        gate = threading.Event()
-        started = []
+        registered = []
         orig_register = m.github_auth.ops.register
 
         def register(uid, proc):
-            started.append(proc)
+            registered.append(proc)
             orig_register(uid, proc)
-            gate.set()
 
         m.github_auth.ops.register = register
-        # make the clone slow: point the fake at a repo, then disconnect while the process runs
+        # The fake git is a .cmd launcher that spawns python. Disconnecting before python is running would race the
+        # process start (taskkill /T can miss a child not yet spawned), so the sleeper drops a marker file first and
+        # the test disconnects only once the sleeper is really running. It sleeps far past every budget, so only
+        # the kill can end the clone.
+        marker = tmp_path / "sleeper-running"
         sleeper = fake.git_dir / "fake_git.py"
-        sleeper.write_text("import time\ntime.sleep(30)\n" + sleeper.read_text(encoding="utf-8"), encoding="utf-8")
+        sleeper.write_text(f"import pathlib, time\npathlib.Path({str(marker)!r}).write_text('1')\ntime.sleep(300)\n"
+                           + sleeper.read_text(encoding="utf-8"), encoding="utf-8")
         result = {}
 
         def run():
@@ -627,17 +630,24 @@ def test_racing_disconnect_stops_inflight_git(tmp_path, fake):
                                     repos_dir(m.cfg, a))
             except GitHubAuthError as e:
                 result["code"] = e.code
+            except BaseException as e:  # reported below, never lost in the thread
+                result["error"] = repr(e)
 
-        t = threading.Thread(target=run)
+        def state():
+            return (f"result={result} alive={t.is_alive()} marker={marker.exists()} "
+                    f"registered={[(p.pid, p.poll()) for p in registered]}")
+
+        t = threading.Thread(target=run, daemon=True)
         t.start()
-        assert gate.wait(20)
+        assert wait_for(marker.exists, 20, describe=state), "sleeper never started: " + state()
         began = time.monotonic()
-        threading.Thread(target=lambda: m.github_auth.disconnect(a)).start()
-        t.join(30)
-        assert result.get("code") == "cancelled" and time.monotonic() - began < 25
+        threading.Thread(target=lambda: m.github_auth.disconnect(a), daemon=True).start()
+        t.join(scaled(30))
+        elapsed = time.monotonic() - began
+        assert result.get("code") == "cancelled" and elapsed < scaled(25), f"{state()} elapsed={elapsed:.1f}"
         assert not (repos_dir(m.cfg, a) / "slow").exists()
         assert wait_for(lambda: fake.namespaces() == set())
-        assert m.db.get_github_connection(a)["status"] == "disconnected"
+        assert wait_for(lambda: m.db.get_github_connection(a)["status"] == "disconnected")
     finally:
         close(client)
 

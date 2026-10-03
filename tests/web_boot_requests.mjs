@@ -279,10 +279,9 @@ if (scenario === "client-update" || scenario === "daemon-update") {
   const gated = before.filter((e) => ["/gpu", "/models/warm", "/profile"].includes(e.path) && e.end > firstData.start);
   if (gated.length && gated.some((e) => e.start < firstData.start - LATENCY * 2)) fail("route data must not wait on /gpu, /models/warm or /profile");
   const warm = paths.includes("POST /models/warm");
-  if (scenario === "guest" && warm) fail("guest must not warm");
   if (scenario === "member" && first("/gpu")) fail("member must not request /gpu");
-  if (scenario === "member" && !warm) fail("member must warm");
-  if (scenario === "owner" && !(first("/gpu") && warm)) fail("owner must request /gpu and warm");
+  if (warm) fail("boot must not warm the model; only a local-model selection does (#311)");
+
   // Round trips before route data: waves of requests that had to finish before the next began.
   const starts = before.filter((e) => ["/health", "/me", "/auth/session"].includes(e.path)).map((e) => e.start).sort((x, y) => x - y);
   const waves = { size: starts.filter((t, i) => i === 0 || t - starts[i - 1] > LATENCY / 2).length };

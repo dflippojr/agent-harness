@@ -93,6 +93,8 @@ class BackendConfig:
     network: str = "harness-cli-claude"
     api_key_file: str = "D:/Agents/harness/secrets/claude-api-key"
     stop_at_utilization: float = 0.0
+    # Claude Code only: expose the daemon's tools over MCP through a per-session relay sidecar (#300).
+    mcp: bool = True
 
 
 @dataclass
@@ -133,10 +135,20 @@ class CleanupConfig:
 
 @dataclass
 class GpuGuardConfig:
-    """Pause the queue and unload the model while a game or a Plex hardware transcode needs the GPU (gpu_guard.py)."""
+    """The resource guard (gpu_guard.py): pause the queue and unload the model while a game or a Plex hardware
+    transcode needs the GPU, load the model only when something needs it, and hold new load while RAM is short.
+    The YAML section keeps the `gpu_guard:` name until the guard's name is settled (Settings writes go there)."""
     enabled: bool = False
     poll_seconds: float = 10
-    resume_after_seconds: float = 180     # the GPU must stay clear this long before the model is reloaded
+    resume_after_seconds: float = 180     # the GPU must stay clear this long before the hold ends
+    # A hold ending (or Images giving the GPU back) leaves the model unloaded until a turn, an endpoint request, a
+    # local-model selection in the app, or "Load local model now" needs it. False restores the old eager reload.
+    lazy_load: bool = True
+    # Below this much available physical memory the harness doesn't load the model, start a worker container or
+    # start a ComfyUI job; the work waits with a `waiting_memory` reason. 0 turns the RAM check off.
+    min_available_ram_gb: float = 4
+    load_now_default_minutes: int = 60    # default window for "Load local model now" (idle unload suspended)
+    keepalive_seconds: float = 300        # a pinned model gets a one-token request this often; keep under the idle unload
     drain_timeout_seconds: float = 300    # longest wait for the current model turn before the server is stopped
     # The model server's supervisor (ops/llama-server/run-qwen.ps1) doesn't restart the server while this file exists.
     pause_flag: str = "C:/AI/llama-server.paused"

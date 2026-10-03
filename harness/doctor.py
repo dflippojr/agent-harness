@@ -182,7 +182,8 @@ def check_model_server(r: Report, cfg) -> None:
     except (httpx.HTTPError, ValueError) as e:
         paused = Path(cfg.gpu_guard.pause_flag).exists() if cfg.gpu_guard.enabled else False
         (r.warn if paused else r.fail)(MODEL_CHECK, f"{model.base_url} not answering ({type(e).__name__})"
-                                       + ("; the GPU guard has it paused" if paused else ""))
+                                       + ("; the resource guard has it paused or parked (unloaded until needed)"
+                                          if paused else ""))
 
 
 def check_daemon_profile(r: Report, cfg, base: str) -> None:
@@ -209,10 +210,13 @@ def check_daemon(r: Report, cfg) -> None:
         gpu = httpx.get(f"{base}/gpu", timeout=5).json()
         if gpu.get("enabled"):
             flag = Path(cfg.gpu_guard.pause_flag).exists()
-            if flag and gpu["state"] == "clear":
-                r.warn("GPU guard", f"pause flag {cfg.gpu_guard.pause_flag} exists but the guard is clear")
+            if flag and gpu["state"] == "clear" and not gpu.get("lazy_load"):
+                r.warn("Resource guard", f"pause flag {cfg.gpu_guard.pause_flag} exists but the guard is clear")
             else:
-                r.ok("GPU guard", f"state {gpu['state']}")
+                parked = "; model parked until needed" if flag and gpu["state"] == "clear" else ""
+                memory = gpu.get("memory") or {}
+                low = "; RAM low, new work waits" if memory.get("low") else ""
+                r.ok("Resource guard", f"state {gpu['state']}{parked}{low}")
         backup = httpx.get(f"{base}/maintenance", timeout=60).json().get("backup") or {}
         if backup.get("enabled"):
             (r.ok if backup.get("ok_at") else r.warn)("Backups", backup.get("path") or

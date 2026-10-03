@@ -45,7 +45,7 @@ while :; do
         -v "$model_path:/models/model.gguf:ro" "$image" \
         -m /models/model.gguf --alias "$model_name" --host 127.0.0.1 --port "$port" \
         --ctx-size "$context" --flash-attn on --parallel 1 --jinja --metrics \
-        --sleep-idle-seconds 1800 "${extra_args[@]}" >>"$server_log" 2>&1 &
+        --sleep-idle-seconds 600 "${extra_args[@]}" >>"$server_log" 2>&1 &
     child=$!
     wait "$child"
     status=$?

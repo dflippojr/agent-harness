@@ -7,8 +7,9 @@ therefore takes the GPU over:
    call in flight finishes; agent turns wait; endpoint requests get 503);
 2. stop llama-server through the guard's pause flag (its supervisor waits while the flag exists);
 3. start ComfyUI (portable install, launched hidden by the daemon) without loading a checkpoint until a prompt runs;
-4. run queued workflows, then stop ComfyUI immediately, remove the flag (llama-server restarts and reloads Qwen, ~1 min)
-   and release the gate.
+4. run queued workflows, then stop ComfyUI immediately and release the gate. With the resource guard's `lazy_load` the
+   flag stays (Qwen loads when a turn needs it); otherwise remove it (llama-server restarts and reloads Qwen, ~1 min).
+   ComfyUI doesn't start while available RAM is under the guard's threshold (phase `waiting_memory`).
 
 Opening the Images tab (owner only) starts ComfyUI in this same GPU session so Generate is not paying the ~45s boot.
 A CUDA context is unavoidable on the portable install, so warmup unloads Qwen rather than sharing the 16 GB card.
@@ -493,6 +494,8 @@ class ImageService:
         # installed-AND-enabled state so an uninstalled component can never run.
         self.edit_enabled = bool(cfg.edit_enabled if edit_enabled is None else edit_enabled)
         self.control = control         # gpu_guard.ServerControl for the language model server
+        self.memory_low: Callable[[], bool] = lambda: False  # the resource guard's RAM check (set by the manager)
+        self.want_model: Callable[[], bool] = lambda: True   # reload Qwen after a batch (False: leave it parked)
         self.db = db
         self.runner = runner
         self.comfy = ComfyProcess(cfg)
@@ -591,7 +594,7 @@ class ImageService:
 
     @property
     def gpu_taken(self) -> bool:
-        return self.phase in ("switching", "starting", "warm", "generating", "restoring")
+        return self.phase in ("switching", "waiting_memory", "starting", "warm", "generating", "restoring")
 
     def start(self) -> None:
         if self._task is None:
@@ -1116,10 +1119,15 @@ class ImageService:
             if empty:
                 return
             self.phase = "switching"
-            await self.control.stop()  # stop llama-server; its supervisor waits while the flag exists
+            # A model load in flight ends first; then the flag is written and llama-server stopped (its supervisor
+            # waits while the flag exists).
+            await self.runner.warmer.park(self.control.stop)
             flagged = True
             first, empty = self._batch_is_empty(first)
             if empty:
+                return
+            if not await self._wait_for_memory(paused):
+                self._requeue_live(first)
                 return
             self.phase = "starting"
             await self.comfy.start()
@@ -1135,6 +1143,16 @@ class ImageService:
             await slot.release()
             self.phase = "idle"
             self.progress = {}
+
+    async def _wait_for_memory(self, paused: Callable[[], bool]) -> bool:
+        """Hold ComfyUI while available RAM is under the guard's threshold. False if the GPU guard paused first."""
+        from .gpu_guard import MEMORY_POLL_SECONDS
+        if self.memory_low():
+            self.phase = "waiting_memory"
+            log.info("image batch waiting for memory")
+        while self.memory_low() and not paused():
+            await asyncio.sleep(MEMORY_POLL_SECONDS)
+        return not paused()
 
     async def _drain_queue(self, first: str | None, paused: Callable[[], bool]) -> None:
         """Run the batch's jobs until the queue is empty, the guard pauses, or (kept warm) Generate never comes."""
@@ -1191,7 +1209,8 @@ class ImageService:
         if took_over:
             self.phase = "restoring"
             await self.comfy.stop()
-        if flagged and not paused():  # when the guard is paused it restores the model itself later
+        # When the guard is paused it restores the model itself later; with lazy loading it stays parked until needed.
+        if flagged and not paused() and self.want_model():
             self.phase = "restoring"
             await self.control.start()  # llama-server restarts and reloads the model
             for _ in range(150):

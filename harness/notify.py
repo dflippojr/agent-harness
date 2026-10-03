@@ -23,7 +23,7 @@ from .settings import frozen_app_defaults, use_live_app_settings
 log = logging.getLogger("harness.notify")
 
 WATCHED = {"approval_requested", "approval_decided", "run_finished", "model_waking", "target_waiting",
-           "target_online", "gpu_paused", "gpu_resumed"}
+           "target_online", "gpu_paused", "gpu_resumed", "waiting_memory", "memory_recovered"}
 
 
 def _short(text: str, limit: int) -> str:
@@ -191,7 +191,7 @@ class Notifier:
         return {**base, "sequence_id": f"gpu-{sid}", "title": f"Paused for the GPU: {title}", "priority": 3,
                 "tags": ["video_game"], "click": self.link(f"/#/s/{sid}"),
                 "message": f"{d['reason']} needs the GPU, so the model was unloaded. The task continues "
-                           f"{minutes} min after it's done (or resume from Actions → GPU)."}
+                           f"{minutes} min after it's done (or resume from Actions → Resources)."}
 
     def _gpu_resumed(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
         seconds = d.get("seconds", 0)
@@ -199,6 +199,20 @@ class Notifier:
         return {**base, "sequence_id": f"gpu-{sid}", "title": f"Resumed: {title}", "priority": 2,
                 "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
                 "message": f"The GPU is free again after {waited}; the model is loading and the task continues."}
+
+    def _waiting_memory(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        # Replaced by the "memory recovered" notification through the same sequence id.
+        return {**base, "sequence_id": f"mem-{sid}", "title": f"Waiting for memory: {title}", "priority": 3,
+                "tags": ["hourglass"], "click": self.link(f"/#/s/{sid}"),
+                "message": f"{d['reason']}, so the {d.get('waiting_for', 'work')} doesn't start yet. The task "
+                           "continues when memory frees up (see Actions → Resources)."}
+
+    def _memory_recovered(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
+        seconds = d.get("seconds", 0)
+        waited = f"{round(seconds / 60)} min" if seconds >= 90 else f"{seconds} s"
+        return {**base, "sequence_id": f"mem-{sid}", "title": f"Resumed: {title}", "priority": 2,
+                "tags": ["arrow_forward"], "click": self.link(f"/#/s/{sid}"),
+                "message": f"Memory recovered after {waited}; the task continues."}
 
     def _approval_decided(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
         approval = self.db.get_approval(d["id"])
@@ -234,6 +248,7 @@ class Notifier:
         "approval_requested": _approval_requested, "model_waking": _model_waking,
         "target_waiting": _target_waiting, "target_online": _target_online,
         "gpu_paused": _gpu_paused, "gpu_resumed": _gpu_resumed,
+        "waiting_memory": _waiting_memory, "memory_recovered": _memory_recovered,
         "approval_decided": _approval_decided, "run_finished": _run_finished,
     }
 
