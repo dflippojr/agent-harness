@@ -1,5 +1,8 @@
 # Supervisor for the always-on Qwen llama-server. Started hidden at logon by the
 # "AgentHarness-LlamaServer" scheduled task (see install-task.ps1). Restarts the server if it exits.
+# At logon it parks the server (creates the pause flag) instead of loading the model: the harness daemon removes the
+# flag when something needs the model (docs/resource-guard.md). -LoadAtLogon restores the old eager start.
+param([switch]$LoadAtLogon)
 $ErrorActionPreference = 'Stop'
 
 $exe = 'C:\AI\llama.cpp\b10950\llama-server.exe'
@@ -20,9 +23,10 @@ $serverArgs = @(
     '--parallel', '1',
     '--jinja',
     '--metrics',
-    # Unload after 30 idle minutes; the next request reloads it. If you change this, also change the
-    # sleep_after constant in the Grafana "Local LLM (llama-server)" dashboard (observability-stack repo).
-    '--sleep-idle-seconds', '1800'
+    # Unload after 10 idle minutes; the next request reloads it (~1 min). If you change this, also change the
+    # sleep_after constant in the Grafana "Local LLM (llama-server)" dashboard (observability-stack repo) and
+    # gpu_guard.keepalive_seconds in config/harness.yaml (it must stay below this).
+    '--sleep-idle-seconds', '600'
 )
 
 New-Item -ItemType Directory -Force $logDir | Out-Null
@@ -33,15 +37,20 @@ if (-not $mutex.WaitOne(0)) { exit 0 }
 
 function Log($msg) { "$(Get-Date -Format s) $msg" | Add-Content $supervisorLog }
 
-# The harness daemon's GPU guard (harness/gpu_guard.py) creates this file and stops the server while a game or a
-# Plex hardware transcode needs the GPU. Don't restart the server until the file is gone. Keep in sync with
-# gpu_guard.pause_flag in config/harness.yaml.
+# The harness daemon's resource guard (harness/gpu_guard.py) creates this file and stops the server while a game or
+# a Plex hardware transcode needs the GPU, and leaves it in place afterwards until something needs the model.
+# Don't start the server until the file is gone. Keep in sync with gpu_guard.pause_flag in config/harness.yaml.
 $pauseFlag = 'C:\AI\llama-server.paused'
 $loggedPause = $false
 
+if (-not $LoadAtLogon -and -not (Test-Path $pauseFlag)) {
+    "parked at logon by run-qwen.ps1 at $(Get-Date -Format s)" | Set-Content $pauseFlag
+    Log 'parked at logon; the harness loads the model when something needs it'
+}
+
 while ($true) {
     if (Test-Path $pauseFlag) {
-        if (-not $loggedPause) { Log 'paused by the harness GPU guard; waiting for the pause flag to go'; $loggedPause = $true }
+        if (-not $loggedPause) { Log 'paused or parked by the harness resource guard; waiting for the pause flag to go'; $loggedPause = $true }
         Start-Sleep -Seconds 5
         continue
     }

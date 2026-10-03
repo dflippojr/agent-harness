@@ -156,6 +156,24 @@ async def _acquire_slot(m, flavor: str, path: str, finish) -> tuple[object | Non
                            headers={"Retry-After": "10"})
 
 
+async def _ensure_model(m, model, flavor: str, finish) -> JSONResponse | None:
+    """Load the local model if it's parked (resource guard lazy loading), or the 503 to send while RAM is short or
+    while it's parked and can't load (a NO_GPU route during a GPU hold; GPU routes got their 503 at the slot)."""
+    from .warmup import SLEEPING, UNLOADED
+    if m.warmer.parked(model) and m.warmer.blocked():
+        finish(503)
+        held = m.guard is not None and (m.guard.active or m.guard.manual)
+        return error(flavor, 503, "overloaded_error", "the model is unloaded while the GPU is in use by "
+                     + ("a game or a Plex transcode" if held else "image generation"),
+                     headers={"Retry-After": "180" if held else "60"})
+    if m.runner.memory_low() and await m.warmer.state(model) in (SLEEPING, UNLOADED):
+        finish(503)
+        return error(flavor, 503, "overloaded_error", "the machine is low on memory; the model stays unloaded until "
+                     "it recovers", headers={"Retry-After": "60"})
+    await m.warmer.ensure_loaded(model)
+    return None
+
+
 def _request_log(m, record: dict, started: float):
     """A `finish(status, ...)` that writes one accounting row for this request."""
     def finish(status: int, prompt: int = 0, completion: int = 0, wait_ms: int = 0) -> None:
@@ -223,6 +241,11 @@ async def proxy(m, request: Request, path: str) -> Response:
 
     slot, err = await _acquire_slot(m, flavor, path, finish)
     if err is not None:
+        return err
+    err = await _ensure_model(m, model, flavor, finish)  # every route is relayed to llama-server, count_tokens too
+    if err is not None:
+        if slot:
+            await slot.release()
         return err
     wait_ms = int((time.monotonic() - started) * 1000)
     client = httpx.AsyncClient(timeout=httpx.Timeout(ecfg.request_timeout_seconds, connect=10), trust_env=False,

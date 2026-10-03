@@ -257,7 +257,7 @@ $settingsPath = Join-Path $InstallDir 'settings.json'
 $settings = [ordered]@{
     instance = $Instance; app_dir = $AppDir; config_dir = $configDir; python = $python; log_dir = $logDir
     llama_server = $llamaServer; model_path = $ModelPath; model_name = $(if ($m) { $m.name } else { '' }); port = $ServerPort
-    context_tokens = $(if ($m) { $m.context } else { 0 }); sleep_idle_seconds = 1800
+    context_tokens = $(if ($m) { $m.context } else { 0 }); sleep_idle_seconds = 600
     extra_args = $(if ($m) { $m.args } else { @() }); pause_flag = $pauseFlag
     existing_server = $ExistingServer
 }
