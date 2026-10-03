@@ -1705,17 +1705,22 @@ class Runner:
                                 ok=False)
             return None, None
 
-        if name == "finish":
+        tools_only = s.get("kind") == TOOLS_ONLY  # not even the loop's own tools: only the App's (#329)
+        if name == "finish" and not tools_only:
             return await self._finish_call(s, call, args, rest), None
-        if name == "update_notes" and isinstance(args.get("notes"), str):
+        if name == "update_notes" and isinstance(args.get("notes"), str) and not tools_only:
             return await self._update_notes_call(sid, call, args), None
-        if name == "update_state":
+        if name == "update_state" and not tools_only:
             return await self._update_state_call(sid, call, args), None
-        if name == "reset_round":
+        if name == "reset_round" and not tools_only:
             return await self._reset_round_call(sid, call, args), None
 
         ws = self.workspace(s)
         schemas = {t["function"]["name"]: t for t in self.tool_schemas(s, ws)}
+        if name not in schemas and tools_only:  # recorded as a policy denial; never run
+            self._bump(sid, "invalid_tool_calls")
+            await self._authorize(s, call, name, args, ws)
+            return None, None
         if name not in schemas:
             self._bump(sid, "invalid_tool_calls")
             await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "

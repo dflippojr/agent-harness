@@ -255,7 +255,7 @@ class AppRootResponse(BaseModel):
     models: list[str]
     backends: list[BackendResponse]
     capabilities: CapabilitiesResponse
-    features: dict[str, bool | str]
+    features: dict[str, bool | str | list[str]]
     release: str
     build_id: str
     protocols: dict
