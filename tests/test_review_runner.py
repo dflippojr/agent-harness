@@ -1556,12 +1556,22 @@ def _complete_check(
     fake_gh = (
         "function gh {\n"
         "    if ($args[0] -eq 'api' -and $args -contains '--paginate') {\n"
-        "        $env:FAKE_DIFF_FILES -split ','\n"
+        # FAKE_REMOVED_FILES are deleted in the PR: the real API drops them only through the jq select.
+        "        $files = @($env:FAKE_DIFF_FILES -split ',')\n"
+        "        $jq = [string]$args[[array]::IndexOf($args, '--jq') + 1]\n"
+        "        if ($env:FAKE_REMOVED_FILES -and -not $jq.Contains('select(.status != \"removed\")')) {\n"
+        "            $files += @($env:FAKE_REMOVED_FILES -split ',')\n"
+        "        }\n"
+        "        $files\n"
         "        $global:LASTEXITCODE = 0\n"
         "        return\n"
         "    }\n"
         "    $fields = [ordered]@{}\n"
         "    $ix = [array]::IndexOf($args, '--input')\n"
+        "    if ($ix -ge 0 -and $env:FAKE_REJECT_ANNOTATIONS) {\n"
+        "        $global:LASTEXITCODE = 1\n"
+        "        return\n"
+        "    }\n"
         "    if ($ix -ge 0) {\n"
         "        $fields = [System.IO.File]::ReadAllText($args[$ix + 1]) | ConvertFrom-Json\n"
         "    }\n"
@@ -1662,6 +1672,23 @@ def test_complete_check_annotates_findings_in_the_diff(tmp_path):
     assert all(n["annotation_level"] == "failure" for n in notes)
     assert notes[0]["message"] == "bad index"
     assert fields["output"]["summary"].startswith("Reviewed")
+
+
+def test_complete_check_skips_findings_on_removed_files(tmp_path):
+    """A deleted file is not in the check's head tree, so GitHub would reject an annotation on it (422)."""
+    review = "Reviewed\n\n- src/gone.py:1: removing this leaves X unregistered\n- src/a.py:4: bug\n"
+    env = {**FINDINGS_ENV, "FAKE_REMOVED_FILES": "src/gone.py"}
+    fields = _complete_check(tmp_path, env, review=review, diff_files="src/a.py")
+    assert [n["path"] for n in fields["output"]["annotations"]] == ["src/a.py"]
+
+
+def test_complete_check_falls_back_to_plain_completion_when_annotations_are_rejected(tmp_path):
+    env = {**FINDINGS_ENV, "FAKE_REJECT_ANNOTATIONS": "1"}
+    fields = _complete_check(tmp_path, env, review="Reviewed\n\n- a.py:3: bug\n", diff_files="a.py")
+    assert fields["status"] == "completed"
+    assert fields["conclusion"] == "failure"
+    assert fields["output[title]"] == "3 findings"
+    assert "- a.py:3: bug" in fields["output[summary]"]
 
 
 def test_complete_check_batches_annotations_by_fifty(tmp_path):
