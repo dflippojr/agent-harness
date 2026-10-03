@@ -357,3 +357,21 @@ def test_hosted_cli_without_tool_limits_refuses_at_run_time(tmp_path):
         assert started == []
         assert s["run"]["failure"]["code"] == "app_tools_only_unsupported"
     asyncio.run(body())
+
+
+def test_unknown_tool_field_is_a_422_that_suggests_parameters(tmp_path):
+    client, m, script = _client(tmp_path, [])
+    with client:
+        auth, _ = _app(client)
+        schema = {"type": "object", "properties": {"id": {"type": "string"}}}
+        for alias in ("input_schema", "inputSchema"):
+            r = client.post("/api/v1/sessions", headers=auth, json={
+                "prompt": "hi", "tools": [{**BALANCE, alias: schema}]})
+            assert r.status_code == 422
+            assert alias in r.text and "parameters" in r.text
+        r = client.post("/api/v1/sessions", headers=auth, json={
+            "prompt": "hi", "tools": [{**BALANCE, "paramters": schema}]})
+        assert r.status_code == 422 and "paramters" in r.text
+        ok = client.post("/api/v1/sessions", headers=auth, json={
+            "prompt": "hi", "tools": [{"name": "get_thing", "description": "no args"}]})
+        assert ok.status_code == 201, ok.text

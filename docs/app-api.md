@@ -197,6 +197,8 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
 - **Tools:** up to 16. Names match `^[a-zA-Z][a-zA-Z0-9_]{2,48}$` and can't reuse a built-in name. `parameters` is
   a JSON Schema object; the agent's arguments are validated against its property types before your app sees them.
   App tools don't need approval.
+  A tool field the API doesn't know (a typo, or Anthropic's `input_schema`) is a `422` at session create naming the
+  field, with a hint to use `parameters`; the tool is never registered as a no-argument tool.
 - `project` must exist in the harness's `projects.yaml` (`GET /api/v1` lists them). Omitted, it is `scratch`.
 - `tools_only: true` starts an [App-tools-only session](#app-tools-only-sessions) instead of an agent session.
 - `backend` is `local` (the tower model) or a hosted CLI id such as `claude`, `codex`, or `cursor`

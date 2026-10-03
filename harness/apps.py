@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .api import RouteTable, mgr, sse
 from .fileops import ToolError
@@ -123,10 +123,22 @@ class ContextBlock(BaseModel):
 
 
 class AppTool(BaseModel):
+    # A misspelled field must not silently become a tool that takes no arguments (#357).
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     description: str = Field(max_length=2000)
     parameters: dict = {"type": "object", "properties": {}}
     timeout_seconds: int = DEFAULT_TOOL_TIMEOUT
+
+    @model_validator(mode="before")
+    @classmethod
+    def _suggest_parameters(cls, data):
+        if isinstance(data, dict):
+            for alias in ("input_schema", "inputSchema"):
+                if alias in data:
+                    raise ValueError(f"unknown tool field '{alias}': this API calls it 'parameters'")
+        return data
 
 
 class CreateAppSession(BaseModel):
