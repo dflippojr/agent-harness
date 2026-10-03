@@ -90,20 +90,21 @@ def test_web_app_and_guard(tmp_path):
         assert "<title>Agent Harness Web</title>" in client.get("/").text
         js = client.get("/static/app.js").text
         actions_js = client.get("/static/pages/actions.mjs").text
+        profile_js = client.get("/static/pages/profile.mjs").text
         assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
         assert "session-chrome" in js
         assert "jump-top" in js
         assert 'method: "PATCH"' in js
         assert "session-title" in js
-        assert "harness.theme" in js
-        assert "harness.textSize" in js
-        assert "TEXT_SIZES" in js
+        assert "harness.theme" in profile_js
+        assert "harness.textSize" in profile_js
+        assert "TEXT_SIZES" in profile_js
         assert "applyTextSize" in js
         assert 'setHeader("agents", "New task", { page: true })' in js
         assert "sessionJumpHidden" in js
         assert "Math.min(160, 0.75 * vh)" in client.get("/static/lib/layout.mjs").text
         assert 'type: "color"' not in js
-        assert "swatch split" in js
+        assert "swatch split" in profile_js
         assert "Scratch is a fresh empty folder" in js
         assert '"＋ New project"' in js
         assert 'api("/projects", { method: "POST"' in js
@@ -166,7 +167,7 @@ def test_web_app_and_guard(tmp_path):
         assert '"Upscale 2×"' in images_page
         assert '"Upscale 4×"' in images_page
         assert "upscale: upscale.value" in images_page
-        assert 'href: "#/profile/account"' in js
+        assert 'href: "#/profile/account"' in profile_js
         assert "gpuActionRow(model.render)" in actions_js
         assert "function diagnosticsCard()" in actions_js and "setInterval" not in actions_js.split(
             "function diagnosticsCard()")[1].split("function gpuActionRow")[0]  # one reading, no polling (#311)
@@ -183,14 +184,14 @@ def test_web_app_and_guard(tmp_path):
         assert 'href: "#/profile/disk"' not in js
         assert 'data-nav="actions"' in client.get("/").text
         assert 'href="#/actions/resources" data-nav="actions"' in client.get("/").text
-        profile_js = js.split("async function viewProfile")[1].split("function connectionCard")[0]
-        assert "gpuActionRow()" not in profile_js
-        assert "Claude Remote Control" not in profile_js
-        assert '"smart-approvals": "Smart approvals"' in js
-        assert "function smartApprovalsCard()" in js
-        assert 'skills: "Skills"' in js
+        view_profile_js = profile_js.split("async function viewProfile")[1].split("function connectionCard")[0]
+        assert "gpuActionRow()" not in view_profile_js
+        assert "Claude Remote Control" not in view_profile_js
+        assert '"smart-approvals": "Smart approvals"' in profile_js
+        assert "function smartApprovalsCard()" in profile_js
+        assert 'skills: "Skills"' in profile_js
         assert 'api("/skills/enabled")' in js
-        assert "Install hash" in js
+        assert "Install hash" in profile_js
         assert "confirmGpuQueue" in js
         assert "gpu.manual" in js
         assert "picker.hidden = !picker.hidden" not in js

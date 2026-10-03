@@ -1,11 +1,11 @@
 // showSecretOnce (hoisted from four nested callbacks, #229): shows the secret once, Copy copies it, Done reloads.
-// It builds DOM and still lives in app.js, so it is sliced out of the source with h/fill/copyToClipboard stubbed.
-// Delete this slicer when the Actions/Settings pages move to harness/web/pages/ and it can be imported (#258).
+// It builds DOM inside mountProfile (pages/profile.mjs), so it is sliced out of the source with h/fill/copyToClipboard stubbed.
+// Delete this slicer when it moves to a lib/ module and can be imported (#258).
 import { readFileSync } from "node:fs";
 
-const src = readFileSync(new URL("../harness/web/app.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const src = readFileSync(new URL("../harness/web/pages/profile.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const start = src.indexOf("function showSecretOnce(");
-if (start < 0) throw new Error("showSecretOnce missing from app.js");
+if (start < 0) throw new Error("showSecretOnce missing from pages/profile.mjs");
 const body = src.slice(start, src.indexOf("\n}\n", start) + 3);
 
 const failures = [];

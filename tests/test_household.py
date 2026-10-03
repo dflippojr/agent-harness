@@ -845,7 +845,7 @@ def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
         assert "function isMember()" in js
         actions_js = client.get("/static/pages/actions.mjs").text
         assert "accountsCard" in actions_js
-        assert "Household member" in js
+        assert "Household member" in client.get("/static/pages/profile.mjs").text
         assert "function ownerSurface()" in js
         assert 'if (isMember()) return "app";' in js
         assert 'agentHarnessWeb.url("/events", ownerSurface())' in js
