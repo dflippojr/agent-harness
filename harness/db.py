@@ -512,7 +512,8 @@ class _Writer(threading.Thread):
         self._conn, self._lock, self._local = conn, lock, local
 
     def run(self) -> None:
-        self._local.conn, self._local.lock, self._local.after_commit = self._conn, self._lock, None
+        self._local.conn, self._local.lock = self._conn, self._lock
+        self._local.after_commit = self._local.after_rollback = None
         while True:
             job = self.jobs.get()
             if job is None:
@@ -610,6 +611,14 @@ class Database:
     def _on_writer(self) -> bool:
         return getattr(self._local, "conn", None) is self._wconn
 
+    def for_session(self, sid: str) -> Database:
+        """The store that holds session `sid`. A lone Database holds them all; `SessionStores` routes (#330)."""
+        return self
+
+    def for_app(self, app_id: str) -> Database:
+        """The store that holds App `app_id`'s sessions: this one, unless `SessionStores` routes (#330)."""
+        return self
+
     def _submit(self, fn, *args, **kwargs) -> Future:
         if self._closed:
             raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
@@ -669,14 +678,23 @@ class Database:
         else:
             callback()
 
+    def after_rollback(self, callback) -> None:
+        """Run callback() on the writer thread if the current transaction rolls back; nothing outside one."""
+        if self.in_transaction():
+            self._local.after_rollback.append(callback)
+
     def _run_tx(self, fn, args, kwargs):
         callbacks: list = []
-        self._local.after_commit = callbacks
+        undo: list = []
+        self._local.after_commit, self._local.after_rollback = callbacks, undo
         try:
             with self._tx(label=getattr(fn, "__name__", None)):
                 value = fn(*args, **kwargs)
+        except BaseException:
+            _run_callbacks(undo)
+            raise
         finally:
-            self._local.after_commit = None
+            self._local.after_commit = self._local.after_rollback = None
         return value, callbacks
 
     def write(self, fn, *args, **kwargs):

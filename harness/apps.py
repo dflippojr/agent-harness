@@ -1028,12 +1028,12 @@ async def list_sessions(request: Request, limit: int = 50):
     key = auth(request, "sessions")
     if key.get("kind") == "member":
         return [m.list_summary(r) for r in m.db.list_sessions(limit, owner_id=key["user_id"])]
-    rows = m.db.list_sessions(limit * 5, owner_id="owner")
-    mine = [r for r in rows if owner_key(key) or SESSIONS_ALL in key["scope_set"]
-            or r.get("app_id") == key["id"]]
+    if owner_key(key) or SESSIONS_ALL in key["scope_set"]:  # every store's (#330)
+        mine = m.db.list_sessions(limit * 5, owner_id="owner")
+    else:  # this App's own store only
+        mine = m.db.for_app(key["id"]).list_sessions(limit * 5, owner_id="owner") if key.get("kind") == "app" else []
     if key.get("kind") == "app":  # an App's tools-only sessions are listed to that App alone (#329)
-        mine += [r for r in m.db.list_sessions(limit * 5, owner_id="owner", kind=TOOLS_ONLY)
-                 if r.get("app_id") == key["id"]]
+        mine += m.db.for_app(key["id"]).list_sessions(limit * 5, owner_id="owner", kind=TOOLS_ONLY)
         mine.sort(key=lambda r: r["created_at"], reverse=True)
     return [m.list_summary(r) for r in mine[:limit]]
 
