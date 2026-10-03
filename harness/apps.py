@@ -40,7 +40,7 @@ NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.13"
+API_VERSION = "1.14"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
