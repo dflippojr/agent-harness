@@ -322,8 +322,8 @@ def test_a_status_write_that_rolls_back_leaves_the_index_as_committed(tmp_path):
 def test_an_app_approval_insert_that_rolls_back_is_not_routed(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
     stores.insert_session(_session("a1", "k-aaaa", status="running"))
-    approval = {"id": "ap1", "session_id": "a1", "tool_call_id": "c1", "tool": "write_file", "args": {}, "reason": "", "status": "pending",
-                "created_at": time.time()}
+    approval = {"id": "ap1", "session_id": "a1", "tool_call_id": "c1", "tool": "write_file", "args": {},
+                "reason": "", "status": "pending", "created_at": time.time()}
 
     def persist_ask():
         stores.insert_approval(dict(approval))
