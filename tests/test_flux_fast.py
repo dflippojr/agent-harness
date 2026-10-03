@@ -1269,12 +1269,12 @@ def test_manifest_pins_public_apache_artifacts():
 def test_scan_node_classes_skips_unreadable_files(tmp_path, monkeypatch):
     root = tmp_path / "comfy"
     (root / "ComfyUI").mkdir(parents=True)
-    (root / "ComfyUI" / "good.py").write_text("class Good:\n    pass\n", encoding="utf-8")
-    (root / "ComfyUI" / "bad.py").write_text("class Bad:\n    pass\n", encoding="utf-8")
+    (root / "ComfyUI" / "nodes.py").write_text("class Good:\n    pass\n", encoding="utf-8")
+    (root / "ComfyUI" / "nodes_flux.py").write_text("class Bad:\n    pass\n", encoding="utf-8")
     real = Path.read_text
 
     def flaky(self, *a, **k):
-        if self.name == "bad.py":
+        if self.name == "nodes_flux.py":
             raise PermissionError("locked")
         return real(self, *a, **k)
 
