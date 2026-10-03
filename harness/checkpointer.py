@@ -37,7 +37,7 @@ class Checkpointer:
     def store(self, s: dict) -> Store:
         from . import storage
         from .principal import session_user_id
-        return Store(storage.checkpoints_dir(self.cfg, session_user_id(s)) / s["id"])
+        return Store(storage.checkpoints_dir(self.cfg, session_user_id(s), s.get("app_id") or "") / s["id"])
 
     # take -------------------------------------------------------------------------------------------------------
     def take(self, sid: str, only_if_changed: bool = False, stats: dict | None = None) -> dict | None:

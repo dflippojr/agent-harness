@@ -51,7 +51,7 @@ SDK_OPERATIONS = {
 SDK_REQUEST_FIELDS = {
     SDK_OPERATIONS["pair"]: {"code"},
     SDK_OPERATIONS["create_session"]: {"prompt", "project", "backend", "model", "title", "context", "tools",
-                                       "metadata", "tools_only"},
+                                       "metadata", "tools_only", "retention_days"},
     SDK_OPERATIONS["send"]: {"content"},
     SDK_OPERATIONS["add_context"]: {"context"},
     SDK_OPERATIONS["submit_tool_result"]: {"output", "ok"},
@@ -328,14 +328,15 @@ class Harness:
     # sessions
     def create_session(self, prompt: str, project: str | None = None, context: dict[str, str] | None = None,
                        tools: list[Tool] | None = None, metadata: dict | None = None, title: str | None = None,
-                       model: str | None = None, backend: str = "local", tools_only: bool = False) -> Session:
+                       model: str | None = None, backend: str = "local", tools_only: bool = False,
+                       retention_days: float | None = None) -> Session:
         """`tools_only=True` starts an App-tools-only session: the model gets only `tools` (no workspace, project,
         built-in or CLI tools). It takes no project; backends that can't do it refuse with
-        app_tools_only_unsupported."""
+        app_tools_only_unsupported. `retention_days` erases the session once it has been idle that long."""
         body = {"prompt": prompt, "project": project if project is not None or tools_only else "scratch",
                 "backend": backend, "metadata": metadata or {}, "title": title, "model": model,
                 "context": [{"title": k, "content": v} for k, v in (context or {}).items()],
-                "tools": [t.spec() for t in tools or []], "tools_only": tools_only}
+                "tools": [t.spec() for t in tools or []], "tools_only": tools_only, "retention_days": retention_days}
         return self._call("POST", "/sessions", json=body)
 
     def session(self, sid: str) -> Session:

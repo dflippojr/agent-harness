@@ -23,6 +23,9 @@ const storeLine = (k) => {
   if (s.errors) parts.push(`${s.errors} failed, last ${s.last_error}${s.last_error_at ? ` ${ago(s.last_error_at)}` : ""}`);
   return parts.join(" · ");
 };
+// A revoked App's (or device's) store and files are erased after a 7-day grace the owner can undo (#330).
+const ERASE_GRACE_DAYS = 7;
+const eraseDate = (k) => new Date(k.erase_after * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
 const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "smart-approvals", "skills"]);
@@ -841,7 +844,7 @@ function endpointCard(me) {
           h("button", {
             class: "btn small bad",
             onclick: async () => {
-              if (!confirm(`Revoke the key “${k.name}”? Tools using it stop working.`)) return;
+              if (!confirm(`Revoke the key “${k.name}”? Tools using it stop working. Any sessions it started, and their files, are erased in ${ERASE_GRACE_DAYS} days unless you undo it under Apps.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No keys yet."),
@@ -871,6 +874,7 @@ function appsCard(me) {
         api("/keys"), api("/pairing-codes"), api("/runner-pairing-codes"), api("/runners"),
       ]);
       const apps = keys.filter((k) => k.kind === "app" && !k.revoked_at);
+      const erasing = keys.filter((k) => k.kind !== "owner" && k.erase_after && !k.erased_at);
       const ownerConnections = keys.filter((k) => k.kind === "owner" && !k.revoked_at);
       const webConnections = ownerConnections.filter((k) => k.origins?.length);
       const cliConnections = ownerConnections.filter((k) => !k.origins?.length);
@@ -954,11 +958,21 @@ function appsCard(me) {
           h("button", {
             class: "btn small bad",
             onclick: async () => {
-              if (!confirm(`Revoke the app “${k.name}”? It can no longer start or read sessions.`)) return;
+              if (!confirm(`Revoke the app “${k.name}”? It can no longer start or read sessions, and its sessions and files are erased in ${ERASE_GRACE_DAYS} days unless you undo the revoke here.`)) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke"),
           storeLine(k) ? h("div", { class: "muted small" }, storeLine(k)) : null))) : h("p", { class: "muted small" }, "No apps yet."),
+        erasing.length ? [h("p", { class: "section-label" }, "Revoked: data to be erased"),
+          h("ul", { class: "small" }, erasing.map((k) => h("li", {},
+            h("strong", {}, k.name), ` · its sessions and files are erased on ${eraseDate(k)} `,
+            h("button", { class: "btn small", type: "button", onclick: async () => {
+              if (!confirm(`Undo revoking “${k.name}”? Its sessions and files are kept, and it gets a new token.`)) return;
+              try {
+                const r = await api(`/apps/${k.id}/restore`, { method: "POST" });
+                showSecretOnce(form, load, `New token for ${r.name}. Copy it now; it isn't shown again. The old token stays revoked.`, r.key, "Copy");
+              } catch (e) { toast(e.message); }
+            } }, "Undo"))))] : null,
         webConnections.length ? [h("p", { class: "section-label" }, "Web connections"),
           h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
             h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${usedSuffix(k)} `,

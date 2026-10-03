@@ -13,6 +13,10 @@ session not created yet. An App store opens on first use and closes after `APP_S
 The owner and members never read an App store (#330 decision 3): their lists, searches and id lookups cover the main
 store only, and an App's cover the main store plus its own (`db.scope(app_id)`). The owner sees per-App metadata
 instead (`app_metadata`): session counts by status from the index, usage and the last error from the main store.
+
+An App's sessions keep their files in its folder too (`storage.session_dirs`): `workspaces/`, `transcripts/`,
+`checkpoints/` and `artifacts/` next to the store. `drop_app` erases the whole folder once a revoked App's grace is
+over (#330 decision 5; the manager's `sweep_app_data` decides when).
 """
 
 from __future__ import annotations
@@ -22,8 +26,11 @@ import functools
 import itertools
 import json
 import logging
+import os
 import re
+import shutil
 import sqlite3
+import stat
 import threading
 import time
 import weakref
@@ -70,6 +77,19 @@ def app_dir(data_dir: Path, app_id: str) -> Path:
     if not _APP_ID.fullmatch(app_id or ""):
         raise ValueError(f"not an App id: {app_id!r}")
     return Path(data_dir) / "apps" / app_id
+
+
+def _remove_tree(path: Path) -> None:
+    """shutil.rmtree that also removes read-only files (git objects are read-only on Windows)."""
+    def on_error(func, p, _exc):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    if path.exists():
+        shutil.rmtree(path, onerror=on_error)
+
+
+def _same_path(a: str | Path, b: Path) -> bool:
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
 
 
 def _kind(name: str) -> str | None:
@@ -203,11 +223,13 @@ class SessionStores:
         self._sessions: dict[str, dict] = {}
         self._approvals: dict[str, str] = {}   # approval id -> App
         self._tokens: dict[str, str] = {}      # approval token -> App
+        self._erased: set[str] = set()       # Apps whose store and folder are gone: never reopened
         self._closed = False
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
         self.migrate_app_sessions()
         self._load_index()
+        self.migrate_app_files()
 
     # stores -----------------------------------------------------------------------------------------------------------
     def store_path(self, app_id: str) -> Path:
@@ -223,6 +245,8 @@ class SessionStores:
         with self._lock:
             if self._closed:
                 raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+            if app_id in self._erased:
+                raise sqlite3.ProgrammingError(f"App {app_id}'s store was erased")
             entry = self._open.get(app_id)
             if entry is None:
                 entry = self._open[app_id] = _OpenStore(Database(self.store_path(app_id)))
@@ -429,7 +453,7 @@ class SessionStores:
         """The key list (Settings → Apps), each App's and device's with its store's metadata."""
         keys = self.main.list_api_keys()
         for k in keys:
-            if k.get("kind") != "owner":
+            if k.get("kind") != "owner" and not k.get("erased_at"):
                 k["store"] = self.app_metadata(k["id"])
         return keys
 
@@ -439,10 +463,43 @@ class SessionStores:
             return self.main.delete_session(sid)
 
         def delete(db: Database) -> None:
+            approvals = db.conn.execute("SELECT id, token FROM approvals WHERE session_id = ?", (sid,)).fetchall()
             db.delete_session(sid)
-            db.after_commit(lambda: self._forget(sid, committed=True))
+
+            def forget() -> None:
+                self._forget(sid, committed=True)
+                for a in approvals:
+                    self._forget_approval(a["id"], a["token"])
+            db.after_commit(forget)
         with self._using(app_id, write=True) as db:
             db.write(delete, db)
+
+    def app_session_ids(self, app_id: str) -> list[str]:
+        """App `app_id`'s sessions, from the index."""
+        return [sid for sid, _ in self._indexed(lambda e: e["app_id"] == app_id)]
+
+    def indexed_apps(self) -> list[str]:
+        """The Apps that have sessions, from the index."""
+        return self._apps()
+
+    def drop_app(self, app_id: str) -> None:
+        """Erase App `app_id`'s store and folder: every session it holds and their files. Stop its sessions first;
+        the store is closed under any call still using it. It is never reopened: a later call about it raises."""
+        folder = self.store_path(app_id).parent
+        with self._lock:
+            self._erased.add(app_id)
+            entry = self._open.pop(app_id, None)
+            self._proxies.pop(app_id, None)
+            for sid in [s for s, e in self._sessions.items() if e["app_id"] == app_id]:
+                del self._sessions[sid]
+            for aid in [a for a, owner in self._approvals.items() if owner == app_id]:
+                del self._approvals[aid]
+            for token in [t for t, owner in self._tokens.items() if owner == app_id]:
+                del self._tokens[token]
+        if entry is not None:
+            entry.db.close()
+        _remove_tree(folder)
+        log.info("erased the store and folder of App %s", app_id)
 
     def _stage(self, db: Database, sid: str) -> None:
         """In `db`'s transaction: once it commits, the index holds the session's row as this transaction left it.
@@ -628,6 +685,57 @@ class SessionStores:
             self._move(app_id, sids)
             log.info("moved %d session(s) of App %s into %s", len(sids), app_id, self.store_path(app_id))
         return backup
+
+    def migrate_app_files(self) -> list[Path]:
+        """Move the files of App sessions made before they had their own folder (workspaces, checkpoints,
+        transcripts) from the owner's folders into their App's, and point their stored workspace there. Backs up each
+        App store it changes first (`<app folder>/pre-migration/`). Idempotent: what has moved is not found again,
+        and a move cut short is finished (files first, then the stored paths). Returns the backups made."""
+        data_dir = self.apps_dir.parent
+        old_ws, old_ckpt, old_tr = data_dir / "workspaces", data_dir / "checkpoints", data_dir / "transcripts"
+        by_app: dict[str, list[str]] = {}
+        for sid, e in self._indexed(lambda e: True):
+            by_app.setdefault(e["app_id"], []).append(sid)
+        backups = []
+        for app_id, sids in sorted(by_app.items()):
+            root = self.store_path(app_id).parent
+            stored = dict(self._raw_rows(app_id, "SELECT id, workspace FROM sessions"))
+            moves = [(src, root / sub / src.name) for sid in sorted(sids) for sub, src in
+                     (("workspaces", old_ws / sid), ("checkpoints", old_ckpt / sid),
+                      ("transcripts", old_tr / f"{sid}.md")) if src.exists()]
+            repoint = {sid: str(root / "workspaces" / sid) for sid in sids
+                       if stored.get(sid) and _same_path(stored[sid], old_ws / sid)}
+            if not moves and not repoint:
+                continue
+            backup = root / "pre-migration" / f"harness-app-files-{time.strftime('%Y%m%dT%H%M%S')}.sqlite3"
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup_sqlite(self.store_path(app_id), backup)
+            backups.append(backup)
+            moved = 0
+            for src, dest in moves:
+                if dest.exists():
+                    log.warning("not moving %s: %s already exists", src, dest)
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dest))
+                moved += 1
+            if repoint:
+                with self._using(app_id, write=True) as db:
+                    db.write(lambda db=db: db.conn.executemany("UPDATE sessions SET workspace = ? WHERE id = ?",
+                                                               [(w, sid) for sid, w in repoint.items()]))
+            log.info("moved %d file(s) of App %s's sessions into %s and repointed %d workspace(s); backup %s",
+                     moved, app_id, root, len(repoint), backup)
+        return backups
+
+    def _raw_rows(self, app_id: str, sql: str) -> list[tuple]:
+        """Rows read from App `app_id`'s store file without opening the store (no migrations, no writer)."""
+        conn = sqlite3.connect(str(self.store_path(app_id)))
+        try:
+            return [tuple(r) for r in conn.execute(sql).fetchall()]
+        except sqlite3.OperationalError:  # created but never migrated
+            return []
+        finally:
+            conn.close()
 
     def _move(self, app_id: str, sids: list[str]) -> None:
         main, marks = self.main, ",".join("?" * len(sids))

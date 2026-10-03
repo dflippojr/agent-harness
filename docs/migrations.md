@@ -76,3 +76,15 @@ is a `Database` too. It runs the same steps when it opens, and a store that need
 `<data dir>/apps/<app_id>/pre-migration/` backup. The one-time move of older App sessions out of the main store
 backs up the main store to `<data dir>/pre-migration/harness-app-stores-<YYYYmmddTHHMMSS>.sqlite3` first. To roll
 that move back, restore that file as above and delete `<data dir>/apps/`.
+
+The next one-time move takes those App sessions' files (working directories, checkpoint snapshots, transcripts) out
+of `<data dir>/workspaces/`, `checkpoints/` and `transcripts/` into the App's folder (`workspaces/`, `checkpoints/`,
+`transcripts/` under `<data dir>/apps/<app_id>/`) and points each session's stored working directory there. Before
+it changes an App's store it backs that store up to
+`<data dir>/apps/<app_id>/pre-migration/harness-app-files-<YYYYmmddTHHMMSS>.sqlite3`. It moves the files first and
+updates the paths last, so a start cut short is finished by the next one; a later start finds nothing to do. To roll
+it back, stop the daemon, move the session folders and transcripts back to the owner's folders and restore that
+backup over the App's `harness.sqlite3`.
+
+Step 0050 (`app_retention`) adds `sessions.retention_days` and, on the App registry (`api_keys`), `retention_days`,
+`erase_after` and `erased_at` (#330 decision 5).

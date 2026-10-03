@@ -40,7 +40,7 @@ NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.15"
+API_VERSION = "1.16"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -154,6 +154,9 @@ class CreateAppSession(BaseModel):
         "Start an App-tools-only session: only the tools sent here, no workspace, project, built-in or CLI tools. "
         "Needs an App token, at least one tool and no project; backends without support refuse with "
         "app_tools_only_unsupported."))
+    retention_days: float | None = Field(default=None, gt=0, le=36500, description=(
+        "Erase this session (as DELETE does) once it has been idle this many days. Without it the App's default "
+        "retention applies, set by the owner; without either it is kept until deleted."))
 
 
 class AppSessionUpdate(BaseModel):
@@ -1033,8 +1036,30 @@ async def create_session(body: CreateAppSession, request: Request):
     s = m.create(body.prompt, project=body.project or "scratch", backend=backend, model=body.model,
                  title=body.title, app=app, app_context=context_text(key["name"], blocks) if blocks else "",
                  app_tools=body.tools, app_metadata=body.metadata, owner_id=user_id,
-                 kind=TOOLS_ONLY if body.tools_only else "agent")
+                 kind=TOOLS_ONLY if body.tools_only else "agent",
+                 retention_days=body.retention_days if app is not None else None)
     return view(m, s)
+
+
+@route_table.delete("/api/v1/sessions/{ref}", status_code=204)
+async def delete_session(ref: str, request: Request):
+    """Erase one of the calling App's sessions and everything tied to it (#330 decision 5). Only the App that started
+    it may: the owner, members and other Apps get a 404. Erasing a session that is already gone succeeds again."""
+    m = mgr(request)
+    key = auth(request, "sessions")
+    mine = calling_app(key)
+    if not mine:
+        raise HarnessError(404, NO_SUCH_SESSION)
+    try:
+        s = own_session(request, key, ref)
+    except HarnessError as e:
+        # Gone from everywhere (an id this App erased before): done. Another App's or the owner's: 404.
+        if e.status == 404 and not m.db.app_of(ref) and m.db.main.get_session(ref) is None:
+            return None
+        raise
+    if s.get("app_id") != mine:
+        raise HarnessError(404, NO_SUCH_SESSION)
+    await m.erase_session(s["id"])
 
 
 @route_table.get("/api/v1/sessions", response_model=list[SessionResponse])
