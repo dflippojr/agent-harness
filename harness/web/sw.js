@@ -22,6 +22,7 @@ const ASSETS = [
   "/pages/daemon-settings.mjs",
   "/pages/images.mjs",
   "/pages/jobs.mjs",
+  "/pages/session-info.mjs",
   "/lib/trace.mjs",
 ];
 
