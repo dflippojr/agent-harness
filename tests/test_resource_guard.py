@@ -16,6 +16,7 @@ from harness.warmup import LOW_MEMORY, PAUSED as MODEL_PAUSED, READY, UNLOADED, 
 
 from test_daemon import Script, events, make_cfg, wait_status
 from test_phase5 import GAME, FakeControl, FakeDetect, make_guard
+from waits import scaled
 
 
 @pytest.fixture(autouse=True)
@@ -831,8 +832,11 @@ def test_hold_ending_after_the_paused_session_ended_leaves_model_unloaded(tmp_pa
         assert m.guard.state == PAUSED
         s = m.create("hello")
         await wait_status(m, s["id"], "queued")
-        await asyncio.sleep(0.05)
-        assert s["id"] in m.runner.gpu_paused_sessions and m.guard.want_model()
+        deadline = time.monotonic() + scaled(10)  # the run registers as held a moment after "queued" (slow on CI)
+        while s["id"] not in m.runner.gpu_paused_sessions and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert s["id"] in m.runner.gpu_paused_sessions, f"never held: {m.runner.gpu_paused_sessions}"
+        assert m.guard.want_model()
         if end == "cancel":
             await m.cancel(s["id"])
             await wait_status(m, s["id"], "cancelled")
