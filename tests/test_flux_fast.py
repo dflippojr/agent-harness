@@ -879,6 +879,21 @@ def test_stage_flattens_the_portable_archive_wrapper_folder(tmp_path):
     assert checked["python"] and checked["main"]
 
 
+def test_flatten_leaves_flat_and_ambiguous_trees_alone(tmp_path):
+    flat = tmp_path / "flat"
+    plant_comfy(flat)
+    images_models_mod._flatten_portable(flat)
+    assert sorted(p.name for p in flat.iterdir()) == ["ComfyUI", "python_embeded"]
+
+    # Two candidate wrappers: nothing is moved, and validation then refuses the tree.
+    ambiguous = tmp_path / "ambiguous"
+    plant_comfy(ambiguous / "a")
+    plant_comfy(ambiguous / "b")
+    images_models_mod._flatten_portable(ambiguous)
+    assert sorted(p.name for p in ambiguous.iterdir()) == ["a", "b"]
+    assert not validate_comfyui(cfg_for(tmp_path), root=ambiguous)["python"]
+
+
 # --- queue / GPU handoff ---
 
 def hanging_comfy():
