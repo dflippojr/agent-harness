@@ -749,7 +749,6 @@ def _assert_no_secrets(m, fake, tmp_path):
 
 
 def test_web_ui_member_card_owner_controls_and_no_browser_storage():
-    js = (Path(__file__).resolve().parents[1] / "harness" / "web" / "app.js").read_text(encoding="utf-8")
     new_task = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "new-task.mjs").read_text(encoding="utf-8")
     profile = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "profile.mjs").read_text(encoding="utf-8")
     start = profile.index("function githubConnectionCard(")
@@ -767,7 +766,8 @@ def test_web_ui_member_card_owner_controls_and_no_browser_storage():
     owner = actions_js[actions_js.index("function githubOwnerCard("):actions_js.index("async function accountsCard(")]
     assert '"/github-member-auth"' in owner and "repo" not in owner.lower().replace("repositories", "")
     assert "github-connection/reset" in actions_js and "Erase GitHub credential" in actions_js
-    assert "s.push_target" in js and "commit authors stay as they are" in js
+    session = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "session.mjs").read_text(encoding="utf-8")
+    assert "s.push_target" in session and "commit authors stay as they are" in session
 
 
 def test_real_git_reaches_only_the_pinned_helper_in_the_member_namespace(tmp_path, fake):

@@ -93,8 +93,9 @@ def test_web_app_and_guard(tmp_path):
         profile_js = client.get("/static/pages/profile.mjs").text
         new_task_js = client.get("/static/pages/new-task.mjs").text
         sessions_js = client.get("/static/pages/sessions.mjs").text
-        assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in js
-        assert "session-chrome" in js
+        session_js = client.get("/static/pages/session.mjs").text
+        assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in session_js
+        assert "session-chrome" in session_js
         assert "jump-top" in js
         assert 'method: "PATCH"' in js
         assert "session-title" in js
