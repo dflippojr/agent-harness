@@ -839,6 +839,31 @@ def test_staged_comfyui_validation_and_rollback(tmp_path):
     assert "flux-fast" in bad["missing"]
 
 
+def test_stage_flattens_the_portable_archive_wrapper_folder(tmp_path):
+    # The official .7z extracts to <dest>/ComfyUI_windows_portable/{python_embeded,ComfyUI,...}.
+    cfg = cfg_for(tmp_path)
+    prod = Path(cfg.comfy_dir)
+    plant_comfy(prod)
+    (prod / "ComfyUI" / "extra_model_paths.yaml").write_text("models:\n", encoding="utf-8")
+    payload = b"fake portable archive"
+    manifest = json.loads(json.dumps(load_manifest()))
+    pin = manifest["comfyui"]["pinned_portable"]
+    pin.update(sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload))
+    staged = Path(str(prod.resolve()) + ".staged")
+    (staged.parent / pin["filename"]).write_bytes(payload)
+
+    def wrapped_extract(src, dest):
+        plant_comfy(Path(dest) / "ComfyUI_windows_portable")
+
+    stage_comfyui(cfg, manifest=manifest, extract=wrapped_extract, free_bytes=lambda p: 10 ** 12)
+    assert (staged / "python_embeded" / "python.exe").is_file()
+    assert (staged / "ComfyUI" / "main.py").is_file()
+    assert (staged / "ComfyUI" / "extra_model_paths.yaml").is_file()
+    assert not (staged / "ComfyUI_windows_portable").exists()
+    checked = validate_comfyui(cfg, root=staged)
+    assert checked["python"] and checked["main"]
+
+
 # --- queue / GPU handoff ---
 
 def hanging_comfy():
