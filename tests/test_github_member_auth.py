@@ -740,8 +740,9 @@ def _assert_no_secrets(m, fake, tmp_path):
 
 def test_web_ui_member_card_owner_controls_and_no_browser_storage():
     js = (Path(__file__).resolve().parents[1] / "harness" / "web" / "app.js").read_text(encoding="utf-8")
-    start = js.index("function githubConnectionCard(")
-    card = js[start:js.index("\n// Each profile subpage", start)]
+    profile = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "profile.mjs").read_text(encoding="utf-8")
+    start = profile.index("function githubConnectionCard(")
+    card = profile[start:profile.index("\n// Each profile subpage", start)]
     for needed in ('"/me/github-connection/connect"', '"/me/github-connection/cancel"', 'act("/me/github-connection", "DELETE"',
                    "copyBox(prompt.user_code)", 'rel: "noopener noreferrer"', "st.scopes_note"):
         assert needed in card, needed

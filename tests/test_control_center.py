@@ -279,6 +279,7 @@ def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path):
 def test_web_shell_includes_transport_module_and_canonical_names():
     web = Path(__file__).parents[1] / "harness" / "web"
     app = (web / "app.js").read_text(encoding="utf-8")
+    profile = (web / "pages" / "profile.mjs").read_text(encoding="utf-8")
     client = (web / "client.mjs").read_text(encoding="utf-8")
     worker = (web / "sw.js").read_text(encoding="utf-8")
     assert 'from "./client.mjs"' in app
@@ -293,9 +294,9 @@ def test_web_shell_includes_transport_module_and_canonical_names():
     manifest = (web / "manifest.webmanifest").read_text(encoding="utf-8")
     assert '"name": "Agent Harness Web"' in manifest
     assert '"short_name": "Harness"' in manifest
-    assert "Agent Harness Server URL" in app
-    assert "Connect another Agent Harness Web" in app
-    assert 'name: `agent-harness-web (' in app
+    assert "Agent Harness Server URL" in profile
+    assert "Connect another Agent Harness Web" in profile
+    assert 'name: `agent-harness-web (' in profile
     assert '"/client.mjs"' in worker
     # The shell cache name is derived from BUILD_ID so a client build bumps it automatically (#69).
     assert 'const BUILD_ID = "' in worker
