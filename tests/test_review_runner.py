@@ -1556,13 +1556,11 @@ def _complete_check(
     fake_gh = (
         "function gh {\n"
         "    if ($args[0] -eq 'api' -and $args -contains '--paginate') {\n"
-        # FAKE_REMOVED_FILES are deleted in the PR: the real API drops them only through the jq select.
-        "        $files = @($env:FAKE_DIFF_FILES -split ',')\n"
+        # Emulates `--jq '.[] | [.status, .filename] | @tsv'`: FAKE_REMOVED_FILES come back with status "removed".
         "        $jq = [string]$args[[array]::IndexOf($args, '--jq') + 1]\n"
-        "        if ($env:FAKE_REMOVED_FILES -and -not $jq.Contains('select(.status != \"removed\")')) {\n"
-        "            $files += @($env:FAKE_REMOVED_FILES -split ',')\n"
-        "        }\n"
-        "        $files\n"
+        "        if (-not $jq.Contains('@tsv')) { throw \"unexpected jq filter: $jq\" }\n"
+        "        foreach ($f in @($env:FAKE_DIFF_FILES -split ',')) { if ($f) { \"modified`t$f\" } }\n"
+        "        foreach ($f in @($env:FAKE_REMOVED_FILES -split ',')) { if ($f) { \"removed`t$f\" } }\n"
         "        $global:LASTEXITCODE = 0\n"
         "        return\n"
         "    }\n"
@@ -1672,6 +1670,15 @@ def test_complete_check_annotates_findings_in_the_diff(tmp_path):
     assert all(n["annotation_level"] == "failure" for n in notes)
     assert notes[0]["message"] == "bad index"
     assert fields["output"]["summary"].startswith("Reviewed")
+
+
+def test_workflow_jq_filters_have_no_double_quotes():
+    """Windows PowerShell strips double quotes from native arguments, so a jq string literal reaches gh broken
+    (`select(.status != "removed")` became `removed/0`, an unknown function, and annotations were skipped)."""
+    import re
+    filters = re.findall(r"--jq\s+'([^']*)'", WORKFLOW.read_text(encoding="utf-8"))
+    assert filters, "expected jq filters in review.yml"
+    assert [f for f in filters if '"' in f] == []
 
 
 def test_complete_check_skips_findings_on_removed_files(tmp_path):
