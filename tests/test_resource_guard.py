@@ -851,3 +851,57 @@ def test_hold_ending_after_the_paused_session_ended_leaves_model_unloaded(tmp_pa
         assert m.guard.state == CLEAR and m.guard.control.flag and m.guard.control.starts == 0
         await m.stop()
     asyncio.run(body())
+
+
+# a llama-server that has started but isn't listening yet (#344)
+def _fake_llama_processes(monkeypatch, procs):
+    """`procs`: (pid, name, cmdline) tuples as psutil would report them; taskkill calls land in the returned list."""
+    import psutil
+    import harness.gpu_guard as gpu_guard
+    alive = {pid: (name, cmd) for pid, name, cmd in procs}
+    killed = []
+
+    class Proc:
+        def __init__(self, pid):
+            self.info = {"pid": pid, "name": alive[pid][0], "cmdline": alive[pid][1]}
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: iter([Proc(p) for p in list(alive)]))
+
+    async def fake_run(args, timeout=60, **kw):
+        if args[0] == "netstat":
+            return 0, "  Proto  Local Address  Foreign Address  State  PID\n", ""  # nothing listening yet
+        killed.append(int(args[2]))
+        alive.pop(int(args[2]), None)
+        return 0, "", ""
+    monkeypatch.setattr(gpu_guard, "run_cmd", fake_run)
+    return alive, killed
+
+
+def test_server_port_reads_the_command_line():
+    from harness.gpu_guard import server_port
+    assert server_port(["llama-server.exe", "-m", "x.gguf", "--port", "8090"]) == 8090
+    assert server_port(["llama-server", "--port=8091"]) == 8091
+    assert server_port(["llama-server", "-p", "8092"]) == 8092
+    assert server_port(["llama-server", "-m", "x.gguf"]) == 8080
+    assert server_port(["llama-server", "--port", "abc"]) == -1
+    assert server_port(None) == 8080
+
+
+def test_park_stops_a_llama_server_that_is_not_listening_yet(tmp_path, monkeypatch):
+    from harness.gpu_guard import ServerControl
+    cfg = make_cfg(tmp_path)
+    cfg.gpu_guard = GpuGuardConfig(enabled=True, pause_flag=str(tmp_path / "llama-server.paused"))
+    model = cfg.models[cfg.default_model]
+    port = ServerControl(cfg.gpu_guard, model).port
+    alive, killed = _fake_llama_processes(monkeypatch, [
+        (4242, "llama-server.exe", ["C:\AI\llama-server.exe", "-m", "q.gguf", "--port", str(port)]),
+        (4343, "llama-server.exe", ["C:\AI\llama-server.exe", "--port", str(port + 1)]),  # someone else's server
+        (4444, "python.exe", ["python", "--port", str(port)]),
+    ])
+
+    async def body():
+        control = ServerControl(cfg.gpu_guard, model)
+        warmer = ModelWarmer()
+        await warmer.park(control.stop)
+        assert killed == [4242] and set(alive) == {4343, 4444}
+        assert control.flagged()  # the supervisor won't start another
+    asyncio.run(body())

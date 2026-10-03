@@ -263,6 +263,23 @@ def describe_memory(status: dict) -> str:
 
 
 # ---------- model server control ----------
+LLAMA_DEFAULT_PORT = 8080  # llama-server's own default when the command line has no --port
+
+
+def server_port(cmdline: list[str] | None) -> int:
+    """The port a llama-server command line serves on (`--port N`, `--port=N` or `-p N`)."""
+    args = cmdline or []
+    for i, arg in enumerate(args):
+        value = None
+        if arg in ("--port", "-p") and i + 1 < len(args):
+            value = args[i + 1]
+        elif arg.startswith("--port="):
+            value = arg.split("=", 1)[1]
+        if value is not None:
+            return int(value) if value.isdigit() else -1
+    return LLAMA_DEFAULT_PORT
+
+
 class ServerControl:
     """Stops and restarts the supervised llama-server through its pause flag."""
 
@@ -280,7 +297,7 @@ class ServerControl:
 
     async def stop(self) -> None:
         self.write_flag()
-        for pid in await self._listening_pids():
+        for pid in await self._server_pids():
             code, out, err = await run_cmd(["taskkill", "/PID", str(pid), "/F"], timeout=30)
             log.info("stopped model server pid %s (exit %s) %s", pid, code, (out + err).strip()[:200])
 
@@ -293,6 +310,28 @@ class ServerControl:
                 return (await client.get(f"{self.base_url}/health")).status_code == 200
         except httpx.HTTPError:
             return False
+
+    async def _server_pids(self) -> set[int]:
+        """Whatever holds the port, plus llama-server processes that haven't started listening yet (still loading)."""
+        pids = await self._listening_pids()
+        try:
+            pids |= await asyncio.to_thread(self._server_processes)
+        except Exception:  # noqa: BLE001 - the port lookup above still stops a listening server
+            log.warning("could not list llama-server processes", exc_info=True)
+        return pids
+
+    def _server_processes(self) -> set[int]:
+        """llama-server processes whose command line says they serve our port, listening or not."""
+        import psutil
+        pids = set()
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                info = proc.info
+                if (info["name"] or "").lower().startswith("llama-server") and server_port(info["cmdline"]) == self.port:
+                    pids.add(int(info["pid"]))
+            except (psutil.Error, TypeError, ValueError):
+                continue
+        return pids
 
     async def _listening_pids(self) -> set[int]:
         _, out, _ = await run_cmd(["netstat", "-ano", "-p", "TCP"], timeout=30)
