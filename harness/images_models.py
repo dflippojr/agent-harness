@@ -305,11 +305,12 @@ def _iter_comfy_python(comfy_root: Path):
 
 
 def scan_node_classes(comfy_root: Path) -> set[str]:
-    """Find `class Foo(` definitions under a portable ComfyUI tree without starting it."""
+    """Find `class Foo:` / `class Foo(Base):` definitions under a portable ComfyUI tree without starting it.
+    Core nodes (KSampler, SaveImage, UNETLoader...) are plain `class Foo:` in nodes.py."""
     found: set[str] = set()
     if not comfy_root.exists():
         return found
-    pattern = re.compile(r"^class\s+([A-Za-z_]\w*)\s*\(", re.M | re.A)
+    pattern = re.compile(r"^class\s+([A-Za-z_]\w*)\s*[(:]", re.M | re.A)
     for path in _iter_comfy_python(comfy_root):
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")

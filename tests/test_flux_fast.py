@@ -839,6 +839,21 @@ def test_staged_comfyui_validation_and_rollback(tmp_path):
     assert "flux-fast" in bad["missing"]
 
 
+def test_static_scan_finds_plain_and_subclassed_node_classes(tmp_path):
+    # Real ComfyUI core nodes are `class KSampler:` in nodes.py; newer ones subclass io.ComfyNode.
+    root = tmp_path / "ComfyUI_portable"
+    plant_comfy(root, nodes=[])
+    graphs = {n for g in ("fast", "quality", "flux-fast") for n in preflight_graphs({})["missing"][g]}
+    core = "\n".join(f"class {n}:\n    pass\n" for n in sorted(graphs) if n != "Flux2Scheduler")
+    (root / "ComfyUI" / "nodes.py").write_text(core, encoding="utf-8")
+    extras = root / "ComfyUI" / "comfy_extras"
+    extras.mkdir()
+    (extras / "nodes_flux.py").write_text("class Flux2Scheduler(io.ComfyNode):\n    pass\n", encoding="utf-8")
+    checked = validate_comfyui(cfg_for(tmp_path), root=root)
+    assert checked["graphs"]["ok"], checked["graphs"]["missing"]
+    assert checked["ok"]
+
+
 def test_stage_flattens_the_portable_archive_wrapper_folder(tmp_path):
     # The official .7z extracts to <dest>/ComfyUI_windows_portable/{python_embeded,ComfyUI,...}.
     cfg = cfg_for(tmp_path)
