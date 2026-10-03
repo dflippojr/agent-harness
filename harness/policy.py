@@ -63,6 +63,18 @@ ALWAYS_ASK: dict[str, str] = {
 }
 
 
+# Hosted Claude Code sees the daemon's own tools through the harness MCP server as mcp__harness__<tool> (#300). They are
+# decided as the native tool they name, so project rules and defaults apply unchanged. Other MCP servers aren't wired.
+MCP_SERVER = "harness"
+MCP_PREFIX = f"mcp__{MCP_SERVER}__"
+
+
+def mcp_harness_tool(name: str) -> str | None:
+    """The harness tool behind a Claude Code MCP tool name (mcp__harness__web_search -> web_search), else None."""
+    bare = name[len(MCP_PREFIX):] if name.startswith(MCP_PREFIX) else ""
+    return bare or None
+
+
 @dataclass
 class Decision:
     action: str
@@ -169,8 +181,14 @@ class Policy:
         return hashlib.sha256(payload).hexdigest()[:16]
 
     def decide(self, name: str, args: dict) -> Decision:
+        alias = ""
+        if name.startswith("mcp__"):
+            bare = mcp_harness_tool(name)
+            if bare is None:
+                return Decision(DENY, "only the harness MCP server is available to hosted sessions")
+            name, alias = bare, name
         for rule in self.rules:
-            if _matches(rule, name, args):
+            if _matches(rule, name, args) or (alias and _matches(rule, alias, args)):
                 if name in ALWAYS_ASK and rule["action"] != DENY:
                     break
                 return Decision(rule["action"], rule.get("reason", ""),

@@ -570,17 +570,17 @@ gpuPayload = {
 };
 await go("#/agents");
 await waitFor(() => /Local models held/.test(byId.app.textContent), "gpu hold notice");
-if (!findHref(byId.app, "#/actions/gpu")) {
+if (!findHref(byId.app, "#/actions/resources")) {
   const stale = findHref(byId.app, "#/profile");
   throw new Error(`gpu hold notice links to ${stale ? stale.attributes.href : "nothing"}`);
 }
 gpuPayload = { manual: false, state: "clear" };
 
 await go("#/actions");
-await waitFor(() => loc.hash === "#/actions/gpu" && /GPU guard disabled|Checking/.test(byId.app.textContent), "default gpu tab");
+await waitFor(() => loc.hash === "#/actions/resources" && /Resource guard disabled|Checking/.test(byId.app.textContent), "default resources tab");
 assertTitle("#/actions", "Actions");
 const gpuTabs = tabLabels(byId.app);
-if (gpuTabs.join("|") !== "GPU|Accounts|Claude Remote Control|Disk") {
+if (gpuTabs.join("|") !== "Resources|Accounts|Claude Remote Control|Disk") {
   throw new Error(`tab order ${gpuTabs.join("|")}`);
 }
 const selected = (root) => {
@@ -595,7 +595,7 @@ const selected = (root) => {
   walk(root);
   return labels;
 };
-if (selected(byId.app).join("|") !== "GPU") throw new Error(`expected GPU selected, got ${selected(byId.app)}`);
+if (selected(byId.app).join("|") !== "Resources") throw new Error(`expected Resources selected, got ${selected(byId.app)}`);
 
 const followDrawerActions = async () => {
   if (loc.hash === actionsHref) return;
@@ -604,23 +604,23 @@ const followDrawerActions = async () => {
   await sleep(40);
 };
 await followDrawerActions();
-await waitFor(() => loc.hash === "#/actions/gpu", "drawer Actions stays on GPU");
+await waitFor(() => loc.hash === "#/actions/resources", "drawer Actions stays on Resources");
 win.history.back();
 await sleep(40);
 if (loc.hash !== "#/agents") {
-  throw new Error(`tapping Actions on GPU left extra history; back landed on ${loc.hash}`);
+  throw new Error(`tapping Actions on Resources left extra history; back landed on ${loc.hash}`);
 }
 await go("#/agents");
 await waitFor(() => /Agents/.test(byId.title.textContent), "agents before bare #/actions");
 await go("#/actions");
-await waitFor(() => loc.hash === "#/actions/gpu", "bare #/actions redirects to gpu");
+await waitFor(() => loc.hash === "#/actions/resources", "bare #/actions redirects to resources");
 win.history.back();
 await sleep(40);
 if (loc.hash !== "#/agents") {
   throw new Error(`bare #/actions left extra history; back landed on ${loc.hash}`);
 }
-await go("#/actions/gpu");
-await waitFor(() => loc.hash === "#/actions/gpu" && /GPU guard disabled|Checking/.test(byId.app.textContent), "gpu after history checks");
+await go("#/actions/gpu");  // old bookmark
+await waitFor(() => loc.hash === "#/actions/resources" && /Resource guard disabled|Checking/.test(byId.app.textContent), "gpu bookmark redirects to resources");
 
 const clickTab = (label) => {
   let found = null;
@@ -649,7 +649,7 @@ await go("#/profile/accounts");
 await waitFor(() => loc.hash === "#/actions/accounts" && /New member/.test(byId.app.textContent), "accounts bookmark redirects");
 await sleep(50);
 const accountTabs = tabLabels(byId.app);
-if (accountTabs.join("|") !== "GPU|Accounts|Claude Remote Control|Disk") {
+if (accountTabs.join("|") !== "Resources|Accounts|Claude Remote Control|Disk") {
   throw new Error(`legacy #/profile/accounts duplicated tabs: ${accountTabs.join("|")}`);
 }
 const accountPanels = (byId.app.textContent.match(/New member/g) || []).length;

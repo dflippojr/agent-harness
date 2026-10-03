@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import BackendConfig, SandboxConfig
+from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, mcp_config
 from .sandbox import run_cmd
 
 # The bind-mount target every provider CLI runs in, and the proxy env every container needs.
@@ -35,7 +36,8 @@ class ClaudeSession:
 
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
-                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None):
+                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
+                 mcp: McpRelay | None = None, mcp_token: str = ""):
         self.session_id = session_id
         self.workspace = workspace.resolve()
         self.backend = backend
@@ -45,6 +47,10 @@ class ClaudeSession:
         self.backend_session_id = backend_session_id
         self.api_key = api_key
         self.container = f"harness-{session_id}-claude"
+        # With MCP the CLI shares the relay's network namespace: the relay's loopback port is reachable from this
+        # container only, and egress still goes through the same network and proxy.
+        self.mcp = mcp
+        self.mcp_token = mcp_token
         self._popen = popen
         self._command_override = command
         self.process: subprocess.Popen | None = None
@@ -59,7 +65,7 @@ class ClaudeSession:
         args = [
             "docker", "run", "--rm", "-i", "--name", self.container,
             "--label", f"agent-harness.session={self.session_id}",
-            "--network", self.backend.network,
+            "--network", f"container:{self.mcp.container}" if self.mcp else self.backend.network,
             "-e", f"HTTPS_PROXY={self.backend.proxy}",
             "-e", f"HTTP_PROXY={self.backend.proxy}",
             "-e", NO_PROXY,
@@ -81,9 +87,13 @@ class ClaudeSession:
         ]
         if self.backend_session_id:
             args += ["--resume", self.backend_session_id]
-        if self.api_key:
+        if self.mcp:
+            # Only the harness server: --strict-mcp-config ignores any .mcp.json the workspace brings along.
+            args += ["--mcp-config", mcp_config(), "--strict-mcp-config"]
+        env_names = (["ANTHROPIC_API_KEY"] if self.api_key else []) + ([TOKEN_ENV] if self.mcp else [])
+        for name in env_names:  # by name only: the value comes from the docker client's environment
             at = args.index(self.backend.image)
-            args[at:at] = ["-e", "ANTHROPIC_API_KEY"]
+            args[at:at] = ["-e", name]
         return args
 
     async def start(self) -> None:
@@ -93,9 +103,16 @@ class ClaudeSession:
             # our finally block and can leave `docker run`'s container behind.
             # Remove only this session's deterministic container before reuse.
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+            if self.mcp is not None:
+                try:
+                    await self.mcp.start()
+                except McpRelayError as e:
+                    raise CliBackendError(str(e)) from e
         child_env = os.environ.copy()
         if self.api_key:
             child_env["ANTHROPIC_API_KEY"] = self.api_key
+        if self.mcp is not None:
+            child_env[TOKEN_ENV] = self.mcp_token
         process = self._popen(
             self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
@@ -187,6 +204,8 @@ class ClaudeSession:
             await asyncio.to_thread(thread.join, 0.5)
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+            if self.mcp is not None:
+                await self.mcp.stop()
 
 
 class CodexSession:

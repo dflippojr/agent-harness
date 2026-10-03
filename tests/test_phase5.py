@@ -92,6 +92,9 @@ class FakeControl:
     def flagged(self):
         return self.flag
 
+    def write_flag(self):
+        self.flag = True
+
     async def stop(self):
         self.flag, self.running = True, False
         self.stops += 1
@@ -118,6 +121,7 @@ GAME = {"key": "game:hades.exe", "kind": "game", "detail": "Hades.exe"}
 def make_guard(busy=lambda: False, **cfg):
     detect, control, scheduler = FakeDetect(), FakeControl(), GpuScheduler()
     log = []
+    cfg = {"lazy_load": False, **cfg}  # the eager reload path; the lazy one has its own tests below
     guard = GpuGuard(GpuGuardConfig(enabled=True, **cfg), None, scheduler, busy, detect=detect, control=control,
                      on_pause=lambda r: log.append(("pause", r)), on_resume=lambda s: log.append(("resume", s)))
     return guard, detect, control, scheduler, log
@@ -386,7 +390,7 @@ def test_expired_timed_hold_resumes_normally_on_restart(tmp_path):
                     break
                 await asyncio.sleep(0.02)
             assert guard2.state == CLEAR
-            assert not control.flag
+            assert control.flag  # lazy_load: parked until something needs the model
             assert not scheduler2.paused
         finally:
             await guard2.stop()
@@ -456,7 +460,7 @@ def test_guard_startup_with_leftover_flag_resumes_when_clear():
     asyncio.run(body())
 
 
-def test_gpu_pause_notification_points_at_actions_gpu(tmp_path):
+def test_gpu_pause_notification_points_at_actions_resources(tmp_path):
     from harness.db import Database
     from harness.notify import Notifier
     from test_phase7 import seed
@@ -471,7 +475,7 @@ def test_gpu_pause_notification_points_at_actions_gpu(tmp_path):
         "data": {"reason": "Hades.exe", "resume_after_seconds": 180},
     })
     assert note is not None
-    assert "Actions → GPU" in note["message"]
+    assert "Actions → Resources" in note["message"]
     assert "Settings" not in note["message"]
 
 
@@ -511,7 +515,7 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
         assert events(m, sid, "gpu_paused")[0]["reason"] == "Hades.exe"
         note = next(m.notifier.build(e) for e in m.db.events(sid) if e["type"] == "gpu_paused")
         assert note["title"].startswith("Paused for the GPU")
-        assert "Actions → GPU" in note["message"]
+        assert "Actions → Resources" in note["message"]
         assert "Settings" not in note["message"]
 
         # a follow-up while paused waits in the queue, then runs once the GPU is clear

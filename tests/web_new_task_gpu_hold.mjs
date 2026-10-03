@@ -351,13 +351,13 @@ assertQueued(true);
 if (holdNote().hidden) throw new Error("local model during hold should show the notice");
 assertNoticeUnderBackend();
 const link = walk(holdNote()).find((el) => el.tagName === "A");
-if (!link || (link.href || link.attributes.href) !== "#/actions/gpu") {
-  throw new Error(`Actions → GPU should link to #/actions/gpu, got ${link && (link.href || link.attributes.href)}`);
+if (!link || (link.href || link.attributes.href) !== "#/actions/resources") {
+  throw new Error(`Actions → Resources should link to #/actions/resources, got ${link && (link.href || link.attributes.href)}`);
 }
 if (!/Model unloaded while something else uses the GPU; tasks wait \(/.test(holdNote().textContent)) {
   throw new Error(`unexpected notice text: ${holdNote().textContent}`);
 }
-if (!holdNote().textContent.includes("Actions → GPU")) throw new Error("notice should include Actions → GPU");
+if (!holdNote().textContent.includes("Actions → Resources")) throw new Error("notice should include Actions → Resources");
 const modelState = walk(byId.app).find((el) => el.tagName === "DIV" && el.hidden === false && /Model unloaded/.test(el.textContent) && !String(el.className).includes("gpu-hold-note"));
 if (modelState) throw new Error("paused hold copy should not remain under Model");
 

@@ -23,7 +23,7 @@ $loggedPause = $false
 
 while ($true) {
     if (Test-Path $s.pause_flag) {
-        if (-not $loggedPause) { Log 'paused by the harness GPU guard; waiting for the pause flag to go'; $loggedPause = $true }
+        if (-not $loggedPause) { Log 'paused or parked by the harness resource guard; waiting for the pause flag to go'; $loggedPause = $true }
         Start-Sleep -Seconds 5
         continue
     }

@@ -1,4 +1,4 @@
-// Owner Actions page (#258): GPU hold, household accounts, Claude Remote Control and disk/maintenance tabs. The shell
+// Owner Actions page (#258): Resources (GPU hold, local model, diagnostics; #311), household accounts, Claude Remote Control and disk/maintenance tabs. The shell
 // (DOM builder, api, router, header) is injected by app.js so this module imports under plain Node and never
 // reaches into another page.
 import { ago, pluralize, fmtBytes, gpuText } from "../lib/format.mjs";
@@ -183,15 +183,15 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
   }
 
   const ACTION_TABS = [
-    ["gpu", "GPU"],
+    ["resources", "Resources"],
     ["accounts", "Accounts"],
     ["remote-control", "Claude Remote Control"],
     ["disk", "Disk"],
   ];
 
   async function viewActions(tab) {
-    const selected = ACTION_TABS.some(([id]) => id === tab) ? tab : "gpu";
-    if (tab !== selected) { go("#/actions/gpu", true); return; }
+    const selected = ACTION_TABS.some(([id]) => id === tab) ? tab : "resources";
+    if (tab !== selected) { go("#/actions/resources", true); return; }  // also old #/actions/gpu bookmarks
     setHeader("agents", "Actions");
     const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Actions" },
       ACTION_TABS.map(([id, label]) => h("button", {
@@ -200,7 +200,7 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
         onclick: () => go(`#/actions/${id}`),
       }, label)));
     let panel;
-    if (selected === "gpu") panel = h("div", { class: "card settings-list" }, gpuActionRow());
+    if (selected === "resources") panel = resourcesPanel();
     else if (selected === "accounts") panel = await accountsCard();
     else panel = selected === "remote-control" ? remoteControlCard() : diskCard();
     append($app, tabs, panel);
@@ -245,7 +245,140 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
       } }, `Review ${a.retention_days}-day image retention`));
   }
 
-  function gpuActionRow() {
+  // Actions -> Resources (#311): the GPU hold, loading/unloading the local model, and one diagnostics reading.
+  function resourcesPanel() {
+    const model = modelActionRow();
+    return h("div", {},
+      h("div", { class: "card settings-list" }, gpuActionRow(model.render), model.el),
+      diagnosticsCard());
+  }
+
+  const MODEL_SHOWN = {
+    loaded: "Loaded", unloaded: "Unloaded; it loads when a task needs it", waking: "Loading (about a minute)",
+    paused: "Unloaded while the GPU is held", disabled: "Local model disabled",
+  };
+
+  function clock(epochSeconds) {
+    return new Date(epochSeconds * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function modelStateText(m) {
+    if (!m) return "Checking…";
+    if (m.pinned_until && m.state !== "paused") return `Loaded until ${clock(m.pinned_until)}`;
+    return MODEL_SHOWN[m.state] || m.state;
+  }
+
+  function modelActionRow() {
+    const status = h("div", { class: "muted small" }, "Checking…");
+    const keepFor = h("select", { disabled: isGuest(), "aria-label": "Keep the model loaded for" },
+      [["1800", "30 minutes"], ["3600", "1 hour"], ["10800", "3 hours"], ["28800", "8 hours"]].map(([v, label]) =>
+        h("option", { value: v }, label)));
+    let defaulted = false;
+    const loadBtn = h("button", { class: "btn small", type: "button", disabled: isGuest() }, "Load local model now");
+    const unloadBtn = h("button", { class: "btn small secondary", type: "button", disabled: isGuest() }, "Unload now");
+    const render = (g) => {
+      const m = g.model;
+      status.textContent = modelStateText(m);
+      if (!defaulted && g.load_now_default_minutes) {
+        const want = String(g.load_now_default_minutes * 60);
+        if (![...keepFor.options].some((o) => o.value === want)) {
+          keepFor.append(h("option", { value: want }, `${g.load_now_default_minutes} minutes`));
+        }
+        keepFor.value = want;
+        defaulted = true;
+      }
+      const held = g.manual || (g.state && g.state !== "clear");
+      const off = isGuest() || !g.enabled || held || m?.state === "disabled";
+      loadBtn.disabled = off;
+      unloadBtn.disabled = off || m?.state === "unloaded";
+    };
+    const post = async (action, body) => {
+      const r = await api(`/resources/${action}`, { method: "POST", body });
+      render(r);
+      return r;
+    };
+    const LOADING = "Loading the local model (about a minute)";
+    loadBtn.addEventListener("click", async () => {
+      const body = { duration_seconds: Number(keepFor.value) };
+      loadBtn.disabled = true;
+      try {
+        await post("load", body);
+        toast(LOADING);
+      } catch (e) {
+        const lowMemory = /low memory/i.test(e.message);
+        if (!lowMemory) toast(e.message);
+        else if (confirm(`${e.message.replace(/\. Send force.*$/, "")}.\n\nLoad the model anyway?`)) {
+          try { await post("load", { ...body, force: true }); toast(LOADING); } catch (e2) { toast(e2.message); }
+        }
+      } finally { loadBtn.disabled = false; }
+    });
+    unloadBtn.addEventListener("click", async () => {
+      try { await post("unload"); toast("Local model unloaded"); } catch (e) { toast(e.message); }
+    });
+    const el = h("div", { class: "action-item" },
+      h("div", { class: "action-row" }, h("div", {}, h("strong", {}, "Local model"), status), unloadBtn),
+      h("label", { class: "action-subitem" }, h("span", {}, "Keep loaded for:"), keepFor, loadBtn),
+      h("div", { class: "muted small" }, "Ending a GPU hold doesn't load the model; a task, an endpoint request or "
+        + "this button does. Idle unload is suspended while it's kept loaded."));
+    return { el, render };
+  }
+
+  function pct(n) { return n == null ? "n/a" : `${Math.round(n)}%`; }
+  function gib(n) { return n == null ? "n/a" : gbLabel(n / 2 ** 30); }
+
+  function diagnosticsCard() {
+    const asOf = h("span", { class: "muted small" }, "");
+    const body = h("div", {}, h("p", { class: "muted small" }, "Reading…"));
+    const refresh = h("button", {
+      class: "btn small secondary", type: "button", title: "Refresh", "aria-label": "Refresh diagnostics",
+      onclick: () => void load(),
+    }, "↻");
+    const meter = (name, used, total, line, extra) => {
+      const ok = Number.isFinite(used) && Number.isFinite(total) && total > 0;
+      return h("div", { class: "disk-device" },
+        h("strong", {}, name),
+        ok ? progressBar(Math.max(0, Math.min(1, used / total))) : null,
+        h("div", { class: "disk-meter" }, h("span", {}, line), ok ? h("span", { class: "muted" }, `of ${gib(total)}`) : null),
+        extra);
+    };
+    const fact = (label, value) => h("p", { class: "small" }, h("strong", {}, label), " ", value);
+    const load = async () => {
+      refresh.disabled = true;
+      try {
+        const d = await api("/resources/diagnostics");
+        const r = d.ram || {};
+        const share = r.harness || {};
+        const vram = d.vram || {};
+        const guard = d.guard || {};
+        const reasons = (guard.reasons || []).map((x) => x.detail);
+        if (r.low) reasons.push("RAM under the threshold: new model, worker and image work waits");
+        const ramUsed = r.total_bytes != null && r.available_bytes != null ? r.total_bytes - r.available_bytes : null;
+        fill(body,
+          meter("VRAM", vram.used_bytes, vram.total_bytes, vram.used_bytes == null ? "n/a" : `${gib(vram.used_bytes)} used`,
+            h("div", { class: "disk-facts" },
+              fact("Held by", (vram.holders || []).join(", ") || "nothing the harness runs"),
+              fact("GPU load", pct(d.gpu_load)))),
+          meter("RAM", ramUsed, r.total_bytes, `${gib(r.available_bytes)} available`,
+            h("div", { class: "disk-facts" },
+              fact("Commit", r.commit_bytes == null ? "n/a" : `${gib(r.commit_bytes)} of ${gib(r.commit_limit_bytes)}`),
+              fact("Harness", `daemon ${gib(share.daemon_bytes)} · llama-server ${gib(share.llama_server_bytes)}`
+                + ` · containers ${gib(share.containers_bytes)}`),
+              fact("Threshold", r.threshold_bytes ? `${gib(r.threshold_bytes)} available${r.low ? " (below it now)" : ""}` : "off"),
+              fact("CPU load", pct(d.cpu_load)))),
+          h("div", { class: "disk-facts" },
+            fact("Model", modelStateText(d.model)),
+            fact("Guard", `${guard.enabled === false ? "disabled" : guard.state}${reasons.length ? ` · ${reasons.join(", ")}` : ""}`)));
+        asOf.textContent = `as of ${clock(d.as_of)}`;
+      } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
+      finally { refresh.disabled = false; }
+    };
+    void load();  // one reading when the tab opens, then only on refresh: no background polling
+    return h("div", { class: "card" },
+      h("div", { class: "row" }, h("strong", {}, "Diagnostics"), h("span", { class: "spacer" }), asOf, refresh),
+      body);
+  }
+
+  function gpuActionRow(onStatus = () => {}) {
     const status = h("div", { class: "muted small" }, "Checking…");
     const toggle = h("input", { class: "switch", type: "checkbox", role: "switch", "aria-label": "GPU hold", disabled: isGuest() });
     const duration = h("select", { disabled: isGuest(), "aria-label": "GPU hold duration" },
@@ -258,15 +391,16 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
     const act = async (action) => {
       const seconds = duration.value ? Number(duration.value) : null;
       const body = action === "pause" ? { duration_seconds: seconds } : undefined;
-      try { render(await api(`/gpu/${action}`, { method: "POST", body })); } catch (e) { toast(e.message); }
+      try { render(await api(`/resources/${action}`, { method: "POST", body })); } catch (e) { toast(e.message); }
       setTimeout(load, 1500);
     };
     const render = (g) => {
+      onStatus(g);
       if (!g.enabled) {
         toggle.disabled = true;
         duration.disabled = true;
         durationRow.classList.add("disabled");
-        status.textContent = "GPU guard disabled";
+        status.textContent = "Resource guard disabled";
         return;
       }
       const now = g.signals.map((s) => s.detail);
@@ -279,7 +413,7 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
       const using = now.length ? ` · ${now.join(", ")}${ignored}` : "";
       status.textContent = `${g.manual ? gpuText(g) : "Local models available"}${automatic}${using}`;
     };
-    const load = async () => { try { render(await api("/gpu")); } catch (e) { status.textContent = e.message; status.classList.add("bad"); } };
+    const load = async () => { try { render(await api("/resources")); } catch (e) { status.textContent = e.message; status.classList.add("bad"); } };
     toggle.addEventListener("change", () => {
       duration.disabled = isGuest() || !toggle.checked;
       durationRow.classList.toggle("disabled", duration.disabled);
@@ -290,7 +424,7 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
     const timer = setInterval(load, 5000);
     onLeave(() => clearInterval(timer));
     return h("div", { class: "action-item" },
-      h("div", { class: "action-row" }, h("div", {}, h("strong", {}, "GPU"), status), toggle),
+      h("div", { class: "action-row" }, h("div", {}, h("strong", {}, "GPU hold"), status), toggle),
       durationRow,
       isGuest() ? h("div", { class: "muted small" }, "Demo access cannot change GPU hold.") : null);
   }
