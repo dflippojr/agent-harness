@@ -1545,7 +1545,9 @@ class Manager:
 
     def decide_by_token(self, token: str, approve: bool) -> dict:
         approval = self.db.approval_by_token(token)
-        if approval is None:
+        session = self.db.get_session(approval["session_id"]) if approval else None
+        if approval is None or (session and session.get("app_id")):
+            # The link is the owner's credential from an owner notification; an App decides its own approvals (#330).
             raise HarnessError(404, "unknown approval link")
         if approval["status"] != "pending":
             return public_approval(approval)  # a repeated button press is harmless

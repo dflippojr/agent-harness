@@ -536,3 +536,27 @@ def test_app_tool_arguments_and_results_never_reach_logs_spans_or_the_audit_log(
     logged = caplog.text + "\n".join(r.getMessage() for r in caplog.records)
     assert caplog.records and arg not in logged and result not in logged
     assert not any(arg in str(row) or result in str(row) for row in audit)
+
+
+def test_an_apps_approvals_never_reach_the_owners_phone_or_one_tap_links(tmp_path):
+    """The ntfy push and its approve/deny link are owner credentials; an App decides its own approvals."""
+    from harness.notify import Notifier
+    steps = [Completion(tool_calls=[call("write_file", 0, path="secret/a.txt", content="x")]),
+             Completion(content="done")]
+    cfg = make_cfg(tmp_path, rules=RULES)
+    m = Manager(cfg, chat=Script(steps))
+    client = TestClient(create_app(m))
+    with client:
+        key = client.post("/keys", json={"name": "app-a", "kind": "app",
+                                         "scopes": ["sessions", "approvals"]}).json()
+        auth = {"Authorization": f"Bearer {key['key']}"}
+        sid = client.post("/api/v1/sessions", headers=auth, json={
+            "prompt": "write the secret", "project": "guarded", "tools": [BALANCE]}).json()["id"]
+        pending = wait_for(lambda: client.get(f"/api/v1/sessions/{sid}/approvals", headers=auth).json())
+        approval = m.db.get_approval(pending[0]["id"])
+        cfg.notify.enabled = True
+        notifier = Notifier(cfg, m.db)
+        notifier.listener({"type": "approval_requested", "session_id": sid, "data": {"id": approval["id"]}})
+        assert notifier.queue.empty()
+        assert client.post(f"/a/{approval['token']}/approve").status_code == 404
+        assert m.db.get_approval(approval["id"])["status"] == "pending"
