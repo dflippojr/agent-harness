@@ -82,8 +82,12 @@ members' sessions. Session ids stay unique across all stores. The `/api/v1` resp
   `<data_dir>/pre-migration/harness-app-stores-<time>.sqlite3`. It then copies each App's sessions, with everything
   tied to them, into that App's store and deletes them from the main store. Later starts find nothing to move and
   make no backup.
-- **Not moved yet.** The files of an App session (its working directory, transcript and checkpoint snapshots) stay
-  under the owner's data folders for now. So do usage rows and short-lived event-stream tickets, which are metadata.
+- **Files.** An App session's files live in the App's folder too: its working directory in
+  `<data_dir>/apps/<app_id>/workspaces/<session id>/`, its transcript in `transcripts/`, its checkpoint snapshots in
+  `checkpoints/`, with `artifacts/` alongside. They never count toward the owner's or a member's disk use. Files of
+  App sessions made before this moved there at the first start after the upgrade, after a backup of the App's store
+  to `<data_dir>/apps/<app_id>/pre-migration/harness-app-files-<time>.sqlite3` (the stored working-directory paths
+  change with them). Usage rows and short-lived event-stream tickets stay in the main store: they are metadata.
 - **Your App alone.** Only your App's token reaches your sessions. The owner's session lists, session pages
   (a 404, even by id or id prefix), transcript and session search, `session_search` and `session_read`, pending
   approvals, the queue and the live session list never read your store. Neither do other Apps, including ones with
@@ -95,12 +99,22 @@ members' sessions. Session ids stay unique across all stores. The `/api/v1` resp
 - **Owner totals.** `/metrics`, the smart-approval stats and Control Center's counts cover the owner's and members'
   sessions only (the main store); App sessions are counted only in the per-App metadata above.
 - **Backups.** The nightly backup copies every App's store into the dated backup folder as `apps/<app_id>.sqlite3`,
-  one file per App, next to the main store's `harness.sqlite3`. A session deleted from a store stays in the older
-  backups that hold it until they rotate out (`backup.keep_days`, 14 days by default).
+  one file per App, next to the main store's `harness.sqlite3`. A session you delete, or that retention or a revoke
+  erases, stays in the older backups that hold it until they rotate out (`backup.keep_days`, 14 days by default).
+  Session files (working directories, checkpoints) are not in the backups.
 - **Logs and telemetry.** Your tools' arguments and results stay in your store: logs, traces and the audit log get
   only tool names, call ids, sizes and timings.
-- **Still to come (#330).** `DELETE` of a session, `retention_days`, erasure of a revoked App's store after a grace
-  period, and moving the session files above into your App's folder.
+- **Retention.** A session is erased, exactly as [`DELETE`](#delete-apiv1sessionsid) erases it, once it has been
+  idle for its `retention_days` (set at [create](#post-apiv1sessions--scope-sessions)), or else your App's default
+  retention, which the owner sets. Idle means since its last event, or since it was created. Without either it is
+  kept until you delete it. The daemon's maintenance sweep (every `cleanup.interval_minutes`, hourly by default)
+  does this whether or not your App is online.
+- **Revoking an App.** The owner's revoke kills your token at once and schedules the erasure of your whole store and
+  folder 7 days later. During those 7 days the owner can undo the revoke: your store and files are kept, and the
+  owner gives you a new token (the old one stays dead). After them the sweep erases the store and folder; only a
+  tombstone (your App's id, name and dates, no scopes) stays in the registry, with your settings, provider
+  credentials and error counts gone. An undo doesn't bring back your App's own settings (`/api/v1/config`): set them
+  again.
 
 ## Household members on `/api/v1`
 
@@ -243,6 +257,9 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
   field, with a hint to use `parameters`; the tool is never registered as a no-argument tool.
 - `project` must exist in the harness's `projects.yaml` (`GET /api/v1` lists them). Omitted, it is `scratch`.
 - `tools_only: true` starts an [App-tools-only session](#app-tools-only-sessions) instead of an agent session.
+- `retention_days` (optional, a positive number of days, fractions allowed) erases the session once it has been idle
+  that long, as `DELETE` does; without it your App's default retention applies (see
+  [Where an App's data lives](#where-an-apps-data-lives)).
 - `backend` is `local` (the tower model) or a hosted CLI id such as `claude`, `codex`, or `cursor`
   (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login.
 
@@ -398,6 +415,16 @@ fixed (`python -m harness.doctor` reports it; the daemon fetches the pinned rele
 ### `POST /api/v1/sessions/{id}/cancel`
 Requires owning the session (or an owner token, for the owner's own sessions); `sessions:all` does not authorize this.
 
+### `DELETE /api/v1/sessions/{id}`
+Erases one of your App's sessions; `204` with no body. Only the App that started the session may: another App (with
+`sessions:all` too), the owner and members get a `404`, as if it didn't exist. A running session is cancelled first,
+and the response waits for its run to end, including a run that just reached `done` and is still saving its branch
+and transcript, so nothing of it is written after the erase. Then its sandbox container, working directory, checkpoint snapshots and transcript are removed, and last its rows:
+the session, its events, tool calls and results, approvals, artifacts, checkpoints, review drafts and search entries.
+It is idempotent: deleting a session that is already gone returns `204` again. Usage counters (tokens, cost) stay
+with the owner as metadata. Older nightly backups keep the session until they rotate out (see Backups above). A
+session that ran on a runner (the Mac) keeps its working directory there until that runner's own cleanup.
+
 ### `GET /api/v1/sessions/{id}/approvals`, `POST /api/v1/sessions/{id}/approvals/{approval_id}`  (scope `approvals` to decide)
 `{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name. The owner's Web doesn't
 list your sessions' approvals (#330), so an App whose sessions can ask for approval needs this scope.
@@ -531,3 +558,4 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.13 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
+| 1.16 | 2026-10-03 | `DELETE /api/v1/sessions/{id}` erases a session and everything tied to it; `retention_days` on create and an App default retention erase idle sessions; a revoked App's store and folder are erased after 7 days unless the owner undoes the revoke; App session files live in the App's folder (#330) |

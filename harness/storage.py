@@ -2,7 +2,9 @@
 
 Owner data stays at the historical paths under `data_dir` (workspaces, transcripts) and `repos_dir`.
 Member data is rooted at `data_dir/users/<opaque-user-id>/` with separate managed-repository and
-workspace/artifact trees. Paths are never derived from a login or display name.
+workspace/artifact trees. An App's sessions keep their workspaces, transcripts, artifacts and checkpoints in the
+App's own folder, `data_dir/apps/<app_id>/`, next to its store (#330): pass the session's `app_id`. Paths are never
+derived from a login or display name.
 
 Containment rejects symlinks, Windows junctions/reparse points, traversal, and case/Unicode tricks
 that would resolve outside the account root. Quota measurement never follows links.
@@ -33,32 +35,49 @@ def user_root(cfg, user_id: str) -> Path:
     return Path(cfg.data_dir) / "users" / user_id
 
 
+def app_root(cfg, app_id: str) -> Path:
+    """App `app_id`'s folder: its store and its sessions' files."""
+    from .app_stores import app_dir
+    try:
+        return app_dir(cfg.data_dir, app_id)
+    except ValueError as e:
+        raise ContainmentError("invalid App id") from e
+
+
 def repos_dir(cfg, user_id: str) -> Path:
     if user_id == OWNER_USER_ID:
         return Path(cfg.repos_dir)
     return user_root(cfg, user_id) / "repos"
 
 
-def workspaces_dir(cfg, user_id: str) -> Path:
+def workspaces_dir(cfg, user_id: str, app_id: str = "") -> Path:
+    if app_id:
+        return app_root(cfg, app_id) / "workspaces"
     if user_id == OWNER_USER_ID:
         return Path(cfg.workspaces_dir)
     return user_root(cfg, user_id) / "workspaces"
 
 
-def transcripts_dir(cfg, user_id: str) -> Path:
+def transcripts_dir(cfg, user_id: str, app_id: str = "") -> Path:
+    if app_id:
+        return app_root(cfg, app_id) / "transcripts"
     if user_id == OWNER_USER_ID:
         return Path(cfg.transcripts_dir)
     return user_root(cfg, user_id) / "transcripts"
 
 
-def checkpoints_dir(cfg, user_id: str) -> Path:
+def checkpoints_dir(cfg, user_id: str, app_id: str = "") -> Path:
     """Host-side checkpoint stores, one directory per session. Never mounted into a sandbox."""
+    if app_id:
+        return app_root(cfg, app_id) / "checkpoints"
     if user_id == OWNER_USER_ID:
         return Path(cfg.data_dir) / "checkpoints"
     return user_root(cfg, user_id) / "checkpoints"
 
 
-def artifacts_dir(cfg, user_id: str) -> Path:
+def artifacts_dir(cfg, user_id: str, app_id: str = "") -> Path:
+    if app_id:
+        return app_root(cfg, app_id) / "artifacts"
     if user_id == OWNER_USER_ID:
         return Path(cfg.data_dir) / "artifacts"
     return user_root(cfg, user_id) / "artifacts"
@@ -172,6 +191,31 @@ def _escapes_via_link(path: Path, root: Path) -> bool:
         return not (target == root or target.is_relative_to(root))
     except (OSError, RuntimeError, ValueError):
         return True
+
+
+def session_dirs(cfg, s: dict) -> dict[str, Path]:
+    """Where session `s` keeps its files: its account's folders, or its App's for an App session. A missing row has
+    no folders: guessing the owner's would put an erased App session's files there."""
+    from .principal import session_user_id
+    if not s:
+        raise ValueError("no such session, so no session folders")
+    user_id, app_id = session_user_id(s), s.get("app_id") or ""
+    return {"workspaces": workspaces_dir(cfg, user_id, app_id), "transcripts": transcripts_dir(cfg, user_id, app_id),
+            "checkpoints": checkpoints_dir(cfg, user_id, app_id), "artifacts": artifacts_dir(cfg, user_id, app_id)}
+
+
+def ensure_app_dirs(cfg, app_id: str) -> Path:
+    """Create App `app_id`'s session folders. Never follows a link out of the App's folder."""
+    root = app_root(cfg, app_id)
+    root.mkdir(parents=True, exist_ok=True)
+    if is_reparse_point(root):
+        raise ContainmentError("App storage must not be a link")
+    for sub in ("workspaces", "transcripts", "artifacts", "checkpoints"):
+        path = root / sub
+        if path.exists() and (path.is_symlink() or _escapes_via_link(path, root)):
+            raise ContainmentError("App storage must not be a link")
+        path.mkdir(exist_ok=True)
+    return root
 
 
 def ensure_user_dirs(cfg, user_id: str) -> Path:

@@ -455,6 +455,9 @@ def _row(row: sqlite3.Row | None) -> dict | None:
 
 
 READ_CONNECTIONS = 4
+# A revoked App's (or device's) store and folder are erased this long after the revoke, unless the owner undoes it
+# first (#330 decision 5). The nightly maintenance does the erasing (maintenance.py).
+APP_ERASE_GRACE_SECONDS = 7 * 86400
 
 
 def _writes(fn):
@@ -869,7 +872,8 @@ class Database:
     @_writes
     def delete_session(self, sid: str) -> None:
         with self._tx():
-            for table in ("events", "approvals", "review_comments", "secret_dismissals", "artifacts", "checkpoints"):
+            for table in ("events", "approvals", "review_comments", "secret_dismissals", "artifacts", "checkpoints",
+                          "app_tool_calls", "smart_reviews"):
                 self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM search_index WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
@@ -1693,18 +1697,81 @@ class Database:
         with self.lock:
             rows = self.conn.execute(
                 "SELECT k.id, k.name, k.prefix, k.kind, k.scopes, k.origins, k.created_at, k.last_used_at, k.revoked_at, "
+                "k.retention_days, k.erase_after, k.erased_at, "
                 "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
                 "FROM api_keys k ORDER BY k.created_at").fetchall()
         return [_row(r) for r in rows]
 
     @_writes
     def revoke_api_key(self, kid: str) -> bool:
+        """Revoke a key at once. An App's or device's store and folder are scheduled for erasure after
+        `APP_ERASE_GRACE_SECONDS` (#330); `restore_api_key` undoes that during the grace. The App's own settings stay
+        until that erasure (unused while revoked), so an undone revoke gets them back."""
+        now = time.time()
         with self.lock:
-            ok = self.conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-                                   (time.time(), kid)).rowcount == 1
-            if ok:
-                self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
+            ok = self.conn.execute("UPDATE api_keys SET revoked_at = ?, erase_after = CASE WHEN kind = 'owner' "
+                                   "THEN NULL ELSE ? END WHERE id = ? AND revoked_at IS NULL",
+                                   (now, now + APP_ERASE_GRACE_SECONDS, kid)).rowcount == 1
+            if ok:  # an owner key has no erasure to take its settings later
+                self.conn.execute("DELETE FROM app_settings WHERE app_id = ? AND app_id IN "
+                                  "(SELECT id FROM api_keys WHERE kind = 'owner')", (kid,))
             return ok
+
+    @_writes
+    def restore_api_key(self, kid: str) -> tuple[dict, str] | None:
+        """Undo a revoke during its erasure grace: the App keeps its id, store and folder, and gets a new token
+        (shown once; the revoked one stays dead). None when `kid` has no pending erasure."""
+        import hashlib
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM api_keys WHERE id = ? AND revoked_at IS NOT NULL AND erased_at "
+                                    "IS NULL AND erase_after > ?", (kid, time.time())).fetchone()
+            if row is None:
+                return None
+            prefix = {"app": "ha-", "owner": "ho-"}.get(row["kind"], "hk-")
+            key = prefix + secrets.token_urlsafe(32)
+            self.conn.execute("UPDATE api_keys SET hash = ?, prefix = ?, revoked_at = NULL, erase_after = NULL "
+                              "WHERE id = ?", (hashlib.sha256(key.encode()).hexdigest(), key[:10], kid))
+        return next(k for k in self.list_api_keys() if k["id"] == kid), key
+
+    @_reads
+    def pending_erasures(self, due_by: float | None = None) -> list[dict]:
+        """Revoked Apps (and devices) whose store and folder are still to be erased, soonest first; with `due_by`,
+        only those due by then."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id, name, kind, revoked_at, erase_after FROM api_keys WHERE erase_after IS NOT NULL AND "
+                "erased_at IS NULL AND erase_after <= ? ORDER BY erase_after",
+                (float("inf") if due_by is None else due_by,)).fetchall()
+        return [dict(r) for r in rows]
+
+    @_writes
+    def mark_app_erased(self, kid: str) -> None:
+        """Leave only a tombstone of an erased App in the registry: its id, name, kind and dates. Its settings,
+        provider credentials and error counts go with its store."""
+        with self.lock:
+            self.conn.execute("UPDATE api_keys SET erased_at = ?, erase_after = NULL, scopes = '', origins = '[]', "
+                              "retention_days = NULL WHERE id = ?", (time.time(), kid))
+            self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
+            self.conn.execute("DELETE FROM app_provider_credentials WHERE app_id = ?", (kid,))
+            self.conn.execute("DELETE FROM meta WHERE key = ?", ("app_error:" + kid,))
+
+    @_writes
+    def set_app_retention(self, kid: str, days: float | None) -> bool:
+        """An App's default retention for its sessions, in days (None: keep them until deleted)."""
+        with self.lock:
+            return self.conn.execute("UPDATE api_keys SET retention_days = ? WHERE id = ? AND kind != 'owner' "
+                                     "AND erased_at IS NULL", (days, kid)).rowcount == 1
+
+    @_reads
+    def session_activity(self) -> list[dict]:
+        """Every session's own retention and when it was last active (its newest event, or its creation), for the
+        retention sweep."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT s.id, s.app_id, s.status, s.retention_days, MAX(s.created_at, COALESCE("
+                "(SELECT MAX(e.ts) FROM events e WHERE e.session_id = s.id), 0)) AS active_at FROM sessions s"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     @_reads
     def get_app_settings(self, app_id: str) -> dict | None:

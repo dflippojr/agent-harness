@@ -8,7 +8,9 @@ Runs every `cleanup.interval_minutes` and on demand (POST /maintenance/cleanup):
   with commits that were never pushed is kept;
 - deletes workspace directories that belong to no session;
 - asks runners (the MacBook) to delete their finished sessions' workspaces after the same retention, saving the
-  branch into the Mac's source repository first. A runner that's offline is simply asked again next time.
+  branch into the Mac's source repository first. A runner that's offline is simply asked again next time;
+- erases App data (#330 decision 5, `app_sweep`, the manager's `sweep_app_data`): the store and folder of a revoked
+  App once its 7-day grace is over, and App sessions past their retention, whether or not the App is online.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ class Maintenance:
         self._task: asyncio.Task | None = None
         self.last_report: dict = {}
         self.operations: dict[str, str] = {}    # the manager's sessions held by a rewind, fork or review
+        self.app_sweep = None                    # async (now) -> report: erases expired and revoked App data
         self.last_backup: dict = self._read_backup_status()
         if self.image_archive and isinstance(self.last_backup.get("image_archive"), dict):
             self.image_archive.last_reconciliation = self.last_backup["image_archive"]
@@ -223,12 +226,18 @@ class Maintenance:
         async with self._lock:
             now = now or time.time()
             report = {"at": now, "containers_removed": [], "workspaces_removed": [], "orphans_removed": [],
-                      "kept": []}
+                      "kept": [], "apps_erased": [], "sessions_expired": []}
+            if self.app_sweep is not None:  # first, so the sweep below removes the containers of what it erased
+                try:
+                    report.update(await self.app_sweep(now))
+                except Exception:  # noqa: BLE001 - the rest of the cleanup still runs
+                    log.exception("App data sweep failed")
             await self._containers(now, report)
             await asyncio.to_thread(self._workspaces, now, report)
             await self._remote_workspaces(now, report)
             self.last_report = report
-            if any(report[k] for k in ("containers_removed", "workspaces_removed", "orphans_removed")):
+            if any(report[k] for k in ("containers_removed", "workspaces_removed", "orphans_removed",
+                                       "apps_erased", "sessions_expired")):
                 log.info("cleanup: %s", {k: v for k, v in report.items() if k != "at"})
             return report
 
@@ -257,11 +266,11 @@ class Maintenance:
     def _workspace_roots(self) -> list:
         from .storage import is_reparse_point, workspaces_dir
         roots = [self.cfg.workspaces_dir]
-        users = self.cfg.data_dir / "users"
-        if users.is_dir() and not is_reparse_point(users):
-            for child in users.iterdir():
-                if child.is_dir() and not is_reparse_point(child):
-                    roots.append(child / "workspaces")
+        for parent in (self.cfg.data_dir / "users", self.cfg.data_dir / "apps"):  # members' and Apps' (#330)
+            if parent.is_dir() and not is_reparse_point(parent):
+                for child in parent.iterdir():
+                    if child.is_dir() and not is_reparse_point(child):
+                        roots.append(child / "workspaces")
         return roots
 
     def _workspaces(self, now: float, report: dict) -> None:
@@ -345,17 +354,17 @@ class Maintenance:
 
     def remove_workspace(self, sid: str) -> None:
         from . import storage
-        from .principal import session_user_id
         s = self.db.get_session(sid)
         path = Path(s["workspace"])
-        root = storage.workspaces_dir(self.cfg, session_user_id(s))
+        dirs = storage.session_dirs(self.cfg, s)
+        root = dirs["workspaces"]
         try:
             storage.require_contained(path, root)
         except storage.ContainmentError:
             log.warning("refusing to delete workspace for %s: path escapes the account root", sid)
             return
         remove_tree(path)
-        remove_tree(storage.checkpoints_dir(self.cfg, session_user_id(s)) / sid)
+        remove_tree(dirs["checkpoints"] / sid)
         self.db.delete_checkpoints(sid, [c["turn"] for c in self.db.checkpoints(sid, hidden=None)])
         self.db.update_session(sid, workspace_removed=1)
 

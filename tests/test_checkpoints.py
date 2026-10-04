@@ -512,8 +512,8 @@ def test_fork_whose_record_fails_leaves_no_child(tmp_path, monkeypatch):
         sid = s["id"]
         made, new_workspace = [], m._new_workspace
 
-        def recorded_workspace(*args):
-            made.append((args[-1], new_workspace(*args)))
+        def recorded_workspace(*args, **kwargs):
+            made.append((args[-1], new_workspace(*args, **kwargs)))
             return made[-1][1]
         monkeypatch.setattr(m, "_new_workspace", recorded_workspace)
 

@@ -142,6 +142,35 @@ denied, and revoking the last assignment keeps the app managed and denied; it ne
 subscription or key. Local-model sessions are unaffected. Credential-store integration is intentionally outside
 this file-based contract; protect the files with OS permissions and rotate them by replacing the file.
 
+## App retention and erasure
+
+Each App's sessions live in its own store and folder (`<data_dir>/apps/<app_id>/`, see
+[App API](app-api.md#where-an-apps-data-lives)). The owner controls how long they stay and what happens on revoke
+(#330 decision 5). These routes take an App's (or device key's) `id` from `GET /keys`.
+
+- **Default retention.** `PUT /api/admin/v1/apps/{app_id}/retention` with `{"retention_days": 30}` erases that
+  App's sessions once they have been idle 30 days (since their last event, or their creation), unless a session was
+  created with its own `retention_days`, which wins. `{"retention_days": null}` keeps them until the App deletes
+  them. Returns the key row; `404` for an owner key, an erased App or an unknown id, `422` for a value that isn't a
+  positive number of days (at most 36500). `GET /keys` shows it as `retention_days`.
+- **The sweep.** The maintenance cleanup (every `cleanup.interval_minutes`, hourly by default; also
+  `POST /maintenance/cleanup`) erases expired sessions exactly as the App's `DELETE` would, whether or not the App
+  is online. Its report adds `sessions_expired` and `apps_erased` (ids).
+- **Revoke.** `DELETE /keys/{kid}` on an App or device key kills its token at once and schedules the erasure of its
+  whole store and folder 7 days later: `GET /keys` shows `revoked_at` and `erase_after` (Unix seconds), and the Apps
+  card lists it under "Revoked: data to be erased" with the date. Owner keys have no erasure.
+- **Pending erasures.** `GET /api/admin/v1/apps/erasures` lists them, soonest first:
+  `[{"id", "name", "kind", "revoked_at", "erase_after"}]`.
+- **Undo.** `POST /api/admin/v1/apps/{app_id}/restore` during the grace keeps the App's id, store, folder, scopes,
+  origins, retention and its own settings (`/api/v1/config`, kept but unused while it is revoked), and returns the
+  key row with a new token in `key`, shown once (`Cache-Control: no-store`); the revoked token stays dead. `404`
+  when nothing is pending for that id (never revoked, already restored, or erased). The Apps card's **Undo** button
+  does this.
+- **After the grace.** The sweep stops the App's running sessions, then erases its store and folder. The registry
+  keeps a tombstone: the key row with `erased_at` set and no scopes, origins or retention. The App's settings,
+  provider credentials and error counts are deleted with it; usage rows stay as the owner's metadata. Older nightly
+  backups keep the App's store until they rotate out.
+
 ## Examples
 
 Tailscale/localhost owner (bundled Agent Harness Web, no bearer token):
@@ -253,6 +282,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.17 | 2026-10-03 | App retention and erasure (#330 decision 5): `PUT /apps/{app_id}/retention`, `GET /apps/erasures`, `POST /apps/{app_id}/restore`. `GET /keys` adds `retention_days`, `erase_after` and `erased_at`; revoking an App or device key schedules its erasure 7 days later; the cleanup report adds `sessions_expired` and `apps_erased` |
 | 1.16 | 2026-10-03 | Owner surfaces never reach an App's sessions (#330 decision 3): `/sessions` (404 by id or prefix), `/search`, `/queue`, `/events`, approvals and transcripts leave them out. `GET /keys` adds a `store` object per App and device key: `sessions` (counts by status), `usage` (`requests`, `prompt_tokens`, `completion_tokens`, `cost_usd`), `errors`, `last_error` (the stop reason's kind only), `last_error_at`. `/metrics`, smart-approval stats and Control Center counts cover the owner's and members' sessions only. Backups add `apps/<app_id>.sqlite3` per App and `app_stores` (a count) to the backup result |
 | 1.15 | 2026-10-01 | Secret scan of a session's added lines on `changes`; Review `merge`/`push` on tower sessions return 409 `secret_findings` (or 503 `secret_scan_unavailable`) until findings are fixed or dismissed; fix and dismiss endpoints |
 | 1.14 | 2026-09-28 | Owner session context-efficiency metrics and Prometheus retry/cache counters |

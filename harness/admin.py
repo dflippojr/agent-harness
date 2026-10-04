@@ -29,7 +29,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.16"
+API_VERSION = "1.17"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
@@ -247,6 +247,10 @@ class AccountUpdateRequest(BaseModel):
     max_queued: int | None = None
 
 
+class AppRetentionRequest(BaseModel):
+    retention_days: float | None = Field(default=None, gt=0, le=36500)
+
+
 class GitHubMemberAuthRequest(BaseModel):
     enabled: bool
 
@@ -276,6 +280,9 @@ def _collect_operations(app: FastAPI, mgr) -> list[dict]:
         {"method": "GET", "path": PREFIX + "/github-member-auth"},
         {"method": "PUT", "path": PREFIX + "/github-member-auth"},
         {"method": "POST", "path": PREFIX + "/accounts/{user_id}/github-connection/reset"},
+        {"method": "GET", "path": PREFIX + "/apps/erasures"},
+        {"method": "POST", "path": PREFIX + "/apps/{app_id}/restore"},
+        {"method": "PUT", "path": PREFIX + "/apps/{app_id}/retention"},
     ])
     from . import config_api
     operations.extend(config_api.register_admin(app, mgr, require_admin))
@@ -341,6 +348,27 @@ def register(app: FastAPI, mgr) -> None:
         require_admin(request, mgr)
         if not mgr(request).revoke_app_provider_credential(credential_id):
             raise HarnessError(404, "no active provider credential with that id")
+
+    # #330 decision 5: an App's default retention, and the erasures that revoking Apps scheduled.
+    @app.get(PREFIX + "/apps/erasures")
+    async def app_erasures(request: Request):
+        require_admin(request, mgr)
+        return mgr(request).db.pending_erasures()
+
+    @app.post(PREFIX + "/apps/{app_id}/restore")
+    async def restore_app(app_id: str, request: Request):
+        require_admin(request, mgr)
+        row, key = mgr(request).restore_app(app_id)
+        return JSONResponse({**row, "key": key},
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+    @app.put(PREFIX + "/apps/{app_id}/retention")
+    async def set_app_retention(app_id: str, body: AppRetentionRequest, request: Request):
+        require_admin(request, mgr)
+        m = mgr(request)
+        if not m.db.set_app_retention(app_id, body.retention_days):
+            raise HarnessError(404, "no App or device key has that id")
+        return next(k for k in m.db.list_api_keys() if k["id"] == app_id)
 
     def _actor(request: Request) -> str:
         ident = getattr(request.state, "access", None)

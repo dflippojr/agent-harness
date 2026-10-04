@@ -61,6 +61,7 @@ class CreateOptions:
     kind: str = "agent"
     compare_group: str = ""
     taint: list | None = None  # untrusted sources the session starts with (taint.py)
+    retention_days: float | None = None  # an App session's own retention (#330); else the App's default
 REMOTE_WORKSPACE_ROOT = "~/.agent-harness/workspaces"  # where runners keep session workspaces (display only)
 MEMORY_PROMPT = ("User context: memory_index, memory_search, and memory_read give read access to part of the "
                  "user's personal memory library (projects, work, home, tastes). Check it when the task depends on "
@@ -170,6 +171,7 @@ class Manager:
         self.image_archive = ImageArchive(cfg, self.db)
         self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
         self.maintenance.operations = self.operations
+        self.maintenance.app_sweep = self.sweep_app_data
         from .member_github import MemberGitHub
         self.github_auth = MemberGitHub(cfg, self.db)
         self._github_reconcile: threading.Thread | None = None
@@ -531,10 +533,11 @@ class Manager:
         else:
             model, effort = self._hosted_choice(backend, model, effort, member, target, app)
         remote = target != "tower"
-        self._check_free_space(remote, member, target, owner_id)
+        app_id = app["id"] if app else ""
+        self._check_free_space(remote, member, target, owner_id, app_id)
 
         sid = uuid.uuid4().hex[:10]
-        workspace = self._new_workspace(remote, target, owner_id, sid)
+        workspace = self._new_workspace(remote, target, owner_id, sid, app_id=app_id)
         system, branch = ((TOOLS_ONLY_PROMPT.format(app=app["name"]), "") if tools_only
                           else self._system_prompt(chat, remote, target, sid, spec, defaults, app))
         tools = self._validated_app_tools(app_tools)
@@ -564,6 +567,7 @@ class Manager:
             "job_id": opts.job_id, "owner_id": owner_id, "kind": opts.kind, "compare_group": opts.compare_group,
             "skills": self.skills.freeze_public(frozen) if self.skills is not None else [],
             "taint": list(opts.taint or []),
+            **({"retention_days": float(opts.retention_days)} if app and opts.retention_days else {}),
         }
         self._insert_created(session, app, tools, opts.job_id, prompt)
         self._spawn(sid)
@@ -721,7 +725,7 @@ class Manager:
             raise HarnessError(400, f"backend {backend!r} only runs on the tower")
         return backend_cfg
 
-    def _check_free_space(self, remote: bool, member: bool, target: str, owner_id: str) -> None:
+    def _check_free_space(self, remote: bool, member: bool, target: str, owner_id: str, app_id: str = "") -> None:
         from . import storage
         if remote:
             if member:
@@ -732,22 +736,26 @@ class Manager:
                 raise HarnessError(507, f"only {free_gb:.1f} GB free on the {target} (minimum {minimum} GB)")
             return
         try:
-            storage.ensure_user_dirs(self.cfg, owner_id)
+            if app_id:  # an App's sessions keep their files in the App's folder (#330)
+                storage.ensure_app_dirs(self.cfg, app_id)
+            else:
+                storage.ensure_user_dirs(self.cfg, owner_id)
         except storage.ContainmentError as e:
             raise HarnessError(400, str(e)) from e
-        ws_root = storage.workspaces_dir(self.cfg, owner_id)
+        ws_root = storage.workspaces_dir(self.cfg, owner_id, app_id)
         free_gb = shutil.disk_usage(ws_root).free / 2**30
         if free_gb < self.cfg.cleanup.min_free_gb:
             raise HarnessError(507, f"only {free_gb:.1f} GB free on the data drive "
                                     f"(minimum {self.cfg.cleanup.min_free_gb} GB); run cleanup first")
 
-    def _new_workspace(self, remote: bool, target: str, owner_id: str, sid: str):
+    def _new_workspace(self, remote: bool, target: str, owner_id: str, sid: str, app_id: str = ""):
         from . import storage
         if remote:
             return f"{target}:{REMOTE_WORKSPACE_ROOT}/{sid}"
-        workspace = storage.workspaces_dir(self.cfg, owner_id) / sid
+        root = storage.workspaces_dir(self.cfg, owner_id, app_id)
+        workspace = root / sid
         try:
-            storage.require_contained(workspace, storage.workspaces_dir(self.cfg, owner_id), allow_missing=True)
+            storage.require_contained(workspace, root, allow_missing=True)
         except storage.ContainmentError as e:
             raise HarnessError(400, str(e)) from e
         workspace.mkdir(parents=True, exist_ok=False)
@@ -1003,10 +1011,11 @@ class Manager:
         owner_id = session_user_id(parent)
         if owner_id != OWNER_USER_ID:
             self._require_member_start(self.db.account_by_id(owner_id), "session")
-        self._check_free_space(False, owner_id != OWNER_USER_ID, "tower", owner_id)
+        app_id = parent.get("app_id") or ""
+        self._check_free_space(False, owner_id != OWNER_USER_ID, "tower", owner_id, app_id)
         cp = self.runner.checkpointer
         new_sid = uuid.uuid4().hex[:10]
-        workspace = self._new_workspace(False, "tower", owner_id, new_sid)
+        workspace = self._new_workspace(False, "tower", owner_id, new_sid, app_id=app_id)
         hosted = parent.get("backend", "local") != "local"
         try:
             git_fields = await asyncio.to_thread(cp.prepare_fork, parent, int(turn), new_sid, workspace)
@@ -1601,6 +1610,88 @@ class Manager:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         return self.db.get_session(sid)
+
+    # erasing App data (#330 decision 5)
+    async def erase_session(self, sid: str) -> bool:
+        """Erase session `sid` and everything tied to it: stop it if it runs, remove its sandbox, workspace,
+        checkpoints and transcript, then its rows (events, tool calls and results, approvals, artifacts, checkpoints,
+        search entries). The rows go last, so an erase cut short is finished by the next one. False when there is no
+        such session (already erased)."""
+        s = self.db.get_session(sid)
+        if s is None:
+            return False
+        await self._stop_run(sid)
+        s = self.db.get_session(sid) or s
+        sandbox = self.runner._sandboxes.pop(sid, None)
+        if sandbox is not None:
+            await sandbox.remove()
+        await asyncio.to_thread(self._erase_files, s)
+        await asyncio.to_thread(self.db.delete_session, sid)
+        log.info("erased session %s", sid)
+        return True
+
+    async def _stop_run(self, sid: str) -> None:
+        """Stop session `sid` if it runs, and wait for its run task to be over, its end included: the status is
+        final before the run's end (sandbox stop, branch save, transcript) is, and nothing may be written after an
+        erase."""
+        await self._compare_stop(sid)
+        task = self.tasks.get(sid)
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _erase_files(self, s: dict) -> None:
+        from . import storage
+        dirs = storage.session_dirs(self.cfg, s)
+        if s["target"] == "tower" and s.get("workspace"):
+            try:
+                remove_tree(storage.require_contained(Path(s["workspace"]), dirs["workspaces"]))
+            except storage.ContainmentError:
+                log.warning("not removing the workspace of %s: it is outside the workspaces root", s["id"])
+        remove_tree(dirs["checkpoints"] / s["id"])
+        (dirs["transcripts"] / f"{s['id']}.md").unlink(missing_ok=True)
+
+    async def erase_app(self, app_id: str) -> None:
+        """Erase a revoked App's store and folder, leaving a tombstone in the registry: its running sessions are
+        stopped and their sandboxes removed first."""
+        for sid in self.db.app_session_ids(app_id):
+            await self._stop_run(sid)
+            sandbox = self.runner._sandboxes.pop(sid, None)
+            if sandbox is not None:
+                await sandbox.remove()
+        await asyncio.to_thread(self.db.drop_app, app_id)
+        self.db.mark_app_erased(app_id)
+
+    def restore_app(self, app_id: str) -> tuple[dict, str]:
+        """Undo the revoke of App `app_id` during its erasure grace; returns its key row and new token."""
+        restored = self.db.restore_api_key(app_id)
+        if restored is None:
+            raise HarnessError(404, "no App with a pending erasure has that id")
+        return restored
+
+    async def sweep_app_data(self, now: float | None = None) -> dict:
+        """Part of the maintenance sweep, whether or not the Apps are online: erase the revoked Apps whose grace is
+        over, then the App sessions past their retention (their own `retention_days`, else their App's default),
+        counted from their last activity."""
+        now = time.time() if now is None else now
+        report: dict[str, list] = {"apps_erased": [], "sessions_expired": []}
+        for row in self.db.pending_erasures(due_by=now):
+            try:
+                await self.erase_app(row["id"])
+                report["apps_erased"].append(row["id"])
+            except Exception:  # noqa: BLE001 - the next sweep tries again
+                log.exception("could not erase App %s", row["id"])
+        defaults = {k["id"]: k.get("retention_days") for k in self.db.main.list_api_keys()}
+        for app_id in self.db.indexed_apps():
+            for r in await asyncio.to_thread(self.db.for_app(app_id).session_activity):
+                days = r["retention_days"] or defaults.get(app_id)
+                if not days or r["active_at"] + float(days) * 86400 > now:
+                    continue
+                try:
+                    await self.erase_session(r["id"])
+                    report["sessions_expired"].append(r["id"])
+                except Exception:  # noqa: BLE001 - the next sweep tries again
+                    log.exception("could not erase expired session %s", r["id"])
+        return report
 
     @staticmethod
     def _failure(s: dict) -> dict | None:
