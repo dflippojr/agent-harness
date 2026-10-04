@@ -52,12 +52,14 @@ export function createSession({ agentHarnessWeb, storage = null }) {
     return agentHarnessWeb.request(path, { method, body, surface: chosen });
   }
 
+  // Called only when an identity is adopted (setMe), never from fetchMe: boot discards a speculative /me on a
+  // protocol mismatch, and that result must not touch the cache. An offline identity leaves it as it is.
   function rememberRole(me) {
+    if (me?.offline) return;
     try {
       if (CACHED_ROLES.has(me?.role)) storage?.setItem(LAST_ROLE_KEY, me.role);
       else storage?.removeItem(LAST_ROLE_KEY);
     } catch (_) { /* storage unavailable */ }
-    return me;
   }
 
   function offlineMe() {
@@ -72,12 +74,12 @@ export function createSession({ agentHarnessWeb, storage = null }) {
   async function fetchMe() {
     const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
     try {
-      return rememberRole(await api("/me", { surface: bootstrap }));
+      return await api("/me", { surface: bootstrap });
     } catch (e) {
       if (e.code === "offline") return offlineMe();
-      if (e.code === "sign_in_required") return rememberRole({ role: "signin" });
-      try { return rememberRole(await api("/me", { surface: "app" })); }
-      catch (e2) { return e2.code === "offline" ? offlineMe() : rememberRole({ role: "guest" }); }
+      if (e.code === "sign_in_required") return { role: "signin" };
+      try { return await api("/me", { surface: "app" }); }
+      catch (e2) { return e2.code === "offline" ? offlineMe() : { role: "guest" }; }
     }
   }
 
@@ -96,7 +98,7 @@ export function createSession({ agentHarnessWeb, storage = null }) {
     api, fetchMe, loadWebAuth, ownerSurface,
     isGuest, isMember, isOwner, canChat, needsSignIn, isOffline,
     getMe: () => currentMe,
-    setMe: (me) => { currentMe = me; },
+    setMe: (me) => { currentMe = me; rememberRole(me); },
     getWebAuth: () => webAuth,
     isBlocked: () => protocolBlocked,
     setBlocked: (on) => { protocolBlocked = on; },

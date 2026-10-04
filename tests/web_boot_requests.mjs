@@ -177,6 +177,7 @@ const fakeFetch = async (url, init = {}) => {
       return jsonResp({ role: "member", name: "M", login: "m" });
     }
     if (scenario === "me-fail") return jsonResp({ error: "nope" }, 500);
+    if (scenario.endsWith("-update")) return jsonResp({ error: { code: "client_update_required" } }, 426);
     return jsonResp(me);
   }
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
@@ -205,7 +206,9 @@ Object.assign(win, {
   cancelAnimationFrame: (id) => clearTimeout(id),
 });
 
-if (scenario === "offline-cached") win.localStorage.setItem("harness.lastRole", "owner");
+if (scenario === "offline-cached" || scenario === "client-update" || scenario === "daemon-update") {
+  win.localStorage.setItem("harness.lastRole", "owner");
+}
 globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
@@ -285,6 +288,7 @@ if (scenario.startsWith("offline")) {
 } else if (scenario === "client-update" || scenario === "daemon-update") {
   if (routeData.length || paths.includes("POST /models/warm") || first("/profile") || first("/gpu")) fail("blocked boot must not request route data, warm or profile");
   if (!/Update/.test(byId.app.textContent)) fail("update card was not shown");
+  if (win.localStorage.getItem("harness.lastRole") !== "owner") fail("a discarded /me must not touch the cached role (#368)");
   console.log("ok");
 } else {
   const health = first("/health");
