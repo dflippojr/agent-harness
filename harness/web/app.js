@@ -53,7 +53,9 @@ const { $app, $conn, $profileIcon } = els;
 const browser = globalThis;
 
 // ---------- shell: identity, chrome, streams, sign-in, router, drawer ----------
-const session = createSession({ agentHarnessWeb });
+let storage = null;
+try { storage = browser.localStorage; } catch (_) { /* storage blocked */ }
+const session = createSession({ agentHarnessWeb, storage });
 const { api, fetchMe, ownerSurface, isGuest, isMember, isOwner, canChat } = session;
 const chrome = mountChrome({ els, browser, session });
 const { layoutBar, setHeader, showFab, toast, setConnLive } = chrome;

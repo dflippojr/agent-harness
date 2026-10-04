@@ -150,6 +150,7 @@ const jsonResp = (body, status = 200) => ({
 });
 
 const scenario = process.argv[2] || "owner";
+const network = { up: false };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const LATENCY = 15;
 const log = [];
@@ -166,6 +167,8 @@ const fakeFetch = async (url, init = {}) => {
   log.push(entry);
   await sleep(LATENCY);
   entry.end = performance.now();
+  // #368: Airplane Mode. Every request fails at the network level until `network.up`.
+  if (scenario.startsWith("offline") && !network.up) throw new TypeError("Failed to fetch");
   if (path === "/health") return jsonResp({ protocols: { admin: adminRange }, update_hint: {} });
   if (path === "/me") {
     if (scenario === "me-fallback" && !entry.fallbackSeen) {
@@ -202,6 +205,7 @@ Object.assign(win, {
   cancelAnimationFrame: (id) => clearTimeout(id),
 });
 
+if (scenario === "offline-cached") win.localStorage.setItem("harness.lastRole", "owner");
 globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
@@ -261,7 +265,24 @@ const fail = (m) => { throw new Error(`${m}
 requests: ${paths.join(", ")}`); };
 const routeData = log.filter((e) => !NOT_ROUTE_DATA.has(e.path));
 const mes = log.filter((e) => e.path === "/me");
-if (scenario === "client-update" || scenario === "daemon-update") {
+if (scenario.startsWith("offline")) {
+  // Never guest: no guest banner, navigation kept, and an offline state painted.
+  const text = byId.app.textContent;
+  if (!byId["guest-banner"].hidden) fail("offline boot adopted the guest role");
+  if (byId["menu-btn"].hidden) fail("offline boot hid the navigation");
+  if (!/Can't reach Agent Harness Server/.test(text)) fail(`no offline state shown: ${text}`);
+  if (scenario === "offline") {
+    if (!/Retry/.test(text)) fail("the offline card needs a Retry button");
+  } else if (/Retry/.test(text)) fail("a cached identity routes normally and paints the page's own error state");
+  if (win.localStorage.getItem("harness.lastRole") !== (scenario === "offline" ? null : "owner")) fail("offline must not change the cached role");
+  // Connectivity returns: the online event re-runs the identity check and the route loads.
+  network.up = true;
+  win.dispatchEvent({ type: "online" });
+  await sleep(200);
+  if (/Can't reach|Retry/.test(byId.app.textContent)) fail("the online event did not re-run boot identity");
+  if (win.localStorage.getItem("harness.lastRole") !== "owner") fail("a successful /me caches the role");
+  console.log("ok");
+} else if (scenario === "client-update" || scenario === "daemon-update") {
   if (routeData.length || paths.includes("POST /models/warm") || first("/profile") || first("/gpu")) fail("blocked boot must not request route data, warm or profile");
   if (!/Update/.test(byId.app.textContent)) fail("update card was not shown");
   console.log("ok");

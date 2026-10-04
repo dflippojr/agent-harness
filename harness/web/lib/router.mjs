@@ -88,6 +88,21 @@ export function mountRouter({ els, session, chrome, signin, stream, views, toast
     else go("#/", true);
   }
 
+  // Offline with no cached identity (#368): keep the navigation and say so, rather than falling back to guest mode.
+  // Retry re-runs route(), which asks /me again.
+  function viewOffline() {
+    $back.hidden = true;
+    $menu.hidden = false;
+    chrome.setHeader("agents", "Offline", { page: true });
+    append($app, h("div", { class: "card" },
+      h("h2", {}, "Can't reach Agent Harness Server"),
+      h("p", {}, "Check your connection, Tailscale and Connection settings. The app reconnects when you're back online."),
+      h("button", { class: "btn primary", onclick: () => route() }, "Retry"),
+      " ",
+      h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings")));
+    chrome.repaintPage();
+  }
+
   async function route() {
     if (session.isBlocked()) return;
     stream.watchDaemonConnection();
@@ -106,6 +121,11 @@ export function mountRouter({ els, session, chrome, signin, stream, views, toast
       $back.hidden = true;
       signin.viewSignIn(parts[0] === "signin" && parts[1] === "failed");
       chrome.repaintPage();
+      return;
+    }
+    // Profile stays reachable so Connection settings can be fixed while offline.
+    if (session.getMe().role === "offline" && !isProfileRoute(parts)) {
+      viewOffline();
       return;
     }
     const images = parts[0] === "images";
@@ -141,6 +161,8 @@ export function mountRouter({ els, session, chrome, signin, stream, views, toast
     go(FEATURE_ROUTES[$feature.value] || "#/agents", true);
   });
   window.addEventListener("hashchange", route);
+  // Connectivity is back: re-run the identity check if the last one could not reach the server (#368).
+  window.addEventListener("online", () => { if (session.isOffline()) void route(); });
 
   return { go, route, onLeave };
 }

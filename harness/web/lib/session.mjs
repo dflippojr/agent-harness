@@ -15,7 +15,12 @@ export function apiSurface(path, method, { role, hasToken }) {
   return "admin";
 }
 
-export function createSession({ agentHarnessWeb }) {
+// Last identity role seen from /me, so an offline launch keeps its shell instead of becoming a guest (#368). Role only.
+export const LAST_ROLE_KEY = "harness.lastRole";
+const CACHED_ROLES = new Set(["owner", "member"]);
+
+// `storage` is localStorage or null; every access is guarded because it can throw in private windows.
+export function createSession({ agentHarnessWeb, storage = null }) {
   let currentMe = { role: "owner" };
   let protocolBlocked = false;
   let webAuth = null;
@@ -27,6 +32,9 @@ export function createSession({ agentHarnessWeb }) {
   const isOwner = () => currentMe.role === "owner";
   const canChat = () => !isGuest() && !isMember();
   const needsSignIn = () => currentMe.role === "signin";
+  // The server could not be reached when identity was checked: either a cached role (pages paint their own
+  // "Can't reach" state) or role "offline" (no cached role; route shows the offline card).
+  const isOffline = () => !!currentMe.offline;
 
   function ownerSurface() {
     if (isMember()) return "app";
@@ -44,16 +52,32 @@ export function createSession({ agentHarnessWeb }) {
     return agentHarnessWeb.request(path, { method, body, surface: chosen });
   }
 
+  function rememberRole(me) {
+    try {
+      if (CACHED_ROLES.has(me?.role)) storage?.setItem(LAST_ROLE_KEY, me.role);
+      else storage?.removeItem(LAST_ROLE_KEY);
+    } catch (_) { /* storage unavailable */ }
+    return me;
+  }
+
+  function offlineMe() {
+    let role = null;
+    try { role = storage?.getItem(LAST_ROLE_KEY); } catch (_) { /* storage unavailable */ }
+    return { role: CACHED_ROLES.has(role) ? role : "offline", offline: true };
+  }
+
   // Resolves (never rejects) to the caller's identity without touching app state, so boot can start it
-  // speculatively beside /health and only adopt the result once compatibility has passed.
+  // speculatively beside /health and only adopt the result once compatibility has passed. A network failure is not
+  // "not signed in": it resolves to the last known role (or the offline marker), never to guest.
   async function fetchMe() {
     const bootstrap = !agentHarnessWeb.token && !agentHarnessWeb.independent ? "legacy" : "admin";
     try {
-      return await api("/me", { surface: bootstrap });
+      return rememberRole(await api("/me", { surface: bootstrap }));
     } catch (e) {
-      if (e.code === "sign_in_required") return { role: "signin" };
-      try { return await api("/me", { surface: "app" }); }
-      catch (_) { return { role: "guest" }; }
+      if (e.code === "offline") return offlineMe();
+      if (e.code === "sign_in_required") return rememberRole({ role: "signin" });
+      try { return rememberRole(await api("/me", { surface: "app" })); }
+      catch (e2) { return e2.code === "offline" ? offlineMe() : rememberRole({ role: "guest" }); }
     }
   }
 
@@ -70,7 +94,7 @@ export function createSession({ agentHarnessWeb }) {
 
   return {
     api, fetchMe, loadWebAuth, ownerSurface,
-    isGuest, isMember, isOwner, canChat, needsSignIn,
+    isGuest, isMember, isOwner, canChat, needsSignIn, isOffline,
     getMe: () => currentMe,
     setMe: (me) => { currentMe = me; },
     getWebAuth: () => webAuth,
