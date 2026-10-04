@@ -7,9 +7,11 @@ from collections import deque
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 
 import httpx
 
@@ -356,6 +358,296 @@ def watch(sid: str, args, after: int = 0) -> int:
             time.sleep(2)  # stream ended or dropped; reconnect
 
 
+# Issue #334: every owner setting and action Agent Harness Web offers is also a command here, so Web stays optional
+# (docs/management-parity.md). A row is (words, method, owner API path, help, fields). Each `{param}` in the path is
+# a positional argument. A field "name" is a positional argument and "--name" an option; a suffix sets its type:
+# ":int", ":float", ":bool" (true/false), ":flag" (no value), ":list" (zero or more values), ":pairs" (key=value,
+# JSON values) or ":file" (a multipart upload). GET fields go in the query string, others in the JSON body (in the
+# form when the row uploads a file). --set key=value and --json '{...}' add fields a row doesn't name.
+_JOB = ("name", "prompt", "cron", "--project", "--backend", "--model", "--notify", "--enabled:bool",
+        "--catch_up_minutes:int")
+_TEMPLATE = ("name", "prompt", "--project", "--backend", "--model")
+_REVISION = ("--revision:int", "--confirm:flag", "--dry_run:flag")
+ADMIN_COMMANDS = (
+    ("me", "GET", "/me", "show the identity the server sees", ()),
+    ("capabilities", "GET", "", "show the owner API version, capabilities and operations", ()),
+    ("profile show", "GET", "/profile", "show the server profile", ()),
+    ("profile set-icon", "PUT", "/profile", "set the profile icon", ("emoji",)),
+    ("accounts list", "GET", "/accounts", "list household members", ()),
+    ("accounts add", "POST", "/accounts", "add a household member by Tailscale login",
+     ("login", "display_name", "--disk_quota_bytes:int", "--max_running:int", "--max_queued:int")),
+    ("accounts show", "GET", "/accounts/{user_id}", "show a household member", ()),
+    ("accounts update", "PATCH", "/accounts/{user_id}", "rename, rebind, disable or re-enable a member, or set limits",
+     ("--display_name", "--login", "--enabled:bool", "--disk_quota_bytes:int", "--max_running:int",
+      "--max_queued:int")),
+    ("accounts audit", "GET", "/accounts/audit", "show the household audit log", ("--limit:int",)),
+    ("accounts github-reset", "POST", "/accounts/{user_id}/github-connection/reset",
+     "erase a member's stored GitHub credential", ("--confirm:flag",)),
+    ("accounts google-invite", "POST", "/accounts/{user_id}/google/invitation",
+     "make a one-time Google link code for a member", ()),
+    ("accounts google-cancel-invite", "DELETE", "/accounts/{user_id}/google/invitation",
+     "cancel a member's pending Google link code", ()),
+    ("accounts google-revoke-sessions", "POST", "/accounts/{user_id}/google/revoke-sessions",
+     "sign a member out of every Google Web session", ()),
+    ("accounts google-unlink", "DELETE", "/accounts/{user_id}/google", "unlink Google from a member",
+     ("--confirm:flag",)),
+    ("github-member-auth show", "GET", "/github-member-auth", "show whether members may connect GitHub", ()),
+    ("github-member-auth set", "PUT", "/github-member-auth", "let members connect GitHub, or stop them",
+     ("enabled:bool",)),
+    ("google-signin status", "GET", "/google-signin", "show Google sign-in for members", ()),
+    ("keys list", "GET", "/keys", "list App, device and owner keys", ()),
+    ("keys create", "POST", "/keys", "create a key (its secret is shown once)",
+     ("name", "--kind", "--scopes:list", "--origins:list")),
+    ("keys revoke", "DELETE", "/keys/{kid}", "revoke a key", ()),
+    ("apps erasures", "GET", "/apps/erasures", "list Apps waiting to be erased", ()),
+    ("apps restore", "POST", "/apps/{app_id}/restore", "cancel a revoked App's pending erasure", ()),
+    ("apps retention", "PUT", "/apps/{app_id}/retention", "set how many days an App's sessions are kept",
+     ("--retention_days:float",)),
+    ("provider-credentials list", "GET", "/provider-credentials", "list per-App provider credentials", ()),
+    ("provider-credentials set", "POST", "/provider-credentials", "set an App's provider credential policy",
+     ("app_id", "backend", "--secret_ref", "--policy", "--models:list")),
+    ("provider-credentials revoke", "DELETE", "/provider-credentials/{credential_id}",
+     "revoke a provider credential", ()),
+    ("pairing-codes list", "GET", "/pairing-codes", "list active App pairing codes", ()),
+    ("pairing-codes create", "POST", "/pairing-codes", "make a one-time App pairing code",
+     ("name", "origin", "--scopes:list", "--ttl_seconds:int")),
+    ("pairing-codes revoke", "DELETE", "/pairing-codes/{pid}", "revoke an App pairing code", ()),
+    ("runner-pairing-codes list", "GET", "/runner-pairing-codes", "list active Mac pairing codes", ()),
+    ("runner-pairing-codes create", "POST", "/runner-pairing-codes", "make a one-time Mac pairing code",
+     ("--name", "--runner", "--ttl_seconds:int")),
+    ("runner-pairing-codes revoke", "DELETE", "/runner-pairing-codes/{pid}", "revoke a Mac pairing code", ()),
+    ("runner list", "GET", "/runners", "list the server's runners", ()),
+    ("runner update", "POST", "/runners/{name}/update", "ask a runner to update itself", ()),
+    ("projects list", "GET", "/projects", "list the server's projects", ()),
+    ("projects create", "POST", "/projects", "add a project to the server's catalog",
+     ("name", "--description", "--target", "--repo", "--github:flag")),
+    ("models list", "GET", "/models", "list local models", ()),
+    ("models status", "GET", "/models/status", "show the local model's state", ()),
+    ("models warm", "POST", "/models/warm", "load the local model ahead of use", ()),
+    ("backends list", "GET", "/backends", "list backends (--auth skip skips sign-in checks)", ("--auth",)),
+    ("backends set", "PUT", "/backends/{name}", "set a backend's default model and effort", ("--model", "--effort")),
+    ("gpu status", "GET", "/gpu", "show the GPU hold", ()),
+    ("gpu pause", "POST", "/gpu/pause", "hold the GPU (local models unload)", ("--duration_seconds:int",)),
+    ("gpu resume", "POST", "/gpu/resume", "release the GPU hold", ()),
+    ("resources status", "GET", "/resources", "show the resource guard and GPU hold", ()),
+    ("resources diagnostics", "GET", "/resources/diagnostics", "show memory, VRAM and load details", ()),
+    ("resources load", "POST", "/resources/load", "load the local model now",
+     ("--duration_seconds:int", "--force:flag")),
+    ("resources unload", "POST", "/resources/unload", "unload the local model", ()),
+    ("resources pause", "POST", "/resources/pause", "hold the GPU", ("--duration_seconds:int",)),
+    ("resources resume", "POST", "/resources/resume", "release the GPU hold", ()),
+    ("smart-approvals show", "GET", "/smart-approvals", "show smart approvals status", ()),
+    ("smart-approvals set", "PUT", "/smart-approvals", "set smart approvals: off, shadow or auto", ("mode",)),
+    ("notify test", "POST", "/notify/test", "send a test notification", ()),
+    ("config show", "GET", "/config", "show daemon settings", ()),
+    ("config schema", "GET", "/config/schema", "show the settings registry", ()),
+    ("config validate", "POST", "/config/validate", "check settings changes without saving them",
+     ("changes:pairs", "--revision:int")),
+    ("config set", "PATCH", "/config", "change daemon settings: config set key=value ...",
+     ("changes:pairs", "--revision:int", "--dry_run:flag")),
+    ("config rollback", "POST", "/config/rollback", "roll settings back to the previous revision", _REVISION),
+    ("config restart", "POST", "/config/restart", "restart the daemon to apply settings", _REVISION),
+    ("maintenance status", "GET", "/maintenance", "show disk usage and maintenance state", ()),
+    ("maintenance cleanup", "POST", "/maintenance/cleanup", "remove expired workspaces and data", ()),
+    ("maintenance backup", "POST", "/maintenance/backup", "back up the databases", ()),
+    ("maintenance image-retention-preview", "POST", "/maintenance/image-archive/retention/preview",
+     "show what image-archive retention would remove", ()),
+    ("maintenance image-retention-apply", "POST", "/maintenance/image-archive/retention/apply",
+     "apply image-archive retention", ("confirmation",)),
+    ("jobs list", "GET", "/jobs", "list scheduled jobs", ()),
+    ("jobs show", "GET", "/jobs/{jid}", "show a scheduled job", ()),
+    ("jobs create", "POST", "/jobs", "schedule a job", _JOB),
+    ("jobs update", "PUT", "/jobs/{jid}", "replace a scheduled job", _JOB),
+    ("jobs delete", "DELETE", "/jobs/{jid}", "delete a scheduled job", ()),
+    ("jobs run", "POST", "/jobs/{jid}/run", "run a scheduled job now", ()),
+    ("jobs preview", "GET", "/jobs/preview", "show a cron expression's next runs", ("cron",)),
+    ("templates list", "GET", "/templates", "list task templates", ()),
+    ("templates create", "POST", "/templates", "save a task template", _TEMPLATE),
+    ("templates update", "PUT", "/templates/{tid}", "replace a task template", _TEMPLATE),
+    ("templates delete", "DELETE", "/templates/{tid}", "delete a task template", ()),
+    ("images list", "GET", "/images", "list generated images", ("--limit:int",)),
+    ("images show", "GET", "/images/{iid}", "show an image job", ()),
+    ("images create", "POST", "/images", "generate an image",
+     ("prompt", "--model", "--aspect_ratio", "--resolution", "--seed:int", "--upscale")),
+    ("images upload", "POST", "/images/uploads", "upload a source image to edit", ("file:file",)),
+    ("images edit", "POST", "/images/{iid}/edit", "repaint an image inside a mask",
+     ("prompt", "mask:file", "--feather:int", "--seed:int")),
+    ("images upscale", "POST", "/images/{iid}/upscale", "upscale an image", ("--upscale",)),
+    ("images cancel", "POST", "/images/{iid}/cancel", "cancel an image job", ()),
+    ("images delete", "DELETE", "/images/{iid}", "delete an image", ()),
+    ("images warmup", "POST", "/images/warmup", "load the image model", ()),
+    ("images cooldown", "POST", "/images/cooldown", "unload the image model", ()),
+    ("remote-control list", "GET", "/remote-control", "list Remote Control folders and sessions", ()),
+    ("remote-control launch", "POST", "/remote-control/{project}", "start Remote Control in a folder", ()),
+    ("remote-control stop", "POST", "/remote-control/{project}/stop", "stop Remote Control in a folder", ()),
+    ("remote-control trust", "POST", "/remote-control/{project}/trust", "trust a folder for Remote Control", ()),
+    ("remote-control scan", "POST", "/remote-control/discovery/scans", "scan for project folders", ()),
+    ("remote-control scan-show", "GET", "/remote-control/discovery/scans/{scan_id}", "show a folder scan", ()),
+    ("remote-control scan-cancel", "DELETE", "/remote-control/discovery/scans/{scan_id}", "cancel a folder scan", ()),
+    ("remote-control promote", "POST", "/remote-control/discovery/scans/{scan_id}/candidates/{candidate_id}/promote",
+     "add a scanned folder to Remote Control", ("slug", "confirmed_path", "confirmed_markers:list")),
+    ("remote-control forget", "DELETE", "/remote-control/folders/{slug}", "remove a discovered folder", ()),
+    ("memory show", "GET", "/memory", "show the memory library", ()),
+    ("memory set-profile", "PUT", "/memory/profile", "replace the agent profile", ("content", "--summary")),
+    ("skills list", "GET", "/skills", "list skills and proposals", ()),
+    ("skills enabled", "GET", "/skills/enabled", "list enabled skills", ()),
+    ("skills proposal", "GET", "/skills/proposals/{pid}", "show a skill proposal", ()),
+    ("skills install", "POST", "/skills/proposals/{pid}/install", "install a proposal at its reviewed hash",
+     ("content_hash",)),
+    ("skills reject", "POST", "/skills/proposals/{pid}/reject", "reject a proposal", ("--reason",)),
+    ("skills reopen", "POST", "/skills/proposals/{pid}/reopen", "reopen a rejected proposal", ()),
+    ("skills review", "POST", "/skills/proposals/{pid}/review", "run the hosted review of a proposal", ()),
+    ("skills delete-proposal", "DELETE", "/skills/proposals/{pid}", "delete a proposal", ()),
+    ("skills enable", "POST", "/skills/{slug}/enable", "enable a skill", ()),
+    ("skills disable", "POST", "/skills/{slug}/disable", "disable a skill", ()),
+    ("skills rollback", "POST", "/skills/{slug}/rollback", "roll a skill back to its previous version", ()),
+    ("skills uninstall", "POST", "/skills/{slug}/uninstall", "uninstall a skill", ()),
+    ("skills projects", "PUT", "/skills/{slug}/projects", "set the projects that may use a skill", ("projects:list",)),
+    ("skills export", "GET", "/skills/{slug}/export", "export a skill", ()),
+    ("sessions rename", "PATCH", "/sessions/{ref}", "rename a session", ("title",)),
+    ("sessions rerun", "POST", "/sessions/{ref}/rerun", "start a new session with the same prompt", ()),
+    ("sessions approvals", "GET", "/sessions/{ref}/approvals", "list a session's approvals", ()),
+    ("sessions metrics", "GET", "/sessions/{ref}/metrics", "show a session's context-efficiency metrics", ()),
+    ("sessions changes", "GET", "/sessions/{ref}/changes", "show a session's diff and secret scan", ()),
+    ("sessions merge", "POST", "/sessions/{ref}/review/merge", "merge a session's branch", ()),
+    ("sessions push", "POST", "/sessions/{ref}/review/push", "push a session's branch", ()),
+    ("sessions discard", "POST", "/sessions/{ref}/review/discard", "discard a session's changes", ()),
+    ("sessions comments", "GET", "/sessions/{ref}/review-comments", "list drafted line comments", ()),
+    ("sessions comment", "POST", "/sessions/{ref}/review-comments", "draft a line comment on the diff",
+     ("path", "side", "start_line:int", "comment", "--end_line:int", "--quoted:list", "--repo", "--base", "--head")),
+    ("sessions comment-delete", "DELETE", "/sessions/{ref}/review-comments/{comment_id}", "delete a drafted comment",
+     ()),
+    ("sessions comments-send", "POST", "/sessions/{ref}/review-comments/send",
+     "send the drafted comments as one follow-up", ()),
+    ("sessions secrets-fix", "POST", "/sessions/{ref}/secret-findings/fix", "ask the agent to fix secret findings",
+     ()),
+    ("sessions secret-dismiss", "POST", "/sessions/{ref}/secret-findings/{fingerprint}/dismiss",
+     "dismiss a secret finding", ("reason",)),
+    ("sessions checkpoints", "GET", "/sessions/{ref}/checkpoints", "list a session's checkpoints", ()),
+    ("sessions rewind", "POST", "/sessions/{ref}/checkpoints/{turn}/rewind", "rewind a session to a checkpoint", ()),
+    ("sessions fork", "POST", "/sessions/{ref}/checkpoints/{turn}/fork", "start a session from a checkpoint",
+     ("prompt",)),
+    ("sessions clear-taint", "POST", "/sessions/{ref}/taint/clear", "clear a session's untrusted-content taint", ()),
+    ("search", "GET", "/search", "search sessions", ("q", "--project", "--limit:int")),
+    ("github items", "GET", "/github/projects/{project}/items", "list a project's GitHub issues and PRs",
+     ("--page:int", "--q")),
+    ("github item", "GET", "/github/projects/{project}/items/{number}", "show a GitHub issue or PR", ()),
+    ("github start", "POST", "/github/sessions", "start a session on a GitHub issue or PR",
+     ("project", "number:int", "prompt", "--backend", "--model", "--title")),
+    ("chats list", "GET", "/chats", "list chats", ("--limit:int",)),
+    ("chats options", "GET", "/chats/options", "list chat backends and models", ()),
+    ("chats snippet-languages", "GET", "/chats/snippet-languages", "list the languages chat snippets can run", ()),
+    ("chats show", "GET", "/chats/{ref}", "show a chat", ()),
+    ("chats new", "POST", "/chats", "start a chat", ("prompt", "--backend", "--model", "--effort")),
+    ("chats send", "POST", "/chats/{ref}/messages", "send a chat message", ("content",)),
+    ("chats cancel", "POST", "/chats/{ref}/cancel", "stop a chat reply", ()),
+    ("chats rename", "PATCH", "/chats/{ref}", "rename a chat", ("title",)),
+    ("chats delete", "DELETE", "/chats/{ref}", "delete a chat", ()),
+    ("chats run", "POST", "/chats/{ref}/snippets", "run a code snippet in a chat", ("language", "source", "--origin")),
+    ("chats run-cancel", "POST", "/chats/{ref}/snippets/{run_id}/cancel", "stop a running snippet", ()),
+)
+_GROUP_HELP = {
+    "profile": "server profile", "accounts": "household members", "github-member-auth": "members' GitHub access",
+    "google-signin": "members' Google sign-in", "keys": "App, device and owner keys", "apps": "App data retention",
+    "provider-credentials": "per-App provider credentials", "pairing-codes": "App pairing codes",
+    "runner-pairing-codes": "Mac pairing codes", "models": "local models", "backends": "model backends",
+    "gpu": "GPU hold", "resources": "resource guard and local model", "smart-approvals": "smart approvals",
+    "notify": "notifications", "config": "daemon settings", "maintenance": "disk cleanup and backups",
+    "jobs": "scheduled jobs", "templates": "task templates", "images": "image generation",
+    "remote-control": "Remote Control folders", "memory": "memory library", "skills": "instruction skills",
+    "sessions": "session review, checkpoints and comments", "github": "GitHub issues and PRs", "chats": "chats",
+}
+_PATH_PARAM = re.compile(r"\{([^}/]+)\}")
+
+
+def _json_value(raw: str):
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def _bool(raw: str) -> bool:
+    value = raw.strip().lower()
+    if value not in ("true", "false", "yes", "no", "on", "off", "1", "0"):
+        raise argparse.ArgumentTypeError(f"expected true or false, not {raw!r}")
+    return value in ("true", "yes", "on", "1")
+
+
+def _pair(raw: str) -> tuple[str, object]:
+    key, sep, value = raw.partition("=")
+    if not sep or not key:
+        raise argparse.ArgumentTypeError(f"expected key=value, not {raw!r}")
+    return key, _json_value(value)
+
+
+def _field_spec(field: str) -> tuple[str, str, bool]:
+    """'--max_running:int' -> ('max_running', 'int', True)."""
+    name, _, kind = field.lstrip("-").partition(":")
+    return name, kind or "str", field.startswith("--")
+
+
+def _add_field(parser: argparse.ArgumentParser, field: str) -> None:
+    name, kind, optional = _field_spec(field)
+    if kind == "flag":
+        parser.add_argument(f"--{name.replace('_', '-')}", dest=f"f_{name}", action="store_true", default=None)
+        return
+    opts = {"metavar": name.upper(), "type": {"int": int, "float": float, "bool": _bool, "pairs": _pair}.get(kind, str)}
+    if kind in ("list", "pairs"):
+        opts["nargs"] = "*" if kind == "list" else "+"
+    if optional:
+        parser.add_argument(f"--{name.replace('_', '-')}", dest=f"f_{name}", **opts)
+    else:
+        parser.add_argument(f"f_{name}", **opts)
+
+
+def _add_admin_commands(sub, groups: dict) -> None:
+    """Register ADMIN_COMMANDS; `groups` maps a command prefix to its subparsers (existing groups are reused)."""
+    for row in ADMIN_COMMANDS:
+        *prefix, leaf = row[0].split()
+        parent = sub
+        for depth, word in enumerate(prefix):
+            key = " ".join(prefix[:depth + 1])
+            if key not in groups:
+                groups[key] = parent.add_parser(word, help=_GROUP_HELP.get(key, word)).add_subparsers(
+                    dest=f"{word.replace('-', '_')}_cmd", required=True)
+            parent = groups[key]
+        p = parent.add_parser(leaf, help=row[3])
+        for param in _PATH_PARAM.findall(row[2]):
+            p.add_argument(f"p_{param}", metavar=param.upper())
+        for field in row[4]:
+            _add_field(p, field)
+        p.add_argument("--set", dest="extra", action="append", type=_pair, default=[], metavar="KEY=VALUE",
+                       help="another field (JSON values)")
+        p.add_argument("--json", dest="body", type=json.loads, help="the whole request body as JSON")
+        p.set_defaults(admin=row)
+
+
+def admin_request(args) -> tuple[str, str, dict]:
+    """The (method, path, httpx kwargs) an ADMIN_COMMANDS row and its parsed arguments ask for."""
+    _, method, template, _, fields = args.admin
+    path = _PATH_PARAM.sub(lambda m: quote(str(getattr(args, f"p_{m.group(1)}")), safe=""), template)
+    body = dict(args.body or {})
+    files = {}
+    for field in fields:
+        name, kind, _ = _field_spec(field)
+        value = getattr(args, f"f_{name}")
+        if value is None:
+            continue
+        if kind == "file":
+            source = Path(value).expanduser()
+            files[name] = (source.name, source.read_bytes())
+        else:
+            body[name] = dict(value) if kind == "pairs" else value
+    body.update(args.extra)
+    if method == "GET":
+        return method, path, {"params": body} if body else {}
+    if files:
+        return method, path, {"files": files, "data": {k: v if isinstance(v, str) else json.dumps(v)
+                                                       for k, v in body.items()}}
+    return method, path, {"json": body}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="harness", description="agent-harness client")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help=argparse.SUPPRESS)
@@ -394,18 +686,19 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("queue", help="GPU queue")
     sub.add_parser("version", help="show installed client and connected server versions")
     sub.add_parser("update", help="verify and install the version-matched Mac client package")
-    projects = sub.add_parser("projects", help="manage Mac runner project roots").add_subparsers(
+    projects = sub.add_parser("projects", help="Mac runner project roots and the server's projects").add_subparsers(
         dest="projects_cmd", required=True)
     add = projects.add_parser("add", help="allow a local project directory")
     add.add_argument("path")
     add.add_argument("--runner-config", default=str(DEFAULT_RUNNER_CONFIG), help=argparse.SUPPRESS)
-    runner = sub.add_parser("runner", help="manage the local launchd runner").add_subparsers(
+    runner = sub.add_parser("runner", help="the local launchd runner and the server's runners").add_subparsers(
         dest="runner_cmd", required=True)
     runner.add_parser("status")
     runner.add_parser("restart")
     logs = runner.add_parser("logs")
     logs.add_argument("--follow", action="store_true")
     logs.add_argument("--lines", type=int, default=80)
+    _add_admin_commands(sub, {"projects": projects, "runner": runner})
     return parser
 
 
@@ -522,6 +815,16 @@ def _cmd_decide(args) -> int:
     return 0
 
 
+def _cmd_admin(args) -> int:
+    method, path, kwargs = admin_request(args)
+    result = api(method, path, **kwargs)
+    if isinstance(result, str):
+        print(result or "ok")
+    else:
+        print(json.dumps(result, indent=2))
+    return 0
+
+
 def _cmd_queue(args) -> int:
     for q in api("GET", "/queue"):
         print(f"{q['position']}  {q['session_id']}")
@@ -544,7 +847,7 @@ def main() -> int:
     if getattr(args, "runner_config", None) is not None:
         args.runner_config = _harness_file(parser, "--runner-config", args.runner_config)
     configure(args.config)
-    return _COMMANDS[args.cmd](args)
+    return _cmd_admin(args) if getattr(args, "admin", None) else _COMMANDS[args.cmd](args)
 
 
 if __name__ == "__main__":

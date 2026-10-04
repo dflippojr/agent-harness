@@ -47,6 +47,22 @@ harness runner restart
 harness runner logs --follow
 ```
 
+The CLI also manages the server, so Agent Harness Web is optional. Every owner setting and action Web offers has a
+command; [management-parity.md](management-parity.md) maps each Web action to its owner API endpoint and command:
+
+```bash
+harness gpu pause --duration-seconds 1800
+harness config set backup.at=03:30 --dry-run
+harness keys create my-app --kind app --scopes sessions
+harness accounts add alice@example.com Alice
+harness jobs create nightly "Run the tests" "0 3 * * *" --project my-repo
+harness <group> --help
+```
+
+These commands call the owner API (`/api/admin/v1`) with the paired config's owner token (or `HARNESS_TOKEN`),
+or as the Tailscale/localhost owner when there is no token, and print its JSON response. `--set key=value` and
+`--json '{…}'` send body fields a command has no option for.
+
 `projects add` changes only the Mac runner's local repository-root allowlist and restarts it. It does not create or
 edit the tower's project catalog; add a matching `target: macbook` project to Agent Harness Server configuration separately.
 Shell commands continue to use the existing `sandbox-exec` profile, repository paths must be under an allowed root,

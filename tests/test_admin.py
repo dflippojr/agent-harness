@@ -118,3 +118,20 @@ def test_admin_owner_operations_match_unversioned_catalog(tmp_path):
         assert PREFIX in openapi
         assert "/a/{token}/{decision}" in openapi
         assert PREFIX + "/a/{token}/{decision}" not in openapi
+
+
+def test_web_session_and_github_actions_are_on_the_owner_api(tmp_path):
+    """#334: Web's checkpoint, secret-finding, taint and GitHub calls reach their handlers under /api/admin/v1."""
+    client, _ = make_client(tmp_path)
+    with client:
+        for method, path in [("GET", "/sessions/nope/checkpoints"), ("POST", "/sessions/nope/checkpoints/1/rewind"),
+                             ("POST", "/sessions/nope/checkpoints/1/fork"), ("POST", "/sessions/nope/taint/clear"),
+                             ("POST", "/sessions/nope/secret-findings/fix"),
+                             ("POST", "/sessions/nope/secret-findings/abc/dismiss")]:
+            body = {"prompt": "x", "reason": "x"}
+            r = client.request(method, PREFIX + path, json=body)
+            assert r.status_code == 404 and "no session matches" in r.json()["detail"], (path, r.text)
+        r = client.get(PREFIX + "/github/projects/scratch/items")
+        assert r.status_code == 400 and "GitHub" in r.json()["detail"]
+        r = client.post(PREFIX + "/github/sessions", json={"prompt": "x", "project": "scratch", "number": 1})
+        assert r.status_code == 400 and "GitHub" in r.json()["detail"]

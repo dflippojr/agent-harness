@@ -29,7 +29,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.18"
+API_VERSION = "1.19"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
@@ -82,6 +82,15 @@ ADMIN_PATHS = frozenset({
     "/sessions/{ref}/transcript",
     "/sessions/{ref}/events",
     "/sessions/{ref}/metrics",
+    "/sessions/{ref}/checkpoints",
+    "/sessions/{ref}/checkpoints/{turn}/rewind",
+    "/sessions/{ref}/checkpoints/{turn}/fork",
+    "/sessions/{ref}/secret-findings/fix",
+    "/sessions/{ref}/secret-findings/{fingerprint}/dismiss",
+    "/sessions/{ref}/taint/clear",
+    "/github/sessions",
+    "/github/projects/{project}/items",
+    "/github/projects/{project}/items/{number}",
     "/chats",
     "/chats/options",
     "/chats/{ref}",
