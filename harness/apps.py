@@ -40,7 +40,7 @@ NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.16"
+API_VERSION = "1.17"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -509,7 +509,8 @@ def _owned_session(request: Request, key: dict, ref: str) -> dict:
     app = key.get("kind") == "app"
     mine = calling_app(key)
     try:
-        s = m.db.get_session(m.resolve_id(ref, user_id=user_id, kind=None if app else "agent", app=mine))
+        s = m.db.get_session(m.resolve_id(ref, user_id=user_id, kind=None if app else "agent", app=mine,
+                                          app_only=not reaches_web(key)))
     except HarnessError as e:
         if e.status in (400, 404):
             raise HarnessError(404, NO_SUCH_SESSION) from e
@@ -526,6 +527,12 @@ def calling_app(key: dict) -> str:
     """The App whose own sessions (and store) this principal reaches: an App or device token's id; "" for the owner
     and household members, who reach no App's sessions (#330 decision 3)."""
     return "" if key.get("kind") == "member" or owner_key(key) else key["id"]
+
+
+def reaches_web(key: dict) -> bool:
+    """Whether this principal may read Agent Harness Web's store, where the owner's and members' sessions live (#330
+    decision 4): everyone but an App, and an App only with the owner-granted, read-only `sessions:all`."""
+    return key.get("kind") != "app" or SESSIONS_ALL in key["scope_set"]
 
 
 def visible_session(request: Request, key: dict, ref: str) -> dict:
@@ -880,6 +887,8 @@ async def api_queue(request: Request):
     for sid, pos in sorted(positions.items(), key=lambda x: x[1]):
         if m.db.app_of(sid) not in ("", calling_app(key)):  # another App's session (#330 decision 3)
             continue
+        if not m.db.app_of(sid) and not reaches_web(key):  # in Web's store, which this App never reads
+            continue
         session = m.db.get_session(sid) or {}
         if session.get("owner_id", "owner") != user_id or (session.get("kind") or "agent") != "agent":
             continue
@@ -913,6 +922,8 @@ async def _global_events_stream(request: Request, m, user_id: str, key: dict, ep
                 yield ": keepalive\n\n"
                 continue
             if m.db.app_of(e["session_id"]) not in ("", calling_app(key)):  # another App's: its store stays unread
+                continue
+            if not m.db.app_of(e["session_id"]) and not reaches_web(key):  # Web's store: unread without sessions:all
                 continue
             if _global_event_visible(e, m.db.get_session(e["session_id"]), user_id, key, global_types):
                 # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
@@ -1054,7 +1065,7 @@ async def delete_session(ref: str, request: Request):
         s = own_session(request, key, ref)
     except HarnessError as e:
         # Gone from everywhere (an id this App erased before): done. Another App's or the owner's: 404.
-        if e.status == 404 and not m.db.app_of(ref) and m.db.main.get_session(ref) is None:
+        if e.status == 404 and not m.db.app_of(ref) and m.db.for_app("").get_session(ref) is None:
             return None
         raise
     if s.get("app_id") != mine:

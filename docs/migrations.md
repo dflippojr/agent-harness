@@ -86,5 +86,31 @@ updates the paths last, so a start cut short is finished by the next one; a late
 it back, stop the daemon, move the session folders and transcripts back to the owner's folders and restore that
 backup over the App's `harness.sqlite3`.
 
+<a id="web-store"></a>
+### Agent Harness Web's store
+
+Agent Harness Web is an App with its own store, `<data dir>/apps/app-web/harness.sqlite3` (#330 decision 4). At the
+first start after the upgrade, right after the App sessions move above, every session left in the main store (the
+owner's, whether started from Web, the CLI or the admin API, and the members') moves there with every row tied to
+it: events, approvals, artifacts, checkpoints, App tool calls, smart reviews, review drafts and secret dismissals.
+The search index is rebuilt in Web's store from the events. The step:
+
+1. backs up the main store to `<data dir>/pre-migration/harness-web-store-<YYYYmmddTHHMMSS>.sqlite3` (never deleted
+   automatically; a second attempt in the same second gets `-1`, `-2`, ...);
+2. copies the rows in one transaction on Web's store, which compares its row counts with the main store's, table by
+   table, and rolls back on any difference;
+3. deletes the sessions from the main store, registers Web in the App registry (`api_keys` row `app-web`, kind
+   `web`, no usable token) and records the move in the `web_store` meta key, all in one transaction.
+
+It logs the counts before and after. If anything fails the main store is left as it was, the daemon keeps serving the
+sessions from it, and the next start tries again. A later start finds no sessions in the main store and writes
+nothing. Session files don't move: their rows already point at them, and working directories can be large.
+
+`HARNESS_WEB_STORE_MIGRATION=dry-run` logs what would move (sessions and rows per table) and changes nothing: the
+main store keeps serving the sessions. No new schema step is needed (Web's row uses the existing `api_keys` columns).
+
+To roll the move back: stop the daemon, restore the `harness-web-store-*` backup over `harness.sqlite3` as above,
+move `<data dir>/apps/app-web/` aside, and start the older harness.
+
 Step 0050 (`app_retention`) adds `sessions.retention_days` and, on the App registry (`api_keys`), `retention_days`,
 `erase_after` and `erased_at` (#330 decision 5).

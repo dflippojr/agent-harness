@@ -1682,7 +1682,7 @@ class Database:
         if not key:
             return None
         with self.lock:
-            row = self.conn.execute("SELECT * FROM api_keys WHERE hash = ? AND revoked_at IS NULL",
+            row = self.conn.execute("SELECT * FROM api_keys WHERE hash = ? AND revoked_at IS NULL AND kind != 'web'",
                                     (hashlib.sha256(key.encode()).hexdigest(),)).fetchone()
         return _row(row)
 
@@ -1694,13 +1694,26 @@ class Database:
 
     @_reads
     def list_api_keys(self) -> list[dict]:
+        """The keys: every App's, device's and owner token's. Agent Harness Web's registry row has no key, so it is
+        not listed (`get_api_key(WEB_APP_ID)` reads it)."""
         with self.lock:
             rows = self.conn.execute(
                 "SELECT k.id, k.name, k.prefix, k.kind, k.scopes, k.origins, k.created_at, k.last_used_at, k.revoked_at, "
                 "k.retention_days, k.erase_after, k.erased_at, "
                 "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
-                "FROM api_keys k ORDER BY k.created_at").fetchall()
+                "FROM api_keys k WHERE k.kind != 'web' ORDER BY k.created_at").fetchall()
         return [_row(r) for r in rows]
+
+    @_writes
+    def ensure_web_app(self, app_id: str) -> None:
+        """Register Agent Harness Web in the App registry (#330 decision 4) under its reserved id, once. It has no
+        token: its hash is of a random secret nobody is given, and `api_key_by_secret` never matches its kind."""
+        import hashlib
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
+                "VALUES (?, 'Agent Harness Web', '', ?, ?, '', 'web', '[]')",
+                (app_id, hashlib.sha256(("web:" + secrets.token_urlsafe(32)).encode()).hexdigest(), time.time()))
 
     @_writes
     def revoke_api_key(self, kid: str) -> bool:
@@ -1710,7 +1723,7 @@ class Database:
         now = time.time()
         with self.lock:
             ok = self.conn.execute("UPDATE api_keys SET revoked_at = ?, erase_after = CASE WHEN kind = 'owner' "
-                                   "THEN NULL ELSE ? END WHERE id = ? AND revoked_at IS NULL",
+                                   "THEN NULL ELSE ? END WHERE id = ? AND revoked_at IS NULL AND kind != 'web'",
                                    (now, now + APP_ERASE_GRACE_SECONDS, kid)).rowcount == 1
             if ok:  # an owner key has no erasure to take its settings later
                 self.conn.execute("DELETE FROM app_settings WHERE app_id = ? AND app_id IN "
@@ -1749,6 +1762,8 @@ class Database:
         """Leave only a tombstone of an erased App in the registry: its id, name, kind and dates. Its settings,
         provider credentials and error counts go with its store."""
         with self.lock:
+            if self.conn.execute("SELECT 1 FROM api_keys WHERE id = ? AND kind = 'web'", (kid,)).fetchone():
+                raise ValueError("Agent Harness Web is never erased")
             self.conn.execute("UPDATE api_keys SET erased_at = ?, erase_after = NULL, scopes = '', origins = '[]', "
                               "retention_days = NULL WHERE id = ?", (time.time(), kid))
             self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
@@ -1759,7 +1774,8 @@ class Database:
     def set_app_retention(self, kid: str, days: float | None) -> bool:
         """An App's default retention for its sessions, in days (None: keep them until deleted)."""
         with self.lock:
-            return self.conn.execute("UPDATE api_keys SET retention_days = ? WHERE id = ? AND kind != 'owner' "
+            return self.conn.execute("UPDATE api_keys SET retention_days = ? WHERE id = ? "
+                                     "AND kind NOT IN ('owner', 'web') "
                                      "AND erased_at IS NULL", (days, kid)).rowcount == 1
 
     @_reads

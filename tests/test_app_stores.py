@@ -109,11 +109,12 @@ def test_two_apps_sessions_are_written_only_to_their_own_stores(tmp_path):
                 assert client.get(f"/api/v1/sessions/{sid}", headers=app["auth"]).status_code == 404
 
     m.db.close()
-    main = Path(cfg.db_path)
+    main, web = Path(cfg.db_path), Path(cfg.data_dir) / "apps" / "app-web" / APP_STORE_FILE
     all_app_sids = apps["app-a"]["sids"] | apps["app-b"]["sids"]
-    assert session_ids(main) == {owner_sid}
-    assert not any(rows_of(main, all_app_sids).values())
-    assert rows_of(main, {owner_sid})["events"] > 0                       # the owner's session is where it was
+    assert session_ids(main) == set()                                     # the main store holds no sessions (#330 c)
+    assert session_ids(web) == {owner_sid}
+    assert not any(rows_of(web, all_app_sids).values())
+    assert rows_of(web, {owner_sid})["events"] > 0                        # the owner's session is in Web's store
     for name, app in apps.items():
         store = Path(cfg.data_dir) / "apps" / app["id"] / APP_STORE_FILE
         assert session_ids(store) == app["sids"]
@@ -153,6 +154,8 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
     stores = SessionStores(Database(path), apps_dir)
     backups = sorted((tmp_path / "pre-migration").glob("harness-app-stores-*.sqlite3"))
     assert len(backups) == 1 and session_ids(backups[0]) == {"own1", "a1", "a2", "b1"}
+    web_backups = sorted((tmp_path / "pre-migration").glob("harness-web-store-*.sqlite3"))
+    assert len(web_backups) == 1 and session_ids(web_backups[0]) == {"own1"}  # the App sessions had moved
     assert stores.get_session("a1")["app_id"] == "k-aaaa"
     assert [e["data"]["content"] for e in stores.events("b1")] == ["find the walrus"]
     assert stores.get_approval("ap-a2")["session_id"] == "a2"
@@ -162,21 +165,24 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
     assert [r["session_id"] for r in found] == ["a2"]
     stores.close()
 
-    assert session_ids(path) == {"own1"}
-    assert not any(rows_of(path, {"a1", "a2", "b1"}).values())
-    assert all(rows_of(path, {"own1"})[t] for t in ("events", "approvals", "app_tool_calls", "artifacts"))
+    web = apps_dir / "app-web" / APP_STORE_FILE
+    assert session_ids(path) == set() and session_ids(web) == {"own1"}  # the owner's moved into Web's store
+    assert not any(rows_of(path, {"a1", "a2", "b1", "own1"}).values())
+    assert not any(rows_of(web, {"a1", "a2", "b1"}).values())
+    assert all(rows_of(web, {"own1"})[t] for t in ("events", "approvals", "app_tool_calls", "artifacts"))
     assert rows(path, "SELECT session_id FROM usage") == [("a1",)]
     assert session_ids(apps_dir / "k-aaaa" / APP_STORE_FILE) == {"a1", "a2"}
     assert session_ids(apps_dir / "k-bbbb" / APP_STORE_FILE) == {"b1"}
 
     # A second start finds nothing to move: no new backup, nothing changes.
     before = {p: rows_of(p, {"a1", "a2", "b1", "own1"}) for p in
-              (path, apps_dir / "k-aaaa" / APP_STORE_FILE, apps_dir / "k-bbbb" / APP_STORE_FILE)}
+              (path, web, apps_dir / "k-aaaa" / APP_STORE_FILE, apps_dir / "k-bbbb" / APP_STORE_FILE)}
     again = SessionStores(Database(path), apps_dir)
     assert again.migrate_app_sessions() is None
     assert again.get_session("b1")["app_id"] == "k-bbbb" and again.get_session("own1")["app_id"] == ""
     again.close()
     assert len(list((tmp_path / "pre-migration").glob("harness-app-stores-*.sqlite3"))) == 1
+    assert len(list((tmp_path / "pre-migration").glob("harness-web-store-*.sqlite3"))) == 1
     assert {p: rows_of(p, {"a1", "a2", "b1", "own1"}) for p in before} == before
 
 
@@ -484,11 +490,13 @@ def test_the_nightly_backup_holds_one_file_per_app_store(tmp_path):
 
     result = asyncio.run(body())
     dest = Path(result["path"])
-    assert result["app_stores"] == 2
-    assert sorted(p.name for p in (dest / "apps").iterdir()) == ["k-aaaa.sqlite3", "k-bbbb.sqlite3"]
+    assert result["app_stores"] == 3  # Web's store too (#330 decision 4)
+    assert sorted(p.name for p in (dest / "apps").iterdir()) == ["app-web.sqlite3", "k-aaaa.sqlite3",
+                                                                 "k-bbbb.sqlite3"]
     assert session_ids(dest / "apps" / "k-aaaa.sqlite3") == {"a1", "a2"}
     assert session_ids(dest / "apps" / "k-bbbb.sqlite3") == {"b1"}
-    assert session_ids(dest / "harness.sqlite3") == {"own1"}
+    assert session_ids(dest / "apps" / "app-web.sqlite3") == {"own1"}
+    assert session_ids(dest / "harness.sqlite3") == set()
 
 
 def test_app_tool_arguments_and_results_never_reach_logs_spans_or_the_audit_log(tmp_path, caplog):

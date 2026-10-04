@@ -278,11 +278,11 @@ def test_interrupted_tool_call_is_marked_after_restart(tmp_path):
         m.tasks[s["id"]].cancel()
         await asyncio.sleep(0.05)
         # Simulate a crash mid-tool-call: assistant message stored, tool marked as executing, no result.
-        s = db.get_session(s["id"])
+        s = m.db.get_session(s["id"])
         ctx = s["context"] + [{"role": "assistant", "content": "", "tool_calls": [call("list_files", 0)]}]
         run = s["run"] | {"executing": {"id": "c0-list_files", "name": "list_files"}}
-        db.update_session(s["id"], context=ctx, run=run, status="running")
-        m2 = Manager(cfg, db=db, chat=script)
+        m.db.update_session(s["id"], context=ctx, run=run, status="running")
+        m2 = Manager(cfg, db=m.db, chat=script)
         await m2.start()
         s = await wait_status(m2, s["id"], "done")
         assert s["answer"].startswith("saw: " + INTERRUPTED[:30])

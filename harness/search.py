@@ -123,7 +123,7 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
 
     Matches `/api/v1`: owner sessions (no app_id) are unrestricted; an app session sees only its
     own sessions unless that app holds `sessions:all` on an unrevoked key. What a caller can reach at all is the
-    main store plus its own App's (`calling_app`).
+    store of the owner's and members' sessions (Web's, #330 decision 4) plus its own App's (`calling_app`).
     """
     if not caller_session_id:
         return None

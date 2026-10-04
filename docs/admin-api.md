@@ -159,6 +159,9 @@ Each App's sessions live in its own store and folder (`<data_dir>/apps/<app_id>/
 - **Revoke.** `DELETE /keys/{kid}` on an App or device key kills its token at once and schedules the erasure of its
   whole store and folder 7 days later: `GET /keys` shows `revoked_at` and `erase_after` (Unix seconds), and the Apps
   card lists it under "Revoked: data to be erased" with the date. Owner keys have no erasure.
+- **Agent Harness Web** (`app-web`) is the owner's own App (#330 decision 4): its store holds the owner's and members'
+  sessions. It has no key, so `GET /keys` doesn't list it and `DELETE /keys/app-web` is a `404`; its retention route
+  is a `404` too, and the sweep never erases it. See [Web's store](#web-store) below.
 - **Pending erasures.** `GET /api/admin/v1/apps/erasures` lists them, soonest first:
   `[{"id", "name", "kind", "revoked_at", "erase_after"}]`.
 - **Undo.** `POST /api/admin/v1/apps/{app_id}/restore` during the grace keeps the App's id, store, folder, scopes,
@@ -170,6 +173,20 @@ Each App's sessions live in its own store and folder (`<data_dir>/apps/<app_id>/
   keeps a tombstone: the key row with `erased_at` set and no scopes, origins or retention. The App's settings,
   provider credentials and error counts are deleted with it; usage rows stay as the owner's metadata. Older nightly
   backups keep the App's store until they rotate out.
+
+<a id="web-store"></a>
+## Web's store and the data layout
+
+Since #330 stage (c) the owner's and members' sessions live in Agent Harness Web's own store; the main store keeps
+no sessions. A one-time step at startup moved them (see [migrations](migrations.md#web-store)).
+
+| Data | Where |
+|---|---|
+| Owner and member sessions, with their events, approvals, artifacts, checkpoints, App tool calls, smart reviews, review drafts, secret dismissals and search index | `<data_dir>/apps/app-web/harness.sqlite3` |
+| Their files: working directories, transcripts, checkpoint snapshots, artifacts | unchanged: `<data_dir>/workspaces/`, `transcripts/`, `checkpoints/`, `artifacts/` for the owner, `<data_dir>/users/<id>/...` for a member |
+| An App's sessions and their files | `<data_dir>/apps/<app_id>/` |
+| App registry (`api_keys`, Web's `app-web` row included), usage counters (`usage`), per-App error counts (`meta`), provider credentials, App settings, stream tickets | main store, `<data_dir>/harness.sqlite3` |
+| Global data: jobs and schedules, templates, images, skills (proposals, installs, versions, reviews, allowlists), the memory library, accounts and Google identities, member projects, GitHub connections, pairing codes, endpoint request log, audit log, canary results, backend usage, browser sign-ins (`web_sessions`), settings and other `meta` | main store |
 
 ## Examples
 
@@ -255,7 +272,8 @@ Failed outputs count. `largest_tool_output_by_tool` is session-API only (never a
 
 Counters, bounded labels, no session id or tool name. Aggregates sum precomputed `turn_metrics` fields (sessions
 without those fields contribute nothing). `harness_round_resets_total` is unchanged and is not duplicated here.
-Every series covers the owner's and members' sessions only: an App's sessions live in its own store, which the owner
+Every series covers the owner's and members' sessions only, read from Agent Harness Web's store
+(`<data_dir>/apps/app-web/harness.sqlite3`, #330 decision 4): an App's sessions live in its own store, which the owner
 surfaces never read (#330); `GET /keys` carries each App's counts instead. The smart-approval stats
 (`GET /smart-approvals`) and Control Center's counts follow the same rule.
 
@@ -282,6 +300,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.18 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions move into `<data_dir>/apps/app-web/harness.sqlite3` at startup (`HARNESS_WEB_STORE_MIGRATION=dry-run` only logs what would move). `/metrics`, smart-approval stats and Control Center counts read it. Web is registered as `app-web` (kind `web`, no key): not in `GET /keys`, `404` from `DELETE /keys/app-web` and its retention route. Backups add `apps/app-web.sqlite3` |
 | 1.17 | 2026-10-03 | App retention and erasure (#330 decision 5): `PUT /apps/{app_id}/retention`, `GET /apps/erasures`, `POST /apps/{app_id}/restore`. `GET /keys` adds `retention_days`, `erase_after` and `erased_at`; revoking an App or device key schedules its erasure 7 days later; the cleanup report adds `sessions_expired` and `apps_erased` |
 | 1.16 | 2026-10-03 | Owner surfaces never reach an App's sessions (#330 decision 3): `/sessions` (404 by id or prefix), `/search`, `/queue`, `/events`, approvals and transcripts leave them out. `GET /keys` adds a `store` object per App and device key: `sessions` (counts by status), `usage` (`requests`, `prompt_tokens`, `completion_tokens`, `cost_usd`), `errors`, `last_error` (the stop reason's kind only), `last_error_at`. `/metrics`, smart-approval stats and Control Center counts cover the owner's and members' sessions only. Backups add `apps/<app_id>.sqlite3` per App and `app_stores` (a count) to the backup result |
 | 1.15 | 2026-10-01 | Secret scan of a session's added lines on `changes`; Review `merge`/`push` on tower sessions return 409 `secret_findings` (or 503 `secret_scan_unavailable`) until findings are fixed or dismissed; fix and dismiss endpoints |

@@ -64,3 +64,15 @@ An installer run without `-Profile` preserves an existing profile. It defaults t
   secret paths, or provider credentials.
 - Admin filesystem browsing is not a service-profile capability and remains disabled for Agent Harness Apps. The optional
   future work tracked in issue #67 does not change this profile's default boundary.
+
+## App data isolation
+
+Each App's data lives in its own store, `<data_dir>/apps/<app_id>/` (a SQLite database plus that App's session files),
+and Agent Harness Web's sessions, the owner's history, live in the reserved App store `apps/app-web/`. The main
+database keeps only the App registry, per-App metadata and counters, provider credentials, settings and global data.
+
+- An App reaches only its own store; another App, the owner's lists, search, `session_search` and `session_read` never
+  read it. The owner sees each App's metadata (session counts, usage, the kind of its last error), not its content.
+- An App can delete its sessions (`DELETE /api/v1/sessions/{id}`) and set a retention; revoking an App erases its store
+  after a 7-day grace that the owner can undo. The nightly backup writes one file per App.
+- Details: [app-api.md](app-api.md#where-an-apps-data-lives) and [admin-api.md](admin-api.md) (#330).

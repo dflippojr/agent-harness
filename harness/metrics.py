@@ -367,11 +367,14 @@ def _skill_metrics(out: _Out, db, by_status) -> None:
 
 
 def render(m: Manager) -> str:
-    """Blocking (SQLite on a pooled read connection): the endpoint runs it in a worker thread."""
+    """Blocking (SQLite on a pooled read connection): the endpoint runs it in a worker thread. Sessions and their
+    rows are counted in Web's store, which holds the owner's and members' (#330 decision 4); everything else in the
+    main store. App sessions are counted in each App's metadata instead."""
     db, out = m.db, _Out()
-    with db.reading():
-        by_status = _core_metrics(m, out, db)
-        _smart_review_metrics(out, db)
+    web = db.for_app("")
+    with db.reading(), web.reading():
+        by_status = _core_metrics(m, out, web)
+        _smart_review_metrics(out, web)
         _backend_metrics(m, out, db)
         _endpoint_metrics(m, out, db)
         _image_metrics(m, out, db)

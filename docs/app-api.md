@@ -69,8 +69,16 @@ Each App has its own SQLite store and data folder, `<data_dir>/apps/<app_id>/har
 the App's token starts or reads a session. An App's sessions (agent and App-tools-only), their events, tool calls and
 results, approvals, artifacts, checkpoints, review drafts and search index are written only to that store. The main
 store (`<data_dir>/harness.sqlite3`) has no row of them. Another App's store has none either. The main store keeps
-the App registry (ids, token hashes, scopes), the per-App usage counters, provider credentials, and the owner's and
-members' sessions. Session ids stay unique across all stores. The `/api/v1` responses are the same as before.
+the App registry (ids, token hashes, scopes), the per-App usage counters, provider credentials, settings and
+everything global (jobs, schedules, skills, the memory library, accounts, the audit log), and no sessions at all.
+Session ids stay unique across all stores. The `/api/v1` responses are the same as before.
+
+- **Agent Harness Web is an App too** (#330 decision 4). Its store, `<data_dir>/apps/app-web/harness.sqlite3`, holds
+  the owner's and members' sessions (every session no App started), and the owner reads them through Web, their own
+  App. Web's id `app-web` is reserved: it is registered in the App registry without a token (the owner's Tailscale
+  and Google identity maps to it), it isn't listed by `GET /keys`, and it can't be revoked, erased or given a
+  retention. Your App never reads Web's store unless the owner grants it the read-only `sessions:all`; a query about
+  your own sessions never touches it. Members stay apart from the owner and from each other inside it, as before.
 
 - **Same schema.** Every store runs the same versioned migrations as the main store
   ([`migrations.md`](migrations.md)) and has its own writer thread and read pool (#294).
@@ -97,11 +105,11 @@ members' sessions. Session ids stay unique across all stores. The `/api/v1` resp
   sessions counted by status, your hosted-backend usage (requests, tokens, cost) and how many of your sessions
   failed, with the last failure's kind (the stop reason up to its first colon, without its details) and time.
 - **Owner totals.** `/metrics`, the smart-approval stats and Control Center's counts cover the owner's and members'
-  sessions only (the main store); App sessions are counted only in the per-App metadata above.
+  sessions only (Web's store); App sessions are counted only in the per-App metadata above.
 - **Backups.** The nightly backup copies every App's store into the dated backup folder as `apps/<app_id>.sqlite3`,
-  one file per App, next to the main store's `harness.sqlite3`. A session you delete, or that retention or a revoke
-  erases, stays in the older backups that hold it until they rotate out (`backup.keep_days`, 14 days by default).
-  Session files (working directories, checkpoints) are not in the backups.
+  one file per App (Web's as `apps/app-web.sqlite3`), next to the main store's `harness.sqlite3`. A session you
+  delete, or that retention or a revoke erases, stays in the older backups that hold it until they rotate out
+  (`backup.keep_days`, 14 days by default). Session files (working directories, checkpoints) are not in the backups.
 - **Logs and telemetry.** Your tools' arguments and results stay in your store: logs, traces and the audit log get
   only tool names, call ids, sizes and timings.
 - **Retention.** A session is erased, exactly as [`DELETE`](#delete-apiv1sessionsid) erases it, once it has been
@@ -558,4 +566,5 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.13 | 2026-09-19 | First-party client protocol ranges, version-skew enforcement, and update discovery metadata |
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
+| 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
 | 1.16 | 2026-10-03 | `DELETE /api/v1/sessions/{id}` erases a session and everything tied to it; `retention_days` on create and an App default retention erase idle sessions; a revoked App's store and folder are erased after 7 days unless the owner undoes the revoke; App session files live in the App's folder (#330) |
