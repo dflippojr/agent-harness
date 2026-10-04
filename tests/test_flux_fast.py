@@ -16,9 +16,9 @@ import pytest
 
 from harness.config import ImagesConfig
 from harness.fileops import ToolError
-from harness.images import workflow
-from harness import images_models as images_models_mod
-from harness.images_models import (
+from harness_modules.images.service import workflow
+from harness_modules.images import models as images_models_mod
+from harness_modules.images.models import (
     RESERVE_BYTES, doctor_warning, download_file, exclusively_owned_by_flux_fast, file_state,
     install_flux_fast, inspect_flux_fast, load_manifest, pin_registry, preflight_graphs,
     promote_comfyui, redact_url, remove_flux_fast, rollback_comfyui, stage_comfyui, validate_comfyui,
@@ -596,12 +596,12 @@ def test_http_and_tool_select_flux_fast_without_fallback(tmp_path):
         enable_flux(m2, tmp_path / "b", payloads, manifest)
         await m2.start(maintenance=False)
         with pytest.raises(ToolError, match="does not support"):
-            await m2.runner.images.call("generate_image",
+            await m2.images.call("generate_image",
                                         {"prompt": "x", "filename": "a.png", "model": "flux-fast",
                                          "resolution": "high"},
                                         workspace_root=tmp_path / "b" / "ws")
         (tmp_path / "b" / "ws").mkdir()
-        out = await m2.runner.images.call("generate_image",
+        out = await m2.images.call("generate_image",
                                           {"prompt": "icon", "filename": "logo.png", "model": "flux-fast"},
                                           workspace_root=tmp_path / "b" / "ws")
         assert "flux-fast" in out

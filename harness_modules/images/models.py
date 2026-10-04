@@ -21,11 +21,11 @@ from pathlib import Path, PureWindowsPath
 
 import httpx
 
-from .config import resolve_images_models_dir
+from harness.modules import resolve_images_models_dir
 
 log = logging.getLogger("harness.images_models")
 
-MANIFEST_PATH = Path(__file__).with_name("images_flux_fast.json")
+MANIFEST_PATH = Path(__file__).with_name("flux_fast.json")
 RESERVE_BYTES = 5 * 1024 ** 3
 CHUNK = 8 * 1024 * 1024
 ZIMAGE_ENCODER = "qwen_3_4b.safetensors"
@@ -677,7 +677,7 @@ def comfy_version_label(root: Path) -> str:
 
 
 def graph_node_classes() -> dict[str, tuple[str, ...]]:
-    from . import images
+    from . import service as images
     return {
         "fast": tuple(sorted({n["class_type"] for n in images.workflow("fast", "x", 1024, 1024, 1, "t").values()})),
         "quality": tuple(sorted({n["class_type"] for n in images.workflow("quality", "x", 1024, 1024, 1, "t").values()})),
@@ -801,8 +801,8 @@ def rollback_comfyui(cfg) -> dict:
 
 
 def load_images_config(config_dir: str | None = None):
-    from . import config as config_mod
-    return config_mod.load(config_dir).images
+    from harness.modules import load_config
+    return load_config(config_dir).images
 
 
 def _print(data: dict, as_json: bool) -> None:

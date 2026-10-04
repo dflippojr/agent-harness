@@ -229,7 +229,8 @@ requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and
 
 ### `GET /api/v1`
 Server info: API version, scopes, projects, models, hosted backends, enabled features, `capabilities`, and
-`image_modes` (labels, availability, and setup text for optional Lightning `quality-fast` and FLUX `flux-fast`). The capability object
+`image_modes` (labels, availability, and setup text for optional Lightning `quality-fast` and FLUX `flux-fast`;
+only while the images module is present, [`modules.md`](modules.md)). The capability object
 identifies the `full` or `service` profile, always-on Server facilities, and effective optional modules. It contains
 no credentials and doesn't need a token. `GET /health` exposes the same capability object for lightweight discovery
 plus first-party release/protocol compatibility and update hints; see [`compatibility.md`](compatibility.md).
@@ -439,7 +440,8 @@ list your sessions' approvals (#330), so an App whose sessions can ask for appro
 
 ### `POST /api/v1/images`, `GET /api/v1/images/{id}`, `GET /api/v1/images/{id}.png`, `POST /api/v1/images/{id}/upscale`  (scope `images`)
 `{"prompt": "...", "model": "fast" | "quality" | "quality-fast" | "flux-fast", "aspect_ratio": "1:1", "upscale": "none" | "2x" | "4x"}`
-queues a job; `upscale` defaults to `none` and must stay that way unless the caller asks. Poll until `status` is
+queues a job; `upscale` defaults to `none` and must stay that way unless the caller asks. These routes, the
+`images` scope and `features.images` come from the images module and don't exist while it is absent. Poll until `status` is
 `done`, then download the PNG. `quality-fast` is
 the Qwen-Image-2512 Lightning 4-step LoRA; it is opt-in and listed on `GET /api/v1` as `image_modes["quality-fast"]`.
 If that LoRA is missing, `available` is false and `setup` has the pinned filename, size, SHA-256, and destination;

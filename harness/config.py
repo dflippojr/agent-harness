@@ -21,14 +21,12 @@ MODULE_NAMES = (
 OPT_IN_MODULES = frozenset({"image_edit"})
 # extra_model_paths root shared by installer, doctor, and image components (Z-Image / quality / image_edit).
 DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
-# Optional modules whose on/off switch is ``cfg.<section>.enabled``. The rest
-# (local_model, homelab, runners) are install-selected only.
+# Core switches whose on/off is ``cfg.<section>.enabled``.
 MODULE_ENABLE_SECTIONS = {
     "web": "web",
     "search": "search",
     "jobs": "jobs",
     "endpoint": "endpoint",
-    "images": "images",
     "gpu_guard": "gpu_guard",
     "notifications": "notify",
     "backup": "backup",
@@ -36,21 +34,33 @@ MODULE_ENABLE_SECTIONS = {
     "remote_control": "remote_control",
     "skills": "skills",
 }
+# Core switches the installer selects and nothing turns off at runtime.
+INSTALL_ONLY_MODULES = frozenset({"local_model", "homelab", "runners"})
+# The switches the core implements itself. Every other name in MODULE_NAMES belongs to an add-on module
+# (harness/modules.py): the installer may write it whether or not the package is there, so the profile accepts it,
+# and it only takes effect when a discovered module answers to it.
+CORE_MODULE_NAMES = tuple(name for name in MODULE_NAMES
+                          if name in MODULE_ENABLE_SECTIONS or name in INSTALL_ONLY_MODULES)
 
 
 def module_effective(cfg: "Config", name: str) -> bool:
     """True when the module is installed and switched on.
 
     ``cfg.installed.<name>`` is installer/profile selection. ``cfg.<section>.enabled``
-    is the operational switch (YAML, then managed overlay). ``cfg.modules`` stays the
-    YAML-time snapshot and is not written by overlay setters. Capabilities, /health,
-    /api/v1 features, and Manager tool construction all use this function.
+    is the operational switch (YAML, then managed overlay); an add-on module supplies
+    its own (``Module.runtime_enabled``). ``cfg.modules`` stays the YAML-time snapshot
+    and is not written by overlay setters. Capabilities, /health, /api/v1 features,
+    and Manager tool construction all use this function.
     """
     installed = getattr(cfg, "installed", None)
     if installed is None or not bool(getattr(installed, name, False)):
         return False
-    if name == "image_edit":
-        return bool(getattr(getattr(cfg, "images", None), "edit_enabled", False))
+    if name not in CORE_MODULE_NAMES:
+        from .modules import claims, is_present
+        module = claims(cfg, name)
+        if module is None or not is_present(cfg, module):
+            return False
+        return bool(module.runtime_enabled(cfg, name)) if module.runtime_enabled else True
     section_name = MODULE_ENABLE_SECTIONS.get(name)
     if section_name is None:
         return True
@@ -490,6 +500,8 @@ class Config:
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
     canary: CanaryConfig = field(default_factory=CanaryConfig)
     tool_output: ToolOutputConfig = field(default_factory=ToolOutputConfig)
+    # Add-on module packages (harness/modules.py); None: every package under the harness_modules namespace.
+    module_packages: tuple[str, ...] | None = None
 
     @property
     def db_path(self) -> Path:
@@ -519,11 +531,16 @@ class Config:
                 "sessions": True, "provider_adapters": True, "approvals": True, "events": True,
                 "scoped_tokens": True, "storage": True, "capability_discovery": True,
             },
-            "modules": {name: module_effective(self, name) for name in MODULE_NAMES},
+            "modules": {name: module_effective(self, name) for name in CORE_MODULE_NAMES} | self._module_capabilities(),
             "hosted_backends": [name for name, cfg in self.backends.items() if cfg.enabled],
             "config_registry": True,
             "supervised_restart": os.environ.get("HARNESS_SUPERVISED", "").strip() in ("1", "true", "yes"),
         }
+
+    def _module_capabilities(self) -> dict:
+        """Each present add-on module's switches. An absent module has no entry at all."""
+        from .modules import present_switches
+        return {name: module_effective(self, name) for name in present_switches(self)}
 
 
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -788,6 +805,15 @@ def _load_runners(raw: dict, selected) -> dict:
     return {name: RunnerConfig(name=name, **(spec or {})) for name, spec in (raw.get("runners") or {}).items()}
 
 
+def _module_packages(raw) -> tuple[str, ...] | None:
+    """``module_packages``: the add-on packages to load, in order (absent: the harness_modules namespace)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not all(isinstance(name, str) and name.strip() for name in raw):
+        raise ValueError("module_packages must be a list of Python package names")
+    return tuple(name.strip() for name in raw)
+
+
 def _load_images(raw: dict, selected) -> ImagesConfig:
     raw_images = raw.get("images") or {}
     images = ImagesConfig(**raw_images)
@@ -892,6 +918,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         models=models,
         sandbox=SandboxConfig(**(raw.get("sandbox") or {})),
         projects=projects,
+        module_packages=_module_packages(raw.get("module_packages")),
         profile=profile,
         modules=modules,
         installed=selected,

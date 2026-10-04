@@ -225,9 +225,6 @@ def check_daemon(r: Report, cfg) -> None:
         r.fail("Daemon", f"{base} not answering ({type(e).__name__}); see {cfg.data_dir / 'logs'}")
 
 
-IMAGE_EDITING = "Image editing"
-
-
 def _autostart_windows(r: Report, args, with_server: bool) -> None:
     for suffix in (("LlamaServer", "Daemon") if with_server else ("Daemon",)):
         task = f"AgentHarness-{args.instance}-{suffix}"
@@ -265,78 +262,6 @@ def check_autostart(r: Report, cfg, args) -> None:
         _autostart_macos(r, args)
 
 
-def _check_image_models(r: Report, cfg) -> None:
-    py = Path(cfg.images.comfy_dir) / "python_embeded" / "python.exe"
-    (r.ok if py.exists() else r.fail)("Image generation", f"ComfyUI at {cfg.images.comfy_dir}"
-                                      + ("" if py.exists() else " not found"))
-    from .images import LIGHTNING_LORA, lightning_lora_status
-    lora = lightning_lora_status(cfg.images)
-    if lora["available"]:
-        r.ok("Qwen quality-fast LoRA",
-             f"{lora['path']} ({LIGHTNING_LORA['filename']}, {LIGHTNING_LORA['bytes']} bytes, "
-             f"revision {LIGHTNING_LORA['revision']})")
-    else:
-        r.warn("Qwen quality-fast LoRA", lora["setup"])
-    from .images_models import doctor_warning, inspect_flux_fast
-    flux_warning = doctor_warning(inspect_flux_fast(cfg.images))
-    if flux_warning:
-        r.warn("FLUX.2 klein 4B (optional)", flux_warning)
-    else:
-        r.ok("FLUX.2 klein 4B (optional)", "flux-fast assets and nodes are ready")
-
-
-def _check_image_edit_ram(r: Report) -> None:
-    try:
-        import psutil
-        ram_gb = psutil.virtual_memory().total / 2**30
-        (r.ok if ram_gb >= 30 else r.warn)(
-            "Image editing RAM", f"{ram_gb:.0f} GB (Qwen-Image-Edit fp8 was tested with 32 GB)")
-    except (ImportError, OSError):
-        r.warn("Image editing RAM", "could not read installed RAM")
-
-
-def _check_image_edit_disk(r: Report, cfg, edit: dict) -> None:
-    from . import image_edit
-    models = image_edit.models_dir(cfg.images)
-    try:
-        free = shutil.disk_usage(models if models.exists() else cfg.data_dir).free / 2**30
-        need = 22 if not edit["available"] else 1
-        (r.ok if free >= need else r.fail)(
-            "Image editing disk", f"{free:.0f} GB free at {models} (need about {need} GB)")
-    except OSError as e:
-        r.warn("Image editing disk", str(e))
-
-
-def _check_image_editing(r: Report, cfg) -> None:
-    from . import image_edit
-    from .config import module_effective
-    edit = image_edit.assets_status(cfg.images, verify_hash=True)
-    if not module_effective(cfg, "image_edit"):
-        if bool(getattr(cfg.installed, "image_edit", False)):
-            r.ok(IMAGE_EDITING, "installed but disabled; text-to-image is unchanged")
-        else:
-            r.ok(IMAGE_EDITING, "optional component not installed; text-to-image is unchanged")
-        return
-    if edit["available"] and edit["hash_ok"] is not False:
-        extra = "checksum verified" if edit["hash_ok"] else "stub or unpackaged file present"
-        r.ok(IMAGE_EDITING, f"{edit['model']} {edit['revision'][:12]} ({extra})")
-    else:
-        missing = ", ".join(edit["missing"]) or "checksum mismatch"
-        r.fail(IMAGE_EDITING, f"image_edit is enabled but assets are not ready ({missing}). {edit['setup']}")
-    _check_image_edit_ram(r)
-    _check_image_edit_disk(r, cfg, edit)
-
-
-def check_images(r: Report, cfg) -> None:
-    _check_image_models(r, cfg)
-    _check_image_editing(r, cfg)
-    from . import upscale as upscale_mod
-    if upscale_mod.missing_weights(cfg.images, verify_hash=True):
-        r.warn("Image upscaling", upscale_mod.remediation(cfg.images))
-    else:
-        r.ok("Image upscaling", f"Real-ESRGAN x2plus/x4plus in {upscale_mod.models_dir(cfg.images)}")
-
-
 def check_secret_scanner(r: Report, cfg) -> None:
     """Review push/merge fail closed without the pinned gitleaks (issue #263); the daemon fetches it at start."""
     from . import secret_scan
@@ -358,8 +283,10 @@ def check_optional(r: Report, cfg) -> None:
             r.ok("Web search", f"SearXNG answered with {n} results")
         except (httpx.HTTPError, ValueError) as e:
             r.fail("Web search", f"SearXNG at {cfg.web.searxng_url} not answering ({type(e).__name__})")
-    if cfg.images.enabled:
-        check_images(r, cfg)
+    from .modules import present
+    for module in present(cfg):  # add-on modules' own checks (harness/modules.py)
+        if module.doctor is not None:
+            module.doctor(r, cfg)
     code, out = run(["tailscale", "serve", "status", "--json"])
     if code == 0 and str(cfg.port) in out:
         r.ok("Phone access", "tailscale serve publishes the daemon")

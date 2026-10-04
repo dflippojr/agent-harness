@@ -23,7 +23,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root '.venv\Scripts\python.exe'
 if (-not (Test-Path $python)) { $python = 'python' }
 
-$argsList = @('-m', 'harness.images_models', $Action, $Component)
+$argsList = @('-m', 'harness_modules.images.models', $Action, $Component)
 if ($ExtractComfyUI) { $argsList += @('--extract-comfyui', $ExtractComfyUI) }
 
 Write-Host "agent-harness images-models $Action $Component"

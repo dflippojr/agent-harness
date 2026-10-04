@@ -239,25 +239,6 @@ def _endpoint_metrics(m: Manager, out: _Out, db) -> None:
                [({"state": "running"}, gate.endpoint_active), ({"state": "waiting"}, gate.endpoint_waiting)])
 
 
-def _image_metrics(m: Manager, out: _Out, db) -> None:
-    if m.images is not None:
-        with db.lock:
-            images = db.conn.execute("SELECT model, source, status, COUNT(*), COALESCE(SUM(seconds), 0) FROM images "
-                                     "GROUP BY 1, 2, 3").fetchall()
-        out.metric("harness_images_total", "counter", "Image jobs by model, source and status.",
-                   [({"model": mo, "source": so, "status": st}, n) for mo, so, st, n, _ in images])
-        out.metric("harness_images_seconds_total", "counter", "Time spent on image jobs (ComfyUI execution).",
-                   [({"model": mo}, sum(s for mo2, _, st, _, s in images if mo2 == mo and st == "done"))
-                    for mo in sorted({row[0] for row in images})])
-        out.metric("harness_images_gpu_taken", "gauge", "1 while image generation or upscaling has the GPU (language model unloaded).",
-                   [({}, 1 if m.images.gpu_taken else 0)])
-        out.metric("harness_images_queued", "gauge", "Image jobs waiting.", [({}, m.images.queue.qsize())])
-        upscale = m.images.status().get("upscale") or {}
-        out.metric("harness_images_upscale_available", "gauge",
-                   "1 when optional Real-ESRGAN 2×/4× weights are installed.",
-                   [({}, 1 if upscale.get("available") else 0)])
-
-
 def _runner_metrics(m: Manager, out: _Out) -> None:
     hub = m.hub.status()
     out.metric("harness_runner_online", "gauge", "1 while a runner (the MacBook) is connected.",
@@ -328,19 +309,6 @@ def _maintenance_metrics(m: Manager, out: _Out) -> None:
         out.metric("harness_backup_last_success_timestamp_seconds", "gauge", "Last successful backup.",
                    [({}, backup["ok_at"])])
         out.metric("harness_backup_size_bytes", "gauge", "Size of the last backup.", [({}, backup.get("bytes", 0))])
-    archive = m.image_archive.health()
-    if archive.get("enabled"):
-        out.metric("harness_image_archive_last_reconciliation_timestamp_seconds", "gauge",
-                   "Last image archive reconciliation.", [({}, archive.get("last_reconciliation", 0))])
-        out.metric("harness_image_archive_images", "gauge", "Image archive jobs by state.",
-                   [({"state": state}, archive.get(state, 0)) for state in ("archived", "missing", "errors", "retained")])
-        out.metric("harness_image_archive_bytes", "gauge", "Verified bytes in the image archive.",
-                   [({}, archive.get("bytes", 0))])
-        out.metric("harness_image_archive_free_bytes", "gauge", "Free space on the image archive volume.",
-                   [({}, archive.get("free_bytes", 0))])
-        out.metric("harness_image_archive_free_space_warning", "gauge",
-                   "1 when image archive free space is below its configured threshold.",
-                   [({}, 1 if archive.get("free_space_warning") else 0)])
     if m.maintenance.last_report.get("at"):
         out.metric("harness_cleanup_last_run_timestamp_seconds", "gauge", "Last cleanup run.",
                    [({}, m.maintenance.last_report["at"])])
@@ -377,7 +345,7 @@ def render(m: Manager) -> str:
         _smart_review_metrics(out, web)
         _backend_metrics(m, out, db)
         _endpoint_metrics(m, out, db)
-        _image_metrics(m, out, db)
+        m.modules.metrics(out, db)  # add-on modules' own (images, image archive)
         _runner_metrics(m, out)
         _guard_metrics(m, out)
         _canary_metrics(m, out)

@@ -489,7 +489,7 @@ def image_manager(tmp_path, steps=None, fail_prompts=(), fail_upscale=False, wei
                               comfy_dir=str(tmp_path / "comfy"), models_dir=str(tmp_path / "models"),
                               upscale_dir=str(upscale_dir))
     if weights:
-        from harness.upscale import MODELS
+        from harness_modules.images.upscale import MODELS
         for spec in MODELS.values():
             (upscale_dir / spec.filename).write_bytes(b"fake-weight")
     m = Manager(cfg, chat=Script(steps or [Completion(content="done")]))
@@ -560,7 +560,7 @@ def test_agent_generate_image_tool_saves_into_workspace(tmp_path):
         job = m.db.list_images()[0]
         assert job["source"] == "agent"
         assert job["session_id"] == s["id"]
-        bad = await m.runner.images.call("generate_image", {"prompt": "x", "filename": "../../escape.png"},
+        bad = await m.images.call("generate_image", {"prompt": "x", "filename": "../../escape.png"},
                                          workspace_root=tmp_path / "data" / "workspaces" / s["id"])
         await m.stop()
     coro = body()
@@ -604,7 +604,7 @@ def test_images_api_and_generate_image_for_tower_and_mac(tmp_path):
 
 
 def test_quality_fast_graph_uses_official_lightning_settings():
-    from harness.images import LIGHTNING_LORA, workflow
+    from harness_modules.images.service import LIGHTNING_LORA, workflow
 
     quality = workflow("quality", "a cat", 1328, 1328, 1, "p")
     lightning = workflow("quality-fast", "a cat", 1328, 1328, 1, "p")
@@ -645,7 +645,7 @@ def test_missing_lightning_lora_disables_only_quality_fast(tmp_path):
 
 
 def test_quality_fast_job_records_lora_and_shares_the_gpu_batch(tmp_path):
-    from harness.images import LIGHTNING_LORA
+    from harness_modules.images.service import LIGHTNING_LORA
 
     async def body():
         m, server, state = image_manager(tmp_path)
@@ -683,7 +683,7 @@ def test_quality_fast_job_records_lora_and_shares_the_gpu_batch(tmp_path):
 
 def test_lightning_lora_status_uses_extra_paths_and_rejects_wrong_size(tmp_path):
     from harness.config import ImagesConfig
-    from harness.images import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status, verify_lightning_lora
+    from harness_modules.images.service import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status, verify_lightning_lora
 
     alt = tmp_path / "alt" / "loras"
     alt.mkdir(parents=True)
@@ -707,7 +707,7 @@ def test_lightning_lora_install_copy_shadows_pinned_models_dir(tmp_path, monkeyp
     """ComfyUI searches install models/loras before extra_model_paths / models_dir."""
     import hashlib
     from harness.config import ImagesConfig
-    from harness.images import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status
+    from harness_modules.images.service import LIGHTNING_LORA, lightning_lora_path, lightning_lora_status
 
     payload = b"pinned-lora-ok"
     monkeypatch.setitem(LIGHTNING_LORA, "bytes", len(payload))
@@ -730,7 +730,7 @@ def test_lightning_lora_install_copy_shadows_pinned_models_dir(tmp_path, monkeyp
 
 def test_quality_fast_hashes_the_file_comfyui_would_load(tmp_path, monkeypatch):
     import hashlib
-    from harness.images import LIGHTNING_LORA
+    from harness_modules.images.service import LIGHTNING_LORA
 
     payload = b"pinned-lora-ok"
     unpinned = b"unpinned-copy!"

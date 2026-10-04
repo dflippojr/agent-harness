@@ -502,12 +502,14 @@ class SettingsService:
         allowed = set()
         mapping = {
             "web": ("sessions", "web"),
-            "images": ("images", "images"),
             "search": ("sessions", "search"),
             "memory_library": ("sessions", "memory_library"),
             "remote_control": ("remote_control", "remote_control"),
             "homelab": ("sessions", "homelab"),
         }
+        from .modules import present
+        for module in present(self.cfg):  # an add-on's capability needs its scope and its switch
+            mapping.update({cap: (scope, module.switches[0]) for cap, scope in module.app_capabilities.items()})
         for cap, (scope, module) in mapping.items():
             if scope in scopes and module_installed_or_effective(self.cfg, module):
                 allowed.add(cap)
@@ -830,6 +832,8 @@ class SettingsService:
     def _apply_one_value(self, candidate: Config, key: str, value: Any, parsed_map: dict[str, Any]) -> dict | None:
         spec = self.registry.specs.get(key)
         if spec is None:
+            if _dormant_key(self.cfg, key):
+                return None  # an absent add-on module's key: kept in the overlay, applied when the module is back
             return {"code": "unknown_key", "message": f"unknown setting {key!r}"}
         if spec.apply_mode == "installer_only":
             return {"code": "installer_only", "message": "installer-only keys cannot be applied"}
@@ -1061,6 +1065,15 @@ def _load_yaml_files(config_dir: Path | None) -> dict[str, dict]:
             data = {}
         files[name] = data if isinstance(data, dict) else {}
     return files
+
+
+def _dormant_key(cfg: Config, key: str) -> bool:
+    """A key under an add-on module's switch (``images.*``) while that module is absent: uninstalling a module or
+    moving to the service profile must not quarantine an overlay that still carries its settings."""
+    from .config import CORE_MODULE_NAMES, MODULE_NAMES
+    from .modules import absent_switches
+    addons = tuple(name for name in MODULE_NAMES if name not in CORE_MODULE_NAMES)
+    return key.split(".", 1)[0] in absent_switches(cfg, addons)
 
 
 def module_installed_or_effective(cfg: Config, name: str) -> bool:

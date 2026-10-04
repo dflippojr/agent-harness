@@ -18,9 +18,12 @@ import httpx
 try:
     from .compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
     from .updater import apply_update
+    from . import modules as _modules
 except ImportError:  # installed native bundle imports these as sibling modules
     from harness_compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
     from harness_update import apply_update
+    _modules = None
+MODULE_COMMANDS_FILE = "harness_module_commands.json"  # the Mac bundle's copy of the modules' rows (mac_client.py)
 
 HOME_DIR = ".agent-harness"
 HARNESS_HOME = Path.home() / HOME_DIR
@@ -450,10 +453,6 @@ ADMIN_COMMANDS = (
     ("maintenance status", "GET", "/maintenance", "show disk usage and maintenance state", ()),
     ("maintenance cleanup", "POST", "/maintenance/cleanup", "remove expired workspaces and data", ()),
     ("maintenance backup", "POST", "/maintenance/backup", "back up the databases", ()),
-    ("maintenance image-retention-preview", "POST", "/maintenance/image-archive/retention/preview",
-     "show what image-archive retention would remove", ()),
-    ("maintenance image-retention-apply", "POST", "/maintenance/image-archive/retention/apply",
-     "apply image-archive retention", ("confirmation",)),
     ("jobs list", "GET", "/jobs", "list scheduled jobs", ()),
     ("jobs show", "GET", "/jobs/{jid}", "show a scheduled job", ()),
     ("jobs create", "POST", "/jobs", "schedule a job", _JOB),
@@ -465,18 +464,6 @@ ADMIN_COMMANDS = (
     ("templates create", "POST", "/templates", "save a task template", _TEMPLATE),
     ("templates update", "PUT", "/templates/{tid}", "replace a task template", _TEMPLATE),
     ("templates delete", "DELETE", "/templates/{tid}", "delete a task template", ()),
-    ("images list", "GET", "/images", "list generated images", ("--limit:int",)),
-    ("images show", "GET", "/images/{iid}", "show an image job", ()),
-    ("images create", "POST", "/images", "generate an image",
-     ("prompt", "--model", "--aspect_ratio", "--resolution", "--seed:int", "--upscale")),
-    ("images upload", "POST", "/images/uploads", "upload a source image to edit", ("file:file",)),
-    ("images edit", "POST", "/images/{iid}/edit", "repaint an image inside a mask",
-     ("prompt", "mask:file", "--feather:int", "--seed:int")),
-    ("images upscale", "POST", "/images/{iid}/upscale", "upscale an image", ("--upscale",)),
-    ("images cancel", "POST", "/images/{iid}/cancel", "cancel an image job", ()),
-    ("images delete", "DELETE", "/images/{iid}", "delete an image", ()),
-    ("images warmup", "POST", "/images/warmup", "load the image model", ()),
-    ("images cooldown", "POST", "/images/cooldown", "unload the image model", ()),
     ("remote-control list", "GET", "/remote-control", "list Remote Control folders and sessions", ()),
     ("remote-control launch", "POST", "/remote-control/{project}", "start Remote Control in a folder", ()),
     ("remote-control stop", "POST", "/remote-control/{project}/stop", "stop Remote Control in a folder", ()),
@@ -553,10 +540,29 @@ _GROUP_HELP = {
     "runner-pairing-codes": "Mac pairing codes", "models": "local models", "backends": "model backends",
     "gpu": "GPU hold", "resources": "resource guard and local model", "smart-approvals": "smart approvals",
     "notify": "notifications", "config": "daemon settings", "maintenance": "disk cleanup and backups",
-    "jobs": "scheduled jobs", "templates": "task templates", "images": "image generation",
+    "jobs": "scheduled jobs", "templates": "task templates",
     "remote-control": "Remote Control folders", "memory": "memory library", "skills": "instruction skills",
     "sessions": "session review, checkpoints and comments", "github": "GitHub issues and PRs", "chats": "chats",
 }
+
+
+def module_commands() -> tuple[tuple, dict]:
+    """The add-on modules' rows and group help (harness/modules.py; images adds `images ...`). A checkout asks the
+    modules; the Mac bundle reads the copy the Server packed next to this file."""
+    if _modules is not None:
+        return _modules.cli_rows(), _modules.cli_groups()
+    try:
+        data = json.loads(Path(__file__).with_name(MODULE_COMMANDS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (), {}
+    return tuple((*row[:4], tuple(row[4])) for row in data.get("rows", [])), dict(data.get("groups", {}))
+
+
+def admin_commands() -> tuple:
+    """ADMIN_COMMANDS and the add-on modules' rows."""
+    return ADMIN_COMMANDS + module_commands()[0]
+
+
 _PATH_PARAM = re.compile(r"\{([^}/]+)\}")
 
 
@@ -603,13 +609,14 @@ def _add_field(parser: argparse.ArgumentParser, field: str) -> None:
 
 def _add_admin_commands(sub, groups: dict) -> None:
     """Register ADMIN_COMMANDS; `groups` maps a command prefix to its subparsers (existing groups are reused)."""
-    for row in ADMIN_COMMANDS:
+    help_text = _GROUP_HELP | module_commands()[1]
+    for row in admin_commands():
         *prefix, leaf = row[0].split()
         parent = sub
         for depth, word in enumerate(prefix):
             key = " ".join(prefix[:depth + 1])
             if key not in groups:
-                groups[key] = parent.add_parser(word, help=_GROUP_HELP.get(key, word)).add_subparsers(
+                groups[key] = parent.add_parser(word, help=help_text.get(key, word)).add_subparsers(
                     dest=f"{word.replace('-', '_')}_cmd", required=True)
             parent = groups[key]
         p = parent.add_parser(leaf, help=row[3])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
+import json
 import tarfile
 from functools import lru_cache
 from pathlib import Path
@@ -40,7 +41,19 @@ def package_bytes() -> bytes:
                 info.mtime = 0
                 info.mode = 0o644
                 archive.addfile(info, io.BytesIO(data))
+            # The client CLI can't import add-on modules: pack their command rows next to it (cli.module_commands).
+            data = _module_commands()
+            info = tarfile.TarInfo("client/harness_module_commands.json")
+            info.size = len(data)
+            info.mtime = 0
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(data))
     return compressed.getvalue()
+
+
+def _module_commands() -> bytes:
+    from .modules import cli_groups, cli_rows
+    return json.dumps({"rows": cli_rows(), "groups": cli_groups()}, sort_keys=True).encode("utf-8")
 
 
 def package_manifest() -> dict:

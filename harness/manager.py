@@ -20,7 +20,6 @@ from . import review_comments
 from . import review_comments
 from .changes import published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
-from .image_archive import ImageArchive
 from .notify import Notifier
 from .warmup import ModelWarmer
 from .config import Config
@@ -168,8 +167,10 @@ class Manager:
         self.compare_busy: set[tuple[str, str]] = set()  # (owner, group) with a pick or discard in progress
         self.notifier = Notifier(cfg, self.db)
         self.bus.add_listener(self.notifier.listener)
-        self.image_archive = ImageArchive(cfg, self.db)
-        self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.image_archive)
+        # Add-on modules (harness/modules.py): built here so a module's backup participant joins Maintenance.
+        from .modules import ModuleHost
+        self.modules = ModuleHost(self)
+        self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.modules.backup_participant())
         self.maintenance.operations = self.operations
         self.maintenance.app_sweep = self.sweep_app_data
         from .member_github import MemberGitHub
@@ -195,6 +196,17 @@ class Manager:
         self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
         self._init_modules(cfg, chat)
         self._init_services(cfg)
+
+    def __getattr__(self, name: str):
+        """An add-on module's main object by module name (``manager.images``): None while it is switched off or
+        absent. Core code goes through ``self.modules``; this keeps reads written before modules working."""
+        host = self.__dict__.get("modules")
+        if host is not None and name in host:
+            return host.get(name).service
+        from .config import CORE_MODULE_NAMES, MODULE_NAMES
+        if name in MODULE_NAMES and name not in CORE_MODULE_NAMES:
+            return None
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def _init_modules(self, cfg: Config, chat) -> None:
         from .config import module_effective
@@ -223,15 +235,8 @@ class Manager:
 
     def _init_services(self, cfg: Config) -> None:
         from .config import module_effective
-        self.images = None
-        if module_effective(cfg, "images"):
-            from .gpu_guard import ServerControl
-            from .images import ImageService
-            self.images = ImageService(cfg.images, self.db, self.runner,
-                                       ServerControl(cfg.gpu_guard, cfg.models[cfg.default_model]),
-                                       notify=self._image_finished, archive=self.image_archive,
-                                       edit_enabled=module_effective(cfg, "image_edit"))
-            self.runner.images = self.images
+        self.modules.init()
+        self.runner.modules = self.modules
         self.remote_control = None
         if module_effective(cfg, "remote_control"):
             from .remote_control import RemoteControl
@@ -255,10 +260,10 @@ class Manager:
                                   on_resume=self._gpu_resumed,
                                   data_dir=cfg.data_dir)
             self.runner.guard = self.guard
-            self.warmer.blocked = lambda: self.guard.active or self.guard.manual or bool(self.images and self.images.gpu_taken)
+            self.warmer.blocked = lambda: self.guard.active or self.guard.manual or self.modules.gpu_taken
             self._wire_resources(cfg)
-        elif self.images is not None:
-            self.warmer.blocked = lambda: self.images.gpu_taken
+        else:
+            self.warmer.blocked = lambda: self.modules.gpu_taken
 
     def _wire_resources(self, cfg: Config) -> None:
         """Lazy model loading and the RAM check (resource guard, docs/resource-guard.md)."""
@@ -272,31 +277,20 @@ class Manager:
         # Work held by the pause (or a pinned model) reloads at the end of the hold; anything else loads on demand.
         guard.want_model = lambda: warmer.pinned() or self.runner.gpu_paused_waiting()
         self.runner.ram = guard.memory
-        if self.images is not None:
-            self.images.memory_low = lambda: guard.memory.low()
-            self.images.want_model = lambda: not cfg.gpu_guard.lazy_load or warmer.pinned()
+        self.modules.wire_resources(guard, warmer)
 
     def _gpu_paused(self, reasons: list[dict]) -> None:
-        if self.images is not None:
-            self.images.hold()
+        self.modules.gpu_hold()
         for s in self.db.sessions_with_status(*ACTIVE):
             if s.get("backend", "local") == "local" and s["status"] != "waiting_approval":
                 self.runner.note_gpu_pause(s["id"])
 
     def _gpu_resumed(self, seconds: float) -> None:
-        if self.images is not None:
-            self.images.drain_after_sessions(self.scheduler.positions())
+        self.modules.gpu_resume(self.scheduler.positions())
         self.runner.gpu_resumed(seconds)
 
     def _remote_control_ready(self, payload: dict) -> None:
         self.notifier.send({"topic": self.cfg.notify.topic, **payload})
-
-    def _image_finished(self, job: dict) -> None:
-        ok = job["status"] == "done"
-        self.notifier.send({"topic": self.cfg.notify.topic, "title": "Image ready" if ok else "Image failed",
-                            "message": (job["prompt"][:200] if ok else job["error"][:300]), "priority": 2 if ok else 3,
-                            "tags": ["frame_with_picture" if ok else "x"],
-                            "click": self.notifier.link(f"/#/images/{job['id']}")})
 
     def _build_canary(self):
         """The nightly regression canary (#265): runs bakeoff/canary.py's suite on this manager at 03:00."""
@@ -327,13 +321,13 @@ class Manager:
         return bool(s) and s["status"] in ACTIVE
 
     def _skills_idle(self) -> bool:
-        """True only when the GPU scheduler, inference gate, image queue, and GPU guard are all idle."""
+        """True only when the GPU scheduler, inference gate, modules' GPU work (images), and GPU guard are all idle."""
         sch = self.scheduler
         if sch.holder or sch.paused or sch._waiters:
             return False
         if self.runner.generating or self.runner.gate.busy or self.runner.gate.exclusive:
             return False
-        if self.images is not None and (self.images.gpu_taken or self.images.phase != "idle"):
+        if self.modules.busy():
             return False
         if self.guard is not None and (self.guard.active or self.guard.manual):
             return False
@@ -373,8 +367,7 @@ class Manager:
             self.maintenance.start()
         if self.guard is not None:
             self.guard.start()
-        if self.images is not None:
-            self.images.start()
+        self.modules.start()
         if self.runner.memory is not None:
             self.runner.memory.refresh_soon()  # so the first session's profile is current
         self._end_interrupted_canary()
@@ -431,8 +424,7 @@ class Manager:
         await self.maintenance.stop()
         if self.guard is not None:
             await self.guard.stop()
-        if self.images is not None:
-            await self.images.stop()
+        await self.modules.stop()
 
     def _spawn(self, sid: str, recovered: bool = False) -> None:
         self._spawn_task(sid, self.runner.run(sid, recovered=recovered))
@@ -820,17 +812,18 @@ class Manager:
         self.runner.memory.refresh_soon()
         return extra
 
-    @staticmethod
-    def _validated_app_tools(app_tools: list | None) -> list:
+    def _validated_app_tools(self, app_tools: list | None) -> list:
         if not app_tools:
             return []
         from .apps import validate_tools
-        from . import homelab, images, memory_library, remote_control, search, web_tools
+        from . import homelab, memory_library, remote_control, search, web_tools
+        from .modules import discovered
         from .tools import tool_schemas
         from .skills import TOOLS as SKILL_TOOLS
-        reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS) | set(images.TOOLS)
+        reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS)
                     | set(memory_library.TOOLS) | set(web_tools.TOOLS) | set(search.TOOLS)
-                    | set(remote_control.TOOLS) | set(SKILL_TOOLS))
+                    | set(remote_control.TOOLS) | set(SKILL_TOOLS)
+                    | {name for module in discovered(self.cfg) for name in module.tool_names})
         try:
             return validate_tools(app_tools, reserved)
         except ValueError as e:

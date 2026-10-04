@@ -8,7 +8,8 @@ An app is a key with scopes (Settings → Apps, or POST /keys with `scopes`). Wi
   `app_tool_call` event (and listed by GET .../tool_calls) and waits until the app posts the result. While it waits
   the session gives up the GPU and shows as `waiting_app`;
 - decide approvals on its own sessions (`approvals`, off by default: normally the user approves from the phone);
-- generate images (`images`) and use the inference endpoint (`inference`).
+- use the inference endpoint (`inference`); add-on modules add scopes and routes of their own (the images module:
+  `images`, docs/modules.md).
 
 Apps only see sessions they created unless they hold `sessions:all`, which expands reads only. The shape follows
 Hermes Agent's /v1/runs (docs/phase6a-hermes-study.md). The API is versioned by path; breaking changes go to /api/v2
@@ -32,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .api import RouteTable, mgr, sse
 from .fileops import ToolError
 from .manager import HarnessError, public_approval
+from .modules import principal_capabilities
 from .policy import TOOLS_ONLY
 from .warmup import LOW_MEMORY, PAUSED
 from . import compat
@@ -47,12 +49,10 @@ SCOPES = {
     "sessions": "create sessions, send messages and context, cancel, read their own sessions and events",
     SESSIONS_ALL: "read every session, not only the app's own",
     "approvals": "approve or deny tool calls in the app's own sessions",
-    "images": "generate images, upscale them, and read them",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
     "remote_control": "start and stop Claude Code Remote Control servers in project folders",
     MODELS_WARM: "start loading the local model ahead of a chat (refused while the GPU or RAM guard says no)",
 }
-NO_SUCH_IMAGE = "no such image"
 TOOL_NAME = re.compile(r"^[a-zA-Z]\w{2,48}$", re.ASCII)
 MAX_CONTEXT_CHARS = 60_000
 MAX_TOOLS = 16
@@ -218,17 +218,6 @@ class RunnerPairRequest(BaseModel):
     code: str = Field(min_length=8, max_length=200)
 
 
-class AppImageRequest(BaseModel):
-    prompt: str
-    model: str = "fast"
-    aspect_ratio: str = "1:1"
-    upscale: str = "none"
-
-
-class AppImageUpscaleRequest(BaseModel):
-    upscale: str = "2x"
-
-
 class CapabilitiesResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     profile: str
@@ -263,6 +252,8 @@ class ProjectResponse(BaseModel):
 
 
 class AppRootResponse(BaseModel):
+    # Add-on modules add top-level keys of their own (images: ``image_modes``; Module runtime app_root).
+    model_config = ConfigDict(extra="allow")
     api_version: str
     server: str
     scopes: dict[str, str]
@@ -276,7 +267,6 @@ class AppRootResponse(BaseModel):
     protocols: dict
     minimum_clients: dict
     update_hint: dict
-    image_modes: dict[str, dict] = Field(default_factory=dict)
 
 
 class ProviderFailureResponse(BaseModel):
@@ -576,9 +566,10 @@ async def create_pairing_code(body: PairingCodeRequest, request: Request):
     name = body.name.strip()
     if not name:
         raise HarnessError(400, "name is required")
-    unknown = [scope for scope in body.scopes if scope not in SCOPES]
+    known = all_scopes(m.cfg)
+    unknown = [scope for scope in body.scopes if scope not in known]
     if unknown or not body.scopes:
-        raise HarnessError(400, f"unknown or empty scopes; known: {', '.join(SCOPES)}")
+        raise HarnessError(400, f"unknown or empty scopes; known: {', '.join(known)}")
     try:
         origin = normalize_origin(body.origin)
     except ValueError as e:
@@ -652,18 +643,19 @@ async def api_root(request: Request):
     from .config import module_effective
     backends = list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, False, None, False)
                                            for name in m.cfg.backends]))
-    return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES,
+    from .modules import app_scopes
+    return {"api_version": API_VERSION, "server": "agent-harness", "scopes": SCOPES | app_scopes(m.cfg),
             **compat.metadata(m.cfg.capabilities()),
             "projects": [],
             "models": list(m.cfg.models), "backends": backends, "features": {
                 "app_tools": True, "app_tools_only": True,
-                "app_tools_only_backends": [b["name"] for b in (local_view(m), *backends) if b["app_tools_only"]], "context": True, "events": "sse", "images": m.images is not None,
-                "image_upscale": bool(m.images is not None),
+                "app_tools_only_backends": [b["name"] for b in (local_view(m), *backends) if b["app_tools_only"]], "context": True, "events": "sse",
+                **m.modules.features(),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                 "runner_pairing": bool(m.cfg.runners),
                 "remote_control": m.remote_control is not None, "browser_pairing": True,
                 "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
-            "image_modes": (await asyncio.to_thread(m.images.mode_catalog)) if m.images is not None else {}}
+            **await m.modules.app_root()}
 
 
 @route_table.get("/api/v1/backends", response_model=list[BackendResponse])
@@ -689,7 +681,8 @@ def _member_me(m, key: dict, ident) -> dict:
         "name": key.get("name") or "",
         "public_url": m.cfg.public_url,
         "capabilities": {
-            "admin": False, "local_sessions": True, "hosted_backends": False, "images": False,
+            "admin": False, "local_sessions": True, "hosted_backends": False,
+            **principal_capabilities(m.cfg, False),
             "jobs": False, "runners": False, "accounts": False,
         },
         "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
@@ -713,7 +706,7 @@ async def api_me(request: Request):
             "public_url": m.cfg.public_url,
             "capabilities": {
                 "admin": owner_key(key), "local_sessions": True, "hosted_backends": owner_key(key),
-                "images": owner_key(key) or "images" in key.get("scope_set", ()),
+                **principal_capabilities(m.cfg, owner_key(key), key.get("scope_set", ())),
                 "jobs": owner_key(key), "runners": owner_key(key), "accounts": owner_key(key),
             }}
 
@@ -1263,40 +1256,6 @@ async def events(ref: str, request: Request, after: int = 0, follow: bool = True
                                       "Referrer-Policy": "no-referrer"})
 
 
-@route_table.post("/api/v1/images", status_code=201)
-async def app_image(body: AppImageRequest, request: Request):
-    m = mgr(request)
-    key = auth(request, "images")
-    if key.get("kind") == "member":
-        raise HarnessError(403, "members cannot use image generation")
-    if m.images is None:
-        raise HarnessError(400, "image generation is disabled on this harness")
-    try:
-        job = m.images.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
-                              source=f"app:{key['name']}"[:40], upscale=body.upscale)
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-    return {**job, "url": f"/api/v1/images/{job['id']}.png"}
-
-
-@route_table.post("/api/v1/images/{iid}/upscale", status_code=201)
-async def app_image_upscale(iid: str, body: AppImageUpscaleRequest, request: Request):
-    m = mgr(request)
-    key = auth(request, "images")
-    if m.images is None:
-        raise HarnessError(400, "image generation is disabled on this harness")
-    from . import image_edit
-    parent = m.db.get_image(iid.removesuffix(".png"))
-    if parent is None or image_edit.is_private(parent):
-        raise HarnessError(404, NO_SUCH_IMAGE)
-    try:
-        job = m.images.submit_upscale(parent["id"], body.upscale,
-                                      source=f"app:{key['name']}"[:40])
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-    return {**job, "url": f"/api/v1/images/{job['id']}.png"}
-
-
 @route_table.get("/api/v1/remote-control")
 async def app_rc_status(request: Request):
     m = mgr(request)
@@ -1331,29 +1290,18 @@ async def app_rc_stop(project: str, request: Request):
         raise HarnessError(404, str(e))
 
 
-@route_table.get("/api/v1/images/{iid}")
-async def app_image_status(iid: str, request: Request):
-    from fastapi.responses import FileResponse
-    m = mgr(request)
-    auth(request, "images")
-    job = m.db.get_image(iid.removesuffix(".png")) if m.images else None
-    if job is None:
-        raise HarnessError(404, NO_SUCH_IMAGE)
-    from . import image_edit
-    if image_edit.is_private(job):
-        raise HarnessError(404, NO_SUCH_IMAGE)
-    if iid.endswith(".png"):
-        if job["status"] != "done":
-            raise HarnessError(404, "image not ready")
-        return FileResponse(m.images.path(job), media_type="image/png")
-    children = [child for child in m.db.image_children(job["id"])
-                if not image_edit.is_private(child)] if m.images else []
-    return {**job, "url": f"/api/v1/images/{job['id']}.png" if job["status"] == "done" else None,
-            "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
-                          "upscale_model": c.get("upscale_model") or ""} for c in children]}
+def all_scopes(cfg=None) -> dict[str, str]:
+    """Every scope a key may hold: the core's and the discovered add-on modules' (a key keeps its scope while its
+    module is switched off)."""
+    from .modules import discover, discovered
+    modules = discovered(cfg) if cfg is not None else discover()
+    return SCOPES | {scope: text for module in modules for scope, text in module.app_scopes.items()}
 
 
-def register(app: FastAPI) -> None:
+def register(app: FastAPI, cfg=None) -> None:
     from . import config_api
+    from .modules import install_routes
     route_table.install(app)
+    if cfg is not None:
+        install_routes(app, cfg, "app")
     config_api.register_app(app, mgr, auth, owner_key)

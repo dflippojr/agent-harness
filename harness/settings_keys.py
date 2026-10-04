@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
-from .config import Config, MODULE_NAMES
+from .config import CORE_MODULE_NAMES, Config
 from .settings import (
     APP_CAPABILITIES, APPLY_MODES, Bounds, EFFORTS, NOTIFY_COMPLETION, Registry, SettingSpec,
     module_installed, parse_value,
@@ -14,7 +15,6 @@ from .settings import (
 GPU_GUARD = "GPU guard"
 SMART_APPROVALS = "Smart approvals"
 APP_DEFAULTS = "App defaults"
-KEY_IMAGES_EDIT_ENABLED = "images.edit_enabled"
 KEY_COMPACTION_SUMMARIZE_AT = "compaction.summarize_at"
 KEY_COMPACTION_KEEP_RECENT = "compaction.keep_recent"
 KEY_COMPACTION_RESET_AT = "compaction.reset_at"
@@ -73,26 +73,6 @@ def check_endpoint(cfg: Config) -> list[str]:
     return errors
 
 
-def check_images(cfg: Config) -> list[str]:
-    errors = []
-    if not module_installed(cfg, "local_model"):
-        errors.append("images requires the local_model module")
-    if not cfg.images.comfy_dir or not Path(cfg.images.comfy_dir).exists():
-        errors.append("images.comfy_dir is missing")
-    return errors
-
-
-def check_image_edit(cfg: Config) -> list[str]:
-    errors = check_images(cfg)
-    if not module_installed(cfg, "image_edit"):
-        errors.append("image_edit is not installed for this profile")
-    from . import image_edit
-    status = image_edit.assets_status(cfg.images)
-    if status["missing"] or status["hash_ok"] is False:
-        errors.append(status["setup"])
-    return errors
-
-
 def check_gpu_guard(cfg: Config) -> list[str]:
     errors = []
     if not module_installed(cfg, "local_model"):
@@ -124,20 +104,6 @@ def check_skills(cfg: Config) -> list[str]:
     return []
 
 
-ENABLE_CHECKS = {
-    "web.enabled": check_web,
-    "search.enabled": check_search,
-    "jobs.enabled": check_jobs,
-    "endpoint.enabled": check_endpoint,
-    "images.enabled": check_images,
-    KEY_IMAGES_EDIT_ENABLED: check_image_edit,
-    "gpu_guard.enabled": check_gpu_guard,
-    "notifications.enabled": check_notifications,
-    "backup.enabled": check_backup,
-    "skills.enabled": check_skills,
-}
-
-
 def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
     """Switch ``cfg.<section>.enabled`` only. Never write ``cfg.modules`` or
     ``cfg.installed`` — those are installer/profile selection. Effective
@@ -153,10 +119,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
         cfg.jobs.enabled = enabled
     elif name == "endpoint":
         cfg.endpoint.enabled = enabled
-    elif name == "images":
-        cfg.images.enabled = enabled
-    elif name == "image_edit":
-        cfg.images.edit_enabled = enabled
     elif name == "gpu_guard":
         cfg.gpu_guard.enabled = enabled
     elif name == "backup":
@@ -168,8 +130,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
 def _get_module_enabled(cfg: Config, name: str) -> bool:
     if name == "notifications":
         return cfg.notify.enabled
-    if name == "image_edit":
-        return cfg.images.edit_enabled
     section = getattr(cfg, name)
     return bool(section.enabled)
 
@@ -218,22 +178,24 @@ def validate_compaction(cfg: Config, proposed: dict) -> list[dict]:
     return errors
 
 
-def validate_enables(cfg: Config, proposed: dict) -> list[dict]:
-    errors = []
-    for key, check in ENABLE_CHECKS.items():
-        if key not in proposed:
-            continue
-        if proposed[key] is not True:
-            continue
-        spec_name = key.split(".", 1)[0]
-        module = "image_edit" if key == KEY_IMAGES_EDIT_ENABLED else spec_name
-        if not module_installed(cfg, module):
-            errors.append({"key": key, "code": "dependency",
-                           "message": f"{module} is not installed for this profile"})
-            continue
-        for message in check(cfg):
-            errors.append({"key": key, "code": "dependency", "message": message})
-    return errors
+def enable_validator(specs: dict[str, SettingSpec]):
+    """Refuse turning on a module that isn't installed for this profile or whose dependencies are missing."""
+    checks = [(key, spec.modules[0], spec.enable_check) for key, spec in specs.items()
+              if spec.enable_check is not None and spec.modules]
+
+    def validate_enables(cfg: Config, proposed: dict) -> list[dict]:
+        errors = []
+        for key, module, check in checks:
+            if proposed.get(key) is not True:
+                continue
+            if not module_installed(cfg, module):
+                errors.append({"key": key, "code": "dependency",
+                               "message": f"{module} is not installed for this profile"})
+                continue
+            for message in check(cfg):
+                errors.append({"key": key, "code": "dependency", "message": message})
+        return errors
+    return validate_enables
 
 
 def _int(key, label, help, category, default, getter, setter, minimum, maximum, yaml_path,
@@ -447,38 +409,6 @@ def _get_req_timeout(cfg: Config):
 
 def _set_req_timeout(cfg: Config, value):
     cfg.endpoint.request_timeout_seconds = float(value)
-
-
-def _get_img_start(cfg: Config):
-    return cfg.images.start_timeout_seconds
-
-
-def _set_img_start(cfg: Config, value):
-    cfg.images.start_timeout_seconds = float(value)
-
-
-def _get_img_job(cfg: Config):
-    return cfg.images.job_timeout_seconds
-
-
-def _set_img_job(cfg: Config, value):
-    cfg.images.job_timeout_seconds = float(value)
-
-
-def _get_img_upload_bytes(cfg: Config):
-    return cfg.images.max_upload_bytes
-
-
-def _set_img_upload_bytes(cfg: Config, value):
-    cfg.images.max_upload_bytes = int(value)
-
-
-def _get_img_pixels(cfg: Config):
-    return cfg.images.max_pixels
-
-
-def _set_img_pixels(cfg: Config, value):
-    cfg.images.max_pixels = int(value)
 
 
 def _get_gpu_poll(cfg: Config):
@@ -756,22 +686,6 @@ STATIC_ADMIN: list[SettingSpec] = [
            "Give up on a hung inference request after this long.",
            "Endpoint", 1800, _get_req_timeout, _set_req_timeout, 30, 7200,
            ("endpoint", "request_timeout_seconds"), modules=("endpoint",)),
-    _float("images.start_timeout_seconds", "Image startup timeout (seconds)",
-           "How long to wait for ComfyUI to become ready.",
-           "Images", 180, _get_img_start, _set_img_start, 30, 600, ("images", "start_timeout_seconds"),
-           modules=("images",)),
-    _float("images.job_timeout_seconds", "Image job timeout (seconds)",
-           "How long a single image job may run.",
-           "Images", 1200, _get_img_job, _set_img_job, 60, 7200, ("images", "job_timeout_seconds"),
-           modules=("images",)),
-    _int("images.max_upload_bytes", "Image-edit upload byte limit",
-         "Maximum source or mask upload size for owner-only masked editing.",
-         "Images", 20 * 2**20, _get_img_upload_bytes, _set_img_upload_bytes,
-         2**20, 100 * 2**20, ("images", "max_upload_bytes"), modules=("image_edit",)),
-    _int("images.max_pixels", "Image-edit decoded pixel limit",
-         "Reject gallery edits and decoded uploads/masks above this pixel count (long side is also capped at 1664).",
-         "Images", 20_000_000, _get_img_pixels, _set_img_pixels,
-         1_000_000, 100_000_000, ("images", "max_pixels"), modules=("image_edit",)),
     _float("gpu_guard.poll_seconds", "GPU guard poll (seconds)",
            "How often the GPU guard looks for games or Plex transcodes.",
            GPU_GUARD, 10, _get_gpu_poll, _set_gpu_poll, 2, 60, ("gpu_guard", "poll_seconds"),
@@ -844,15 +758,6 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for the OpenAI/Anthropic-compatible endpoint.",
           "Features", False, _enable_get("endpoint"), _enable_set("endpoint"), ("endpoint", "enabled"),
           apply_mode="daemon_restart", modules=("endpoint",), enable_check=check_endpoint),
-    _bool("images.enabled", "Image generation",
-          "Runtime enable for local image generation.",
-          "Features", False, _enable_get("images"), _enable_set("images"), ("images", "enabled"),
-          apply_mode="daemon_restart", modules=("images",), enable_check=check_images),
-    _bool(KEY_IMAGES_EDIT_ENABLED, "Masked image editing",
-          "Runtime enable for the installed Qwen-Image-Edit component. Does not download model weights.",
-          "Features", False, _enable_get("image_edit"), _enable_set("image_edit"),
-          ("images", "edit_enabled"), apply_mode="daemon_restart", modules=("image_edit",),
-          enable_check=check_image_edit),
     _bool("gpu_guard.enabled", GPU_GUARD,
           "Runtime enable for pausing the model while a game or Plex transcode needs the GPU.",
           "Features", False, _enable_get("gpu_guard"), _enable_set("gpu_guard"), ("gpu_guard", "enabled"),
@@ -896,12 +801,16 @@ STATIC_ADMIN: list[SettingSpec] = [
             ("profile",)),
 ]
 
-for _mod in MODULE_NAMES:
-    STATIC_ADMIN.append(_hidden(
-        f"modules.{_mod}", f"Module: {_mod}",
-        f"{_mod} installation/profile selection. Change this with the installer, not this registry.",
-        "Install", ("modules", _mod),
-    ))
+def module_switch_spec(name: str) -> SettingSpec:
+    return _hidden(
+        f"modules.{name}", f"Module: {name}",
+        f"{name} installation/profile selection. Change this with the installer, not this registry.",
+        "Install", ("modules", name),
+    )
+
+
+for _mod in CORE_MODULE_NAMES:
+    STATIC_ADMIN.append(module_switch_spec(_mod))
 
 
 APP_SPECS: list[SettingSpec] = [
@@ -1062,9 +971,23 @@ def discovery_specs():
     return specs
 
 
+def module_specs(cfg: Config) -> list[SettingSpec]:
+    """The present add-on modules' keys (harness/modules.py): absent modules have none."""
+    from . import modules
+    return [*modules.settings_specs(cfg), *(module_switch_spec(name) for name in modules.present_switches(cfg))]
+
+
+def _app_specs(cfg: Config) -> list[SettingSpec]:
+    from . import modules
+    extra = tuple(name for name in modules.app_capabilities(cfg) if name not in APP_CAPABILITIES)
+    return [replace(spec, bounds=replace(spec.bounds, enum=(*spec.bounds.enum, *extra)))
+            if spec.key == KEY_APP_CAPABILITIES and extra else spec for spec in APP_SPECS]
+
+
 def build_registry(cfg: Config) -> Registry:
-    specs = {spec.key: spec for spec in [*STATIC_ADMIN, *discovery_specs(), *backend_specs(cfg), *APP_SPECS]}
-    return Registry(specs=specs, validators=[validate_compaction, validate_enables, validate_discovery],
+    specs = {spec.key: spec for spec in [*STATIC_ADMIN, *module_specs(cfg), *discovery_specs(),
+                                         *backend_specs(cfg), *_app_specs(cfg)]}
+    return Registry(specs=specs, validators=[validate_compaction, enable_validator(specs), validate_discovery],
                     change_validators=[validate_discovery_roots_change])
 
 

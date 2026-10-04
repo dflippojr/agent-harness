@@ -15,8 +15,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import Config
-from .db import Database
+from harness.modules import Config, Database
 
 
 class ImageArchiveError(RuntimeError):

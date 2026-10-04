@@ -49,14 +49,6 @@ ADMIN_PATHS = frozenset({
     "/backends",
     "/backends/{name}",
     "/smart-approvals",
-    "/images",
-    "/images/uploads",
-    "/images/warmup",
-    "/images/cooldown",
-    "/images/{iid}",
-    "/images/{iid}/edit",
-    "/images/{iid}/cancel",
-    "/images/{iid}/upscale",
     "/gpu",
     "/gpu/{action}",
     "/resources",
@@ -119,8 +111,6 @@ ADMIN_PATHS = frozenset({
     "/maintenance",
     "/maintenance/cleanup",
     "/maintenance/backup",
-    "/maintenance/image-archive/retention/preview",
-    "/maintenance/image-archive/retention/apply",
     "/jobs",
     "/jobs/preview",
     "/jobs/{jid}",
@@ -139,12 +129,13 @@ ADMIN_PATHS = frozenset({
 
 
 def _validated_scopes(scopes) -> list[str]:
-    from .apps import SCOPES
+    from .apps import all_scopes
+    known = all_scopes()
     if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-        raise HarnessError(400, f"unknown scopes {scopes!r}; known: {', '.join(SCOPES)}")
-    unknown = [s for s in scopes if s not in SCOPES and s != ADMIN_SCOPE]
+        raise HarnessError(400, f"unknown scopes {scopes!r}; known: {', '.join(known)}")
+    unknown = [s for s in scopes if s not in known and s != ADMIN_SCOPE]
     if unknown:
-        raise HarnessError(400, f"unknown scopes {unknown}; known: {', '.join(SCOPES)}")
+        raise HarnessError(400, f"unknown scopes {unknown}; known: {', '.join(known)}")
     return scopes
 
 
@@ -268,10 +259,10 @@ class GitHubResetRequest(BaseModel):
     confirm: bool = False
 
 
-def _collect_operations(app: FastAPI, mgr) -> list[dict]:
+def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS) -> list[dict]:
     operations: list[dict] = []
-    existing = [route for route in app.routes if isinstance(route, APIRoute) and route.path in ADMIN_PATHS]
-    missing = ADMIN_PATHS - {route.path for route in existing}
+    existing = [route for route in app.routes if isinstance(route, APIRoute) and route.path in paths]
+    missing = paths - {route.path for route in existing}
     if missing:
         log.warning("admin API has no unversioned handler for %s", ", ".join(sorted(missing)))
     for route in existing:
@@ -320,9 +311,11 @@ async def _apply_account_update(svc, actor: str, user_id: str, body: AccountUpda
     return row
 
 
-def register(app: FastAPI, mgr) -> None:
-    matchers = [_template_re(path) for path in ADMIN_PATHS]
-    operations = _collect_operations(app, mgr)
+def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset()) -> None:
+    """``module_paths``: the present add-on modules' owner routes to serve here too (Module.admin_paths)."""
+    paths = ADMIN_PATHS | module_paths
+    matchers = [_template_re(path) for path in paths]
+    operations = _collect_operations(app, mgr, paths)
 
     @app.get(PREFIX)
     async def admin_root(request: Request):

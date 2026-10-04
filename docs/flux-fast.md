@@ -9,7 +9,7 @@ a staged ComfyUI build need an explicit owner command (disk, bandwidth, and the 
 
 ## Pins
 
-Manifest: [`harness/images_flux_fast.json`](../harness/images_flux_fast.json). Weights are not in git.
+Manifest: [`harness_modules/images/flux_fast.json`](../harness_modules/images/flux_fast.json). Weights are not in git.
 
 | Asset | Source | Revision | File | Bytes | SHA-256 |
 | --- | --- | --- | --- | --- | --- |
@@ -50,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File ops/images-models.ps1 install flux-fast
 powershell -ExecutionPolicy Bypass -File ops/images-models.ps1 remove flux-fast
 ```
 
-Or `python -m harness.images_models status|install|remove flux-fast`. Downloads stream to `.part`, resume with
+Or `python -m harness_modules.images.models status|install|remove flux-fast`. Downloads stream to `.part`, resume with
 `Range` when the server honors it, verify size and SHA-256, then `os.replace` onto the destination. Free-space
 preflight: missing payload + one temp copy of the largest file + 5 GiB reserve. Query strings are never logged.
 

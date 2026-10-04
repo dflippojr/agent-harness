@@ -21,7 +21,7 @@ DOC = ROOT / "docs" / "management-parity.md"
 WEB = ROOT / "harness" / "web"
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
-# The CLI's hand-written commands (the rest come from cli.ADMIN_COMMANDS) and the owner API route each one calls.
+# The CLI's hand-written commands (the rest come from cli.admin_commands()) and the owner API route each one calls.
 HAND_WRITTEN = {
     "list": ("GET", "/sessions"), "new": ("POST", "/sessions"), "show": ("GET", "/sessions/{ref}"),
     "transcript": ("GET", "/sessions/{ref}/transcript"), "cancel": ("POST", "/sessions/{ref}/cancel"),
@@ -190,7 +190,7 @@ def test_owner_endpoints_have_a_cli_command_that_calls_them(operations):
 
 
 def test_every_cli_admin_command_calls_an_owner_operation(operations):
-    for words, method, path, _, _ in cli.ADMIN_COMMANDS:
+    for words, method, path, _, _ in cli.admin_commands():  # the core's rows and the add-on modules'
         assert _is_operation(operations, method, path or "/"), (words, method, path)
 
 
