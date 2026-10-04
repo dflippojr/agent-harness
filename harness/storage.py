@@ -193,10 +193,13 @@ def _escapes_via_link(path: Path, root: Path) -> bool:
         return True
 
 
-def session_dirs(cfg, s: dict | None) -> dict[str, Path]:
-    """Where session `s` keeps its files: its account's folders, or its App's for an App session."""
+def session_dirs(cfg, s: dict) -> dict[str, Path]:
+    """Where session `s` keeps its files: its account's folders, or its App's for an App session. A missing row has
+    no folders: guessing the owner's would put an erased App session's files there."""
     from .principal import session_user_id
-    user_id, app_id = session_user_id(s), (s or {}).get("app_id") or ""
+    if not s:
+        raise ValueError("no such session, so no session folders")
+    user_id, app_id = session_user_id(s), s.get("app_id") or ""
     return {"workspaces": workspaces_dir(cfg, user_id, app_id), "transcripts": transcripts_dir(cfg, user_id, app_id),
             "checkpoints": checkpoints_dir(cfg, user_id, app_id), "artifacts": artifacts_dir(cfg, user_id, app_id)}
 

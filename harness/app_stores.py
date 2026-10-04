@@ -60,6 +60,12 @@ _BY_SESSION = frozenset({
     "delete_review_comments", "insert_event", "events", "pushed_heads", "last_event_seq", "approval_for_call",
     "approvals", "insert_app_tool_call", "get_app_tool_call", "app_tool_calls", "finish_app_tool_call",
 })
+# The by-session calls above that write. An erased App session's id leaves the index, so they would land in the main
+# store (the owner's): they are refused for it instead.
+_SESSION_WRITES = frozenset({
+    "add_checkpoint", "delete_checkpoints", "put_artifact", "add_review_comment", "add_secret_dismissal",
+    "delete_review_comments", "insert_event", "insert_app_tool_call", "finish_app_tool_call",
+})
 # Session columns the in-memory index of App sessions mirrors.
 _INDEXED = ("app_id", "owner_id", "kind", "status")
 _SEQ = itertools.count(1)  # orders the index updates staged by transactions, in the order they ran
@@ -224,6 +230,7 @@ class SessionStores:
         self._approvals: dict[str, str] = {}   # approval id -> App
         self._tokens: dict[str, str] = {}      # approval token -> App
         self._erased: set[str] = set()       # Apps whose store and folder are gone: never reopened
+        self._gone: set[str] = set()         # App sessions erased since startup: writes about them are refused
         self._closed = False
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
@@ -356,9 +363,18 @@ class SessionStores:
             raise AttributeError(name)
         if name in _BY_SESSION:
             def by_session(sid, *args, **kwargs):
+                if name in _SESSION_WRITES:
+                    self._refuse_erased(sid)
                 return getattr(self.for_session(sid), name)(sid, *args, **kwargs)
             return by_session
         return getattr(self.main, name)
+
+    def _refuse_erased(self, sid: str) -> None:
+        """Refuse a write about an erased App session: nothing of it may be written again, least of all into the
+        main store, where its id now routes."""
+        with self._lock:
+            if sid in self._gone:
+                raise sqlite3.ProgrammingError(f"session {sid} was erased")
 
     def _indexed(self, pred) -> list[tuple[str, dict]]:
         with self._lock:
@@ -410,6 +426,7 @@ class SessionStores:
             raise
 
     def update_session(self, sid: str, **fields) -> None:
+        self._refuse_erased(sid)
         app_id = self.app_of(sid)
         if not app_id:
             return self.main.update_session(sid, **fields)
@@ -468,6 +485,8 @@ class SessionStores:
 
             def forget() -> None:
                 self._forget(sid, committed=True)
+                with self._lock:
+                    self._gone.add(sid)
                 for a in approvals:
                     self._forget_approval(a["id"], a["token"])
             db.after_commit(forget)
@@ -492,6 +511,7 @@ class SessionStores:
             self._proxies.pop(app_id, None)
             for sid in [s for s, e in self._sessions.items() if e["app_id"] == app_id]:
                 del self._sessions[sid]
+                self._gone.add(sid)
             for aid in [a for a, owner in self._approvals.items() if owner == app_id]:
                 del self._approvals[aid]
             for token in [t for t, owner in self._tokens.items() if owner == app_id]:
@@ -583,6 +603,7 @@ class SessionStores:
 
     # approvals --------------------------------------------------------------------------------------------------------
     def insert_approval(self, a: dict) -> None:
+        self._refuse_erased(a["session_id"])
         app_id = self.app_of(a["session_id"])
         if not app_id:
             return self.main.insert_approval(a)

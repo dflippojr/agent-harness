@@ -1620,7 +1620,8 @@ class Manager:
         s = self.db.get_session(sid)
         if s is None:
             return False
-        await self._compare_stop(sid)
+        await self._stop_run(sid)
+        s = self.db.get_session(sid) or s
         sandbox = self.runner._sandboxes.pop(sid, None)
         if sandbox is not None:
             await sandbox.remove()
@@ -1628,6 +1629,15 @@ class Manager:
         await asyncio.to_thread(self.db.delete_session, sid)
         log.info("erased session %s", sid)
         return True
+
+    async def _stop_run(self, sid: str) -> None:
+        """Stop session `sid` if it runs, and wait for its run task to be over, its end included: the status is
+        final before the run's end (sandbox stop, branch save, transcript) is, and nothing may be written after an
+        erase."""
+        await self._compare_stop(sid)
+        task = self.tasks.get(sid)
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
 
     def _erase_files(self, s: dict) -> None:
         from . import storage
@@ -1644,7 +1654,7 @@ class Manager:
         """Erase a revoked App's store and folder, leaving a tombstone in the registry: its running sessions are
         stopped and their sandboxes removed first."""
         for sid in self.db.app_session_ids(app_id):
-            await self._compare_stop(sid)
+            await self._stop_run(sid)
             sandbox = self.runner._sandboxes.pop(sid, None)
             if sandbox is not None:
                 await sandbox.remove()

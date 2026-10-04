@@ -417,8 +417,9 @@ Requires owning the session (or an owner token, for the owner's own sessions); `
 
 ### `DELETE /api/v1/sessions/{id}`
 Erases one of your App's sessions; `204` with no body. Only the App that started the session may: another App (with
-`sessions:all` too), the owner and members get a `404`, as if it didn't exist. A running session is cancelled first.
-Then its sandbox container, working directory, checkpoint snapshots and transcript are removed, and last its rows:
+`sessions:all` too), the owner and members get a `404`, as if it didn't exist. A running session is cancelled first,
+and the response waits for its run to end, including a run that just reached `done` and is still saving its branch
+and transcript, so nothing of it is written after the erase. Then its sandbox container, working directory, checkpoint snapshots and transcript are removed, and last its rows:
 the session, its events, tool calls and results, approvals, artifacts, checkpoints, review drafts and search entries.
 It is idempotent: deleting a session that is already gone returns `204` again. Usage counters (tokens, cost) stay
 with the owner as metadata. Older nightly backups keep the session until they rotate out (see Backups above). A

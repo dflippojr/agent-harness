@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
+import threading
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from harness import storage
@@ -236,6 +239,87 @@ def test_retention_days_and_the_app_default_expire_sessions_in_the_sweep_while_t
     assert m.db.get_session(owner_sid) is not None
     assert asyncio.run(m.sweep_app_data())["sessions_expired"] == []
     m.db.close()
+
+
+@pytest.mark.parametrize("erase", ["delete", "sweep", "revoke"])
+def test_an_erase_right_after_done_waits_for_the_run_to_end_and_leaves_nothing(tmp_path, erase):
+    """The status is final before the run's end (branch save, transcript) is over: an erase in that window waits
+    for it, so nothing is written after the erase, in the App's folder or the owner's."""
+    cfg = make_cfg(tmp_path)
+    m = Manager(cfg, chat=Script([Completion(content="ok")]))
+    ended, release = threading.Event(), threading.Event()
+    save_branch = m.runner.save_branch
+
+    async def held(sid: str) -> None:  # the run's end, held at a gate before its transcript
+        await save_branch(sid)
+        ended.set()
+        await asyncio.to_thread(release.wait, 30)
+    m.runner.save_branch = held
+    client = TestClient(create_app(m))
+    with client:
+        a_id, a = _key(client, "app-a", "sessions")
+        sid = client.post("/api/v1/sessions", headers=a, json={"prompt": "task", "retention_days": 1}).json()["id"]
+        wait_for(ended.is_set)
+        assert _done(client, sid, a) and sid in m.tasks
+        s = m.db.get_session(sid)
+        if erase == "delete":
+            def run() -> None:
+                assert client.delete(f"/api/v1/sessions/{sid}", headers=a).status_code == 204
+        elif erase == "sweep":
+            def run() -> None:
+                assert client.portal.call(m.sweep_app_data, time.time() + 2 * DAY)["sessions_expired"] == [sid]
+        else:
+            assert client.delete(f"/keys/{a_id}").status_code == 204
+
+            def run() -> None:
+                later = time.time() + APP_ERASE_GRACE_SECONDS + 60
+                assert client.portal.call(m.sweep_app_data, later)["apps_erased"] == [a_id]
+        worker = threading.Thread(target=run)
+        worker.start()
+        time.sleep(0.3)
+        waited = m.db.get_session(sid) is not None and m.db.app_of(sid) == a_id  # the erase waits for the run's end
+        release.set()
+        worker.join(30)
+        assert waited and not worker.is_alive()
+        assert m.db.get_session(sid) is None and sid not in m.tasks
+        main = Path(m.db.main.path)
+        store = Path(cfg.data_dir) / "apps" / a_id / APP_STORE_FILE
+    assert not any(p.exists() for p in _files(cfg, s))
+    assert not (storage.transcripts_dir(cfg, "owner") / f"{sid}.md").exists()
+    assert not any(rows_of(main, {sid}).values())
+    assert not store.parent.exists() if erase == "revoke" else not any(rows_of(store, {sid}).values())
+
+
+def test_nothing_about_an_erased_app_session_is_written_to_the_owners_files_or_store(tmp_path):
+    """Its id no longer routes to the App, so a late writer must not fall back to the owner's folders or store."""
+    cfg = make_cfg(tmp_path)
+    cfg.search.enabled = True
+    m = Manager(cfg, chat=Script([Completion(content="ok")]))
+    client = TestClient(create_app(m))
+    with client:
+        _, a = _key(client, "app-a", "sessions")
+        sid = client.post("/api/v1/sessions", headers=a, json={"prompt": "pelican"}).json()["id"]
+        wait_for(lambda: _done(client, sid, a) and sid not in m.tasks)
+        assert client.delete(f"/api/v1/sessions/{sid}", headers=a).status_code == 204
+        main = Path(m.db.main.path)
+
+        m.runner.write_transcript(sid)
+        client.portal.call(m.runner._end_run, sid)
+        client.portal.call(m.runner.save_branch, sid)
+        for write in (lambda: m.db.insert_event(sid, "error", {"message": "pelican"}),
+                      lambda: m.db.put_artifact(sid, "h1", "pelican"),
+                      lambda: m.db.update_session(sid, title="pelican"),
+                      lambda: m.db.insert_approval({"id": "ap-x", "session_id": sid, "tool_call_id": "c1",
+                                                    "tool": "write_file", "args": {}, "reason": "ask"})):
+            with pytest.raises(sqlite3.ProgrammingError, match="was erased"):
+                write()
+        with pytest.raises(ValueError):
+            storage.session_dirs(cfg, None)
+        owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
+        wait_for(lambda: _done(client, owner_sid))
+        m.db.insert_event(owner_sid, "error", {"message": "still written"})  # other sessions are unaffected
+    assert not (storage.transcripts_dir(cfg, "owner") / f"{sid}.md").exists()
+    assert not any(rows_of(main, {sid}).values())
 
 
 def test_the_maintenance_cleanup_runs_the_app_sweep(tmp_path):

@@ -2600,6 +2600,8 @@ class Runner:
 
     async def _end_run_inner(self, sid: str) -> None:
         s = self.db.get_session(sid)
+        if s is None:  # erased: nothing of it may be written again
+            return
         if s["run"].get(END_PENDING) != RUN_FINISHED:  # else a restart after its run_finished: just the rest
             s = await self._run_finished(sid)
         if s.get("backend", "local") == "local":
@@ -2666,6 +2668,8 @@ class Runner:
             from .transcript import write_transcript
             from . import storage
             s = self.db.get_session(sid)
+            if s is None:  # erased meanwhile
+                return
             dest = storage.session_dirs(self.cfg, s)["transcripts"]
             dest.mkdir(parents=True, exist_ok=True)
             write_transcript(self.db, dest, sid)
@@ -2675,7 +2679,7 @@ class Runner:
     async def save_branch(self, sid: str) -> None:
         """Commit leftovers on the session branch and copy it to a local source repo."""
         s = self.db.get_session(sid)
-        project = self.project_for(s)
+        project = self.project_for(s) if s else None
         if not project or not project.repo or not s["base_commit"] or s["workspace_removed"]:
             return
         ws = Path(s["workspace"])
