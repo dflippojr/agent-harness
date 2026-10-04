@@ -27,7 +27,7 @@ that template's 4-step Lightning LoRA subgraph instead of inventing sampler valu
 
 ## Design
 
-- **GPU hand-over** (`harness/images.py`): Qwen (~14.7 GB) and an image model never fit together. A batch of image
+- **GPU hand-over** (`harness_modules/images/service.py`, formerly `harness/images.py`): Qwen (~14.7 GB) and an image model never fit together. A batch of image
   jobs:
   1. waits while the GPU guard is paused;
   2. takes `InferenceGate.acquire_exclusive()` (the model call in flight finishes, agent turns wait, endpoint requests

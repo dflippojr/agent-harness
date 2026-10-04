@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from harness import images_models as models
+from harness_modules.images import models as models
 from harness.config import ImagesConfig
 
 

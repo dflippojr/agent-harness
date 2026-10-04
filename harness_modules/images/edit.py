@@ -12,8 +12,7 @@ import io
 import threading
 from pathlib import Path
 
-from .config import ImagesConfig, resolve_images_models_dir
-from .fileops import ToolError
+from harness.modules import ImagesConfig, ToolError, resolve_images_models_dir
 
 EDIT_MODEL_ID = "edit"
 OPERATION_GENERATE = "generate"

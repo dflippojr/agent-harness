@@ -13,7 +13,8 @@ import yaml
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from harness import config, image_edit, setup_config
+from harness import config, setup_config
+from harness_modules.images import edit as image_edit
 from harness.api import create_app
 from harness.accounts import AccountService
 from harness.config import GuestAccess
@@ -142,7 +143,7 @@ def test_full_profile_image_edit_upgrade_without_force(tmp_path):
 
 def test_setup_config_records_non_default_images_models_dir(tmp_path):
     from harness.config import DEFAULT_IMAGES_MODELS_DIR, resolve_images_models_dir
-    from harness.images_models import models_dir as flux_models_dir
+    from harness_modules.images.models import models_dir as flux_models_dir
 
     custom = tmp_path / "opt" / "comfy-models"
     args = ["--config-dir", str(tmp_path / "cfg"), "--data-dir", str(tmp_path / "data"), "--model", "gpt-oss",

@@ -49,9 +49,9 @@ from typing import Callable
 import httpx
 import yaml
 
-from .config import ImagesConfig
-from .fileops import ToolError
-from . import image_edit
+from harness.modules import ImagesConfig, ToolError
+
+from . import edit as image_edit
 from . import upscale as upscale_mod
 
 IMAGE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -378,12 +378,12 @@ def workflow(model: str, prompt: str, width: int, height: int, seed: int, prefix
 
 
 async def _run(args: list[str]) -> tuple[int, str, str]:
-    from .sandbox import run_cmd
+    from harness.modules import run_cmd
     return await run_cmd(args, timeout=30)
 
 
 def _comfy_revision(cfg: ImagesConfig) -> str:
-    from .images_models import comfy_version_label
+    from .models import comfy_version_label
     return comfy_version_label(Path(cfg.comfy_dir))
 
 
@@ -643,7 +643,7 @@ class ImageService:
     def _warm_flux_status(self) -> None:
         """Hash flux-fast assets off the event loop so the first status poll is O(stat)."""
         try:
-            from .images_models import inspect_flux_fast
+            from .models import inspect_flux_fast
             inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
                               hash_if_needed=True)
             self._flux_verify_error = None
@@ -725,7 +725,7 @@ class ImageService:
             await self.comfy.stop()
 
     def flux_status(self) -> dict:
-        from .images_models import inspect_flux_fast
+        from .models import inspect_flux_fast
         report = inspect_flux_fast(self.cfg, object_info=self.object_info, manifest=self.flux_manifest,
                                    hash_if_needed=False)
         if report.get("verifying"):
@@ -1146,7 +1146,7 @@ class ImageService:
 
     async def _wait_for_memory(self, paused: Callable[[], bool]) -> bool:
         """Hold ComfyUI while available RAM is under the guard's threshold. False if the GPU guard paused first."""
-        from .gpu_guard import MEMORY_POLL_SECONDS
+        from harness.modules import MEMORY_POLL_SECONDS
         if self.memory_low():
             self.phase = "waiting_memory"
             log.info("image batch waiting for memory")

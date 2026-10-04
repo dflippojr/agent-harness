@@ -327,6 +327,9 @@ class _Toolkit:
     def refresh_soon(self):
         return None
 
+    def itself(self):
+        return self
+
 
 def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
     """app.capabilities must strip daemon toolkits and homelab tools, not only system-prompt text."""
@@ -338,7 +341,7 @@ def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
     manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
-    manager.runner.images = _Toolkit(("generate_image",))
+    manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.runner.sessions = _Toolkit(("session_search", "session_read"))
     with client:
         app = client.post("/keys", json={
@@ -399,7 +402,7 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
     manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
-    manager.runner.images = _Toolkit(("generate_image",))
+    manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.runner.sessions = _Toolkit(("session_search", "session_read"))
     with client:
         app = client.post("/keys", json={
@@ -477,7 +480,7 @@ def test_never_patched_app_keeps_inherited_tools_and_notifications(tmp_path):
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
     manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
-    manager.runner.images = _Toolkit(("generate_image",))
+    manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.runner.sessions = _Toolkit(("session_search", "session_read"))
     with client:
         app = client.post("/keys", json={
@@ -512,7 +515,7 @@ def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
     manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
-    manager.runner.images = _Toolkit(("generate_image",))
+    manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.runner.sessions = _Toolkit(("session_search", "session_read"))
     with client:
         app = client.post("/keys", json={
@@ -549,7 +552,7 @@ def test_active_app_follows_live_config_patch(tmp_path):
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
     manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
-    manager.runner.images = _Toolkit(("generate_image",))
+    manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.runner.sessions = _Toolkit(("session_search", "session_read"))
     with client:
         app = client.post("/keys", json={
@@ -899,7 +902,7 @@ def test_web_installed_enabled_overlay_matrix(tmp_path, monkeypatch,
 
 
 def _image_edit_loadable(tmp_path, *, installed=True, yaml_enabled=True):
-    from harness import image_edit
+    from harness_modules.images import edit as image_edit
     comfy_dir = tmp_path / "comfy"
     models_dir = tmp_path / "models"
     comfy_dir.mkdir()

@@ -147,6 +147,11 @@ the Manager's tool construction are derived from `installed AND <section>.enable
 `web.enabled`, `search.enabled`, `jobs.enabled`, `endpoint.enabled`, `images.enabled`,
 `gpu_guard.enabled`, `notifications.enabled`, `backup.enabled`.
 
+An add-on module ([`modules.md`](modules.md)) brings its own keys (images: `images.enabled`,
+`images.edit_enabled`, `images.*` limits, `modules.images`). They exist only while the module is present; a
+saved overlay value for an absent module's key is kept but not applied, so uninstalling one never quarantines
+the overlay.
+
 Installer/file-only metadata (value omitted): `listen.host`, `listen.port`, `paths.data_dir`, `paths.repos_dir`,
 `backup.dir`, `notify.server`, `notify.topic`, `notify.token_file`, `smart_approvals.secret_ref`,
 `smart_approvals.proxy`, `install.profile`, `modules.*`, `compaction.mask_min_chars`.
@@ -159,7 +164,7 @@ Require a live app token (`ha-`) and the related scope. An app value may only na
 | --- | --- |
 | `app.default_backend` / `app.default_model` / `app.default_effort` | used only when a session request omits them |
 | `app.sessions.max_turns` / `app.sessions.max_completion_tokens` | capped by owner limits (`capped_by`) |
-| `app.capabilities` | subset of `web`, `images`, `search`, `memory_library`, `remote_control`, `homelab` already granted, installed, and allowed |
+| `app.capabilities` | subset of `web`, `search`, `memory_library`, `remote_control`, `homelab` (and `images` while that module is present) already granted, installed, and allowed |
 | `app.notify.completion` | `inherit` or `never` |
 
 Owner, device, runner, guest, and anonymous credentials cannot impersonate app configuration.

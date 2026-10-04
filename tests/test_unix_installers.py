@@ -112,8 +112,8 @@ def test_linux_image_edit_opt_in_is_documented_and_not_default(tmp_path):
 
 def test_installers_share_images_models_dir_with_daemon_and_doctor():
     from harness.config import DEFAULT_IMAGES_MODELS_DIR, ImagesConfig, resolve_images_models_dir
-    from harness.images_models import models_dir as flux_models_dir
-    from harness import image_edit
+    from harness_modules.images.models import models_dir as flux_models_dir
+    from harness_modules.images import edit as image_edit
 
     default = resolve_images_models_dir(ImagesConfig())
     assert default == Path(DEFAULT_IMAGES_MODELS_DIR)

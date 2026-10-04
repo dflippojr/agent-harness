@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from harness.fileops import ToolError
-from harness import upscale as upscale_mod
+from harness_modules.images import upscale as upscale_mod
 from harness.api import create_app
 
 from test_phase6 import PNG, image_manager

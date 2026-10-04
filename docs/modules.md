@@ -1,0 +1,115 @@
+# Optional modules
+
+Issue #334 splits Agent Harness Server into a core and optional add-on modules. This page is the module
+interface ([`harness/modules.py`](../harness/modules.py)) and how to write a module. Images
+([`harness_modules/images/`](../harness_modules/images/)) is the first module behind it; the other optional
+features move in stage (c).
+
+## Rules
+
+- **One registration point.** A module is a package whose `MODULE` attribute is a `harness.modules.Module`. Everything
+  the module adds to the daemon is a field of that object. The core asks `harness/modules.py` for contributions and
+  never imports a module package (`tests/test_modules.py` scans `harness/` for it).
+- **Modules import the core only through `harness.modules`.** Its `_PUBLIC` table re-exports the core objects a
+  module may use (`HarnessError`, `RouteTable`, `require_owner`, `app_auth`, `SettingSpec`, `ToolError`,
+  `ServerControl`, …). A module never imports another module. Both are enforced by a test.
+- **Absent means absent.** A module is *present* when its package is discovered and its first service-profile
+  switch is installed (`cfg.installed.<switch>`, [#26](service-profile.md)). An absent module (service profile, or
+  the package isn't there) adds no routes (they answer 404, or 405 from the static site for other methods), no
+  tools, no settings keys, no capability entries, no App scope, and the daemon starts as usual.
+- **Present but switched off is not absent.** `images.enabled: false` keeps the module's settings keys (so the owner
+  can turn it back on) and its routes, which answer "image generation is disabled" as before.
+
+## Discovery
+
+A configured list: `module_packages` in `config/harness.yaml` (or `harness.local.yaml`), in load order:
+
+```yaml
+module_packages: [harness_modules.images]   # [] runs the core alone
+```
+
+Without the key the list is every package under the `harness_modules` namespace, so installing a module is putting
+its package there and uninstalling it is removing it. A listed package that fails to import is logged and skipped:
+a broken add-on never stops the core.
+
+Why a list and not Python entry points: the Server runs from a checkout (`python -m harness`, deployed by
+fast-forwarding the live checkout), not from an installed distribution, so there is no package metadata for entry
+points to read. A list is explicit, ordered and testable (tests pass their own), and the namespace default needs no
+configuration for an ordinary install.
+
+## Layout
+
+```
+harness/                 the core (moves to its own repository in stage f)
+  modules.py             the interface, discovery and ModuleHost
+harness_modules/         a PEP 420 namespace package: no __init__.py, so separate distributions can each add one
+  images/
+    __init__.py          MODULE = Module(...): the registration point; light, the CLI imports it
+    runtime.py           ImagesRuntime: lifecycle, GPU hand-over, tools, metrics
+    routes.py            owner (/images, image-archive retention) and App API (/api/v1/images) routes
+    settings.py          the images.* registry keys
+    doctor.py            python -m harness.doctor checks
+    service.py edit.py archive.py models.py upscale.py flux_fast.json   (formerly harness/images*.py etc.)
+```
+
+Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
+`harness_modules/` stays here as add-on packages: nothing in either tree has to be pulled out of the other, and a
+module's only link back is `harness.modules`.
+
+## What a module contributes
+
+| `Module` field | What the core does with it |
+| --- | --- |
+| `name`, `switches` | `switches[0]` decides presence; every switch gets a `capabilities.modules.<switch>` entry and a hidden `modules.<switch>` registry key while present. |
+| `runtime_enabled(cfg, switch)` | The runtime switch behind a profile switch (`cfg.images.enabled`). `module_effective` = installed AND this. |
+| `runtime(manager, module)` | Builds a `ModuleRuntime` (below) for each Manager. |
+| `owner_routes()` | A `RouteTable` installed with the core's daemon routes, behind the same owner/guest/member guard. Handlers call `require_owner` where the route is owner-only. |
+| `admin_paths` | Owner routes also served under `/api/admin/v1` (owner credential required) and listed in its `operations`. |
+| `app_routes()` | A `RouteTable` of `/api/v1/...` routes. Handlers call `app_auth(request, scope)`. |
+| `public_routes()` | Unauthenticated routes (none today). |
+| `app_scopes`, `app_capabilities` | App token scopes it adds, and `app.capabilities` values (`{capability: scope}`). |
+| `tools` (`ToolGate`), `tool_names` | When the runtime's `toolkit()` is offered to a session: project flag, App capability, members, MCP for hosted sessions, whether it writes into the workspace (`workspace_root` / runner `put_bytes`), which tools mutate files (quota and checkpoints), the telemetry span. `tool_names` are reserved against App tools. |
+| `settings()` | `SettingSpec`s with defaults, bounds, `enable_check`s and named getters/setters, merged into the registry. |
+| `cli`, `cli_groups` | Rows in `harness.cli` `ADMIN_COMMANDS` format (`harness images …`); the stage (a) parity rows. The Mac client bundle carries a JSON copy (`mac_client.py`). |
+| `principal_capabilities(owner, scopes)` | Entries for `/me` and `/api/v1/me` `capabilities`. |
+| `doctor(report, cfg)` | Checks for `python -m harness.doctor`. |
+| `docs` | Pointers to the module's documentation. |
+
+`ModuleRuntime` hooks, all optional:
+
+| Hook | When |
+| --- | --- |
+| `__init__` | In `Manager.__init__`, before Maintenance. Set `self.backup` to join the nightly backup (images: the image archive). |
+| `init()` | After the managed settings overlay is applied: create services here (`self.service`). |
+| `wire_resources(guard, warmer)` | The resource guard is on: take its RAM check and lazy-load preference. |
+| `start()` / `stop()` | Daemon start and shutdown. |
+| `toolkit()` | The object with `tool_names`, `schemas()` and `call()`; offered per `Module.tools`. |
+| `gpu_taken`, `busy()`, `gpu_hold()`, `gpu_resume(ids)` | GPU interaction: the model warmer stays parked while `gpu_taken`; skill review waits while `busy()`; the GPU guard's pause and resume. |
+| `features()`, `app_root()` | `/api/v1` `features` entries and extra top-level keys (`image_modes`). |
+| `metrics(out, db)` | Prometheus lines on `/metrics`. |
+
+`manager.<module name>` returns the runtime's `service` (None while switched off or absent), for code written before
+modules; new core code goes through `manager.modules`.
+
+## Writing a module
+
+1. Make `harness_modules/<name>/__init__.py` with `MODULE = Module(name=..., switches=(...), ...)`. Keep it light:
+   point at the heavy parts with small functions that import them on demand.
+2. Import the core only from `harness.modules`. If you need a core object it doesn't export, add it to `_PUBLIC`.
+3. Put the profile switch in `config.MODULE_NAMES` so profiles and the installer accept it (see below).
+4. Add tests next to the module's behaviour, and check `tests/test_modules.py` still passes with your package absent
+   (`module_packages: []`).
+
+## What stage (b) leaves in the core
+
+These are names, not imports, and move with the config and storage split in stages (c) and (f):
+
+- `config.py`: the `images:` YAML section (`ImagesConfig`), the `images` / `image_edit` profile switches in
+  `MODULE_NAMES` and `ModulesConfig`, `Project.images`, and `DEFAULT_IMAGES_MODELS_DIR`. Config loads before any
+  module is discovered and the installer writes these switches, so the core still parses them; it only gives them
+  effect when a present module answers to them.
+- `db.py` and its migrations: the `images` table.
+- `access.py`: members are refused `/images` paths (harmless when the routes are absent).
+- `checkpoints.MUTATING_TOOLS` lists `generate_image`; the module also declares it through `ToolGate.mutating`.
+- `resources.py` and `endpoint.py` read `manager.images` for the ComfyUI GPU holder and the `/v1` `features.images`
+  flag.

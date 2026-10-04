@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
@@ -28,6 +28,7 @@ from . import taint
 from . import telemetry
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
+from .modules import principal_capabilities
 from .webgzip import WebGzipMiddleware
 
 NO_SUCH_JOB = "no such job"
@@ -146,19 +147,6 @@ class RunnerResult(BaseModel):
     kind: str = "internal"
 
 
-class ImageRequest(BaseModel):
-    prompt: str
-    model: str = "fast"
-    aspect_ratio: str = "1:1"
-    resolution: str = "auto"
-    seed: int | None = None
-    upscale: str = "none"
-
-
-class ImageUpscaleRequest(BaseModel):
-    upscale: str = "2x"
-
-
 class GpuHoldRequest(BaseModel):
     duration_seconds: int | None = None
     force: bool = False   # load: go ahead although available RAM is under the guard's threshold
@@ -194,10 +182,6 @@ class SkillReject(BaseModel):
     reason: str = ""
 
 
-class ImageArchiveRetentionApply(BaseModel):
-    confirmation: str
-
-
 class Job(BaseModel):
     name: str
     prompt: str
@@ -221,9 +205,6 @@ class Template(BaseModel):
 def sse(event: dict) -> str:
     head = f"id: {event['seq']}\n" if event.get("seq") is not None else ""
     return f"{head}event: {event['type']}\ndata: {json.dumps(event)}\n\n"
-
-
-IMAGE_NOT_READY = "image not ready"
 
 
 class RouteTable:
@@ -557,7 +538,7 @@ async def me(request: Request):
             "admin": ident.role == "owner",
             "local_sessions": ident.role in ("owner", "member"),
             "hosted_backends": ident.role == "owner",
-            "images": ident.role == "owner",
+            **principal_capabilities(cfg, ident.role == "owner"),
             "jobs": ident.role == "owner",
             "runners": ident.role == "owner",
             "accounts": ident.role == "owner",
@@ -762,179 +743,6 @@ async def models_warm(request: Request):
         raise HarnessError(400, "the local model is disabled by this service profile")
     model = m.cfg.models[m.cfg.default_model]
     return {"name": model.name, "state": await m.warmer.warm(model)}
-
-
-# image generation
-def images_service(request: Request):
-    m = mgr(request)
-    if m.images is None:
-        raise HarnessError(400, "image generation is disabled in config/harness.yaml")
-    return m.images
-
-
-def image_payload(job: dict, svc, request: Request, status: dict) -> dict:
-    from . import image_edit
-    parent = svc.db.get_image(job["parent_id"]) if job.get("parent_id") else None
-    children = svc.db.image_children(job["id"])
-    if request.state.access.role == "guest":
-        children = [child for child in children if not image_edit.is_private(child)]
-    eligibility = image_edit.edit_eligibility(
-        job.get("width"), job.get("height"), max_pixels=svc.cfg.max_pixels)
-    edit = status.get("edit") or {}
-    ready = bool(svc.edit_enabled and edit.get("available"))
-    editable = ready and eligibility["editable"]
-    editable_reason = (eligibility["reason"] if ready
-                       else (edit.get("setup") or svc.edit_status().get("setup", "")))
-    return {**job, "service": status, "private": image_edit.is_private(job),
-            "editable": editable, "editable_reason": editable_reason,
-            "parent": ({"id": parent["id"], "width": parent["width"], "height": parent["height"]}
-                       if parent else None),
-            "children": [{"id": child["id"], "operation": child.get("operation") or "generate",
-                          "scale": child.get("scale"), "status": child["status"],
-                          "upscale_model": child.get("upscale_model") or "", "width": child["width"],
-                          "height": child["height"]} for child in children]}
-
-
-def visible_job(job, request):
-    from . import image_edit
-    if job is None:
-        raise HarnessError(404, "no such image")
-    if request.state.access.role == "guest" and image_edit.is_private(job):
-        raise HarnessError(404, "no such image")
-    return job
-
-
-async def read_upload(file: UploadFile | None, limit: int) -> bytes:
-    if file is None:
-        raise HarnessError(400, "file is required")
-    # Ignore the client filename entirely: uploads are stored as a generated id, never as a path.
-    data = await file.read(limit + 1)
-    if len(data) > limit:
-        raise HarnessError(400, f"image is too large (max {limit} bytes)")
-    return data
-
-
-@api_router.get("/images")
-async def list_images(request: Request, limit: int = 60):
-    from . import image_edit
-    svc = images_service(request)
-    visible_operations = tuple(image_edit.PUBLIC_OPERATIONS) if request.state.access.role == "guest" else ()
-    images = svc.db.list_images(limit=limit, operations=visible_operations)
-    status = await asyncio.to_thread(svc.status)
-    return {"status": status, "images": images}
-
-
-@api_router.post("/images", status_code=201)
-async def create_image(body: ImageRequest, request: Request):
-    from .fileops import ToolError
-    svc = images_service(request)
-    try:
-        return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
-                          resolution=body.resolution, seed=body.seed, upscale=body.upscale)
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-
-
-@api_router.post("/images/uploads", status_code=201)
-async def upload_image(request: Request, file: UploadFile = File(...)):
-    from .fileops import ToolError
-    require_owner(request)
-    svc = images_service(request)
-    try:
-        return svc.ingest_upload(await read_upload(file, svc.cfg.max_upload_bytes))
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-
-
-@api_router.post("/images/warmup")
-async def warmup_images(request: Request):
-    """Start ComfyUI without a checkpoint. Called when the owner opens the Images tab."""
-    return await images_service(request).warmup()
-
-
-@api_router.post("/images/cooldown")
-async def cooldown_images(request: Request):
-    """Drop an unused Images-tab warmup so the language model can come back."""
-    return images_service(request).cooldown()
-
-
-@api_router.post("/images/{iid}/edit", status_code=201)
-async def edit_image(iid: str, request: Request, prompt: str = Form(...), mask: UploadFile = File(...),
-                     feather: int = Form(0), seed: int | None = Form(None)):
-    from .fileops import ToolError
-    require_owner(request)
-    svc = images_service(request)
-    parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
-    try:
-        return svc.submit_edit(parent["id"], prompt, await read_upload(mask, svc.cfg.max_upload_bytes),
-                               feather=feather, seed=seed)
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-
-
-@api_router.post("/images/{iid}/upscale", status_code=201)
-async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
-    from .fileops import ToolError
-    svc = images_service(request)
-    parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
-    try:
-        return svc.submit_upscale(parent["id"], body.upscale)
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-
-
-@api_router.post("/images/{iid}/cancel")
-async def cancel_image(iid: str, request: Request):
-    from .fileops import ToolError
-    require_owner(request)
-    svc = images_service(request)
-    job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
-    try:
-        return await svc.cancel(job["id"])
-    except ToolError as e:
-        raise HarnessError(409, str(e))
-
-
-@api_router.delete("/images/{iid}")
-async def delete_image(iid: str, request: Request):
-    from .fileops import ToolError
-    require_owner(request)
-    svc = images_service(request)
-    job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
-    backup = Path(mgr(request).cfg.backup.dir) if mgr(request).cfg.backup.dir else None
-    try:
-        return await svc.delete(job["id"], backup_dir=backup)
-    except ToolError as e:
-        raise HarnessError(404, str(e))
-
-
-@api_router.get("/images/{iid}")
-async def get_image(iid: str, request: Request):
-    svc = images_service(request)
-    variant = "json"
-    raw = iid
-    if raw.endswith(".source.png"):
-        variant, raw = "source", raw[: -len(".source.png")]
-    elif raw.endswith(".mask.png"):
-        variant, raw = "mask", raw[: -len(".mask.png")]
-    elif raw.endswith(".png"):
-        variant, raw = "png", raw[: -len(".png")]
-    job = visible_job(svc.db.get_image(raw), request)
-    owner = request.state.access.role == "owner"
-    if variant == "json":
-        status = await asyncio.to_thread(svc.status)
-        return image_payload(job, svc, request, status)
-    from . import image_edit
-    if variant in ("source", "mask") and not owner:
-        raise HarnessError(404, IMAGE_NOT_READY)
-    path = {"png": svc.path, "source": svc.source_path, "mask": svc.mask_path}[variant](job)
-    if variant == "png" and job["status"] != "done":
-        raise HarnessError(404, IMAGE_NOT_READY)
-    if not path.exists():
-        raise HarnessError(404, IMAGE_NOT_READY)
-    headers = {"Cache-Control": "private, no-store"} if image_edit.is_private(job) or variant != "png" else {
-        "Cache-Control": "max-age=86400"}
-    return FileResponse(path, media_type="image/png", headers=headers)
 
 
 # Resource guard (formerly the GPU guard; /gpu stays as an alias). docs/resource-guard.md
@@ -1422,20 +1230,6 @@ async def maintenance_backup(request: Request):
     return await require_owner(request).maintenance.backup()
 
 
-@api_router.post("/maintenance/image-archive/retention/preview")
-async def image_archive_retention_preview(request: Request):
-    return await asyncio.to_thread(require_owner(request).image_archive.retention_preview)
-
-
-@api_router.post("/maintenance/image-archive/retention/apply")
-async def image_archive_retention_apply(body: ImageArchiveRetentionApply, request: Request):
-    from .image_archive import ImageArchiveError
-    try:
-        return await asyncio.to_thread(require_owner(request).image_archive.apply_retention, body.confirmation)
-    except ImageArchiveError as e:
-        raise HarnessError(409, str(e))
-
-
 @api_router.get("/sessions/{ref}/approvals")
 async def approvals(ref: str, request: Request, all: bool = False):
     m, sid, _ = owned_session(request, ref)
@@ -1852,9 +1646,12 @@ async def chat_events(ref: str, request: Request, after: int = 0, follow: bool =
 
 
 def create_app(manager: Manager | None = None) -> FastAPI:
+    # Built now, not in the lifespan: which add-on modules are present decides which routes exist.
+    manager = manager or Manager(config_mod.load())
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.manager = manager or Manager(config_mod.load())
+        app.state.manager = manager
         telemetry.enable_asyncio_debug()
         probe = telemetry.LoopLagProbe()
         probe.start()
@@ -1869,12 +1666,14 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     app.add_exception_handler(HarnessError, harness_error)
     web_router.install(app)
     app.mount("/static", StaticFiles(directory=WEB), name="static")
-    from . import apps, endpoint
+    from . import apps, endpoint, modules
     endpoint.register(app, mgr)
-    apps.register(app)
+    apps.register(app, manager.cfg)
     api_router.install(app)
+    modules.install_routes(app, manager.cfg, "owner")
+    modules.install_routes(app, manager.cfg, "public")
     from . import admin
-    admin.register(app, mgr)
+    admin.register(app, mgr, modules.admin_paths(manager.cfg))
     # Keep /static for installed bundled clients, while making harness/web directly deployable at a static-site root.
     # This catch-all mount is last so daemon/API routes always win.
     app.mount("/", StaticFiles(directory=WEB), name="web-root")

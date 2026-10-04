@@ -59,11 +59,11 @@ same; only the prefix and the owner credential check are new.
 | Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}` |
 | App provider policy | `/provider-credentials`, `/provider-credentials/{credential_id}` |
 | Mac pairing | `/runner-pairing-codes`, `/runner-pairing-codes/{pid}` |
-| Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup`, image-archive retention preview/apply |
+| Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` (image-archive retention: see Images) |
 | Configuration | `/config`, `/config/schema`, `/config/validate`, `/config/rollback`, `/config/restart` |
 | GPU and models | `/gpu`, `/gpu/{pause\|resume}`, `/models`, `/models/status`, `/models/warm`, `/backends` |
 | Smart approvals | `/smart-approvals` (`GET` status, `PUT` `{mode: off\|shadow\|auto}`; last writer with Settings `smart_approvals.mode`; `off` calls no reviewer) |
-| Images | `/images`, `/images/uploads`, `/images/warmup`, `/images/cooldown`, `/images/{iid}`, `/images/{iid}/edit`, `/images/{iid}/upscale`, `/images/{iid}/cancel` |
+| Images (the images module, [`modules.md`](modules.md): absent on the service profile) | `/images`, `/images/uploads`, `/images/warmup`, `/images/cooldown`, `/images/{iid}`, `/images/{iid}/edit`, `/images/{iid}/upscale`, `/images/{iid}/cancel`, `/maintenance/image-archive/retention/{preview\|apply}` |
 | Runners | `GET /runners` (status only; poll/results stay on the runner token) |
 | Memory | `/memory`, `/memory/profile` |
 | Skills | `/skills`, `/skills/enabled`, `/skills/proposals/{pid}`, install/reject/reopen/review, `/skills/{slug}/enable`, disable, rollback, uninstall, projects, export |

@@ -12,7 +12,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 
-from .fileops import ToolError
+from harness.modules import ToolError
 
 CHOICES = ("none", "2x", "4x")
 SCALES = {"2x": 2, "4x": 4}

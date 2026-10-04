@@ -193,7 +193,7 @@ class Runner:
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
         self.web_overrides: dict = {}           # session id -> WebTools (the canary replays a recorded web, #265)
         self.yields: dict[str, int] = {}        # low-priority session id -> times it stepped aside (guard or a real session)
-        self.images = None                      # images.ImageService, set by the manager when enabled
+        self.modules = None                     # modules.ModuleHost (add-on toolkits such as images), set by the manager
         self.sessions = None                    # search.SessionSearch, set by the manager when enabled
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
         self.skills = None                      # skills.SkillStore, set by the manager when enabled
@@ -260,8 +260,9 @@ class Runner:
         web = self.web_overrides.get(s["id"], self.web)
         if web is not None and self._kit_allowed(project, "web", defaults, "web"):
             kits.append(web)
-        if not member and self.images is not None and self._kit_allowed(project, "images", defaults, "images"):
-            kits.append(self.images)
+        for gate, kit in self._module_toolkits():
+            if (gate.members or not member) and self._kit_allowed(project, gate.project_flag, defaults, gate.capability):
+                kits.append(kit)
         if self.sessions is not None and self._kit_allowed(project, "session_search", defaults, "search"):
             kits.append(self.sessions)
         if (not member and self.remote_control is not None and s["target"] == "tower"
@@ -274,7 +275,17 @@ class Runner:
     @staticmethod
     def _kit_allowed(project, flag: str, defaults: dict, capability: str) -> bool:
         """The project (when there is one) enables the toolkit and app.capabilities doesn't narrow it away."""
-        return (project is None or getattr(project, flag)) and app_allows(defaults, capability)
+        return (project is None or getattr(project, flag, False)) and app_allows(defaults, capability)
+
+    def _module_toolkits(self) -> list:
+        """(ToolGate, toolkit) for each present, switched-on add-on module that offers tools (harness/modules.py)."""
+        return self.modules.toolkits() if self.modules is not None else []
+
+    def _module_gate(self, kit):
+        return self.modules.gate_for(kit) if self.modules is not None and kit is not None else None
+
+    def _module_mutating(self) -> frozenset:
+        return self.modules.mutating_tools() if self.modules is not None else frozenset()
 
     def _app_defaults_for_session(self, s: dict) -> dict:
         if self.settings is None:
@@ -317,8 +328,8 @@ class Runner:
         s = self.db.get_session(sid)
         if s is None or s.get("kind") == "chat" or s.get("backend") != "claude":
             return []
-        served = [k for k in (self.memory, self.web_overrides.get(sid, self.web), self.images, self.sessions)
-                  if k is not None]
+        served = [k for k in (self.memory, self.web_overrides.get(sid, self.web), self.sessions) if k is not None]
+        served += [kit for gate, kit in self._module_toolkits() if gate.mcp]
         schemas = [schema for kit in self.daemon_toolkits(s) if kit in served for schema in kit.schemas()]
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
             schemas = schemas + self.app_tools.schemas(s)
@@ -366,8 +377,9 @@ class Runner:
         if self.app_tools is not None and name in self.app_tools.names(s):
             return await self.app_tools.call(s, call_id, name, args)
         kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
-        if kit is self.images:
-            return await self._call_images(s["id"], s, None, kit, name, args)
+        gate = self._module_gate(kit)
+        if gate is not None and gate.workspace:
+            return await self._call_workspace_kit(s["id"], s, None, kit, name, args)
         if getattr(kit, "wants_session", False):
             return await kit.call(name, args, session=s, call_id=call_id)
         return await kit.call(name, args)
@@ -1745,7 +1757,7 @@ class Runner:
                     mutated.append(name)
                 output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
             span.set({"harness.ok": executed, "harness.output_chars": len(output)})
-        if executed and name in ("run_shell", "git_clone", "write_file", "generate_image") \
+        if executed and (name in ("run_shell", "git_clone", "write_file") or name in self._module_mutating()) \
                 and await self._over_quota(sid):
             await self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
             return True, None
@@ -2061,8 +2073,8 @@ class Runner:
         ok = True
         try:
             kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
-            with telemetry.span("image_job" if kit is not None and kit is self.images else "sandbox_exec",
-                                {"gen_ai.tool.name": name}):
+            gate = self._module_gate(kit)
+            with telemetry.span((gate.span if gate is not None else "") or "sandbox_exec", {"gen_ai.tool.name": name}):
                 output = await self._dispatch(sid, s, call, name, args, ws, kit)
         except (ToolError, OSError, UnicodeError) as e:
             ok = False
@@ -2136,8 +2148,8 @@ class Runner:
                 self.set_status(sid, "waiting_app")
             output = await self.app_tools.call(s, call["id"], name, args, on_wait=waiting,
                                                on_resume=lambda: self._acquire(sid))
-        elif kit is not None and kit is self.images:
-            output = await self._call_images(sid, s, ws, kit, name, args)
+        elif (gate := self._module_gate(kit)) is not None and gate.workspace:
+            output = await self._call_workspace_kit(sid, s, ws, kit, name, args)
         elif kit is not None and getattr(kit, "wants_session", False):
             output = await kit.call(name, args, session=s, call_id=call["id"])
         elif kit is not None:
@@ -2248,7 +2260,8 @@ class Runner:
         output, truncated = recovered
         return output + "\n[truncated; request a smaller range to continue]" if truncated else output
 
-    async def _call_images(self, sid: str, s: dict, ws: Workspace, kit, name: str, args: dict) -> str:
+    async def _call_workspace_kit(self, sid: str, s: dict, ws: Workspace, kit, name: str, args: dict) -> str:
+        """A module tool that writes into the session workspace: on the tower by path, on a runner through put_file."""
         put_bytes = None
         root = Path(s["workspace"]) if s["target"] == "tower" else None
         if root is None and isinstance(ws, RemoteWorkspace):

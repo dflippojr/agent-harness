@@ -29,7 +29,8 @@ provider. `GET /health`, `GET /api/v1`, and authenticated `GET /api/admin/v1` re
 }
 ```
 
-The actual response includes every module. Agent Harness Web, Apps, and SDK consumers should use capability
+The actual response includes every core module, and each add-on module ([`modules.md`](modules.md)) that is
+present: an absent add-on (images on the service profile) has no entry at all. Agent Harness Web, Apps, and SDK consumers should use capability
 discovery instead of assuming that model,
 GPU, jobs, image, memory, runner, or other optional routes are usable.
 
