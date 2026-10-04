@@ -1,4 +1,5 @@
-"""Boot issues /health and /me together, one /me, and route data without waiting on warm-up (#289)."""
+"""Boot issues /health and /me together, one /me, and route data without waiting on warm-up (#289).
+Offline boot keeps the shell instead of becoming a guest (#368)."""
 import shutil
 import subprocess
 from pathlib import Path
@@ -7,7 +8,7 @@ import pytest
 
 
 @pytest.mark.parametrize("scenario", [
-    "owner", "member", "guest", "me-fallback", "client-update", "daemon-update",
+    "owner", "member", "guest", "me-fallback", "client-update", "daemon-update", "offline", "offline-cached",
 ])
 def test_boot_request_chain(scenario):
     node = shutil.which("node")

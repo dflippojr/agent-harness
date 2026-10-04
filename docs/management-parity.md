@@ -287,3 +287,4 @@ Stored in the browser's `localStorage` and read only by that browser. None of th
 | `harness.ownerToken` | Separately hosted Web: its owner token (made with `harness keys create`) |
 | `harness.webUpdateAttempt` | Web update reload guard |
 | `harness.webUpdatePrompt` | Web update prompt dismissal |
+| `harness.lastRole` | Last signed-in role (owner or member only), so an offline launch keeps the app shell |

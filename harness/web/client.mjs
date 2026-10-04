@@ -3,7 +3,7 @@
 
 const BASE_KEY = "harness.daemonUrl";
 const TOKEN_KEY = "harness.ownerToken";
-export const WEB_BUILD_ID = "2026.10.03.5";
+export const WEB_BUILD_ID = "2026.10.04.1";
 export const WEB_PROTOCOL = 2;
 
 function stripTrailingSlashes(text) {
@@ -22,6 +22,14 @@ export function normalizeDaemonUrl(value) {
   }
   url.pathname = stripTrailingSlashes(url.pathname);
   return url.toString().replace(/\/$/, "");
+}
+
+// A request that never reached the server (offline, DNS, Tailscale down). The `offline` code tells it apart from an HTTP
+// error, so boot does not mistake "can't connect" for "not signed in" (#368).
+function unreachable() {
+  const err = new Error("Can't reach Agent Harness Server. Check Connection settings and Tailscale.");
+  err.code = "offline";
+  return err;
 }
 
 export class AgentHarnessWebClient {
@@ -74,7 +82,7 @@ export class AgentHarnessWebClient {
     }
     let resp;
     try { resp = await fetch(this.url(path, surface), opts); }
-    catch (_) { throw new Error("Can't reach Agent Harness Server. Check Connection settings and Tailscale."); }
+    catch (_) { throw unreachable(); }
     if (resp.status === 204) return null;
     const type = resp.headers.get("content-type") || "";
     const data = type.includes("json") ? await resp.json() : await resp.text();
@@ -97,7 +105,7 @@ export class AgentHarnessWebClient {
   async blob(path, surface = "admin") {
     let resp;
     try { resp = await fetch(this.url(path, surface), { headers: this.headers(), cache: "no-store" }); }
-    catch (_) { throw new Error("Can't reach Agent Harness Server. Check Connection settings and Tailscale."); }
+    catch (_) { throw unreachable(); }
     if (!resp.ok) {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) { /* binary/text response */ }
