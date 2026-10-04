@@ -93,9 +93,12 @@ def test_draft_survives_restart_and_sends_one_followup(tmp_path):
         assert client.post(url, json={"path": "x", "side": "new", "start_line": 1, "quoted": [], "comment": "c"}
                            ).status_code == 400
         assert [c["comment"] for c in client.get(url).json()] == ["greet better"]
-        # a fresh Database handle on the same file (daemon restart) still sees the draft
+        # a fresh Database handle on the same file (daemon restart) still sees the draft, in Web's store (#330)
+        from pathlib import Path
+
+        from harness.app_stores import APP_STORE_FILE, WEB_APP_ID
         from harness.db import Database
-        assert Database(m.cfg.db_path).list_review_comments(s["id"])
+        assert Database(Path(m.cfg.data_dir) / "apps" / WEB_APP_ID / APP_STORE_FILE).list_review_comments(s["id"])
         sent = client.post(url + "/send")
         assert sent.status_code == 200
         wait_for(lambda: m.db.get_session(s["id"])["status"] == "done")

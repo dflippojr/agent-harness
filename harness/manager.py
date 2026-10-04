@@ -443,10 +443,12 @@ class Manager:
         task.add_done_callback(lambda t, sid=sid: self.tasks.pop(sid, None) if self.tasks.get(sid) is t else None)
 
     def resolve_id(self, ref: str, user_id: str | None = None, kind: str | None = None,
-                   app: str = EVERY_APP) -> str:
+                   app: str = EVERY_APP, app_only: bool = False) -> str:
         """The one session `ref` (an id or its prefix) names. `app` is whose App sessions it may name: "" for the
-        owner and members (none: #330 decision 3), an App's id for that App (its own), every App's for the daemon."""
-        ids = self.db.find_session_ids(ref, user_id=user_id, kind=kind, with_app=app)
+        owner and members (none: #330 decision 3), an App's id for that App (its own, plus the owner's and members'
+        in Web's store unless `app_only`), every App's for the daemon."""
+        ids = self.db.find_session_ids(ref, user_id=user_id, kind=kind, with_app=app,
+                                       **({"app_id": app} if app_only and app else {}))
         if ref in ids:
             return ref
         if len(ids) != 1:

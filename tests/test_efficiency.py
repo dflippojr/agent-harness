@@ -373,7 +373,7 @@ def test_metrics_survive_manager_restart(tmp_path):
         s = await wait_status(m, m.create("persist")["id"], "done")
         sid = s["id"]
         await m.stop()
-        return sid, db
+        return sid, m.db
 
     async def second(sid, db):
         m = Manager(cfg, db=db, chat=script)

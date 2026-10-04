@@ -562,7 +562,7 @@ def test_metrics_and_backup(tmp_path):
         dest = tmp_path / "backups" / result["path"].replace("\\", "/").rsplit("/", 1)[-1]
         assert not old.exists()
         assert result["removed"] == ["2020-01-01"]
-        with sqlite3.connect(dest / "harness.sqlite3") as conn:
+        with sqlite3.connect(dest / "apps" / "app-web.sqlite3") as conn:  # the owner's sessions (#330)
             assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
         assert zipfile.ZipFile(dest / "transcripts.zip").namelist()
         assert "harness_backup_last_success_timestamp_seconds" in render(m)
