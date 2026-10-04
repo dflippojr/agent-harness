@@ -115,7 +115,7 @@ jobs:
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: >
           python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
-          --cov=harness --cov=sdk --cov=scripts --cov=macrunner
+          --cov=harness --cov=harness_modules --cov=sdk --cov=scripts --cov=macrunner
           --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload coverage
