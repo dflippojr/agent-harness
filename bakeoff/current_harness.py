@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .canary import CanaryRunner
 from .tasks import hash_tree
+from .results import error_metrics
 
 
 def session_result(final: dict, events: list[dict]) -> dict:
@@ -26,11 +27,11 @@ def session_result(final: dict, events: list[dict]) -> dict:
             "tool_calls": len(tools), "tool_errors": sum(not t.get("ok", True) for t in tools),
             "invalid_tool_calls": final["run"].get("invalid_tool_calls", 0),
             "retries": sum(e["type"] == "llm_retry" for e in events),
-            "model_errors": sum(e["type"] == "llm_retry" for e in events) + len(failures),
             "compactions": sum(c.get("tier") != "mask" for c in compactions),
             "masking_events": sum(c.get("tier") == "mask" for c in compactions),
             "compaction_failures": sum("compaction" in str(e["data"]).lower() for e in failures),
-            "compaction_events": compactions}
+            "compaction_events": compactions,
+            **error_metrics([*failures, *[e for e in events if e["type"] == "llm_retry"]])}
 
 
 async def run_current(task, run_dir: Path, model: str, base_url: str, chat=None) -> dict:

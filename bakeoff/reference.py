@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from types import SimpleNamespace
-from .results import classify, outcome
+from .results import classify, error_metrics, outcome
 
 from .run import RUNS, prepare, write_report
 from .sandbox import build_image
@@ -130,7 +130,7 @@ def openhands_result(events: list[dict], facts: dict) -> dict:
             "turns": sum(e.get("source") == "agent" for e in events),
             "tool_calls": sum(a.get("kind") != "FinishAction" for a in actions) + sum(e.get("tool_name") != "finish" for e in native_actions),
             "tool_errors": sum(e.get("source") == "environment" and bool((e.get("observation") or {}).get("is_error")) for e in events),
-            "model_errors": len(errors), "finished": facts["finished"] and not errors}
+            "finished": facts["finished"] and not errors, **error_metrics(errors, facts.get("infrastructure_error"))}
 
 
 def run_openhands(task: Task, run_dir: Path, model: str, port: int) -> dict:
@@ -162,10 +162,11 @@ def opencode_result(events: list[dict], facts: dict) -> dict:
     errors = [e for e in events if e.get("type") == "error"]
     return {"answer": opencode_answer(events), **facts, "finished": facts["finished"] and not errors,
             "adapter_error": "missing agent events" if not events and facts.get("stop_reason") != "wall_limit" else None,
-            "turns": len(steps), "tool_calls": len(tools), "model_errors": len(errors),
+            "turns": len(steps), "tool_calls": len(tools),
             "tool_errors": sum((t.get("state") or {}).get("status") == "error" for t in tools),
             "prompt_tokens": sum((s.get("tokens") or {}).get("input", 0) for s in steps) if steps else None,
-            "completion_tokens": sum((s.get("tokens") or {}).get("output", 0) for s in steps) if steps else None}
+            "completion_tokens": sum((s.get("tokens") or {}).get("output", 0) for s in steps) if steps else None,
+            **error_metrics(errors, facts.get("infrastructure_error"))}
 
 
 def run_opencode(task: Task, run_dir: Path, model: str, port: int) -> dict:
@@ -187,9 +188,10 @@ def hermes_result(events: list[dict], facts: dict) -> dict:
             "adapter_error": None if final or facts.get("stop_reason") == "wall_limit" else "missing result envelope",
             "turns": metrics.get("turns"), "tool_calls": sum(e.get("type") == "tool_use" for e in events),
             "tool_errors": sum(e.get("type") == "tool_result" and bool(e.get("is_error")) for e in events),
-            "model_errors": len(errors), "prompt_tokens": metrics.get("prompt_tokens", tokens.get("input")),
+            "prompt_tokens": metrics.get("prompt_tokens", tokens.get("input")),
             "completion_tokens": metrics.get("completion_tokens", tokens.get("output")),
-            "compactions": metrics.get("compactions"), "compaction_failures": metrics.get("compaction_failures")}
+            "compactions": metrics.get("compactions"), "compaction_failures": metrics.get("compaction_failures"),
+            **error_metrics(errors, facts.get("infrastructure_error"))}
 
 
 def openclaw_result(events: list[dict], facts: dict) -> dict:
@@ -201,19 +203,21 @@ def openclaw_result(events: list[dict], facts: dict) -> dict:
     tools = [c for m in assistants for c in m.get("content", []) if c.get("type") == "toolCall"]
     usage = agent.get("usage") or {}
     tool_summary = meta.get("toolSummary") or {}
-    errors = sum(m.get("stopReason") == "error" for m in assistants)
+    errors = [m for m in assistants if m.get("stopReason") == "error"]
+    if meta.get("error"):
+        errors.append(meta["error"])
     return {**facts, "answer": "\n".join(p.get("text", "") for p in final.get("payloads", [])),
             "finished": facts["finished"] and bool(final) and not errors and not meta.get("error"),
             "adapter_error": None if final or facts.get("stop_reason") == "wall_limit" else "missing result envelope",
             "turns": agent.get("assistantTurns", len(assistants) if messages else None),
             "tool_calls": tool_summary.get("calls", len(tools) if messages else None),
             "tool_errors": tool_summary.get("failures", sum(m.get("role") == "toolResult" and bool(m.get("isError")) for m in messages) if messages else None),
-            "model_errors": errors + int(bool(meta.get("error"))),
             "prompt_tokens": usage.get("input"), "completion_tokens": usage.get("output"),
             "context_tokens": (agent.get("lastCallUsage") or {}).get("total"),
             "retries": max(0, len((meta.get("executionTrace") or {}).get("attempts", [])) - 1),
             "compactions": sum(e.get("type") == "compaction" for e in events) if messages else None,
-            "system_prompt_chars": (meta.get("systemPromptReport") or {}).get("systemPrompt", {}).get("chars")}
+            "system_prompt_chars": (meta.get("systemPromptReport") or {}).get("systemPrompt", {}).get("chars"),
+            **error_metrics(errors, facts.get("infrastructure_error"))}
 
 
 def run_hermes(task: Task, run_dir: Path, model: str, port: int) -> dict:

@@ -16,7 +16,7 @@ from bakeoff import reference
 from bakeoff.current_harness import run_current, session_result
 from bakeoff.fake_endpoint import ScriptedServer
 from bakeoff.fake_network import FakeEndpoint
-from bakeoff.results import classify, outcome, report_lines
+from bakeoff.results import classify, error_metrics, outcome, report_lines
 from bakeoff.run import prepare, write_report
 from bakeoff.tasks import Context, TASKS
 
@@ -124,6 +124,12 @@ def test_container_missing_docker_is_infrastructure(tmp_path, monkeypatch):
     assert not events and classify(facts) == "infrastructure"
 
 
+def test_http_5xx_and_connection_failure_have_different_classes():
+    assert classify(error_metrics([{"error": "HTTP 500: unable to parse tool call"}])) == "model"
+    result = error_metrics([{"error": "fetch failed ECONNREFUSED"}])
+    assert classify(result) == "infrastructure" and result["model_errors"] == 0
+
+
 def test_reports_repeat_percentiles_unknown_and_failure_classes(tmp_path):
     rows = [{**FACTS, "task": "repo_qa", "repeat": i % 2, "passed": i == 0, "turns": None,
              "tool_errors": 0, "invalid_tool_calls": 0, "wall_seconds": i + 1} for i in range(4)]
@@ -195,10 +201,12 @@ def test_core_task_with_fake_endpoint_and_hidden_checker(name, tmp_path):
             passed, note = task.check(Context(run_dir / "workspace", sandbox, result["answer"], baseline))
             assert passed, (note, result, list(run_dir.glob("*.log")))
             assert result["finished"] and result["tool_calls"] == 1, result
+            assert result["tool_errors"] == 0, result
             requests = [row["request"] for line in (tmp_path / "endpoint/requests.jsonl").read_text().splitlines()
                         for row in [json.loads(line)] if row["index"] is not None]
             assert len(requests) == 2
-            assert any(m.get("role") == "tool" for m in requests[-1]["messages"])
+            assert any(m.get("role") == "tool" and "8731" in json.dumps(m.get("content"))
+                       for m in requests[-1]["messages"])
     finally:
         sandbox.stop()
 

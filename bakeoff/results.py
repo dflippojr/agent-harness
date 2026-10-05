@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import math
 import statistics
+import json
 
 
 MEASURES = ("turns", "tool_calls", "tool_errors", "model_errors", "invalid_tool_calls", "retries",
             "compactions", "masking_events", "compaction_failures", "prompt_tokens", "completion_tokens",
             "context_tokens")
+
+
+def error_metrics(errors: list[dict], infrastructure_error: str | None = None) -> dict:
+    """Transport failures are infrastructure; HTTP 5xx/tool parsing are model failures."""
+    messages = [json.dumps(error) for error in errors]
+    transport = [m for m in messages if any(marker in m.lower() for marker in
+                 ("econnrefused", "enotfound", "eai_again", "connection refused", "connecterror",
+                  "could not resolve host", "connection error", "connect timeout"))]
+    return {"model_errors": len(messages) - len(transport), "error_messages": messages,
+            "infrastructure_error": infrastructure_error or "\n".join(transport) or None}
 
 
 def classify(record: dict) -> str | None:
