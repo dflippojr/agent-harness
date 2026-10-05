@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from contextlib import asynccontextmanager
 
 import pytest
@@ -178,12 +179,38 @@ def test_strict_diffs_include_untracked_and_refuse_failed_reads(tmp_path, monkey
 
     def git(repo, *args, **kwargs):
         if "--no-index" in args:
-            raise projects.GitError("failed to read")
+            return SimpleNamespace(code=2, out="")
         return real_git(repo, *args, **kwargs)
 
     monkeypatch.setattr(changes, "git", git)
     with pytest.raises(projects.GitError):
         changes.repo_diffs(ws, projects.head(ws), strict=True)
+
+
+@pytest.mark.parametrize("action", ["push", "merge"])
+def test_publication_uses_scanned_commit_even_after_head_check(tmp_path, monkeypatch, action):
+    ex = executor(tmp_path, [tmp_path])
+    sid = "0123456789"
+    src = make_repo(tmp_path / "source", bare=action == "push")
+    repo = src.as_uri() if action == "push" else str(src)
+    project = harness_runner.Project(repo)
+    ws = ex.workspace(sid)
+    branch = projects.prepare(project, ws, sid)
+    (ws / "app.py").write_text("VALUE = 2\n")
+    projects.snapshot(ws, "scanned work")
+    scanned = projects.head(ws)
+    real = ex._review_head
+
+    def late_commit(workspace, session_id, params):
+        real(workspace, session_id, params)
+        (ws / "app.py").write_text("VALUE = 3\n")
+        projects.snapshot(ws, "after the head check")
+
+    monkeypatch.setattr(ex, "_review_head", late_commit)
+    result = getattr(ex, f"op_{action}")({"session": sid, "repo": repo, **branch,
+                                         "title": "review", "expect_head": scanned})
+    assert result["head"] == scanned
+    assert sh(src, "show", f"{branch['branch'] if action == 'push' else 'main'}:app.py") == "VALUE = 2"
 
 
 @pytest.mark.parametrize("action", ["merge", "push"])
