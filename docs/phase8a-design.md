@@ -218,7 +218,8 @@ instruction file that every later session loaded. `harness/cli_domains.py` now g
 - **Erase:** erasing a session (App API delete, App retention) deletes the CLI's copy of its conversation, found by
   `backend_session_id`, from its domain's state volume: `harness/cli_erase.py` runs as uid 1000 in a throwaway
   container and removes every file or directory named with the id, its lines in `history.jsonl` /
-  `session_index.jsonl`, and its rows in the top-level SQLite stores (`threads.id`, any `thread_id`). Erasing an App
+  `session_index.jsonl`, and its rows in the thread-keyed tables of Codex 0.154.0's top-level SQLite stores
+  (`threads`, `logs`, goals, memories, queue; recheck them when the pin moves). Erasing an App
   removes its state volumes (and so its Codex login) with `docker volume rm`. Neither ever removes Web's state or a
   shared login.
 - **Migration (owner, once):** `ops/backends/migrate-cli-state.ps1` (or `.sh`) moves the Claude and Cursor

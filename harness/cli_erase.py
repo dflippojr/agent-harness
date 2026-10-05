@@ -1,15 +1,16 @@
 """Erase one provider-CLI conversation from a CLI state directory (#371).
 
 The daemon never mounts a CLI volume on the host, so this file runs inside a throwaway container
-(`cli_domains.erase_history`) as ``python3 -c <this source> <state dir> <conversation id>``. It has no imports from the
-harness for that reason. Tests call `erase` directly on a temporary directory.
+(`cli_domains.erase_history`) as ``python3 - <state dir> <conversation id>``, with this source on stdin. It has no
+imports from the harness for that reason. Tests call `erase` directly on a temporary directory.
 
 What goes, for the conversation id (Claude's session id, Codex's thread id, Cursor's chat id):
 - every file or directory whose name contains the id, at any depth (Claude `projects/*/<id>.jsonl` and `<id>/`,
   `file-history/<id>`, `todos/<id>-*`, `session-env/<id>`; Codex `sessions/**/rollout-*-<id>.jsonl` and
   `archived_sessions`; Cursor `config/chats/<hash>/<id>/`);
 - the lines naming it in the top-level prompt indexes (`history.jsonl`, `session_index.jsonl`);
-- its rows in the top-level SQLite stores (Codex `state_*.sqlite` and friends): `threads.id` and every `thread_id`.
+- its rows in the top-level SQLite stores (Codex `state_*.sqlite`, `logs_*`, `goals_*`, `memories_*`, `queue_*`), by
+  the thread-keyed tables of Codex 0.154.0 (`ROW_DELETES`; recheck them when the pin moves).
 """
 
 from __future__ import annotations
@@ -21,6 +22,18 @@ import sqlite3
 import sys
 
 INDEXES = ("history.jsonl", "session_index.jsonl")
+ROW_DELETES = {
+    "threads": "DELETE FROM threads WHERE id = ?",
+    "thread_dynamic_tools": "DELETE FROM thread_dynamic_tools WHERE thread_id = ?",
+    "thread_artifacts": "DELETE FROM thread_artifacts WHERE thread_id = ?",
+    "thread_spawn_edges": "DELETE FROM thread_spawn_edges WHERE parent_thread_id = ?1 OR child_thread_id = ?1",
+    "thread_goals": "DELETE FROM thread_goals WHERE thread_id = ?",
+    "thread_goal_continuation_deferrals": "DELETE FROM thread_goal_continuation_deferrals WHERE thread_id = ?",
+    "logs": "DELETE FROM logs WHERE thread_id = ?",
+    "stage1_outputs": "DELETE FROM stage1_outputs WHERE thread_id = ?",
+    "queued_items": "DELETE FROM queued_items WHERE thread_id = ?",
+    "queued_thread_revisions": "DELETE FROM queued_thread_revisions WHERE thread_id = ?",
+}
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{15,127}")
 
 
@@ -54,14 +67,9 @@ def _delete_rows(path: str, conv_id: str) -> int:
     removed = 0
     conn = sqlite3.connect(path, timeout=10)
     try:
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
-        for table in tables:
-            columns = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
-            keys = ["thread_id"] if "thread_id" in columns else []
-            if table == "threads" and "id" in columns:
-                keys.append("id")
-            for key in keys:
-                removed += conn.execute(f'DELETE FROM "{table}" WHERE "{key}" = ?', (conv_id,)).rowcount
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        for table in sorted(tables & ROW_DELETES.keys()):
+            removed += conn.execute(ROW_DELETES[table], (conv_id,)).rowcount
         conn.commit()
     finally:
         conn.close()

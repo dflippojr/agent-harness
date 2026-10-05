@@ -126,9 +126,11 @@ def _conversation_tree(root: Path, keep: str, gone: str) -> None:
     db = sqlite3.connect(root / "state_5.sqlite")
     db.execute("CREATE TABLE threads (id TEXT, title TEXT)")
     db.execute("CREATE TABLE thread_goals (thread_id TEXT, goal TEXT)")
+    db.execute("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)")
     db.execute("CREATE TABLE other (id TEXT)")
     db.executemany("INSERT INTO threads VALUES (?, 't')", [(keep,), (gone,)])
     db.executemany("INSERT INTO thread_goals VALUES (?, 'g')", [(keep,), (gone,)])
+    db.executemany("INSERT INTO thread_spawn_edges VALUES (?, ?)", [(keep, gone), (gone, keep), (keep, keep)])
     db.execute("INSERT INTO other VALUES (?)", (gone,))
     db.commit()
     db.close()
@@ -149,6 +151,7 @@ def test_erase_removes_one_conversation_and_nothing_else(tmp_path):
     db = sqlite3.connect(tmp_path / "state_5.sqlite")
     assert db.execute("SELECT id FROM threads").fetchall() == [(keep,)]
     assert db.execute("SELECT thread_id FROM thread_goals").fetchall() == [(keep,)]
+    assert db.execute("SELECT * FROM thread_spawn_edges").fetchall() == [(keep, keep)]
     assert db.execute("SELECT id FROM other").fetchall() == [(gone,)]  # not a thread table
     db.close()
     for unsafe in ("", "a", "x" * 10, "../" + "a" * 20, "a b" * 10):
