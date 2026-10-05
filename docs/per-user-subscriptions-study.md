@@ -1,8 +1,9 @@
 # Per-user CLI subscriptions: provider terms and display-only login (#377, #365 step 1)
 
 Docs-only study. Nothing was signed in, created or accepted to write it: every fact below comes from public pages read
-on **2026-10-05**. Pinned CLIs (`sandbox/cli.Dockerfile`): Claude Code 2.1.272, Codex 0.154.0, Cursor Agent
-2026.10.01-e373342.
+on **2026-10-05**. Pinned CLIs (`sandbox/cli.Dockerfile`): Claude Code 2.1.272 and Codex 0.154.0. Cursor Agent is not pinned there (the
+image runs Cursor's install script); the version checked is the one `docs/phase8a-design.md` recorded in the image on
+2026-10-04, 2026.10.01-e373342, and a rebuild may differ.
 
 **How the sources were read.** Pages were fetched through a summarising fetch tool, so quoted passages are the tool's
 extraction, not a byte-for-byte copy. Where a page could not be read (HTTP 403) the row says so and the point is
@@ -96,8 +97,12 @@ None of the three sources forbids several subscribers' CLI logins on one machine
 Code documents separate accounts side by side through separate `CLAUDE_CONFIG_DIR`s (authentication docs, "Log in
 with multiple accounts"). What the terms do constrain is *who holds the credential* and *whose plan pays*: Anthropic
 requires each end user to use their own plan and forbids the platform from collecting or relaying the login; the
-other two bar sharing credentials. The harness design already keeps each person's login in a volume only their
-sessions mount (`docs/phase8a-design.md`, "Per-domain CLI state (#371)"), which is consistent with all three.
+other two bar sharing credentials.
+
+The harness does not yet isolate per-person logins for two of the three. Per `docs/phase8a-design.md` ("Per-domain CLI
+state (#371)"), only Codex logs in per domain; the Claude and Cursor login volumes (`harness-login-claude`,
+`harness-login-cursor`) are shared by every domain. Per-person Claude or Cursor logins would need per-person login
+volumes. That is #365 work, and a precondition for using any verdict above.
 
 ## 3. Login flows at the pinned versions
 
