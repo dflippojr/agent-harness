@@ -41,8 +41,8 @@ async def ready_domain(name: str, backend: BackendConfig, app_id: str, api_key: 
     except RuntimeError as e:
         raise CliBackendError(str(e)) from e
     if app_id and not api_key and cli_domains.needs_app_login(name):
-        from .backend_state import subscription_status
-        if not await asyncio.to_thread(subscription_status, name, backend, app_id):
+        from .backend_state import app_login_ready
+        if not await asyncio.to_thread(app_login_ready, name, backend, app_id):
             raise CliBackendError(f"{name.title()} has no login for this App yet: the owner runs "
                                   f"`ops/backends/login.ps1 {name} -App {app_id}` on the server")
 

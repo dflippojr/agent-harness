@@ -105,6 +105,19 @@ def _subscription_status(name: str, cfg, app_id: str = "") -> bool:
     return ok
 
 
+def app_login_ready(name: str, cfg, app_id: str) -> bool:
+    """For starting an App session on a CLI whose login is per App: a cached login stands, but a cached "not logged
+    in" is probed again, so a session right after the owner's `login.ps1 -App` isn't refused for the cache's TTL."""
+    key = (str(getattr(cfg, "volume", "")), name, app_id)
+    now = time.time()
+    cached = _auth_cache.get(key)
+    if cached and cached[0] > now and cached[1]:
+        return True
+    ok = _probe_subscription(name, cfg, app_id)
+    _auth_cache[key] = (now + _AUTH_TTL, ok)
+    return ok
+
+
 def subscription_status(name: str, cfg, app_id: str = "") -> bool:
     from . import cli_domains
     login_app = app_id if cli_domains.needs_app_login(name) else ""

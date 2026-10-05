@@ -200,14 +200,26 @@ def test_codex_app_session_refuses_to_start_without_its_login(monkeypatch):
     async def prepare(name, _cfg, app_id=""):
         prepared.append((name, app_id))
     monkeypatch.setattr(cli_domains, "prepare", prepare)
-    monkeypatch.setattr(backend_state, "_subscription_status", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(backend_state, "_auth_cache", {})
+    logged_in = {"k-1": False}
+    probes = []
+
+    def probe(name, _cfg, app_id=""):
+        probes.append((name, app_id))
+        return logged_in.get(app_id, False)
+    monkeypatch.setattr(backend_state, "_probe_subscription", probe)
     cfg = _standard("codex")
+    assert not backend_state.subscription_status("codex", cfg, "k-1")  # GET /backends caches "not logged in"
     with pytest.raises(CliBackendError, match=r"login.ps1 codex -App k-1"):
         asyncio.run(ready_domain("codex", cfg, "k-1", ""))
+    logged_in["k-1"] = True  # the owner runs login.ps1 codex -App k-1 within the cache's TTL
+    asyncio.run(ready_domain("codex", cfg, "k-1", ""))
+    asyncio.run(ready_domain("codex", cfg, "k-1", ""))  # a login, once seen, comes from the cache
+    assert probes == [("codex", "k-1")] * 3
     asyncio.run(ready_domain("codex", cfg, "k-1", "an-api-key"))  # an API key needs no subscription login
     asyncio.run(ready_domain("codex", cfg, "", ""))               # Web's login is the owner's
     asyncio.run(ready_domain("claude", _standard("claude"), "k-1", ""))  # shared login
-    assert prepared == [("codex", "k-1")] * 2 + [("codex", ""), ("claude", "k-1")]
+    assert prepared == [("codex", "k-1")] * 4 + [("codex", ""), ("claude", "k-1")]
 
 
 def test_erase_session_and_erase_app_remove_cli_history_and_volumes(tmp_path, monkeypatch):
@@ -308,5 +320,7 @@ def test_erase_and_app_drop_reach_the_volumes(tmp_path):
         asyncio.run(cli_domains.drop_app_volumes(backends, "app-a"))
         assert subprocess.run(["docker", "volume", "inspect", state], capture_output=True).returncode != 0
         assert subprocess.run(["docker", "volume", "inspect", login], capture_output=True).returncode == 0
+        # An App that never ran a hosted CLI has no volumes; dropping them still succeeds.
+        asyncio.run(cli_domains.drop_app_volumes(backends, "app-never-ran"))
     finally:
         _remove_volumes(state, login)
