@@ -26,6 +26,9 @@ and [provider registry](https://github.com/unreallabsai/unreal-agent/blob/1b9f77
 Hermes' minimum is enforced in
 [agent_init.py](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/agent/agent_init.py).
 These are compatibility exclusions, not requests to alter native agents or launch settings.
+The reference CLI rejects Hermes profiles below 65,536 before building images,
+starting a proxy, or loading a model. Its container wrapper also checks the
+endpoint's `/props` context and fails closed if it is smaller or unavailable.
 
 ## Headless interfaces and native settings
 
@@ -63,6 +66,8 @@ HTTP errors, delays and exhaustion. It has no model code. An optional
 `auxiliary` script handles native title-generation requests without advancing
 the task script. It logs every request with the selected step index; auxiliary
 requests have a null index. It rejects other inference protocols.
+The fake advertises a 65,536-token context for Hermes compatibility; scripted
+responses impose no real context limit and this is never a scored 32K cell.
 
 `FakeEndpoint` owns uniquely named containers and an internal Docker network.
 Like the existing socat pattern, only its endpoint container joins the default
@@ -123,6 +128,8 @@ context-size and retry counts. Do not use these missing fields to claim parity
 or a performance result. Checker errors are infrastructure failures; missing
 terminal envelopes are adapter failures; a failing checker after successful
 execution is classified as a model failure. Timing caps count as timeouts.
+Recovered retry and tool errors remain diagnostics; completion counts use the
+terminal result, and earlier candidate errors followed by success are recovered.
 
 The stage B section will add smoke exclusions, scored matrices, repeat variation,
 Phase 0 comparisons, hosted costs (only after its owner gate), and recommendations.

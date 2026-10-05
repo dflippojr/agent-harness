@@ -43,7 +43,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ("/health", "/props"):
-            self.send_json(200, {"status": "ok", "default_generation_settings": {"n_ctx": 32768}})
+            self.send_json(200, {"status": "ok", "default_generation_settings": {"n_ctx": 65536}})
         elif self.path == "/v1/models":
             self.send_json(200, {"object": "list", "data": [{"id": "fake", "object": "model", "owned_by": "test"}]})
         else:

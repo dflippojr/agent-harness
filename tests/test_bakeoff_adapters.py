@@ -72,7 +72,8 @@ def test_current_session_metrics_and_classification():
     assert result["answer"] == ANSWER and result["turns"] == 2 and result["tool_calls"] == 1
     assert result["compactions"] == result["masking_events"] == result["compaction_failures"] == 1
     assert result["retries"] == 1 and result["context_tokens"] == 110
-    assert classify(result) == "harness/tooling"
+    assert classify(result) == "model"
+    assert classify({**result, "finished": False}) == "harness/tooling"
     assert outcome({**result, "status": "timeout"}) == "timeout"
     failed = session_result({**final, "status": "failed"}, [{"type": "error", "data": {"message": "HTTP 500"}}])
     assert classify(failed) == "model" and not failed["finished"]
@@ -134,7 +135,29 @@ def test_candidate_tool_error_events(name):
         "openclaw": {"type": "message", "message": {"role": "toolResult", "isError": True}},
     }
     result = parser([*events, errors[name]], FACTS)
-    assert result["tool_errors"] == 1 and classify(result) == "harness/tooling"
+    assert result["tool_errors"] == 1 and classify(result) == "model"
+    assert classify({**result, "finished": False}) == "harness/tooling"
+
+
+@pytest.mark.parametrize("name", PARSERS)
+def test_candidates_recovered_error_then_terminal_success(name):
+    parser, events = PARSERS[name]
+    earlier = {"type": "error", "error": "HTTP 503"}
+    if name == "openclaw":
+        earlier = {"type": "message", "message": {"role": "assistant", "stopReason": "error"}}
+    result = parser([earlier, *events], FACTS)
+    assert result["finished"] and result["model_errors"] == 0
+    assert outcome(result) == "completion" and classify({**result, "passed": False}) == "model"
+
+
+def test_hermes_32k_cell_excluded_before_model_or_container_start(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["reference", "--harness", "hermes"])
+    monkeypatch.setattr(reference, "load_config", lambda: {"ctx_size": 32768})
+    monkeypatch.setattr(sys.stdout, "reconfigure", lambda **kwargs: None)
+    with pytest.raises(ValueError, match="cell is excluded"):
+        reference.main()
+    reference.validate_context("hermes", 65536)
+    reference.validate_context("opencode", 32768)
 
 
 def test_container_timeout_preserves_events_and_removes_only_owned_container(tmp_path, monkeypatch):

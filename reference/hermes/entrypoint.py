@@ -5,6 +5,15 @@ from pathlib import Path
 import sys
 import sqlite3
 import subprocess
+from urllib.request import urlopen
+
+# Fail closed if a direct container invocation bypasses the host's context guard.
+# The configured window must fit the endpoint's actual per-slot context.
+props_url = os.environ["LLM_BASE_URL"].removesuffix("/v1").rstrip("/") + "/props"
+with urlopen(props_url, timeout=10) as response:
+    props = json.load(response)
+if props.get("default_generation_settings", {}).get("n_ctx", 0) < 65536:
+    sys.exit("Hermes cell excluded: endpoint context is unknown or below 65536")
 
 config = Path("/opt/bakeoff/config.json").read_text()
 for key in ("LLM_BASE_URL", "LLM_MODEL"):

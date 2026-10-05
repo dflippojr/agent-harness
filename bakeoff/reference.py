@@ -106,6 +106,21 @@ def run_container(harness: str, task: Task, run_dir: Path, env: dict[str, str], 
 
 # --- OpenHands CLI ----------------------------------------------------------
 
+def terminal_errors(events: list[dict], is_error, is_success) -> list[dict]:
+    """Errors before a subsequent successful terminal event were recovered."""
+    errors = []
+    for event in events:
+        if is_error(event):
+            errors.append(event)
+        elif is_success(event):
+            errors.clear()
+    return errors
+
+
+def openhands_finished(event: dict) -> bool:
+    action = event.get("action") or {}
+    return (isinstance(action, dict) and action.get("kind") == "FinishAction") or event.get("tool_name") == "finish"
+
 def openhands_answer(events: list[dict]) -> str:
     """The agent's last words: whichever comes last of a finish action's message or a plain assistant message."""
     for event in reversed(events):
@@ -124,7 +139,7 @@ def openhands_answer(events: list[dict]) -> str:
 def openhands_result(events: list[dict], facts: dict) -> dict:
     actions = [e["action"] for e in events if e.get("source") == "agent" and isinstance(e.get("action"), dict)]
     native_actions = [e for e in events if e.get("kind") == "ActionEvent" and not isinstance(e.get("action"), dict)]
-    errors = [e for e in events if e.get("error") or e.get("type") == "error"]
+    errors = terminal_errors(events, lambda e: e.get("error") or e.get("type") == "error", openhands_finished)
     return {"answer": openhands_answer(events), **facts,
             "adapter_error": "missing agent events" if not events and facts.get("stop_reason") != "wall_limit" else None,
             "turns": sum(e.get("source") == "agent" for e in events),
@@ -159,7 +174,8 @@ def opencode_answer(events: list[dict]) -> str:
 def opencode_result(events: list[dict], facts: dict) -> dict:
     tools = [e["part"] for e in events if e.get("type") == "tool_use" and isinstance(e.get("part"), dict)]
     steps = [e.get("part") or {} for e in events if e.get("type") == "step_finish"]
-    errors = [e for e in events if e.get("type") == "error"]
+    errors = terminal_errors(events, lambda e: e.get("type") == "error",
+                             lambda e: e.get("type") == "text" and (e.get("part") or {}).get("text"))
     return {"answer": opencode_answer(events), **facts, "finished": facts["finished"] and not errors,
             "adapter_error": "missing agent events" if not events and facts.get("stop_reason") != "wall_limit" else None,
             "turns": len(steps), "tool_calls": len(tools),
@@ -181,7 +197,8 @@ def run_opencode(task: Task, run_dir: Path, model: str, port: int) -> dict:
 def hermes_result(events: list[dict], facts: dict) -> dict:
     final = next((e for e in reversed(events) if e.get("type") == "result"), {})
     tokens = final.get("tokens") or {}
-    errors = [e for e in events if e.get("error") or e.get("type") == "error"]
+    errors = terminal_errors(events, lambda e: e.get("error") or e.get("type") == "error",
+                             lambda e: e.get("type") == "result" and not e.get("exit_code"))
     metrics = next((e for e in events if e.get("type") == "bakeoff_metrics"), {})
     return {**facts, "answer": final.get("text", ""),
             "finished": facts["finished"] and bool(final) and not final.get("exit_code") and not errors,
@@ -203,7 +220,7 @@ def openclaw_result(events: list[dict], facts: dict) -> dict:
     tools = [c for m in assistants for c in m.get("content", []) if c.get("type") == "toolCall"]
     usage = agent.get("usage") or {}
     tool_summary = meta.get("toolSummary") or {}
-    errors = [m for m in assistants if m.get("stopReason") == "error"]
+    errors = assistants[-1:] if assistants and assistants[-1].get("stopReason") == "error" else []
     if meta.get("error"):
         errors.append(meta["error"])
     attempts = (meta.get("executionTrace") or {}).get("attempts")
@@ -247,6 +264,11 @@ HARNESSES: dict[str, Callable[[Task, Path, str, int], dict]] = {
 }
 
 
+def validate_context(harness: str, ctx_size: int) -> None:
+    if harness == "hermes" and ctx_size < 65536:
+        raise ValueError("Hermes requires at least 65536 context tokens; this cell is excluded (no model started)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--harness", choices=sorted(HARNESSES), required=True)
@@ -262,6 +284,8 @@ def main() -> None:
 
     harness, run_task = args.harness, HARNESSES[args.harness]
     config = load_config()
+    if not args.fake_script:
+        validate_context(harness, config["ctx_size"])
     suite = {"core": TASKS, "hard": HARD_TASKS, "all": TASKS + HARD_TASKS}[args.suite]
     tasks = suite if args.tasks == "all" else [t for t in suite if t.id in args.tasks.split(",")]
     if not args.no_build:

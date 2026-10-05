@@ -32,6 +32,8 @@ def classify(record: dict) -> str | None:
         return "infrastructure"
     if record.get("adapter_error"):
         return "adapter"
+    if record.get("finished"):
+        return "model"
     if record.get("tool_errors") or record.get("compaction_failures"):
         return "harness/tooling"
     if record.get("model_errors") or record.get("invalid_tool_calls"):
