@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -50,7 +51,7 @@ def test_unsafe_app_ids_are_hashed_into_distinct_volume_names():
     hashed = {cli_domains.domain_slug(app) for app in ("Upper", "a/b", "x" * 60, "../web", "h-" + "0" * 24)}
     assert len(hashed) == 5
     assert all(slug.startswith("h-") and len(slug) == 26 for slug in hashed)
-    assert cli_domains.domain_slug("Upper") == cli_domains.domain_slug("Upper")
+    assert cli_domains.domain_slug("Upper") == "h-" + hashlib.sha256(b"Upper").hexdigest()[:24]
 
 
 def test_mounts_put_config_read_only_over_the_domain_state():

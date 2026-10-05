@@ -166,8 +166,8 @@ def erase_command(backend: str, cfg, app_id: str, conversation_id: str) -> list[
     if not cli_erase.SAFE_ID.fullmatch(conversation_id):
         raise ValueError(f"unsafe {backend} conversation id {conversation_id!r}")
     return ["docker", "run", "--rm", "-i", "--network", "none", "--user", AGENT_UID,
-            "-v", f"{state_volume(backend, cfg, app_id)}:/state", cfg.image,
-            "python3", "-", "/state", conversation_id]
+            "-v", f"{state_volume(backend, cfg, app_id)}:{cli_erase.STATE_DIR}", cfg.image,
+            "python3", "-", conversation_id]
 
 
 async def erase_history(backend: str, cfg, app_id: str, conversation_id: str) -> None:

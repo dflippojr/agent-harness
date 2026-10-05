@@ -1,8 +1,9 @@
 """Erase one provider-CLI conversation from a CLI state directory (#371).
 
 The daemon never mounts a CLI volume on the host, so this file runs inside a throwaway container
-(`cli_domains.erase_history`) as ``python3 - <state dir> <conversation id>``, with this source on stdin. It has no
-imports from the harness for that reason. Tests call `erase` directly on a temporary directory.
+(`cli_domains.erase_history`) as ``python3 - <conversation id>``, with this source on stdin and the domain's state
+volume at `STATE_DIR`. It has no imports from the harness for that reason. Tests call `erase` directly on a temporary
+directory.
 
 What goes, for the conversation id (Claude's session id, Codex's thread id, Cursor's chat id):
 - every file or directory whose name contains the id, at any depth (Claude `projects/*/<id>.jsonl` and `<id>/`,
@@ -21,6 +22,7 @@ import shutil
 import sqlite3
 import sys
 
+STATE_DIR = "/state"  # where erase_history mounts the state volume; never taken from the command line
 INDEXES = ("history.jsonl", "session_index.jsonl")
 ROW_DELETES = {
     "threads": "DELETE FROM threads WHERE id = ?",
@@ -93,4 +95,4 @@ def erase(root: str, conv_id: str) -> int:
 
 
 if __name__ == "__main__":
-    print(erase(sys.argv[1], sys.argv[2]))
+    print(erase(STATE_DIR, sys.argv[1]))
