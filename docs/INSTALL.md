@@ -44,7 +44,9 @@ ops\backends\login.ps1 claude  # repeat for codex or cursor as wanted
 
 On Linux or macOS, use `install/install.sh --profile service` and then
 `ops/backends/login.sh claude` (or `codex` / `cursor`). Credentials remain in provider-specific Docker volumes on
-all platforms.
+all platforms. Codex needs one more login per App that uses it (`login.ps1 codex -App <app id>`, or
+`login.sh codex --app <app id>`): its credential can't be kept apart from its session history, which stays separate
+per App (docs/phase8a-design.md, "Per-domain CLI state").
 
 Docker (Docker Desktop on Windows/macOS) and at least one provider login are the operational minimum. The installer configures Claude, Codex,
 and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example

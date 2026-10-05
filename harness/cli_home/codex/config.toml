@@ -1,0 +1,2 @@
+# Codex user config for Agent Harness sessions, mounted read-only over CODEX_HOME (#371).
+# The harness passes model, sandbox and approval policy per session; nothing is set here.

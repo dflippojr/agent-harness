@@ -48,22 +48,30 @@ def notice(name: str, cfg, limits: dict | None = None) -> str:
     return base + billing + " An API key can be configured as the default or limit fallback."
 
 
-def _probe_subscription(name: str, cfg) -> bool:
+def _volume_exists(volume: str) -> bool:
+    try:
+        result = subprocess.run(["docker", "volume", "inspect", volume], capture_output=True, timeout=30,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _probe_subscription(name: str, cfg, app_id: str = "") -> bool:
+    from . import cli_domains
     commands = {
         "claude": ["claude", "auth", "status"],
         "codex": ["codex", "login", "status"],
         "cursor": ["agent", "status"],
     }
-    dirs = {"claude": "/home/agent/.claude", "codex": "/home/agent/.codex", "cursor": "/home/agent/.cursor"}
     if name not in commands:
+        return False
+    # An App's own login (#371): don't create its volume just to find it empty.
+    if app_id and cli_domains.needs_app_login(name) and not _volume_exists(cli_domains.login_volume(name, cfg, app_id)):
         return False
     command = ["docker", "run", "--rm", "--network", cfg.network,
                "-e", f"HTTPS_PROXY={cfg.proxy}", "-e", "NODE_USE_ENV_PROXY=1",
-               "-v", f"{cfg.volume}:{dirs[name]}", cfg.image, *commands[name]]
-    if name == "cursor":
-        at = command.index(cfg.image)
-        command[at:at] = ["-e", "HOME=/home/agent/.cursor/home",
-                          "-e", "CURSOR_CONFIG_DIR=/home/agent/.cursor/config"]
+               *cli_domains.probe_args(name, cfg, app_id), cfg.image, *commands[name]]
     try:
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -83,15 +91,37 @@ _AUTH_TTL = 45.0
 _auth_cache: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
-def _subscription_status(name: str, cfg) -> bool:
-    key = (str(getattr(cfg, "volume", "")), name)
+def _subscription_status(name: str, cfg, app_id: str = "") -> bool:
+    """Whether the login a session of this domain would use is signed in. Only Codex's login differs per App."""
+    from . import cli_domains
+    login_app = app_id if cli_domains.needs_app_login(name) else ""
+    key = (str(getattr(cfg, "volume", "")), name, login_app)
     now = time.time()
     cached = _auth_cache.get(key)
     if cached and cached[0] > now:
         return cached[1]
-    ok = _probe_subscription(name, cfg)
+    ok = _probe_subscription(name, cfg, login_app) if login_app else _probe_subscription(name, cfg)
     _auth_cache[key] = (now + _AUTH_TTL, ok)
     return ok
+
+
+def app_login_ready(name: str, cfg, app_id: str) -> bool:
+    """For starting an App session on a CLI whose login is per App: a cached login stands, but a cached "not logged
+    in" is probed again, so a session right after the owner's `login.ps1 -App` isn't refused for the cache's TTL."""
+    key = (str(getattr(cfg, "volume", "")), name, app_id)
+    now = time.time()
+    cached = _auth_cache.get(key)
+    if cached and cached[0] > now and cached[1]:
+        return True
+    ok = _probe_subscription(name, cfg, app_id)
+    _auth_cache[key] = (now + _AUTH_TTL, ok)
+    return ok
+
+
+def subscription_status(name: str, cfg, app_id: str = "") -> bool:
+    from . import cli_domains
+    login_app = app_id if cli_domains.needs_app_login(name) else ""
+    return _subscription_status(name, cfg, login_app) if login_app else _subscription_status(name, cfg)
 
 
 def local_view(manager) -> dict:
@@ -135,11 +165,15 @@ def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
     week = now - 7 * 86400
     provider_policy = manager.app_provider_status(app_id, name) if app_id is not None else None
     allowed, effective_auth, key_ready = _credential_state(cfg, provider_policy, check_auth)
-    subscription = (_subscription_status(name, cfg)
+    subscription = (subscription_status(name, cfg, app_id or "")
                     if check_auth and effective_auth not in ("api_key", "denied") else False)
     logged_in = key_ready if effective_auth == "api_key" else subscription
     if effective_auth == "subscription_then_api_key":
         logged_in = subscription or key_ready
+    # A CLI whose login can't be shared stays unavailable to an App until the owner logs it in for that App (#371).
+    from . import cli_domains
+    if app_id and check_auth and cli_domains.needs_app_login(name) and not logged_in:
+        allowed = False
     # Machine-wide provider limits may describe another app's isolated key. Managed apps get their own
     # rate-limit events on their sessions instead of this shared cache; public discovery gets no limit data.
     hide_shared_limits = not include_usage or bool(provider_policy and provider_policy["managed"])

@@ -157,7 +157,10 @@ def test_claude_command_joins_the_relay_namespace_and_only_names_the_token(tmp_p
     plain = ClaudeSession(session_id="abc", workspace=tmp_path, backend=_backend(), sandbox=SandboxConfig(),
                           system_prompt="system").command()
     assert plain[plain.index("--network") + 1] == "cli-net"
-    assert "--mcp-config" not in plain and TOKEN_ENV not in plain
+    assert TOKEN_ENV not in plain
+    # No relay: no MCP server at all, and --strict-mcp-config still ignores user-scope servers in the state (#371).
+    assert json.loads(plain[plain.index("--mcp-config") + 1]) == {"mcpServers": {}}
+    assert "--strict-mcp-config" in plain
 
 
 def test_relay_runs_unprivileged_on_the_session_network_with_loopback_only():

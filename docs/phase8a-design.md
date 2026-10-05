@@ -164,9 +164,10 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
 
 - One image, `agent-harness-cli:<ver>`: the sandbox base plus node, `@anthropic-ai/claude-code`, the Codex CLI and
   the Cursor agent, pinned versions, installed unmodified from the official packages.
-- Per-provider login volumes (`harness-auth-claude` → `/home/agent/.claude`, `harness-auth-codex` →
-  `~/.codex`, `harness-auth-cursor` → `~/.cursor`) are mounted only into that backend's sessions. **The daemon
-  never mounts or reads these volumes on the host side.**
+- Each backend keeps its CLI state (history, settings, caches) in one volume per domain, Web or one App, and its
+  login in a volume of its own where the CLI allows it (see "Per-domain CLI state (#371)" below). The volumes are
+  mounted only into that backend's sessions of that domain. **The daemon never mounts or reads these volumes on the
+  host side.**
 - Network: sandboxes are offline today, and a CLI backend needs its provider API. Add an **egress proxy container**
   (e.g. tinyproxy or squid with a domain allowlist per backend: `api.anthropic.com`, `claude.ai`,
   `statsig.anthropic.com`, ... / `api.openai.com`, `chatgpt.com` / `api2.cursor.sh`, ...) and set
@@ -175,6 +176,58 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
   build.
 - The CLI's own sandbox stays enabled where it has one (Codex `workspace-write`, Cursor `--sandbox enabled`), inside
   the container.
+
+### Per-domain CLI state (#371)
+
+The provider CLIs keep their own copy of every conversation, plus user-level settings, hooks, MCP servers and
+instruction files, in their state directory. One shared volume per backend let an App's session read the owner's and
+other Apps' history (Codex reads anywhere inside its sandbox; Cursor runs with `--force`) and leave a hook or
+instruction file that every later session loaded. `harness/cli_domains.py` now gives each **domain** its own state:
+
+- **Domains:** Web (the owner's sessions; members only run the local model) and each App. Not one per session:
+  `--resume` after a daemon restart needs the history.
+- **State volumes:** Web keeps the configured `backends.<name>.volume` (`harness-auth-<backend>`), so the owner's
+  sessions keep their history and `--resume`. An App gets `harness-cli-<backend>-app-<app id>` (the id is hashed when
+  it isn't a short, lower-case volume name part; daemon App ids are `k-<hex>` and never are).
+- **Login: can the credential live apart from the state? (checked 2026-10-04 in `agent-harness-cli:1`)**
+
+  | CLI (pinned) | Credential | Apart from the state? | Login volume |
+  |---|---|---|---|
+  | Claude Code 2.1.272 | `.credentials.json` in `CLAUDE_SECURESTORAGE_CONFIG_DIR` (default `CLAUDE_CONFIG_DIR`) | **Yes.** With the variable set, `claude auth status` reports `loggedIn: true` from a credential that exists only there. | `harness-login-claude` at `/home/agent/.claude-login`, shared by every domain |
+  | Codex 0.154.0 | `auth.json` in `CODEX_HOME` (`cli_auth_credentials_store` only picks file or keyring) | **No** path or variable for the credential alone. | Each domain's own state volume: the owner's is `harness-auth-codex`; an App logs in with `login.ps1 codex -App <app id>` |
+  | Cursor Agent 2026.10.01-e373342 | `$XDG_CONFIG_HOME/cursor/auth.json` (default `~/.config/cursor`); chats live in `CURSOR_CONFIG_DIR/chats`, transcripts in `CURSOR_DATA_DIR/projects` | **Yes.** `agent status` reports a login from `~/.config/cursor` alone. | `harness-login-cursor` at `/home/agent/.config/cursor`, shared by every domain |
+
+  Codex is therefore **unavailable to an App until the owner has logged it in for that App**: `GET /api/v1/backends`
+  shows it as `available: false` for that App, and a session that reaches it anyway fails before the CLI starts with
+  the `login.ps1` command to run. An App whose provider policy is `api_key` needs no login. A shared login is
+  readable by every domain's sessions of that backend (it's the same account), so #370's read confinement still
+  matters for Claude.
+- **Read-only config:** mounted read-only over the writable state, so no session can plant one for the next session
+  in any domain, its own included. Files come from `harness/cli_home/<backend>/` (empty, `{}`, or a commented
+  `config.toml`); directories are empty `tmpfs` mounts owned by root (mode 0555). Only these load from the state:
+
+  | CLI | Read-only files | Read-only directories | Other |
+  |---|---|---|---|
+  | Claude Code | `settings.json`, `CLAUDE.md` | `agents`, `commands`, `skills`, `plugins`, `hooks`, `output-styles`, `rules` | Always `--strict-mcp-config` (with the harness server or none), which ignores user-scope MCP servers in the state's `.claude.json` |
+  | Codex | `config.toml`, `AGENTS.md`, `AGENTS.override.md`, `hooks.json` | `rules`, `skills` (the bundled system skills then fail to install, which Codex logs and survives), `prompts` | |
+  | Cursor | `config/permissions.json` (`{}`: no extra allow-lists) | | `HOME` is the container's own `/home/agent`, which goes with the container: `~/.cursor` (`mcp.json`, `hooks.json`, `sandbox.json`, `cli.json`, rules, skills, agents), `~/.claude` and shell dotfiles never persist. Only `/home/agent/.cursor-state/config` and `data` do. `config/cli-config.json` stays writable: Cursor rewrites it on every run, and with `--force` its allow-lists grant nothing more. |
+- **Preparing volumes:** a volume mounted where the image has no directory, and any directory Docker creates for a
+  nested mount, would be root's. Before a domain's first session (once per daemon process) a throwaway root
+  container creates the volumes and hands their roots to uid 1000. The login scripts do the same for the login
+  volume.
+- **Erase:** erasing a session (App API delete, App retention) deletes the CLI's copy of its conversation, found by
+  `backend_session_id`, from its domain's state volume: `harness/cli_erase.py` runs as uid 1000 in a throwaway
+  container and removes every file or directory named with the id, its lines in `history.jsonl` /
+  `session_index.jsonl`, and its rows in the thread-keyed tables of Codex 0.154.0's top-level SQLite stores
+  (`threads`, `logs`, goals, memories, queue; recheck them when the pin moves). Erasing an App
+  removes its state volumes (and so its Codex login) with `docker volume rm`. Neither ever removes Web's state or a
+  shared login.
+- **Migration (owner, once):** `ops/backends/migrate-cli-state.ps1` (or `.sh`) moves the Claude and Cursor
+  credentials out of `harness-auth-claude` / `harness-auth-cursor` into the login volumes. Everything else stays: the
+  old volumes are Web's state. App sessions start with fresh CLI state; the history of App sessions that ran before
+  this change stays in Web's volumes. The owner's own settings, `CLAUDE.md`, Codex `config.toml` and the like in
+  those volumes no longer load (the read-only files cover them), and Cursor's old `home/` directory is no longer
+  mounted as `HOME`.
 
 ### Harness tools over MCP (#300, Claude Code only)
 
@@ -204,6 +257,9 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
 
 ### Login (requirement 1)
 
+- Where the login lives per CLI, and why Codex needs one per App, is under "Per-domain CLI state (#371)" above.
+  `ops/backends/login.ps1 <backend>` (or `login.sh`) logs in the shared login; `login.ps1 codex -App <app id>` logs
+  Codex in for one App.
 - **Codex:** `codex login --device-auth` inside the auth volume. The daemon shows the URL and the *user code* on the
   phone. That code is meant to be displayed, and it isn't a credential. The login finishes on OpenAI's site.
 - **Cursor:** `agent login` with `NO_OPEN_BROWSER=1`. The daemon shows the login URL, and the login finishes on
@@ -218,7 +274,7 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
 
 | Backend | Bridge |
 | --- | --- |
-| Claude | `can_use_tool` control request → harness policy first (project rules, defaults; e.g. Read/Grep/Glob/LS inside the workspace allow, Edit/Write inside the workspace allow, Bash asks unless it matches the allow patterns, WebFetch asks) → `ALLOW` answers at once, `ASK` creates a normal approval (card, `approval_requested` event, ntfy), `DENY` answers with the reason. The decision note goes back as the deny message. Reads outside `/workspace`, or through a symlink or junction in the host workspace, ask ("reads a file outside /workspace", never smart-approved): the shared login volume at `/home/agent/.claude` holds every Claude session's history (#370). |
+| Claude | `can_use_tool` control request → harness policy first (project rules, defaults; e.g. Read/Grep/Glob/LS inside the workspace allow, Edit/Write inside the workspace allow, Bash asks unless it matches the allow patterns, WebFetch asks) → `ALLOW` answers at once, `ASK` creates a normal approval (card, `approval_requested` event, ntfy), `DENY` answers with the reason. The decision note goes back as the deny message. Reads outside `/workspace`, or through a symlink or junction in the host workspace, ask ("reads a file outside /workspace", never smart-approved): the state at `/home/agent/.claude` holds the domain's other sessions' history and the shared login is mounted next to it (#370, #371). |
 | Codex | app-server approval requests (command, file change) → the same path. Fallback if app-server proves unstable: `codex exec --sandbox workspace-write` with approvals off, contained by the Docker sandbox plus branch review. |
 | Cursor | No host approvals exist. **Decided:** `--force` inside the Docker sandbox (egress allowlist: Cursor's domains only), with changes landing only through branch review. |
 

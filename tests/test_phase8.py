@@ -1428,9 +1428,10 @@ def test_cursor_docker_command_is_sandboxed_forced_and_resumable(tmp_path):
     command = cli.command("do it")
     assert command[:6] == ["docker", "run", "--rm", "-i", "--name", "harness-abc-cursor"]
     for pair in (["--network", "cursor-net"], ["-e", "HTTPS_PROXY=http://proxy:8888"],
-                 ["-e", "HOME=/home/agent/.cursor/home"],
-                 ["-e", "CURSOR_CONFIG_DIR=/home/agent/.cursor/config"],
-                 ["-v", "cursor-auth:/home/agent/.cursor"], ["--memory", "3g"], ["--cpus", "1.5"],
+                 ["-e", "CURSOR_CONFIG_DIR=/home/agent/.cursor-state/config"],
+                 ["-e", "CURSOR_DATA_DIR=/home/agent/.cursor-state/data"],
+                 ["-v", "cursor-auth:/home/agent/.cursor-state"], ["-v", "cursor-auth-login:/home/agent/.config/cursor"],
+                 ["--memory", "3g"], ["--cpus", "1.5"],
                  ["--pids-limit", "321"], ["--sandbox", "enabled"], ["--workspace", "/workspace"],
                  ["--model", "cursor-grok-4.6-high"], ["--resume", "resume-me"]):
         assert any(command[at:at + 2] == pair for at in range(len(command) - 1))
@@ -1438,6 +1439,7 @@ def test_cursor_docker_command_is_sandboxed_forced_and_resumable(tmp_path):
         command.index("seccomp=unconfined") - 1:command.index("seccomp=unconfined") + 1]
     assert ["--security-opt", "apparmor=unconfined"] == command[
         command.index("apparmor=unconfined") - 1:command.index("apparmor=unconfined") + 1]
+    assert not any(arg.startswith("HOME=") for arg in command)  # HOME goes with the container (#371)
     assert "--force" in command
     assert "--trust" in command
     assert "--auto-review" not in command

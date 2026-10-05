@@ -1,8 +1,9 @@
 """Unmodified provider CLIs used as session backends.
 
 The daemon owns stdin/stdout and translates the provider's JSONL protocol into
-the harness's ordinary session events. Provider credentials stay in Docker
-volumes; this module never opens those volumes or handles a login flow.
+the harness's ordinary session events. Provider credentials and each CLI's
+own state stay in Docker volumes, one state volume per domain (Web or one App, see cli_domains); this module never
+opens those volumes or handles a login flow.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
+from . import cli_domains
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, mcp_config
 from .sandbox import run_cmd
@@ -25,10 +27,24 @@ NO_PROXY = "NO_PROXY=localhost,127.0.0.1"
 # Keep this at runtime as well as in cli.Dockerfile so sessions still
 # work if the daemon is briefly paired with an older cached image.
 NODE_USE_ENV_PROXY = "NODE_USE_ENV_PROXY=1"
+EMPTY_MCP_CONFIG = '{"mcpServers": {}}'
 
 
 class CliBackendError(Exception):
     """The provider CLI exited or stopped speaking valid JSONL."""
+
+
+async def ready_domain(name: str, backend: BackendConfig, app_id: str, api_key: str) -> None:
+    """Prepare the session's domain volumes; refuse an App on a CLI whose login is per App until it has one."""
+    try:
+        await cli_domains.prepare(name, backend, app_id)
+    except RuntimeError as e:
+        raise CliBackendError(str(e)) from e
+    if app_id and not api_key and cli_domains.needs_app_login(name):
+        from .backend_state import app_login_ready
+        if not await asyncio.to_thread(app_login_ready, name, backend, app_id):
+            raise CliBackendError(f"{name.title()} has no login for this App yet: the owner runs "
+                                  f"`ops/backends/login.ps1 {name} -App {app_id}` on the server")
 
 
 class ClaudeSession:
@@ -37,8 +53,9 @@ class ClaudeSession:
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = ""):
         self.session_id = session_id
+        self.app_id = app_id  # the session's domain: "" for Web, else its App (#371)
         self.workspace = workspace.resolve()
         self.tools_only = tools_only  # an App-tools-only session (#329): no built-in tools, only the MCP server's
         self.backend = backend
@@ -71,8 +88,7 @@ class ClaudeSession:
             "-e", f"HTTP_PROXY={self.backend.proxy}",
             "-e", NO_PROXY,
             "-e", NODE_USE_ENV_PROXY,
-            "-e", "CLAUDE_CONFIG_DIR=/home/agent/.claude",
-            "-v", f"{self.backend.volume}:/home/agent/.claude",
+            *cli_domains.docker_args("claude", self.backend, self.app_id),
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
             "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
@@ -92,9 +108,9 @@ class ClaudeSession:
             args += ["--tools", "", "--disable-slash-commands"]
         if self.backend_session_id:
             args += ["--resume", self.backend_session_id]
-        if self.mcp:
-            # Only the harness server: --strict-mcp-config ignores any .mcp.json the workspace brings along.
-            args += ["--mcp-config", mcp_config(), "--strict-mcp-config"]
+        # Only the harness server, or none: --strict-mcp-config ignores any .mcp.json the workspace brings along and
+        # the user-scope servers in the state's .claude.json, which a session could have written (#371).
+        args += ["--mcp-config", mcp_config() if self.mcp else EMPTY_MCP_CONFIG, "--strict-mcp-config"]
         env_names = (["ANTHROPIC_API_KEY"] if self.api_key else []) + ([TOKEN_ENV] if self.mcp else [])
         for name in env_names:  # by name only: the value comes from the docker client's environment
             at = args.index(self.backend.image)
@@ -108,6 +124,7 @@ class ClaudeSession:
             # our finally block and can leave `docker run`'s container behind.
             # Remove only this session's deterministic container before reuse.
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+            await ready_domain("claude", self.backend, self.app_id, self.api_key)
             if self.mcp is not None:
                 try:
                     await self.mcp.start()
@@ -218,8 +235,10 @@ class CodexSession:
 
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
-                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None):
+                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
+                 app_id: str = ""):
         self.session_id = session_id
+        self.app_id = app_id
         self.workspace = workspace.resolve()
         self.backend = backend
         self.sandbox = sandbox
@@ -255,8 +274,7 @@ class CodexSession:
             "-e", f"HTTP_PROXY={self.backend.proxy}",
             "-e", NO_PROXY,
             "-e", NODE_USE_ENV_PROXY,
-            "-e", "CODEX_HOME=/home/agent/.codex",
-            "-v", f"{self.backend.volume}:/home/agent/.codex",
+            *cli_domains.docker_args("codex", self.backend, self.app_id),
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
             "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
@@ -280,6 +298,7 @@ class CodexSession:
         loop = asyncio.get_running_loop()
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+            await ready_domain("codex", self.backend, self.app_id, self.api_key)
         child_env = os.environ.copy()
         if self.api_key:
             child_env["OPENAI_API_KEY"] = self.api_key
@@ -448,8 +467,10 @@ class CursorSession:
 
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
-                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None):
+                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
+                 app_id: str = ""):
         self.session_id = session_id
+        self.app_id = app_id
         self.workspace = workspace.resolve()
         self.backend = backend
         self.sandbox = sandbox
@@ -484,12 +505,8 @@ class CursorSession:
             "-e", f"HTTP_PROXY={self.backend.proxy}",
             "-e", NO_PROXY,
             "-e", NODE_USE_ENV_PROXY,
-            # Keep every home-relative Cursor auth path inside the provider
-            # volume; recent releases do not keep browser auth solely in the
-            # documented config directory.
-            "-e", "HOME=/home/agent/.cursor/home",
-            "-e", "CURSOR_CONFIG_DIR=/home/agent/.cursor/config",
-            "-v", f"{self.backend.volume}:/home/agent/.cursor",
+            # The login is $XDG_CONFIG_HOME/cursor/auth.json; HOME stays the container's own (#371).
+            *cli_domains.docker_args("cursor", self.backend, self.app_id),
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
             "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
@@ -523,6 +540,7 @@ class CursorSession:
     async def start(self) -> None:
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+            await ready_domain("cursor", self.backend, self.app_id, self.api_key)
 
     def _spawn(self, prompt: str) -> None:
         loop = asyncio.get_running_loop()

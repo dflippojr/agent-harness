@@ -1,9 +1,10 @@
+import re
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from harness import gpu_guard, metrics, secret_scan
+from harness import backend_state, cli_domains, gpu_guard, metrics, secret_scan
 from harness.warmup import READY, ModelWarmer
 
 # One pinned gitleaks per machine, fetched once and checked against harness/gitleaks/pin.json (issue #263).
@@ -15,6 +16,26 @@ _real_download = secret_scan._download
 def fresh_metrics(monkeypatch):
     """Tests read /metrics right after changing the database; the 10 s aggregate cache would hide the change."""
     monkeypatch.setattr(metrics, "CORE_CACHE_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def no_real_cli_volumes(monkeypatch):
+    """No test reaches the server's hosted-CLI volumes (#371): preparing a domain is a no-op, and a docker call from
+    cli_domains that names a standard harness volume fails. Container tests use their own uniquely named volumes."""
+    real = cli_domains.run_cmd
+    standard = re.compile(r"harness-(auth|login)-|harness-cli-\w+-app-")
+
+    async def guarded(args, *rest, **kwargs):
+        if any(standard.search(str(arg)) for arg in args):
+            raise AssertionError(f"a test reached a real CLI volume: {args}")
+        return await real(args, *rest, **kwargs)
+
+    async def prepare(*_args, **_kwargs):
+        return None
+    monkeypatch.setattr(cli_domains, "run_cmd", guarded)
+    monkeypatch.setattr(cli_domains, "prepare", prepare)
+    # The login probe runs `docker run -v <login volume>`, which would also create a missing one.
+    monkeypatch.setattr(backend_state, "_probe_subscription", lambda *_args, **_kwargs: False)
 
 
 @pytest.fixture(autouse=True)

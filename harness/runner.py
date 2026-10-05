@@ -912,7 +912,8 @@ class Runner:
             Path(s["workspace"]).mkdir(parents=True, exist_ok=True)  # emptied at the end of every run
         cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=frozen,
                       sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
-                      model=s["model"], backend_session_id=backend_session_id, api_key=api_key, **extra)
+                      model=s["model"], backend_session_id=backend_session_id, api_key=api_key,
+                      app_id=s.get("app_id") or "", **extra)
         self._cli_sessions[sid] = cli
         await cli.start()
         prompt = ("The harness restarted; continue the task." if recovered else

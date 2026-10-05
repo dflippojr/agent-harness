@@ -1608,8 +1608,8 @@ class Manager:
 
     # erasing App data (#330 decision 5)
     async def erase_session(self, sid: str) -> bool:
-        """Erase session `sid` and everything tied to it: stop it if it runs, remove its sandbox, workspace,
-        checkpoints and transcript, then its rows (events, tool calls and results, approvals, artifacts, checkpoints,
+        """Erase session `sid` and everything tied to it: stop it if it runs, remove its sandbox, its hosted CLI's own
+        copy of the conversation (#371), workspace, checkpoints and transcript, then its rows (events, tool calls and results, approvals, artifacts, checkpoints,
         search entries). The rows go last, so an erase cut short is finished by the next one. False when there is no
         such session (already erased)."""
         s = self.db.get_session(sid)
@@ -1620,6 +1620,7 @@ class Manager:
         sandbox = self.runner._sandboxes.pop(sid, None)
         if sandbox is not None:
             await sandbox.remove()
+        await self._erase_cli_history(s)
         await asyncio.to_thread(self._erase_files, s)
         await asyncio.to_thread(self.db.delete_session, sid)
         log.info("erased session %s", sid)
@@ -1634,6 +1635,15 @@ class Manager:
         if task is not None and task is not asyncio.current_task():
             await asyncio.gather(task, return_exceptions=True)
 
+    async def _erase_cli_history(self, s: dict) -> None:
+        """Delete the hosted CLI's history of session `s` from its domain's state volume, in a throwaway container."""
+        from . import cli_domains
+        backend = s.get("backend") or "local"
+        conversation = str((s.get("run") or {}).get("backend_session_id") or "")
+        if backend not in cli_domains.LAYOUTS or backend not in self.cfg.backends or not conversation:
+            return
+        await cli_domains.erase_history(backend, self.cfg.backends[backend], s.get("app_id") or "", conversation)
+
     def _erase_files(self, s: dict) -> None:
         from . import storage
         dirs = storage.session_dirs(self.cfg, s)
@@ -1646,13 +1656,16 @@ class Manager:
         (dirs["transcripts"] / f"{s['id']}.md").unlink(missing_ok=True)
 
     async def erase_app(self, app_id: str) -> None:
-        """Erase a revoked App's store and folder, leaving a tombstone in the registry: its running sessions are
-        stopped and their sandboxes removed first."""
+        """Erase a revoked App's store and folder and its hosted CLIs' state and login volumes (#371), leaving a
+        tombstone in the registry: its running sessions are stopped and their sandboxes removed first."""
+        from . import cli_domains
         for sid in self.db.app_session_ids(app_id):
             await self._stop_run(sid)
             sandbox = self.runner._sandboxes.pop(sid, None)
             if sandbox is not None:
                 await sandbox.remove()
+        if self.cfg.backends:
+            await cli_domains.drop_app_volumes(self.cfg.backends, app_id)
         await asyncio.to_thread(self.db.drop_app, app_id)
         self.db.mark_app_erased(app_id)
 
