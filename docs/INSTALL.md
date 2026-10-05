@@ -227,6 +227,62 @@ git pull
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
+## Backups and restore
+
+With the `backup` module on (the default), the daemon writes `backup.dir/<YYYY-MM-DD>/` every night at `backup.at`
+and deletes dated folders older than `backup.keep_days`. `harness maintenance backup` takes one now.
+
+A backup folder holds exactly:
+
+| File | What it is |
+| --- | --- |
+| `harness.sqlite3` | the main store: App registry, accounts, settings, jobs, skills, provider credentials, audit log |
+| `apps/<app_id>.sqlite3` | one per App store, Agent Harness Web's `app-web.sqlite3` included (every owner and member session) |
+| `transcripts.zip` | the owner's transcripts (`<data_dir>/transcripts`) |
+| `transcripts/users/<user_id>.zip` | each member's transcripts, when they have any |
+| `transcripts/apps/<app_id>.zip` | each App's transcripts, when it has any |
+| `config/` | `harness.yaml`, `harness.local.yaml`, `projects.yaml` from the install's `config` folder |
+| `managed-config*.json` | the managed-config overlay from `<data_dir>` |
+
+It does not hold workspaces (a local git project's branches are already saved in its source repository),
+checkpoints, artifact files, `pre-migration/` snapshots, logs, image archives, model files or anything off this
+machine. Copy the backup folder elsewhere yourself if you want an off-machine copy.
+
+Check a backup at any time; it changes nothing and can run while the daemon is up:
+
+```powershell
+python -m harness.backup_restore verify <backup.dir>\2026-10-04
+```
+
+It fails (exit code 1) if a store doesn't open read-only or fails `PRAGMA integrity_check`, if a store's schema is
+newer than this code (upgrade the harness first), if a zip fails its CRC check or holds a path outside its folder,
+or if an App or member file isn't named by a valid id.
+
+To restore, stop the daemon (the scheduled task or service), then:
+
+```powershell
+python -m harness.backup_restore restore <backup.dir>\2026-10-04          # dry run: prints what it would replace
+python -m harness.backup_restore restore <backup.dir>\2026-10-04 --apply  # does it
+```
+
+Add `--config-dir <folder>` if the install doesn't use the default `config` folder. `restore` verifies the backup
+first and refuses, changing nothing, if verification fails or the daemon is still running (it answers on the
+configured port, or something holds a store's write lock). It restores into the configured `data_dir`:
+
+- the main store, and every App store in the backup;
+- the owner's, members' and Apps' transcripts. Each transcripts folder is replaced as a whole;
+- with `--include-config` only: the `config` files and the managed-config overlay. They are left out by default
+  because they may hold another machine's paths.
+
+An App store or App transcript archive whose App no longer exists in the restored main store (erased after its
+revoke) is skipped with a warning, so a restore can't bring back erased App data on its own.
+
+Nothing is deleted. `--apply` first moves every file and folder it replaces, a store's `-wal` and `-shm` files
+included, into `<data_dir>/restore-<timestamp>-previous/`, keeping their paths relative to `data_dir` (config files
+go under its `config/`). `RESTORE.txt` in that folder lists what was moved and what was put in place. To undo, stop
+the daemon, move the restored files listed there out of the way and move the folder's contents back. Start the
+daemon after a restore as usual; `python -m harness.doctor` checks the result.
+
 ## Uninstall
 
 ```powershell
