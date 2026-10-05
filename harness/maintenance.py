@@ -190,9 +190,11 @@ class Maintenance:
         return False
 
     def _transcript_files(self, root: Path, warnings: list[str]):
-        # Check ancestors as well: a plain transcripts folder can sit beneath a junction.
-        for path in reversed((root, *root.parents)):
-            if self._skip_transcript_link(path, warnings):
+        # Check ancestors within storage, but allow OS redirects above the configured data directory.
+        data_root = Path(self.cfg.data_dir).absolute()
+        absolute_root = root.absolute()
+        for path in reversed((absolute_root, *absolute_root.parents)):
+            if path.is_relative_to(data_root) and self._skip_transcript_link(path, warnings):
                 return
         if not root.is_dir():
             return

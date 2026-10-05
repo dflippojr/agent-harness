@@ -148,3 +148,24 @@ def test_missing_owner_preserves_legacy_empty_archive(maintenance):
     assert result["transcript_archives"] == 1
     with zipfile.ZipFile(Path(result["path"]) / "transcripts.zip") as archive:
         assert archive.namelist() == []
+
+
+def test_redirect_above_configured_data_directory_is_allowed(maintenance, tmp_path):
+    m = maintenance
+    seed(m)
+    redirect = tmp_path / "redirect"
+    junction_or_symlink(redirect, tmp_path)
+    original_data_dir = m.cfg.data_dir
+    try:
+        m.cfg.data_dir = redirect / "data"
+        result = m._backup_sync(time.time())
+        assert result["transcript_archives"] == 5
+        assert result["warnings"] == []
+        with zipfile.ZipFile(Path(result["path"]) / "transcripts/users/u-first.zip") as archive:
+            assert archive.read("nested/session.md") == b"account 1"
+    finally:
+        m.cfg.data_dir = original_data_dir
+        if os.name == "nt":
+            redirect.rmdir()
+        else:
+            redirect.unlink()
