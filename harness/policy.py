@@ -112,13 +112,15 @@ def _workspace_parts(value: str) -> list[str] | None:
     return normalized[len("/workspace/"):].split("/")
 
 
-def _crosses_link(root: Path, parts: list[str]) -> bool:
+def _crosses_link(root: Path, parts: list[str], glob: bool = False) -> bool:
     """True when a component of `parts` under the host workspace `root` is a symlink or reparse point, so the read
-    could land outside /workspace. Components past the first missing one can't be links. Stops at a glob."""
+    could land outside /workspace. Components past the first missing one can't be links. Every component is literal,
+    except in a Glob pattern: there a wildcard may match any folder, link or not, so a literal folder after it (as in
+    `**/link/x`) can't be checked and counts as crossing. A trailing name after a wildcard only lists paths."""
     cur = root
-    for part in parts:
-        if _GLOB_CHARS.search(part):
-            break
+    for i, part in enumerate(parts):
+        if glob and _GLOB_CHARS.search(part):
+            return i < len(parts) - 2
         if os.name == "nt" and ":" in part:
             return True  # a drive or stream name would check a different host path than the container reads
         cur = cur / part
@@ -152,7 +154,7 @@ def _workspace_read_matches(rule: dict, name: str, args: dict, root: Path | None
         parts = _workspace_parts(joined)
         if parts is None:
             return False
-    return root is None or not _crosses_link(root, parts)
+    return root is None or not _crosses_link(root, parts, glob=pattern is not None)
 
 
 def _path_rule_matches(rule: dict, args: dict) -> bool:

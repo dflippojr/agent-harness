@@ -77,6 +77,17 @@ def test_read_through_a_link_in_the_host_workspace_is_asked(tmp_path):
     assert policy.decide("Read", {"file_path": "/workspace/link"}).action == ASK
     assert policy.decide("Read", {"file_path": "/workspace/link/../.credentials.json"}).action == ASK
     assert policy.decide("Glob", {"pattern": "link/../*.json"}).action == ASK
+    # A wildcard folder may be the link, so a literal folder after one can't be checked.
+    assert policy.decide("Glob", {"pattern": "**/link/x"}).action == ASK
+    assert policy.decide("Glob", {"pattern": "*/x/*.jsonl"}).action == ASK
+    assert policy.decide("Glob", {"pattern": "src/**/*.py"}).action == ALLOW
+    assert policy.decide("Glob", {"pattern": "**/package.json"}).action == ALLOW
+    # Read, Grep and LS paths are literal: glob characters in a folder name don't end the walk.
+    (workspace / "[x]").mkdir()
+    _link_dir(workspace / "[x]" / "link", outside)
+    assert policy.decide("Read", {"file_path": "/workspace/[x]/link/x"}).action == ASK
+    assert policy.decide("Grep", {"pattern": "x", "path": "/workspace/[x]/link"}).action == ASK
+    assert policy.decide("Read", {"file_path": "/workspace/[x]/other.py"}).action == ALLOW
     assert policy.decide("Grep", {"pattern": "x", "path": "/workspace/link"}).action == ASK
     assert policy.decide("LS", {"path": "/workspace/link"}).action == ASK
     assert policy.decide("Glob", {"pattern": "link/**"}).action == ASK
