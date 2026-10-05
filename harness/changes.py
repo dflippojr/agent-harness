@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .projects import git
+from .projects import GitError, git
 from .review_comments import parse_diff
 
 MAX_DIFF_CHARS = 400_000
@@ -17,9 +17,9 @@ EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # the parent of a root 
 SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, strict: bool = False) -> str:
     # Isolated host Git: workspace config/hooks/filters must not run. See harness.projects.
-    return git(repo, *args, timeout=60, check=False).out
+    return git(repo, *args, timeout=60, check=strict).out
 
 
 def find_repos(root: Path, depth: int = 2) -> list[Path]:
@@ -37,8 +37,8 @@ def find_repos(root: Path, depth: int = 2) -> list[Path]:
     return found
 
 
-def _status_files(repo: Path) -> list[dict]:
-    status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
+def _status_files(repo: Path, strict: bool = False) -> list[dict]:
+    status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all", strict=strict)
     files = []
     for line in status.splitlines():
         code, path = line[:2], line[3:]
@@ -58,22 +58,25 @@ def _base_commit(repo: Path, workspace: Path, base_commit: str | None) -> str:
     return base or _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip()
 
 
-def _repo_diff(repo: Path, base: str, untracked: list[str]) -> str:
-    diff = _git(repo, "diff", base, "--no-color", "--no-ext-diff", "--no-textconv") if base else ""
+def _repo_diff(repo: Path, base: str, untracked: list[str], strict: bool = False) -> str:
+    diff = _git(repo, "diff", base, "--no-color", "--no-ext-diff", "--no-textconv", strict=strict) if base else ""
     for path in untracked:
         # Git for Windows maps /dev/null for --no-index too.
-        diff += _git(repo, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv",
-                     "--", "/dev/null", path)
+        result = git(repo, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv",
+                     "--", "/dev/null", path, timeout=60, check=False)
+        if strict and result.code not in (0, 1):
+            raise GitError("could not read an untracked file for the secret scan")
+        diff += result.out
     return diff
 
 
-def commit_diffs(repo: Path, base: str) -> list[dict]:
+def commit_diffs(repo: Path, base: str, strict: bool = False) -> list[dict]:
     """Each commit in base..HEAD, oldest first, with its own diff against its first parent: what a push sends."""
     out = []
-    for sha in _git(repo, "rev-list", "--reverse", f"{base}..HEAD").split() if base else ():
+    for sha in _git(repo, "rev-list", "--reverse", f"{base}..HEAD", strict=strict).split() if base else ():
         parent = _git(repo, "rev-parse", "--verify", "-q", f"{sha}^").strip() or EMPTY_TREE
         out.append({"sha": sha, "diff": _git(repo, "diff", parent, sha, "--no-color", "--no-ext-diff",
-                                             "--no-textconv")})
+                                             "--no-textconv", strict=strict)})
     return out
 
 
@@ -90,20 +93,22 @@ def published(repo: Path, commit: str, tips: list[str]) -> bool:
     return False
 
 
-def repo_diffs(workspace: Path, base_commit: str | None = None) -> list[dict]:
+def repo_diffs(workspace: Path, base_commit: str | None = None, *, strict: bool = False) -> list[dict]:
     """Each repository's full (untruncated) diff from its base to the working tree, untracked files included,
     and each commit since the base with its own diff (`commits`)."""
     workspace = workspace.resolve()
     out = []
     for repo in find_repos(workspace):
-        files = _status_files(repo)
+        files = _status_files(repo, strict)
         # Show untracked files in the diff too, without staging anything for real.
         untracked = [f["path"] for f in files if f["status"] == "??" and "__pycache__/" not in f["path"]]
         base = _base_commit(repo, workspace, base_commit)
+        if strict:
+            _git(repo, "rev-parse", "--verify", f"{base}^{{commit}}", strict=True)
         out.append({"repo": repo, "path": repo.relative_to(workspace).as_posix() or ".", "files": files,
-                    "base": base, "diff": _repo_diff(repo, base, untracked),
-                    "head": _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip(),
-                    "commits": commit_diffs(repo, base),
+                    "base": base, "diff": _repo_diff(repo, base, untracked, strict),
+                    "head": _git(repo, "rev-parse", "--verify", "-q", "HEAD", strict=strict).strip(),
+                    "commits": commit_diffs(repo, base, strict),
                     "branch": _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip(),
                     "subjects": _git(repo, "log", "--oneline", "--no-color", f"{base}..HEAD").splitlines()
                     if base else []})

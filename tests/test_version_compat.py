@@ -59,7 +59,7 @@ def test_discovery_is_always_reachable_and_omitted_header_has_transition_notice(
         assert data["release"] == compat.RELEASE
         assert data["build_id"] == compat.BUILD_ID
         assert data["protocols"] == compat.PROTOCOLS
-        assert data["minimum_clients"]["runner"] == "4.1"
+        assert data["minimum_clients"]["runner"] == "4.2"
         serialized = json.dumps(data)
         assert "runner-secret" not in serialized
         assert str(tmp_path) not in serialized
@@ -450,7 +450,7 @@ def test_old_runner_gets_exact_manual_update_fallback(tmp_path):
     assert response.status_code == 409
     assert "harness update" in response.json()["detail"]
     status = manager.hub.status()[0]
-    assert status["compatibility"]["state"] == "compatible"
+    assert status["compatibility"]["state"] == "client_update_required"
     assert status["update_supported"] is False
     assert status["manual_update"] == "harness update"
 

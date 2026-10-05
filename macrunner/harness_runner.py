@@ -368,9 +368,10 @@ class Executor:
         """No scanner on the runner: send a complete bounded snapshot to the tower."""
         ws, sid = self.workspace(p["session"]), p["session"]
         projects.snapshot(ws, f"Work in progress from session {sid}")
+        head = projects.head(ws)
         diffs = [{k: v for k, v in d.items() if k != "repo"}
-                 for d in repo_diffs(ws, p.get("base_commit") or None)]
-        data = {"head": projects.head(ws), "diffs": diffs}
+                 for d in repo_diffs(ws, p.get("base_commit") or None, strict=True)]
+        data = {"head": head, "diffs": diffs}
         if (sum(len(d["commits"]) for d in diffs) > MAX_SCAN_COMMITS
                 or len(json.dumps(data).encode("utf-8")) > MAX_DIFF_CHARS):
             return {"unavailable": True, "message": "the scan input exceeds the runner limit"}
