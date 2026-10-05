@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath
 
 from . import migrations, storage
 from .app_stores import APP_STORE_FILE, WEB_APP_ID, app_dir
+from .maintenance import remove_tree
 from .principal import OWNER_USER_ID
 
 CONFIG_FILES = ("harness.yaml", "harness.local.yaml", "projects.yaml")
@@ -303,6 +304,8 @@ def apply(cfg, p: Plan, now: float | None = None) -> Path:
                 shutil.copy2(item.source, item.dest)
     except BaseException:
         _roll_back(created, moved)
+        if not any(previous.rglob("*")):
+            remove_tree(previous)
         raise
     lines = [f"Restored from {p.folder} at {time.strftime('%Y-%m-%d %H:%M:%S')}.", "",
              "Moved here (original location):"]
@@ -313,8 +316,6 @@ def apply(cfg, p: Plan, now: float | None = None) -> Path:
 
 
 def _roll_back(created: list[Path], moved: list[tuple[Path, Path]]) -> None:
-    from .maintenance import remove_tree
-
     for path in reversed(created):
         if path.is_dir() and not path.is_symlink():
             remove_tree(path)

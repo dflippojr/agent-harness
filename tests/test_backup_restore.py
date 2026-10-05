@@ -264,8 +264,8 @@ def test_a_failed_copy_puts_the_moved_files_back(backed_up, monkeypatch):
     monkeypatch.setattr(backup_restore.shutil, "copy2", fail)
     with pytest.raises(OSError, match="disk full"):
         restore(cfg, folder, apply_changes=True, out=_quiet)
-    after = {k: v for k, v in _hashes(Path(cfg.data_dir)).items() if not k.startswith("restore-")}
-    assert after == before
+    assert _hashes(Path(cfg.data_dir)) == before
+    assert not list(Path(cfg.data_dir).glob("restore-*"))
 
 
 def test_the_cli_verifies_and_dry_runs_against_the_configured_data_dir(backed_up, monkeypatch, capsys):
