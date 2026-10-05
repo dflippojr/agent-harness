@@ -100,11 +100,18 @@ def main() -> int:
     send({"type": "control_request", "request_id": "init-1", "request": {"subtype": "initialize"}})
     send({"type": "user", "message": {"role": "user", "content": f"SCENARIO:{args.scenario} go"},
           "parent_tool_use_id": None, "session_id": ""})
-    deadline = time.monotonic() + args.timeout
+    # The read below blocks, so a CLI that stalls without writing is ended from a timer, not by checking a deadline.
+    timed_out = threading.Event()
+
+    def watchdog() -> None:
+        timed_out.set()
+        subprocess.run(["docker", "rm", "-f", "modstudy-claude"], capture_output=True)
+        proc.kill()
+
+    timer = threading.Timer(args.timeout, watchdog)
+    timer.daemon = True
+    timer.start()
     for line in proc.stdout:
-        if time.monotonic() > deadline:
-            show("timeout")
-            break
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
@@ -132,7 +139,13 @@ def main() -> int:
             show("result", subtype=event.get("subtype"), result=str(event.get("result"))[:200],
                  session_id=event.get("session_id"))
             break
-    proc.stdin.close()
+    timer.cancel()
+    if timed_out.is_set():
+        show("timeout", seconds=args.timeout)
+    try:
+        proc.stdin.close()
+    except OSError:  # the watchdog already killed it
+        pass
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
