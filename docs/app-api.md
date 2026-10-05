@@ -110,6 +110,11 @@ Session ids stay unique across all stores. The `/api/v1` responses are the same 
   one file per App (Web's as `apps/app-web.sqlite3`), next to the main store's `harness.sqlite3`. A session you
   delete, or that retention or a revoke erases, stays in the older backups that hold it until they rotate out
   (`backup.keep_days`, 14 days by default). Session files (working directories, checkpoints) are not in the backups.
+- **Hosted Claude reads.** A Claude Code session reads files inside its own `/workspace` without asking. A `Read`,
+  `Glob`, `Grep` or `LS` of any other path, or of a path that passes through a symlink or junction in the workspace,
+  needs an approval (#370): the provider login volume at `/home/agent/.claude` is shared by every Claude session and
+  holds their history. Project rules can still allow or deny specific paths. Codex and Cursor read the shared volume
+  through their own sandboxes, which this approval can't reach (#371).
 - **Logs and telemetry.** Your tools' arguments and results stay in your store: logs, traces and the audit log get
   only tool names, call ids, sizes and timings.
 - **Retention.** A session is erased, exactly as [`DELETE`](#delete-apiv1sessionsid) erases it, once it has been
