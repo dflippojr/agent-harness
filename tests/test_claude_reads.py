@@ -46,6 +46,7 @@ def test_reads_inside_workspace_are_allowed(name, args):
     ("Read", {"file_path": "$HOME/.claude/.credentials.json"}),
     ("Read", {"file_path": "../home/agent/.claude/.credentials.json"}),
     ("Read", {"file_path": "/workspacex/a.py"}),
+    ("Read", {"file_path": "/workspace/src/../a.py"}),
     ("Read", {}),
     ("Grep", {"pattern": "token", "path": "/home/agent"}),
     ("LS", {"path": "/"}),
@@ -74,6 +75,8 @@ def test_read_through_a_link_in_the_host_workspace_is_asked(tmp_path):
     assert policy.decide("Grep", {"pattern": "x"}).action == ALLOW
     assert policy.decide("Read", {"file_path": "/workspace/link/x"}).action == ASK
     assert policy.decide("Read", {"file_path": "/workspace/link"}).action == ASK
+    assert policy.decide("Read", {"file_path": "/workspace/link/../.credentials.json"}).action == ASK
+    assert policy.decide("Glob", {"pattern": "link/../*.json"}).action == ASK
     assert policy.decide("Grep", {"pattern": "x", "path": "/workspace/link"}).action == ASK
     assert policy.decide("LS", {"path": "/workspace/link"}).action == ASK
     assert policy.decide("Glob", {"pattern": "link/**"}).action == ASK

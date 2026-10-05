@@ -99,9 +99,10 @@ _GLOB_CHARS = re.compile(r"[*?\[{]")
 
 def _workspace_parts(value: str) -> list[str] | None:
     """The components under /workspace of a Claude Code read path (relative paths start at its cwd, /workspace),
-    or None when the path leaves /workspace or uses a form the CLI may expand differently (~, $VAR)."""
+    or None when the path leaves /workspace or uses a form the CLI may expand differently (~, $VAR). Any `..` is
+    refused: normalizing it away would hide a link before it (`link/../x` opens x beside the link's target)."""
     raw = value.strip().replace("\\", "/")
-    if raw.startswith(("~", "$")) or "\0" in raw:
+    if raw.startswith(("~", "$")) or "\0" in raw or ".." in raw.split("/"):
         return None
     normalized = posixpath.normpath(raw if raw.startswith("/") else "/workspace/" + raw)
     if normalized == "/workspace":
