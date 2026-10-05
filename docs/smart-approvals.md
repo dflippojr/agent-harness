@@ -49,6 +49,7 @@ Turning it `off` or back to `shadow` applies to the next tool call without resta
 The optional proxy is the `reviewer` service in `ops/egress/compose.yaml` (host `127.0.0.1:8890`),
 allowlisting official OpenAI and Anthropic API hosts only.
 A possible TypeSafe Jev reviewer is studied, not implemented, in `docs/jev-smart-approvals-study.md` (#160).
+A self-hosted CLM-8B reviewer was assessed as a no-go for now in `docs/clm-study.md` (#225).
 
 ## Authority
 
