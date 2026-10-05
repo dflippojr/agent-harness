@@ -1,0 +1,1 @@
+{ "name": "harness-policy", "version": "0.1.0", "description": "Study prototype for #306: reports a worker's events to the relay and screens commands as a second layer." }
