@@ -7,7 +7,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-ARG OPENCODE_VERSION=1.18.30
+# Phase 0 used 1.18.30; stage A pins the latest release (v1.18.34).
+ARG OPENCODE_VERSION=1.18.34
 RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" && opencode --version
 
 COPY opencode.json /root/.config/opencode/opencode.json

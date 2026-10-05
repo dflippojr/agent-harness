@@ -1,0 +1,8 @@
+{
+  "agents": {"defaults": {"workspace": "/workspace", "model": {"primary": "bakeoff/{env:LLM_MODEL}"}}, "entries": {"main": {"default": true}}},
+  "models": {"mode": "replace", "providers": {"bakeoff": {
+    "api": "openai-completions", "baseUrl": "{env:LLM_BASE_URL}", "apiKey": "local",
+    "models": [{"id": "{env:LLM_MODEL}", "name": "Bake-off", "input": ["text"], "reasoning": false,
+                "contextWindow": 32768, "maxTokens": 8192, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]
+  }}}
+}

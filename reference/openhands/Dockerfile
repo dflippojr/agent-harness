@@ -11,6 +11,7 @@ ENV UV_TOOL_DIR=/opt/uv-tools \
 ENV OPENHANDS_SUPPRESS_BANNER=1 \
     LITELLM_LOCAL_MODEL_COST_MAP=True
 
+# Latest release is still 1.16.0 at stage A's 2026-10-04 compatibility check.
 ARG OPENHANDS_VERSION=1.16.0
 RUN uv tool install "openhands==${OPENHANDS_VERSION}" --python 3.12 \
     && openhands --version
