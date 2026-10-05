@@ -24,7 +24,7 @@ import stat
 import time
 from pathlib import Path
 
-from . import projects
+from . import projects, storage
 from .config import Config
 from .db import Database
 from .principal import OWNER_USER_ID
@@ -147,7 +147,6 @@ class Maintenance:
         return result
 
     def _backup_sync(self, now: float) -> dict:
-        import zipfile
         from .config import ROOT
 
         root = Path(self.cfg.backup.dir)
@@ -158,11 +157,10 @@ class Maintenance:
         db_copy = tmp / "harness.sqlite3"
         self._backup_db(db_copy)
         app_stores = self._backup_app_stores(tmp / "apps")
-        with zipfile.ZipFile(tmp / "transcripts.zip", "w", zipfile.ZIP_DEFLATED) as z:
-            if self.cfg.transcripts_dir.is_dir():
-                for f in sorted(self.cfg.transcripts_dir.rglob("*")):
-                    if f.is_file():
-                        z.write(f, f.relative_to(self.cfg.transcripts_dir).as_posix())
+        warnings: list[str] = []
+        transcript_archives = self._archive_transcripts(
+            storage.transcripts_dir(self.cfg, OWNER_USER_ID), tmp / "transcripts.zip", warnings, owner=True)
+        transcript_archives += self._backup_other_transcripts(tmp / "transcripts", warnings)
         config = tmp / "config"
         config.mkdir()
         for name in ("harness.yaml", "harness.local.yaml", "projects.yaml"):
@@ -178,7 +176,81 @@ class Maintenance:
         removed = self._prune_old_backups(root, dest, now - self.cfg.backup.keep_days * 86400)
         size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
         return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": "",
-                "app_stores": app_stores}
+                "app_stores": app_stores, "transcript_archives": transcript_archives, "warnings": warnings}
+
+    @staticmethod
+    def _skip_transcript_link(path: Path, warnings: list[str]) -> bool:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        if storage.is_reparse_point(path):
+            warnings.append(f"Skipped transcript link: {path}")
+            return True
+        return False
+
+    def _transcript_files(self, root: Path, warnings: list[str]):
+        # Check ancestors within storage, but allow OS redirects above the configured data directory.
+        data_root = Path(self.cfg.data_dir).absolute()
+        absolute_root = root.absolute()
+        for path in reversed((absolute_root, *absolute_root.parents)):
+            if path.is_relative_to(data_root) and self._skip_transcript_link(path, warnings):
+                return
+        if not root.is_dir():
+            return
+        yield from self._walk_transcripts(root, warnings)
+
+    def _walk_transcripts(self, folder: Path, warnings: list[str]):
+        for path in sorted(folder.iterdir()):
+            if self._skip_transcript_link(path, warnings):
+                continue
+            if path.is_dir():
+                yield from self._walk_transcripts(path, warnings)
+            elif path.is_file():
+                yield path
+
+    def _archive_transcripts(self, root: Path, dest: Path, warnings: list[str], *, owner=False) -> int:
+        import zipfile
+
+        try:
+            files = iter(self._transcript_files(root, warnings))
+            first = next(files, None)
+            if first is None and not owner:
+                return 0
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
+                if first is not None:
+                    archive.write(first, first.relative_to(root).as_posix())
+                for path in files:
+                    archive.write(path, path.relative_to(root).as_posix())
+            return 1
+        except Exception as e:  # noqa: BLE001 - secondary archives must not invalidate the database snapshot
+            if owner:
+                raise
+            dest.unlink(missing_ok=True)
+            warnings.append(f"Transcript archive failed for {root}: {type(e).__name__}: {e}")
+            return 0
+
+    def _backup_other_transcripts(self, dest: Path, warnings: list[str]) -> int:
+        from .app_stores import app_dir
+
+        count = 0
+        for account in self.db.list_accounts():
+            user_id = account["user_id"]
+            if user_id != OWNER_USER_ID:
+                count += self._archive_transcripts(storage.transcripts_dir(self.cfg, user_id),
+                                                   dest / "users" / f"{user_id}.zip", warnings)
+        root = Path(self.cfg.data_dir) / "apps"
+        if self._skip_transcript_link(root, warnings) or not root.is_dir():
+            return count
+        for folder in sorted(root.iterdir()):
+            try:
+                app_dir(self.cfg.data_dir, folder.name)
+            except ValueError:
+                continue
+            count += self._archive_transcripts(storage.transcripts_dir(self.cfg, OWNER_USER_ID, folder.name),
+                                               dest / "apps" / f"{folder.name}.zip", warnings)
+        return count
 
     def _backup_db(self, db_copy: Path) -> None:
         backup_sqlite(self.cfg.db_path, db_copy)

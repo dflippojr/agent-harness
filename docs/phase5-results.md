@@ -97,11 +97,18 @@ Prometheus without errors; the dashboard wasn't viewed in a browser (Grafana nee
 ## Backups
 
 At 03:30 (and at start if the last good backup is over 26 h old): SQLite online backup API → `harness.sqlite3`
-(integrity-checked), `transcripts.zip`, and `config/` (`harness.yaml`, `harness.local.yaml`, `projects.yaml`) into
+(integrity-checked), each App store in `apps/<app_id>.sqlite3` (including Web), the owner's `transcripts.zip`,
+nonempty members' `transcripts/users/<user_id>.zip` and Apps' `transcripts/apps/<app_id>.zip`, managed overlays,
+and `config/` (`harness.yaml`, `harness.local.yaml`, `projects.yaml`) into
 `D:\My Backups\agent-harness\<date>`, written as `<date>.partial` and renamed when complete; dated folders older than
 14 days are deleted. Secrets (`D:\Agents\harness\secrets`, ntfy tokens) are not copied. First manual run: 1.1 MB.
 D: is a mirrored pool on the same machine, so this protects against DB corruption and mistakes, not against losing
 the tower.
+
+All transcript archives use deflate compression and relative file paths; links and Windows reparse points are
+skipped with warnings. Member/App archive failures warn without failing the database backup. Working directories,
+checkpoints and artifacts are excluded. Backups stay owner-only, outside the member privacy guarantee for the
+OS-level machine owner. Data erased by delete, retention or revoke remains in older backups until they rotate out.
 
 ## Memory library
 
