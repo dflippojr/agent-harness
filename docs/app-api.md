@@ -304,9 +304,12 @@ What the server guarantees, enforced rather than prompted:
 - **Only your tools.** The model is offered your tools and nothing else. On `local` the schemas sent to the model are
   exactly your tools; the harness's file, shell, edit, web, memory, image, session-search, skill and loop-control
   tools are absent. On `claude`, Claude Code starts with `--tools ""` (no built-in tools: no Bash, Read, Edit,
-  WebFetch, Task, ...), slash commands and skills off, and only your tools on its harness MCP server.
+  WebFetch, Task, ...), slash commands and skills off, and only your tools on its harness MCP server. On `codex`,
+  Codex starts with no environment (no shell, `apply_patch` or image viewing), web search, image generation,
+  sub-agents, apps and plugins switched off, and only your tools on its harness MCP server. If Codex reports a
+  built-in tool anyway, the run stops and fails.
 - **Everything else is denied, never asked about.** The session's policy allows exactly your tool names (natively,
-  or as `mcp__harness__<name>` from Claude Code) and denies every other call outright. A model that tries a built-in
+  or as `mcp__harness__<name>` from Claude Code or Codex) and denies every other call outright. A model that tries a built-in
   tool anyway gets an error result, the call shows in the events as a `tool_call` with `decision: "deny"`, and it
   never runs. There are no approval prompts in these sessions.
 - **No workspace.** There is no repository. Where a hosted CLI insists on a working directory it gets an empty one
@@ -318,9 +321,10 @@ What the server guarantees, enforced rather than prompted:
   free text such as bank transaction descriptions). It changes nothing today, since the session has no risky tools.
 - It can't be rerun (`POST .../rerun` is a 409); start a new session with its tools instead.
 
-Backends: `local` and `claude` (with its MCP server on, the default). `GET /api/v1` lists them in
-`features.app_tools_only_backends`, and each `GET /api/v1/backends` entry has `app_tools_only: true|false`, so your
-App can show which backends can run its bot. Any other backend (`codex`, `cursor`) refuses at create time with a 400
+Backends: `local`, `claude` and `codex` (each hosted CLI with its MCP server on, the default). `GET /api/v1`
+lists them in `features.app_tools_only_backends`, and each `GET /api/v1/backends` entry has `app_tools_only:
+true|false`, so your App can show which backends can run its bot. Any other backend (`cursor`, or a hosted CLI whose
+MCP server the owner switched off) refuses at create time with a 400
 whose `error.code` is `app_tools_only_unsupported`; it never runs with its built-in tools. A session that can't get
 its tools to the CLI at run time fails with `failure.code` `app_tools_only_unsupported`.
 
@@ -582,4 +586,5 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
 | 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
+| 1.18 | 2026-10-05 | `codex` runs App-tools-only sessions and is listed in `app_tools_only_backends`; hosted Codex sessions get the harness tools over MCP (#373) |
 | 1.16 | 2026-10-03 | `DELETE /api/v1/sessions/{id}` erases a session and everything tied to it; `retention_days` on create and an App default retention erase idle sessions; a revoked App's store and folder are erased after 7 days unless the owner undoes the revoke; App session files live in the App's folder (#330) |

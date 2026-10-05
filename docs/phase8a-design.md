@@ -229,31 +229,115 @@ instruction file that every later session loaded. `harness/cli_domains.py` now g
   those volumes no longer load (the read-only files cover them), and Cursor's old `home/` directory is no longer
   mounted as `HOME`.
 
-### Harness tools over MCP (#300, Claude Code only)
+### Harness tools over MCP (#300 Claude Code, #373 Codex)
 
-- **What:** a hosted Claude Code session can call `web_search`, `web_fetch`, `session_search`, `session_read`, the
-  memory library tools, `generate_image` and app-registered tools as `mcp__harness__<tool>`, as far as the project
-  and `app.capabilities` enable them for the native loop. Remote control and skills are not served.
+- **What:** a hosted Claude Code or Codex session can call `web_search`, `web_fetch`, `session_search`,
+  `session_read`, the memory library tools, `generate_image` and app-registered tools on the harness MCP server, as
+  far as the project and `app.capabilities` enable them for the native loop. Claude Code names them
+  `mcp__harness__<tool>`. Codex reports `server: "harness", tool: "<tool>"`, which the runner names the same way.
+  Remote control and skills are not served. Cursor gets no endpoint: it has no host approval to hang a grant on.
 - **Network path:** a per-session relay sidecar (`harness-<sid>-mcp`, `harness/mcp_relay.js` run by `node` from the
-  CLI image, `--cap-drop ALL`, no published ports) joins `harness-cli-claude` and listens on `127.0.0.1:8790`. The
-  Claude container runs with `--network container:harness-<sid>-mcp`, so it shares the relay's namespace. It keeps
-  the same network, proxy and allowlist, and it is the only container that can reach that loopback port. The relay
-  hands each HTTP request to the daemon as a JSON line over its stdio pipe. The daemon opens no listener, so there
-  is nothing on the host for a container to reach. The relay stops and is removed with the session's CLI.
-- **Token:** minted per CLI start (`McpTokens`), kept in daemon memory only, and revoked when the CLI stops. Claude
-  gets it as `-e HARNESS_MCP_TOKEN` (name only, value from the docker client's environment). `--mcp-config`
-  refers to it as `${HARNESS_MCP_TOKEN}`. The endpoint rejects a missing or revoked token (401) and another
-  session's token (403). `--strict-mcp-config` ignores any `.mcp.json` in the workspace.
+  CLI image, `--cap-drop ALL`, no published ports) joins the backend's network (`harness-cli-claude`,
+  `harness-cli-codex`) and listens on `127.0.0.1:8790`. The CLI container runs with `--network
+  container:harness-<sid>-mcp`, so it shares the relay's namespace. It keeps the same network, proxy and allowlist,
+  and it is the only container that can reach that loopback port (`NO_PROXY` covers `127.0.0.1`). The relay hands
+  each HTTP request to the daemon as a JSON line over its stdio pipe. The daemon opens no listener, so there is
+  nothing on the host for a container to reach. The relay stops and is removed with the session's CLI.
+- **Token:** minted per CLI start (`McpTokens`), kept in daemon memory only, and revoked when the CLI stops. The CLI
+  gets it as `-e HARNESS_MCP_TOKEN` (name only, value from the docker client's environment). Claude Code's
+  `--mcp-config` refers to it as `${HARNESS_MCP_TOKEN}`, and Codex's server entry as
+  `bearer_token_env_var="HARNESS_MCP_TOKEN"`. The endpoint rejects a missing or revoked token (401) and another
+  session's token (403). For Claude, `--strict-mcp-config` ignores any `.mcp.json` in the workspace.
 - **Policy:** `Policy.decide` treats `mcp__harness__<tool>` as `<tool>`, so project rules (written with either name),
-  the defaults and `ALWAYS_ASK` apply unchanged. Other `mcp__*` servers are denied. Claude Code asks through
-  `can_use_tool` before each MCP call. An allowed or approved call leaves a one-use grant (tool, args, tool_use_id),
-  and the endpoint refuses a `tools/call` without one, so the approval gate holds even if a permission mode skips
-  the prompt. Memory-library approvals carry the diff as for native calls. Successful MCP results taint the session
-  like the native tools (#262). Each run is wrapped in an `mcp_tool_call` span.
-- **Transcript:** the calls and results are Claude's own `tool_use`/`tool_result` records, so they show as ordinary
-  tool events named `mcp__harness__<tool>`.
-- **Off switch:** `backends.claude.mcp: false`. Codex and Cursor get no MCP endpoint until their config mechanism
-  and approval path are verified on the tower.
+  the defaults and `ALWAYS_ASK` apply unchanged. Other `mcp__*` servers are denied. The CLI asks before each MCP
+  call: Claude Code through `can_use_tool`, Codex through `mcpServer/elicitation/request`. An allowed or approved
+  call leaves a one-use grant (tool, args, call id), and the endpoint refuses a `tools/call` without one, so the
+  approval gate holds even if a permission mode skips the prompt. The call id is Claude's tool_use id
+  (`_meta["claudecode/toolUseId"]`) or Codex's mcpToolCall item id (`_meta.callId`). Memory-library approvals carry
+  the diff as for native calls. Successful MCP results taint the session like the native tools (#262). Each run is
+  wrapped in an `mcp_tool_call` span.
+- **Transcript:** the calls and results are the CLI's own records (Claude's `tool_use`/`tool_result`, Codex's
+  `mcpToolCall` items), so they show as ordinary tool events named `mcp__harness__<tool>`.
+- **Off switch:** `backends.claude.mcp: false` and `backends.codex.mcp: false` (both default `true`). With it off,
+  that backend also can't run App-tools-only sessions.
+
+#### Codex 0.154.0 verification (#373, 2026-10-05)
+
+Read from the source at tag [`rust-v0.154.0`](https://github.com/openai/codex/tree/rust-v0.154.0) (the version pinned
+in `sandbox/cli.Dockerfile`). `S` below is `https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs`. Recheck all
+three when the pin moves. Not yet run against the real Codex on the tower: that live check is left on #373.
+
+**(a) Registering the server from the command line.** `-c key=value` is a global flag on every subcommand,
+`app-server` included ([S/utils/cli/src/config_override.rs#L34](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/utils/cli/src/config_override.rs#L34)).
+The value is parsed as TOML and becomes the session-flags layer, merged over the config files
+([S/config/src/loader/mod.rs#L370](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/config/src/loader/mod.rs#L370)).
+A streamable-HTTP server takes `url`, `bearer_token_env_var` (the token is read from that variable) and
+`default_tools_approval_mode`
+([S/config/src/mcp_types.rs#L342](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/config/src/mcp_types.rs#L342),
+[#L366](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/config/src/mcp_types.rs#L366)). The harness
+passes:
+
+```
+codex app-server --stdio -c 'mcp_servers.harness={url="http://127.0.0.1:8790/mcp",
+  bearer_token_env_var="HARNESS_MCP_TOKEN", default_tools_approval_mode="prompt", startup_timeout_sec=30}'
+```
+
+No file in `CODEX_HOME` changes. The user-level `config.toml` is the harness's read-only file, which registers no
+server (#371). A workspace `.codex/config.toml` loads only for a trusted project, and the harness trusts none
+([S/config/src/loader/mod.rs#L119](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/config/src/loader/mod.rs#L119)).
+A server from another source, such as a plugin a session installed in its domain's state, would still be asked
+about through the same elicitation, and the policy denies it.
+
+**(b) A pre-call approval the harness can answer: yes.** For a non-Apps server Codex takes the server's
+`default_tools_approval_mode`, and `prompt` requires approval for every call whatever the tool's annotations say
+([S/core/src/mcp_tool_call.rs#L2351](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/mcp_tool_call.rs#L2351)).
+Codex first sends `item/started` with the `mcpToolCall` item (id = the call id)
+([#L258](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/mcp_tool_call.rs#L258),
+[S/app-server-protocol/src/protocol/thread_history.rs#L761](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server-protocol/src/protocol/thread_history.rs#L761)).
+It then blocks on approval
+([#L272](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/mcp_tool_call.rs#L272)). Permission
+hooks come first (Codex's `hooks.json` is the harness's read-only file), then the `user` reviewer the harness
+selects with `approvalsReviewer: "user"`
+([S/core/src/tools/approvals.rs#L512](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/approvals.rs#L512)).
+With `tool_call_mcp_elicitation` (stable, on by default:
+[S/features/src/lib.rs#L1632](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/features/src/lib.rs#L1632)),
+the question reaches the client as the server request `mcpServer/elicitation/request`
+([S/core/src/mcp_tool_call.rs#L1570](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/mcp_tool_call.rs#L1570),
+[S/app-server-protocol/src/protocol/common.rs#L1747](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server-protocol/src/protocol/common.rs#L1747)).
+Its params are `{threadId, turnId, serverName, mode: "form", _meta: {codex_approval_kind: "mcp_tool_call",
+tool_params, ...}, message, requestedSchema}`. They carry no call id: app-server notes it can't correlate the
+elicitation with the item yet. The runner therefore matches it to the newest unasked `mcpToolCall` item in progress
+with the same server and arguments. The answer is `{action: "accept" | "decline", content: null, _meta: null}`.
+Without a `persist` key in `_meta`, accept approves that one call, and the next one asks again
+([#L1986](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/mcp_tool_call.rs#L1986)). The
+`tools/call` that follows carries the call id as `_meta.callId`
+([#L1246](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/mcp_tool_call.rs#L1246)), which is
+what the grant is matched on. Under `approvalPolicy: "never"` Codex refuses every MCP call that needs approval
+itself ([#L1533](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/mcp_tool_call.rs#L1533)), so
+with `permission_mode: never` the harness tools are listed but never run.
+
+**(c) Switching every built-in tool off: yes, for App-tools-only.** The tool plan is
+[S/core/src/tools/spec_plan.rs](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs):
+
+| Tool(s) | Off by |
+| --- | --- |
+| `exec_command`, `write_stdin` ([L1079](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1079)), `apply_patch` ([L1255](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1255)), `view_image` ([L1269](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1269)), `request_permissions` ([L1202](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1202)) | No environment: `environments: []` on `thread/start` and on every `turn/start` ("Empty disables environment access", [S/app-server-protocol/src/protocol/v2/turn.rs#L181](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server-protocol/src/protocol/v2/turn.rs#L181)). It is an experimental field, so `initialize` sends `capabilities.experimentalApi: true` for these sessions only. `apply_patch` has no config switch (the model catalog decides), so this is the only way to drop it. `features.shell_tool` and `features.view_image` are off as well |
+| Hosted `web_search` ([L596](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L596)) and the standalone `web.run` extension ([S/ext/web-search/src/extension.rs#L48](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/ext/web-search/src/extension.rs#L48)) | `web_search="disabled"` |
+| Image generation ([L699](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L699)) | `features.image_generation=false` |
+| Sub-agents ([L1285](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1285)) | `features.multi_agent=false` |
+| Apps (ChatGPT connectors as the `codex_apps` server), plugins and their tool suggestions ([L633](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L633)) | `features.apps=false`, `features.plugins=false`, `features.tool_suggest=false` |
+| `update_plan` ([L1142](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1142)), `request_user_input` ([L1158](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1158)), `sleep` ([L1220](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1220)), goals ([S/ext/goal/src/runtime.rs#L122](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/ext/goal/src/runtime.rs#L122)), memories | `tools.update_plan.enabled=false`, `tools.experimental_request_user_input.enabled=false`, `features.sleep_tool=false`, `features.goals=false`, `features.memories=false` |
+| Code mode, browser and computer use, skill MCP installs | `features.code_mode=false`, `features.browser_use=false`, `features.computer_use=false`, `features.skill_mcp_dependency_install=false` |
+
+The full list is `CODEX_TOOLS_ONLY_OVERRIDES` in `harness/cli_backends.py`. Two things stay:
+- **MCP resource tools** (`list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`;
+  [L1128](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/tools/spec_plan.rs#L1128)). Codex adds
+  them whenever an MCP server is configured. They only reach the harness server, which serves no resources (-32601).
+- **The approval policy.** It is always `on-request` with sandbox `read-only`, and `baseInstructions` replaces
+  Codex's coding-agent prompt with the App's, as `--system-prompt` does for Claude Code.
+
+As a backstop, the runner stops a tools-only run as soon as app-server reports any item but a message, reasoning,
+plan, context compaction or a harness `mcpToolCall`.
 
 ### Login (requirement 1)
 
@@ -275,7 +359,7 @@ instruction file that every later session loaded. `harness/cli_domains.py` now g
 | Backend | Bridge |
 | --- | --- |
 | Claude | `can_use_tool` control request → harness policy first (project rules, defaults; e.g. Read/Grep/Glob/LS inside the workspace allow, Edit/Write inside the workspace allow, Bash asks unless it matches the allow patterns, WebFetch asks) → `ALLOW` answers at once, `ASK` creates a normal approval (card, `approval_requested` event, ntfy), `DENY` answers with the reason. The decision note goes back as the deny message. Reads outside `/workspace`, or through a symlink or junction in the host workspace, ask ("reads a file outside /workspace", never smart-approved): the state at `/home/agent/.claude` holds the domain's other sessions' history and the shared login is mounted next to it (#370, #371). |
-| Codex | app-server approval requests (command, file change) → the same path. Fallback if app-server proves unstable: `codex exec --sandbox workspace-write` with approvals off, contained by the Docker sandbox plus branch review. |
+| Codex | app-server approval requests (command, file change, and MCP tool calls as `mcpServer/elicitation/request`) → the same path. Fallback if app-server proves unstable: `codex exec --sandbox workspace-write` with approvals off, contained by the Docker sandbox plus branch review. |
 | Cursor | No host approvals exist. **Decided:** `--force` inside the Docker sandbox (egress allowlist: Cursor's domains only), with changes landing only through branch review. |
 
 Policy rules gain CLI tool names (`Bash`, `Edit`, `Write`, `WebFetch`, `mcp__harness__<tool>`, Codex `exec_command` /
