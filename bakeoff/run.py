@@ -110,6 +110,7 @@ def run_model(name: str, config: dict, tasks: list[Task], repeats: int, out_dir:
 
 
 def write_report(summaries: list[dict], out_dir: Path) -> Path:
+    from .results import report_lines
     lines = [f"# Bake-off results ({out_dir.name})", "", "## Agent tasks", "",
              "| Model | Pass | Finished | Avg turns | Invalid tool calls | Tool errors | Avg wall s | Median gen tok/s | Median prompt tok/s | Load s | Peak VRAM MiB |",
              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
@@ -117,12 +118,14 @@ def write_report(summaries: list[dict], out_dir: Path) -> Path:
         t = s["tasks"]
         if not t:
             continue
-        gen = [x["median_gen_tps"] for x in t if x["median_gen_tps"]]
-        pp = [x["median_prompt_tps"] for x in t if x["median_prompt_tps"]]
+        gen = [x["median_gen_tps"] for x in t if x.get("median_gen_tps")]
+        pp = [x["median_prompt_tps"] for x in t if x.get("median_prompt_tps")]
+        turns = [x["turns"] for x in t if x.get("turns") is not None]
+        avg_turns = f"{statistics.mean(turns):.1f}" if len(turns) == len(t) else "unknown"
         lines.append(
             f"| {s['model']} | {sum(x['passed'] for x in t)}/{len(t)} | {sum(x['finished'] for x in t)}/{len(t)} "
-            f"| {statistics.mean(x['turns'] for x in t):.1f} | {sum(x['invalid_tool_calls'] for x in t)} "
-            f"| {sum(x['tool_errors'] for x in t)} | {statistics.mean(x['wall_seconds'] for x in t):.0f} "
+            f"| {avg_turns} | {sum(x.get('invalid_tool_calls', 0) or 0 for x in t)} "
+            f"| {sum(x.get('tool_errors', 0) or 0 for x in t)} | {statistics.mean(x['wall_seconds'] for x in t):.0f} "
             f"| {statistics.median(gen) if gen else '-'} | {statistics.median(pp) if pp else '-'} "
             f"| {s['load_seconds']} | {s['peak_vram_mib']} |"
         )
@@ -140,6 +143,7 @@ def write_report(summaries: list[dict], out_dir: Path) -> Path:
             lines += ["", f"## Throughput: {s['model']}", "", "| Context tokens | Prompt s | Prompt tok/s | Gen tok/s |",
                       "| --- | --- | --- | --- |"]
             lines += [f"| {r['context_tokens']} | {r['prompt_seconds']} | {r['prompt_tps']} | {r['gen_tps']} |" for r in s["perf"]]
+    lines += report_lines(summaries)
     report = out_dir / "summary.md"
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report

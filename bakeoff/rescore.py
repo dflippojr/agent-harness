@@ -20,6 +20,7 @@ from .sandbox import Sandbox
 from .tasks import TASKS, Context
 from .tasks_hard import HARD_TASKS
 from .tasks_memory import MEMORY_TASKS
+from .results import classify, outcome
 
 
 def main() -> None:
@@ -59,6 +60,7 @@ def main() -> None:
             if passed != record["passed"]:
                 print(f"{summary['model']} {task.id}#{record['repeat']}: {record['passed']} -> {passed} ({note})")
             record.update(passed=passed, note=note)
+            record.update(failure_class=classify(record), outcome=outcome(record))
             (run_dir / "result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
 
     summaries_path.write_text(json.dumps(summaries, indent=2), encoding="utf-8")
