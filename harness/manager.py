@@ -1124,8 +1124,12 @@ class Manager:
         try:
             data = await asyncio.wait_for(self.remote(s, "scan_input", {"base_commit": s["base_commit"]},
                                                       timeout=120), timeout=120)
-        except (HarnessError, asyncio.TimeoutError):
+        except HarnessError as e:
+            if e.code == "secret_scan_head_changed":
+                raise
             # Runner errors may contain Git output; no raw scan input belongs in events or logs.
+            raise HarnessError(503, message, code="secret_scan_unavailable") from None
+        except asyncio.TimeoutError:
             raise HarnessError(503, message, code="secret_scan_unavailable") from None
         try:
             diffs = data["diffs"]

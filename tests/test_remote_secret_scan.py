@@ -157,6 +157,25 @@ def test_scan_input_fails_on_git_errors_and_changes_during_collection(tmp_path, 
     assert error.value.kind == "head_changed"
 
 
+@pytest.mark.parametrize("action", ["merge", "push"])
+def test_head_change_during_scan_reaches_owner_as_conflict(tmp_path, monkeypatch, action):
+    async def body():
+        async with session(tmp_path, url=action == "push") as (m, s, ws, src, ex, runner):
+            def changed(params):
+                raise harness_runner.OpError("the branch changed; review again", "head_changed")
+
+            monkeypatch.setattr(ex, "op_scan_input", changed)
+            with pytest.raises(HarnessError) as error:
+                await m.review(s["id"], action)
+            assert (error.value.status, error.value.code) == (409, "secret_scan_head_changed")
+            assert "branch changed; review again" in str(error.value)
+            assert action not in runner.seen_ops
+            scan = (await m.changes(s["id"]))["secret_scan"]
+            assert "branch changed; review again" in scan["message"]
+            assert "reconnect" not in scan["message"]
+    asyncio.run(body())
+
+
 def test_runner_requires_expected_head(tmp_path):
     ex = executor(tmp_path, [tmp_path])
     ws = make_repo(ex.workspace("0123456789"))
