@@ -43,6 +43,11 @@ def test_remote_gate_dismissal_masking_and_fix(tmp_path, action, caplog):
         async with session(tmp_path, url=action == "push") as (m, s, ws, src, ex, runner):
             sid = s["id"]
             (ws / "settings.py").write_text(f"AWS_ACCESS_KEY_ID = '{KEY}'\n")
+            head = projects.head(ws)
+            preview = await m.changes(sid)
+            assert KEY not in json.dumps(preview) and preview["secret_scan"]["open"] == 1
+            assert projects.head(ws) == head
+            assert "?? settings.py" in sh(ws, "status", "--porcelain")
             with pytest.raises(HarnessError) as error:
                 await m.review(sid, action)
             assert (error.value.status, error.value.code) == (409, "secret_findings")

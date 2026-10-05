@@ -1105,7 +1105,7 @@ class Manager:
         # No wait for the start-up fetch here: the diff shows at once, with the scan `unavailable` until it lands.
         if s["target"] != "tower":
             try:
-                data = await self._remote_scan_input(s)
+                data = await self._remote_scan_input(s, snapshot=False)
             except HarnessError as e:
                 return {"repos": [], "secret_scan": {"status": "unavailable", "scanner": secret_scan.SCANNER,
                                                      "findings": [], "open": 0, "message": str(e)}}
@@ -1116,13 +1116,14 @@ class Manager:
         state = self.hub.state.get(s["target"])
         return bool(state and state.info.get("protocol") == 3)
 
-    async def _remote_scan_input(self, s: dict) -> dict:
+    async def _remote_scan_input(self, s: dict, *, snapshot: bool = True) -> dict:
         """Never pass incomplete or older-runner input to the scanner."""
         message = "the secret scan could not run; update or reconnect the runner and review again"
         if not self._remote_scan_supported(s):
             raise HarnessError(503, message, code="secret_scan_unavailable")
         try:
-            data = await asyncio.wait_for(self.remote(s, "scan_input", {"base_commit": s["base_commit"]},
+            data = await asyncio.wait_for(self.remote(s, "scan_input", {"base_commit": s["base_commit"],
+                                                                       "snapshot": snapshot},
                                                       timeout=120), timeout=120)
         except HarnessError as e:
             if e.code == "secret_scan_head_changed":

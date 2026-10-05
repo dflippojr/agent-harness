@@ -367,7 +367,8 @@ class Executor:
     def op_scan_input(self, p: dict):
         """No scanner on the runner: send a complete bounded snapshot to the tower."""
         ws, sid = self.workspace(p["session"]), p["session"]
-        projects.snapshot(ws, f"Work in progress from session {sid}")
+        if p.get("snapshot", True):
+            projects.snapshot(ws, f"Work in progress from session {sid}")
         head = projects.head(ws)
         diffs = [{k: v for k, v in d.items() if k != "repo"}
                  for d in repo_diffs(ws, p.get("base_commit") or None, strict=True)]

@@ -398,6 +398,9 @@ is still in the commit a push sends, so it is reported with that commit's short 
 fingerprint). No workspace `.gitleaks.toml`, `.gitleaksignore`, baseline, or `gitleaks:allow`
 comment changes the result.
 
+Viewing Changes reads uncommitted and untracked work without committing it (`scan_input` with `snapshot: false`).
+Merge and Push use the default snapshotting mode before applying the gate.
+
 ```json
 "secret_scan": {"status": "ok", "message": "", "scanner": "gitleaks 8.30.1", "cached": false, "elapsed_ms": 140.2,
   "open": 1, "findings": [{"repo": ".", "file": "app/settings.py", "line": 12, "rule": "aws-access-token",
