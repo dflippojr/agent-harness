@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from bakeoff import reference
-from bakeoff.current_harness import run_current, session_result
+from bakeoff.current_harness import return_workspace, run_current, session_result
 from bakeoff.fake_endpoint import ScriptedServer
 from bakeoff.fake_network import FakeEndpoint
 from bakeoff.results import classify, error_metrics, outcome, report_lines
@@ -76,6 +76,19 @@ def test_current_session_metrics_and_classification():
     assert outcome({**result, "status": "timeout"}) == "timeout"
     failed = session_result({**final, "status": "failed"}, [{"type": "error", "data": {"message": "HTTP 500"}}])
     assert classify(failed) == "model" and not failed["finished"]
+
+
+def test_manager_result_returns_deletions_without_replacing_checker_mount(tmp_path):
+    source, target = tmp_path / "session", tmp_path / "checker"
+    source.mkdir()
+    (source / "changed.py").write_text("new")
+    (target / "nested").mkdir(parents=True)
+    (target / "nested/stale.py").write_text("removed by agent")
+    (target / "changed.py").write_text("old")
+    root_inode = target.stat().st_ino
+    return_workspace(source, target)
+    assert target.stat().st_ino == root_inode
+    assert (target / "changed.py").read_text() == "new" and not (target / "nested").exists()
 
 
 def test_parse_noise_pretty_envelope_and_non_objects():

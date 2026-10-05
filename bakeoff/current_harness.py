@@ -14,6 +14,16 @@ from .tasks import hash_tree
 from .results import error_metrics
 
 
+def return_workspace(source: Path, target: Path) -> None:
+    """Return the exact result while keeping the checker's mounted root alive."""
+    for child in target.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
+
+
 def session_result(final: dict, events: list[dict]) -> dict:
     totals = final["totals"]
     compactions = [e["data"] for e in events if e["type"] == "compaction"]
@@ -71,7 +81,7 @@ async def run_current(task, run_dir: Path, model: str, base_url: str, chat=None)
         result = session_result(final, events)
         if report.outcomes[0]["status"] == "wall_limit":
             result.update(status="timeout", stop_reason="wall_limit", finished=False)
-        shutil.copytree(workspace, run_dir / "workspace", dirs_exist_ok=True)
+        return_workspace(workspace, run_dir / "workspace")
         (run_dir / "agent-harness.jsonl").write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
         return {**result, "wall_seconds": round(time.monotonic() - started, 1)}
     finally:
