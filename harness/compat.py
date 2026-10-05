@@ -14,15 +14,15 @@ import re
 RELEASE = "0.9.0"
 BUILD_ID = os.environ.get("HARNESS_BUILD_ID", "2026.09.17.1")
 WEB_BUILD_ID = "2026.10.04.1"
-MAC_CLIENT_VERSION = "4.2"
+MAC_CLIENT_VERSION = "4.3"
 
 PROTOCOLS = {
     "app": {"min": 1, "max": 2},
     "admin": {"min": 1, "max": 2},
-    "runner": {"min": 1, "max": 2},
+    "runner": {"min": 2, "max": 3},
 }
-CLIENT_PROTOCOLS = {"web": 2, "cli": 2, "runner": 2}
-MINIMUM_CLIENTS = {"web": "2026.09.16", "cli": "4.1", "runner": "4.1"}
+CLIENT_PROTOCOLS = {"web": 2, "cli": 2, "runner": 3}
+MINIMUM_CLIENTS = {"web": "2026.09.16", "cli": "4.1", "runner": "4.2"}
 
 CLIENT_HEADER = "X-Agent-Harness-Client"
 _HEADER_RE = re.compile(r"^(web|cli|runner)/(\d+)$")

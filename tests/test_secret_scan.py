@@ -592,7 +592,7 @@ def test_clean_branch_scan_is_fast(tmp_path):
 
 
 def test_remote_session_changes_say_the_scan_is_not_available(tmp_path, monkeypatch):
-    """The gate covers tower sessions only (issue #263); a remote target's Changes says so instead of nothing."""
+    """An older runner's Changes explains why the gate is unavailable."""
     m = Manager(project_cfg(tmp_path, str(make_repo(tmp_path / "src"))), chat=edit_steps())
     s = {"id": "s1", "target": "macbook", "workspace_removed": 0, "base_commit": "abc"}
     monkeypatch.setattr(m, "get", lambda ref: s)

@@ -70,3 +70,14 @@ and approvals use the same Agent Harness Server flow as Agent Harness Web.
 
 The older `ops/macbook/deploy.ps1` SSH deployment remains available for repair and development. It installs the same
 venv, Agent Harness CLI, and launchd layout, but native pairing is the normal first-install path.
+
+## Secret scan before push and merge
+
+Mac client 4.3 uses runner protocol 3. Before Merge or Push, `scan_input` snapshots uncommitted work and sends
+bounded net and commit diffs to the tower's pinned gitleaks scanner. The Mac needs no gitleaks install.
+Changes shows masked findings, audited owner dismissals and **Ask agent to fix**, including history findings.
+Push checks every commit since the session base; squash merge checks the net diff. Published history is dismiss-only.
+
+The runner checks the scanned `expect_head` after snapshotting again; if it changed, review again before publishing.
+An offline runner, a timeout or oversized input blocks Merge and Push. Protocol 2 still runs sessions but requires
+`harness update` before Merge or Push. Discard bypasses the scan. See [the API contract](app-api.md#secret-scan-before-push-and-merge).

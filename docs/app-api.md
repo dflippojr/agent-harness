@@ -389,13 +389,17 @@ Requires owning the session (or an owner token, for the owner's own sessions); `
 
 ### Secret scan before push and merge
 
-`GET /api/v1/sessions/{id}/changes` (and the owner-surface equivalent) includes `secret_scan` for tower sessions. For a
-session on another target (such as `macbook`) it is `{"status": "unsupported", "message": "...", "findings": []}`:
-those sessions are not scanned. The pinned gitleaks release and rules in `harness/gitleaks/` scan only the lines the session added (`base..HEAD` plus
+`GET /api/v1/sessions/{id}/changes` (and the owner-surface equivalent) includes `secret_scan` for tower and Mac Runner
+sessions. The tower scans the Mac's input; no scanner is installed on the Mac. A runner on protocol 2 returns
+`{"status": "unsupported", "message": "...", "findings": []}` and must be updated before Merge or Push.
+The pinned gitleaks release and rules in `harness/gitleaks/` scan only the lines the session added (`base..HEAD` plus
 uncommitted and untracked files), and the lines each commit in `base..HEAD` added. A value that a later commit removed
 is still in the commit a push sends, so it is reported with that commit's short SHA in `"commit"` (and in its
 fingerprint). No workspace `.gitleaks.toml`, `.gitleaksignore`, baseline, or `gitleaks:allow`
 comment changes the result.
+
+Viewing Changes reads uncommitted and untracked work without committing it (`scan_input` with `snapshot: false`).
+Merge and Push use the default snapshotting mode before applying the gate.
 
 ```json
 "secret_scan": {"status": "ok", "message": "", "scanner": "gitleaks 8.30.1", "cached": false, "elapsed_ms": 140.2,
@@ -404,19 +408,23 @@ comment changes the result.
 ```
 
 `status` is `ok`, `unavailable` (the pinned binary is missing or the wrong version), `error` (it failed to run), or
-`unsupported` (not a tower session).
+`unsupported` (a runner older than protocol 3). Remote input is bounded to 400,000 UTF-8 bytes including metadata
+and commit diffs, and 1,000 commits. Exceeding either cap returns `unavailable`; partial input never passes.
 `preview` shows at most the first and last two characters. The value is never returned, logged, or stored, and the
 diff in the same response shows each flagged value as `[secret AK…7Q]`. A dismissed finding has
 `"dismissed": true` and `dismissal: {reason, actor_id, at}`. Dismissals apply to the same fingerprint at later heads of
 that session. A repeated scan of an unchanged head, commit range and working tree comes from a cache
 (`"cached": true`).
 
-The gate below applies to **tower sessions only**. Review `merge` and `push` on other targets are not scanned or
-blocked. On tower sessions, Review `merge` and `push` scan after committing uncommitted work. `push` sends every commit, so it counts every
+Review `merge` and `push` on tower and Mac Runner sessions scan after committing uncommitted work.
+`push` sends every commit, so it counts every
 finding; `merge` squashes, so it ignores findings with a `"commit"` (values no longer in the net diff). They return
 **409** `secret_findings` (`details: {findings, rules: {rule: count}}`) while any such finding is not dismissed, and
 **503** `secret_scan_unavailable` if the scanner cannot run. They fail closed, so a broken install blocks them until it is
 fixed (`python -m harness.doctor` reports it; the daemon fetches the pinned release at start).
+An offline, timed-out or older runner also returns **503** `secret_scan_unavailable`: update or reconnect it.
+The runner checks `expect_head` after its own snapshot and publishes that immutable scanned commit. A changed
+branch returns **409** `secret_scan_head_changed` (review again), with nothing pushed or merged. Discard is never gated.
 
 - `POST /api/v1/sessions/{id}/secret-findings/fix` adds one draft review comment per open finding in the diff, naming
   the rule and line and never the value. Send them with `review-comments/send`. A finding with a `"commit"` has no
