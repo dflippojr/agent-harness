@@ -140,7 +140,10 @@ def test_unix_hosted_provider_login_matches_isolation_contract():
     for backend in ("claude", "codex", "cursor"):
         assert f"    {backend})" in text
     assert '"harness-cli-$backend"' in text
-    assert '"harness-auth-$backend"' in text
+    # Claude and Cursor share one login; Codex's is the owner's state volume or one App's own (#371).
+    assert 'volume="harness-login-$backend"' in text
+    assert "volume=harness-auth-codex" in text
+    assert 'volume="harness-cli-codex-app-$app"' in text
     assert '"harness-egress-$backend"' in text
     assert "HTTPS_PROXY=" in text
 
