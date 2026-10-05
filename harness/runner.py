@@ -22,14 +22,15 @@ from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
 from .checkpoints import MUTATING_TOOLS
-from .cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
+from .cli_backends import (CODEX_TOOLS_ONLY_ITEMS, ELICITATION, ClaudeSession, CliBackendError, CodexSession,
+                           CursorSession)
 from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit
 from .db import Database, finish_then_cancel
 from .homelab import Homelab
-from .mcp_server import McpRelay, McpServer, McpTokens
+from .mcp_server import MCP_BACKENDS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
-from .policy import (ALLOW, ASK, DENY, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED, AppToolsPolicy,
-                     ChatPolicy, Decision, Policy, mcp_harness_tool)
+from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED,
+                     AppToolsPolicy, ChatPolicy, Decision, Policy, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
@@ -323,10 +324,11 @@ class Runner:
         return schemas
 
     def mcp_tool_schemas(self, sid: str) -> list[dict]:
-        """The daemon tools a hosted Claude Code session may call over MCP: web, session search, memory library and
-        images as enabled for its project and app, plus app-registered tools. Never remote control or skills."""
+        """The daemon tools a hosted Claude Code or Codex session may call over MCP: web, session search, memory
+        library and images as enabled for its project and app, plus app-registered tools. Never remote control or
+        skills."""
         s = self.db.get_session(sid)
-        if s is None or s.get("kind") == "chat" or s.get("backend") != "claude":
+        if s is None or s.get("kind") == "chat" or s.get("backend") not in MCP_BACKENDS:
             return []
         served = [k for k in (self.memory, self.web_overrides.get(sid, self.web), self.sessions) if k is not None]
         served += [kit for gate, kit in self._module_toolkits() if gate.mcp]
@@ -900,13 +902,14 @@ class Runner:
         from dataclasses import replace
         frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
         extra = {}
-        if backend_name == "claude" and backend.mcp and self.mcp_tool_schemas(sid):
+        if backend_name in MCP_BACKENDS and backend.mcp and self.mcp_tool_schemas(sid):
             extra = {"mcp": self.mcp_relay_factory(session_id=sid, backend=frozen, server=self.mcp_server),
                      "mcp_token": self.mcp_tokens.mint(sid)}
         if s.get("kind") == TOOLS_ONLY:
-            # Never run a hosted CLI with its built-in tools here: Claude Code gets --tools "" and only the App's tools
-            # over MCP (can_use_tool still denies anything else); a CLI without both refuses (#329).
-            if backend_name != "claude" or not extra:
+            # Never run a hosted CLI with its built-in tools here: Claude Code gets --tools "", Codex no environment
+            # and every other built-in tool off, and only the App's tools over MCP (the approval path still denies
+            # anything else); a CLI without both refuses (#329, #373).
+            if backend_name not in MCP_BACKENDS or not extra:
                 raise ToolsOnlyUnsupported(f"{backend_name} can't reach App tools without its built-in tools")
             extra["tools_only"] = True
             Path(s["workspace"]).mkdir(parents=True, exist_ok=True)  # emptied at the end of every run
@@ -1273,6 +1276,8 @@ class Runner:
             getattr(self, self._CODEX_SIMPLE[method])(sid, cli, params, tool_names, method)
         elif method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
             await self._codex_request_approval(sid, cli, event, params, tool_names, recovered)
+        elif method == ELICITATION:
+            await self._codex_mcp_approval(sid, cli, event, params, recovered)
         elif method == "turn/completed":
             self._codex_turn_completed(sid, cli, params)
             return True
@@ -1315,11 +1320,14 @@ class Runner:
         item_id, kind = str(item.get("id") or ""), str(item.get("type") or "")
         if item_id:
             cli.items[item_id] = item
+        self._codex_tools_only_guard(cli, item)
         if kind == "commandExecution":
             name = "exec_command"
             args = {"command": str(item.get("command") or ""), "cwd": str(item.get("cwd") or "")}
         elif kind == "fileChange":
             name, args = "apply_patch", self._codex_file_args(item)
+        elif kind == "mcpToolCall":
+            name, args = self._codex_mcp_tool(item)
         else:
             return
         tool_names[item_id] = name
@@ -1335,6 +1343,17 @@ class Runner:
             cli.last_answer = str(item.get("text") or "")
             self._emit_assistant(sid, cli.last_answer)
             return
+        self._codex_tools_only_guard(cli, item)
+        if kind == "mcpToolCall":
+            name, _ = self._codex_mcp_tool(item)
+            tool_names[item_id] = name
+            ok = str(item.get("status") or "") == "completed"
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            error = item.get("error") if isinstance(item.get("error"), dict) else {}
+            output = self._cli_text(result.get("content")) if ok else str(error.get("message") or "")
+            self._record_cli_tool_result(sid, item_id, name, ok, output,
+                                         seconds=float(item.get("durationMs") or 0) / 1000)
+            return
         if kind not in ("commandExecution", "fileChange"):
             return
         name = "exec_command" if kind == "commandExecution" else "apply_patch"
@@ -1344,6 +1363,23 @@ class Runner:
                                  if isinstance(c, dict)))
         self._record_cli_tool_result(sid, item_id, name, str(item.get("status") or "") == "completed", output,
                                      seconds=float(item.get("durationMs") or 0) / 1000)
+
+    @staticmethod
+    def _codex_mcp_tool(item: dict) -> tuple[str, dict]:
+        """A Codex mcpToolCall item as the name the policy decides (mcp__<server>__<tool>, as Claude Code names it)
+        and its arguments."""
+        args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+        return f"mcp__{item.get('server') or ''}__{item.get('tool') or ''}", args
+
+    @staticmethod
+    def _codex_tools_only_guard(cli: CodexSession, item: dict) -> None:
+        """An App-tools-only Codex session starts with every built-in tool off. Should one run anyway (a Codex
+        change the pinned-version notes missed), stop the run rather than let it go on."""
+        if not cli.tools_only:
+            return
+        kind = str(item.get("type") or "")
+        if kind not in CODEX_TOOLS_ONLY_ITEMS or (kind == "mcpToolCall" and item.get("server") != MCP_SERVER):
+            raise CliBackendError(f"Codex used a built-in tool ({kind}) in an App-tools-only session; stopped")
 
     async def _codex_request_approval(self, sid: str, cli: CodexSession, event: dict, params: dict,
                                       tool_names: dict[str, str], recovered: bool) -> None:
@@ -1362,6 +1398,33 @@ class Runner:
         tool_names[item_id] = name
         request = {"tool_name": name, "input": args, "tool_use_id": item_id,
                    "description": str(params.get("reason") or params.get("command") or "")}
+        await self._authorize_cli(sid, cli, event.get("id"), request, recovered=recovered)
+
+    async def _codex_mcp_approval(self, sid: str, cli: CodexSession, event: dict, params: dict,
+                                  recovered: bool) -> None:
+        """Codex asks before every harness MCP call (default_tools_approval_mode "prompt") with an MCP elicitation
+        that follows the call's mcpToolCall item/started. The call is decided like Claude Code's can_use_tool
+        request; an allowed call leaves the one-use grant the endpoint matches on the item id (Codex's tools/call
+        _meta.callId). A call to any other server goes the same way and the policy denies it. Any other elicitation
+        is declined: nobody is there to fill in a server's form."""
+        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        item = None
+        if meta.get("codex_approval_kind") == "mcp_tool_call":
+            server = params.get("serverName")
+            wanted = meta.get("tool_params") if isinstance(meta.get("tool_params"), dict) else {}
+            # The newest started, unasked call to this server with these arguments: Codex asks right after it starts
+            # the item, and never twice for one call.
+            item = next((i for i in reversed(list(cli.items.values()))
+                         if i.get("type") == "mcpToolCall" and i.get("server") == server
+                         and i.get("status") == "inProgress" and i.get("id") not in cli.asked
+                         and (i.get("arguments") if isinstance(i.get("arguments"), dict) else {}) == wanted), None)
+        if item is None:
+            await cli.respond_permission(event.get("id"), "deny", {})
+            return
+        cli.asked.add(item.get("id"))
+        name, args = self._codex_mcp_tool(item)
+        request = {"tool_name": name, "input": args, "tool_use_id": str(item.get("id") or ""),
+                   "description": str(params.get("message") or "")}
         await self._authorize_cli(sid, cli, event.get("id"), request, recovered=recovered)
 
     def _codex_rate_limits_event(self, sid: str, _cli, params: dict, _tool_names=None, _method="") -> None:

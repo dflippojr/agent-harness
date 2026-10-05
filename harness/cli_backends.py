@@ -18,7 +18,7 @@ from typing import Callable
 
 from . import cli_domains
 from .config import BackendConfig, SandboxConfig
-from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, mcp_config
+from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
 from .sandbox import run_cmd
 
 # The bind-mount target every provider CLI runs in, and the proxy env every container needs.
@@ -230,16 +230,40 @@ class ClaudeSession:
                 await self.mcp.stop()
 
 
+# Every Codex 0.154.0 built-in tool an App-tools-only session (#329) turns off, besides the ones that need an
+# environment (exec_command, write_stdin, apply_patch, view_image, request_permissions), which `environments: []`
+# removes. Source notes in docs/phase8a-design.md "Harness tools over MCP"; recheck them when the Codex pin moves.
+CODEX_TOOLS_ONLY_OVERRIDES = (
+    'web_search="disabled"',                          # hosted web_search and the standalone web.run
+    "tools.update_plan.enabled=false",
+    "tools.experimental_request_user_input.enabled=false",
+    *(f"features.{name}=false" for name in (
+        "shell_tool", "unified_exec", "view_image", "code_mode", "multi_agent", "apps", "plugins",
+        "tool_suggest", "image_generation", "goals", "sleep_tool", "memories", "browser_use", "computer_use",
+        "skill_mcp_dependency_install")),
+)
+# Thread items an App-tools-only Codex session may produce. Anything else means a built-in tool ran: the run stops.
+CODEX_TOOLS_ONLY_ITEMS = ("userMessage", "hookPrompt", "agentMessage", "plan", "reasoning", "contextCompaction",
+                          "mcpToolCall")
+# Answers Codex takes for an MCP tool call approval (an MCP elicitation), as opposed to command and file approvals.
+ELICITATION = "mcpServer/elicitation/request"
+
+
 class CodexSession:
     """One long-lived ``codex app-server`` JSON-RPC process."""
 
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 app_id: str = ""):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = ""):
         self.session_id = session_id
         self.app_id = app_id
         self.workspace = workspace.resolve()
+        # With MCP Codex shares the relay's network namespace, as Claude Code does (#373). An App-tools-only session
+        # starts with no environment and every other built-in tool off, so only the harness server's tools remain.
+        self.mcp = mcp
+        self.mcp_token = mcp_token
+        self.tools_only = tools_only
         self.backend = backend
         self.sandbox = sandbox
         self.system_prompt = system_prompt
@@ -258,6 +282,7 @@ class CodexSession:
         self._pending: list[dict] = []
         self._approval_methods: dict[str, str] = {}
         self.items: dict[str, dict] = {}
+        self.asked: set = set()  # mcpToolCall item ids an MCP approval was already asked for
         self.last_answer = ""
         self.token_usage: dict = {}
         self.active_turn_id = ""
@@ -269,7 +294,7 @@ class CodexSession:
         args = [
             "docker", "run", "--rm", "-i", "--name", self.container,
             "--label", f"agent-harness.session={self.session_id}",
-            "--network", self.backend.network,
+            "--network", f"container:{self.mcp.container}" if self.mcp else self.backend.network,
             "-e", f"HTTPS_PROXY={self.backend.proxy}",
             "-e", f"HTTP_PROXY={self.backend.proxy}",
             "-e", NO_PROXY,
@@ -289,9 +314,15 @@ class CodexSession:
             "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
             self.backend.image, "codex", "app-server", "--stdio",
         ]
-        if self.api_key:
+        if self.mcp:
+            args += codex_mcp_overrides()
+        if self.tools_only:
+            for override in CODEX_TOOLS_ONLY_OVERRIDES:
+                args += ["-c", override]
+        env_names = (["OPENAI_API_KEY"] if self.api_key else []) + ([TOKEN_ENV] if self.mcp else [])
+        for name in env_names:  # by name only: the value comes from the docker client's environment
             at = args.index(self.backend.image)
-            args[at:at] = ["-e", "OPENAI_API_KEY"]
+            args[at:at] = ["-e", name]
         return args
 
     async def start(self) -> None:
@@ -299,9 +330,16 @@ class CodexSession:
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
             await ready_domain("codex", self.backend, self.app_id, self.api_key)
+            if self.mcp is not None:
+                try:
+                    await self.mcp.start()
+                except McpRelayError as e:
+                    raise CliBackendError(str(e)) from e
         child_env = os.environ.copy()
         if self.api_key:
             child_env["OPENAI_API_KEY"] = self.api_key
+        if self.mcp is not None:
+            child_env[TOKEN_ENV] = self.mcp_token
         process = self._popen(
             self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
@@ -377,16 +415,21 @@ class CodexSession:
             self._pending.append(event)
 
     async def initialize(self, prompt: str) -> None:
-        await self._request("initialize", {"clientInfo": {"name": "agent-harness", "version": "0.1.0"}})
+        init = {"clientInfo": {"name": "agent-harness", "version": "0.1.0"}}
+        if self.tools_only:  # `environments` is an experimental field in 0.154.0; nothing else here opts in
+            init["capabilities"] = {"experimentalApi": True}
+        await self._request("initialize", init)
         await self._write({"method": "initialized"})
-        approval_policy = (self.backend.permission_mode if self.backend.permission_mode in
-                           ("on-request", "never") else "on-request")
         common = {
-            "cwd": WORKSPACE, "model": self.model, "approvalPolicy": approval_policy,
-            "approvalsReviewer": "user", "sandbox": "workspace-write",
+            "cwd": WORKSPACE, "model": self.model, "approvalPolicy": self._approval_policy(),
+            "approvalsReviewer": "user", "sandbox": "read-only" if self.tools_only else "workspace-write",
         }
         if self.backend_session_id:
             result = await self._request("thread/resume", {**common, "threadId": self.backend_session_id})
+        elif self.tools_only:
+            # The App's prompt replaces Codex's coding-agent instructions, as --system-prompt does for Claude Code.
+            result = await self._request("thread/start", {**common, "baseInstructions": self.system_prompt,
+                                                          "environments": []})
         else:
             result = await self._request("thread/start", {
                 **common, "developerInstructions": self.system_prompt,
@@ -400,12 +443,22 @@ class CodexSession:
         turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
         self.active_turn_id = str(turn.get("id") or "")
 
+    def _approval_policy(self) -> str:
+        # Codex itself refuses every MCP call under "never", so an App-tools-only session always asks (the harness
+        # answers from AppToolsPolicy; nobody is prompted).
+        if self.tools_only:
+            return "on-request"
+        return self.backend.permission_mode if self.backend.permission_mode in ("on-request", "never") else "on-request"
+
     def _turn_start_params(self, content: str) -> dict:
-        approval_policy = (self.backend.permission_mode if self.backend.permission_mode in
-                           ("on-request", "never") else "on-request")
-        return {"threadId": self.backend_session_id, "input": [{"type": "text", "text": content}],
-                "cwd": WORKSPACE, "model": self.model, "effort": self.backend.effort,
-                "approvalPolicy": approval_policy, "approvalsReviewer": "user"}
+        params = {"threadId": self.backend_session_id, "input": [{"type": "text", "text": content}],
+                  "cwd": WORKSPACE, "model": self.model, "effort": self.backend.effort,
+                  "approvalPolicy": self._approval_policy(), "approvalsReviewer": "user"}
+        if self.tools_only:
+            # No environment for this turn and the ones after it: no shell, apply_patch, view_image or
+            # request_permissions. Every turn/start says so again, so a resumed thread can't get one back.
+            params["environments"] = []
+        return params
 
     def user_message(self, content: str) -> dict:
         request_id = self._id()
@@ -429,7 +482,7 @@ class CodexSession:
             turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
             self.active_turn_id = str(turn.get("id") or self.active_turn_id)
         if event and event.get("method") in (
-                "item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+                "item/commandExecution/requestApproval", "item/fileChange/requestApproval", ELICITATION):
             self._approval_methods[str(event.get("id"))] = str(event["method"])
         return event
 
@@ -437,9 +490,14 @@ class CodexSession:
         # App-server's stable approval response is deliberately narrower than
         # Claude's: notes remain in the harness transcript, while Codex gets the
         # accept/decline decision.
-        original_id = request_id
-        await self._write({"id": original_id, "result": {
-            "decision": "accept" if behavior == "allow" else "decline"}})
+        accept = behavior == "allow"
+        if self._approval_methods.pop(str(request_id), "") == ELICITATION:
+            # An MCP tool call approval. A plain accept approves this one call; no "persist" in _meta, so Codex
+            # never remembers it for the session and asks again next time.
+            result = {"action": "accept" if accept else "decline", "content": None, "_meta": None}
+        else:
+            result = {"decision": "accept" if accept else "decline"}
+        await self._write({"id": request_id, "result": result})
 
     async def stop(self) -> None:
         proc = self.process
@@ -455,6 +513,8 @@ class CodexSession:
             await asyncio.to_thread(thread.join, 0.5)
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+            if self.mcp is not None:
+                await self.mcp.stop()
 
 
 class CursorSession:

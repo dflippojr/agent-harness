@@ -135,8 +135,8 @@ def local_view(manager) -> dict:
 
 
 def tools_only_supported(manager, name: str) -> bool:
-    """Whether this backend can run an App-tools-only session (#329): the local loop, or Claude Code with its MCP
-    server on. The rest refuse with app_tools_only_unsupported."""
+    """Whether this backend can run an App-tools-only session (#329): the local loop, or Claude Code or Codex with
+    its MCP server on. The rest refuse with app_tools_only_unsupported."""
     from .policy import TOOLS_ONLY_BACKENDS
     if name == "local":
         return bool(manager.cfg.modules.local_model and manager.cfg.models)
