@@ -109,7 +109,13 @@ Session ids stay unique across all stores. The `/api/v1` responses are the same 
 - **Backups.** The nightly backup copies every App's store into the dated backup folder as `apps/<app_id>.sqlite3`,
   one file per App (Web's as `apps/app-web.sqlite3`), next to the main store's `harness.sqlite3`. A session you
   delete, or that retention or a revoke erases, stays in the older backups that hold it until they rotate out
-  (`backup.keep_days`, 14 days by default). Session files (working directories, checkpoints) are not in the backups.
+  (`backup.keep_days`, 14 days by default). Transcripts are included: the owner's in `transcripts.zip`, each known
+  member's in `transcripts/users/<user_id>.zip`, and each App's in `transcripts/apps/<app_id>.zip`. Member and App
+  archives contain relative file paths and are omitted when missing or empty. Links and Windows reparse points
+  are skipped with warnings. Deleted or erased transcripts remain in older backups until those backups rotate
+  out too. Working directories, checkpoints and artifacts are not in the backups. Backups are owner-only machine
+  files and owner-only maintenance operations; they do not add an API for reading members' transcripts. The
+  OS-level machine owner is outside the household member privacy guarantee.
 - **Logs and telemetry.** Your tools' arguments and results stay in your store: logs, traces and the audit log get
   only tool names, call ids, sizes and timings.
 - **Retention.** A session is erased, exactly as [`DELETE`](#delete-apiv1sessionsid) erases it, once it has been

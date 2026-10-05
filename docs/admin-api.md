@@ -74,6 +74,22 @@ Not on this surface: `/api/v1` app sessions, `/v1` inference, runner `POST /runn
 and ntfy `POST /a/{token}/{decision}`. Household members receive **403** `members cannot use the owner API` on
 every `/api/admin/v1` path and learn no admin data from the error.
 
+## Maintenance
+
+`POST /api/admin/v1/maintenance/backup` (also `/maintenance/backup`) is owner-only. The dated backup contains
+`harness.sqlite3`, each App store in `apps/<app_id>.sqlite3` (including Web), config files and managed overlays,
+the owner's `transcripts.zip`, and nonempty transcript archives for known members in
+`transcripts/users/<user_id>.zip` and Apps in `transcripts/apps/<app_id>.zip`. All transcript archives use
+deflate compression and relative file paths. Working directories, checkpoints and artifacts are excluded.
+
+The backup result and `/maintenance` backup status add `transcript_archives` (the count of completed archives,
+including the owner's) and `warnings` (a list of skipped links/reparse points and member/App archive failures).
+A failed member or App archive is omitted and does not fail the backup; an owner archive failure still fails it.
+`backup.keep_days` prunes the entire dated folder, including every transcript archive. A delete, retention or
+revoke only erases live data: older backups retain the erased stores and transcripts until they rotate out.
+Backups and maintenance remain owner-only; no new API exposes member transcripts. The OS-level machine owner
+is outside the member privacy guarantee.
+
 ## Household accounts
 
 `POST /api/admin/v1/accounts` with `login` (exact Tailscale login), `display_name`, and optional `disk_quota_bytes`,
@@ -303,6 +319,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.20 | 2026-10-04 | Nightly backups include known members' and Apps' transcript archives; backup results add `transcript_archives` and `warnings` (#378) |
 | 1.19 | 2026-10-04 | Management parity (#334): checkpoints (list, rewind, fork), secret-finding fix and dismiss, taint clear, and GitHub tasks (items, item, `POST /github/sessions`) answer under `/api/admin/v1`, where Agent Harness Web already called them. Every owner setting and action Web offers has an Agent Harness CLI command ([management-parity.md](management-parity.md)) |
 | 1.18 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions move into `<data_dir>/apps/app-web/harness.sqlite3` at startup (`HARNESS_WEB_STORE_MIGRATION=dry-run` only logs what would move). `/metrics`, smart-approval stats and Control Center counts read it. Web is registered as `app-web` (kind `web`, no key): not in `GET /keys`, `404` from `DELETE /keys/app-web` and its retention route. Backups add `apps/app-web.sqlite3` |
 | 1.17 | 2026-10-03 | App retention and erasure (#330 decision 5): `PUT /apps/{app_id}/retention`, `GET /apps/erasures`, `POST /apps/{app_id}/restore`. `GET /keys` adds `retention_days`, `erase_after` and `erased_at`; revoking an App or device key schedules its erasure 7 days later; the cleanup report adds `sessions_expired` and `apps_erased` |
