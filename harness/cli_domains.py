@@ -6,8 +6,8 @@ leave a file that a session of another domain loads.
 
 - **State:** Web keeps the backend's configured volume (`harness-auth-<backend>`), so the owner's `--resume` keeps
   working. An App gets `harness-cli-<backend>-app-<id>` (the id hashed when it isn't a safe volume name).
-- **Login:** Claude Code and Cursor read their credential from a directory of its own (`CLAUDE_SECURESTORAGE_CONFIG_DIR`;
-  `$XDG_CONFIG_HOME/cursor`), so one login volume, `harness-login-<backend>`, serves every domain. Codex keeps
+- **Login:** Claude Code and Cursor read their credential from a directory of its own
+  (`CLAUDE_SECURESTORAGE_CONFIG_DIR`; `$XDG_CONFIG_HOME/cursor`), so one login volume, `harness-login-<backend>`, serves every domain. Codex keeps
   `auth.json` in `CODEX_HOME` with no separate path, so each App's Codex volume holds that App's own login
   (`ops/backends/login.ps1 codex -App <id>`), and Codex is unavailable to an App until the owner has logged it in.
 - **Read-only config:** the user-level settings, hooks, MCP, rules and instruction files each CLI would load are

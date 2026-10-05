@@ -287,7 +287,8 @@ def test_domains_cannot_read_each_others_history_or_plant_config(tmp_path, backe
         targets = [f"{layout.state_dir}/{f}" for f, _ in layout.ro_files]
         targets += [f"{layout.state_dir}/{d}/planted" for d in layout.ro_dirs]
         plant = " ; ".join(f"(echo PLANTED >> {t}) 2>/dev/null && echo WROTE {t}" for t in targets)
-        out = _fake_cli(backend, cfg, "app-a", tmp_path, f"{plant} ; grep -rsl --exclude-dir=.local --exclude-dir=.cache HISTORY- /home/agent /tmp ; true")
+        grep = "grep -rs --exclude-dir=.local --exclude-dir=.cache"
+        out = _fake_cli(backend, cfg, "app-a", tmp_path, f"{plant} ; {grep} -l HISTORY- /home/agent /tmp ; true")
         assert "WROTE" not in out, out
         found = [line for line in out.splitlines() if line.strip()]
         assert found == [f"{layout.state_dir}/projects/history-a.jsonl"], out
