@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from harness.api import create_app
 from harness.apps import AppTool
-from harness.cli_backends import ClaudeSession
+from harness.cli_backends import CODEX_TOOLS_ONLY_OVERRIDES, ClaudeSession, CodexSession
 from harness.config import BackendConfig, SandboxConfig
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
@@ -21,7 +21,7 @@ from harness.policy import ALLOW, DENY, TOOLS_ONLY, AppToolsPolicy
 from harness.warmup import LOW_MEMORY, PAUSED, SLEEPING
 
 from test_daemon import Script, call, events, make_cfg, wait_status
-from test_mcp_server import FAKE_MCP_CLAUDE, NODE, _free_port, _log
+from test_mcp_server import FAKE_MCP_CLAUDE, NODE, _codex_manager, _free_port, _log
 from test_phase6 import wait_for
 
 BALANCE = {"name": "get_balance", "description": "Balance of one account",
@@ -174,14 +174,15 @@ def test_tools_only_sessions_are_the_creating_apps_alone(tmp_path):
 
 
 @pytest.mark.parametrize("body,status,code", [
-    ({"backend": "codex"}, 400, "app_tools_only_unsupported"),
+    ({"backend": "codex"}, 400, "app_tools_only_unsupported"),  # backends.codex.mcp off
     ({"backend": "cursor"}, 400, "app_tools_only_unsupported"),
     ({"backend": "claude-nomcp"}, 400, "app_tools_only_unsupported"),
     ({"project": "scratch"}, 400, "invalid_request"),
     ({"tools": []}, 400, "invalid_request"),
 ])
 def test_refusals(tmp_path, body, status, code):
-    backends = {"codex": BackendConfig(enabled=True, model="gpt"), "cursor": BackendConfig(enabled=True, model="c"),
+    backends = {"codex": BackendConfig(enabled=True, model="gpt", mcp=False),
+                "cursor": BackendConfig(enabled=True, model="c"),
                 "claude-nomcp": BackendConfig(enabled=True, model="opus", mcp=False)}
     client, m, _ = _client(tmp_path, [Completion(content="hi")], **backends)
     with client:
@@ -214,15 +215,16 @@ def test_device_token_cannot_start_one(tmp_path):
 
 
 def test_capability_discovery_lists_supporting_backends(tmp_path):
-    backends = {"claude": BackendConfig(enabled=True, model="opus"), "codex": BackendConfig(enabled=True, model="g")}
+    backends = {"claude": BackendConfig(enabled=True, model="opus"), "codex": BackendConfig(enabled=True, model="g"),
+                "cursor": BackendConfig(enabled=True, model="c")}
     client, m, _ = _client(tmp_path, [Completion(content="hi")], **backends)
     with client:
         auth, _ = _app(client)
         root = client.get("/api/v1").json()
         assert root["features"]["app_tools_only"] is True
-        assert root["features"]["app_tools_only_backends"] == ["local", "claude"]
+        assert root["features"]["app_tools_only_backends"] == ["local", "claude", "codex"]
         listed = {b["name"]: b["app_tools_only"] for b in client.get("/api/v1/backends", headers=auth).json()}
-        assert listed == {"claude": True, "codex": False}
+        assert listed == {"claude": True, "codex": True, "cursor": False}
 
 
 def test_models_status_for_apps_and_warm_behind_its_scope(tmp_path, monkeypatch):
@@ -270,6 +272,25 @@ def test_claude_command_drops_every_builtin_tool(tmp_path):
     agent = ClaudeSession(session_id="abc", workspace=tmp_path, backend=_backend(), sandbox=SandboxConfig(),
                           system_prompt="s").command()
     assert "--tools" not in agent and "--append-system-prompt" in agent
+
+
+def test_codex_command_switches_off_every_builtin_tool(tmp_path):
+    relay = McpRelay(session_id="abc", backend=_backend(), server=None)
+    cli = CodexSession(session_id="abc", workspace=tmp_path, backend=_backend(permission_mode="never"),
+                       sandbox=SandboxConfig(), system_prompt="only app tools", mcp=relay, mcp_token="t",
+                       tools_only=True)
+    command = cli.command()
+    overrides = {command[i + 1] for i, arg in enumerate(command) if arg == "-c"}
+    assert set(CODEX_TOOLS_ONLY_OVERRIDES) < overrides
+    assert {'web_search="disabled"', "features.shell_tool=false", "features.view_image=false",
+            "features.multi_agent=false", "features.apps=false", "features.plugins=false",
+            "features.image_generation=false"} <= overrides
+    assert cli._approval_policy() == "on-request"  # Codex itself refuses every MCP call under "never"
+    assert cli._turn_start_params("hi")["environments"] == []
+    agent = CodexSession(session_id="abc", workspace=tmp_path, backend=_backend(), sandbox=SandboxConfig(),
+                         system_prompt="s")
+    assert not any("features." in arg for arg in agent.command())
+    assert "environments" not in agent._turn_start_params("hi")
 
 
 FAKE_TOOLS_ONLY_CLAUDE = FAKE_MCP_CLAUDE.replace('name = "mcp__harness__" + step["tool"]',
@@ -375,3 +396,56 @@ def test_unknown_tool_field_is_a_422_that_suggests_parameters(tmp_path):
         ok = client.post("/api/v1/sessions", headers=auth, json={
             "prompt": "hi", "tools": [{"name": "get_thing", "description": "no args"}]})
         assert ok.status_code == 201, ok.text
+
+
+def _tools_only_codex(tmp_path, plan):
+    async def body():
+        m, made, state, _ = _codex_manager(tmp_path, plan)
+        await m.start()
+        app, _ = m.db.create_api_key("finance-bot", "sessions", kind="app")
+        sid = m.create("savings?", backend="codex", app=app, app_tools=[AppTool(**BALANCE)], kind=TOOLS_ONLY)["id"]
+        if any(step.get("tool") == "get_balance" for step in plan):
+            pending = []
+            for _ in range(600):
+                pending = m.db.app_tool_calls(sid, "pending")
+                if pending:
+                    break
+                await asyncio.sleep(0.05)
+            assert [(p["name"], p["args"]) for p in pending] == [("get_balance", {"account": "savings"})]
+            assert m.app_tools.submit(sid, pending[0]["call_id"], "$900", True)
+        s = await wait_status(m, sid, "done", "failed")
+        await asyncio.gather(*m.tasks.values())
+        decided = [(e["name"], e["decision"]) for e in events(m, sid, "tool_call")]
+        await m.stop()
+        return s, made, _log(state), decided
+    return asyncio.run(body())
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the relay")
+def test_hosted_codex_reaches_only_app_tools_and_starts_without_builtins(tmp_path):
+    plan = [{"tool": "web_search", "input": {"query": "sneaky"}},
+            {"tool": "get_balance", "input": {"account": "savings"}}]
+    s, made, log, decided = _tools_only_codex(tmp_path, plan)
+    assert s["status"] == "done" and made[0]["tools_only"] is True
+    init = next(entry[1] for entry in log if entry[0] == "initialize")
+    assert init["capabilities"] == {"experimentalApi": True}
+    thread = next(entry[1] for entry in log if entry[0] == "thread/start")
+    assert thread["environments"] == [] and thread["baseInstructions"] == s["context"][0]["content"]
+    assert "developerInstructions" not in thread
+    assert (thread["sandbox"], thread["approvalPolicy"], thread["approvalsReviewer"]) == ("read-only", "on-request",
+                                                                                          "user")
+    assert next(entry[1] for entry in log if entry[0] == "turn/start")["environments"] == []
+    assert next(entry[1] for entry in log if entry[0] == "tools") == ["get_balance"]
+    calls = [entry[1:] for entry in log if entry[0] == "call"]
+    assert calls[0][:2] == ["web_search", True]
+    assert calls[1] == ["get_balance", False, "$900"]
+    assert decided == [("mcp__harness__web_search", DENY), ("mcp__harness__get_balance", ALLOW)]
+    assert not Path(s["workspace"]).exists()
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the relay")
+@pytest.mark.parametrize("item", ["commandExecution", "fileChange", "imageView", "dynamicToolCall"])
+def test_hosted_codex_stops_if_a_builtin_tool_runs_anyway(tmp_path, item):
+    s, _, _, _ = _tools_only_codex(tmp_path, [{"builtin": item}])
+    assert s["status"] == "failed"
+    assert f"Codex used a built-in tool ({item})" in s["run"]["failure"]["message"]

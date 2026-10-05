@@ -1,7 +1,7 @@
-"""Daemon-side MCP server for hosted Claude Code sessions (#300).
+"""Daemon-side MCP server for hosted Claude Code (#300) and Codex (#373) sessions.
 
 Network path: a small relay sidecar per session joins the provider's internal ``harness-cli-<backend>`` network and
-listens on its own loopback. The Claude Code container joins the relay's network namespace (``--network
+listens on its own loopback. The CLI container joins the relay's network namespace (``--network
 container:<relay>``), so the endpoint is reachable from that one container and nothing else: not from other
 sessions on the same network, nor from any other container. The relay hands every HTTP request to the daemon over
 its stdio pipe, so the daemon never listens on a port a container can reach, and the egress allowlists don't change.
@@ -10,10 +10,10 @@ Authentication: every request carries a token minted for one session at start, h
 and revoked when the session's CLI stops. It reaches the CLI by environment-variable name only, so it never appears
 in a command line, transcript, event or log.
 
-Authorization is not decided here. Claude Code asks the daemon through ``can_use_tool`` before every
-``mcp__harness__*`` call (the ordinary Policy and approval path); the runner records a one-use grant for each call it
-allows, and the endpoint refuses a call without one. Results reach the transcript through Claude Code's own
-tool_result records, like any other tool.
+Authorization is not decided here. The CLI asks the daemon before every call (Claude Code through ``can_use_tool``,
+Codex through ``mcpServer/elicitation/request``), which takes the ordinary Policy and approval path; the runner
+records a one-use grant for each call it allows, and the endpoint refuses a call without one. Results reach the
+transcript through the CLI's own tool-result records, like any other tool.
 """
 
 from __future__ import annotations
@@ -37,8 +37,12 @@ RELAY_PORT = 8790
 TOKEN_ENV = "HARNESS_MCP_TOKEN"
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 RELAY_SCRIPT = Path(__file__).with_name("mcp_relay.js")
-# Claude Code sends the tool_use id of the call it is making; grants are matched on it when present.
+# The CLIs that get the endpoint (#300 Claude Code, #373 Codex). Cursor has no host approval to hang a grant on.
+MCP_BACKENDS = ("claude", "codex")
+# The id of the call the CLI is making, in the tools/call _meta; grants are matched on it when present. Claude Code
+# sends its tool_use id, Codex its call id (the mcpToolCall item id the approval was asked under).
 TOOL_USE_META = "claudecode/toolUseId"
+CODEX_CALL_META = "callId"
 
 
 class McpRelayError(Exception):
@@ -50,6 +54,15 @@ def mcp_config() -> str:
     return json.dumps({"mcpServers": {MCP_SERVER: {
         "type": "http", "url": f"http://127.0.0.1:{RELAY_PORT}/mcp",
         "headers": {"Authorization": f"Bearer ${{{TOKEN_ENV}}}"}}}})
+
+
+def codex_mcp_overrides() -> list[str]:
+    """The `-c` arguments that register the harness server with Codex for this process only (CODEX_HOME's files
+    don't change). Codex reads the bearer token from the variable it names; "prompt" makes Codex ask the client
+    (mcpServer/elicitation/request) before every call, whatever the tool's annotations say."""
+    server = (f'{{url="http://127.0.0.1:{RELAY_PORT}/mcp", bearer_token_env_var="{TOKEN_ENV}", '
+              'default_tools_approval_mode="prompt", startup_timeout_sec=30}')
+    return ["-c", f"mcp_servers.{MCP_SERVER}={server}"]
 
 
 def _digest(token: str) -> str:
@@ -163,7 +176,8 @@ class McpServer:
         if name not in {(t.get("function") or {}).get("name") for t in self._tools(sid)}:
             text, ok = f"Error: unknown tool {name!r}", False
         else:
-            text, ok = await self._call(sid, name, args, str(meta.get(TOOL_USE_META) or ""))
+            text, ok = await self._call(sid, name, args,
+                                        str(meta.get(TOOL_USE_META) or meta.get(CODEX_CALL_META) or ""))
         return {"content": [{"type": "text", "text": text}], "isError": not ok}
 
 

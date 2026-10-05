@@ -1,4 +1,4 @@
-"""Harness tools for hosted Claude Code over MCP (#300)."""
+"""Harness tools for hosted Claude Code (#300) and Codex (#373) over MCP."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ import pytest
 from harness.cli_backends import ClaudeSession, CliBackendError, CodexSession, CursorSession
 from harness.config import BackendConfig, SandboxConfig
 from harness.manager import Manager
-from harness.mcp_server import (RELAY_PORT, RELAY_SCRIPT, TOKEN_ENV, McpRelay, McpServer, McpTokens, mcp_config,
-                                relay_node_args)
+from harness import cli_domains
+from harness.mcp_server import (RELAY_PORT, RELAY_SCRIPT, TOKEN_ENV, McpRelay, McpServer, McpTokens,
+                                codex_mcp_overrides, mcp_config, relay_node_args)
 from harness.search import SessionSearch
 from harness.policy import ALLOW, ASK, DENY, ChatPolicy, Policy, mcp_harness_tool
 from test_daemon import events, make_cfg, wait_status
@@ -176,13 +177,38 @@ def test_relay_runs_unprivileged_on_the_session_network_with_loopback_only():
     assert "${HARNESS_MCP_TOKEN}" in mcp_config()
 
 
-def test_codex_and_cursor_get_no_mcp_endpoint(tmp_path):
-    for cls in (CodexSession, CursorSession):
-        command = cls(session_id="abc", workspace=tmp_path, backend=_backend(), sandbox=SandboxConfig(),
-                      system_prompt="system").command()
-        joined = " ".join(command)
-        assert "mcp" not in joined.lower() and TOKEN_ENV not in joined
-        assert command[command.index("--network") + 1] == "cli-net"
+def test_codex_command_joins_the_relay_namespace_and_only_names_the_token(tmp_path):
+    relay = McpRelay(session_id="abc", backend=_backend(), server=None)
+    cli = CodexSession(session_id="abc", workspace=tmp_path, backend=_backend(), sandbox=SandboxConfig(),
+                       system_prompt="system", mcp=relay, mcp_token="secret-token", api_key="sk-1")
+    command = cli.command()
+    assert command[command.index("--network") + 1] == "container:harness-abc-mcp"
+    image = command.index(_backend().image)
+    assert command[image - 4:image] == ["-e", "OPENAI_API_KEY", "-e", TOKEN_ENV]
+    assert command[image + 1:image + 4] == ["codex", "app-server", "--stdio"]
+    assert command[image + 4:] == codex_mcp_overrides()
+    assert command[-1] == ('mcp_servers.harness={url="http://127.0.0.1:8790/mcp", '
+                           'bearer_token_env_var="HARNESS_MCP_TOKEN", default_tools_approval_mode="prompt", '
+                           'startup_timeout_sec=30}')
+    assert not any("secret-token" in arg or "sk-1" in arg for arg in command)
+    # The server is registered with -c for this process only: CODEX_HOME's volume and read-only files are the
+    # same mounts as without MCP, and the harness's config.toml registers nothing.
+    plain = CodexSession(session_id="abc", workspace=tmp_path, backend=_backend(), sandbox=SandboxConfig(),
+                         system_prompt="system").command()
+    assert plain[plain.index("--network") + 1] == "cli-net"
+    assert TOKEN_ENV not in plain and not any("mcp_servers" in arg for arg in plain)
+    domain = cli_domains.docker_args("codex", _backend())
+    for args in (command, plain):
+        at = args.index(domain[1]) - 1
+        assert args[at:at + len(domain)] == domain
+    assert "mcp_servers" not in (cli_domains.CLI_HOME / "codex" / "config.toml").read_text(encoding="utf-8")
+
+
+def test_cursor_gets_no_mcp_endpoint(tmp_path):
+    command = CursorSession(session_id="abc", workspace=tmp_path, backend=_backend(), sandbox=SandboxConfig(),
+                            system_prompt="system").command()
+    assert TOKEN_ENV not in command and not any("mcp_servers" in arg or "harness-abc-mcp" in arg for arg in command)
+    assert command[command.index("--network") + 1] == "cli-net"
 
 
 # end to end: fake Claude CLI -> real node relay -> daemon
@@ -408,11 +434,12 @@ def test_an_ask_rule_prompts_for_an_mcp_call_and_denial_blocks_it(tmp_path):
     assert call[1] is True and ran == []
 
 
-def test_codex_sessions_and_disabled_backends_get_no_relay_or_token(tmp_path):
+def test_disabled_backends_and_cursor_get_no_relay_or_token(tmp_path):
     async def body():
         cfg = make_cfg(tmp_path)
         cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", mcp=False)
-        cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-test", network="harness-cli-codex")
+        cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-test", network="harness-cli-codex", mcp=False)
+        cfg.backends["cursor"] = BackendConfig(enabled=True, model="auto", network="harness-cli-cursor")
         m = Manager(cfg)
         m.runner.web = FakeWeb()
         made = []
@@ -420,17 +447,213 @@ def test_codex_sessions_and_disabled_backends_get_no_relay_or_token(tmp_path):
         def factory(**kwargs):
             made.append(kwargs)
             raise CliBackendError("stop here")
-        m.runner.cli_factory = m.runner.codex_factory = factory
+        m.runner.cli_factory = m.runner.codex_factory = m.runner.cursor_factory = factory
         await m.start()
-        claude = m.create("x", backend="claude")["id"]
-        codex = m.create("x", backend="codex")["id"]
-        for sid in (claude, codex):
+        sids = [m.create("x", backend=name)["id"] for name in ("claude", "codex", "cursor")]
+        for sid in sids:
             await wait_status(m, sid, "failed")
         await asyncio.gather(*m.tasks.values())
-        assert len(made) == 2 and not any("mcp" in kw or "mcp_token" in kw for kw in made)
-        assert m.runner.mcp_tool_schemas(claude)  # the tools exist; the backend switch keeps them off the CLI
-        assert m.runner.mcp_tool_schemas(codex) == []
+        assert len(made) == 3 and not any("mcp" in kw or "mcp_token" in kw for kw in made)
+        claude, codex, cursor = sids
+        # The tools exist for Claude Code and Codex; the backend switch keeps them off the CLI. Cursor has none.
+        assert m.runner.mcp_tool_schemas(claude) and m.runner.mcp_tool_schemas(codex)
+        assert m.runner.mcp_tool_schemas(cursor) == []
         await m.stop()
+    asyncio.run(body())
+
+
+# end to end: fake Codex app-server -> real node relay -> daemon (#373)
+
+FAKE_MCP_CODEX = r'''import json
+import os
+import pathlib
+import sys
+import urllib.request
+
+port, state, plan = int(sys.argv[1]), pathlib.Path(sys.argv[2]), json.loads(sys.argv[3])
+token = os.environ.get("HARNESS_MCP_TOKEN", "")
+
+def log(*parts):
+    with state.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(parts) + "\n")
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
+
+def send(item):
+    print(json.dumps(item), flush=True)
+
+def rpc(method, params=None, rid=1, bearer=None):
+    body = json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/mcp", data=body, method="POST", headers={
+        "Content-Type": "application/json", "Authorization": f"Bearer {token if bearer is None else bearer}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+def call(tool, args, call_id, rid):
+    body = rpc("tools/call", {"name": tool, "arguments": args, "_meta": {"callId": call_id}}, rid=rid)[1]
+    result = body["result"]
+    return result["content"][0]["text"], result["isError"]
+
+for method, reply in (("initialize", {}), ("thread/start", {"thread": {"id": "thr-1"}}),
+                      ("turn/start", {"turn": {"id": "turn-1"}})):
+    request = read()
+    assert request["method"] == method, request
+    log(method, request["params"])
+    send({"id": request["id"], "result": reply})
+    if method == "initialize":
+        assert read().get("method") == "initialized"
+log("tools", sorted(t["name"] for t in rpc("tools/list")[1]["result"]["tools"]))
+log("bad_token", rpc("tools/list", bearer="wrong")[0])
+for n, step in enumerate(plan):
+    cid = f"call-{n}"
+    if step.get("builtin"):
+        send({"method": "item/started", "params": {"item": {"type": step["builtin"], "id": cid, "command": "id"}}})
+        continue
+    server, args = step.get("server", "harness"), step["input"]
+    send({"method": "item/started", "params": {"item": {"type": "mcpToolCall", "id": cid, "server": server,
+                                                        "tool": step["tool"], "arguments": args,
+                                                        "status": "inProgress"}}})
+    accepted = True
+    if not step.get("skip_ask"):
+        send({"id": 100 + n, "method": "mcpServer/elicitation/request", "params": {
+            "threadId": "thr-1", "turnId": "turn-1", "serverName": server, "mode": "form",
+            "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": args},
+            "message": f"Allow the {server} MCP server to run tool \"{step['tool']}\"?",
+            "requestedSchema": {"type": "object", "properties": {}}}})
+        reply = read()
+        assert reply["id"] == 100 + n, reply
+        log("answer", step["tool"], reply["result"])
+        accepted = reply["result"]["action"] == "accept"
+    if accepted:
+        text, error = call(step["tool"], args, cid, 10 + n)
+        if step.get("replay"):  # the same call id again, with no fresh approval
+            log("replay", *call(step["tool"], args, cid, 50 + n)[::-1])
+    else:
+        text, error = "user rejected MCP tool call", True
+    log("call", step["tool"], error, text)
+    item = {"type": "mcpToolCall", "id": cid, "server": server, "tool": step["tool"], "arguments": args,
+            "status": "failed" if error else "completed", "durationMs": 5,
+            "result": None if error else {"content": [{"type": "text", "text": text}]},
+            "error": {"message": text} if error else None}
+    send({"method": "item/completed", "params": {"item": item}})
+send({"method": "item/completed", "params": {"item": {"type": "agentMessage", "id": "msg-1", "text": "done"}}})
+send({"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}})
+while True:
+    read()
+'''
+
+
+def _codex_manager(tmp_path, plan, rules=None, **backend):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fake = tmp_path / "fake_mcp_codex.py"
+    fake.write_text(FAKE_MCP_CODEX, encoding="utf-8")
+    state = tmp_path / "codex-state.jsonl"
+    port = _free_port()
+    cfg = make_cfg(tmp_path, rules=rules)
+    cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-test", network="harness-cli-codex", **backend)
+    manager = Manager(cfg)
+    web = FakeWeb()
+    manager.runner.web = web
+    manager.runner.sessions = manager.runner.sessions or SessionSearch(manager.db)
+    made = []
+
+    class RelayedCodex(CodexSession):  # the docker path starts the relay; the test command must do it itself
+        async def start(self):
+            await self.mcp.start()
+            await super().start()
+
+        async def stop(self):
+            await super().stop()
+            await self.mcp.stop()
+
+    def factory(**kwargs):
+        made.append(kwargs)
+        return RelayedCodex(**kwargs, command=[sys.executable, "-u", str(fake), str(port), str(state),
+                                               json.dumps(plan)])
+
+    manager.runner.codex_factory = factory
+    manager.runner.mcp_relay_factory = lambda **kw: McpRelay(**kw, command=[NODE, *relay_node_args(port)])
+    return manager, made, state, web
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the relay")
+def test_hosted_codex_calls_harness_tools_through_policy_and_relay(tmp_path):
+    async def body():
+        plan = [{"tool": "web_search", "input": {"query": "mcp"}, "replay": True},
+                {"tool": "session_search", "input": {"query": "earlier"}},
+                {"tool": "web_search", "input": {"query": "sneaky"}, "skip_ask": True},
+                {"tool": "create_issue", "input": {"title": "x"}, "server": "github"}]
+        m, made, state, web = _codex_manager(tmp_path, plan)
+        await m.start()
+        sid = m.create("search", backend="codex")["id"]
+        s = await wait_status(m, sid, "done")
+        await asyncio.gather(*m.tasks.values())
+        log = _log(state)
+        assert made[0]["mcp"].container == f"harness-{sid}-mcp" and made[0]["mcp_token"]
+        tools = next(entry[1] for entry in log if entry[0] == "tools")
+        assert {"web_search", "web_fetch", "session_search", "session_read"} <= set(tools)
+        assert ["bad_token", 401] in log
+        answers = [entry[1:] for entry in log if entry[0] == "answer"]
+        assert answers == [["web_search", {"action": "accept", "content": None, "_meta": None}],
+                           ["session_search", {"action": "accept", "content": None, "_meta": None}],
+                           ["create_issue", {"action": "decline", "content": None, "_meta": None}]]
+        calls = [entry[1:] for entry in log if entry[0] == "call"]
+        assert calls[0] == ["web_search", False, "results for mcp"]
+        assert calls[1][:2] == ["session_search", False]
+        # Allowed once is run once: the same call id again finds no grant.
+        replay = next(entry[1:] for entry in log if entry[0] == "replay")
+        assert replay[0] is True and "not allowed through the harness" in replay[1]
+        # A call Codex didn't ask about never runs: the endpoint wants a grant from the policy path.
+        assert calls[2][:2] == ["web_search", True] and "not allowed through the harness" in calls[2][2]
+        assert calls[3][:2] == ["create_issue", True]
+        assert web.calls == [("web_search", {"query": "mcp"})]
+        decided = [(e["name"], e["decision"]) for e in events(m, sid, "tool_call")]
+        assert decided == [("mcp__harness__web_search", "allow"), ("mcp__harness__session_search", "allow"),
+                           ("mcp__github__create_issue", "deny")]
+        results = events(m, sid, "tool_result")
+        assert [(r["name"], r["ok"]) for r in results] == [
+            ("mcp__harness__web_search", True), ("mcp__harness__session_search", True),
+            ("mcp__harness__web_search", False), ("mcp__github__create_issue", False)]
+        assert results[0]["output"] == "results for mcp"
+        assert [t["kind"] for t in s["taint"]] == ["web_search"]  # MCP results taint like native web tools
+        assert m.runner.mcp_tokens.session_for(made[0]["mcp_token"]) is None
+        assert sid not in m.runner._mcp_grants
+        for record in m.db.events(sid):
+            assert made[0]["mcp_token"] not in json.dumps(record)
+        await m.stop()
+    asyncio.run(body())
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the relay")
+@pytest.mark.parametrize("rule,approve,ran", [("ask", True, True), ("ask", False, False), ("deny", None, False)])
+def test_codex_mcp_calls_follow_ask_and_deny_rules(tmp_path, rule, approve, ran):
+    async def body():
+        plan = [{"tool": "web_search", "input": {"query": "guarded"}}]
+        rules = [{"tool": "web_search", "action": rule, "reason": "check searches"}]
+        m, _, state, web = _codex_manager(tmp_path, plan, rules=rules)
+        await m.start()
+        sid = m.create("search", backend="codex", project="guarded")["id"]
+        if rule == "ask":
+            await wait_status(m, sid, "waiting_approval")
+            pending = m.db.pending_approvals(sid)
+            assert [(p["tool"], p["reason"]) for p in pending] == [("mcp__harness__web_search", "check searches")]
+            m.decide(sid, pending[0]["id"], approve=approve)
+        await wait_status(m, sid, "done")
+        await asyncio.gather(*m.tasks.values())
+        log = _log(state)
+        answer = next(entry[2]["action"] for entry in log if entry[0] == "answer")
+        call = next(entry[1:] for entry in log if entry[0] == "call")
+        await m.stop()
+        assert answer == ("accept" if ran else "decline")
+        assert call[1] is (not ran)
+        assert web.calls == ([("web_search", {"query": "guarded"})] if ran else [])
     asyncio.run(body())
 
 

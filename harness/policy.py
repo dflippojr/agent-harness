@@ -294,17 +294,17 @@ class ChatPolicy:
 
 
 # The session kind of an App-tools-only session (#329) and the backends that can run one: the local loop sends only the
-# App's schemas, and Claude Code runs with --tools "" plus the harness MCP server. Codex and Cursor have no verified
-# way to drop their built-in tools yet, so they refuse.
+# App's schemas, Claude Code runs with --tools "" and Codex with no environment and its other built-in tools switched
+# off (#373), each plus the harness MCP server. Cursor has no way to drop its built-in tools, so it refuses.
 TOOLS_ONLY = "tools_only"
-TOOLS_ONLY_BACKENDS = ("local", "claude")
+TOOLS_ONLY_BACKENDS = ("local", "claude", "codex")
 TOOLS_ONLY_UNSUPPORTED = "app_tools_only_unsupported"
 APP_TOOLS_ONLY_DENY = "not available in an App-tools-only session; only the App's own tools are"
 
 
 class AppToolsPolicy:
     """App-tools-only sessions (#329) may call exactly the App's registered tools, natively or as
-    mcp__harness__<tool> from hosted Claude Code. Everything else is denied outright: no owner is present to approve."""
+    mcp__harness__<tool> from hosted Claude Code or Codex. Everything else is denied outright: no owner is present to approve."""
 
     def __init__(self, names) -> None:
         self.names = frozenset(names)
