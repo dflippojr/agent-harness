@@ -124,7 +124,7 @@ class RunnerHub:
         out = []
         for name, st in self.state.items():
             try:
-                update_supported = int(st.info.get("protocol")) == PROTOCOLS["runner"]["max"]
+                update_supported = 2 <= int(st.info.get("protocol")) <= PROTOCOLS["runner"]["max"]
             except (TypeError, ValueError):
                 update_supported = False
             out.append({"name": name, "online": self.online(name),

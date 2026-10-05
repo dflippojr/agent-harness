@@ -39,7 +39,7 @@ APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 
 from harness import projects  # noqa: E402
-from harness.changes import workspace_changes  # noqa: E402
+from harness.changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, published, repo_diffs, workspace_changes  # noqa: E402
 from harness.compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION  # noqa: E402
 from harness.fileops import FILE_TOOLS, FileOps, ToolError, cap_command_output, dir_size, resolve_path  # noqa: E402
 from harness.updater import apply_update, schedule_launchd_handoff  # noqa: E402
@@ -346,14 +346,45 @@ class Executor:
 
     def op_merge(self, p: dict):
         project, ws, sid = self.project(p), self.workspace(p["session"]), p["session"]
-        result = projects.merge(project, ws, sid, p["branch"], p["base_branch"], p["title"])
-        result["head"] = projects.head(ws) if (ws / ".git").exists() else ""
+        self._review_head(ws, sid, p)
+        result = projects.merge(project, ws, sid, p["branch"], p["base_branch"], p["title"],
+                                source_ref=p["expect_head"])
+        result["head"] = p["expect_head"]
         return result
 
     def op_push(self, p: dict):
         project, ws, sid = self.project(p), self.workspace(p["session"]), p["session"]
+        self._review_head(ws, sid, p)
+        return {"message": projects.push(project, ws, p["branch"], source_ref=p["expect_head"]),
+                "head": p["expect_head"]}
+
+    @staticmethod
+    def _review_head(ws: Path, sid: str, p: dict) -> None:
         projects.snapshot(ws, f"Work in progress from session {sid}")
-        return {"message": projects.push(project, ws, p["branch"]), "head": projects.head(ws)}
+        if not p.get("expect_head") or projects.head(ws) != p["expect_head"]:
+            raise OpError("the branch changed; review again", "head_changed")
+
+    def op_scan_input(self, p: dict):
+        """No scanner on the runner: send a complete bounded snapshot to the tower."""
+        ws, sid = self.workspace(p["session"]), p["session"]
+        projects.snapshot(ws, f"Work in progress from session {sid}")
+        diffs = [{k: v for k, v in d.items() if k != "repo"}
+                 for d in repo_diffs(ws, p.get("base_commit") or None)]
+        data = {"head": projects.head(ws), "diffs": diffs}
+        if (sum(len(d["commits"]) for d in diffs) > MAX_SCAN_COMMITS
+                or len(json.dumps(data).encode("utf-8")) > MAX_DIFF_CHARS):
+            return {"unavailable": True, "message": "the scan input exceeds the runner limit"}
+        if projects.head(ws) != data["head"] or any(d["head"] != data["head"] for d in diffs if d["path"] == "."):
+            raise OpError("the branch changed; review again", "head_changed")
+        return data
+
+    def op_secret_published(self, p: dict):
+        ws = self.workspace(p["session"])
+        path = p["path"]
+        repo = resolve_path(ws / path)
+        if not repo.is_relative_to(ws.resolve()):
+            raise OpError("repository path is outside the workspace")
+        return published(repo, p["commit"], p["tips"])
 
     def op_discard(self, p: dict):
         self.op_kill_session(p)

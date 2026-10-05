@@ -18,7 +18,7 @@ from pathlib import Path
 from .bus import EventBus
 from . import review_comments
 from . import review_comments
-from .changes import published, repo_diffs, workspace_changes
+from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
 from .notify import Notifier
 from .warmup import ModelWarmer
@@ -1081,20 +1081,21 @@ class Manager:
         except RunnerOffline as e:
             raise HarnessError(503, f"{e}; try again when it's awake") from None
         except RunnerError as e:
+            if e.kind == "head_changed":
+                raise HarnessError(409, "the branch changed; review again", code="secret_scan_head_changed") from None
             raise HarnessError(e.status, str(e)) from None
 
     async def changes(self, ref: str) -> dict:
         s = self.get(ref)
         if s["workspace_removed"]:
             return {"repos": [], "removed": True}
-        if s["target"] != "tower":
+        sid = s["id"]
+        if s["target"] != "tower" and not self._remote_scan_supported(s):
             data = await self.remote(s, "changes", {"base_commit": s["base_commit"]}, timeout=120)
-            # The push/merge secret gate covers tower sessions only (issue #263); say so rather than show nothing.
             return {**data, "secret_scan": {
                 "status": "unsupported", "scanner": secret_scan.SCANNER, "findings": [], "open": 0,
                 "message": f"the secret scan is not available for the {s['target']} target, so Merge and Push "
-                           "are not checked for secrets"}}
-        sid = s["id"]
+                           "are blocked; update the runner with harness update"}}
 
         def scan(diffs: list[dict]) -> tuple[dict, list[str]]:
             result = self.secret_scanner.scan(diffs, sid)
@@ -1102,7 +1103,44 @@ class Manager:
             return self._public_scan(sid, result), masked
 
         # No wait for the start-up fetch here: the diff shows at once, with the scan `unavailable` until it lands.
+        if s["target"] != "tower":
+            try:
+                data = await self._remote_scan_input(s)
+            except HarnessError as e:
+                return {"repos": [], "secret_scan": {"status": "unavailable", "scanner": secret_scan.SCANNER,
+                                                     "findings": [], "open": 0, "message": str(e)}}
+            return await asyncio.to_thread(changes_from_diffs, data["diffs"], scan)
         return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None, scan)
+
+    def _remote_scan_supported(self, s: dict) -> bool:
+        state = self.hub.state.get(s["target"])
+        return bool(state and state.info.get("protocol") == 3)
+
+    async def _remote_scan_input(self, s: dict) -> dict:
+        """Never pass incomplete or older-runner input to the scanner."""
+        message = "the secret scan could not run; update or reconnect the runner and review again"
+        if not self._remote_scan_supported(s):
+            raise HarnessError(503, message, code="secret_scan_unavailable")
+        try:
+            data = await asyncio.wait_for(self.remote(s, "scan_input", {"base_commit": s["base_commit"]},
+                                                      timeout=120), timeout=120)
+        except (HarnessError, asyncio.TimeoutError):
+            # Runner errors may contain Git output; no raw scan input belongs in events or logs.
+            raise HarnessError(503, message, code="secret_scan_unavailable") from None
+        try:
+            diffs = data["diffs"]
+            valid = (isinstance(diffs, list) and bool(data["head"]) and not data.get("unavailable")
+                     and len(json.dumps(data).encode("utf-8")) <= MAX_DIFF_CHARS
+                     and sum(len(d["commits"]) for d in diffs) <= MAX_SCAN_COMMITS
+                     and any(d["path"] == "." and d["head"] == data["head"] for d in diffs)
+                     and all(isinstance(d["diff"], str) and not d.get("truncated")
+                             and all(isinstance(c["diff"], str) and c["sha"] and not c.get("truncated")
+                                     for c in d["commits"]) for d in diffs))
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise HarnessError(503, message, code="secret_scan_unavailable")
+        return data
 
     # secret scanning before push/merge (issue #263)
     async def _bootstrap_scanner(self) -> None:
@@ -1149,11 +1187,10 @@ class Manager:
         out["open"] = sum(not f["dismissed"] for f in out["findings"])
         return out
 
-    async def _secret_gate(self, sid: str, s: dict, ws: Path, action: str) -> None:
+    async def _secret_gate(self, sid: str, diffs: list[dict], action: str) -> None:
         """Block push/merge while an undismissed finding exists, or when the scanner can't run (fail closed)."""
         await self._scanner_waited()
-        result = self._public_scan(sid, await asyncio.to_thread(
-            lambda: self.secret_scanner.scan(repo_diffs(ws, s["base_commit"] or None), sid)))
+        result = self._public_scan(sid, await asyncio.to_thread(self.secret_scanner.scan, diffs, sid))
         if result["status"] != "ok":
             raise HarnessError(503, f"{action} is blocked: the secret scan could not run ({result['message']}). "
                                     "Fix the gitleaks install (python -m harness.doctor) and retry.",
@@ -1179,6 +1216,9 @@ class Manager:
         tips = [f"refs/remotes/origin/{branch}"] if branch and branch != "HEAD" else []
         if finding["repo"] == ".":
             tips += self.db.pushed_heads(s["id"])
+        if s["target"] != "tower":
+            return await self.remote(s, "secret_published", {"path": finding["repo"],
+                                                           "commit": finding["commit"], "tips": tips}, timeout=120)
         return await asyncio.to_thread(published, Path(s["workspace"]) / finding["repo"], finding["commit"], tips)
 
     async def secret_findings_fix(self, ref: str) -> dict:
@@ -1480,7 +1520,8 @@ class Manager:
         if action in ("merge", "push"):
             # Snapshot first so uncommitted work is scanned too, then gate on the scan (issue #263).
             await asyncio.to_thread(projects.snapshot, ws, f"Work in progress from session {sid}")
-            await self._secret_gate(sid, s, ws, action)
+            diffs = await asyncio.to_thread(repo_diffs, ws, s["base_commit"] or None)
+            await self._secret_gate(sid, diffs, action)
         if action == "merge":
             result = await asyncio.to_thread(projects.merge, project, ws, sid, s["branch"], s["base_branch"],
                                              s["title"])
@@ -1524,6 +1565,10 @@ class Manager:
         if action not in ("merge", "push", "discard"):
             raise HarnessError(404, f"unknown review action {action!r}")
         params = {"repo": project.repo, "branch": s["branch"], "base_branch": s["base_branch"], "title": s["title"]}
+        if action in ("merge", "push"):
+            data = await self._remote_scan_input(s)
+            await self._secret_gate(sid, data["diffs"], action)
+            params["expect_head"] = data["head"]
         try:
             result = await self.remote(s, action, params, timeout=600)
         except HarnessError as e:

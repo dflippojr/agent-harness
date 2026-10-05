@@ -362,7 +362,7 @@ def commits_ahead(workspace: Path, base_commit: str) -> list[str]:
     return out.splitlines()
 
 
-def publish_local(project: Project, workspace: Path, branch: str) -> bool:
+def publish_local(project: Project, workspace: Path, branch: str, source_ref: str | None = None) -> bool:
     """Copy the session branch into a local source repository. No-op for URL projects.
 
     Push from the isolated workspace into the trusted source so receive-pack (and its hooks) run in the source,
@@ -371,15 +371,15 @@ def publish_local(project: Project, workspace: Path, branch: str) -> bool:
     src = source_path(project)
     if src is None or not (workspace / ".git").exists():
         return False
-    git(workspace, "push", "--quiet", "--no-verify", str(src), f"+{branch}:refs/heads/{branch}")
+    git(workspace, "push", "--quiet", "--no-verify", str(src), f"+{source_ref or branch}:refs/heads/{branch}")
     return True
 
 
-def push(project: Project, workspace: Path, branch: str) -> str:
+def push(project: Project, workspace: Path, branch: str, source_ref: str | None = None) -> str:
     """Push the session branch to the URL source, with the daemon's (the user's) git credentials."""
     if not is_url(project.repo):
         raise GitError("push is for URL projects; local projects already have the branch", 400)
-    result = git(workspace, "push", "--quiet", "--no-verify", "origin", f"{branch}:refs/heads/{branch}",
+    result = git(workspace, "push", "--quiet", "--no-verify", "origin", f"{source_ref or branch}:refs/heads/{branch}",
                  timeout=300, check=False)
     if result.code != 0:
         raise GitError(f"push failed: {result.text[-1500:]}")
@@ -391,7 +391,8 @@ def _delete_branch(src: Path, branch: str) -> None:
         git(src, "branch", "-q", "-D", branch, trusted=True)
 
 
-def merge(project: Project, workspace: Path, sid: str, branch: str, base_branch: str, title: str) -> dict:
+def merge(project: Project, workspace: Path, sid: str, branch: str, base_branch: str, title: str,
+          source_ref: str | None = None) -> dict:
     """Squash-merge the session branch into the base branch of a local source repository.
 
     A checked-out source is merged in place, which needs it to be on the base branch with nothing staged
@@ -401,8 +402,10 @@ def merge(project: Project, workspace: Path, sid: str, branch: str, base_branch:
     src = source_path(project)
     if src is None:
         raise GitError("merging is for local projects; push the branch and open a pull request instead", 400)
-    snapshot(workspace, f"Work in progress from session {sid}")
-    publish_local(project, workspace, branch)
+    # A runner has already snapshotted and checked its scanned head; publish that immutable commit.
+    if source_ref is None:
+        snapshot(workspace, f"Work in progress from session {sid}")
+    publish_local(project, workspace, branch, source_ref)
     subjects = git(src, "log", "--reverse", "--format=- %s", f"{base_branch}..{branch}",
                    check=False, trusted=True).out.strip()
     if not subjects:

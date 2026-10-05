@@ -12,6 +12,7 @@ from .projects import git
 from .review_comments import parse_diff
 
 MAX_DIFF_CHARS = 400_000
+MAX_SCAN_COMMITS = 1_000
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # the parent of a root commit
 SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 
@@ -102,7 +103,10 @@ def repo_diffs(workspace: Path, base_commit: str | None = None) -> list[dict]:
         out.append({"repo": repo, "path": repo.relative_to(workspace).as_posix() or ".", "files": files,
                     "base": base, "diff": _repo_diff(repo, base, untracked),
                     "head": _git(repo, "rev-parse", "--verify", "-q", "HEAD").strip(),
-                    "commits": commit_diffs(repo, base)})
+                    "commits": commit_diffs(repo, base),
+                    "branch": _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip(),
+                    "subjects": _git(repo, "log", "--oneline", "--no-color", f"{base}..HEAD").splitlines()
+                    if base else []})
     return out
 
 
@@ -112,6 +116,11 @@ def workspace_changes(workspace: Path, base_commit: str | None = None, scan=None
     `scan(diffs) -> (public result, [diff per repo])` is the secret scan (issue #263): it sees the full diffs and
     returns them with flagged values masked, before truncation and parsing."""
     diffs = repo_diffs(workspace, base_commit)
+    return changes_from_diffs(diffs, scan)
+
+
+def changes_from_diffs(diffs: list[dict], scan=None) -> dict:
+    """Render the same snapshot locally or from a runner, masking before parsing."""
     secret = None
     if scan is not None:
         secret, masked = scan(diffs)
@@ -120,14 +129,12 @@ def workspace_changes(workspace: Path, base_commit: str | None = None, scan=None
     repos = []
     budget = MAX_DIFF_CHARS
     for d in diffs:
-        repo, base, diff = d["repo"], d["base"], d["diff"]
+        base, diff = d["base"], d["diff"]
         truncated = len(diff) > budget
         diff = diff[:max(0, budget)]
         budget -= len(diff)
-        new_commits = _git(repo, "log", "--oneline", "--no-color", f"{base}..HEAD") if base else ""
-        branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
-        repos.append({"path": d["path"], "branch": branch, "files": d["files"], "diff": diff,
+        repos.append({"path": d["path"], "branch": d["branch"], "files": d["files"], "diff": diff,
                       "truncated": truncated, "base": base[:12], "head": d["head"][:12],
                       "parsed": parse_diff(diff),
-                      "commits": new_commits.splitlines()})
+                      "commits": d["subjects"]})
     return {"repos": repos} if secret is None else {"repos": repos, "secret_scan": secret}

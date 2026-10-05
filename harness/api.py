@@ -666,7 +666,7 @@ async def runner_update(name: str, request: Request):
     if not m.hub.online(name):
         raise HarnessError(409, f"runner is offline. {fallback}")
     try:
-        remote_update_supported = int(protocol) == compat.PROTOCOLS["runner"]["max"]
+        remote_update_supported = 2 <= int(protocol) <= compat.PROTOCOLS["runner"]["max"]
     except (TypeError, ValueError):
         remote_update_supported = False
     if not remote_update_supported:

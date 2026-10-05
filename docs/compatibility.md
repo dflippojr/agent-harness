@@ -4,6 +4,10 @@ Agent Harness versions its first-party wire contracts separately from Git commit
 supports the current and immediately previous protocol for Agent Harness Web/app calls, the owner/admin API, and the
 Mac Runner. Additive response fields are compatible; clients must ignore fields they do not understand.
 
+Mac client 4.3 speaks runner protocol 3; the Server accepts runner protocols 2–3. Protocol 2 can still execute
+sessions and discard workspaces, but Merge and Push require protocol 3's `scan_input` and `expect_head` guard.
+The scan runs on the tower, so no scanner binary is installed by the Mac client.
+
 `GET /health`, `GET /api/v1`, and `GET /api/admin/v1` publish the Server release/build, supported protocol ranges,
 minimum client releases, effective capabilities, and machine-readable update actions. First-party HTTP clients send
 `X-Agent-Harness-Client: web/<protocol>` or `cli/<protocol>`; the Runner sends `runner/<protocol>` and repeats its
