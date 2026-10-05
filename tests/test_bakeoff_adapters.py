@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+import sys
 
 import httpx
 import pytest
@@ -87,6 +88,42 @@ def test_missing_envelope_is_adapter_failure():
         assert classify(parser([], FACTS)) == "adapter"
 
 
+@pytest.mark.parametrize("name", PARSERS)
+def test_candidate_tool_error_events(name):
+    parser, events = PARSERS[name]
+    errors = {
+        "openhands": {"source": "environment", "observation": {"is_error": True}},
+        "opencode": {"type": "tool_use", "part": {"state": {"status": "error"}}},
+        "hermes": {"type": "tool_result", "is_error": True},
+        "openclaw": {"type": "message", "message": {"role": "toolResult", "isError": True}},
+    }
+    result = parser([*events, errors[name]], FACTS)
+    assert result["tool_errors"] == 1 and classify(result) == "harness/tooling"
+
+
+def test_container_timeout_preserves_events_and_removes_only_owned_container(tmp_path, monkeypatch):
+    task = next(t for t in TASKS if t.id == "repo_qa")
+    removed = []
+    monkeypatch.setattr(reference, "docker", lambda *args, **kwargs: removed.append(args))
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], task.wall_limit, output=b'{"type":"text"}\n')
+
+    monkeypatch.setattr(reference.subprocess, "run", timeout)
+    events, facts = reference.run_container("opencode", task, tmp_path, {}, ["opencode"])
+    assert events == [{"type": "text"}] and outcome(facts) == "timeout"
+    assert len(removed) == 1 and removed[0][:2] == ("rm", "-f") and removed[0][2].startswith("opencode-")
+
+
+def test_container_missing_docker_is_infrastructure(tmp_path, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError("docker unavailable")
+    monkeypatch.setattr(reference.subprocess, "run", unavailable)
+    task = next(t for t in TASKS if t.id == "repo_qa")
+    events, facts = reference.run_container("opencode", task, tmp_path, {}, ["opencode"])
+    assert not events and classify(facts) == "infrastructure"
+
+
 def test_reports_repeat_percentiles_unknown_and_failure_classes(tmp_path):
     rows = [{**FACTS, "task": "repo_qa", "repeat": i % 2, "passed": i == 0, "turns": None,
              "tool_errors": 0, "invalid_tool_calls": 0, "wall_seconds": i + 1} for i in range(4)]
@@ -135,15 +172,17 @@ def test_core_task_with_fake_endpoint_and_hidden_checker(name, tmp_path):
     task = next(t for t in TASKS if t.id == "repo_qa")
     tool, arguments = {
         "agent-harness": ("read_file", {"path": "app/config.py"}),
-        "openhands": ("terminal", {"command": "cat app/config.py"}),
+        "openhands": ("terminal", {"command": "cat app/config.py", "security_risk": "LOW"}),
         "opencode": ("read", {"filePath": "/workspace/app/config.py"}),
         "hermes": ("terminal", {"command": "cat app/config.py"}),
         "openclaw": ("read", {"path": "/workspace/app/config.py"}),
     }[name]
     script = tmp_path / "script.json"
-    script.write_text(json.dumps([{"message": {"content": None, "tool_calls": [
+    script.write_text(json.dumps({"steps": [{"message": {"content": None, "tool_calls": [
         {"id": "call_fixture", "type": "function", "function": {"name": tool, "arguments": json.dumps(arguments)}}]}},
-                                  {"message": {"content": ANSWER}}]))
+                                  {"message": {"content": ANSWER}}],
+                                 "auxiliary": [{"contains": "title generator", "message": {"content": "Core fixture"}},
+                                               {"contains": "You name chat sessions", "message": {"content": '{"title":"Core fixture"}'}}]}))
     run_dir = tmp_path / "run"
     sandbox, baseline = prepare(task, run_dir / "workspace")
     try:
@@ -156,8 +195,28 @@ def test_core_task_with_fake_endpoint_and_hidden_checker(name, tmp_path):
             passed, note = task.check(Context(run_dir / "workspace", sandbox, result["answer"], baseline))
             assert passed, (note, result, list(run_dir.glob("*.log")))
             assert result["finished"] and result["tool_calls"] == 1, result
-            requests = [json.loads(line)["request"] for line in (tmp_path / "endpoint/requests.jsonl").read_text().splitlines()]
+            requests = [row["request"] for line in (tmp_path / "endpoint/requests.jsonl").read_text().splitlines()
+                        for row in [json.loads(line)] if row["index"] is not None]
             assert len(requests) == 2
             assert any(m.get("role") == "tool" for m in requests[-1]["messages"])
     finally:
         sandbox.stop()
+
+
+@pytest.mark.docker
+def test_reference_module_cli_fake_run_and_rescore(tmp_path):
+    if os.environ.get("BAKEOFF_DOCKER_TESTS") != "1" or not docker_ready():
+        pytest.skip("requires opt-in Docker reference images")
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({"steps": [{"message": {"content": ANSWER}}],
+                                 "auxiliary": [{"contains": "title generator", "message": {"content": "Core fixture"}}]}))
+    run_dir = tmp_path / "cli-run"
+    subprocess.run([sys.executable, "-m", "bakeoff.reference", "--harness", "opencode", "--suite", "core",
+                    "--tasks", "repo_qa", "--fake-script", str(script), "--no-build", "--resume", str(run_dir)],
+                   check=True, timeout=120, capture_output=True)
+    record = run_dir / "fake/repo_qa-0/result.json"
+    assert json.loads(record.read_text())["passed"]
+    assert (run_dir / "fake-endpoint/requests.jsonl").is_file()
+    assert not (run_dir / "memory.csv").exists()
+    subprocess.run([sys.executable, "-m", "bakeoff.rescore", str(run_dir)], check=True, timeout=60, capture_output=True)
+    assert json.loads(record.read_text())["failure_class"] is None

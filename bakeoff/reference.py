@@ -82,9 +82,10 @@ def run_container(harness: str, task: Task, run_dir: Path, env: dict[str, str], 
     name = f"{harness}-{run_dir.parent.name}-{run_dir.name}".replace(".", "-")[:60]
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     cmd = ["docker", "run", "--rm", "--name", name, "--network", NETWORK, "--memory", "4g", "--cpus", "2",
-           "--mount", f"type=bind,source={ws},target=/workspace", "-w", "/workspace", *env_args,
+           "--init", "--mount", f"type=bind,source={ws},target={'/fixture' if harness == 'openclaw' else '/workspace'}", "-w", "/workspace", *env_args,
            f"agent-harness-{harness}", *argv]
     started = time.monotonic()
+    infrastructure_error = None
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=task.wall_limit)
@@ -93,9 +94,13 @@ def run_container(harness: str, task: Task, run_dir: Path, env: dict[str, str], 
         docker("rm", "-f", name, check=False)
         stdout = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         stderr, code, stop = "", None, "wall_limit"
+    except OSError as error:
+        stdout, stderr, code, stop = "", str(error), None, "infrastructure_error"
+        infrastructure_error = str(error)
     (run_dir / f"{harness}.jsonl").write_text(stdout, encoding="utf-8")
     (run_dir / f"{harness}.stderr.log").write_text(stderr, encoding="utf-8")
     return parse_events(stdout), {"finished": code == 0, "exit_code": code, "stop_reason": stop,
+                                  "infrastructure_error": infrastructure_error,
                                   "wall_seconds": round(time.monotonic() - started, 1)}
 
 
@@ -118,10 +123,12 @@ def openhands_answer(events: list[dict]) -> str:
 
 def openhands_result(events: list[dict], facts: dict) -> dict:
     actions = [e["action"] for e in events if e.get("source") == "agent" and isinstance(e.get("action"), dict)]
+    native_actions = [e for e in events if e.get("kind") == "ActionEvent" and not isinstance(e.get("action"), dict)]
     errors = [e for e in events if e.get("error") or e.get("type") == "error"]
     return {"answer": openhands_answer(events), **facts,
+            "adapter_error": "missing agent events" if not events and facts.get("stop_reason") != "wall_limit" else None,
             "turns": sum(e.get("source") == "agent" for e in events),
-            "tool_calls": sum(a.get("kind") != "FinishAction" for a in actions),
+            "tool_calls": sum(a.get("kind") != "FinishAction" for a in actions) + sum(e.get("tool_name") != "finish" for e in native_actions),
             "tool_errors": sum(e.get("source") == "environment" and bool((e.get("observation") or {}).get("is_error")) for e in events),
             "model_errors": len(errors), "finished": facts["finished"] and not errors}
 
@@ -154,6 +161,7 @@ def opencode_result(events: list[dict], facts: dict) -> dict:
     steps = [e.get("part") or {} for e in events if e.get("type") == "step_finish"]
     errors = [e for e in events if e.get("type") == "error"]
     return {"answer": opencode_answer(events), **facts, "finished": facts["finished"] and not errors,
+            "adapter_error": "missing agent events" if not events and facts.get("stop_reason") != "wall_limit" else None,
             "turns": len(steps), "tool_calls": len(tools), "model_errors": len(errors),
             "tool_errors": sum((t.get("state") or {}).get("status") == "error" for t in tools),
             "prompt_tokens": sum((s.get("tokens") or {}).get("input", 0) for s in steps) if steps else None,
@@ -173,12 +181,15 @@ def hermes_result(events: list[dict], facts: dict) -> dict:
     final = next((e for e in reversed(events) if e.get("type") == "result"), {})
     tokens = final.get("tokens") or {}
     errors = [e for e in events if e.get("error") or e.get("type") == "error"]
+    metrics = next((e for e in events if e.get("type") == "bakeoff_metrics"), {})
     return {**facts, "answer": final.get("text", ""),
             "finished": facts["finished"] and bool(final) and not final.get("exit_code") and not errors,
             "adapter_error": None if final or facts.get("stop_reason") == "wall_limit" else "missing result envelope",
-            "turns": None, "tool_calls": sum(e.get("type") == "tool_use" for e in events),
+            "turns": metrics.get("turns"), "tool_calls": sum(e.get("type") == "tool_use" for e in events),
             "tool_errors": sum(e.get("type") == "tool_result" and bool(e.get("is_error")) for e in events),
-            "model_errors": len(errors), "prompt_tokens": tokens.get("input"), "completion_tokens": tokens.get("output")}
+            "model_errors": len(errors), "prompt_tokens": metrics.get("prompt_tokens", tokens.get("input")),
+            "completion_tokens": metrics.get("completion_tokens", tokens.get("output")),
+            "compactions": metrics.get("compactions"), "compaction_failures": metrics.get("compaction_failures")}
 
 
 def openclaw_result(events: list[dict], facts: dict) -> dict:
@@ -189,15 +200,18 @@ def openclaw_result(events: list[dict], facts: dict) -> dict:
     assistants = [m for m in messages if m.get("role") == "assistant"]
     tools = [c for m in assistants for c in m.get("content", []) if c.get("type") == "toolCall"]
     usage = agent.get("usage") or {}
+    tool_summary = meta.get("toolSummary") or {}
     errors = sum(m.get("stopReason") == "error" for m in assistants)
     return {**facts, "answer": "\n".join(p.get("text", "") for p in final.get("payloads", [])),
             "finished": facts["finished"] and bool(final) and not errors and not meta.get("error"),
             "adapter_error": None if final or facts.get("stop_reason") == "wall_limit" else "missing result envelope",
             "turns": agent.get("assistantTurns", len(assistants) if messages else None),
-            "tool_calls": len(tools) if messages else None,
-            "tool_errors": sum(m.get("role") == "toolResult" and bool(m.get("isError")) for m in messages) if messages else None,
+            "tool_calls": tool_summary.get("calls", len(tools) if messages else None),
+            "tool_errors": tool_summary.get("failures", sum(m.get("role") == "toolResult" and bool(m.get("isError")) for m in messages) if messages else None),
             "model_errors": errors + int(bool(meta.get("error"))),
             "prompt_tokens": usage.get("input"), "completion_tokens": usage.get("output"),
+            "context_tokens": (agent.get("lastCallUsage") or {}).get("total"),
+            "retries": max(0, len((meta.get("executionTrace") or {}).get("attempts", [])) - 1),
             "compactions": sum(e.get("type") == "compaction" for e in events) if messages else None,
             "system_prompt_chars": (meta.get("systemPromptReport") or {}).get("systemPrompt", {}).get("chars")}
 
@@ -212,7 +226,7 @@ def run_hermes(task: Task, run_dir: Path, model: str, port: int) -> dict:
 
 def run_openclaw(task: Task, run_dir: Path, model: str, port: int) -> dict:
     events, facts = run_container("openclaw", task, run_dir,
-                                 {"LLM_BASE_URL": f"http://{PROXY}:{port}/v1", "LLM_MODEL": model},
+                                 {"LLM_BASE_URL": f"http://{PROXY}:{port}/v1", "LLM_MODEL": model, "OPENCLAW_DEBUG": "1"},
                                  ["python", "/opt/bakeoff/entrypoint.py", task.prompt])
     return openclaw_result(events, facts)
 
@@ -257,7 +271,7 @@ def main() -> None:
     fake = None
     if args.fake_script:
         from .fake_network import FakeEndpoint
-        fake = FakeEndpoint(args.fake_script, out_dir / "fake-endpoint")
+        fake = FakeEndpoint(args.fake_script, out_dir / "fake-endpoint", reference_module=sys.modules[__name__])
         fake.__enter__()
         args.models = "fake"
     else:
@@ -280,8 +294,8 @@ def main() -> None:
             server_log = out_dir / model / f"server-{datetime.now().strftime('%H%M%S')}.log"
             server_context = nullcontext(SimpleNamespace(load_seconds=0)) if fake else LlamaServer(model, server_log, config)
             gpu_context = nullcontext(SimpleNamespace(peak_mib=None)) if fake else GpuSampler()
-            with server_context as server, gpu_context as gpu, \
-                    MemorySampler(out_dir / "memory.csv") as mem:
+            memory_context = nullcontext(SimpleNamespace(peak_commit_mib=None, min_avail_mib=None)) if fake else MemorySampler(out_dir / "memory.csv")
+            with server_context as server, gpu_context as gpu, memory_context as mem:
                 summary["load_seconds"] = round(server.load_seconds or 0, 1)
                 print(f"[{label}] loaded in {summary['load_seconds']}s; {len(todo)} runs to go")
                 for task, r in todo:

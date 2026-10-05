@@ -22,7 +22,9 @@ class ScriptedServer(ThreadingHTTPServer):
 
     def __init__(self, address, steps: list[dict], requests: Path | None = None):
         super().__init__(address, Handler)
-        self.steps, self.requests = steps, requests
+        self.auxiliary = steps.get("auxiliary", []) if isinstance(steps, dict) else []
+        self.steps = steps["steps"] if isinstance(steps, dict) else steps
+        self.requests = requests
         self.index = 0
         self.lock = threading.Lock()
 
@@ -53,10 +55,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         with self.server.lock:
-            index = self.server.index
-            self.server.index += 1
-            step = self.server.steps[index] if index < len(self.server.steps) else {
-                "status": 500, "error": "script exhausted"}
+            auxiliary = next((s for s in self.server.auxiliary
+                              if s["contains"] in json.dumps(payload.get("messages", []))), None)
+            index = None if auxiliary else self.server.index
+            if auxiliary:
+                step = auxiliary
+            else:
+                self.server.index += 1
+                step = self.server.steps[index] if index < len(self.server.steps) else {
+                    "status": 500, "error": "script exhausted"}
             if self.server.requests:
                 with self.server.requests.open("a", encoding="utf-8") as log:
                     log.write(json.dumps({"index": index, "request": payload}) + "\n")

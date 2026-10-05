@@ -1,4 +1,4 @@
 {
-  "model": {"provider": "custom", "base_url": "{env:LLM_BASE_URL}", "default": "{env:LLM_MODEL}", "context_length": 32768},
+  "model": {"provider": "custom", "base_url": "{env:LLM_BASE_URL}", "default": "{env:LLM_MODEL}", "context_length": 65536},
   "terminal": {"backend": "local", "cwd": "/workspace"}
 }

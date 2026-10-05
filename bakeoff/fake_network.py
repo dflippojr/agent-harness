@@ -13,14 +13,17 @@ from . import reference
 
 
 class FakeEndpoint:
-    def __init__(self, script: Path, artifacts: Path):
+    def __init__(self, script: Path, artifacts: Path, reference_module=reference):
+        # `python -m bakeoff.reference` executes as __main__, a different module
+        # object from an ordinary import. Configure the module owning the runner.
+        self.reference = reference_module
         self.script = script.resolve()
         self.artifacts = artifacts.resolve()
         token = uuid.uuid4().hex[:12]
         self.network = f"bakeoff-fake-{token}"
         self.name = f"bakeoff-model-{token}"
         self.port = None
-        self.previous = reference.NETWORK, reference.PROXY
+        self.previous = self.reference.NETWORK, self.reference.PROXY
 
     def __enter__(self):
         self.artifacts.mkdir(parents=True, exist_ok=True)
@@ -39,7 +42,7 @@ class FakeEndpoint:
             reference.docker("network", "connect", self.network, self.name)
             ports = json.loads(reference.docker("inspect", self.name, "--format", "{{json .NetworkSettings.Ports}}").stdout)
             self.port = int(ports["8080/tcp"][0]["HostPort"])
-            reference.NETWORK, reference.PROXY = self.network, self.name
+            self.reference.NETWORK, self.reference.PROXY = self.network, self.name
             deadline = time.monotonic() + 15
             while True:
                 try:
@@ -60,6 +63,6 @@ class FakeEndpoint:
         return 8080
 
     def __exit__(self, *args):
-        reference.NETWORK, reference.PROXY = self.previous
+        self.reference.NETWORK, self.reference.PROXY = self.previous
         reference.docker("rm", "-f", self.name, check=False)
         reference.docker("network", "rm", self.network, check=False)

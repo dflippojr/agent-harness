@@ -34,10 +34,9 @@ def session_result(final: dict, events: list[dict]) -> dict:
 
 
 async def run_current(task, run_dir: Path, model: str, base_url: str, chat=None) -> dict:
-    from harness.config import Config, ModelConfig, Project, SandboxConfig
+    from harness.config import CanaryConfig, Config, ModelConfig, Project, SandboxConfig
     from harness.llm import chat as real_chat
     from harness.manager import Manager
-    from harness.canary import CanaryConfig
 
     # Construct a throwaway config; never read the production config or start its services.
     token = uuid.uuid4().hex[:10]
