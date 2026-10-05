@@ -91,6 +91,29 @@ def test_manager_result_returns_deletions_without_replacing_checker_mount(tmp_pa
     assert (target / "changed.py").read_text() == "new" and not (target / "nested").exists()
 
 
+@pytest.mark.parametrize("message", ["HTTP 503", "ECONNREFUSED"])
+def test_recovered_retry_is_completion_and_failed_checker_is_model(message):
+    final = {"answer": ANSWER, "status": "done", "totals": {}, "run": {}}
+    result = session_result(final, [{"type": "llm_retry", "data": {"error": message}}])
+    assert result["retries"] == 1 and result["model_errors"] == 0
+    assert result["retry_events"] == [{"error": message}]
+    assert result["infrastructure_error"] is None
+    assert outcome(result) == "completion"
+    assert classify({**result, "passed": False}) == "model"
+    assert classify({**result, "passed": True}) is None
+    # Completed runs from older saved reports may contain recovered error evidence.
+    assert outcome({**result, **error_metrics([{"error": message}])}) == "completion"
+    assert classify({**result, **error_metrics([{"error": message}]), "passed": False}) == "model"
+
+
+def test_openclaw_missing_retry_telemetry_remains_unknown():
+    parser, events = PARSERS["openclaw"]
+    assert parser(events, FACTS)["retries"] is None
+    for attempts, retries in [([], 0), ([{}], 0), ([{}, {}], 1)]:
+        final = {"payloads": [], "meta": {"executionTrace": {"attempts": attempts}}}
+        assert parser([final], FACTS)["retries"] == retries
+
+
 def test_parse_noise_pretty_envelope_and_non_objects():
     assert reference.parse_events('banner\n[]\n{"type":"text"}\n{broken') == [{"type": "text"}]
     assert reference.parse_events(json.dumps({"payloads": []}, indent=2)) == [{"payloads": []}]

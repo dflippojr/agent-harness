@@ -206,6 +206,7 @@ def openclaw_result(events: list[dict], facts: dict) -> dict:
     errors = [m for m in assistants if m.get("stopReason") == "error"]
     if meta.get("error"):
         errors.append(meta["error"])
+    attempts = (meta.get("executionTrace") or {}).get("attempts")
     return {**facts, "answer": "\n".join(p.get("text", "") for p in final.get("payloads", [])),
             "finished": facts["finished"] and bool(final) and not errors and not meta.get("error"),
             "adapter_error": None if final or facts.get("stop_reason") == "wall_limit" else "missing result envelope",
@@ -214,7 +215,7 @@ def openclaw_result(events: list[dict], facts: dict) -> dict:
             "tool_errors": tool_summary.get("failures", sum(m.get("role") == "toolResult" and bool(m.get("isError")) for m in messages) if messages else None),
             "prompt_tokens": usage.get("input"), "completion_tokens": usage.get("output"),
             "context_tokens": (agent.get("lastCallUsage") or {}).get("total"),
-            "retries": max(0, len((meta.get("executionTrace") or {}).get("attempts", [])) - 1),
+            "retries": max(0, len(attempts) - 1) if attempts is not None else None,
             "compactions": sum(e.get("type") == "compaction" for e in events) if messages else None,
             "system_prompt_chars": (meta.get("systemPromptReport") or {}).get("systemPrompt", {}).get("chars"),
             **error_metrics(errors, facts.get("infrastructure_error"))}

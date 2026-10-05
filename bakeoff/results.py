@@ -26,7 +26,9 @@ def classify(record: dict) -> str | None:
     """Checker failures are model failures unless process/event evidence says otherwise."""
     if record.get("passed"):
         return None
-    if str(record.get("note", "")).startswith("checker error:") or record.get("infrastructure_error"):
+    if str(record.get("note", "")).startswith("checker error:"):
+        return "infrastructure"
+    if record.get("infrastructure_error") and not record.get("finished"):
         return "infrastructure"
     if record.get("adapter_error"):
         return "adapter"
@@ -42,11 +44,13 @@ def classify(record: dict) -> str | None:
 def outcome(record: dict) -> str:
     if record.get("stop_reason") in ("wall_limit", "timeout") or record.get("status") in ("timeout", "wall_limit"):
         return "timeout"
+    if record.get("finished"):
+        return "completion"
     if record.get("model_errors") or record.get("invalid_tool_calls"):
         return "model_error"
     if record.get("tool_errors"):
         return "tool_error"
-    return "completion" if record.get("finished") else "incomplete"
+    return "incomplete"
 
 
 def total(rows: list[dict], key: str):
