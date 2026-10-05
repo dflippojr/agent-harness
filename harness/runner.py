@@ -390,7 +390,8 @@ class Runner:
         if s.get("kind") == TOOLS_ONLY:
             return AppToolsPolicy(t["name"] for t in (s.get("app_tools") or []))
         project = self.project_for(s)
-        return Policy(project.rules if project else [], repo=bool(project and project.repo))
+        return Policy(project.rules if project else [], repo=bool(project and project.repo),
+                      workspace_root=Path(s["workspace"]) if s.get("workspace") else None)
 
     def quota_mb(self, s: dict) -> int:
         project = self.project_for(s)

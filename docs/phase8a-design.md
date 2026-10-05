@@ -218,7 +218,7 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
 
 | Backend | Bridge |
 | --- | --- |
-| Claude | `can_use_tool` control request → harness policy first (project rules, defaults; e.g. Read/Grep/Glob allow, Edit/Write inside the workspace allow, Bash asks unless it matches the allow patterns, WebFetch asks) → `ALLOW` answers at once, `ASK` creates a normal approval (card, `approval_requested` event, ntfy), `DENY` answers with the reason. The decision note goes back as the deny message. |
+| Claude | `can_use_tool` control request → harness policy first (project rules, defaults; e.g. Read/Grep/Glob/LS inside the workspace allow, Edit/Write inside the workspace allow, Bash asks unless it matches the allow patterns, WebFetch asks) → `ALLOW` answers at once, `ASK` creates a normal approval (card, `approval_requested` event, ntfy), `DENY` answers with the reason. The decision note goes back as the deny message. Reads outside `/workspace`, or through a symlink or junction in the host workspace, ask ("reads a file outside /workspace", never smart-approved): the shared login volume at `/home/agent/.claude` holds every Claude session's history (#370). |
 | Codex | app-server approval requests (command, file change) → the same path. Fallback if app-server proves unstable: `codex exec --sandbox workspace-write` with approvals off, contained by the Docker sandbox plus branch review. |
 | Cursor | No host approvals exist. **Decided:** `--force` inside the Docker sandbox (egress allowlist: Cursor's domains only), with changes landing only through branch review. |
 
