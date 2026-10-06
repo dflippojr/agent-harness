@@ -178,7 +178,6 @@ def test_over_quota_prunes_then_skips_without_failing_the_turn(tmp_path, monkeyp
         m, s = await started(tmp_path)
         sid = s["id"]
         cp = m.runner.checkpointer
-        cp._unreclaimed.clear()
         usage = {"bytes": 10}
         monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: usage["bytes"])
         monkeypatch.setattr("harness.checkpointer.CAP", 50)
@@ -189,9 +188,13 @@ def test_over_quota_prunes_then_skips_without_failing_the_turn(tmp_path, monkeyp
         usage["bytes"] = 150
         monkeypatch.setattr("harness.fileops.dir_size", lambda p: 100)
         monkeypatch.setattr(store, "reclaim", lambda: usage.update(bytes=50), raising=False)
+        before = [c["turn"] for c in m.db.checkpoints(sid, hidden=None)]
         assert cp._within_quota(member, store, sid, keep=2) is True
+        # Unreachable objects only a reclaim frees (it is deferred) must not cost a live checkpoint.
+        assert [c["turn"] for c in m.db.checkpoints(sid, hidden=None)] == before
         # Even an empty store would not fit: skipped, never raises.
         monkeypatch.setattr("harness.fileops.dir_size", lambda p: 10)
+        monkeypatch.setattr(store, "reclaim", lambda: None, raising=False)
         usage["bytes"] = 500
         assert cp._within_quota(member, store, sid, keep=2) is False
 

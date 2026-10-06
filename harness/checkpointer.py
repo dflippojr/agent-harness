@@ -182,6 +182,9 @@ class Checkpointer:
             return True
         uid, limit = quota
         used = account_usage_bytes(self.cfg, uid)
+        if used >= limit:
+            store.reclaim()         # unreachable objects count as used until reclaimed, and reclaiming is deferred
+            used = account_usage_bytes(self.cfg, uid)
         if used < limit:
             return True
         if used - dir_size(store.base) >= limit:    # even an empty store would not fit
