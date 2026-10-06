@@ -32,7 +32,9 @@ def fake_transport(monkeypatch):
 
     def spawn(argv, secrets=None):
         mode = argv[-1] if argv[-1] != "--stdio" else "normal"
-        client = real([sys.executable, "-u", str(FAKE), mode], secrets)
+        binding = argv[argv.index("--mount") + 1] if "--mount" in argv else ""
+        workspace = binding.split("source=", 1)[-1].split(",target=", 1)[0]
+        client = real([sys.executable, "-u", str(FAKE), mode, workspace], secrets)
         clients.append(client)
         return client
 
@@ -424,4 +426,54 @@ def test_daemon_shutdown_attempts_every_session_after_cleanup_failure(tmp_path, 
             await rt.stop()
         assert len(attempted) == 2 and not rt.sessions
         assert all(client.proc.poll() is not None for client in fake_transport[0])
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("mount", [False, "ro", "rw"])
+def test_session_mutating_names_follow_workspace_grant(tmp_path, fake_transport, mount):
+    async def body():
+        m = manager(tmp_path)
+        m.cfg.projects["scratch"].mcp_servers[0]["mount_workspace"] = mount
+        session = SESSION | {"workspace": str(tmp_path)}
+        await m.modules.prepare_session(session)
+        assert (NAME in m.modules.mutating_tools(session)) == (mount == "rw")
+        assert NAME not in m.modules.mutating_tools()
+        await m.modules.end_session(session["id"])
+        assert NAME not in m.modules.mutating_tools(session)
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("mode", ["write", "large_write"])
+def test_rw_tools_checkpoint_rewind_and_quota(tmp_path, fake_transport, mode):
+    async def body():
+        m = manager(tmp_path, packages=["harness_modules.mcp_client"], steps=[
+            Completion(tool_calls=[call(NAME, text="first")]),
+            Completion(tool_calls=[call(NAME, text="second")]), Completion(content="done")])
+        project = m.cfg.projects["scratch"]
+        project.mcp_servers[0].update(command=[mode], mount_workspace="rw",
+                                     rules=[{"tool": NAME, "action": "allow"}])
+        if mode == "large_write":
+            project.quota_mb = 1
+        await m.start(maintenance=False)
+        try:
+            s = m.create("write")
+            sid = s["id"]
+            final = await wait_status(m, sid, "done", "failed")
+            path = Path(final["workspace"]) / "mcp.txt"
+            if mode == "large_write":
+                assert final["status"] == "failed"
+                assert final["stop_reason"].startswith("quota_exceeded:")
+                assert len(events(m, sid, "tool_call")) == 1
+                assert [c["turn"] for c in m.db.checkpoints(sid)] == [1]
+                assert path.stat().st_size == 2**21
+            else:
+                assert final["status"] == "done", final["stop_reason"]
+                assert [c["turn"] for c in m.db.checkpoints(sid)] == [1, 2]
+                assert path.read_text() == "second"
+                await m.rewind(sid, 1)
+                assert path.read_text() == "first"
+                await m.rewind(sid, 2)
+                assert path.read_text() == "second"
+        finally:
+            await m.stop()
     asyncio.run(body())

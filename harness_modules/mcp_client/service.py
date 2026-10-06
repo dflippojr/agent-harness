@@ -155,6 +155,7 @@ class SessionTools:
         self.session, self.servers, self.cfg = session, servers, cfg
         self.clients = []
         self.tools = {}
+        self.mutating_tools = set()
 
     @property
     def tool_names(self):
@@ -205,6 +206,8 @@ class SessionTools:
             Draft202012Validator.check_schema(schema)
         except SchemaError:
             raise ToolError("invalid MCP input schema") from None
+        if server.get("mount_workspace") == "rw":
+            self.mutating_tools.add(full)
         self.tools[full] = (client, name, {"type": "function", "function": {
             "name": full, "description": str(tool.get("description", "")), "parameters": schema}})
 
@@ -235,6 +238,7 @@ class SessionTools:
     async def close(self):
         clients, self.clients = self.clients, []
         self.tools.clear()
+        self.mutating_tools.clear()
         errors = []
         for server, client in clients:
             try:

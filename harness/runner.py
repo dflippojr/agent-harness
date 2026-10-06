@@ -278,8 +278,8 @@ class Runner:
     def _module_gate(self, kit):
         return self.modules.gate_for(kit) if self.modules is not None and kit is not None else None
 
-    def _module_mutating(self) -> frozenset:
-        return self.modules.mutating_tools() if self.modules is not None else frozenset()
+    def _module_mutating(self, session=None) -> frozenset:
+        return self.modules.mutating_tools(session) if self.modules is not None else frozenset()
 
     def _app_defaults_for_session(self, s: dict) -> dict:
         if self.settings is None:
@@ -1846,10 +1846,11 @@ class Runner:
         sid = s["id"]
         fn = call.get("function") or {}
         name = fn.get("name", "")
-        if name in MUTATING_TOOLS:
+        mutating = name in MUTATING_TOOLS or name in self._module_mutating(s)
+        if mutating:
             await self._join_checkpoint(sid)    # the last turn's snapshot must read the files before this changes them
         if executing.get("id") == call["id"]:
-            if name in MUTATING_TOOLS:                          # it may have changed files before it was cut off
+            if mutating:                                          # it may have changed files before it was cut off
                 mutated.append(name)
             await self._record_result(sid, call, name, INTERRUPTED, ok=False)
             return None, None
@@ -1901,11 +1902,11 @@ class Runner:
             output = await self._authorize(s, call, name, args, ws)
             executed = output is None
             if executed:
-                if name in MUTATING_TOOLS:
+                if mutating:
                     mutated.append(name)
                 output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
             span.set({"harness.ok": executed, "harness.output_chars": len(output)})
-        if executed and (name in ("run_shell", "git_clone", "write_file") or name in self._module_mutating()) \
+        if executed and (name in ("run_shell", "git_clone", "write_file") or name in self._module_mutating(s)) \
                 and await self._over_quota(sid):
             await self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
             return True, None

@@ -193,3 +193,7 @@ These are names, not imports, and move with the config and storage split in stag
   `mcp=False` preserves its exclusion from hosted MCP tools. Absent skills add no routes, settings, metrics or tools.
   Import paths moved from `harness.skills`, `harness.skill_review`, and `harness.skill_validate` to
   `harness_modules.skills.service`, `harness_modules.skills.skill_review`, and `harness_modules.skills.skill_validate`.
+
+Toolkits may expose `mutating_tools`, a collection of full tool names evaluated for the current session.
+The host combines it with `ToolGate.mutating` for native checkpoints and workspace quota enforcement.
+MCP client toolkits conservatively mark every tool on a server with a `rw` workspace grant as mutating.

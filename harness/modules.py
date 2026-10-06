@@ -410,8 +410,11 @@ class ModuleHost:
     def gate_for(self, kit) -> ToolGate | None:
         return next((rt.module.tools for rt in self if rt.module.tools and rt.owns_toolkit(kit)), None)
 
-    def mutating_tools(self) -> frozenset[str]:
-        return frozenset(name for rt in self if rt.module.tools for name in rt.module.tools.mutating)
+    def mutating_tools(self, session=None) -> frozenset[str]:
+        static = frozenset(name for rt in self if rt.module.tools for name in rt.module.tools.mutating)
+        dynamic = frozenset(name for _, kit in self.toolkits(session)
+                            for name in getattr(kit, "mutating_tools", ()))
+        return static | dynamic
 
     @property
     def gpu_taken(self) -> bool:

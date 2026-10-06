@@ -36,6 +36,10 @@ for line in sys.stdin:
     elif method == "tools/call":
         result = {"content": [{"type": "text", "text": request["params"]["arguments"].get("text", "")}],
                   "isError": mode == "tool_error"}
+        if mode in ("write", "large_write"):
+            from pathlib import Path
+            text = request["params"]["arguments"]["text"]
+            (Path(sys.argv[2]) / "mcp.txt").write_text(text if mode == "write" else "x" * 2**21)
         if mode == "env":
             import os
             result["content"][0]["text"] = os.environ.get("TOKEN", "") + ":" + os.environ.get("DAEMON_SECRET", "")

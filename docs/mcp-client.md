@@ -50,3 +50,4 @@ requests receive an unsupported-method response. Tests use a local Python fake s
 argv; they never pull or run an MCP image.
 Arguments are validated against the complete input schema before approval. Local schema references are supported;
 external schema retrieval is disabled, so schemas cannot cause network requests from the daemon.
+Every tool on a server with a rw workspace grant participates in native workspace checkpoints, rewind and quota checks, even if its schema claims it is read-only.
