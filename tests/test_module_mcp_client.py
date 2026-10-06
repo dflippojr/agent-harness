@@ -1,0 +1,241 @@
+"""Pinned client acceptance through local fake stdio servers only."""
+
+import asyncio
+import copy
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+from harness import config, modules, taint
+from harness.fileops import ToolError
+from harness.manager import Manager
+from harness.policy import Policy
+from harness.settings_keys import build_registry
+from harness_modules.mcp_client import MODULE
+from harness_modules.mcp_client import service
+from test_daemon import Script, call, events, make_cfg, wait_status
+from harness.llm import Completion
+
+SERVER = {"name": "demo", "image": "local/fake@sha256:" + "a" * 64, "command": ["fake", "--stdio"]}
+NAME = "mcp__demo__echo"
+SESSION = {"id": "fake-session", "project": "scratch", "workspace": "unused", "owner_id": "owner",
+           "backend": "local", "kind": "agent", "target": "tower"}
+FAKE = Path(__file__).with_name("fake_mcp_stdio.py")
+
+
+@pytest.fixture
+def fake_transport(monkeypatch):
+    clients, commands = [], []
+    real = service.StdioClient
+
+    def spawn(argv, secrets=None):
+        mode = argv[-1] if argv[-1] != "--stdio" else "normal"
+        client = real([sys.executable, "-u", str(FAKE), mode], secrets)
+        clients.append(client)
+        return client
+
+    async def cmd(argv, **kwargs):
+        commands.append(argv)
+        return 0, "", ""
+
+    monkeypatch.setattr(service, "StdioClient", spawn)
+    monkeypatch.setattr(service, "run_cmd", cmd)
+    yield clients, commands
+    for client in clients:
+        if client.proc.poll() is None:
+            client.close()
+
+
+@pytest.mark.parametrize("change", [
+    {"image": "repo:latest"}, {"url": "https://example.com"}, {"name": "harness"}, {"name": "A"},
+    {"command": "shell"}, {"command": []}, {"command": [1]}, {"command": ["\0"]},
+    {"env": {"TOKEN": "plaintext"}}, {"env": {"TOKEN": {"secret_file": ""}}},
+    {"mount_workspace": True}, {"rules": [{"tool": "write_file", "action": "allow"}]}, {"unknown": True},
+])
+def test_invalid_project_config(change):
+    with pytest.raises(ValueError):
+        config._project_from_spec("demo", {"mcp_servers": [SERVER | change]})
+
+
+def test_config_owner_only_and_duplicates():
+    for servers in ([SERVER, SERVER], ["bad"], "bad"):
+        with pytest.raises(ValueError):
+            config._project_from_spec("demo", {"mcp_servers": servers})
+    with pytest.raises(ValueError, match="member"):
+        config._project_from_spec("demo", {"mcp_servers": [SERVER]}, owner_id="member")
+    assert config._project_from_spec("demo", {"mcp_servers": [SERVER]}).mcp_servers == [SERVER]
+    assert config._project_from_spec("demo", {}).mcp_servers == []
+
+
+@pytest.mark.parametrize("mount", [False, "ro", "rw"])
+def test_container_hardening_and_mount(tmp_path, mount):
+    argv = service.container_argv(SESSION | {"workspace": str(tmp_path)}, SERVER | {"mount_workspace": mount},
+                                  config.SandboxConfig())
+    assert argv[argv.index("--network") + 1] == "none"
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert "no-new-privileges" in argv and "--pull=never" in argv
+    assert all(arg in argv for arg in ("--memory", "--cpus", "--pids-limit", "--init"))
+    assert argv[-3:] == [SERVER["image"], "fake", "--stdio"]
+    if mount:
+        binding = argv[argv.index("--mount") + 1]
+        assert "target=/workspace" in binding
+        assert binding.endswith(",readonly") == (mount == "ro")
+    else:
+        assert "--mount" not in argv and "--workdir" not in argv
+
+
+def test_policy_is_scoped_default_ask_and_rules_apply():
+    assert Policy(mcp_servers=["demo"]).decide(NAME, {}).action == "ask"
+    for action in ("allow", "ask", "deny"):
+        policy = Policy([{"tool": NAME, "action": action}], mcp_servers=["demo"])
+        assert policy.decide(NAME, {}).action == action
+        assert policy.decide("mcp__other__echo", {}).action == "deny"
+    assert Policy([{"tool": "*", "action": "allow"}]).decide(NAME, {}).action == "deny"
+    assert Policy(mcp_servers=["demo"]).decide("mcp__demo__", {}).action == "deny"
+    assert Policy().decide("mcp__harness__read_file", {}).action == "allow"
+    assert Policy().fingerprint() != Policy(mcp_servers=["demo"]).fingerprint()
+    assert taint.source_for(NAME, {}) == ("mcp", NAME)
+
+
+def manager(tmp_path, enabled=True, packages=None, steps=None):
+    cfg = make_cfg(tmp_path)
+    cfg.module_packages = packages
+    cfg.installed.mcp_client = enabled
+    cfg.modules.mcp_client = enabled
+    cfg.memory_library.enabled = False
+    cfg.remote_control.enabled = False
+    cfg.gpu_guard.enabled = False
+    cfg.notify.enabled = False
+    cfg.modules.runners = False
+    cfg.installed.runners = False
+    cfg.projects["scratch"].mcp_servers = [copy.deepcopy(SERVER)]
+    return Manager(cfg, chat=Script(steps or [Completion(content="done")]))
+
+
+def test_module_absent_off_and_native_only(tmp_path, fake_transport):
+    async def body():
+        for enabled, packages in ((False, None), (True, [])):
+            m = manager(tmp_path / str(enabled), enabled, packages)
+            assert "modules.mcp_client" not in build_registry(m.cfg).specs
+            assert m.runner.policy(SESSION).decide(NAME, {}).action == "deny"
+            assert all(NAME not in kit.tool_names for kit in m.runner.daemon_toolkits(SESSION))
+            await m.modules.prepare_session(SESSION)
+            assert not fake_transport[0]
+        m = manager(tmp_path / "on")
+        rt = m.modules.get("mcp_client")
+        for changes in ({"backend": "claude"}, {"owner_id": "member"}, {"kind": "chat"},
+                        {"kind": "tools_only"}, {"target": "mac"}, {"project": "missing"}):
+            s = SESSION | changes
+            await rt.prepare_session(s)
+            assert rt.session_toolkit(s) is None
+        m.cfg.projects["scratch"].owner_id = "member"
+        await rt.prepare_session(SESSION)
+        assert not fake_transport[0]
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("mode", ["normal", "pagination", "notification"])
+def test_listing_call_and_cleanup(tmp_path, fake_transport, mode):
+    async def body():
+        m = manager(tmp_path)
+        m.cfg.projects["scratch"].mcp_servers[0]["command"] = [mode]
+        await m.modules.prepare_session(SESSION)
+        await m.modules.prepare_session(SESSION)
+        kits = m.runner.daemon_toolkits(SESSION)
+        kit = next(kit for kit in kits if NAME in kit.tool_names)
+        assert m.modules.gate_for(kit) is MODULE.tools and not MODULE.tools.mcp
+        assert kit.schemas()[0]["function"]["name"] == NAME
+        assert json.loads(await kit.call(NAME, {"text": "ok"}))["content"][0]["text"] == "ok"
+        with pytest.raises(ToolError):
+            await kit.call("unknown", {})
+        assert len(fake_transport[0]) == 1
+        await m.modules.stop()
+        assert not m.modules.get("mcp_client").sessions
+        assert fake_transport[0][0].proc.poll() is not None
+        assert fake_transport[1][-1][1:3] == ["rm", "-f"]
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("mode", ["version", "invalid_tool", "schema", "duplicate", "empty_pages", "invalid_list",
+                                 "protocol_error", "id", "result", "malformed", "oversize", "nonobject"])
+def test_failed_listing_cleans_sidecar(tmp_path, fake_transport, mode):
+    async def body():
+        m = manager(tmp_path)
+        m.cfg.projects["scratch"].mcp_servers[0]["command"] = [mode]
+        with pytest.raises(ToolError):
+            await m.modules.prepare_session(SESSION)
+        assert not m.modules.get("mcp_client").sessions
+        assert all(client.proc.poll() is not None for client in fake_transport[0])
+    asyncio.run(body())
+
+
+def test_tool_error_and_timeout(fake_transport, monkeypatch):
+    async def body():
+        kit = service.SessionTools(SESSION, [SERVER | {"command": ["tool_error"]}], config.SandboxConfig())
+        await kit.start()
+        with pytest.raises(ToolError, match="tool returned"):
+            await kit.call(NAME, {"text": "bad"})
+        await kit.close()
+        monkeypatch.setattr(service, "RPC_TIMEOUT", 0.1)
+        client = fake_transport[0][-1]
+        with pytest.raises((ToolError, OSError, ValueError)):
+            await asyncio.to_thread(client.request, "closed", {})
+        real = service.StdioClient(["unused", "timeout"])
+        with pytest.raises(ToolError, match="timed out"):
+            await asyncio.to_thread(real.request, "wait", {})
+        real.close()
+    asyncio.run(body())
+
+
+def test_secrets_are_references_never_argv(tmp_path, fake_transport):
+    secret = tmp_path / "secret"
+    secret.write_text("private-token", encoding="utf-8")
+    server = SERVER | {"env": {"TOKEN": {"secret_file": str(secret)}}}
+    config._project_from_spec("demo", {"mcp_servers": [server]})
+    argv = service.container_argv(SESSION, server, config.SandboxConfig())
+    assert argv[argv.index("--env") + 1] == "TOKEN"
+    assert "private-token" not in str(argv)
+    with pytest.raises(ToolError):
+        service.container_argv(SESSION | {"workspace": "a,b"}, SERVER | {"mount_workspace": "rw"}, config.SandboxConfig())
+    async def body():
+        kit = service.SessionTools(SESSION, [server], config.SandboxConfig())
+        await kit.start()
+        await kit.close()
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("approve", [True, False])
+def test_native_loop_approval_events_taint_metrics_and_cleanup(tmp_path, fake_transport, approve):
+    async def body():
+        m = manager(tmp_path, packages=["harness_modules.mcp_client"], steps=[
+            Completion(tool_calls=[call(NAME, text="untrusted result")]), Completion(content="done")])
+        await m.start()
+        try:
+            s = m.create("echo")
+            sid = s["id"]
+            # wait_status waits for the run task for terminal states, so use the pending approval as the checkpoint.
+            for _ in range(500):
+                if m.db.pending_approvals(sid):
+                    break
+                await asyncio.sleep(0.01)
+            assert m.db.pending_approvals(sid), m.db.get_session(sid)
+            assert not events(m, sid, "tool_result")
+            m.decide(sid, None, approve=approve)
+            final = await wait_status(m, sid, "done", "failed")
+            assert final["status"] == "done", final["stop_reason"]
+            assert events(m, sid, "tool_call")[0]["name"] == NAME
+            assert events(m, sid, "tool_result")[0]["ok"] == approve
+            assert bool(final["taint"]) == approve
+            if approve:
+                assert final["taint"][0]["origin"] == NAME
+                assert "untrusted result" in events(m, sid, "tool_result")[0]["output"]
+                from harness.efficiency import compose
+                assert compose(final["context"], 0, 3, None)["buckets"]["tool_outputs"] > 0
+            assert events(m, sid, "turn_metrics")
+            assert not m.modules.get("mcp_client").sessions
+            assert all(client.proc.poll() is not None for client in fake_transport[0])
+        finally:
+            await m.stop()
+    asyncio.run(body())

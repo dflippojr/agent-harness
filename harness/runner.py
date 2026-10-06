@@ -24,7 +24,7 @@ from .checkpointer import Checkpointer
 from .checkpoints import MUTATING_TOOLS
 from .cli_backends import (CODEX_TOOLS_ONLY_ITEMS, ELICITATION, ClaudeSession, CliBackendError, CodexSession,
                            CursorSession)
-from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit
+from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit, module_effective
 from .db import Database, finish_then_cancel
 from .mcp_server import MCP_BACKENDS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
@@ -256,7 +256,7 @@ class Runner:
         web = self.web_overrides.get(s["id"], self.web)
         if web is not None and self._kit_allowed(project, "web", defaults, "web"):
             kits.append(web)
-        for gate, kit in self._module_toolkits():
+        for gate, kit in self._module_toolkits(s):
             allowed = (gate.eligible(kit, s) if gate.eligible is not None
                        else self._kit_allowed(project, gate.project_flag, defaults, gate.capability))
             if (gate.members or not member) and allowed:
@@ -271,9 +271,9 @@ class Runner:
         """The project (when there is one) enables the toolkit and app.capabilities doesn't narrow it away."""
         return (project is None or getattr(project, flag, False)) and app_allows(defaults, capability)
 
-    def _module_toolkits(self) -> list:
+    def _module_toolkits(self, session=None) -> list:
         """(ToolGate, toolkit) for each present, switched-on add-on module that offers tools (harness/modules.py)."""
-        return self.modules.toolkits() if self.modules is not None else []
+        return self.modules.toolkits(session) if self.modules is not None else []
 
     def _module_gate(self, kit):
         return self.modules.gate_for(kit) if self.modules is not None and kit is not None else None
@@ -385,7 +385,11 @@ class Runner:
         if s.get("kind") == TOOLS_ONLY:
             return AppToolsPolicy(t["name"] for t in (s.get("app_tools") or []))
         project = self.project_for(s)
-        return Policy(project.rules if project else [], repo=bool(project and project.repo),
+        servers = (project.mcp_servers if project and project.owner_id == OWNER_USER_ID
+                   and session_user_id(s) == OWNER_USER_ID and s.get("backend", "local") == "local"
+                   and s.get("target", "tower") == "tower" and module_effective(self.cfg, "mcp_client") else [])
+        rules = (project.rules if project else []) + [r for server in servers for r in server.get("rules", [])]
+        return Policy(rules, repo=bool(project and project.repo), mcp_servers=[server["name"] for server in servers],
                       workspace_root=Path(s["workspace"]) if s.get("workspace") else None)
 
     def quota_mb(self, s: dict) -> int:
@@ -709,6 +713,8 @@ class Runner:
                 return
             if not self.cfg.modules.local_model:
                 raise CliBackendError("the local model is disabled in this service profile")
+            if self.modules is not None:
+                await self.modules.prepare_session(s)
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
             await self._take_pending_cancel(sid, cancelled=True)
@@ -737,6 +743,8 @@ class Runner:
             await self._end_run(sid)
         finally:
             await asyncio.shield(self._stop_cli(sid))
+            if self.modules is not None:
+                await asyncio.shield(self.modules.end_session(sid))
             self.scheduler.release(sid)
             self.user_cancelled.discard(sid)
             self._unended.discard(sid)

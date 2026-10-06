@@ -238,10 +238,11 @@ def _target_outside_scratch(target: str) -> bool:
 
 class Policy:
     def __init__(self, project_rules: list[dict] | None = None, repo: bool = False,
-                 workspace_root: Path | None = None):
+                 workspace_root: Path | None = None, mcp_servers=()):
         """`workspace_root` is the host folder bind-mounted at /workspace; with it, Claude Code reads that pass
         through a symlink or junction there are asked, not allowed. Without it only the lexical check applies."""
         self.workspace_root = Path(workspace_root) if workspace_root else None
+        self.mcp_servers = frozenset(mcp_servers)
         cleaned = []
         for rule in project_rules or []:
             if rule.get("action") not in (ALLOW, ASK, DENY):
@@ -252,16 +253,21 @@ class Policy:
 
     def fingerprint(self) -> str:
         """Stable id of the ordered rule set the deterministic gate used."""
-        payload = json.dumps(self.rules, sort_keys=True, default=str).encode()
+        payload = json.dumps([self.rules, sorted(self.mcp_servers)], sort_keys=True, default=str).encode()
         return hashlib.sha256(payload).hexdigest()[:16]
 
     def decide(self, name: str, args: dict) -> Decision:
         alias = ""
+        client = False
         if name.startswith("mcp__"):
             bare = mcp_harness_tool(name)
             if bare is None:
-                return Decision(DENY, "only the harness MCP server is available to hosted sessions")
-            name, alias = bare, name
+                if not any(name.startswith(f"mcp__{server}__") and len(name) > len(f"mcp__{server}__")
+                           for server in self.mcp_servers):
+                    return Decision(DENY, "MCP server is not configured for this session")
+                client = True
+            else:
+                name, alias = bare, name
         for rule in self.rules:
             root = self.workspace_root
             if _matches(rule, name, args, root) or (alias and _matches(rule, alias, args, root)):
@@ -273,7 +279,7 @@ class Policy:
             return Decision(ASK, ALWAYS_ASK[name])
         if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
             return Decision(ASK, "deletes files outside the scratch area")
-        return Decision(ALLOW)
+        return Decision(ASK, "owner-configured MCP tool requires approval") if client else Decision(ALLOW)
 
 
 CHAT_ALLOWED_TOOLS = frozenset({"web_search", "web_fetch", "WebSearch", "WebFetch"})

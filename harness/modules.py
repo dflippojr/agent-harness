@@ -45,6 +45,7 @@ _PUBLIC = {
     "Completion": ('harness.llm', 'Completion'),
 
     "Config": ("harness.config", "Config"),
+    "validate_mcp_servers": ("harness.mcp_config", "validate_servers"),
     "ImagesConfig": ("harness.config", "ImagesConfig"),
     "DEFAULT_IMAGES_MODELS_DIR": ("harness.config", "DEFAULT_IMAGES_MODELS_DIR"),
     "load_config": ("harness.config", "load"),
@@ -110,6 +111,7 @@ class ToolGate:
     span: str = ""                # telemetry span name for a call (default: the core's sandbox span)
     prompt: str = ""              # system-prompt section for a session that gets the toolkit
     eligible: Callable[[Any, dict], bool] | None = None  # toolkit/session eligibility instead of project/app flags
+    per_session: bool = False    # runtime.session_toolkit(session), after async prepare_session(session)
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,18 @@ class ModuleRuntime:
     def session_prompt(self, project, defaults, app) -> str:
         """Project guidance with the calling App, so private context can be withheld from Apps."""
         return self.project_prompt(project, defaults)
+
+    async def prepare_session(self, session: dict) -> None:
+        """Prepare session-specific tools before the native loop's first tool listing."""
+
+    def session_toolkit(self, session: dict) -> Any:
+        return None
+
+    def owns_toolkit(self, kit) -> bool:
+        return self.toolkit() is kit
+
+    async def end_session(self, sid: str) -> None:
+        """Release session resources on completion, failure or cancellation."""
 
     # GPU and resources: a module that takes the whole GPU (and stops the language model) reports it here.
     @property
@@ -372,16 +386,29 @@ class ModuleHost:
             except Exception:
                 log.exception("module %s did not stop cleanly", rt.module.name)
 
-    def toolkits(self) -> list[tuple[ToolGate, Any]]:
+    async def prepare_session(self, session: dict) -> None:
+        for rt in self:
+            await rt.prepare_session(session)
+
+    async def end_session(self, sid: str) -> None:
+        for rt in reversed(list(self)):
+            try:
+                await rt.end_session(sid)
+            except Exception:
+                log.exception("module %s session cleanup failed", rt.module.name)
+
+    def toolkits(self, session=None) -> list[tuple[ToolGate, Any]]:
         out = []
         for rt in self:
-            kit = rt.toolkit() if rt.module.tools is not None else None
+            gate = rt.module.tools
+            kit = (rt.session_toolkit(session) if gate.per_session and session is not None
+                   else rt.toolkit()) if gate is not None else None
             if kit is not None:
                 out.append((rt.module.tools, kit))
         return out
 
     def gate_for(self, kit) -> ToolGate | None:
-        return next((gate for gate, k in self.toolkits() if k is kit), None)
+        return next((rt.module.tools for rt in self if rt.module.tools and rt.owns_toolkit(kit)), None)
 
     def mutating_tools(self) -> frozenset[str]:
         return frozenset(name for rt in self if rt.module.tools for name in rt.module.tools.mutating)

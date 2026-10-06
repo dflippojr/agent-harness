@@ -106,6 +106,15 @@ module's only link back is `harness.modules`.
 `manager.<module name>` returns the runtime's `service` (None while switched off or absent), for code written before
 modules; new core code goes through `manager.modules`.
 
+Session-specific native toolkits (#260): `ToolGate.per_session=True` selects
+`runtime.session_toolkit(session)` through `ModuleHost.toolkits(session)`. The native loop awaits
+`prepare_session(session)` before its first listing and calls `end_session(sid)` on completion, cancellation or
+failure. These hooks default to no-ops. `owns_toolkit(kit)` lets a runtime associate cached per-session toolkits
+with its gate for dispatch and tracing. A per-session toolkit is excluded from sessionless listings; set
+`mcp=False` to exclude it from hosted sessions. The owner-pinned MCP client uses this interface; see
+[`mcp-client.md`](mcp-client.md). Its core configuration names (`Project.mcp_servers`, `ModulesConfig.mcp_client`
+and validation in `harness/mcp_config.py`) remain in core so file validation works with the package absent.
+
 ## Writing a module
 
 Host tools that belong to tower workspaces use `ModuleRuntime.workspace_toolkit(project, defaults, member)`.
