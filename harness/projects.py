@@ -208,24 +208,42 @@ def _copy_git_state(src: Path, dst: Path) -> None:
             _mirror_tree(s, dst / name)
 
 
-def _write_isolated_config(real_config: Path, dest: Path, hooks: Path) -> None:
+def _write_isolated_config(dest: Path, hooks: Path) -> None:
     dest.write_text(
         "[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n"
         "\tlogallrefupdates = true\n\tautocrlf = false\n\tfsmonitor =\n"
         f"\thooksPath = {hooks.as_posix()}\n",
         encoding="utf-8",
     )
+
+
+def _allowlisted_config(real_config: Path) -> list[tuple[str, str]]:
+    """The real repo config's allowlisted entries: one `git config --list` process, no per-key writes."""
     if not real_config.is_file():
-        return
+        return []
     listed = _run(["config", "--file", str(real_config), "--null", "--list"], check=False, env=_isolate_env())
     if listed.code != 0 or not listed.out:
-        return
+        return []
+    entries = []
     for item in listed.out.split("\0"):
         if not item or "\n" not in item:
             continue
         key, value = item.split("\n", 1)
         if _safe_config_key(key, value):
-            _run(["config", "--file", str(dest), key, value], check=False, env=_isolate_env())
+            entries.append((key, value))
+    return entries
+
+
+def _inject_config(env: dict, entries: list[tuple[str, str]]) -> None:
+    """Hand the allowlisted entries to git through GIT_CONFIG_COUNT/KEY_n/VALUE_n (appended after any existing)."""
+    try:
+        start = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        start = 0
+    for i, (key, value) in enumerate(entries, start):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    env["GIT_CONFIG_COUNT"] = str(start + len(entries))
 
 
 def _isolated_flags(work_tree: Path, tmp: Path, hooks: Path) -> list[str]:
@@ -275,8 +293,9 @@ def git(repo: Path | str | None, *args: str, timeout: float = 600, check: bool =
         hooks.mkdir(parents=True)
         tmp.mkdir()
         _copy_git_state(metadata, tmp)
-        _write_isolated_config(metadata / "config", tmp / "config", hooks)
+        _write_isolated_config(tmp / "config", hooks)
         env = _isolate_env()
+        _inject_config(env, _allowlisted_config(metadata / "config"))
         env["GIT_INDEX_FILE"] = str(index_dir / "index")
         env["GIT_OBJECT_DIRECTORY"] = str(metadata / "objects")
         (metadata / "objects").mkdir(parents=True, exist_ok=True)
