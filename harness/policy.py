@@ -267,6 +267,16 @@ class Policy:
             return Decision(DENY, reason)
         alias = name if bare else ""
         name = bare or name
+        decision = self._rule_decision(name, args, alias)
+        if decision is not None:
+            return decision
+        if name in ALWAYS_ASK:
+            return Decision(ASK, ALWAYS_ASK[name])
+        if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
+            return Decision(ASK, "deletes files outside the scratch area")
+        return Decision(ASK, "owner-configured MCP tool requires approval") if client else Decision(ALLOW)
+
+    def _rule_decision(self, name: str, args: dict, alias: str) -> Decision | None:
         for rule in self.rules:
             root = self.workspace_root
             if _matches(rule, name, args, root) or (alias and _matches(rule, alias, args, root)):
@@ -274,11 +284,7 @@ class Policy:
                     break
                 return Decision(rule["action"], rule.get("reason", ""),
                                 smart_eligible=bool(rule.get("smart_eligible")))
-        if name in ALWAYS_ASK:
-            return Decision(ASK, ALWAYS_ASK[name])
-        if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
-            return Decision(ASK, "deletes files outside the scratch area")
-        return Decision(ASK, "owner-configured MCP tool requires approval") if client else Decision(ALLOW)
+        return None
 
     def _configured_mcp_tool(self, name: str) -> bool:
         return any(name.startswith(f"mcp__{server}__") and len(name) > len(f"mcp__{server}__")
