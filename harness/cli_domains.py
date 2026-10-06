@@ -93,9 +93,13 @@ END_USER_LOGIN_SUBDIR = ".login"
 _END_USER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}")
 
 
+MEMBER_PREFIX = "member:"  # a household member's hosted session carries `member:<user_id>` as its end user (#393)
+
+
 def valid_end_user(end_user: str) -> bool:
-    """An end user's id is the App's own opaque string: short, printable and free of path or shell characters."""
-    return bool(_END_USER_ID.fullmatch(end_user or ""))
+    """An end user's id is the App's own opaque string: short, printable and free of path or shell characters. The
+    `member:` prefix is the harness's own, so an App can't name a member."""
+    return bool(_END_USER_ID.fullmatch(end_user or "")) and not end_user.startswith(MEMBER_PREFIX)
 
 
 def end_user_layout(backend: str) -> Layout:

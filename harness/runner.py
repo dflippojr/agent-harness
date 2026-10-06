@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, taint, telemetry
+from . import claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, taint, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -169,6 +169,7 @@ class Runner:
         self.cfg = cfg
         self.hub = hub or RunnerHub(cfg.runners)
         self.github_auth = None  # MemberGitHub, set by the Manager (issue #63)
+        self.member_keys = None  # MemberKeys, set by the Manager (issue #393)
         self.warmer = warmer or ModelWarmer()
         self.db = db
         self.bus = bus
@@ -884,6 +885,9 @@ class Runner:
     def _cli_credentials(self, sid: str, s: dict, backend_name: str) -> tuple[dict, bool, str]:
         """The credential for this attempt, whether it is an API key, and the key itself."""
         credential = self._backend_credential(s)
+        if credential["policy"] == "denied" and credential["source"] == "member_api_key":
+            raise CliBackendError(f"add your API key in your settings to use {backend_name.title()}",
+                                  member_keys.REQUIRED)
         if credential["policy"] == "denied":
             raise CliBackendError(f"{backend_name} credential policy was revoked for this app")
         use_api_key = credential["policy"] == "api_key" or s["run"].get("backend_auth") == "api_key"
@@ -899,7 +903,8 @@ class Runner:
         s = self.db.get_session(sid)
         if s["status"] != "waiting_approval":
             await self.aset_status(sid, "running")
-        source = credential["source"] if use_api_key or credential["source"] == "end_user_login" else "subscription"
+        source = (credential["source"] if use_api_key or credential["source"] == "end_user_login"
+                  else "subscription")
         run = {**s["run"], "billing_mode": "api_key" if use_api_key else backend.billing,
                "credential_source": source,
                "credential_assignment": credential["assignment_id"]}
@@ -1007,6 +1012,13 @@ class Runner:
         backend = self.cfg.backends[s["backend"]]
         app_id = s.get("app_id") or ""
         assignment = self.db.app_provider_credential(app_id, s["backend"]) if app_id else None
+        member = member_keys.member_of(s.get("end_user") or "") if not app_id else ""
+        if member:
+            # A household member's own API key (#393), whatever the owner has configured: never the owner's login,
+            # token or key. Without a key the credential is denied and the session refused.
+            key = self.member_keys.get(member, s["backend"]) if self.member_keys is not None else ""
+            return {"policy": "api_key" if key else "denied", "key": key, "source": "member_api_key",
+                    "assignment_id": "", "path": "", "marker": None}
         if s.get("end_user"):
             # The person's own subscription login, whatever the App or the owner has configured (#365): never a key,
             # a fallback to a key or the owner's token. An App the owner has not granted this backend is still denied.

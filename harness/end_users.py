@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import backend_state, cli_domains, credential_sources
+from . import backend_state, cli_domains, credential_sources, member_keys
 from .credential_sources import CredentialRefused
 from .sandbox import run_cmd
 
@@ -95,7 +95,7 @@ class EndUserLogin(credential_sources.CredentialSource):
     label = "end_user_login"
 
     def selects(self, app_id: str, end_user: str) -> bool:
-        return bool(end_user)
+        return bool(end_user) and not member_keys.member_of(end_user)   # a member runs on their own API key (#393)
 
     def docker_args(self, backend: str, cfg, app_id: str, end_user: str) -> list[str]:
         return cli_domains.docker_args(backend, cfg, app_id, end_user=end_user)

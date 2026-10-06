@@ -1222,6 +1222,15 @@ class Database:
                                     (app_id, end_user)).fetchone()
         return dict(row)
 
+    @_reads
+    def member_backend_usage(self, end_user: str, backend: str) -> dict:
+        """What a member's hosted sessions on `backend` used (#393): the usage log's tally for their end user id."""
+        with self.lock:
+            row = self.conn.execute("SELECT COUNT(*) sessions, COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
+                                    "COALESCE(SUM(completion_tokens),0) completion_tokens FROM usage "
+                                    "WHERE app_id = '' AND end_user = ? AND backend = ?", (end_user, backend)).fetchone()
+        return dict(row)
+
     @_writes
     def register_end_user(self, end_user: str) -> None:
         """Record an App's end user in the store it is called on (the App's own, `db.for_app(app_id)`)."""
@@ -2262,6 +2271,41 @@ class Database:
             return self.conn.execute(
                 "DELETE FROM member_projects WHERE user_id = ? AND slug = ?", (user_id, slug)
             ).rowcount == 1
+
+    # Issue #393: a member's own provider API key. `ciphertext` is sealed by `member_keys`; `last4` is all that shows.
+    @_reads
+    def member_api_key(self, user_id: str, backend: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM member_api_keys WHERE user_id = ? AND backend = ?",
+                                    (user_id, backend)).fetchone()
+        return dict(row) if row else None
+
+    @_reads
+    def member_api_keys(self, user_id: str) -> list[dict]:
+        """The member's keys without their ciphertext."""
+        with self.lock:
+            rows = self.conn.execute("SELECT user_id, backend, last4, created_at, updated_at FROM member_api_keys "
+                                     "WHERE user_id = ? ORDER BY backend", (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    @_writes
+    def set_member_api_key(self, user_id: str, backend: str, ciphertext: bytes, last4: str) -> None:
+        now = time.time()
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO member_api_keys (user_id, backend, ciphertext, last4, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, backend) DO UPDATE SET "
+                "ciphertext = excluded.ciphertext, last4 = excluded.last4, updated_at = excluded.updated_at",
+                (user_id, backend, ciphertext, last4, now, now))
+
+    @_writes
+    def delete_member_api_keys(self, user_id: str, backend: str | None = None) -> int:
+        """Delete one backend's key, or every key of the member."""
+        with self.lock:
+            if backend is None:
+                return self.conn.execute("DELETE FROM member_api_keys WHERE user_id = ?", (user_id,)).rowcount
+            return self.conn.execute("DELETE FROM member_api_keys WHERE user_id = ? AND backend = ?",
+                                     (user_id, backend)).rowcount
 
     # Issue #64: Google identities, link invitations, and Agent Harness Web sessions (hashes only).
     @_reads

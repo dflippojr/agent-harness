@@ -32,7 +32,7 @@ from .runner import (ACTIVE, END_PENDING, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_S
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import checkpoints, llm, projects, secret_scan, telemetry
+from . import checkpoints, llm, member_keys, projects, secret_scan, telemetry
 
 log = logging.getLogger("harness.manager")
 
@@ -184,6 +184,10 @@ class Manager:
         from .google_signin import GoogleSignin
         self.google_signin = GoogleSignin(self)
         self.runner.github_auth = self.github_auth
+        from . import member_keys
+        self.member_keys = member_keys.MemberKeys(cfg, self.db)
+        self.runner.member_keys = self.member_keys
+        member_keys.SOURCE.store = self.member_keys
         from .apps import AppToolBroker
         self.app_tools = AppToolBroker(self.db, self.bus)
         from .snippets import SnippetService
@@ -520,6 +524,7 @@ class Manager:
         member = owner_id != OWNER_USER_ID
         if member:
             backend = self._check_member(owner_id, backend, target, spec, app)
+        end_user = opts.end_user or (member_keys.end_user_id(owner_id) if member and backend != "local" else "")
         self.check_end_user(opts.end_user, app, backend)
         defaults = self.settings.app_defaults(app) if app and getattr(self, "settings", None) else {}
         backend, model, effort = self._default_choice(backend, model, effort, defaults)
@@ -530,7 +535,7 @@ class Manager:
         if backend == "local":
             model, effort = self._local_choice(model)
         else:
-            model, effort = self._hosted_choice(backend, model, effort, member, target, app)
+            model, effort = self._hosted_choice(backend, model, effort, target, app)
         remote = target != "tower"
         app_id = app["id"] if app else ""
         self._check_free_space(remote, member, target, owner_id, app_id)
@@ -565,7 +570,7 @@ class Manager:
             "app_defaults": dict(defaults) if app else {},
             "job_id": opts.job_id, "owner_id": owner_id, "kind": opts.kind, "compare_group": opts.compare_group,
             "skills": self.skills.freeze_public(frozen) if self.skills is not None else [],
-            "taint": list(opts.taint or []), "end_user": opts.end_user,
+            "taint": list(opts.taint or []), "end_user": end_user,
             **({"retention_days": float(opts.retention_days)} if app and opts.retention_days else {}),
         }
         self._insert_created(session, app, tools, opts.job_id, prompt)
@@ -641,6 +646,60 @@ class Manager:
         except LoginError as e:
             raise self._login_error(e) from e
 
+    # household members' own API keys (#393)
+    @staticmethod
+    def _key_error(e) -> HarnessError:
+        return HarnessError(e.status, str(e), e.code)
+
+    def member_keys_status(self, user_id: str) -> dict:
+        status = self.member_keys.status(user_id)
+        from .backend_state import billing_warning
+        status["billing_warning"] = billing_warning(None, using_api_key=True)
+        status["usage"] = {b: self._member_usage(user_id, b) for b in member_keys.BACKENDS}
+        return status
+
+    def _member_usage(self, user_id: str, backend: str) -> dict:
+        usage = self.db.member_backend_usage(member_keys.end_user_id(user_id), backend)
+        return {"sessions": usage["sessions"], "prompt_tokens": usage["prompt_tokens"],
+                "completion_tokens": usage["completion_tokens"]}
+
+    def member_key_set(self, user_id: str, backend: str, key: str) -> dict:
+        try:
+            self.member_keys.set(user_id, backend, key)
+        except member_keys.MemberKeyError as e:
+            raise self._key_error(e) from e
+        return self.member_keys_status(user_id)
+
+    def member_key_test(self, user_id: str, backend: str) -> dict:
+        try:
+            return self.member_keys.test(user_id, backend)
+        except member_keys.MemberKeyError as e:
+            raise self._key_error(e) from e
+
+    async def member_key_delete(self, user_id: str, backend: str) -> dict:
+        """Remove the key: the member's running sessions on that backend stop and their CLI state is deleted."""
+        try:
+            self.member_keys.delete(user_id, backend)
+        except member_keys.MemberKeyError as e:
+            raise self._key_error(e) from e
+        await self._stop_member_sessions(user_id, (backend,))
+        return self.member_keys_status(user_id)
+
+    async def _stop_member_sessions(self, user_id: str, backends) -> None:
+        end_user = member_keys.end_user_id(user_id)
+        for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):
+            if s.get("end_user") == end_user and s["backend"] in backends:
+                await self._stop_run(s["id"])
+        try:
+            await cli_domains.drop_end_user_volumes("", [end_user], backends=tuple(backends))
+        except RuntimeError:
+            log.warning("could not remove a member's CLI state volumes")
+
+    async def purge_member_keys(self, user_id: str) -> None:
+        """The member's keys are deleted and their hosted sessions stop (the account is cut off)."""
+        if self.member_keys.purge(user_id):
+            await self._stop_member_sessions(user_id, tuple(member_keys.BACKENDS))
+
     def _create_budgets(self, app: dict | None) -> tuple[int, int]:
         if getattr(self, "settings", None):
             return self.settings.session_budgets(app)
@@ -701,18 +760,28 @@ class Manager:
         return spec
 
     def _check_member(self, owner_id: str, backend: str | None, target: str | None, spec, app: dict | None) -> str:
-        """Household members run on the tower with the local model; returns the backend they get."""
+        """Household members run on the tower, on the local model or on a hosted CLI with their own API key (#393);
+        returns the backend they get."""
         account = self.db.account_by_id(owner_id)
         if account is None or not account.get("enabled", 1):
             raise HarnessError(403, ACCOUNT_DISABLED)
         if backend not in (None, "", "local"):
-            raise HarnessError(403, "household members can only use the local model")
+            self._check_member_hosted(owner_id, backend)
         if (target or spec.target) != "tower":
             raise HarnessError(403, "household members can only run sessions on the tower")
         if app is not None:
             raise HarnessError(403, "app tokens cannot create household member sessions")
         self._require_member_start(account, "session")
-        return "local"
+        return backend or "local"
+
+    def _check_member_hosted(self, owner_id: str, backend: str) -> None:
+        """A member's hosted session needs the member's own key for that backend; the owner's login, token and keys
+        are never a substitute."""
+        if backend not in member_keys.BACKENDS:
+            raise HarnessError(403, "household members can use the local model, Claude or Codex", "member_backend_unsupported")
+        if not self.member_keys.has(owner_id, backend):
+            raise HarnessError(403, f"add your {member_keys.BACKENDS[backend]['provider']} API key in your settings "
+                                    f"to use {backend.title()}", member_keys.REQUIRED)
 
     @staticmethod
     def _pick_target(target: str | None, spec, project: str) -> str:
@@ -744,10 +813,8 @@ class Manager:
             raise HarnessError(400, f"unknown model {model!r}; known: {', '.join(self.cfg.models)}")
         return model, ""
 
-    def _hosted_choice(self, backend: str, model: str | None, effort: str | None, member: bool, target: str,
+    def _hosted_choice(self, backend: str, model: str | None, effort: str | None, target: str,
                        app: dict | None) -> tuple[str, str | None]:
-        if member:
-            raise HarnessError(403, "household members can only use the local model")
         backend_cfg = self._hosted_backend(backend, target)
         model = model or backend_cfg.model
         if not model:
@@ -2067,6 +2134,7 @@ class Manager:
         the next waiter while the disabled account's run is still executing.
         """
         self.revoke_member_streams(user_id)
+        await self.purge_member_keys(user_id)  # a cut-off account keeps no credential (#393)
         self.github_auth.member_disabled(user_id)
         self.google_signin.member_disabled(user_id)
         # One unit: a cancelled request must not leave the rest of the account's work running (or a cancelled

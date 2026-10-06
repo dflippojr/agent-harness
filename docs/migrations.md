@@ -118,3 +118,6 @@ Step 0050 (`app_retention`) adds `sessions.retention_days` and, on the App regis
 
 Step 0051 (`end_users`) adds the `end_users` registry table (read through `db.for_app(app_id)`, so it lives in the App's
 own store and goes with `drop_app`), `sessions.end_user` and `usage.end_user` (#365).
+
+Step 0052 (`member_api_keys`) adds the `member_api_keys` table to the main store: one AES-GCM-sealed provider API key per
+(member, backend) plus its last four characters (#393). The master key is `<data_dir>/member-keys.key`, outside the database.

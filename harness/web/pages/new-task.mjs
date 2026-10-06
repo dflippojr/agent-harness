@@ -112,12 +112,22 @@ function projectTargetInput(targets, target) {
   return select;
 }
 
+// A member runs the local model, plus Claude or Codex on their own API key once they have added it (#393).
+async function memberBackends() {
+  const local = { name: "local", available: true };
+  try {
+    const st = await api("/me/api-keys");
+    return [local, ...st.keys.filter((k) => k.configured).map((k) => ({
+      name: k.backend, available: true, model: "", billing_warning: st.billing_warning }))];
+  } catch { return [local]; }
+}
+
 function loadNewTaskData() {
   const member = isMember();
   return Promise.all([
     api("/projects"), api("/models"),
     member ? Promise.resolve([]) : api("/templates").catch(() => []),
-    member ? Promise.resolve([{ name: "local", available: true }]) : api("/backends?auth=skip"),
+    member ? memberBackends() : api("/backends?auth=skip"),
     member ? Promise.resolve(null) : api("/gpu").catch(() => null)]);
 }
 
@@ -396,7 +406,7 @@ async function viewNew() {
   githubPicker,
   h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState, projectHint,
-  isMember() ? [] : [h("label", {}, "Backend"), backend, holdNotice, backendState],
+  isMember() && availableBackends.length < 2 ? [] : [h("label", {}, "Backend"), backend, holdNotice, backendState],
   h("label", {}, "Model"), model, modelState,
   h("label", {}, "Title"), title,
   skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,

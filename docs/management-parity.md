@@ -264,6 +264,9 @@ The owner manages members' Google links and GitHub credentials with `harness acc
 | Member's GitHub connection | GET, DELETE | `/me/github-connection` | — the member's own GitHub credential |
 | Member connects GitHub | POST | `/me/github-connection/connect` | — the member's own GitHub credential |
 | Member cancels connecting GitHub | POST | `/me/github-connection/cancel` | — the member's own GitHub credential |
+| Member's API keys | GET | `/me/api-keys` | — the member's own provider keys (last four characters only) |
+| Member saves, replaces or deletes an API key | PUT, DELETE | `/me/api-keys/{backend}` | — the member's own provider key |
+| Member tests an API key | POST | `/me/api-keys/{backend}/test` | — the member's own provider key |
 | Sign-in state | GET | `/auth/session` | — browser cookie session |
 | Sign in with Google | POST | `/auth/google/start` | — browser cookie session |
 | Sign out | POST | `/auth/logout` | — browser cookie session |
