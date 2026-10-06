@@ -131,6 +131,7 @@ class EndUserLogins:
                  command: Callable[[str, str, str, str, str], list[str]] | None = None):
         self.cfg = cfg
         self._popen = popen
+        self._docker = command is None   # False when a test supplies a stub login process
         self._command = command or self._docker_command
         self._attempts: dict[str, Attempt] = {}
         self._guard = threading.Lock()
@@ -155,7 +156,7 @@ class EndUserLogins:
         """Begin the CLI's own login for this end user: returns what the App's popup shows."""
         self.check(backend, end_user)
         cfg = self.cfg.backends[backend]
-        if self._command is self._docker_command:
+        if self._docker:
             try:
                 await cli_domains.prepare(backend, cfg, app_id, end_user)
             except RuntimeError as e:
@@ -248,7 +249,7 @@ class EndUserLogins:
                 proc.kill()
         except OSError:
             pass
-        if self._command == self._docker_command:  # `docker run` was killed; its container may outlive the client
+        if self._docker:  # `docker run` was killed; its container may outlive the client
             subprocess.run(["docker", "rm", "-f", attempt.container], capture_output=True, timeout=30,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False)
 

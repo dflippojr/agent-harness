@@ -372,6 +372,23 @@ def test_the_codex_device_flow_returns_only_a_url_and_a_user_code_and_completes(
         assert client.post(url).status_code in (401, 403)
 
 
+def test_starting_a_real_sign_in_prepares_the_end_users_volume_first(tmp_path, monkeypatch, stub):
+    _, _marker, command_for = stub
+    prepared = []
+
+    async def prepare(*args):
+        prepared.append(args)
+    monkeypatch.setattr(cli_domains, "prepare", prepare)
+    cfg = _cfg(tmp_path)
+    logins = EndUserLogins(cfg)                       # the Docker path ...
+    logins._command = command_for("claude")           # ... with a stub in place of `docker run`
+    try:
+        asyncio.run(logins.start("app-1", "dana", "claude"))
+    finally:
+        logins.close()
+    assert prepared == [("claude", cfg.backends["claude"], "app-1", "dana")]
+
+
 def test_a_stuck_login_that_prints_no_url_fails_instead_of_hanging(tmp_path, monkeypatch):
     monkeypatch.setattr(end_users, "URL_WAIT_SECONDS", 1)
     script = tmp_path / "silent.py"
