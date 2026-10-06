@@ -533,7 +533,7 @@ def _seed_unresolved_cancel_work(manager, sid):
 
 
 def _notification_titles(manager, sid):
-    from harness.notify import Notifier
+    from harness_modules.notifications.service import Notifier
     notifier = Notifier(manager.cfg, manager.db)
     titles = []
     for event in manager.db.events(sid):

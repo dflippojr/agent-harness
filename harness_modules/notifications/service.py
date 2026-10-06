@@ -16,10 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from .config import Config
-from .db import Database
-from .policy import TOOLS_ONLY
-from .settings import frozen_app_defaults, use_live_app_settings
+from harness.modules import Config, Database, TOOLS_ONLY, frozen_app_defaults, use_live_app_settings
 
 log = logging.getLogger("harness.notify")
 
@@ -278,7 +275,7 @@ class Notifier:
         if d["status"] == "failed":
             return {**base, "title": f"Job failed: {name}", "message": _short(d.get("stop_reason") or "failed", 400),
                     "priority": 4, "tags": ["x"], "click": click}
-        from .jobs import summary
+        from harness.modules import job_summary as summary
         answer = summary(d.get("answer") or "") or d.get("stop_reason") or ""
         if d.get("job_status") == "ok":
             mode = job.get("notify", "low")

@@ -2,8 +2,9 @@
 
 Issue #334 splits Agent Harness Server into a core and optional add-on modules. This page is the module
 interface ([`harness/modules.py`](../harness/modules.py)) and how to write a module. Images
-([`harness_modules/images/`](../harness_modules/images/)) is the first module behind it; the other optional
-features move in stage (c).
+([`harness_modules/images/`](../harness_modules/images/)) is the first module behind it and notifications
+([`harness_modules/notifications/`](../harness_modules/notifications/)) the second; the other optional features move
+one module per PR in stage (c).
 
 ## Rules
 
@@ -50,6 +51,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     settings.py          the images.* registry keys
     doctor.py            python -m harness.doctor checks
     service.py edit.py archive.py models.py upscale.py flux_fast.json   (formerly harness/images*.py etc.)
+  notifications/         ntfy phone notifications (formerly harness/notify.py)
+    __init__.py runtime.py routes.py settings.py service.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
@@ -113,3 +116,8 @@ These are names, not imports, and move with the config and storage split in stag
 - `checkpoints.MUTATING_TOOLS` lists `generate_image`; the module also declares it through `ToolGate.mutating`.
 - `resources.py` and `endpoint.py` read `manager.images` for the ComfyUI GPU holder and the `/v1` `features.images`
   flag.
+- Notifications (`notify:` YAML section and `NotifyConfig`, the `notifications` switch, `/me`'s `notify` block,
+  `access.py`'s `/notify` rule) stay in the core as names. Core code that sends a notification (canary, Remote
+  Control, the image module) goes through `Manager.notifier`, a stand-in that drops everything while the module is
+  absent. The module reaches `harness.jobs.summary` through `harness.modules.job_summary` until jobs is a module.
+  The old config keys (`notify.*`, `notifications.enabled`) are unchanged.

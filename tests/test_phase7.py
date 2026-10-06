@@ -367,7 +367,7 @@ from datetime import datetime  # noqa: E402
 
 from harness.config import JobsConfig  # noqa: E402
 from harness.jobs import Cron, CronError, JobScheduler, parse_status  # noqa: E402
-from harness.notify import Notifier  # noqa: E402
+from harness_modules.notifications.service import Notifier  # noqa: E402
 
 
 def ts(*parts) -> float:

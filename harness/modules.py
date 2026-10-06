@@ -38,6 +38,9 @@ _PUBLIC = {
     "module_effective": ("harness.config", "module_effective"),
     "resolve_images_models_dir": ("harness.config", "resolve_images_models_dir"),
     "Database": ("harness.db", "Database"),
+    "TOOLS_ONLY": ("harness.policy", "TOOLS_ONLY"),
+    "frozen_app_defaults": ("harness.settings", "frozen_app_defaults"),
+    "use_live_app_settings": ("harness.settings", "use_live_app_settings"),
     "ToolError": ("harness.fileops", "ToolError"),
     "run_cmd": ("harness.sandbox", "run_cmd"),
     "ServerControl": ("harness.gpu_guard", "ServerControl"),
@@ -52,6 +55,9 @@ _PUBLIC = {
     "setting_int": ("harness.settings_keys", "_int"),
     "setting_float": ("harness.settings_keys", "_float"),
     "setting_bool": ("harness.settings_keys", "_bool"),
+    "job_summary": ("harness.jobs", "summary"),  # until jobs is itself a module
+    "require_url": ("harness.settings_keys", "_require_url"),
+    "require_readable_file": ("harness.settings_keys", "_require_readable_file"),
 }
 
 

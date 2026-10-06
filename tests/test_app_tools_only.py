@@ -135,7 +135,7 @@ def test_local_session_answers_the_hosted_alias_instead_of_leaving_it_pending(tm
 
 def test_owner_phone_never_gets_a_tools_only_sessions_events(tmp_path):
     """run_finished carries the title and answer: a tools-only session's must not reach the owner's ntfy."""
-    from harness.notify import Notifier
+    from harness_modules.notifications.service import Notifier
     client, m, _ = _client(tmp_path, [Completion(content="Checking has $120."), Completion(content="hi")])
     with client:
         auth, _ = _app(client)

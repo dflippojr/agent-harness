@@ -28,7 +28,6 @@ MODULE_ENABLE_SECTIONS = {
     "jobs": "jobs",
     "endpoint": "endpoint",
     "gpu_guard": "gpu_guard",
-    "notifications": "notify",
     "backup": "backup",
     "memory_library": "memory_library",
     "remote_control": "remote_control",

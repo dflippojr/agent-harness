@@ -20,7 +20,6 @@ from . import cli_domains, review_comments
 from . import review_comments
 from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
-from .notify import Notifier
 from .warmup import ModelWarmer
 from .config import Config
 from .app_stores import EVERY_APP, SessionStores
@@ -144,6 +143,26 @@ class HarnessError(Exception):
         self.details = details or {}
 
 
+class NoNotifier:
+    """Stands in for the Notifier when the notifications module is absent: every notification is dropped."""
+    enabled = False
+
+    def listener(self, event: dict) -> None:
+        pass
+
+    def send(self, payload: dict) -> None:
+        pass
+
+    def build(self, event: dict) -> None:
+        return None
+
+    def link(self, path: str) -> str:
+        return ""
+
+
+NO_NOTIFIER = NoNotifier()
+
+
 class Manager:
     def __init__(self, cfg: Config, db: Database | SessionStores | None = None, chat=llm.chat):
         self.cfg = cfg
@@ -166,8 +185,6 @@ class Manager:
         # `checkpoints.UNSETTLED` keeps it across a restart, when its write succeeds): a send is refused meanwhile.
         self.unsettled: set[str] = set()
         self.compare_busy: set[tuple[str, str]] = set()  # (owner, group) with a pick or discard in progress
-        self.notifier = Notifier(cfg, self.db)
-        self.bus.add_listener(self.notifier.listener)
         # Add-on modules (harness/modules.py): built here so a module's backup participant joins Maintenance.
         from .modules import ModuleHost
         self.modules = ModuleHost(self)
@@ -203,6 +220,13 @@ class Manager:
         self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
         self._init_modules(cfg, chat)
         self._init_services(cfg)
+
+    @property
+    def notifier(self):
+        """The notifications module's Notifier, or a stand-in that drops everything while the module is absent."""
+        host = self.__dict__.get("modules")
+        runtime = host.get("notifications") if host is not None else None
+        return runtime.service if runtime is not None else NO_NOTIFIER
 
     def __getattr__(self, name: str):
         """An add-on module's main object by module name (``manager.images``): None while it is switched off or
@@ -368,7 +392,6 @@ class Manager:
 
     # lifecycle
     async def start(self, maintenance: bool = True) -> None:
-        self.notifier.start()
         # Issue #263: fetch the pinned gitleaks if it's missing; push/merge wait for this, then fail closed.
         self._scanner_boot = asyncio.create_task(self._bootstrap_scanner(), name="secret-scanner")
         if maintenance:
@@ -429,7 +452,6 @@ class Manager:
             self._scanner_boot.cancel()
             await asyncio.gather(self._scanner_boot, return_exceptions=True)
         await self.snippets.stop()
-        await self.notifier.stop()
         await self.maintenance.stop()
         if self.guard is not None:
             await self.guard.stop()

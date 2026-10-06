@@ -462,7 +462,7 @@ def test_guard_startup_with_leftover_flag_resumes_when_clear():
 
 def test_gpu_pause_notification_points_at_actions_resources(tmp_path):
     from harness.db import Database
-    from harness.notify import Notifier
+    from harness_modules.notifications.service import Notifier
     from test_phase7 import seed
 
     cfg = make_cfg(tmp_path)
