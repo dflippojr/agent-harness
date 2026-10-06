@@ -166,7 +166,7 @@ async def _ensure_model(m, model, flavor: str, finish) -> JSONResponse | None:
         return error(flavor, 503, "overloaded_error", "the model is unloaded while the GPU is in use by "
                      + ("a game or a Plex transcode" if held else "image generation"),
                      headers={"Retry-After": "180" if held else "60"})
-    if m.runner.memory_low() and await m.warmer.state(model) in (SLEEPING, UNLOADED):
+    if m.runner.model_load_low() and await m.warmer.state(model) in (SLEEPING, UNLOADED):
         finish(503)
         return error(flavor, 503, "overloaded_error", "the machine is low on memory; the model stays unloaded until "
                      "it recovers", headers={"Retry-After": "60"})

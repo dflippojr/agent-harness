@@ -276,6 +276,10 @@ def _resource_metrics(m: Manager, out: _Out) -> None:
             out.metric(name, "gauge", help_, [({}, mem[key])])
     out.metric("harness_resource_memory_low", "gauge", "1 while new work waits for memory.",
                [({}, 1 if mem["low"] else 0)])
+    if m.warmer.load_min_available is not None:
+        out.metric("harness_model_load_min_available_bytes", "gauge",
+                   "Lowest available physical memory seen during the most recent model load.",
+                   [({}, m.warmer.load_min_available)])
     out.metric("harness_model_parked", "gauge", "1 while the local model is unloaded until something needs it.",
                [({}, 1 if g.state == "clear" and g.control.flagged() else 0)])
     out.metric("harness_model_pinned_until_seconds", "gauge",

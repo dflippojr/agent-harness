@@ -32,7 +32,7 @@ def parked_aware_state(monkeypatch):
 
 
 class FakeRam:
-    def __init__(self, available_gb: float = 16):
+    def __init__(self, available_gb: float = 24):
         self.available = available_gb * GIB
 
     def __call__(self):
@@ -44,7 +44,7 @@ def guarded_manager(tmp_path, steps=None, ram: FakeRam | None = None, **guard_cf
     cfg.gpu_guard = GpuGuardConfig(enabled=True, resume_after_seconds=0, poll_seconds=3600, **guard_cfg)
     m = Manager(cfg, chat=Script(steps or [Completion(content="done")]))
     m.guard.detector, m.guard.control = FakeDetect(), FakeControl()
-    m.guard.memory = MemoryWatch(cfg.gpu_guard.min_available_ram_gb, read=ram or FakeRam(), ttl=0)
+    m.guard.memory = MemoryWatch(cfg.gpu_guard.min_available_ram_gb, model_gb=cfg.gpu_guard.model_ram_gb, read=ram or FakeRam(), ttl=0)
     m.runner.ram = m.guard.memory
     return m
 
@@ -151,7 +151,7 @@ def test_selection_warm_loads_only_with_headroom(tmp_path):
         m.guard.control.flag = True
         assert await m.warmer.warm(model) == LOW_MEMORY
         assert m.guard.control.starts == 0
-        ram.available = 16 * GIB
+        ram.available = 24 * GIB
         assert await m.warmer.warm(model) == UNLOADED
         await m.warmer.ensure_loaded(model)
         assert m.guard.control.starts == 1 and not m.guard.control.flag
@@ -220,6 +220,30 @@ def test_memory_watch_threshold():
     assert not MemoryWatch(4, read=lambda: None, ttl=0).low()  # no reading: don't block work
 
 
+def test_load_deferred_when_it_would_drop_ram_below_the_threshold():
+    """Issue #402: 11.7 GB available passes a plain 4 GB check, but the 14 GB load leaves none."""
+    ram = FakeRam(11.7)
+    watch = MemoryWatch(4, model_gb=14, read=ram, ttl=0)
+    assert not watch.low() and watch.load_low()
+    ram.available = 18.5 * GIB
+    assert not watch.load_low()
+    ram.available = 18 * GIB  # exactly the threshold left: proceeds
+    assert not watch.load_low()
+    assert not MemoryWatch(0, model_gb=14, read=FakeRam(1), ttl=0).load_low()
+    assert not MemoryWatch(4, model_gb=14, read=lambda: None, ttl=0).load_low()
+
+
+def test_load_samples_min_available_for_the_metric(tmp_path):
+    async def body():
+        m = guarded_manager(tmp_path, ram=FakeRam(24))
+        samples = iter([20 * GIB, 3 * GIB, 9 * GIB, 12 * GIB, 12 * GIB, 12 * GIB])
+        m.warmer.read_available = lambda: next(samples, 12 * GIB)
+        m.guard.control.flag = True
+        await m.warmer.ensure_loaded(m.cfg.models[m.cfg.default_model])
+        assert m.warmer.load_min_available == 3 * GIB
+    asyncio.run(body())
+
+
 def test_session_waits_for_memory_before_loading_then_continues(tmp_path, monkeypatch):
     from harness import gpu_guard
     monkeypatch.setattr(gpu_guard, "MEMORY_POLL_SECONDS", 0.02)
@@ -239,7 +263,7 @@ def test_session_waits_for_memory_before_loading_then_continues(tmp_path, monkey
         assert m.guard.control.starts == 0
         note = next(m.notifier.build(e) for e in m.db.events(s["id"]) if e["type"] == "waiting_memory")
         assert note["title"].startswith("Waiting for memory") and "Actions → Resources" in note["message"]
-        ram.available = 16 * GIB
+        ram.available = 24 * GIB
         await wait_status(m, s["id"], "done", timeout=15)
         assert events(m, s["id"], "memory_recovered")
         assert m.guard.control.starts == 1
@@ -259,7 +283,7 @@ def test_worker_container_start_waits_for_memory(tmp_path, monkeypatch):
         await asyncio.sleep(0.1)
         assert not gate.done()
         assert events(m, s["id"], "waiting_memory")[0]["waiting_for"] == "claude worker container"
-        ram.available = 16 * GIB
+        ram.available = 24 * GIB
         await asyncio.wait_for(gate, 2)
         assert events(m, s["id"], "memory_recovered")
     asyncio.run(body())
@@ -323,7 +347,7 @@ def test_endpoint_loads_parked_model_and_refuses_under_memory_pressure(tmp_path)
         refused = client.post("/v1/chat/completions", json=body, headers=headers)
         assert refused.status_code == 503 and "low on memory" in refused.text
         assert m.guard.control.starts == 0
-        ram.available = 16 * GIB
+        ram.available = 24 * GIB
         ok = client.post("/v1/chat/completions", json=body, headers=headers)
         assert ok.status_code == 200
         assert m.guard.control.starts == 1 and not m.guard.control.flag

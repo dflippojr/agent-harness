@@ -82,7 +82,36 @@ Below `min_available_ram_gb` (default **4**, `0` turns it off), the harness:
   `waiting_memory` before starting ComfyUI.
 - skips selection warm-ups, and asks before *Load local model now*.
 
+A model load is held to a stricter test than the rest. Loading adds about `model_ram_gb` (default **14**; Phase 0
+measured 12.5 to 14.7 GB private bytes) to physical use, so a load starts only when available RAM **minus
+`model_ram_gb`** is still at or above `min_available_ram_gb`. With 11.7 GB free the load waits (it would leave nothing);
+with 18.5 GB free it goes ahead. Before this, the daily 08:00 load saw 11.7 GB free against the 4 GB threshold, passed,
+and then pushed available RAM to 0.17 GB for 2 to 4 minutes. Worker containers and ComfyUI jobs still compare the plain
+number. The wait polls every `MEMORY_POLL_SECONDS` and the session shows `waiting_memory` with the reason
+"the model load needs 14 GB and 4 GB must stay free".
+
 Work already running isn't stopped. If nothing can be read (no psutil), work isn't blocked.
+
+### Inventory (read-only, 2026-10-06)
+
+Measured from Prometheus (`windows_memory_available_bytes`, `harness_resource_*`), the daemon log, `Get-Counter` and
+`nvidia-smi`, with nothing changed on the tower.
+
+- **Idle, model unloaded (07:20).** Physical 31.8 GB, about 13 GB free. Docker VM (`vmmemWSL`) 5.75 GB working set under
+  the 8 GB `.wslconfig` cap; containers use about 1.6 GB and the rest is page cache (VM `Cached` 4.38 GB, swap 217 MB).
+  Containers: grafana 513 MB, prometheus 167 MB, financial-planner-app 166 MB, tempo 80 MB, harness-eulogin 74 MB, the
+  rest 1 to 60 MB. Host processes by working set: claude (7) 2.1 GB, Memory Compression 1.3 GB, powershell (18) 1.0 GB,
+  Defender 0.95 GB, Orca (11) 0.9 GB, msedge (12) 0.8 GB, Plex 60 MB. VRAM 529 MiB used. Committed 31.1 GB of a 63.8 GB
+  limit (pagefile 32 GB, 5 GB peak use).
+- **Peak, 14 days.** `harness_resource_commit_bytes` peaked at 55.8 GB of 63.8 GB (p50 26.8 GB);
+  `windows_memory_available_bytes` reached 0.16 GB. Of 10,072 two-minute samples, 46 had under 1 GB available, 86 under
+  2 GB and 159 under 4 GB. One 50-minute period (2026-10-05 23:50, commit 52 GB, model loaded, no active sessions) had 0.5
+  to 5.3 GB available; that consumer is not a harness session and is not attributed.
+- **The 08:00 load.** On 9 of 14 mornings a 2 to 4 minute dip to 0.16 to 0.32 GB available starts at 08:01. On 2026-10-05:
+  11.7 GB at 08:00, 0.173 GB at 08:02, 11.1 GB at 08:05; the normal-priority standby cache fell from 8.0 GB to 0.5 GB.
+
+Method for the morning check: query `windows_memory_available_bytes` at 2-minute steps from 08:00 to 08:10 each day and
+count samples under 1 GB. The target after this change is 0 over 7 mornings.
 
 ## Diagnostics and metrics
 
@@ -97,7 +126,8 @@ Actions → Resources shows a diagnostics card styled like Actions → Disk:
 It takes **one reading when the tab opens**, shows "as of HH:MM", and re-reads only when you press ↻. Nothing polls
 in the background. API: `GET /resources/diagnostics`.
 
-`/metrics` exports the following for Grafana's own scrape:
+`/metrics` exports the following for Grafana's own scrape (including `harness_model_load_min_available_bytes`, the lowest
+available RAM sampled during the most recent model load, every 2 s while it waits for `/health`):
 
 - `harness_resource_ram_available_bytes`, `_ram_total_bytes`, `_commit_bytes`, `_commit_limit_bytes`,
   `_ram_threshold_bytes`

@@ -229,8 +229,10 @@ def memory_reading() -> dict | None:
 class MemoryWatch:
     """Is available RAM under the guard's threshold? Readings are cached for a couple of seconds."""
 
-    def __init__(self, min_available_gb: float, read: Callable[[], dict | None] | None = None, ttl: float = 2.0):
+    def __init__(self, min_available_gb: float, read: Callable[[], dict | None] | None = None, ttl: float = 2.0,
+                 model_gb: float = 0.0):
         self.threshold = int(max(0.0, min_available_gb) * GIB)
+        self.model_bytes = int(max(0.0, model_gb) * GIB)  # what a model load adds; see load_low()
         self.read = read or (lambda: memory_reading())  # looked up per call so tests can patch the module function
         self.ttl = ttl
         self._at = -math.inf
@@ -248,17 +250,34 @@ class MemoryWatch:
         r = self.reading()
         return r is not None and r["available"] < self.threshold
 
+    def load_low(self) -> bool:
+        """Would loading the model leave less than the threshold? Compares available RAM minus the model's expected
+        size, because the plain check sees the RAM before the load, not the state the load creates."""
+        if not self.threshold:
+            return False
+        r = self.reading()
+        return r is not None and r["available"] - self.model_bytes < self.threshold
+
+    def available(self) -> int | None:
+        r = self.read()  # uncached: sampled while a load runs
+        return None if r is None else r["available"]
+
     def status(self) -> dict:
         r = self.reading() or {}
         return {"available_bytes": r.get("available"), "total_bytes": r.get("total"),
                 "commit_bytes": r.get("commit"), "commit_limit_bytes": r.get("commit_limit"),
-                "threshold_bytes": self.threshold, "low": self.low()}
+                "threshold_bytes": self.threshold, "low": self.low(),
+                "model_bytes": self.model_bytes, "load_low": self.load_low()}
 
 
 def describe_memory(status: dict) -> str:
     avail, threshold = status.get("available_bytes"), status.get("threshold_bytes")
     if avail is None:
         return "low memory"
+    model = status.get("model_bytes") or 0
+    if model and status.get("load_low") and not status.get("low"):
+        return (f"{avail / GIB:.1f} GB RAM available, the model load needs {model / GIB:.0f} GB and "
+                f"{threshold / GIB:.0f} GB must stay free")
     return f"{avail / GIB:.1f} GB RAM available, needs {threshold / GIB:.0f} GB"
 
 
@@ -360,7 +379,7 @@ class GpuGuard:
         self.control = control or ServerControl(cfg, model)
         self.on_pause = on_pause
         self.on_resume = on_resume
-        self.memory = memory or MemoryWatch(cfg.min_available_ram_gb)
+        self.memory = memory or MemoryWatch(cfg.min_available_ram_gb, model_gb=cfg.model_ram_gb)
         self.want_model: Callable[[], bool] = lambda: False  # lazy_load: reload at the end of a hold anyway (queued work)
         self.on_change: Callable[[], None] = lambda: None  # the state or the pause flag changed (ModelWarmer.notify)
         # Stops the server once a load in flight has ended (ModelWarmer.park), so the pause flag stays in place.
