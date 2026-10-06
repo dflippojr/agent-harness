@@ -301,3 +301,18 @@ def test_trusted_source_operations_still_see_the_source_repo(tmp_path):
     assert publish_local(Project(name="proj", repo=str(src)), workspace, info["branch"]) is True
     listed = git(src, "branch", "--list", info["branch"], trusted=True).out.strip()
     assert info["branch"] in listed
+
+
+def test_isolated_call_spawns_at_most_two_git_processes(tmp_path, monkeypatch):
+    """The allowlisted config is injected through the environment, not replayed one `git config` per key (#403)."""
+    import harness.projects as projects
+
+    repo = make_repo(tmp_path / "repo")
+    sh(repo, "config", "branch.main.description", "kept")
+    sh(repo, "remote", "add", "origin", "https://example.com/x.git")
+    calls = []
+    real_run = projects._run
+    monkeypatch.setattr(projects, "_run", lambda args, *a, **k: calls.append(args) or real_run(args, *a, **k))
+    result = git(repo, "config", "--get", "remote.origin.url")
+    assert result.out.strip() == "https://example.com/x.git"
+    assert len(calls) <= 2, calls
