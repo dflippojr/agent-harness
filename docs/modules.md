@@ -2,8 +2,9 @@
 
 Issue #334 splits Agent Harness Server into a core and optional add-on modules. This page is the module
 interface ([`harness/modules.py`](../harness/modules.py)) and how to write a module. Images
-([`harness_modules/images/`](../harness_modules/images/)) is the first module behind it and notifications
-([`harness_modules/notifications/`](../harness_modules/notifications/)) the second; the other optional features move
+([`harness_modules/images/`](../harness_modules/images/)) is the first module behind it notifications
+([`harness_modules/notifications/`](../harness_modules/notifications/)) the second and session search
+([`harness_modules/search/`](../harness_modules/search/)) the third; the other optional features move
 one module per PR in stage (c).
 
 ## Rules
@@ -53,6 +54,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     service.py edit.py archive.py models.py upscale.py flux_fast.json   (formerly harness/images*.py etc.)
   notifications/         ntfy phone notifications (formerly harness/notify.py)
     __init__.py runtime.py routes.py settings.py service.py
+  search/                session search (formerly harness/search.py): /search, /api/v1/search, session_search/read
+    __init__.py runtime.py routes.py settings.py service.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
@@ -71,7 +74,7 @@ module's only link back is `harness.modules`.
 | `app_routes()` | A `RouteTable` of `/api/v1/...` routes. Handlers call `app_auth(request, scope)`. |
 | `public_routes()` | Unauthenticated routes (none today). |
 | `app_scopes`, `app_capabilities` | App token scopes it adds, and `app.capabilities` values (`{capability: scope}`). |
-| `tools` (`ToolGate`), `tool_names` | When the runtime's `toolkit()` is offered to a session: project flag, App capability, members, MCP for hosted sessions, whether it writes into the workspace (`workspace_root` / runner `put_bytes`), which tools mutate files (quota and checkpoints), the telemetry span. `tool_names` are reserved against App tools. |
+| `tools` (`ToolGate`), `tool_names` | When the runtime's `toolkit()` is offered to a session: project flag, App capability, members, MCP for hosted sessions, whether it writes into the workspace (`workspace_root` / runner `put_bytes`), which tools mutate files (quota and checkpoints), the telemetry span, the system-prompt section (`prompt`) a session gets with it. `tool_names` are reserved against App tools. |
 | `settings()` | `SettingSpec`s with defaults, bounds, `enable_check`s and named getters/setters, merged into the registry. |
 | `cli`, `cli_groups` | Rows in `harness.cli` `ADMIN_COMMANDS` format (`harness images …`); the stage (a) parity rows. The Mac client bundle carries a JSON copy (`mac_client.py`). |
 | `principal_capabilities(owner, scopes)` | Entries for `/me` and `/api/v1/me` `capabilities`. |
@@ -121,3 +124,9 @@ These are names, not imports, and move with the config and storage split in stag
   Control, the image module) goes through `Manager.notifier`, a stand-in that drops everything while the module is
   absent. The module reaches `harness.jobs.summary` through `harness.modules.job_summary` until jobs is a module.
   The old config keys (`notify.*`, `notifications.enabled`) are unchanged.
+- Session search: the FTS5 `search_index` table, its indexing as events are written and `Database.search_events`
+  stay in the core (`harness/search_index.py`, `harness/db.py`), because the index lives in the session database and
+  backups carry it; events keep being indexed while the module is absent, so installing it later finds old sessions.
+  The `search:` YAML section, the `search.enabled` key, `Project.session_search` and the `search` App capability are
+  unchanged. The module owns the queries, `/search`, `/api/v1/search`, `session_search` / `session_read`, their prompt
+  section and the `harness search` row.

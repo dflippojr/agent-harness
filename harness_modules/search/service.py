@@ -24,12 +24,8 @@ import asyncio
 import re
 import time
 
-from .app_stores import scoped
-from .fileops import ToolError
+from harness.modules import SEARCH_TOOLS as TOOLS, ToolError, scoped_store as scoped
 
-TOOLS = ("session_search", "session_read")
-INDEX_VERSION = "3"
-TOOL_OUTPUT_CHARS = 6000       # indexed prefix of a tool result
 READ_PAGE_CHARS = 12000
 KIND_WEIGHT = {"title": 3.0, "answer": 2.0, "message": 1.5, "assistant": 1.2, "context": 1.0, "tool": 0.8}
 STOPWORDS = {"a", "an", "and", "are", "as", "at", "be", "did", "do", "does", "for", "from", "how", "i", "in", "is",
@@ -63,38 +59,6 @@ def schemas() -> list[dict]:
             "find": {"type": "string", "description": "Case-insensitive regular expression."},
         }, ["session_id"]),
     ]
-
-
-# ---------- indexing ----------
-_SIMPLE_EVENT_TEXT = {  # event type -> (index kind, data key)
-    "session_created": ("title", "title"),
-    "user_message": ("message", "content"),
-    "app_context": ("context", "content"),
-    "error": ("tool", "message"),
-}
-
-
-def _assistant_text(data: dict) -> tuple[str, str] | None:
-    parts = [data.get("content") or ""]
-    for call in data.get("tool_calls") or []:
-        fn = call.get("function") or {}
-        parts.append(f"{fn.get('name', '')} {(fn.get('arguments') or '')[:500]}")
-    text = "\n".join(p for p in parts if p.strip())
-    return ("assistant", text) if text else None
-
-
-def event_text(type_: str, data: dict) -> tuple[str, str] | None:
-    """(kind, text) to index for a persisted event, or None."""
-    if type_ == "assistant":
-        return _assistant_text(data)
-    if type_ == "tool_result":
-        if data.get("name") in TOOLS:  # earlier search results would only echo other sessions back
-            return None
-        return "tool", f"{data.get('name', '')}: {(data.get('output') or '')[:TOOL_OUTPUT_CHARS]}"
-    if type_ == "status":
-        return ("answer", data["answer"]) if data.get("answer") else None
-    simple = _SIMPLE_EVENT_TEXT.get(type_)
-    return (simple[0], data.get(simple[1], "")) if simple else None
 
 
 def fts_query(query: str, any_term: bool = False) -> str:

@@ -11,7 +11,7 @@ from harness.config import Project, SearchConfig
 from harness.db import Database
 from harness.llm import Completion
 from harness.manager import Manager
-from harness.search import compact_transcript, fts_query, search
+from harness_modules.search.service import compact_transcript, fts_query, search
 
 from test_daemon import Script, call, events, make_cfg, wait_status
 

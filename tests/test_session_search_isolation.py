@@ -13,7 +13,7 @@ from harness.db import Database
 from harness.fileops import ToolError
 from harness.llm import Completion
 from harness.manager import Manager
-from harness.search import SessionSearch, restrict_app_id, search
+from harness_modules.search.service import SessionSearch, restrict_app_id, search
 
 from test_daemon import Script, call, events, wait_status
 from test_phase7 import search_cfg, seed

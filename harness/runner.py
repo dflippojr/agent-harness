@@ -198,7 +198,6 @@ class Runner:
         self.web_overrides: dict = {}           # session id -> WebTools (the canary replays a recorded web, #265)
         self.yields: dict[str, int] = {}        # low-priority session id -> times it stepped aside (guard or a real session)
         self.modules = None                     # modules.ModuleHost (add-on toolkits such as images), set by the manager
-        self.sessions = None                    # search.SessionSearch, set by the manager when enabled
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
         self.skills = None                      # skills.SkillStore, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
@@ -267,8 +266,6 @@ class Runner:
         for gate, kit in self._module_toolkits():
             if (gate.members or not member) and self._kit_allowed(project, gate.project_flag, defaults, gate.capability):
                 kits.append(kit)
-        if self.sessions is not None and self._kit_allowed(project, "session_search", defaults, "search"):
-            kits.append(self.sessions)
         if (not member and self.remote_control is not None and s["target"] == "tower"
                 and s.get("app_id", "") == "" and app_allows(defaults, "remote_control")):
             kits.append(self.remote_control)  # not for app sessions: apps launch through /api/v1/remote-control
@@ -333,7 +330,7 @@ class Runner:
         s = self.db.get_session(sid)
         if s is None or s.get("kind") == "chat" or s.get("backend") not in MCP_BACKENDS:
             return []
-        served = [k for k in (self.memory, self.web_overrides.get(sid, self.web), self.sessions) if k is not None]
+        served = [k for k in (self.memory, self.web_overrides.get(sid, self.web)) if k is not None]
         served += [kit for gate, kit in self._module_toolkits() if gate.mcp]
         schemas = [schema for kit in self.daemon_toolkits(s) if kit in served for schema in kit.schemas()]
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:

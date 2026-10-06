@@ -38,6 +38,8 @@ _PUBLIC = {
     "module_effective": ("harness.config", "module_effective"),
     "resolve_images_models_dir": ("harness.config", "resolve_images_models_dir"),
     "Database": ("harness.db", "Database"),
+    "SEARCH_TOOLS": ("harness.search_index", "SEARCH_TOOLS"),
+    "scoped_store": ("harness.app_stores", "scoped"),
     "TOOLS_ONLY": ("harness.policy", "TOOLS_ONLY"),
     "frozen_app_defaults": ("harness.settings", "frozen_app_defaults"),
     "use_live_app_settings": ("harness.settings", "use_live_app_settings"),
@@ -49,6 +51,9 @@ _PUBLIC = {
     "RouteTable": ("harness.api", "RouteTable"),
     "require_owner": ("harness.api", "require_owner"),
     "app_auth": ("harness.apps", "auth"),
+    "calling_app": ("harness.apps", "calling_app"),
+    "SESSIONS_ALL": ("harness.apps", "SESSIONS_ALL"),
+    "owner_id": ("harness.api", "owner_id"),
     "SettingSpec": ("harness.settings", "SettingSpec"),
     "Bounds": ("harness.settings", "Bounds"),
     "module_installed": ("harness.settings", "module_installed"),
@@ -79,6 +84,7 @@ class ToolGate:
     workspace: bool = False       # the handler writes into the session workspace (workspace_root / put_bytes)
     mutating: tuple[str, ...] = ()  # tool names that change workspace files (checkpoints, review)
     span: str = ""                # telemetry span name for a call (default: the core's sandbox span)
+    prompt: str = ""              # system-prompt section for a session that gets the toolkit
 
 
 @dataclass(frozen=True)

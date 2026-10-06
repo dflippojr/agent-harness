@@ -148,7 +148,7 @@ agent-harness/
 │   ├── state.py           structured per-round agent state + reset_round
 │   ├── grounding.py       checks that quoted text in answers was actually read
 │   ├── verify.py          turns test/lint logs into a bounded failure list
-│   ├── search.py          SQLite FTS5 over every session
+│   ├── search_index.py    what the SQLite FTS5 session index holds (queries: harness_modules/search)
 │   ├── apps.py, admin.py  versioned App API and owner API
 │   ├── principal.py       owner / member / guest / app / device identity model
 │   ├── settings*.py       typed configuration registry
@@ -233,7 +233,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | --- | --- |
 | **Typed configuration registry** ([`settings.py`](harness/settings.py), [docs](docs/config-registry.md)) | Every writable setting has an explicit spec with a named setter: no reflection, no dotted-path traversal, no YAML merge. Writes use optimistic concurrency (revision + ETag → `409`), batches are all-or-nothing, and a failed apply hook undoes the hooks already applied. |
 | **Crash-safe config lifecycle** ([`managed_config.py`](harness/managed_config.py), [`overlay.py`](harness/overlay.py)) | An explicit state machine covers the active, pending (restart-required), last-known-good, and quarantined generations, using fsync plus atomic replace. Boot applies only confirmed config. |
-| **Search on write** ([`search.py`](harness/search.py)) | Every persisted event is indexed into SQLite FTS5 as it's written. Agents can search and read past sessions through `session_search` / `session_read`. |
+| **Search on write** ([`search`](harness_modules/search/service.py)) | Every persisted event is indexed into SQLite FTS5 as it's written. Agents can search and read past sessions through `session_search` / `session_read`. |
 | **Stale-aware review comments** ([`review_comments.py`](harness/review_comments.py)) | Line comments on a diff are anchored to side, range, and base/head commits. A comment whose quoted lines have since changed is marked stale when sent back to the agent. |
 
 ### Testing and delivery

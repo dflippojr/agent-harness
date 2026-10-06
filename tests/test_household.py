@@ -286,7 +286,7 @@ def test_two_member_adversarial_matrix(tmp_path):
         page = client.get("/api/v1/sessions", params={"limit": 2}, headers=ah).json()
         assert len(page) == 2
         assert all(s["id"] != bob_s["id"] and s["id"] != owner_s["id"] for s in page)
-        from harness.search import SessionSearch
+        from harness_modules.search.service import SessionSearch
         found = SessionSearch(m.db).session_search("zebra", _session=extra[0]["id"])
         assert "No earlier sessions match" in found
         assert owner_s["id"] not in found
