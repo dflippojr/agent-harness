@@ -558,7 +558,7 @@ def test_metrics_and_backup(tmp_path):
 
         old = tmp_path / "backups" / "2020-01-01"
         old.mkdir(parents=True)
-        result = await m.maintenance.backup()
+        result = await m.modules.get("backup").service.backup()
         dest = tmp_path / "backups" / result["path"].replace("\\", "/").rsplit("/", 1)[-1]
         assert not old.exists()
         assert result["removed"] == ["2020-01-01"]

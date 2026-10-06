@@ -1,7 +1,7 @@
-"""Verify and restore a nightly backup (#374): python -m harness.backup_restore verify|restore <folder>
+"""Verify and restore a nightly backup (#374): python -m harness_modules.backup.restore verify|restore <folder>
 
 A local tool like `harness.doctor`, run on the server machine against the configured `data_dir` with the daemon
-stopped (a restore replaces the daemon's own files). What a backup folder holds is `Maintenance._backup_sync`'s:
+stopped (a restore replaces the daemon's own files). What a backup folder holds is `BackupService.backup_sync`'s:
 
 - `harness.sqlite3`: the main store;
 - `apps/<app_id>.sqlite3`: one per App store, Web's `app-web` included;
@@ -31,10 +31,8 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from . import migrations, storage
-from .app_stores import APP_STORE_FILE, WEB_APP_ID, app_dir
-from .maintenance import remove_tree
-from .principal import OWNER_USER_ID
+from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ROOT, WEB_APP_ID, app_dir,
+                            migrations, remove_tree, storage)
 
 CONFIG_FILES = ("harness.yaml", "harness.local.yaml", "projects.yaml")
 SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
@@ -182,8 +180,6 @@ def _live_apps(main_store: Path) -> set[str] | None:
 
 def plan(cfg, folder: Path, *, include_config: bool = False, config_dir: Path | None = None) -> Plan:
     """What a restore of a verified `folder` puts where. Doesn't touch anything."""
-    from .config import ROOT
-
     folder = Path(folder)
     data = Path(cfg.data_dir)
     p = Plan(folder)
@@ -358,7 +354,7 @@ def restore(cfg, folder: Path, *, apply_changes: bool = False, include_config: b
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m harness.backup_restore",
+    ap = argparse.ArgumentParser(prog="python -m harness_modules.backup.restore",
                                  description="Verify or restore a nightly backup folder (backup.dir/<date>)")
     ap.add_argument("--config-dir", help="the harness config folder (default: HARNESS_CONFIG_DIR or config/)")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -378,8 +374,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{args.folder}: " + ("failed verification" if problems else "OK"))
         return 1 if problems else 0
 
-    from . import config as config_mod
-    cfg = config_mod.load(args.config_dir)
+    import harness.modules as core
+    cfg = core.load_config(args.config_dir)
     try:
         restore(cfg, args.folder, apply_changes=args.apply, include_config=args.include_config,
                 config_dir=args.config_dir)

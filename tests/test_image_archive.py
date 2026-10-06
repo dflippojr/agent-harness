@@ -112,11 +112,11 @@ def test_unwritable_and_low_space_are_actionable_without_breaking_snapshot(tmp_p
         "free_bytes": 12, "free_space_warning": "image archive has less than the configured free-space threshold"})
 
     async def run():
-        result = await m.maintenance.backup()
+        result = await m.modules.get("backup").service.backup()
         assert Path(result["path"], "harness.sqlite3").is_file()
         assert result["image_archive"]["errors"] == 1
         assert result["image_archive"]["free_space_warning"]
-        assert m.maintenance.last_backup["ok_at"]
+        assert m.modules.get("backup").service.last_backup["ok_at"]
     asyncio.run(run())
 
     original_root = m.modules.get("images").archive.root

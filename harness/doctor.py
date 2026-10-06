@@ -237,10 +237,6 @@ def check_daemon(r: Report, cfg) -> None:
                 memory = gpu.get("memory") or {}
                 low = "; RAM low, new work waits" if memory.get("low") else ""
                 r.ok("Resource guard", f"state {gpu['state']}{parked}{low}")
-        backup = httpx.get(f"{base}/maintenance", timeout=60).json().get("backup") or {}
-        if backup.get("enabled"):
-            (r.ok if backup.get("ok_at") else r.warn)("Backups", backup.get("path") or
-                                                      "no backup yet (the first runs 5 minutes after start)")
     except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
         r.fail("Daemon", f"{base} not answering ({type(e).__name__}); see {cfg.data_dir / 'logs'}")
 

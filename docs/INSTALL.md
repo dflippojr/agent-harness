@@ -259,7 +259,7 @@ machine. Copy the backup folder elsewhere yourself if you want an off-machine co
 Check a backup at any time; it changes nothing and can run while the daemon is up:
 
 ```powershell
-python -m harness.backup_restore verify <backup.dir>\2026-10-04
+python -m harness_modules.backup.restore verify <backup.dir>\2026-10-04
 ```
 
 It fails (exit code 1) if a store doesn't open read-only or fails `PRAGMA integrity_check`, if a store's schema is
@@ -269,8 +269,8 @@ or if an App or member file isn't named by a valid id.
 To restore, stop the daemon (the scheduled task or service), then:
 
 ```powershell
-python -m harness.backup_restore restore <backup.dir>\2026-10-04          # dry run: prints what it would replace
-python -m harness.backup_restore restore <backup.dir>\2026-10-04 --apply  # does it
+python -m harness_modules.backup.restore restore <backup.dir>\2026-10-04          # dry run: prints what it would replace
+python -m harness_modules.backup.restore restore <backup.dir>\2026-10-04 --apply  # does it
 ```
 
 Add `--config-dir <folder>` if the install doesn't use the default `config` folder. `restore` verifies the backup

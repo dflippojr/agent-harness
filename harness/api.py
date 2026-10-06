@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1210,11 +1209,6 @@ async def maintenance(request: Request):
 @api_router.post("/maintenance/cleanup")
 async def maintenance_cleanup(request: Request):
     return await require_owner(request).maintenance.cleanup()
-
-
-@api_router.post("/maintenance/backup")
-async def maintenance_backup(request: Request):
-    return await require_owner(request).maintenance.backup()
 
 
 @api_router.get("/sessions/{ref}/approvals")

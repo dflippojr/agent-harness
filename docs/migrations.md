@@ -12,7 +12,7 @@ brings it up to date on every start, before the daemon serves anything (issue #2
    each in its own `BEGIN IMMEDIATE` ... `COMMIT` together with its `user_version` bump.
 3. **Too new**: if `user_version` is higher than the newest step this code knows, the daemon refuses to start
    (`SchemaTooNewError`) without writing to the file. Upgrade the harness or restore a backup
-   (`python -m harness.backup_restore`, see INSTALL.md "Backups and restore").
+   (`python -m harness_modules.backup.restore`, see INSTALL.md "Backups and restore").
 
 `python -m harness.doctor` reports the version read-only: OK when current, WARN when behind (it migrates on
 the next start), FAIL when too new.

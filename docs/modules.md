@@ -3,8 +3,9 @@
 Issue #334 splits Agent Harness Server into a core and optional add-on modules. This page is the module
 interface ([`harness/modules.py`](../harness/modules.py)) and how to write a module. Images
 ([`harness_modules/images/`](../harness_modules/images/)) is the first module behind it notifications
-([`harness_modules/notifications/`](../harness_modules/notifications/)) the second and session search
-([`harness_modules/search/`](../harness_modules/search/)) the third; the other optional features move
+([`harness_modules/notifications/`](../harness_modules/notifications/)) the second, session search
+([`harness_modules/search/`](../harness_modules/search/)) the third and the nightly backup
+([`harness_modules/backup/`](../harness_modules/backup/)) the fourth; the other optional features move
 one module per PR in stage (c).
 
 ## Rules
@@ -56,6 +57,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     __init__.py runtime.py routes.py settings.py service.py
   search/                session search (formerly harness/search.py): /search, /api/v1/search, session_search/read
     __init__.py runtime.py routes.py settings.py service.py
+  backup/                nightly backup (formerly Maintenance's backup section) and verify/restore (#374)
+    __init__.py runtime.py routes.py settings.py service.py restore.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
@@ -130,3 +133,12 @@ These are names, not imports, and move with the config and storage split in stag
   The `search:` YAML section, the `search.enabled` key, `Project.session_search` and the `search` App capability are
   unchanged. The module owns the queries, `/search`, `/api/v1/search`, `session_search` / `session_read`, their prompt
   section and the `harness search` row.
+- Backup: the `backup:` YAML section (`BackupConfig`), the `backup` switch, `backup.dir` in discovery paths and
+  `harness/sqlite_backup.py` (shared with pre-migration snapshots, which keep working whatever modules are present)
+  stay in the core; the old config keys are unchanged, so nothing needs a deprecation. The module owns the nightly
+  schedule, the on-demand `POST /maintenance/backup` and `harness maintenance backup`, the `backup.*` settings keys,
+  the `backup` entry of `GET /maintenance` (the core reports `{"enabled": false}` while the module is absent), the
+  `harness_backup_*` metrics, the doctor check and `python -m harness_modules.backup.restore` (was
+  `python -m harness.backup_restore`). While the module is absent no scheduled backup runs and `backup.enabled` has
+  no effect; pre-migration snapshots still happen. The image archive joins the backup through
+  `ModuleRuntime.backup` as before.
