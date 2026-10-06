@@ -77,7 +77,7 @@ accept a manual floor change, and ideally run when the machine is otherwise quie
 
 ### Re-run
 
-`scripts/mitsuba_study.py` is the committed driver (phases `write-qwen`, `write-mitsuba`, `write-mitsuba-cpu`,
+`ops/mitsuba_study.py` is the committed driver (phases `write-qwen`, `write-mitsuba`, `write-mitsuba-cpu`,
 `images`, `describe`, `handover`; separate ComfyUI on port 8189 through its HTTP API; 2 GB RAM guard; seed 307). It was
 exercised only up to the first two Qwen prompts; the other phases are untested. The prompts and protocol above are
 unchanged and still valid for a re-run. The owner visual check is not applicable yet.
