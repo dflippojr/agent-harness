@@ -2151,7 +2151,8 @@ class Runner:
         return max(decisions, key=lambda d: rank.get(d.action, 1))
 
     def _taint_from_result(self, s: dict, name: str, args: dict) -> None:
-        source = taint.source_for(name, args)
+        policy = self.policy(s) if name.startswith("mcp__") else None
+        source = taint.source_for(name, args, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
         if source is None and s.get("kind") == TOOLS_ONLY and name in {t["name"] for t in s.get("app_tools") or []}:
             source = ("app_tool", f"app tool {name}")  # free text from the App's data, e.g. bank descriptions (#329)
         if source is None and name == "session_read":

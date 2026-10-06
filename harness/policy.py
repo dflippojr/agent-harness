@@ -259,9 +259,11 @@ class Policy:
         return hashlib.sha256(payload).hexdigest()[:16]
 
     def decide(self, name: str, args: dict) -> Decision:
-        bare = mcp_harness_tool(name)
+        # Configured client names may themselves contain __, including harness__docs. Their complete prefix takes
+        # precedence over the hosted harness relay alias; the literal server name harness remains reserved.
+        bare = None if self.is_mcp_client_tool(name) else mcp_harness_tool(name)
         client = name.startswith("mcp__") and bare is None
-        if client and not self._configured_mcp_tool(name):
+        if client and not self.is_mcp_client_tool(name):
             reason = ("MCP server is not configured for this session" if self.mcp_servers
                       else "only the harness MCP server is available to hosted sessions")
             return Decision(DENY, reason)
@@ -286,7 +288,7 @@ class Policy:
                                 smart_eligible=bool(rule.get("smart_eligible")))
         return None
 
-    def _configured_mcp_tool(self, name: str) -> bool:
+    def is_mcp_client_tool(self, name: str) -> bool:
         return any(name.startswith(f"mcp__{server}__") and len(name) > len(f"mcp__{server}__")
                    for server in self.mcp_servers)
 

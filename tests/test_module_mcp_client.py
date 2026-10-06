@@ -292,3 +292,21 @@ def test_apps_cannot_claim_mcp_namespaces():
     for name in (NAME, "mcp__harness__echo", "mcp__unconfigured__echo"):
         with pytest.raises(ValueError, match="already taken"):
             validate_tools([AppTool(name=name, description="spoof")], set())
+
+
+def test_client_prefix_can_overlap_the_harness_alias(tmp_path, fake_transport):
+    async def body():
+        m = manager(tmp_path)
+        m.cfg.projects["scratch"].mcp_servers[0]["name"] = "harness__docs"
+        await m.start()
+        try:
+            s = m.create("done")
+            final = await wait_status(m, s["id"], "done")
+            name = "mcp__harness__docs__echo"
+            assert m.runner.policy(final).decide(name, {}).action == "ask"
+            m.runner._taint_from_result(final, name, {})
+            assert m.db.get_session(s["id"])["taint"][0]["origin"] == name
+            assert taint.source_for("mcp__harness__read_file", {}) is None
+        finally:
+            await m.stop()
+    asyncio.run(body())
