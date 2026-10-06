@@ -34,7 +34,7 @@ def _validate_server(server):
     name = server.get("name", "")
     if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_]+", name) or name == "harness":
         raise ValueError("MCP name must be [a-z0-9_]+; harness is reserved")
-    if not re.fullmatch(r"[^\s@]+@sha256:[a-fA-F0-9]{64}", str(server.get("image", ""))):
+    if not re.fullmatch(r"[a-zA-Z0-9][^\s@]*@sha256:[a-fA-F0-9]{64}", str(server.get("image", ""))):
         raise ValueError("MCP image must be pinned by digest (repo@sha256:64 hex digits)")
     _validate_launch(server)
     _validate_env(server.get("env", {}))

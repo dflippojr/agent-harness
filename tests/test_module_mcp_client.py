@@ -53,6 +53,7 @@ def fake_transport(monkeypatch):
     {"command": "shell"}, {"command": []}, {"command": [1]}, {"command": ["\0"]},
     {"env": {"TOKEN": "plaintext"}}, {"env": {"TOKEN": {"secret_file": ""}}},
     {"mount_workspace": True}, {"rules": [{"tool": "write_file", "action": "allow"}]}, {"unknown": True},
+    {"image": "--volume=/:/host@sha256:" + "a" * 64}, {"image": "-repo@sha256:" + "a" * 64},
 ])
 def test_invalid_project_config(change):
     with pytest.raises(ValueError):
@@ -404,3 +405,23 @@ def test_mcp_arguments_use_full_schema_without_external_retrieval():
     schema["properties"]["text"]["$ref"] = "https://schemas.invalid/tool"
     with pytest.raises(ToolError, match="cannot resolve"):
         kit.validate_args(NAME, {"text": "yes"})
+
+
+def test_daemon_shutdown_attempts_every_session_after_cleanup_failure(tmp_path, fake_transport, monkeypatch):
+    async def body():
+        m = manager(tmp_path)
+        rt = m.modules.get("mcp_client")
+        await rt.prepare_session(SESSION)
+        await rt.prepare_session(SESSION | {"id": "another-session"})
+        attempted = []
+
+        async def fail_first(argv, **kwargs):
+            attempted.append(argv[-1])
+            return (124, "", "timed out") if len(attempted) == 1 else (0, "", "")
+
+        monkeypatch.setattr(service, "run_cmd", fail_first)
+        with pytest.raises(ToolError, match="session cleanup failed"):
+            await rt.stop()
+        assert len(attempted) == 2 and not rt.sessions
+        assert all(client.proc.poll() is not None for client in fake_transport[0])
+    asyncio.run(body())

@@ -1,6 +1,6 @@
 """Session lifecycle; no container is started for hosted, member or tools-only sessions."""
 
-from harness.modules import ModuleRuntime, validate_mcp_servers
+from harness.modules import ModuleRuntime, ToolError, validate_mcp_servers
 
 from .service import SessionTools
 
@@ -40,5 +40,11 @@ class McpRuntime(ModuleRuntime):
             await kit.close()
 
     async def stop(self):
+        errors = []
         for sid in list(self.sessions):
-            await self.end_session(sid)
+            try:
+                await self.end_session(sid)
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise ToolError("MCP session cleanup failed") from errors[0]
