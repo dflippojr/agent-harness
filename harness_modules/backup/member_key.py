@@ -35,12 +35,13 @@ def fingerprint(content: bytes) -> str:
 def restrict(path: Path) -> None:
     """Enforce owner-only access, including a protected Windows DACL."""
     if os.name == "nt":
-        # Use the native ACL tool to remove inherited access and grant only the daemon account.
-        # This is a freshly created empty file: it has no explicit access rules to preserve.
+        # Reset explicit temp-file grants too (Python/Windows can add SYSTEM, Administrators and Owner Rights).
+        # The file is still empty; protect it before writing any key bytes.
         identity = _windows_command(["whoami", "/user", "/fo", "csv", "/nh"])
         sid = next(csv.reader(identity.splitlines()))[-1]
         if not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
             raise OSError("could not determine the daemon account's Windows SID")
+        _windows_command(["icacls", str(path.resolve()), "/reset"])
         _windows_command(["icacls", str(path.resolve()), "/inheritance:r", "/grant:r", f"*{sid}:F"])
     else:
         path.chmod(0o600)

@@ -23,6 +23,21 @@ from test_daemon import make_cfg
 CANARY = "synthetic-member-api-key-123456789"
 
 
+def _assert_private_acl(path, manifest):
+    identity = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], check=True,
+                              capture_output=True, text=True).stdout
+    sid = next(csv.reader(identity.splitlines()))[-1]
+    subprocess.run(["icacls", str(path), "/save", str(manifest)], check=True, capture_output=True)
+    descriptor = manifest.read_text(encoding="utf-16-le").splitlines()[1]
+    assert descriptor.startswith("D:P")  # protected, no inherited access
+    assert descriptor.count("(") == 1  # exactly one access rule
+    assert "(A;;FA;;;" in descriptor  # one allow rule, full access
+    # Built-in accounts can use an SDDL alias (e.g. LA); ask Windows to resolve the SID.
+    found = subprocess.run(["icacls", str(path), "/findsid", f"*{sid}"], check=True,
+                           capture_output=True, text=True)
+    assert str(path) in found.stdout  # the single rule belongs to the daemon account
+
+
 @pytest.fixture
 def snapshot(tmp_path, caplog):
     cfg = make_cfg(tmp_path / "source")
@@ -56,20 +71,8 @@ def test_round_trip_decrypts_and_keeps_key_separate(snapshot):
     restored = target.data_dir / member_key.KEY_FILE
     assert restored.read_bytes() == (cfg.data_dir / member_key.KEY_FILE).read_bytes()
     if os.name == "nt":
-        identity = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], check=True,
-                                  capture_output=True, text=True).stdout
-        sid = next(csv.reader(identity.splitlines()))[-1]
         for path in (restored, key):
-            manifest = target.data_dir.parent / "key-acl.txt"
-            subprocess.run(["icacls", str(path), "/save", str(manifest)], check=True, capture_output=True)
-            descriptor = manifest.read_text(encoding="utf-16-le").splitlines()[1]
-            assert descriptor.startswith("D:P")  # protected, no inherited access
-            assert descriptor.count("(") == 1  # exactly one access rule
-            assert "(A;;FA;;;" in descriptor  # one allow rule, full access
-            # Built-in accounts can use an SDDL alias (e.g. LA); ask Windows to resolve the SID.
-            found = subprocess.run(["icacls", str(path), "/findsid", f"*{sid}"], check=True,
-                                   capture_output=True, text=True)
-            assert str(path) in found.stdout  # the single rule belongs to the daemon account
+            _assert_private_acl(path, target.data_dir.parent / "key-acl.txt")
     else:
         assert restored.stat().st_mode & 0o777 == 0o600
         assert key.stat().st_mode & 0o777 == 0o600
@@ -248,3 +251,17 @@ def test_invalid_restore_key_directory_warns_and_restores_database(snapshot):
     restore(target, folder, apply_changes=True, out=lines.append)
     assert target.db_path.is_file() and not (target.data_dir / member_key.KEY_FILE).exists()
     assert any("member-key directory is invalid" in line for line in lines)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows explicit temp-file ACLs")
+def test_private_write_removes_explicit_temp_file_grants(tmp_path, monkeypatch):
+    restrict = member_key.restrict
+    def with_extra_grants(path):
+        assert path.read_bytes() == b""  # permission changes happen before writing the secret
+        subprocess.run(["icacls", str(path), "/grant", "*S-1-5-18:F", "*S-1-5-32-544:F", "*S-1-3-4:F",
+                        "*S-1-1-0:R"], check=True, capture_output=True)
+        restrict(path)
+    monkeypatch.setattr(member_key, "restrict", with_extra_grants)
+    path = tmp_path / "synthetic.key"
+    member_key.write_private(path, base64.b64encode(b"s" * 32))
+    _assert_private_acl(path, tmp_path / "key-acl.txt")
