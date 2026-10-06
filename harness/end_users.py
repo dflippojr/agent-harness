@@ -343,7 +343,7 @@ class EndUserLogins:
                  "-e", "NODE_USE_ENV_PROXY=1", *cli_domains.probe_args(backend, cfg, app_id, end_user),
                  cfg.image, *LOGOUT_COMMANDS[backend]], timeout=60)
             if code != 0:  # the volume goes either way: the person is unlinked locally even if the CLI could not call out
-                log.warning("%s logout for an end user exited %s", backend, code)
+                log.warning("an end user's CLI logout failed; their volume is deleted regardless")
         backend_state.forget_end_user_login(backend, app_id, end_user)
         try:
             await cli_domains.drop_end_user_volumes(app_id, [end_user], backends=(backend,))

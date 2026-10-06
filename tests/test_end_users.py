@@ -493,6 +493,24 @@ def test_unlink_runs_the_clis_logout_then_deletes_the_volume(tmp_path, monkeypat
     assert remove == ["docker", "volume", "rm", "-f", volume]
 
 
+def test_a_failed_logout_logs_nothing_taken_from_the_request(tmp_path, monkeypatch, caplog):
+    manager = _manager(tmp_path)
+    calls = []
+
+    async def run_cmd(command, **kwargs):
+        calls.append(command)
+        return (1, "", "boom") if "logout" in command else (0, "", "")
+    monkeypatch.setattr(end_users, "run_cmd", run_cmd)
+    monkeypatch.setattr(cli_domains, "run_cmd", run_cmd)
+    monkeypatch.setattr(backend_state, "_volume_exists", lambda volume: True)
+    caplog.set_level(logging.DEBUG, logger="harness.end_users")
+    logins = EndUserLogins(manager.cfg)
+    asyncio.run(logins.unlink("app-\nforged", "dana", "claude"))
+    assert any(c[-1] == "logout" for c in calls) and calls[-1][:4] == ["docker", "volume", "rm", "-f"]
+    text = caplog.text
+    assert "logout failed" in text and "forged" not in text and "dana" not in text
+
+
 def test_app_erase_removes_every_end_users_volumes_and_the_registry(tmp_path, monkeypatch):
     manager = _manager(tmp_path)
     removed = []
