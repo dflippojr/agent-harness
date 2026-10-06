@@ -217,7 +217,11 @@ class SessionTools:
         errors = []
         for server, client in clients:
             try:
-                await run_cmd(["docker", "rm", "-f", container_name(self.session["id"], server)], timeout=30)
+                code, out, err = await run_cmd(
+                    ["docker", "rm", "-f", container_name(self.session["id"], server)], timeout=30)
+                # --rm may already have removed a server that exited on its own. Other failures must be reported.
+                if code and "no such container" not in (err or out).lower():
+                    raise ToolError("could not remove MCP sidecar")
             except Exception as exc:
                 errors.append(exc)
             try:

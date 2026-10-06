@@ -339,7 +339,8 @@ def test_timeout_does_not_include_waiting_for_rpc_lock(fake_transport, monkeypat
     asyncio.run(body())
 
 
-def test_cleanup_failure_still_closes_every_sidecar(fake_transport, monkeypatch):
+@pytest.mark.parametrize("failure", ["exception", "exit_code", "process_close"])
+def test_cleanup_failure_still_closes_every_sidecar(fake_transport, monkeypatch, failure):
     async def body():
         kit = service.SessionTools(SESSION, [SERVER, SERVER | {"name": "second"}], config.SandboxConfig())
         await kit.start()
@@ -347,14 +348,38 @@ def test_cleanup_failure_still_closes_every_sidecar(fake_transport, monkeypatch)
 
         async def fail_first(argv, **kwargs):
             attempted.append(argv[-1])
-            if len(attempted) == 1:
+            if len(attempted) == 1 and failure == "exception":
                 raise OSError("docker failed")
+            if len(attempted) == 1 and failure == "exit_code":
+                return 124, "", "timed out"
             return 0, "", ""
 
         monkeypatch.setattr(service, "run_cmd", fail_first)
+        if failure == "process_close":
+            close = fake_transport[0][0].close
+
+            def close_then_fail():
+                close()
+                raise OSError("process close failed")
+
+            monkeypatch.setattr(fake_transport[0][0], "close", close_then_fail)
         with pytest.raises(ToolError, match="cleanup failed"):
             await kit.close()
         assert len(attempted) == 2
         assert not kit.clients and not kit.tools
         assert all(client.proc.poll() is not None for client in fake_transport[0])
+    asyncio.run(body())
+
+
+def test_cleanup_accepts_an_already_removed_container(fake_transport, monkeypatch):
+    async def body():
+        kit = service.SessionTools(SESSION, [SERVER], config.SandboxConfig())
+        await kit.start()
+
+        async def removed(argv, **kwargs):
+            return 1, "", "Error response from daemon: No such container: fake"
+
+        monkeypatch.setattr(service, "run_cmd", removed)
+        await kit.close()
+        assert fake_transport[0][0].proc.poll() is not None
     asyncio.run(body())
