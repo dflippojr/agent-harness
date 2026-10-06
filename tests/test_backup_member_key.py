@@ -159,6 +159,20 @@ def test_key_changed_after_plan_rolls_back(snapshot):
     assert existing.read_bytes() == original and not target.db_path.exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL error handling")
+@pytest.mark.parametrize("failure", ["identity", "acl"])
+def test_windows_permission_errors_abort_before_writing(tmp_path, monkeypatch, failure):
+    def command(args, **kwargs):
+        if args[0] == "whoami":
+            identity = '"synthetic-user","invalid"' if failure == "identity" else '"synthetic-user","S-1-5-21-1"'
+            return subprocess.CompletedProcess(args, 0, stdout=identity, stderr="")
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="synthetic access denied")
+    monkeypatch.setattr(member_key.subprocess, "run", command)
+    with pytest.raises(OSError, match="Windows SID|synthetic access denied"):
+        member_key.write_private(tmp_path / "key", b"synthetic")
+    assert not list(tmp_path.iterdir())
+
+
 def test_doctor_reports_copy_and_warning(snapshot, monkeypatch):
     import httpx
     _, _, _, key = snapshot

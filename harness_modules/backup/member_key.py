@@ -2,6 +2,7 @@
 
 import base64
 from contextlib import closing
+import csv
 import hashlib
 import os
 import re
@@ -34,16 +35,22 @@ def fingerprint(content: bytes) -> str:
 def restrict(path: Path) -> None:
     """Enforce owner-only access, including a protected Windows DACL."""
     if os.name == "nt":
-        script = ("$ErrorActionPreference='Stop'; $p=$env:HARNESS_BACKUP_KEY_PATH; "
-                  "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; "
-                  "$acl=New-Object System.Security.AccessControl.FileSecurity; "
-                  "$acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); "
-                  "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow'); "
-                  "$acl.AddAccessRule($rule); Set-Acl -LiteralPath $p -AclObject $acl")
-        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True,
-                       capture_output=True, env={**os.environ, "HARNESS_BACKUP_KEY_PATH": str(path.resolve())})
+        # Use the native ACL tool to remove inherited access and grant only the daemon account.
+        # This is a freshly created empty file: it has no explicit access rules to preserve.
+        identity = _windows_command(["whoami", "/user", "/fo", "csv", "/nh"])
+        sid = next(csv.reader(identity.splitlines()))[-1]
+        if not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
+            raise OSError("could not determine the daemon account's Windows SID")
+        _windows_command(["icacls", str(path.resolve()), "/inheritance:r", "/grant:r", f"*{sid}:F"])
     else:
         path.chmod(0o600)
+
+
+def _windows_command(args: list[str]) -> str:
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode:
+        raise OSError(f"Windows key permissions failed: {result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout
 
 
 def write_private(path: Path, content: bytes) -> None:
