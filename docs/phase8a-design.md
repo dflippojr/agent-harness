@@ -211,7 +211,24 @@ instruction file that every later session loaded. `harness/cli_domains.py` now g
   | Claude Code | `settings.json`, `CLAUDE.md` | `agents`, `commands`, `skills`, `plugins`, `hooks`, `output-styles`, `rules` | Always `--strict-mcp-config` (with the harness server or none), which ignores user-scope MCP servers in the state's `.claude.json` |
   | Codex | `config.toml`, `AGENTS.md`, `AGENTS.override.md`, `hooks.json` | `rules`, `skills` (the bundled system skills then fail to install, which Codex logs and survives), `prompts` | |
   | Claude Code (managed) | `/etc/claude-code/managed-settings.json` (`{"allowManagedHooksOnly": true}`), mounted outside the state volume in every domain, App-tools-only sessions included | | Managed settings outrank project settings: `hooks` in the workspace's `.claude/settings.json` and `settings.local.json` are ignored (#388), while the workspace `CLAUDE.md` still loads (`--setting-sources user` would drop it). On 2.1.272 managed settings seat no plugin (`cc-plugin-sec-default` is not present) and change no tools, skills, agents or slash commands. A workspace `.mcp.json` never runs: `--strict-mcp-config` ignores it. |
+  | Codex (managed) | `/etc/codex/requirements.toml` (`[mcp_servers.harness]` identity = the relay URL), mounted outside the state volume in every domain | | Managed requirements outrank the workspace's `.codex/config.toml`: a project-scope `[mcp_servers.*]` is disabled instead of running its command (#394). The workspace `AGENTS.md` still loads. Study results below. |
   | Cursor | `config/permissions.json` (`{}`: no extra allow-lists) | | `HOME` is the container's own `/home/agent`, which goes with the container: `~/.cursor` (`mcp.json`, `hooks.json`, `sandbox.json`, `cli.json`, rules, skills, agents), `~/.claude` and shell dotfiles never persist. Only `/home/agent/.cursor-state/config` and `data` do. `config/cli-config.json` stays writable: Cursor rewrites it on every run, and with `--force` its allow-lists grant nothing more. |
+- **Workspace-planted Codex config (#394):** a hosted Codex session loads the workspace's `.codex/` without asking, so
+  each project-scope path was tried on Codex 0.154.0 (the image's pin) in a worker-shaped container (the real
+  `CodexSession` flags and mounts, no network, a stub Responses endpoint, a throwaway volume, `codex app-server`
+  driven over stdio like the daemon does):
+
+  | Path in `/workspace/.codex/` or the workspace | Result on 0.154.0 |
+  |---|---|
+  | `config.toml` `[mcp_servers.<name>]` (`command`) | **Ran** the command at session start, without approval. Blocked by `requirements.toml`; `-c mcp_servers={}` does not (tables merge), and `-c` can only name a server the attacker chooses |
+  | `config.toml` `notify` | Blocked: Codex ignores it from project config ("Ignored unsupported project-local config keys") |
+  | `config.toml` `[[hooks.*]]` and `hooks.json` (`SessionStart`, `UserPromptSubmit`) | Loaded but did not run in an untrusted project |
+  | `config.toml` `openai_base_url`, `model_provider`, `model_providers` | Blocked: ignored as unsupported project-local keys |
+  | `config.toml` `approval_policy`, `sandbox_mode`, `model` | No effect: the harness's `thread/start` and `turn/start` set the approval policy, sandbox and model explicitly |
+  | `AGENTS.md` | Loads (kept: repos rely on it) |
+
+  Recheck the table when the Codex pin moves. With `requirements.toml` mounted the planted MCP server never starts and
+  the harness's own server (named in the file) still does. The regression tests are in `tests/test_cli_domains.py`.
 - **Preparing volumes:** a volume mounted where the image has no directory, and any directory Docker creates for a
   nested mount, would be root's. Before a domain's first session (once per daemon process) a throwaway root
   container creates the volumes and hands their roots to uid 1000. The login scripts do the same for the login
