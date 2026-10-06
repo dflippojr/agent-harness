@@ -23,7 +23,15 @@ be a fair drop-in for Qwen3.6 if the provenance is accepted. No follow-up implem
 | Architecture | Qwen3.6-35B-A3B (30 Gated DeltaNet + 10 full-attention layers, 256 experts, 8 routed). Loads and serves on b10950, so no llama.cpp upgrade is needed |
 | Settings | `--fit on --cache-type-k q8_0 --cache-type-v q8_0`, sampling temperature 0.6, top_p 0.95, top_k 20, min_p 0 (same as Qwen; the model card recommends the same) |
 
-Entry added to `bakeoff/models.yaml` as `qwen3.8-35b-a3b-distill` (its path points at a file that was deleted after the study).
+The study used a temporary `bakeoff/models.yaml` entry, removed again because the file is deleted and `run.py` defaults
+to `--models all`. To re-run, add it back:
+
+```
+  qwen3.8-35b-a3b-distill:
+    path: C:/AI/models/qwen38-distill/Qwen3.8-35B-A3B-Q4_K_M.gguf
+    args: [--fit, "on", --cache-type-k, q8_0, --cache-type-v, q8_0]
+    sampling: {temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.0}
+```
 
 ## Commands (identical for both models)
 
@@ -33,8 +41,8 @@ python -m bakeoff.run --suite hard --repeats 3 --models qwen3.6-35b-a3b,qwen3.8-
 python -m bakeoff.run --suite core --repeats 3 --models qwen3.6-35b-a3b,qwen3.8-35b-a3b-distill
 ```
 
-Note: the `core` suite currently holds 12 tasks, not the 5 named in the issue (the 5 are all included and all 3/3 for
-both models). Throughput per run is the median over agent turns as recorded by `run.py`.
+Note: the `core` suite currently holds 13 tasks, not the 5 named in the issue (the 5 are all included and all 3/3 for
+both models; the others, including `git_branch_commit`, are also 3/3 for both). Throughput per run is the median over agent turns as recorded by `run.py`.
 
 ## Gates
 
@@ -42,7 +50,7 @@ both models). Throughput per run is the median over agent turns as recorded by `
 | --- | --- | --- | --- |
 | Hard-suite passes (10 tasks x 3), need >= Qwen - 3 = 25 | 28/30 | 27/30 | **pass** |
 | Per repeat (min / median / max) | 9 / 9 / 10 | 9 / 9 / 9 | reported |
-| Core-suite passes (12 tasks x 3) | 39/39 | 39/39 | tie |
+| Core-suite passes (13 tasks x 3) | 39/39 | 39/39 | tie |
 | Invalid tool calls, hard + core (need <= Qwen) | 0 + 0 | 0 + 0 | **pass** |
 | Decode speed >= 90% at each perf point | see below | | **pass** (lowest 90.8%) |
 | Memory at ctx 32768, `vram_mib` + `server_private_mib` after longest prompt (need <= Qwen) | 14756 + 15748 = 30504 MiB | 14723 + 15721 = 30444 MiB | **pass** (-0.2%, no gain for the companion 20% rule) |
