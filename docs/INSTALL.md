@@ -262,6 +262,8 @@ mode 600 elsewhere). Set `backup.member_key_dir` in local YAML to choose its dir
 the database snapshot records the fingerprint it expects. Key copies are retained even when dated backups are
 pruned, so an older off-site database can still find its key after a key change. Move obsolete copies manually
 only when no retained database needs them. The key directory cannot be inside a dated backup folder.
+An invalid or unreadable source key, unavailable key directory or permission-setting failure skips the key copy
+with a warning and leaves the database backup usable. A key is never written without first restricting access.
 
 **Warning:** the key and a database backup together decrypt every member's stored API key. Every run that copies
 the key logs this warning. Keep the key copy somewhere other than where the database backups are kept off-site;

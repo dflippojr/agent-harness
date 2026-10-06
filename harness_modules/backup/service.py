@@ -122,7 +122,11 @@ class BackupService:
         db_copy = tmp / "harness.sqlite3"
         self._backup_db(db_copy)
         warnings: list[str] = []
-        member_key = snapshot_key(self.cfg, root, db_copy, warnings)
+        try:
+            member_key = snapshot_key(self.cfg, root, db_copy, warnings)
+        except (OSError, ValueError) as e:
+            member_key = None
+            warnings.append(f"Member key backup skipped: {e}; members may need to re-add their API keys after restore.")
         for warning in warnings:
             log.warning(warning)
         if member_key:

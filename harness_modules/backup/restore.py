@@ -229,17 +229,25 @@ def _plan_member_key(cfg, folder: Path, p: Plan) -> None:
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             reason = "the database's member-key fingerprint is invalid"
         else:
-            source = key_dir(cfg, folder.parent) / f"{digest}.key"
-            try:
-                matches = fingerprint(source.read_bytes()) == digest
-            except (OSError, ValueError):
-                reason = "the matching member-key copy is missing, unreadable or invalid"
-            else:
-                if matches:
-                    p.items.append(Item("member_key", source, Path(cfg.data_dir) / KEY_FILE, "member encryption key"))
-                    return
-                reason = "the member-key copy's fingerprint does not match the database"
+            source, reason = _matching_member_key(cfg, folder, digest)
+            if source:
+                p.items.append(Item("member_key", source, Path(cfg.data_dir) / KEY_FILE, "member encryption key"))
+                return
     p.warnings.append(f"{reason}; members must re-add their API keys if their existing key cannot decrypt them")
+
+
+def _matching_member_key(cfg, folder: Path, digest: str) -> tuple[Path | None, str]:
+    try:
+        source = key_dir(cfg, folder.parent) / f"{digest}.key"
+    except ValueError as e:
+        return None, f"the member-key directory is invalid: {e}"
+    try:
+        matches = fingerprint(source.read_bytes()) == digest
+    except (OSError, ValueError):
+        return None, "the matching member-key copy is missing, unreadable or invalid"
+    if not matches:
+        return None, "the member-key copy's fingerprint does not match the database"
+    return source, ""
 
 
 # the daemon

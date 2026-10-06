@@ -67,11 +67,11 @@ def write_private(path: Path, content: bytes) -> None:
 
 
 def snapshot_key(cfg, root: Path, database: Path, warnings: list[str]) -> Path | None:
-    directory = key_dir(cfg, root)
     source = Path(cfg.data_dir) / KEY_FILE
     with closing(sqlite3.connect(database)) as conn:
         conn.execute("DROP TABLE IF EXISTS backup_member_key")
         conn.commit()
+    directory = key_dir(cfg, root)
     if not source.exists():
         return None
     try:

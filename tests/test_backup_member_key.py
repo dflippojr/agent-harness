@@ -213,3 +213,31 @@ def test_bad_source_key_keeps_database_backup_usable(snapshot, monkeypatch, dama
     restore(target, folder, apply_changes=True, out=lines.append)
     assert target.db_path.is_file()
     assert any("members must re-add" in line for line in lines)
+
+
+@pytest.mark.parametrize("failure", ["directory", "permissions"])
+def test_key_copy_failure_keeps_database_backup(snapshot, monkeypatch, failure):
+    cfg, _, folder, _ = snapshot
+    if failure == "directory":
+        cfg.backup.member_key_dir = str(folder)
+    else:
+        def denied(path):
+            raise OSError("synthetic ACL denial")
+        monkeypatch.setattr(member_key, "restrict", denied)
+    db = Database(cfg.db_path)
+    try:
+        result = asyncio.run(BackupService(cfg, db).backup())
+    finally:
+        db.close()
+    assert result["ok_at"] and not result["member_key_path"]
+    assert "Member key backup skipped" in result["warnings"][0]
+    assert member_key.expected_fingerprint(folder / "harness.sqlite3") == ""
+
+
+def test_invalid_restore_key_directory_warns_and_restores_database(snapshot):
+    _, target, folder, _ = snapshot
+    target.backup.member_key_dir = str(folder)
+    lines = []
+    restore(target, folder, apply_changes=True, out=lines.append)
+    assert target.db_path.is_file() and not (target.data_dir / member_key.KEY_FILE).exists()
+    assert any("member-key directory is invalid" in line for line in lines)
