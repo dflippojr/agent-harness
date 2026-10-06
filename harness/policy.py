@@ -259,19 +259,14 @@ class Policy:
         return hashlib.sha256(payload).hexdigest()[:16]
 
     def decide(self, name: str, args: dict) -> Decision:
-        alias = ""
-        client = False
-        if name.startswith("mcp__"):
-            bare = mcp_harness_tool(name)
-            if bare is None:
-                if not any(name.startswith(f"mcp__{server}__") and len(name) > len(f"mcp__{server}__")
-                           for server in self.mcp_servers):
-                    reason = ("MCP server is not configured for this session" if self.mcp_servers
-                              else "only the harness MCP server is available to hosted sessions")
-                    return Decision(DENY, reason)
-                client = True
-            else:
-                name, alias = bare, name
+        bare = mcp_harness_tool(name)
+        client = name.startswith("mcp__") and bare is None
+        if client and not self._configured_mcp_tool(name):
+            reason = ("MCP server is not configured for this session" if self.mcp_servers
+                      else "only the harness MCP server is available to hosted sessions")
+            return Decision(DENY, reason)
+        alias = name if bare else ""
+        name = bare or name
         for rule in self.rules:
             root = self.workspace_root
             if _matches(rule, name, args, root) or (alias and _matches(rule, alias, args, root)):
@@ -284,6 +279,10 @@ class Policy:
         if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
             return Decision(ASK, "deletes files outside the scratch area")
         return Decision(ASK, "owner-configured MCP tool requires approval") if client else Decision(ALLOW)
+
+    def _configured_mcp_tool(self, name: str) -> bool:
+        return any(name.startswith(f"mcp__{server}__") and len(name) > len(f"mcp__{server}__")
+                   for server in self.mcp_servers)
 
 
 CHAT_ALLOWED_TOOLS = frozenset({"web_search", "web_fetch", "WebSearch", "WebFetch"})
