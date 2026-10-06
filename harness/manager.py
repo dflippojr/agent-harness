@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bus import EventBus
-from . import review_comments
+from . import cli_domains, review_comments
 from . import review_comments
 from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
@@ -61,6 +61,7 @@ class CreateOptions:
     compare_group: str = ""
     taint: list | None = None  # untrusted sources the session starts with (taint.py)
     retention_days: float | None = None  # an App session's own retention (#330); else the App's default
+    end_user: str = ""  # the App's end user whose own subscription login the session runs on (#365)
 REMOTE_WORKSPACE_ROOT = "~/.agent-harness/workspaces"  # where runners keep session workspaces (display only)
 MEMORY_PROMPT = ("User context: memory_index, memory_search, and memory_read give read access to part of the "
                  "user's personal memory library (projects, work, home, tastes). Check it when the task depends on "
@@ -175,6 +176,8 @@ class Manager:
         self.maintenance.app_sweep = self.sweep_app_data
         from .member_github import MemberGitHub
         self.github_auth = MemberGitHub(cfg, self.db)
+        from .end_users import EndUserLogins
+        self.end_user_logins = EndUserLogins(cfg)
         self._github_reconcile: threading.Thread | None = None
         self.secret_scanner = secret_scan.Scanner(secret_scan.tools_dir(cfg))
         self._scanner_boot: asyncio.Task | None = None
@@ -404,6 +407,7 @@ class Manager:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
         self.hub.close()
         await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
+        await asyncio.to_thread(self.end_user_logins.close)  # a sign-in in flight ends with the daemon
         if self.jobs is not None:
             await self.jobs.stop()
         if self.canary is not None:
@@ -516,6 +520,7 @@ class Manager:
         member = owner_id != OWNER_USER_ID
         if member:
             backend = self._check_member(owner_id, backend, target, spec, app)
+        self.check_end_user(opts.end_user, app, backend)
         defaults = self.settings.app_defaults(app) if app and getattr(self, "settings", None) else {}
         backend, model, effort = self._default_choice(backend, model, effort, defaults)
         if tools_only:
@@ -560,12 +565,81 @@ class Manager:
             "app_defaults": dict(defaults) if app else {},
             "job_id": opts.job_id, "owner_id": owner_id, "kind": opts.kind, "compare_group": opts.compare_group,
             "skills": self.skills.freeze_public(frozen) if self.skills is not None else [],
-            "taint": list(opts.taint or []),
+            "taint": list(opts.taint or []), "end_user": opts.end_user,
             **({"retention_days": float(opts.retention_days)} if app and opts.retention_days else {}),
         }
         self._insert_created(session, app, tools, opts.job_id, prompt)
         self._spawn(sid)
         return self.db.get_session(sid)
+
+    @staticmethod
+    def check_end_user(end_user: str, app: dict | None, backend: str | None) -> None:
+        """An `end_user` names a person of one App who signed in with their own subscription (#365)."""
+        if not end_user:
+            return
+        if app is None:
+            raise HarnessError(403, "only an App token can name an end user")
+        if not cli_domains.valid_end_user(end_user):
+            raise HarnessError(400, "end user ids are 1-128 letters, digits and _.@:-", "invalid_end_user")
+        if backend not in cli_domains.END_USER_BACKENDS:
+            raise HarnessError(400, f"an end user's own login runs on {' or '.join(cli_domains.END_USER_BACKENDS)}, "
+                                    f"not {backend!r}", "end_user_backend_unsupported")
+
+    async def require_end_user_login(self, app_id: str, end_user: str, backend: str) -> None:
+        """Refuse before a session exists when this end user has no login on `backend` (never another credential)."""
+        from .backend_state import end_user_login_ready
+        cfg = self.cfg.backends.get(backend)
+        if cfg is None or not await asyncio.to_thread(end_user_login_ready, backend, cfg, app_id, end_user):
+            raise HarnessError(409, f"this end user has not signed in to {backend}; sign them in with "
+                                    f"POST /api/v1/end-users/{{id}}/logins/{backend} first", "end_user_login_required")
+
+    # end users' own logins (#365)
+    @staticmethod
+    def _login_error(e) -> HarnessError:
+        return HarnessError(e.status, str(e), e.code)
+
+    async def end_user_login_start(self, app_id: str, end_user: str, backend: str) -> dict:
+        from .end_users import LoginError
+        try:
+            self.end_user_logins.check(backend, end_user)
+            self._require_end_user_backend(backend)
+            await asyncio.to_thread(self.db.for_app(app_id).register_end_user, end_user)
+            return await self.end_user_logins.start(app_id, end_user, backend)
+        except LoginError as e:
+            raise self._login_error(e) from e
+
+    def _require_end_user_backend(self, backend: str) -> None:
+        if backend not in self.cfg.backends or not self.cfg.backends[backend].enabled:
+            raise HarnessError(409, f"backend {backend!r} is not enabled on this server", "backend_unavailable")
+
+    async def end_user_login_code(self, app_id: str, end_user: str, backend: str, attempt_id: str, code: str) -> dict:
+        from .end_users import LoginError
+        try:
+            return await self.end_user_logins.submit_code(app_id, end_user, backend, attempt_id, code)
+        except LoginError as e:
+            raise self._login_error(e) from e
+
+    async def end_user_login_status(self, app_id: str, end_user: str, backend: str) -> dict:
+        from .end_users import LoginError
+        try:
+            self._require_end_user_backend(backend)
+            return await self.end_user_logins.status(app_id, end_user, backend)
+        except LoginError as e:
+            raise self._login_error(e) from e
+
+    async def end_user_unlink(self, app_id: str, end_user: str, backend: str) -> None:
+        """Sign an end user out of `backend`: their running sessions stop, the CLI's own logout runs and the volume
+        holding their login and CLI state is deleted."""
+        from .end_users import LoginError
+        try:
+            self.end_user_logins.check(backend, end_user)
+            for sid in self.db.app_session_ids(app_id):
+                s = self.db.get_session(sid)
+                if s and s.get("end_user") == end_user and s["backend"] == backend and s["status"] in ACTIVE:
+                    await self._stop_run(sid)
+            await self.end_user_logins.unlink(app_id, end_user, backend)
+        except LoginError as e:
+            raise self._login_error(e) from e
 
     def _create_budgets(self, app: dict | None) -> tuple[int, int]:
         if getattr(self, "settings", None):
@@ -1716,6 +1790,10 @@ class Manager:
                 await sandbox.remove()
         if self.cfg.backends:
             await cli_domains.drop_app_volumes(self.cfg.backends, app_id)
+        end_users = await asyncio.to_thread(self.db.for_app(app_id).end_users)
+        if end_users:  # every end user's login and CLI state goes with the App (#365)
+            await asyncio.to_thread(self.end_user_logins.cancel_app, app_id)
+            await cli_domains.drop_end_user_volumes(app_id, end_users)
         await asyncio.to_thread(self.db.drop_app, app_id)
         self.db.mark_app_erased(app_id)
 

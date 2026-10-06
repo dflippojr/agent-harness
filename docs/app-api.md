@@ -284,6 +284,55 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
   [Where an App's data lives](#where-an-apps-data-lives)).
 - `backend` is `local` (the tower model) or a hosted CLI id such as `claude`, `codex`, or `cursor`
   (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login.
+- `end_user` (optional, App tokens only, with `backend` `claude` or `codex`) runs the session on **that person's own
+  subscription**: your App's own opaque id for them, 1-128 letters, digits and `_.@:-`. The person must have signed
+  in first ([End users' own logins](#end-users-own-logins)). Without a login the request is refused with `409
+  end_user_login_required`; it never falls back to the owner's login or token, or to an App key. A request without
+  `end_user` behaves as before. The session response repeats `end_user`, and the owner's usage tally is kept per
+  end user.
+
+### End users' own logins
+
+An App can let each person use their own Claude or Codex plan (`harness/end_users.py`, #365). Everything below needs
+an App token with the `sessions` scope; end users belong to the calling App alone. Cursor is not supported.
+
+| Call | Does |
+| --- | --- |
+| `POST /api/v1/end-users/{id}/logins/{backend}` | Starts the CLI's own login in a throwaway container on that person's volume. `201` with `{attempt_id, verification_url, user_code?, needs_code, state, expires_in}`. Starting again replaces the person's last attempt |
+| `POST /api/v1/end-users/{id}/logins/{backend}/{attempt_id}/code` | Claude only. Body `{"code": "..."}`: the one-time code the person pasted. `200`. Once per attempt (`409 code_already_submitted` after) |
+| `GET /api/v1/end-users/{id}/logins/{backend}` | `{backend, linked, attempt}`: `linked` is whether the person is signed in now; `attempt` is `null` or `{attempt_id, state, needs_code, expires_in}` (`waiting`, `submitted`, `completed`, `failed`, `expired`, `cancelled`), for the popup to poll |
+| `DELETE /api/v1/end-users/{id}/logins/{backend}` | Unlink: stops the person's running sessions on that backend, runs the CLI's own logout and deletes their volume. `204`; harmless to repeat |
+
+**The popup contract.**
+
+1. The App calls the first endpoint and shows `verification_url` in a popup (Codex: also `user_code`, which is meant
+   to be displayed and is not a credential).
+2. The person signs in on the provider's own site. Codex finishes there and nothing comes back; poll `GET` until
+   `linked` is true. Claude shows the person a one-time code: the popup passes it to the code endpoint, which writes
+   it straight to the waiting `claude auth login`, then poll `GET`.
+3. A request with `end_user` now runs on that person's login.
+
+**What happens to the code.** It goes from the request body to the login process's stdin and nowhere else: not to
+disk, logs, events, the database, transcripts or any response, and no error repeats it. It works once, expires with
+the attempt (10 minutes) and only the App that started the attempt can submit it. The credential stays in the
+person's volume; the daemon never reads it host-side and no API returns it.
+
+**Isolation.** One volume per (App, end user, backend), named from a hash of the ids, holds the person's login and
+their CLI's history and config (read-only config and managed settings as for any session). A session mounts only its
+own end user's volume: never another person's, the owner's login or the owner's token. The harness guarantees a
+credential serves only requests naming its end user; separating the end users' *data* inside your App stays your job.
+
+**Concurrency.** One person's sessions on one backend share one login, whose refresh token rotates on use (#390). The
+harness therefore runs at most one session per (App, end user, backend) at a time and queues the next until it ends.
+This applies to Codex too, whose refresh could race alike.
+
+**Errors** carry `error.code`: `end_user_login_required` (409), `invalid_end_user`, `end_user_backend_unsupported`
+(400), `no_such_attempt` (404), `code_not_needed`, `code_already_submitted`, `attempt_not_waiting` (409),
+`invalid_code` (400), `login_failed` (502), `too_many_logins` (429).
+
+**Revocation.** Unlinking and erasing the App delete the person's volumes. A logout inside the CLI does not
+necessarily revoke the grant at the provider (unconfirmed for both CLIs, `docs/per-user-subscriptions-study.md`
+section 4), so tell people they can remove the CLI's authorisation in their provider account settings.
 
 ### App-tools-only sessions
 
@@ -594,5 +643,6 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
 | 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
+| 1.19 | 2026-10-05 | End users' own subscription logins (#365): `end_user` on session create and `/api/v1/end-users/{id}/logins/{backend}` (start, code, status, unlink), for `claude` and `codex` |
 | 1.18 | 2026-10-05 | `codex` runs App-tools-only sessions and is listed in `app_tools_only_backends`; hosted Codex sessions get the harness tools over MCP (#373) |
 | 1.16 | 2026-10-03 | `DELETE /api/v1/sessions/{id}` erases a session and everything tied to it; `retention_days` on create and an App default retention erase idle sessions; a revoked App's store and folder are erased after 7 days unless the owner undoes the revoke; App session files live in the App's folder (#330) |

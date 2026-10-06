@@ -15,6 +15,11 @@ leave a file that a session of another domain loads.
   mounted read-only over the writable state (harness-defined files from `cli_home/`, or empty read-only directories),
   so a session can't plant one for the next session in its own domain either.
 
+- **End users (#365):** an App's end user who signs in with their own subscription gets one volume per (App, end
+  user, backend), `harness-eu-<backend>-<hash of the ids>`, holding both their login and the CLI's state (Claude's
+  login directory moves into it, `.login`). It takes the same read-only config and managed settings; no other
+  login or token is mounted with it.
+
 The daemon never mounts these volumes on the host: preparing them, erasing a conversation and removing an App's
 volumes all run in throwaway containers. Findings per CLI version are in docs/phase8a-design.md.
 """
@@ -22,9 +27,10 @@ volumes all run in throwaway containers. Findings per CLI version are in docs/ph
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .sandbox import run_cmd
@@ -82,6 +88,38 @@ LAYOUTS = {
 }
 
 
+END_USER_BACKENDS = ("claude", "codex")  # the backends an App's end user can sign in to (#365)
+END_USER_LOGIN_SUBDIR = ".login"
+_END_USER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}")
+
+
+def valid_end_user(end_user: str) -> bool:
+    """An end user's id is the App's own opaque string: short, printable and free of path or shell characters."""
+    return bool(_END_USER_ID.fullmatch(end_user or ""))
+
+
+def end_user_layout(backend: str) -> Layout:
+    """`backend`'s layout for an end user's single volume: the login sits in the state volume, not in a shared one."""
+    layout = LAYOUTS[backend]
+    if not layout.login_dir:
+        return layout
+    state = layout.state_dir
+    env = tuple(f"CLAUDE_SECURESTORAGE_CONFIG_DIR={state}/{END_USER_LOGIN_SUBDIR}"
+                if item.startswith("CLAUDE_SECURESTORAGE_CONFIG_DIR=") else item for item in layout.env)
+    return replace(layout, login_dir="", env=env, state_subdirs=(*layout.state_subdirs, END_USER_LOGIN_SUBDIR))
+
+
+def end_user_volume(backend: str, app_id: str, end_user: str) -> str:
+    """The one volume of (App, end user, backend). Named from a hash, so neither id (nor a lookalike) can pick another
+    person's volume."""
+    digest = hashlib.sha256(json.dumps([app_id, end_user], separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+    return f"harness-eu-{backend}-{digest}"
+
+
+def _layout(backend: str, end_user: str) -> Layout:
+    return end_user_layout(backend) if end_user else LAYOUTS[backend]
+
+
 def domain_slug(app_id: str) -> str:
     """`app_id` as a Docker volume name part: itself when it is short and safe, else a hash of it."""
     if _SAFE_SLUG.fullmatch(app_id) and not _HASHED_SLUG.fullmatch(app_id):
@@ -114,17 +152,20 @@ def needs_app_login(backend: str) -> bool:
     return backend in LAYOUTS and LAYOUTS[backend].per_app_login
 
 
-def docker_args(backend: str, cfg, app_id: str = "", *, token: bool = False) -> list[str]:
+def docker_args(backend: str, cfg, app_id: str = "", *, token: bool = False, end_user: str = "") -> list[str]:
     """The env and mount arguments that give a session its domain's state, the login and the read-only config.
     With `token` (Claude's CLAUDE_CODE_OAUTH_TOKEN, #390) the session has no login volume: nothing can refresh, race
-    over or overwrite a shared credential."""
-    layout = LAYOUTS[backend]
+    over or overwrite a shared credential. With `end_user` (#365) the session has that person's own volume and never the
+    token."""
+    layout = _layout(backend, end_user)
+    token = token and not end_user
     args: list[str] = []
     for item in layout.env:
         if token and item.startswith("CLAUDE_SECURESTORAGE_CONFIG_DIR="):
             continue
         args += ["-e", item]
-    args += ["-v", f"{state_volume(backend, cfg, app_id)}:{layout.state_dir}"]
+    state = end_user_volume(backend, app_id, end_user) if end_user else state_volume(backend, cfg, app_id)
+    args += ["-v", f"{state}:{layout.state_dir}"]
     if layout.login_dir and not token:
         args += ["-v", f"{login_volume(backend, cfg, app_id)}:{layout.login_dir}"]
     for target, source in layout.ro_files:
@@ -137,20 +178,24 @@ def docker_args(backend: str, cfg, app_id: str = "", *, token: bool = False) -> 
     return args
 
 
-def probe_args(backend: str, cfg, app_id: str = "") -> list[str]:
-    """Mounts for a login-status probe: the login only. The CLI's state is a throwaway directory in the container."""
-    layout = LAYOUTS[backend]
+def probe_args(backend: str, cfg, app_id: str = "", end_user: str = "") -> list[str]:
+    """Mounts for a login-status probe: the login only. The CLI's state is a throwaway directory in the container,
+    except for an end user's single volume (#365), which holds both."""
+    layout = _layout(backend, end_user)
+    if end_user:
+        return [*[a for item in layout.env for a in ("-e", item)],
+                "-v", f"{end_user_volume(backend, app_id, end_user)}:{layout.state_dir}"]
     login_dir = layout.login_dir or layout.state_dir
     return [*[a for item in layout.env for a in ("-e", item)],
             "-v", f"{login_volume(backend, cfg, app_id)}:{login_dir}"]
 
 
-def prepare_command(backend: str, cfg, app_id: str = "") -> list[str]:
+def prepare_command(backend: str, cfg, app_id: str = "", end_user: str = "") -> list[str]:
     """A throwaway root container that creates the domain's volumes and hands them to the agent user. A volume
     mounted where the image has no directory, and any directory Docker makes for a nested mount, would be root's."""
-    layout = LAYOUTS[backend]
-    args = ["docker", "run", "--rm", "--network", "none", "--user", "0:0",
-            "-v", f"{state_volume(backend, cfg, app_id)}:/state"]
+    layout = _layout(backend, end_user)
+    state = end_user_volume(backend, app_id, end_user) if end_user else state_volume(backend, cfg, app_id)
+    args = ["docker", "run", "--rm", "--network", "none", "--user", "0:0", "-v", f"{state}:/state"]
     owned = ["/state", *(f"/state/{d}" for d in layout.state_subdirs)]
     owned += [f"/state/{Path(t).parent.as_posix()}" for t, _ in layout.ro_files if Path(t).parent.as_posix() != "."]
     if layout.login_dir:
@@ -164,12 +209,13 @@ def prepare_command(backend: str, cfg, app_id: str = "") -> list[str]:
 _prepared: set[tuple[str, ...]] = set()
 
 
-async def prepare(backend: str, cfg, app_id: str = "") -> None:
+async def prepare(backend: str, cfg, app_id: str = "", end_user: str = "") -> None:
     """Run `prepare_command` once per daemon process for each domain's volumes."""
-    key = (backend, cfg.image, state_volume(backend, cfg, app_id), login_volume(backend, cfg, app_id))
+    key = ((backend, cfg.image, end_user_volume(backend, app_id, end_user)) if end_user else
+           (backend, cfg.image, state_volume(backend, cfg, app_id), login_volume(backend, cfg, app_id)))
     if key in _prepared:
         return
-    code, out, err = await run_cmd(prepare_command(backend, cfg, app_id), timeout=120)
+    code, out, err = await run_cmd(prepare_command(backend, cfg, app_id, end_user), timeout=120)
     if code != 0:
         raise RuntimeError(f"could not prepare the {backend} volumes: {(err or out).strip()[:300]}")
     _prepared.add(key)
@@ -216,3 +262,20 @@ async def drop_app_volumes(backends: dict, app_id: str) -> None:
     if code != 0:
         raise RuntimeError(f"could not remove the CLI volumes of App {app_id}: {(err or out).strip()[:300]}")
     log.info("removed the CLI volumes of App %s", app_id)
+
+
+def end_user_volumes(app_id: str, end_user: str, backends=END_USER_BACKENDS) -> list[str]:
+    return [end_user_volume(b, app_id, end_user) for b in backends]
+
+
+async def drop_end_user_volumes(app_id: str, end_users: list[str], backends=END_USER_BACKENDS) -> None:
+    """Remove every volume of these end users of App `app_id` (unlink, App erase). Their sessions must be stopped."""
+    names = [n for e in end_users for n in end_user_volumes(app_id, e, backends)]
+    if not names:
+        return
+    for key in [k for k in _prepared if k[-1] in names]:  # a re-link must prepare (and chown) the new volume
+        _prepared.discard(key)
+    code, out, err = await run_cmd(["docker", "volume", "rm", "-f", *names], timeout=120)
+    if code != 0:
+        raise RuntimeError(f"could not remove end-user volumes of App {app_id}: {(err or out).strip()[:300]}")
+    log.info("removed %s end-user volumes of App %s", len(names), app_id)

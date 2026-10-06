@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import claude_token, compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, taint, telemetry
+from . import claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, taint, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -181,6 +181,7 @@ class Runner:
         self._cli_sessions: dict[str, ClaudeSession | CodexSession | CursorSession] = {}
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
+        self._locks = credential_sources.KeyedLocks()
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
         self.cursor_factory = CursorSession
@@ -717,7 +718,7 @@ class Runner:
                 return
             message = str(e)
             code = (TOOLS_ONLY_UNSUPPORTED if isinstance(e, ToolsOnlyUnsupported)
-                    else self._cli_failure_code(self.db.get_session(sid), message))
+                    else e.code or self._cli_failure_code(self.db.get_session(sid), message))
             self._record_failure(sid, code, message, code in ("model_unavailable", "provider_unavailable"),
                                  f"{code}: {message}")
             await self._end_run(sid)
@@ -858,7 +859,7 @@ class Runner:
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
             await self._memory_gate(sid, f"{backend_name} worker container")
             try:
-                async with slot:
+                async with self._credential_lock(s), slot:
                     with telemetry.span("hosted_cli_turn", {"harness.backend": backend_name,
                                                             "gen_ai.request.model": backend.model}):
                         cli = await self._start_cli(sid, backend_name, backend, credential, use_api_key, api_key,
@@ -868,6 +869,17 @@ class Runner:
             except CliLimitError as limit:
                 await self._cli_limit_reached(sid, backend_name, limit, use_api_key)
                 recovered = True
+
+    def _credential_lock(self, s: dict):
+        """Held for a CLI attempt on a credential that two sessions must not use at once (#365 decision 5: one end
+        user's sessions share one refresh token, so the next session queues until the running one ends). Taken before
+        the backend's slot, so a queued session holds none."""
+        end_user = s.get("end_user") or ""
+        source = credential_sources.select(s.get("app_id") or "", end_user) if end_user else None
+        key = source.lock_key(s["backend"], s.get("app_id") or "", end_user) if source else ""
+        if not key:
+            return contextlib.nullcontext()
+        return self._locks.hold(key)
 
     def _cli_credentials(self, sid: str, s: dict, backend_name: str) -> tuple[dict, bool, str]:
         """The credential for this attempt, whether it is an API key, and the key itself."""
@@ -887,7 +899,7 @@ class Runner:
         s = self.db.get_session(sid)
         if s["status"] != "waiting_approval":
             await self.aset_status(sid, "running")
-        source = credential["source"] if use_api_key else "subscription"
+        source = credential["source"] if use_api_key or credential["source"] == "end_user_login" else "subscription"
         run = {**s["run"], "billing_mode": "api_key" if use_api_key else backend.billing,
                "credential_source": source,
                "credential_assignment": credential["assignment_id"]}
@@ -897,7 +909,8 @@ class Runner:
             run["billing_warned"] = True
             self.db.update_session(sid, run=run)
             await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": warning})
-        if backend_name == "claude" and claude_token.uses_token(backend, s.get("app_id") or "", api_key):
+        end_user = s.get("end_user") or ""
+        if backend_name == "claude" and not end_user and claude_token.uses_token(backend, s.get("app_id") or "", api_key):
             note = claude_token.reminder(backend.oauth_token_file)
             if note and not run.get("token_expiry_warned"):
                 run["token_expiry_warned"] = True
@@ -922,7 +935,7 @@ class Runner:
         cli = factory(session_id=sid, workspace=Path(s["workspace"]), backend=frozen,
                       sandbox=self.cfg.sandbox, system_prompt=s["context"][0]["content"],
                       model=s["model"], backend_session_id=backend_session_id, api_key=api_key,
-                      app_id=s.get("app_id") or "", **extra)
+                      app_id=s.get("app_id") or "", **({"end_user": end_user} if end_user else {}), **extra)
         self._cli_sessions[sid] = cli
         await cli.start()
         prompt = ("The harness restarted; continue the task." if recovered else
@@ -994,6 +1007,13 @@ class Runner:
         backend = self.cfg.backends[s["backend"]]
         app_id = s.get("app_id") or ""
         assignment = self.db.app_provider_credential(app_id, s["backend"]) if app_id else None
+        if s.get("end_user"):
+            # The person's own subscription login, whatever the App or the owner has configured (#365): never a key,
+            # a fallback to a key or the owner's token. An App the owner has not granted this backend is still denied.
+            granted = not (assignment is None and self.db.app_provider_managed(app_id)) and (
+                assignment is None or assignment["policy"] != "denied")
+            return {"policy": "subscription" if granted else "denied", "key": "", "source": "end_user_login",
+                    "assignment_id": assignment["id"] if assignment else "", "path": "", "marker": None}
         if assignment is not None:
             path = self.cfg.provider_secret_files.get(assignment["secret_ref"], "")
             return {"policy": assignment["policy"], "key": self._read_secret(path),
@@ -1566,7 +1586,7 @@ class Runner:
             self._flag_end_pending(sid, status)
             self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
                                  str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
-                                 str(run.get("credential_source") or "subscription"))
+                                 str(run.get("credential_source") or "subscription"), s.get("end_user") or "")
             if failed:
                 self.bus.emit(sid, "error", failure)
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})

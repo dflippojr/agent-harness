@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from . import claude_token, cli_domains
+from . import claude_token, cli_domains, credential_sources, end_users  # noqa: F401 - end_users registers its source
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
 from .sandbox import run_cmd
@@ -31,11 +31,23 @@ EMPTY_MCP_CONFIG = '{"mcpServers": {}}'
 
 
 class CliBackendError(Exception):
-    """The provider CLI exited or stopped speaking valid JSONL."""
+    """The provider CLI exited or stopped speaking valid JSONL. `code` is a stable failure code when there is one."""
+
+    def __init__(self, message: str = "", code: str = ""):
+        super().__init__(message)
+        self.code = code
 
 
-async def ready_domain(name: str, backend: BackendConfig, app_id: str, api_key: str) -> None:
-    """Prepare the session's domain volumes; refuse an App on a CLI whose login is per App until it has one."""
+async def ready_domain(name: str, backend: BackendConfig, app_id: str, api_key: str, end_user: str = "") -> None:
+    """Prepare the session's domain volumes; refuse an App on a CLI whose login is per App until it has one. An end
+    user's session runs on that person's own login or is refused (#365): no other credential is tried."""
+    if end_user:
+        source = credential_sources.select(app_id, end_user)
+        try:
+            await source.ready(name, backend, app_id, end_user)
+        except credential_sources.CredentialRefused as e:
+            raise CliBackendError(str(e), e.code) from e
+        return
     try:
         await cli_domains.prepare(name, backend, app_id)
     except RuntimeError as e:
@@ -57,9 +69,10 @@ class ClaudeSession:
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = ""):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = ""):
         self.session_id = session_id
         self.app_id = app_id  # the session's domain: "" for Web, else its App (#371)
+        self.end_user = end_user  # the App's end user whose own login this session runs on (#365)
         self.workspace = workspace.resolve()
         self.tools_only = tools_only  # an App-tools-only session (#329): no built-in tools, only the MCP server's
         self.backend = backend
@@ -67,7 +80,7 @@ class ClaudeSession:
         self.system_prompt = system_prompt
         self.model = model or backend.model
         self.backend_session_id = backend_session_id
-        self.api_key = api_key
+        self.api_key = "" if end_user else api_key  # an end user's session never runs on a key of the App's or owner's
         self.container = f"harness-{session_id}-claude"
         # With MCP the CLI shares the relay's network namespace: the relay's loopback port is reachable from this
         # container only, and egress still goes through the same network and proxy.
@@ -92,7 +105,7 @@ class ClaudeSession:
             "-e", f"HTTP_PROXY={self.backend.proxy}",
             "-e", NO_PROXY,
             "-e", NODE_USE_ENV_PROXY,
-            *cli_domains.docker_args("claude", self.backend, self.app_id, token=self._uses_token()),
+            *cli_domains.docker_args("claude", self.backend, self.app_id, token=self._uses_token(), end_user=self.end_user),
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
             "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
@@ -123,7 +136,7 @@ class ClaudeSession:
         return args
 
     def _uses_token(self) -> bool:
-        return claude_token.uses_token(self.backend, self.app_id, self.api_key)
+        return not self.end_user and claude_token.uses_token(self.backend, self.app_id, self.api_key)
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -132,7 +145,7 @@ class ClaudeSession:
             # our finally block and can leave `docker run`'s container behind.
             # Remove only this session's deterministic container before reuse.
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-            await ready_domain("claude", self.backend, self.app_id, self.api_key)
+            await ready_domain("claude", self.backend, self.app_id, self.api_key, self.end_user)
             if self.mcp is not None:
                 try:
                     await self.mcp.start()
@@ -270,9 +283,10 @@ class CodexSession:
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = ""):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = ""):
         self.session_id = session_id
         self.app_id = app_id
+        self.end_user = end_user
         self.workspace = workspace.resolve()
         # With MCP Codex shares the relay's network namespace, as Claude Code does (#373). An App-tools-only session
         # starts with no environment and every other built-in tool off, so only the harness server's tools remain.
@@ -284,7 +298,7 @@ class CodexSession:
         self.system_prompt = system_prompt
         self.model = model or backend.model
         self.backend_session_id = backend_session_id
-        self.api_key = api_key
+        self.api_key = "" if end_user else api_key
         self.container = f"harness-{session_id}-codex"
         self._popen = popen
         self._command_override = command
@@ -314,7 +328,7 @@ class CodexSession:
             "-e", f"HTTP_PROXY={self.backend.proxy}",
             "-e", NO_PROXY,
             "-e", NODE_USE_ENV_PROXY,
-            *cli_domains.docker_args("codex", self.backend, self.app_id),
+            *cli_domains.docker_args("codex", self.backend, self.app_id, end_user=self.end_user),
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
             "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
@@ -344,7 +358,7 @@ class CodexSession:
         loop = asyncio.get_running_loop()
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-            await ready_domain("codex", self.backend, self.app_id, self.api_key)
+            await ready_domain("codex", self.backend, self.app_id, self.api_key, self.end_user)
             if self.mcp is not None:
                 try:
                     await self.mcp.start()

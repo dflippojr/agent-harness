@@ -42,7 +42,7 @@ NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.18"
+API_VERSION = "1.19"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -157,6 +157,11 @@ class CreateAppSession(BaseModel):
     retention_days: float | None = Field(default=None, gt=0, le=36500, description=(
         "Erase this session (as DELETE does) once it has been idle this many days. Without it the App's default "
         "retention applies, set by the owner; without either it is kept until deleted."))
+    end_user: str | None = Field(default=None, max_length=128, description=(
+        "The App's own opaque id of the person this session runs for. It runs on that person's own Claude or Codex "
+        "subscription login (set up with /api/v1/end-users/{id}/logins/{backend}) or is refused with "
+        "end_user_login_required; it never uses the owner's login or an App key. Needs an App token and backend "
+        "claude or codex."))
 
 
 class AppSessionUpdate(BaseModel):
@@ -550,6 +555,8 @@ def view(m, s: dict) -> dict:
     out = m.summary(s)
     out["app_tools"] = [t["name"] for t in (s.get("app_tools") or [])]
     out["metadata"] = s.get("app_metadata") or {}
+    if s.get("end_user"):
+        out["end_user"] = s["end_user"]
     out["answer"] = m.db.get_session(s["id"])["answer"]
     return out
 
@@ -1037,12 +1044,63 @@ async def create_session(body: CreateAppSession, request: Request):
             raise HarnessError(403, "only an App token can start an App-tools-only session")
         if body.project:
             raise HarnessError(400, "an App-tools-only session has no project; leave project out")
+    end_user = body.end_user or ""
+    if end_user:
+        if key.get("kind") != "app":
+            raise HarnessError(403, "only an App token can name an end user")
+        m.check_end_user(end_user, app, backend)
+        await m.require_end_user_login(key["id"], end_user, backend or "")
     s = m.create(body.prompt, project=body.project or "scratch", backend=backend, model=body.model,
                  title=body.title, app=app, app_context=context_text(key["name"], blocks) if blocks else "",
                  app_tools=body.tools, app_metadata=body.metadata, owner_id=user_id,
                  kind=TOOLS_ONLY if body.tools_only else "agent",
-                 retention_days=body.retention_days if app is not None else None)
+                 retention_days=body.retention_days if app is not None else None, end_user=end_user)
     return view(m, s)
+
+
+def end_user_app(request: Request) -> tuple:
+    """The manager and the calling App's id: end users belong to an App, so only an App token reaches them."""
+    m = mgr(request)
+    key = auth(request, "sessions")
+    if key.get("kind") != "app":
+        raise HarnessError(403, "only an App token can manage its end users' logins")
+    return m, key["id"]
+
+
+@route_table.post("/api/v1/end-users/{end_user}/logins/{backend}", status_code=201)
+async def start_end_user_login(end_user: str, backend: str, request: Request):
+    """Start the CLI's own sign-in for one of the App's end users (#365): `{verification_url, user_code?, needs_code,
+    attempt_id, ...}`. The App shows the URL (and the user code) in a popup."""
+    m, app_id = end_user_app(request)
+    return JSONResponse(await m.end_user_login_start(app_id, end_user, backend), status_code=201,
+                        headers={"Cache-Control": "no-store"})
+
+
+@route_table.post("/api/v1/end-users/{end_user}/logins/{backend}/{attempt_id}/code")
+async def submit_end_user_login_code(end_user: str, backend: str, attempt_id: str, request: Request):
+    """Pass the one-time code the person pasted into the popup (Claude) straight to the waiting login. The body is
+    read by hand, so a validation error can never echo the code back."""
+    m, app_id = end_user_app(request)
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    code = body.get("code") if isinstance(body, dict) else None
+    out = await m.end_user_login_code(app_id, end_user, backend, attempt_id, code)
+    return JSONResponse(out, headers={"Cache-Control": "no-store"})
+
+
+@route_table.get("/api/v1/end-users/{end_user}/logins/{backend}")
+async def end_user_login_status(end_user: str, backend: str, request: Request):
+    m, app_id = end_user_app(request)
+    return JSONResponse(await m.end_user_login_status(app_id, end_user, backend),
+                        headers={"Cache-Control": "no-store"})
+
+
+@route_table.delete("/api/v1/end-users/{end_user}/logins/{backend}", status_code=204)
+async def unlink_end_user_login(end_user: str, backend: str, request: Request):
+    m, app_id = end_user_app(request)
+    await m.end_user_unlink(app_id, end_user, backend)
 
 
 @route_table.delete("/api/v1/sessions/{ref}", status_code=204)

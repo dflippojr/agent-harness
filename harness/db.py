@@ -1204,12 +1204,40 @@ class Database:
     @_writes
     def record_usage(self, backend: str, sid: str, app_id: str, prompt_tokens: int,
                      completion_tokens: int, cost_usd: float, billing: str,
-                     credential_source: str = "subscription") -> None:
+                     credential_source: str = "subscription", end_user: str = "") -> None:
         with self.lock:
             self.conn.execute("INSERT INTO usage (backend, session_id, app_id, prompt_tokens, completion_tokens, "
-                              "cost_usd, billing, credential_source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              "cost_usd, billing, credential_source, end_user, created_at) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                               (backend, sid, app_id, prompt_tokens, completion_tokens, cost_usd, billing,
-                               credential_source, time.time()))
+                               credential_source, end_user, time.time()))
+
+    @_reads
+    def end_user_usage(self, app_id: str, end_user: str) -> dict:
+        """What one end user's sessions used (#365): the usage log's tally for that (App, end user)."""
+        with self.lock:
+            row = self.conn.execute("SELECT COUNT(*) sessions, COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
+                                    "COALESCE(SUM(completion_tokens),0) completion_tokens, "
+                                    "COALESCE(SUM(cost_usd),0) cost_usd FROM usage WHERE app_id = ? AND end_user = ?",
+                                    (app_id, end_user)).fetchone()
+        return dict(row)
+
+    @_writes
+    def register_end_user(self, end_user: str) -> None:
+        """Record an App's end user in the store it is called on (the App's own, `db.for_app(app_id)`)."""
+        with self.lock:
+            self.conn.execute("INSERT OR IGNORE INTO end_users (id, created_at) VALUES (?, ?)",
+                              (end_user, time.time()))
+
+    @_reads
+    def end_users(self) -> list[str]:
+        with self.lock:
+            return [r["id"] for r in self.conn.execute("SELECT id FROM end_users ORDER BY created_at, id")]
+
+    @_writes
+    def forget_end_user(self, end_user: str) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM end_users WHERE id = ?", (end_user,))
 
     @_reads
     def app_usage(self, app_id: str) -> dict:
