@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, taint, telemetry
+from . import claude_token, compaction, delegate_edit, efficiency, grounding, llm, projects, state as agent_state, taint, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -897,6 +897,12 @@ class Runner:
             run["billing_warned"] = True
             self.db.update_session(sid, run=run)
             await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": warning})
+        if backend_name == "claude" and claude_token.uses_token(backend, s.get("app_id") or "", api_key):
+            note = claude_token.reminder(backend.oauth_token_file)
+            if note and not run.get("token_expiry_warned"):
+                run["token_expiry_warned"] = True
+                self.db.update_session(sid, run=run)
+                await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": note})
         factory = {"claude": self.cli_factory, "codex": self.codex_factory,
                    "cursor": self.cursor_factory}[backend_name]
         from dataclasses import replace

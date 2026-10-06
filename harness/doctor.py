@@ -128,6 +128,26 @@ def check_github_token(r: Report, cfg) -> None:
         r.ok("GitHub task token", "configured and readable")
 
 
+def check_claude_token(r: Report, cfg) -> None:
+    """The owner's `claude setup-token` token (#390): presence and expiry only, never the value or its path."""
+    from . import claude_token
+    claude = cfg.backends.get("claude")
+    path = getattr(claude, "oauth_token_file", "") if claude is not None else ""
+    if not path:
+        return
+    if not claude_token.read_token(path):
+        r.warn("Claude token", "configured but missing or empty; run ops/backends/login.ps1 claude -Token")
+        return
+    end = claude_token.expiry(path)
+    note = claude_token.reminder(path)
+    if end is None:
+        r.warn("Claude token", "present, but its expiry date is unknown (no .expires file)")
+    elif note:
+        r.warn("Claude token", note)
+    else:
+        r.ok("Claude token", f"present, expires {end}")
+
+
 def check_provider_containers(r: Report, cfg) -> None:
     """Provider CLI images and their egress proxies; service profile only."""
     for image in sorted({backend.image for backend in cfg.backends.values() if backend.enabled}):
@@ -321,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     check_data_dir(r, cfg)
     check_schema_version(r, cfg)
     check_github_token(r, cfg)
+    check_claude_token(r, cfg)
     check_canary(r, cfg)
     check_docker(r, cfg)
     check_model_server(r, cfg)

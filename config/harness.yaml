@@ -82,6 +82,10 @@ backends:
     proxy: http://harness-egress-claude:8888
     volume: harness-auth-claude
     network: harness-cli-claude
+    # The owner's `claude setup-token` token (ops/backends/login.ps1 claude -Token, #390): sessions get it as
+    # CLAUDE_CODE_OAUTH_TOKEN and no login volume. Owner's own sessions only: Web, and the Apps listed here.
+    # oauth_token_file: D:/Agents/harness/secrets/claude-oauth-token
+    # oauth_token_apps: []
     mcp: true                     # harness tools over MCP via a per-session relay sidecar (#300)
   codex:
     enabled: true
