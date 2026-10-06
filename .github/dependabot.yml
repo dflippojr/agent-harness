@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directories:
+      # Dockerfile discovery also includes cli.Dockerfile.
+      - /sandbox
+      - /ops/egress
+      - /reference/hermes
+      - /reference/openclaw
+      - /reference/opencode
+      - /reference/openhands
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker-compose
+    # Discovers docker-compose.tempo.yml. ops/egress/compose.yaml only uses
+    # the locally built agent-harness-egress image, so it has no update job.
+    directory: /ops/observability
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

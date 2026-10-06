@@ -1,11 +1,64 @@
 """Contracts for SonarCloud coverage reporting and the quality-gate wait."""
 
 from pathlib import Path
+import os
+import subprocess
+
+import pytest
+import yaml
 
 
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 PROPERTIES = ROOT / "sonar-project.properties"
+
+
+@pytest.mark.parametrize(
+    ("token", "dependabot", "available", "exit_code"),
+    [("test-placeholder", "true", "true", 0),
+     ("test-placeholder", "false", "true", 0),
+     ("", "true", "false", 0),
+     ("   ", "true", "false", 0),
+     ("", "false", None, 1)],
+)
+def test_sonar_token_preflight(tmp_path, token, dependabot, available, exit_code):
+    """Execute the workflow's preflight with synthetic inputs, never real secrets."""
+    job = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["sonar"]
+    preflight = next(step for step in job["steps"] if step.get("id") == "sonar-token")
+    output = tmp_path / "output"
+    summary = tmp_path / "summary"
+    env = {**os.environ, "SONAR_TOKEN": token, "DEPENDABOT_PR": dependabot,
+           "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", preflight["run"]],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == exit_code
+    if available is None:
+        assert not output.exists()
+        assert "required for SonarCloud analysis" in result.stderr
+    else:
+        assert output.read_text(encoding="utf-8-sig").strip() == f"available={available}"
+    if available == "false":
+        assert "::notice::" in result.stdout
+        assert "analysis was not performed" in summary.read_text(encoding="utf-8-sig")
+    else:
+        assert not summary.exists()
+    assert "test-placeholder" not in result.stdout + result.stderr
+
+
+def test_sonar_uses_same_scan_for_dependabot_and_preserves_fork_guard():
+    job = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["sonar"]
+    assert job["if"] == (
+        "github.event_name == 'push' || "
+        "github.event.pull_request.head.repo.full_name == github.repository"
+    )
+    preflight = next(step for step in job["steps"] if step.get("id") == "sonar-token")
+    scan = next(step for step in job["steps"] if step.get("name") == "Scan with SonarCloud")
+    assert preflight["env"]["SONAR_TOKEN"] == scan["env"]["SONAR_TOKEN"] == "${{ secrets.SONARCLOUD_TOKEN }}"
+    assert "github.event.pull_request.user.login == 'dependabot[bot]'" in preflight["env"]["DEPENDABOT_PR"]
+    assert scan["if"] == "steps.sonar-token.outputs.available == 'true'"
+    assert "continue-on-error" not in scan
 
 
 def test_sonar_job_produces_coverage_xml_before_the_scan():

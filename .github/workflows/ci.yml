@@ -131,21 +131,42 @@ jobs:
     # image as `test`, so the absolute <source> paths in coverage.xml resolve.
     needs: test
     runs-on: windows-latest
-    # Secrets are not passed to pull requests from forks; skip rather than fail.
+    # Forks have no secrets. Same-repository Dependabot PRs use the separate
+    # Dependabot secret store; they run the same scan when its token is set.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     continue-on-error: ${{ github.event_name == 'push' }}
     steps:
+      - name: Check SonarCloud token availability
+        id: sonar-token
+        shell: powershell
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARCLOUD_TOKEN }}
+          DEPENDABOT_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' }}
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:SONAR_TOKEN)) {
+            'available=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } elseif ($env:DEPENDABOT_PR -eq 'true') {
+            'available=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host '::notice::SonarCloud analysis was not performed: add repository Dependabot secret SONARCLOUD_TOKEN, then rerun this PR workflow.'
+            'SonarCloud analysis was not performed because the repository Dependabot secret SONARCLOUD_TOKEN is unavailable. Add that secret and rerun this PR workflow to publish analysis.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          } else {
+            throw 'SONARCLOUD_TOKEN is required for SonarCloud analysis.'
+          }
+
       - uses: actions/checkout@v4
+        if: steps.sonar-token.outputs.available == 'true'
         with:
           # Full history so SonarCloud can blame lines and find the PR base.
           fetch-depth: 0
 
       - name: Download coverage
+        if: steps.sonar-token.outputs.available == 'true'
         uses: actions/download-artifact@v4
         with:
           name: coverage
 
       - name: Scan with SonarCloud
+        if: steps.sonar-token.outputs.available == 'true'
         uses: SonarSource/sonarqube-scan-action@v8
         env:
           SONAR_TOKEN: ${{ secrets.SONARCLOUD_TOKEN }}
