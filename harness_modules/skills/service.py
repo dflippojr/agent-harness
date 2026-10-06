@@ -19,9 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import SkillsConfig
-from .fileops import ToolError, resolve_path
-from .storage import contained, is_reparse_point
+from harness.modules import SkillsConfig, ToolError, resolve_path, contained, is_reparse_point
 from .skill_validate import (
     MAX_EXAMPLE_CHARS,
     MAX_EXAMPLES,

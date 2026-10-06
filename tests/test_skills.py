@@ -18,8 +18,8 @@ from harness.config import SkillsConfig
 from harness.db import Database
 from harness.llm import Completion
 from harness.manager import Manager
-from harness.skill_review import SkillReviewer, _extract_json, normalize_findings, review_payload
-from harness.skill_validate import (
+from harness_modules.skills.skill_review import SkillReviewer, _extract_json, normalize_findings, review_payload
+from harness_modules.skills.skill_validate import (
     SANDBOX_WORK,
     canonical_hash,
     sandbox_command,
@@ -27,7 +27,7 @@ from harness.skill_validate import (
     validate_bundle,
     validate_dir,
 )
-from harness.skills import SkillError, SkillStore, in_process_sandbox, session_eligible, skill_instructions, _safe_join, _write_contained
+from harness_modules.skills.service import SkillError, SkillStore, in_process_sandbox, session_eligible, skill_instructions, _safe_join, _write_contained
 from test_daemon import Script, call, make_cfg, wait_status
 
 SKILL_MD = "# Commit messages\nWrite conventional commits: `type: summary`.\nKeep the first line under 72 characters.\n"

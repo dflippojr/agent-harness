@@ -353,7 +353,7 @@ def _key(client, name: str, *scopes: str, kind: str = "app") -> tuple[str, dict]
 
 
 def test_the_owner_and_sessions_all_never_reach_another_apps_sessions(tmp_path):
-    from harness import skills
+    from harness_modules.skills import service as skills
     from harness.fileops import ToolError
     from harness_modules.search.service import SessionSearch
 

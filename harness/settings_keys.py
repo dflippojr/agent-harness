@@ -76,10 +76,6 @@ def check_gpu_guard(cfg: Config) -> list[str]:
     return errors
 
 
-def check_skills(cfg: Config) -> list[str]:
-    return []
-
-
 def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
     """Switch ``cfg.<section>.enabled`` only. Never write ``cfg.modules`` or
     ``cfg.installed`` — those are installer/profile selection. Effective
@@ -93,8 +89,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
         cfg.endpoint.enabled = enabled
     elif name == "gpu_guard":
         cfg.gpu_guard.enabled = enabled
-    elif name == "skills":
-        cfg.skills.enabled = enabled
 
 
 def _get_module_enabled(cfg: Config, name: str) -> bool:
@@ -692,10 +686,6 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for pausing the model while a game or Plex transcode needs the GPU.",
           "Features", False, _enable_get("gpu_guard"), _enable_set("gpu_guard"), ("gpu_guard", "enabled"),
           apply_mode="daemon_restart", modules=("gpu_guard",), enable_check=check_gpu_guard),
-    _bool("skills.enabled", "Instruction skills",
-          "Runtime enable for owner-approved instruction skills. Does not install the skills module.",
-          "Features", False, _enable_get("skills"), _enable_set("skills"), ("skills", "enabled"),
-          apply_mode="daemon_restart", modules=("skills",), enable_check=check_skills),
     _hidden("listen.host", "Listen address", "Bind address for the daemon HTTP server.", "Network",
             ("listen", "host")),
     _hidden("listen.port", "Listen port", "TCP port for the daemon HTTP server.", "Network",

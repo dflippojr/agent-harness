@@ -9,9 +9,8 @@ import time
 import uuid
 from typing import Callable
 
-from .config import ModelConfig, SkillsConfig
-from .llm import chat as default_chat
-from .skills import REVIEWABLE_STATUSES, SkillError
+from harness.modules import ModelConfig, SkillsConfig, default_chat
+from .service import REVIEWABLE_STATUSES, SkillError
 
 log = logging.getLogger("harness.skill_review")
 

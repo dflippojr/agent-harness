@@ -199,7 +199,6 @@ class Runner:
         self.yields: dict[str, int] = {}        # low-priority session id -> times it stepped aside (guard or a real session)
         self.modules = None                     # modules.ModuleHost (add-on toolkits such as images), set by the manager
         self.remote_control = None              # remote_control.RemoteControl, set by the manager when enabled
-        self.skills = None                      # skills.SkillStore, set by the manager when enabled
         self.app_tools = None                   # apps.AppToolBroker, set by the manager
         self.smart = SmartReviewer(cfg)
         self.settings = None                    # settings_service.SettingsService, set by the manager
@@ -264,13 +263,13 @@ class Runner:
         if web is not None and self._kit_allowed(project, "web", defaults, "web"):
             kits.append(web)
         for gate, kit in self._module_toolkits():
-            if (gate.members or not member) and self._kit_allowed(project, gate.project_flag, defaults, gate.capability):
+            allowed = (gate.eligible(kit, s) if gate.eligible is not None
+                       else self._kit_allowed(project, gate.project_flag, defaults, gate.capability))
+            if (gate.members or not member) and allowed:
                 kits.append(kit)
         if (not member and self.remote_control is not None and s["target"] == "tower"
                 and s.get("app_id", "") == "" and app_allows(defaults, "remote_control")):
             kits.append(self.remote_control)  # not for app sessions: apps launch through /api/v1/remote-control
-        if self.skills is not None and self.skills.can_propose(s):
-            kits.append(self.skills)
         return kits
 
     @staticmethod

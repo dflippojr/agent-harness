@@ -5,7 +5,8 @@ interface ([`harness/modules.py`](../harness/modules.py)) and how to write a mod
 ([`harness_modules/images/`](../harness_modules/images/)) is the first module behind it notifications
 ([`harness_modules/notifications/`](../harness_modules/notifications/)) the second, session search
 ([`harness_modules/search/`](../harness_modules/search/)) the third and the nightly backup
-([`harness_modules/backup/`](../harness_modules/backup/)) the fourth; the other optional features move
+([`harness_modules/backup/`](../harness_modules/backup/)) the fourth and instruction skills
+([`harness_modules/skills/`](../harness_modules/skills/)) the fifth; the other optional features move
 one module per PR in stage (c).
 
 ## Rules
@@ -59,6 +60,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     __init__.py runtime.py routes.py settings.py service.py
   backup/                nightly backup (formerly Maintenance's backup section) and verify/restore (#374)
     __init__.py runtime.py routes.py settings.py service.py restore.py
+  skills/                owner-approved instructions (formerly harness/skills.py, skill_review.py, skill_validate.py)
+    __init__.py runtime.py routes.py settings.py service.py skill_review.py skill_validate.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
@@ -142,3 +145,13 @@ These are names, not imports, and move with the config and storage split in stag
   `python -m harness.backup_restore`). While the module is absent no scheduled backup runs and `backup.enabled` has
   no effect; pre-migration snapshots still happen. The image archive joins the backup through
   `ModuleRuntime.backup` as before.
+- Skills: the `skills:` YAML section (`SkillsConfig`), the `skills` profile switch, the skill tables and frozen
+  session records in `db.py` / migrations, discovery of the reviewer key path, and `access.py`'s `/skills` rule
+  remain core names. All configuration keys and `harness skills ...` commands are unchanged; no deprecation is
+  needed. The module owns the store, standalone sandbox validator, advisory reviewer and GPU-idle check,
+  owner/admin routes, CLI rows, `skills.enabled`, skill metrics, and instruction injection. The manager reads
+  `manager.skills` (None while absent/off) and delegates injection to the runtime. `ToolGate.eligible(kit, session)`
+  lets the module preserve the proposal tool's session rules instead of using project/App capability flags;
+  `mcp=False` preserves its exclusion from hosted MCP tools. Absent skills add no routes, settings, metrics or tools.
+  Import paths moved from `harness.skills`, `harness.skill_review`, and `harness.skill_validate` to
+  `harness_modules.skills.service`, `harness_modules.skills.skill_review`, and `harness_modules.skills.skill_validate`.

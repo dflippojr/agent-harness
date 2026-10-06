@@ -239,19 +239,6 @@ class Manager:
 
     def _init_modules(self, cfg: Config, chat) -> None:
         from .config import module_effective
-        self.skills = None
-        if module_effective(cfg, "skills"):
-            from .skill_review import SkillReviewer
-            from .skills import SkillStore
-            reviewer = SkillReviewer(
-                cfg.skills, self.db, idle=self._skills_idle,
-                model=cfg.models.get(cfg.default_model) if cfg.modules.local_model else None,
-                chat=chat,
-                hosted_chat=self._hosted_skill_review if cfg.skills.reviewer_base_url else None,
-                local_review=cfg.skills.local_review and cfg.profile == "full" and cfg.modules.local_model,
-            )
-            self.skills = SkillStore(cfg.skills, self.db, cfg.data_dir, cfg.sandbox.image, reviewer=reviewer)
-            self.runner.skills = self.skills
         if module_effective(cfg, "memory_library"):
             from .memory_library import MemoryLibrary
             self.runner.memory = MemoryLibrary(cfg.memory_library, db=self.db)
@@ -347,36 +334,6 @@ class Manager:
         s = self.db.get_session(sid)
         return bool(s) and s["status"] in ACTIVE
 
-    def _skills_idle(self) -> bool:
-        """True only when the GPU scheduler, inference gate, modules' GPU work (images), and GPU guard are all idle."""
-        sch = self.scheduler
-        if sch.holder or sch.paused or sch._waiters:
-            return False
-        if self.runner.generating or self.runner.gate.busy or self.runner.gate.exclusive:
-            return False
-        if self.modules.busy():
-            return False
-        if self.guard is not None and (self.guard.active or self.guard.manual):
-            return False
-        return True
-
-    async def _hosted_skill_review(self, messages: list[dict]):
-        """Owner-triggered hosted review only. Never used for silent background Qwen work."""
-        from .llm import Completion
-        import httpx
-        cfg = self.cfg.skills
-        headers = {}
-        if cfg.reviewer_api_key_file:
-            key_path = Path(cfg.reviewer_api_key_file)
-            headers["Authorization"] = "Bearer " + key_path.read_text(encoding="utf-8").strip()
-        url = cfg.reviewer_base_url.rstrip("/") + "/v1/chat/completions"
-        async with httpx.AsyncClient(timeout=180) as client:
-            resp = await client.post(url, json={"model": cfg.reviewer_model, "messages": messages, "max_tokens": 1200},
-                                     headers=headers)
-            resp.raise_for_status()
-            content = (((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or "")
-        return Completion(content=content)
-
     def _keep_awake(self, target: str) -> bool:
         """A runner holds off idle sleep while one of its sessions is actually running."""
         return any(s["target"] == target for s in self.db.sessions_with_status("running"))
@@ -408,10 +365,6 @@ class Manager:
             self.jobs.start()
         if self.canary is not None:
             self.canary.start()
-        if self.skills is not None:
-            self.skills.reconcile()
-            if self.skills.reviewer is not None:
-                self.skills.reviewer.start()
         if getattr(self, "settings", None) is not None:
             self.settings.confirm_startup()
         if self.github_auth.enabled() or self.github_auth.owes_erase():
@@ -435,8 +388,6 @@ class Manager:
             await self.jobs.stop()
         if self.canary is not None:
             await self.canary.stop()
-        if self.skills is not None and self.skills.reviewer is not None:
-            await self.skills.reviewer.stop()
         tasks = list(self.tasks.values())
         for task in tasks:
             task.cancel()
@@ -979,10 +930,9 @@ class Manager:
         from . import homelab, memory_library, remote_control, web_tools
         from .modules import discovered
         from .tools import tool_schemas
-        from .skills import TOOLS as SKILL_TOOLS
         reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS)
                     | set(memory_library.TOOLS) | set(web_tools.TOOLS)
-                    | set(remote_control.TOOLS) | set(SKILL_TOOLS)
+                    | set(remote_control.TOOLS)
                     | {name for module in discovered(self.cfg) for name in module.tool_names})
         try:
             return validate_tools(app_tools, reserved)
@@ -991,16 +941,7 @@ class Manager:
 
     def _add_skills(self, system: str, project: str, skills: list[str] | None, session_meta: dict,
                     missing: str) -> tuple[str, list]:
-        from .skills import SKILLS_TOOL_PROMPT, SkillError, skill_instructions
-        try:
-            frozen = self.skills.resolve_for_session(project, skills, session_meta, missing=missing)
-        except SkillError as e:
-            raise HarnessError(e.status, str(e)) from e
-        if frozen:
-            system += "\n\n" + skill_instructions(frozen)
-        if self.skills.can_propose(session_meta):
-            system += "\n\n" + SKILLS_TOOL_PROMPT
-        return system, frozen
+        return self.modules.get("skills").add_skills(system, project, skills, session_meta, missing)
 
     async def send(self, ref: str, content: str, kind: str = "user_message") -> dict:
         sid = self.resolve_id(ref)
