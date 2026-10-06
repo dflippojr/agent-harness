@@ -5,6 +5,7 @@ No provider is contacted (the key check is a stub) and no container starts (sess
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -309,3 +310,15 @@ def test_a_members_hosted_session_runs_through_the_runner_on_their_key(tmp_path,
         assert started == {"api_key": CANARY, "end_user": member_keys.end_user_id(ids[ALICE]), "app_id": ""}
         run_row = m.db.get_session(sid)["run"]
         assert run_row["credential_source"] == "member_api_key" and run_row["billing_mode"] == "api_key"
+
+
+def test_a_partial_master_key_file_is_replaced_not_trusted(tmp_path, monkeypatch):
+    with setup(tmp_path, monkeypatch) as (client, m, ids):
+        path = m.cfg.data_dir / member_keys.KEY_FILE
+        path.write_bytes(b"")                       # a crash between create and write
+        fresh = MemberKeys(m.cfg, m.db)
+        fresh.set(ids[ALICE], "claude", CANARY)
+        assert fresh.get(ids[ALICE], "claude") == CANARY
+        assert len(base64.b64decode(path.read_bytes())) == 32
+        assert not list(path.parent.glob(f"{member_keys.KEY_FILE}.*.tmp"))
+        assert MemberKeys(m.cfg, m.db).get(ids[ALICE], "claude") == CANARY

@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -91,22 +92,50 @@ class MemberKeys:
         self.db = db
         self._probe = probe
         self._aead: AESGCM | None = None
+        self._guard = threading.Lock()
 
     # --- sealing -----------------------------------------------------------------------------------------------
     def _cipher(self) -> AESGCM:
-        if self._aead is None:
-            path = Path(self.cfg.data_dir) / KEY_FILE
-            if not path.exists():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                except FileExistsError:
-                    pass
-                else:
-                    with os.fdopen(fd, "wb") as f:
-                        f.write(base64.b64encode(secrets.token_bytes(32)))
-            self._aead = AESGCM(base64.b64decode(path.read_bytes().strip()))
-        return self._aead
+        with self._guard:
+            if self._aead is None:
+                self._aead = AESGCM(self._master_key(Path(self.cfg.data_dir) / KEY_FILE))
+            return self._aead
+
+    @staticmethod
+    def _read_master(path: Path) -> bytes | None:
+        try:
+            key = base64.b64decode(path.read_bytes().strip(), validate=True)
+        except (OSError, ValueError):
+            return None
+        return key if len(key) == 32 else None
+
+    def _master_key(self, path: Path) -> bytes:
+        """The master key, created whole or not at all: written to a temp file and linked into place, so a crash or a
+        second process never leaves a partial key. A file that is not a full key can't have sealed anything and is
+        replaced."""
+        key = self._read_master(path)
+        if key is not None:
+            return key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{secrets.token_hex(4)}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(base64.b64encode(secrets.token_bytes(32)))
+                f.flush()
+                os.fsync(f.fileno())
+            if path.exists():
+                path.unlink()   # unreadable or short: nothing was ever sealed under it
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                pass            # another process won the race: use its key
+        finally:
+            tmp.unlink(missing_ok=True)
+        key = self._read_master(path)
+        if key is None:
+            raise RuntimeError("the member key file could not be created")
+        return key
 
     @staticmethod
     def _aad(user_id: str, backend: str) -> bytes:
