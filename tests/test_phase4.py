@@ -447,7 +447,7 @@ def test_fileops_skip_symlinks_out_of_the_workspace(tmp_path):
 
 
 def test_github_token_patterns_keep_unicode_word_boundaries():
-    from harness.skill_validate import SECRET_RES
+    from harness_modules.skills.skill_validate import SECRET_RES
     patterns = dict(SECRET_RES)
     token = "ghp_" + "A" * 24
     assert patterns["github-token"].search(f" {token} ")

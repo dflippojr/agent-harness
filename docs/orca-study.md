@@ -67,7 +67,7 @@ task line instead of raw tool noise, and a per-turn "files changed" summary.
 ### Skills and the catalog (agent-written skills, marketplace design)
 
 Orca's skill-sharing checklist is the most transferable document found. Its package rules could tighten
-`docs/marketplace-design.md` and the skill validators (`harness/skill_validate.py`):
+`docs/marketplace-design.md` and the skill validators (`harness_modules/skills/skill_validate.py`):
 
 - immutable, digest-identified archives; installs pin a version
 - hard limits: 512 files, 32 MiB extracted, 40 MiB compressed, 16 path levels

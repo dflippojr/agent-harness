@@ -29,7 +29,6 @@ MODULE_ENABLE_SECTIONS = {
     "gpu_guard": "gpu_guard",
     "memory_library": "memory_library",
     "remote_control": "remote_control",
-    "skills": "skills",
 }
 # Core switches the installer selects and nothing turns off at runtime.
 INSTALL_ONLY_MODULES = frozenset({"local_model", "homelab", "runners"})
@@ -294,7 +293,7 @@ class JobsConfig:
 
 @dataclass
 class SkillsConfig:
-    """Instruction-only owner-approved skills (skills.py). Agents may only stage drafts."""
+    """Instruction-only owner-approved skills (harness_modules.skills). Agents may only stage drafts."""
     enabled: bool = False
     local_review: bool = True          # full local profile: advisory Qwen review at true GPU idle
     proposal_rate_per_hour: int = 8

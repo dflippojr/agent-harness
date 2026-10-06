@@ -31,6 +31,14 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    "SkillsConfig": ('harness.config', 'SkillsConfig'),
+    "ModelConfig": ('harness.config', 'ModelConfig'),
+    "resolve_path": ('harness.fileops', 'resolve_path'),
+    "contained": ('harness.storage', 'contained'),
+    "is_reparse_point": ('harness.storage', 'is_reparse_point'),
+    "default_chat": ('harness.llm', 'chat'),
+    "Completion": ('harness.llm', 'Completion'),
+
     "Config": ("harness.config", "Config"),
     "ImagesConfig": ("harness.config", "ImagesConfig"),
     "DEFAULT_IMAGES_MODELS_DIR": ("harness.config", "DEFAULT_IMAGES_MODELS_DIR"),
@@ -96,6 +104,7 @@ class ToolGate:
     mutating: tuple[str, ...] = ()  # tool names that change workspace files (checkpoints, review)
     span: str = ""                # telemetry span name for a call (default: the core's sandbox span)
     prompt: str = ""              # system-prompt section for a session that gets the toolkit
+    eligible: Callable[[Any, dict], bool] | None = None  # toolkit/session eligibility instead of project/app flags
 
 
 @dataclass(frozen=True)
