@@ -45,5 +45,6 @@ MODULE = Module(
     owner_routes=_owner_routes,
     admin_paths=frozenset({"/maintenance/backup"}),
     settings=_settings,
+    doctor=_doctor,
     cli=(("maintenance backup", "POST", "/maintenance/backup", "back up the databases", ()),),
 )

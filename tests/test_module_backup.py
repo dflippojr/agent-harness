@@ -40,6 +40,7 @@ def test_backup_registers_through_the_interface(tmp_path):
     specs = build_registry(m.cfg).specs
     assert all(key in specs for key in KEYS)
     assert any(row[0] == "maintenance backup" for row in cli.admin_commands())
+    assert runtime.module.doctor is not None  # `python -m harness.doctor` runs it through Module.doctor
 
 
 def test_a_manual_backup_works_while_the_schedule_is_off(tmp_path):
