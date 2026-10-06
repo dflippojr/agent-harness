@@ -48,3 +48,5 @@ once per run, including pagination, with at most 128 tools and 1 MB per protocol
 30 seconds. Resources, prompts, sampling, elicitation and remote HTTP transport are outside v1. Server-initiated
 requests receive an unsupported-method response. Tests use a local Python fake stdio server and inspect Docker
 argv; they never pull or run an MCP image.
+Arguments are validated against the complete input schema before approval. Local schema references are supported;
+external schema retrieval is disabled, so schemas cannot cause network requests from the daemon.

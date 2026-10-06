@@ -23,6 +23,8 @@ for line in sys.stdin:
             tool["inputSchema"] = None
         elif mode == "bad_schema":
             tool["inputSchema"] = {"type": "not-a-type"}
+        elif mode == "noargs":
+            tool["inputSchema"] = {"type": "object"}
         elif mode == "duplicate":
             result["tools"] *= 2
         elif mode == "empty_pages":

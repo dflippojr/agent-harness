@@ -216,10 +216,13 @@ def test_secrets_are_references_never_argv(tmp_path, fake_transport, monkeypatch
 
 
 @pytest.mark.parametrize("approve", [True, False])
-def test_native_loop_approval_events_taint_metrics_and_cleanup(tmp_path, fake_transport, approve):
+@pytest.mark.parametrize("mode", ["normal", "noargs"])
+def test_native_loop_approval_events_taint_metrics_and_cleanup(tmp_path, fake_transport, approve, mode):
     async def body():
+        args = {"text": "untrusted result"} if mode == "normal" else {}
         m = manager(tmp_path, packages=["harness_modules.mcp_client"], steps=[
-            Completion(tool_calls=[call(NAME, text="untrusted result")]), Completion(content="done")])
+            Completion(tool_calls=[call(NAME, **args)]), Completion(content="done")])
+        m.cfg.projects["scratch"].mcp_servers[0]["command"] = [mode]
         await m.start()
         try:
             s = m.create("echo")
@@ -239,7 +242,8 @@ def test_native_loop_approval_events_taint_metrics_and_cleanup(tmp_path, fake_tr
             assert bool(final["taint"]) == approve
             if approve:
                 assert final["taint"][0]["origin"] == NAME
-                assert "untrusted result" in events(m, sid, "tool_result")[0]["output"]
+                if mode == "normal":
+                    assert "untrusted result" in events(m, sid, "tool_result")[0]["output"]
                 from harness.efficiency import compose
                 assert compose(final["context"], 0, 3, None)["buckets"]["tool_outputs"] > 0
             assert events(m, sid, "turn_metrics")
@@ -383,3 +387,20 @@ def test_cleanup_accepts_an_already_removed_container(fake_transport, monkeypatc
         await kit.close()
         assert fake_transport[0][0].proc.poll() is not None
     asyncio.run(body())
+
+
+def test_mcp_arguments_use_full_schema_without_external_retrieval():
+    kit = service.SessionTools(SESSION, [], config.SandboxConfig())
+    schema = {"type": "object", "$defs": {"choice": {"enum": ["yes"]}},
+              "properties": {"text": {"$ref": "#/$defs/choice"}}, "required": ["text"],
+              "additionalProperties": False}
+    kit._add_tool(SERVER, None, {"name": "echo", "inputSchema": schema})
+    assert kit.validate_args(NAME, {"text": "yes"}) == {"text": "yes"}
+    for args in ({"text": "no"}, {}, {"text": "yes", "extra": True}):
+        with pytest.raises(ToolError, match="invalid MCP arguments"):
+            kit.validate_args(NAME, args)
+    with pytest.raises(ToolError, match="unknown MCP tool"):
+        kit.validate_args("unknown", {})
+    schema["properties"]["text"]["$ref"] = "https://schemas.invalid/tool"
+    with pytest.raises(ToolError, match="cannot resolve"):
+        kit.validate_args(NAME, {"text": "yes"})

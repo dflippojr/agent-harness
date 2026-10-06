@@ -114,6 +114,9 @@ with its gate for dispatch and tracing. A per-session toolkit is excluded from s
 `mcp=False` to exclude it from hosted sessions. The owner-pinned MCP client uses this interface; see
 [`mcp-client.md`](mcp-client.md). Its core configuration names (`Project.mcp_servers`, `ModulesConfig.mcp_client`
 and validation in `harness/mcp_config.py`) remain in core so file validation works with the package absent.
+Toolkits may supply `validate_args(name, args)` to return validated arguments or raise `ToolError` before policy
+and approval; otherwise the native argument checker applies. MCP uses full JSON Schema validation with external
+schema retrieval disabled, including support for zero-argument schemas and local references.
 
 ## Writing a module
 

@@ -1889,7 +1889,9 @@ class Runner:
                                                  f"{', '.join(schemas)}.", ok=False)
             return None, None
         try:
-            args = validate_args(schemas[name], args)
+            kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
+            validator = getattr(kit, "validate_args", None)
+            args = validator(name, args) if validator is not None else validate_args(schemas[name], args)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
             await self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)

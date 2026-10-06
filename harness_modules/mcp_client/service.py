@@ -9,13 +9,22 @@ import subprocess
 import threading
 from pathlib import Path
 
-from jsonschema import Draft202012Validator, SchemaError
+from jsonschema import Draft202012Validator, SchemaError, ValidationError
+from referencing import Registry
+from referencing.exceptions import NoSuchResource, Unresolvable
 
 from harness.modules import ToolError, run_cmd
 
 MAX_MESSAGE = 1_000_000
 MAX_TOOLS = 128
 RPC_TIMEOUT = 30
+
+
+def _no_external_schema(uri):
+    raise NoSuchResource(ref=uri)
+
+
+LOCAL_SCHEMAS = Registry(retrieve=_no_external_schema)
 
 
 def container_name(sid, server):
@@ -201,6 +210,18 @@ class SessionTools:
 
     def schemas(self):
         return [value[2] for value in self.tools.values()]
+
+    def validate_args(self, name, args):
+        if name not in self.tools:
+            raise ToolError("unknown MCP tool")
+        schema = self.tools[name][2]["function"]["parameters"]
+        try:
+            Draft202012Validator(schema, registry=LOCAL_SCHEMAS).validate(args)
+        except ValidationError as exc:
+            raise ToolError(f"invalid MCP arguments: {exc.message[:300]}") from None
+        except Unresolvable:
+            raise ToolError("MCP schemas cannot resolve external or missing references") from None
+        return args
 
     async def call(self, name, args):
         if name not in self.tools:
