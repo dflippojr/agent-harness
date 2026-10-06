@@ -11,10 +11,17 @@ def validate_servers(raw, owner_id="owner") -> list[dict]:
     names = set()
     for server in raw:
         name = _validate_server(server)
-        if name in names:
-            raise ValueError("MCP server names must be unique per project")
+        _unique_namespace(name, names)
         names.add(name)
     return raw
+
+
+def _unique_namespace(name, names):
+    prefix = f"mcp__{name}__"
+    for other in names:
+        other_prefix = f"mcp__{other}__"
+        if prefix.startswith(other_prefix) or other_prefix.startswith(prefix):
+            raise ValueError("MCP server names must be unique and their namespaces must not overlap")
 
 
 def _validate_server(server):

@@ -77,8 +77,11 @@ class StdioClient:
         data = (json.dumps({"jsonrpc": "2.0", **message}) + "\n").encode()
         if len(data) > MAX_MESSAGE:
             raise ToolError("MCP request exceeded the message limit")
-        self.proc.stdin.write(data)
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
+        except (OSError, ValueError):
+            raise ToolError("MCP server stdin is closed") from None
 
     def notify(self, method):
         self._send({"method": method})

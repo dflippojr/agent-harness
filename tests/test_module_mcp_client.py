@@ -67,6 +67,9 @@ def test_config_owner_only_and_duplicates():
         config._project_from_spec("demo", {"mcp_servers": [SERVER]}, owner_id="member")
     assert config._project_from_spec("demo", {"mcp_servers": [SERVER]}).mcp_servers == [SERVER]
     assert config._project_from_spec("demo", {}).mcp_servers == []
+    for names in (("a", "a__b"), ("a__b", "a"), ("a", "a_")):
+        with pytest.raises(ValueError, match="overlap"):
+            config._project_from_spec("demo", {"mcp_servers": [SERVER | {"name": name} for name in names]})
 
 
 @pytest.mark.parametrize("mount", [False, "ro", "rw"])
@@ -285,6 +288,9 @@ def test_request_limit(fake_transport, monkeypatch):
     with pytest.raises(ToolError, match="request exceeded"):
         client.request("too big", {"text": "x" * 50})
     client.close()
+    monkeypatch.setattr(service, "MAX_MESSAGE", 1_000_000)
+    with pytest.raises(ToolError, match="stdin is closed"):
+        client.request("x", {})
 
 
 def test_apps_cannot_claim_mcp_namespaces():

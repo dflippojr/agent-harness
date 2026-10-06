@@ -23,7 +23,9 @@ projects:
 ```
 
 The owner must preinstall the exact image digest locally; the client uses `--pull=never`. Tags without digests,
-URL entries, the reserved name `harness`, duplicate names and member-project entries are rejected. Environment
+URL entries, the reserved name `harness`, duplicate or overlapping server namespaces and member-project entries
+are rejected. A name may contain underscores, but a project cannot configure both `a` and `a__b`, whose tool
+prefixes overlap. Environment
 values come only from UTF-8 secret files. Values are passed through Docker's process environment, never command
 arguments; the daemon's other environment credentials are excluded. Do not put secrets in the command itself.
 
