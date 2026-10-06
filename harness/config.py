@@ -102,6 +102,11 @@ class BackendConfig:
     volume: str = "harness-auth-claude"
     network: str = "harness-cli-claude"
     api_key_file: str = "D:/Agents/harness/secrets/claude-api-key"
+    # Claude only (#390): file holding the owner's `claude setup-token` token. When set, Web and the Apps in
+    # `oauth_token_apps` authenticate with it as CLAUDE_CODE_OAUTH_TOKEN and no login volume is mounted; any other
+    # App on the subscription is refused. Owner's own sessions only (docs/per-user-subscriptions-study.md).
+    oauth_token_file: str = ""
+    oauth_token_apps: list[str] = field(default_factory=list)
     stop_at_utilization: float = 0.0
     # Claude Code and Codex: expose the daemon's tools over MCP through a per-session relay sidecar (#300, #373).
     mcp: bool = True

@@ -7,7 +7,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 claude|codex|cursor [--app APP_ID] [--status|--logout] [--image IMAGE]" >&2
+    echo "usage: $0 claude|codex|cursor [--app APP_ID] [--status|--logout|--token] [--token-file FILE] [--image IMAGE]" >&2
     exit 64
 }
 
@@ -16,12 +16,15 @@ backend=$1
 shift
 mode=login
 image=agent-harness-cli:1
+token_file=/var/lib/agent-harness/secrets/claude-oauth-token
 app=
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --app) shift; [[ $# -gt 0 ]] || usage; app=$1 ;;
         --status) mode=status ;;
         --logout) mode=logout ;;
+        --token) mode=token ;;
+        --token-file) shift; [[ $# -gt 0 ]] || usage; token_file=$1 ;;
         --image) shift; [[ $# -gt 0 ]] || usage; image=$1 ;;
         *) usage ;;
     esac
@@ -80,6 +83,29 @@ docker image inspect "$image" >/dev/null 2>&1 || {
     echo "proxy harness-egress-$backend is not running" >&2
     exit 1
 }
+show_token_status() {
+    if [[ ! -s $token_file ]]; then echo "token: not set (run login.sh claude --token)"; return; fi
+    if [[ -r $token_file.expires ]]; then
+        end=$(tr -d '[:space:]' <"$token_file.expires")
+        left=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+        note=; [[ $left -le 30 ]] && note=" ($left days left: reissue with --token)"
+        echo "token: present, expires $end$note"
+    else echo "token: present, expiry unknown"; fi
+}
+
+if [[ $mode == token ]]; then
+    # The owner's long-lived token (#390), for the owner's own sessions only. No volume: setup-token only prints it.
+    [[ $backend == claude ]] || { echo "--token is for claude only" >&2; exit 64; }
+    docker run --rm -it --network "harness-cli-claude" -e "HTTPS_PROXY=http://harness-egress-claude:8888"         -e "HTTP_PROXY=http://harness-egress-claude:8888" -e NO_PROXY=localhost,127.0.0.1 "$image" claude setup-token
+    read -r -s -p "Paste the token it printed (input hidden): " pasted
+    echo
+    [[ -n $pasted ]] || { echo "no token entered" >&2; exit 1; }
+    mkdir -p "$(dirname "$token_file")"
+    (umask 077; printf '%s' "$pasted" >"$token_file"; date -d "+1 year" +%F >"$token_file.expires")
+    unset pasted
+    show_token_status
+    exit 0
+fi
 docker volume create "$volume" >/dev/null
 # A volume mounted where the image has no directory starts out root's; hand it to the agent user.
 docker run --rm --network none --user 0:0 -v "$volume:/login" "$image" chown 1000:1000 /login
@@ -93,7 +119,8 @@ elif [[ $mode == logout ]]; then
     command=("${logout_cmd[@]}")
 fi
 
-exec docker run --rm "${tty_args[@]}" --network "harness-cli-$backend" \
+if [[ $mode == status && $backend == claude ]]; then trap show_token_status EXIT; fi
+docker run --rm "${tty_args[@]}" --network "harness-cli-$backend" \
     -e "HTTPS_PROXY=http://harness-egress-$backend:8888" \
     -e "HTTP_PROXY=http://harness-egress-$backend:8888" -e NO_PROXY=localhost,127.0.0.1 \
     "${env_args[@]}" -v "$volume:$auth_dir" "$image" "${command[@]}"

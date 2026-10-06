@@ -111,14 +111,18 @@ def needs_app_login(backend: str) -> bool:
     return backend in LAYOUTS and LAYOUTS[backend].per_app_login
 
 
-def docker_args(backend: str, cfg, app_id: str = "") -> list[str]:
-    """The env and mount arguments that give a session its domain's state, the login and the read-only config."""
+def docker_args(backend: str, cfg, app_id: str = "", *, token: bool = False) -> list[str]:
+    """The env and mount arguments that give a session its domain's state, the login and the read-only config.
+    With `token` (Claude's CLAUDE_CODE_OAUTH_TOKEN, #390) the session has no login volume: nothing can refresh, race
+    over or overwrite a shared credential."""
     layout = LAYOUTS[backend]
     args: list[str] = []
     for item in layout.env:
+        if token and item.startswith("CLAUDE_SECURESTORAGE_CONFIG_DIR="):
+            continue
         args += ["-e", item]
     args += ["-v", f"{state_volume(backend, cfg, app_id)}:{layout.state_dir}"]
-    if layout.login_dir:
+    if layout.login_dir and not token:
         args += ["-v", f"{login_volume(backend, cfg, app_id)}:{layout.login_dir}"]
     for target, source in layout.ro_files:
         args += ["--mount", f"type=bind,source={CLI_HOME / backend / source},"

@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from . import cli_domains
+from . import claude_token, cli_domains
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
 from .sandbox import run_cmd
@@ -40,6 +40,10 @@ async def ready_domain(name: str, backend: BackendConfig, app_id: str, api_key: 
         await cli_domains.prepare(name, backend, app_id)
     except RuntimeError as e:
         raise CliBackendError(str(e)) from e
+    if name == "claude":
+        reason = claude_token.refusal(backend, app_id, api_key)
+        if reason:
+            raise CliBackendError(reason)
     if app_id and not api_key and cli_domains.needs_app_login(name):
         from .backend_state import app_login_ready
         if not await asyncio.to_thread(app_login_ready, name, backend, app_id):
@@ -88,7 +92,7 @@ class ClaudeSession:
             "-e", f"HTTP_PROXY={self.backend.proxy}",
             "-e", NO_PROXY,
             "-e", NODE_USE_ENV_PROXY,
-            *cli_domains.docker_args("claude", self.backend, self.app_id),
+            *cli_domains.docker_args("claude", self.backend, self.app_id, token=self._uses_token()),
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
             "-w", WORKSPACE,
             "--memory", self.sandbox.memory,
@@ -111,11 +115,15 @@ class ClaudeSession:
         # Only the harness server, or none: --strict-mcp-config ignores any .mcp.json the workspace brings along and
         # the user-scope servers in the state's .claude.json, which a session could have written (#371).
         args += ["--mcp-config", mcp_config() if self.mcp else EMPTY_MCP_CONFIG, "--strict-mcp-config"]
-        env_names = (["ANTHROPIC_API_KEY"] if self.api_key else []) + ([TOKEN_ENV] if self.mcp else [])
+        env_names = ((["ANTHROPIC_API_KEY"] if self.api_key else []) + ([claude_token.ENV] if self._uses_token() else [])
+                     + ([TOKEN_ENV] if self.mcp else []))
         for name in env_names:  # by name only: the value comes from the docker client's environment
             at = args.index(self.backend.image)
             args[at:at] = ["-e", name]
         return args
+
+    def _uses_token(self) -> bool:
+        return claude_token.uses_token(self.backend, self.app_id, self.api_key)
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -133,6 +141,13 @@ class ClaudeSession:
         child_env = os.environ.copy()
         if self.api_key:
             child_env["ANTHROPIC_API_KEY"] = self.api_key
+        child_env.pop(claude_token.ENV, None)  # the daemon's own environment never leaks a token into a session
+        if self._uses_token():
+            token = claude_token.read_token(self.backend.oauth_token_file)
+            if not token:
+                raise CliBackendError("the Claude subscription token file is missing or empty; run "
+                                      "ops/backends/login.ps1 claude -Token")
+            child_env[claude_token.ENV] = token
         if self.mcp is not None:
             child_env[TOKEN_ENV] = self.mcp_token
         process = self._popen(

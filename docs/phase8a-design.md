@@ -355,6 +355,27 @@ plan, context compaction or a harness `mcpToolCall`.
   `docker run -it` with the volume. The app shows the command to run until `claude auth status` in the container
   reports a subscription login. If Claude Code gains a device-style flow later, switch to it.
 
+#### Claude: the owner's long-lived token (#390)
+
+The shared Claude login (`harness-login-claude`) broke within hours: its OAuth refresh token rotates on use, so two
+sessions refreshing together raced, and the loser wrote an empty credential that logged out every domain. Claude
+sessions therefore authenticate with a token from `claude setup-token`, passed as `CLAUDE_CODE_OAUTH_TOKEN`, which
+outranks any login and never refreshes. A session on the token has **no login volume** (and no
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`), so there is no shared credential to race over or overwrite.
+
+- **Setup:** `opsackends\login.ps1 claude -Token` (`login.sh claude --token`) runs `claude setup-token` in a
+  throwaway container, asks for the printed token (hidden input) and stores it in an owner-only file with its expiry
+  (one year) in `<file>.expires`; then set `backends.claude.oauth_token_file` in `config/harness.yaml`. The daemon
+  reads the file when a session starts and hands the value to the docker client by environment, never as an argument,
+  and never logs it. `-Status` prints presence and expiry only. `harness.doctor` and the first Claude run of a
+  session warn 30 days before expiry.
+- **Owner only:** Anthropic permits the token for the owner's own account driving the owner's own sessions
+  (docs/per-user-subscriptions-study.md section 5). Web sessions use it; an App may only if its id is listed in
+  `backends.claude.oauth_token_apps`; any other App on the subscription is refused with a pointer to API-key billing.
+  Other people's use needs API keys or a Commercial Terms agreement, not this token.
+- **Costs:** claude.ai connectors and Remote Control don't work on the token. The old login volume stays for runs
+  without `oauth_token_file`, and is still what `login.ps1 claude` signs in.
+
 ### Approvals (requirement 4)
 
 | Backend | Bridge |
