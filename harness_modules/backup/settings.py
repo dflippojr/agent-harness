@@ -7,6 +7,8 @@ from pathlib import Path
 
 from harness.modules import Bounds, SettingSpec, setting_bool, setting_int
 
+from .member_key import key_dir
+
 TIME_OF_DAY = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 
 
@@ -16,6 +18,10 @@ def check_backup(cfg) -> list[str]:
     parent = Path(cfg.backup.dir).expanduser()
     if not parent.parent.exists():
         return ["backup.dir parent is missing"]
+    try:
+        key_dir(cfg, parent)
+    except ValueError as e:
+        return [str(e)]
     return []
 
 
@@ -62,6 +68,13 @@ def _dir_set(cfg, value):
 
 def specs() -> list:
     return [
+        SettingSpec(
+            key="backup.member_key_dir", label="Member key backup directory",
+            help="Separate key copies; keep apart from database backups off-site. Unset uses backup.dir/member-keys.",
+            category="Backup", value_type="string", default=None, scope="admin", apply_mode="installer_only",
+            getter=_dir_get, setter=_dir_set, sensitivity="hidden", readable=False, writable=False,
+            yaml_path=("backup", "member_key_dir"), modules=("backup",),
+        ),
         SettingSpec(
             key="backup.at", label="Backup time", help="Local time (HH:MM) for the nightly backup.",
             category="Backup", value_type="string", default="03:30", scope="admin", apply_mode="live",

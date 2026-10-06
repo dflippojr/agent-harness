@@ -253,8 +253,19 @@ A backup folder holds exactly:
 | `managed-config*.json` | the managed-config overlay from `<data_dir>` |
 
 It does not hold workspaces (a local git project's branches are already saved in its source repository),
-checkpoints, artifact files, `member-keys.key` (the key that opens members' stored API keys, #393: after a restore members add their API keys again), `pre-migration/` snapshots, logs, image archives, model files or anything off this
+checkpoints, artifact files, `pre-migration/` snapshots, logs, image archives, model files or anything off this
 machine. Copy the backup folder elsewhere yourself if you want an off-machine copy.
+
+`member-keys.key` is copied separately (#414), with owner-only permissions (a protected owner-only ACL on Windows,
+mode 600 elsewhere). Set `backup.member_key_dir` in local YAML to choose its directory; unset defaults to
+`backup.dir/member-keys/`, next to and outside the dated database folders. Each copy is named `<SHA-256>.key`, and
+the database snapshot records the fingerprint it expects. Key copies are retained even when dated backups are
+pruned, so an older off-site database can still find its key after a key change. Move obsolete copies manually
+only when no retained database needs them. The key directory cannot be inside a dated backup folder.
+
+**Warning:** the key and a database backup together decrypt every member's stored API key. Every run that copies
+the key logs this warning. Keep the key copy somewhere other than where the database backups are kept off-site;
+the default provides local separation only. Copy the key directory separately when taking backups off-site.
 
 Check a backup at any time; it changes nothing and can run while the daemon is up:
 
@@ -278,6 +289,11 @@ first and refuses, changing nothing, if verification fails or the daemon is stil
 configured port, or something holds a store's write lock). It restores into the configured `data_dir`:
 
 - the main store, and every App store in the backup;
+- `member-keys.key` from the separate key directory, only when its fingerprint matches the database snapshot.
+  For an off-site restore, set `backup.member_key_dir` to the separately retrieved key directory. Missing,
+  unreadable, invalid or mismatched copies produce a warning and the database restore still succeeds; members
+  must re-add their API keys if the existing key cannot decrypt them. Older backups without a fingerprint also
+  warn and leave the existing key in place;
 - the owner's, members' and Apps' transcripts. Each transcripts folder is replaced as a whole;
 - with `--include-config` only: the `config` files and the managed-config overlay. They are left out by default
   because they may hold another machine's paths.
@@ -290,6 +306,7 @@ included, into `<data_dir>/restore-<timestamp>-previous/`, keeping their paths r
 go under its `config/`). `RESTORE.txt` in that folder lists what was moved and what was put in place. To undo, stop
 the daemon, move the restored files listed there out of the way and move the folder's contents back. Start the
 daemon after a restore as usual; `python -m harness.doctor` checks the result.
+Doctor also reports whether the last backup has a separate member-key copy and repeats the off-site warning.
 
 ## Uninstall
 

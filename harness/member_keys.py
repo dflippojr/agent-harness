@@ -5,8 +5,8 @@ run on it, billed to their own account. The owner's login, token and keys are ne
 
 - **Storage:** the key is sealed with AES-GCM under a master key in `<data_dir>/member-keys.key` (created on first
   use, owner-readable only where the OS has modes). The database holds only the ciphertext and the last four
-  characters, bound to (member, backend) so a row can't be moved to another member. The master key is not part of a
-  backup, so a restored backup's ciphertext is unreadable and members add their keys again. Nothing logs, emits or
+  characters, bound to (member, backend) so a row can't be moved to another member. Nightly backups copy the master
+  key separately (#414); restore uses it only when its fingerprint matches the database snapshot. Nothing logs, emits or
   returns a key; the API shows the last four characters.
 - **Domain (decision 3, recorded):** a member is treated like an App's end user of the Web domain (#365): the session
   carries `end_user = "member:<user_id>"` with an empty App id. That gives the member their own CLI state volume

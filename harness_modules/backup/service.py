@@ -18,6 +18,8 @@ from pathlib import Path
 from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ROOT, ManagedStore, app_dir, backup_sqlite,
                              remove_tree, storage)
 
+from .member_key import WARNING, snapshot_key
+
 log = logging.getLogger("harness.backup")
 
 
@@ -119,6 +121,9 @@ class BackupService:
         tmp.mkdir(parents=True)
         db_copy = tmp / "harness.sqlite3"
         self._backup_db(db_copy)
+        member_key = snapshot_key(self.cfg, root, db_copy)
+        if member_key:
+            log.warning(WARNING)
         app_stores = self._backup_app_stores(tmp / "apps")
         warnings: list[str] = []
         transcript_archives = self._archive_transcripts(
@@ -138,7 +143,8 @@ class BackupService:
         removed = self._prune_old_backups(root, dest, now - self.cfg.backup.keep_days * 86400)
         size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
         return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": "",
-                "app_stores": app_stores, "transcript_archives": transcript_archives, "warnings": warnings}
+                "app_stores": app_stores, "transcript_archives": transcript_archives, "warnings": warnings,
+                "member_key_path": str(member_key) if member_key else ""}
 
     @staticmethod
     def _skip_transcript_link(path: Path, warnings: list[str]) -> bool:

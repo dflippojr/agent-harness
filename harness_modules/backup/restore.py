@@ -34,6 +34,8 @@ from pathlib import Path, PurePosixPath
 from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ROOT, WEB_APP_ID, app_dir,
                             migrations, remove_tree, storage)
 
+from .member_key import KEY_FILE, expected_fingerprint, fingerprint, key_dir, write_private
+
 CONFIG_FILES = ("harness.yaml", "harness.local.yaml", "projects.yaml")
 SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 PREVIOUS_PREFIX = "restore-"
@@ -184,6 +186,7 @@ def plan(cfg, folder: Path, *, include_config: bool = False, config_dir: Path | 
     data = Path(cfg.data_dir)
     p = Plan(folder)
     p.items.append(Item("store", folder / "harness.sqlite3", Path(cfg.db_path), "main store"))
+    _plan_member_key(cfg, folder, p)
     live = _live_apps(folder / "harness.sqlite3")
 
     def app_exists(app_id: str) -> bool:
@@ -215,6 +218,28 @@ def plan(cfg, folder: Path, *, include_config: bool = False, config_dir: Path | 
         for path in sorted(folder.glob("managed-config*.json")):
             p.items.append(Item("config", path, data / path.name, f"managed config {path.name}"))
     return p
+
+
+def _plan_member_key(cfg, folder: Path, p: Plan) -> None:
+    digest = expected_fingerprint(folder / "harness.sqlite3")
+    reason = "the database has no member-key fingerprint (older backup or no key copied)"
+    if digest:
+        # Only a SHA-256 digest may become a filename, even for an edited database.
+        import re
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            reason = "the database's member-key fingerprint is invalid"
+        else:
+            source = key_dir(cfg, folder.parent) / f"{digest}.key"
+            try:
+                matches = fingerprint(source.read_bytes()) == digest
+            except (OSError, ValueError):
+                reason = "the matching member-key copy is missing, unreadable or invalid"
+            else:
+                if matches:
+                    p.items.append(Item("member_key", source, Path(cfg.data_dir) / KEY_FILE, "member encryption key"))
+                    return
+                reason = "the member-key copy's fingerprint does not match the database"
+    p.warnings.append(f"{reason}; members must re-add their API keys if their existing key cannot decrypt them")
 
 
 # the daemon
@@ -296,6 +321,11 @@ def apply(cfg, p: Plan, now: float | None = None) -> Path:
                 item.dest.mkdir()
                 with zipfile.ZipFile(item.source) as archive:
                     archive.extractall(item.dest)
+            elif item.kind == "member_key":
+                content = item.source.read_bytes()
+                if fingerprint(content) != expected_fingerprint(p.folder / "harness.sqlite3"):
+                    raise RestoreRefused("member-key fingerprint changed after planning")
+                write_private(item.dest, content)
             else:
                 shutil.copy2(item.source, item.dest)
     except BaseException:
@@ -339,7 +369,7 @@ def restore(cfg, folder: Path, *, apply_changes: bool = False, include_config: b
     for item in p.items:
         verb = "replace" if _occupied(item) else "create "
         what = "folder" if item.kind == "transcripts" else "file"
-        out(f"{verb} {what} {item.dest}  <- {item.source.relative_to(Path(folder)).as_posix()} ({item.label})")
+        out(f"{verb} {what} {item.dest}  <- {item.source} ({item.label})")
     if not include_config and ((Path(folder) / "config").is_dir() or any(Path(folder).glob("managed-config*.json"))):
         out("Config files and the managed overlay are not restored; add --include-config to restore them.")
     if not apply_changes:

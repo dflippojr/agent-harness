@@ -43,3 +43,11 @@ def doctor(report, cfg) -> None:
     if backup.get("enabled"):
         (report.ok if backup.get("ok_at") else report.warn)(
             "Backups", backup.get("path") or "no backup yet (the first runs 5 minutes after start)")
+        if "member_key_path" in backup:
+            from pathlib import Path
+            from .member_key import WARNING
+            path = backup["member_key_path"]
+            if path and Path(path).is_file():
+                report.warn("Member key backup", f"{path}. {WARNING}")
+            else:
+                report.warn("Member key backup", "No key copy available; members may need to re-add their API keys.")
