@@ -278,4 +278,4 @@ async def drop_end_user_volumes(app_id: str, end_users: list[str], backends=END_
     code, out, err = await run_cmd(["docker", "volume", "rm", "-f", *names], timeout=120)
     if code != 0:
         raise RuntimeError(f"could not remove end-user volumes of App {app_id}: {(err or out).strip()[:300]}")
-    log.info("removed %s end-user volumes of App %s", len(names), app_id)
+    log.info("removed %s end-user volumes", len(names))
