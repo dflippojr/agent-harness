@@ -159,3 +159,59 @@ def test_owner_proposal_lifecycle_on_admin_api(tmp_path):
         draft_url = base + "/proposals/" + draft["id"]
         assert client.delete(draft_url).status_code == 204
         assert client.get(draft_url).status_code == 404
+
+
+@pytest.mark.parametrize("result,code", [
+    ((1, "", "failure"), "sandbox"),
+    ((1, "not json", ""), "sandbox"),
+    ((0, "[]", ""), "sandbox"),
+    (FileNotFoundError("docker"), "sandbox-unavailable"),
+    (RuntimeError("failed"), "sandbox"),
+    ((0, '{"ok": true}', ""), None),
+])
+def test_sandbox_validator_failure_is_closed(tmp_path, monkeypatch, result, code):
+    from harness_modules.skills import service
+    m = make(tmp_path)
+    def run(argv):
+        assert argv[-2].endswith("validate.py")
+        if isinstance(result, Exception):
+            raise result
+        return result
+    monkeypatch.setattr(service, "_run_docker_sync", run)
+    checked = m.skills._docker_validate(tmp_path)
+    if code is None:
+        assert checked == {"ok": True}
+    else:
+        assert checked["ok"] is False
+        assert checked["findings"][0]["code"] == code
+
+
+@pytest.mark.parametrize("change,code", [
+    ({"files": []}, "skill-md"),
+    ({"files": ["invalid"]}, "files"),
+    ({"files": {"SKILL.md": 3}}, "skill-md"),
+    ({"slug": "x"}, "slug"),
+    ({"title": ""}, "title"),
+    ({"purpose": ""}, "purpose"),
+    ({"activation_suggestion": "x" * 10000}, "activation"),
+    ({"examples": [None, None, None]}, "examples"),
+    ({"examples": [{"prompt": "", "expected": ""}] * 3}, "examples"),
+    ({"examples": [{"prompt": "x" * 10000, "expected": "x"}] * 3}, "examples"),
+])
+def test_validator_rejects_malformed_instruction_bundle(change, code):
+    from test_skills import bundle
+    from harness_modules.skills.skill_validate import validate_bundle
+    candidate = bundle()
+    candidate.update(change)
+    result = validate_bundle(candidate)
+    assert not result["ok"] and code in result["codes"]
+
+
+def test_validator_rejects_corrupt_sidecars_and_binary_files(tmp_path):
+    from harness_modules.skills.skill_validate import validate_dir, main
+    (tmp_path / "SKILL.md").write_bytes(b"\xff")
+    (tmp_path / "manifest.json").write_text("not JSON", encoding="utf-8")
+    (tmp_path / "script.py").write_text("print('untrusted')", encoding="utf-8")
+    result = validate_dir(tmp_path)
+    assert {"not-utf8", "manifest", "forbidden-type"} <= set(result["codes"])
+    assert main([str(tmp_path)]) == 2

@@ -21,7 +21,7 @@ class SkillReject(BaseModel):
     reason: str = ""
 
 
-def skills_or_400(m: Manager):
+def skills_or_400(m):
     if m.skills is None:
         raise HarnessError(400, "instruction skills are disabled")
     return m.skills
@@ -131,5 +131,3 @@ async def skill_projects(slug: str, body: SkillAllowlist, request: Request):
 async def skill_export(slug: str, request: Request):
     store = skills_owner(request)
     return skill_op(lambda: store.export_bundle(slug))
-
-
