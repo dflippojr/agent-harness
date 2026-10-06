@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import csv
 import os
 import sqlite3
 import subprocess
@@ -55,14 +56,16 @@ def test_round_trip_decrypts_and_keeps_key_separate(snapshot):
     restored = target.data_dir / member_key.KEY_FILE
     assert restored.read_bytes() == (cfg.data_dir / member_key.KEY_FILE).read_bytes()
     if os.name == "nt":
-        script = ("$a=Get-Acl -LiteralPath $env:HARNESS_BACKUP_KEY_PATH; "
-                  "$a.AreAccessRulesProtected; $a.Access.Count; "
-                  "$a.Access[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value; "
-                  "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value")
-        result = subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True, capture_output=True,
-                                text=True, env={**os.environ, "HARNESS_BACKUP_KEY_PATH": str(restored)})
-        rows = result.stdout.splitlines()
-        assert rows[:2] == ["True", "1"] and rows[2] == rows[3]
+        identity = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], check=True,
+                                  capture_output=True, text=True).stdout
+        sid = next(csv.reader(identity.splitlines()))[-1]
+        for path in (restored, key):
+            manifest = target.data_dir.parent / "key-acl.txt"
+            subprocess.run(["icacls", str(path), "/save", str(manifest)], check=True, capture_output=True)
+            descriptor = manifest.read_text(encoding="utf-16-le").splitlines()[1]
+            assert descriptor.startswith("D:P")  # protected, no inherited access
+            assert descriptor.count("(") == 1  # exactly one access rule
+            assert f"(A;;FA;;;{sid})" in descriptor  # daemon account, full access
     else:
         assert restored.stat().st_mode & 0o777 == 0o600
         assert key.stat().st_mode & 0o777 == 0o600
