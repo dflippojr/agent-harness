@@ -345,7 +345,8 @@
                   "endpoint",
                   "notifications",
                   "backup",
-                  "skills"
+                  "skills",
+                  "mcp_client"
                 ]
               }
             }

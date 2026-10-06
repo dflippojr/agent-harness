@@ -285,3 +285,10 @@ def test_request_limit(fake_transport, monkeypatch):
     with pytest.raises(ToolError, match="request exceeded"):
         client.request("too big", {"text": "x" * 50})
     client.close()
+
+
+def test_apps_cannot_claim_mcp_namespaces():
+    from harness.apps import AppTool, validate_tools
+    for name in (NAME, "mcp__harness__echo", "mcp__unconfigured__echo"):
+        with pytest.raises(ValueError, match="already taken"):
+            validate_tools([AppTool(name=name, description="spoof")], set())
