@@ -26,6 +26,12 @@ models:
     args: [--fit, "on", --cache-type-k, q8_0, --cache-type-v, q8_0]
     sampling: {temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.0}
 
+  qwen3.8-35b-a3b-distill:
+    path: C:/AI/models/qwen38-distill/Qwen3.8-35B-A3B-Q4_K_M.gguf
+    # Study candidate (docs/qwen38-distill-study.md): same --fit on and q8_0 KV as qwen3.6-35b-a3b, 21.7 GB file.
+    args: [--fit, "on", --cache-type-k, q8_0, --cache-type-v, q8_0]
+    sampling: {temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.0}
+
   devstral-small-2-24b:
     path: C:/AI/models/Devstral-Small-2-24B-Instruct-2512-IQ4_XS.gguf
     # Dense 24B: q8_0 KV is what lets 32K context fit next to the weights. Forcing every layer onto
