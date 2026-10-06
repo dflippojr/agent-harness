@@ -105,6 +105,11 @@ modules; new core code goes through `manager.modules`.
 
 ## Writing a module
 
+Host tools that belong to tower workspaces use `ModuleRuntime.workspace_toolkit(project, defaults, member)`.
+The core calls this hook only for tower workspaces; a returned toolkit supplies `schemas()`, `tool_names` and
+`call()`. `ModuleRuntime.project_prompt(project, defaults)` can add project-specific guidance to non-chat
+sessions. Both hooks default to nothing when a module does not contribute them.
+
 1. Make `harness_modules/<name>/__init__.py` with `MODULE = Module(name=..., switches=(...), ...)`. Keep it light:
    point at the heavy parts with small functions that import them on demand.
 2. Import the core only from `harness.modules`. If you need a core object it doesn't export, add it to `_PUBLIC`.
@@ -115,6 +120,13 @@ modules; new core code goes through `manager.modules`.
 ## What stage (b) leaves in the core
 
 These are names, not imports, and move with the config and storage split in stages (c) and (f):
+
+- Homelab: `HomelabConfig`, the `homelab:` YAML section, profile switch, project flag, App capability,
+  discovery path and restart/rebuild approval rules stay in the core. Configuration keys and agent tool names
+  are unchanged. The service import moved from `harness.homelab` to `harness_modules.homelab.service`.
+  The add-on owns allowlisted host tools and project guidance, including the scratch-project warning.
+  An absent or uninstalled package contributes no tools or prompt. There is no runtime enable setting,
+  management route or CLI command for homelab; the existing installer/profile switch selects it.
 
 - `config.py`: the `images:` YAML section (`ImagesConfig`), the `images` / `image_edit` profile switches in
   `MODULE_NAMES` and `ModulesConfig`, `Project.images`, and `DEFAULT_IMAGES_MODELS_DIR`. Config loads before any

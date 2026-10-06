@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from harness import homelab as homelab_mod
+from harness_modules.homelab import service as homelab_mod
 from harness import maintenance as maintenance_mod
 from harness.config import HomelabConfig, HomelabService, Project
-from harness.homelab import Homelab, format_prometheus
+from harness_modules.homelab.service import Homelab, format_prometheus
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.policy import ALLOW, ASK, DENY, Policy

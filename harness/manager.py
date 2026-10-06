@@ -26,7 +26,7 @@ from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .remote import RunnerError, RunnerHub, RunnerOffline
-from .runner import (ACTIVE, END_PENDING, HOMELAB_PROMPT, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT,
+from .runner import (ACTIVE, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT,
                      SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
@@ -889,8 +889,8 @@ class Manager:
     def _optional_prompts(self, spec, defaults: dict, app: dict | None) -> str:
         """Homelab, memory, web and search sections a non-chat session gets when its project and app allow them."""
         extra = ""
-        if spec.homelab and app_allows(defaults, "homelab"):
-            extra += self._homelab_prompt(spec)
+        for rt in self.modules:
+            extra += rt.project_prompt(spec, defaults)
         if self.runner.memory is not None and spec.memory_library and app_allows(defaults, "memory_library"):
             extra += self._memory_prompt(app)
         if self.runner.web is not None and spec.web and app_allows(defaults, "web"):
@@ -898,16 +898,6 @@ class Manager:
         for gate, _kit in self.modules.toolkits():
             if gate.prompt and getattr(spec, gate.project_flag, False) and app_allows(defaults, gate.capability):
                 extra += "\n\n" + gate.prompt
-        return extra
-
-    def _homelab_prompt(self, spec) -> str:
-        extra = "\n\n" + HOMELAB_PROMPT
-        if not spec.repo:
-            repos = [p.name for p in self.cfg.projects.values() if p.repo and p.target == "tower"]
-            extra += ("\n\nThis project has no repository, so you can't change files on the server (the workspace "
-                      "is an empty scratch directory the services never see). If the fix needs a code or config "
-                      "change, don't look for a way around that: finish with the diagnosis, the exact change, and "
-                      "which project to run it in" + (f" ({', '.join(repos)})" if repos else "") + ".")
         return extra
 
     def _memory_prompt(self, app: dict | None) -> str:
@@ -927,10 +917,10 @@ class Manager:
         if not app_tools:
             return []
         from .apps import validate_tools
-        from . import homelab, memory_library, remote_control, web_tools
+        from . import memory_library, remote_control, web_tools
         from .modules import discovered
         from .tools import tool_schemas
-        reserved = ({t["function"]["name"] for t in tool_schemas(100)} | set(homelab.TOOLS)
+        reserved = ({t["function"]["name"] for t in tool_schemas(100)}
                     | set(memory_library.TOOLS) | set(web_tools.TOOLS)
                     | set(remote_control.TOOLS)
                     | {name for module in discovered(self.cfg) for name in module.tool_names})
