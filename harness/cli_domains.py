@@ -67,7 +67,10 @@ LAYOUTS = {
         env=("CODEX_HOME=/home/agent/.codex",),
         ro_files=(("config.toml", "config.toml"), ("AGENTS.md", "AGENTS.md"), ("AGENTS.override.md", "AGENTS.md"),
                   ("hooks.json", "hooks.json")),
-        ro_dirs=("rules", "skills", "prompts")),
+        ro_dirs=("rules", "skills", "prompts"),
+        # Managed requirements outrank the workspace's .codex/config.toml: only the harness's MCP server may start,
+        # so a project-scope `[mcp_servers.*]` command never runs (#394).
+        managed_files=(("/etc/codex/requirements.toml", "requirements.toml"),)),
     # HOME stays the container's own /home/agent, which goes with the container: ~/.cursor (user-level mcp.json,
     # hooks.json, sandbox.json, rules, skills), ~/.claude and the shell's dotfiles never persist. Only the config
     # directory (chats, cli-config.json) and the data directory (transcripts) are kept.

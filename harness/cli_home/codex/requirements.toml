@@ -1,0 +1,6 @@
+# Managed requirements for hosted Codex sessions, mounted read-only at /etc/codex/requirements.toml (#394).
+# They outrank the workspace's .codex/config.toml, which Codex loads without asking: only the harness's own MCP
+# server may start (its URL is mcp_server.RELAY_PORT), and a project-scope `[mcp_servers.*]` entry is disabled
+# instead of running its command.
+[mcp_servers.harness]
+identity = { url = "http://127.0.0.1:8790/mcp" }
