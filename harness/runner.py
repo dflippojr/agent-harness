@@ -188,6 +188,7 @@ class Runner:
         self.cursor_factory = CursorSession
         self._quota_checked: dict[str, float] = {}
         self.checkpointer = Checkpointer(cfg, db, bus)
+        self._checkpoints: dict[str, tuple[asyncio.Task, dict]] = {}   # a session's background checkpoint and its stats, until joined
         self.guard = None                       # gpu_guard.GpuGuard, set by the manager when enabled
         self.ram = None                         # gpu_guard.MemoryWatch (the guard's RAM check), set with the guard
         self.generating: set[str] = set()       # sessions loading the model or calling it (the guard waits for them)
@@ -475,7 +476,10 @@ class Runner:
         self.db.for_session(sid).write(self._status_writer(sid, status, fields))
 
     async def aset_status(self, sid: str, status: str, **fields) -> None:
-        """`set_status` for the event loop."""
+        """`set_status` for the event loop. A final status waits for the background checkpoint, so a session that
+        reads as finished has its checkpoints."""
+        if status not in ACTIVE:
+            await self._join_checkpoint(sid)
         await self.db.for_session(sid).awrite(self._status_writer(sid, status, fields))
 
     async def _acquire(self, sid: str, front: bool = False) -> None:
@@ -1787,20 +1791,54 @@ class Runner:
                     s = self.db.get_session(sid)
             return False
         finally:
-            if mutated:
-                await asyncio.shield(self._checkpoint(sid))
+            if mutated:     # in the background: the next model call does not need it (see `_join_checkpoint`)
+                await asyncio.shield(self._checkpoint(sid, defer=True))
 
-    async def _checkpoint(self, sid: str, only_if_changed: bool = False) -> None:
-        """Snapshot the workspace off the loop (git can take seconds), then report it on the loop."""
+    async def _checkpoint(self, sid: str, only_if_changed: bool = False, defer: bool = False) -> None:
+        """Snapshot the workspace off the loop (git can take seconds), then report it on the loop. With `defer`
+        the snapshot runs in the background and this returns once it is started: the model context and log
+        position are taken now, so the checkpoint is of this turn whatever runs meanwhile, and the files are
+        safe to read because only a mutating tool changes them. `_join_checkpoint` waits for it."""
+        await self._join_checkpoint(sid)        # one at a time: the turn numbers and the store's index are shared
+        at = (self.db.get_session(sid), self.db.last_event_seq(sid))
         stats: dict = {}
-        with telemetry.span("checkpoint") as span:
+        if defer:
+            # No trace span of its own: it would outlive the turn that owns it. `_join_checkpoint` records the wait.
+            self._checkpoints[sid] = (asyncio.create_task(self._take_checkpoint(sid, only_if_changed, at, stats)), stats)
+        else:
+            with telemetry.span("checkpoint") as span:
+                try:
+                    await self._take_checkpoint(sid, only_if_changed, at, stats)
+                finally:
+                    self._span_checkpoint(span, stats)
+
+    async def _join_checkpoint(self, sid: str) -> None:
+        """Wait for the session's background checkpoint, if any. Called before anything that changes the files or
+        needs the checkpoint recorded: a mutating tool, a final status, the end of the run (and so a rewind or fork,
+        which wait for the run's task). Shielded: a cancel must not abandon a snapshot half way."""
+        entry = self._checkpoints.pop(sid, None)
+        if entry is None:
+            return
+        task, stats = entry
+        with telemetry.span("checkpoint") as span:     # only the time spent waiting is on the critical path
             try:
-                event = await asyncio.to_thread(self.checkpointer.take, sid, only_if_changed, stats)
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.done():
+                    self._checkpoints.setdefault(sid, entry)
+                raise
             finally:
-                span.set({"harness.turn": stats.get("turn"), "harness.files": stats.get("files"),
-                          "harness.bytes": stats.get("bytes"), "harness.skipped_reason": stats.get("skipped")})
-            if event:
-                await self.bus.aemit(sid, "checkpoint", event)
+                self._span_checkpoint(span, stats)
+
+    @staticmethod
+    def _span_checkpoint(span, stats: dict) -> None:
+        span.set({"harness.turn": stats.get("turn"), "harness.files": stats.get("files"),
+                  "harness.bytes": stats.get("bytes"), "harness.skipped_reason": stats.get("skipped")})
+
+    async def _take_checkpoint(self, sid: str, only_if_changed: bool, at: tuple[dict, int], stats: dict) -> None:
+        event = await asyncio.to_thread(self.checkpointer.take, sid, only_if_changed, stats, at)
+        if event:
+            await self.bus.aemit(sid, "checkpoint", event)
 
     async def _resolve_call(self, s: dict, call: dict, rest: list[dict], executing: dict,
                             budget: int, mutated: list[str]) -> tuple[bool | None, int | None]:
@@ -1810,6 +1848,8 @@ class Runner:
         sid = s["id"]
         fn = call.get("function") or {}
         name = fn.get("name", "")
+        if name in MUTATING_TOOLS:
+            await self._join_checkpoint(sid)    # the last turn's snapshot must read the files before this changes them
         if executing.get("id") == call["id"]:
             if name in MUTATING_TOOLS:                          # it may have changed files before it was cut off
                 mutated.append(name)
@@ -2720,6 +2760,7 @@ class Runner:
             await finish_then_cancel(self._end_run_inner(sid))
 
     async def _end_run_inner(self, sid: str) -> None:
+        await self._join_checkpoint(sid)
         s = self.db.get_session(sid)
         if s is None:  # erased: nothing of it may be written again
             return

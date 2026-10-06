@@ -16,6 +16,7 @@ from .checkpoints import (CAP, TURN_RUN_KEYS, UNSETTLED, Store, eligible, git_st
 from .projects import GitError
 
 log = logging.getLogger("harness.checkpointer")
+RECLAIM_EVERY = 10
 
 
 @dataclass
@@ -33,6 +34,7 @@ class Restored:
 class Checkpointer:
     def __init__(self, cfg, db, bus):
         self.cfg, self.db, self.bus = cfg, db, bus
+        self._unreclaimed: dict[str, int] = {}      # checkpoints taken per session since its last reclaim
 
     def store(self, s: dict) -> Store:
         from . import storage
@@ -40,16 +42,19 @@ class Checkpointer:
         return Store(storage.checkpoints_dir(self.cfg, session_user_id(s), s.get("app_id") or "") / s["id"])
 
     # take -------------------------------------------------------------------------------------------------------
-    def take(self, sid: str, only_if_changed: bool = False, stats: dict | None = None) -> dict | None:
+    def take(self, sid: str, only_if_changed: bool = False, stats: dict | None = None,
+             at: tuple[dict, int] | None = None) -> dict | None:
         """Checkpoint the session's workspace now. Returns the "checkpoint" event payload (`turn`, or `status`
         "skipped" and a `reason`), or None when there was nothing to record. Never raises: a checkpoint is a
         convenience and must not fail the turn it describes, so any failure leaves the turn not checkpointed, with
         nothing of it kept (row, ref, context or objects). `stats`, when given, is filled with the trace span's
-        attributes: `turn`, `files`, `bytes`, and a `skipped` code (never the reason text, which can hold paths)."""
+        attributes: `turn`, `files`, `bytes`, and a `skipped` code (never the reason text, which can hold paths).
+        `at` is the (session row, last event seq) the checkpoint is of, when the caller took them earlier than this
+        call runs: the model context and the log position are those of the turn, not of whatever ran since."""
         stats = {} if stats is None else stats
         made: dict = {}
         try:
-            return self._take(sid, only_if_changed, stats, made)
+            return self._take(sid, only_if_changed, stats, made, at)
         except Exception as e:      # noqa: BLE001 (the contract above: git, disk and database errors alike)
             log.warning("checkpoint %s/%s failed: %s", sid, stats.get("turn"), e,
                         exc_info=not isinstance(e, (GitError, OSError, subprocess.SubprocessError)))
@@ -57,9 +62,10 @@ class Checkpointer:
             stats["skipped"] = "snapshot_failed"
             return self._skipped(sid, f"the snapshot failed ({str(e)[-160:]})")
 
-    def _take(self, sid: str, only_if_changed: bool, stats: dict, made: dict) -> dict | None:
+    def _take(self, sid: str, only_if_changed: bool, stats: dict, made: dict,
+              at: tuple[dict, int] | None = None) -> dict | None:
         """`take`, raising on failure; `made` tracks what exists so far for `_discard`."""
-        s = self.db.get_session(sid)
+        s, event_seq = at if at else (self.db.get_session(sid), None)
         if s is None or not eligible(s):
             stats["skipped"] = "ineligible"
             return None
@@ -89,17 +95,22 @@ class Checkpointer:
         made["published"] = set()
         store.publish(sid, turn, sha, made["published"])
         stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
-        capped = self.db.for_session(sid).write(self._record, sid, turn, sha, head, branch, stale)
-        self._tidy(s, store, sid, turn, [t for t in stale + capped if t != turn])
+        capped = self.db.for_session(sid).write(self._record, sid, turn, sha, head, branch, stale, event_seq)
+        self._tidy(s, store, sid, turn, [t for t in stale + capped if t != turn], only_if_changed)
         return {"turn": turn, "head": head[:12]}
 
-    def _tidy(self, s: dict, store: Store, sid: str, turn: int, superseded: list[int]) -> None:
+    def _tidy(self, s: dict, store: Store, sid: str, turn: int, superseded: list[int],
+              run_end: bool = False) -> None:
         """After the record commits: delete what it superseded and keep within quota. Best effort, never raising,
-        and never undoing the new turn: a failure here only costs disk."""
+        and never undoing the new turn: a failure here only costs disk. Reclaiming (reflog expiry and gc, about
+        0.25 s) is deferred to every `RECLAIM_EVERY`th checkpoint and the end of a run, off the per-turn path."""
         try:
             store.drop_replaced(sid, turn)
             store.delete(sid, superseded)
-            store.reclaim()
+            self._unreclaimed[sid] = self._unreclaimed.get(sid, 0) + 1
+            if run_end or self._unreclaimed[sid] >= RECLAIM_EVERY:
+                store.reclaim()
+                self._unreclaimed.pop(sid, None)
             if not self._within_quota(s, store, sid, turn):     # the account grew meanwhile; its quota check refuses writes
                 log.warning("checkpoint %s/%s kept although the account is still over its quota", sid, turn)
         except Exception as e:      # noqa: BLE001 (the turn is recorded; what is left costs disk, not correctness)
@@ -130,11 +141,12 @@ class Checkpointer:
         known = self.db.checkpoints(sid, hidden=None)
         return store.tree_of_commit(known[-1]["sha"]) if known else ""
 
-    def _record(self, sid: str, turn: int, sha: str, head: str, branch: str, stale: list[int]) -> list[int]:
+    def _record(self, sid: str, turn: int, sha: str, head: str, branch: str, stale: list[int],
+                event_seq: int | None = None) -> list[int]:
         """One transaction (pass to `db.write`): the new checkpoint replaces the rewound-past ones and the oldest
         beyond the cap. Returns the capped turns; the caller deletes their refs once this has committed."""
         self.db.delete_checkpoints(sid, stale)
-        self.db.add_checkpoint(sid, turn, sha, head, branch)
+        self.db.add_checkpoint(sid, turn, sha, head, branch, event_seq)
         self.db.update_session(sid, turn_seq=turn)
         visible = self.db.checkpoints(sid, hidden=False)
         capped = [c["turn"] for c in visible[:max(0, len(visible) - CAP)]]
@@ -170,6 +182,9 @@ class Checkpointer:
             return True
         uid, limit = quota
         used = account_usage_bytes(self.cfg, uid)
+        if used >= limit:
+            store.reclaim()         # unreachable objects count as used until reclaimed, and reclaiming is deferred
+            used = account_usage_bytes(self.cfg, uid)
         if used < limit:
             return True
         if used - dir_size(store.base) >= limit:    # even an empty store would not fit

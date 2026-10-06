@@ -289,9 +289,9 @@ def test_scripted_session_produces_one_covering_trace(tmp_path):
     assert {"approval_wait", "sandbox_exec"} <= tool_kids
     wait = next(sp for sp in spans if sp.name == "approval_wait")
     assert wait.attributes["harness.approval_status"] == "approved"
-    ckpt = next(sp for sp in spans if sp.name == "checkpoint")   # the snapshot after write_file, inside its turn
-    turn_ids = {sp.context.span_id for sp in spans if sp.name == "turn"}
-    assert ckpt.parent.span_id in turn_ids
+    # The snapshot after write_file runs in the background; its span is where the run waited for it.
+    ckpt = next(sp for sp in spans if sp.name == "checkpoint")
+    assert ckpt.parent.span_id in {sp.context.span_id for sp in spans}
     assert ckpt.attributes["harness.turn"] == 1 and ckpt.attributes["harness.files"] >= 1
     assert ckpt.attributes["harness.bytes"] >= 1 and "harness.skipped_reason" not in ckpt.attributes
 

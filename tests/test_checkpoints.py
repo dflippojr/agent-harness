@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import checkpoints, storage
+from harness import checkpointer, checkpoints, storage
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 
@@ -188,9 +188,13 @@ def test_over_quota_prunes_then_skips_without_failing_the_turn(tmp_path, monkeyp
         usage["bytes"] = 150
         monkeypatch.setattr("harness.fileops.dir_size", lambda p: 100)
         monkeypatch.setattr(store, "reclaim", lambda: usage.update(bytes=50), raising=False)
+        before = [c["turn"] for c in m.db.checkpoints(sid, hidden=None)]
         assert cp._within_quota(member, store, sid, keep=2) is True
+        # Unreachable objects only a reclaim frees (it is deferred) must not cost a live checkpoint.
+        assert [c["turn"] for c in m.db.checkpoints(sid, hidden=None)] == before
         # Even an empty store would not fit: skipped, never raises.
         monkeypatch.setattr("harness.fileops.dir_size", lambda p: 10)
+        monkeypatch.setattr(store, "reclaim", lambda: None, raising=False)
         usage["bytes"] = 500
         assert cp._within_quota(member, store, sid, keep=2) is False
 
@@ -441,6 +445,7 @@ def test_rewind_whose_record_fails_puts_the_files_back(tmp_path, monkeypatch):
         m, sid, ws, state = await later_work(tmp_path)
         before = state()
         cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
 
         def failing_commit(*args):
             raise sqlite3.OperationalError("disk I/O error")
@@ -471,6 +476,7 @@ def test_rewind_that_can_neither_record_nor_undo_blocks_sends_until_a_rewind(tmp
     async def body():
         m, sid, ws, _ = await later_work(tmp_path)
         cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
 
         def failing_commit(*args):
             raise sqlite3.OperationalError("disk I/O error")
@@ -566,6 +572,7 @@ def test_unchanged_hosted_runs_write_no_objects(tmp_path):
     async def body():
         m, s = await started(tmp_path)
         cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
         store = cp.store(s)
         before = objects(store)
         for _ in range(20):                                              # a hosted run that changed nothing
@@ -583,6 +590,7 @@ def test_unrecorded_snapshot_objects_are_reclaimed(tmp_path, monkeypatch):
     async def body():
         m, s = await started(tmp_path)
         cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
         store = cp.store(s)
         store.reclaim()
         before = objects(store)
@@ -713,6 +721,7 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
         m, s = await started(tmp_path)
         sid, ws = s["id"], Path(s["workspace"])
         cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
         store = cp.store(s)
         await m.rewind(sid, 1)
         hidden = m.db.checkpoints(sid, hidden=True)
@@ -746,6 +755,7 @@ def test_a_take_that_fails_naming_or_recording_after_a_rewind_keeps_the_rewound_
         m, s = await started(tmp_path)
         sid, ws = s["id"], Path(s["workspace"])
         cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
         store = cp.store(s)
         await m.rewind(sid, 1)
         hidden = m.db.checkpoints(sid, hidden=True)
@@ -776,6 +786,7 @@ def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(
         m, s = await started(tmp_path)
         sid, ws = s["id"], Path(s["workspace"])
         cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
         store = cp.store(s)
         await m.rewind(sid, 1)
         hidden = m.db.checkpoints(sid, hidden=True)
@@ -798,6 +809,7 @@ def test_a_send_or_review_during_a_rewind_is_refused_until_it_ends(tmp_path, out
         m, s = await started(tmp_path)
         sid, ws = s["id"], Path(s["workspace"])
         cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
         restore, entered, release = cp.restore, threading.Event(), threading.Event()
 
         def slow_restore(*args):
@@ -904,5 +916,61 @@ def test_rewind_to_a_checkpoint_without_saved_state_clears_it(tmp_path):
         fork = await m.fork(sid, 1, "do something else")
         assert "state" not in fork["run"] and "notes" not in fork["run"]
         await finished(m, fork["id"])
+
+    asyncio.run(body())
+
+
+def test_reclaim_waits_for_every_tenth_checkpoint_and_the_run_end(tmp_path, monkeypatch):
+    async def body():
+        m, s = await started(tmp_path)
+        sid, ws = s["id"], Path(s["workspace"])
+        reclaims = []
+        monkeypatch.setattr(checkpoints.Store, "reclaim", lambda self: reclaims.append(1))
+        cp = m.runner.checkpointer
+        cp._unreclaimed.clear()
+        for i in range(checkpointer.RECLAIM_EVERY - 1):
+            (ws / "f.txt").write_text(str(i))
+            assert cp.take(sid)["turn"]
+        assert reclaims == []
+        (ws / "f.txt").write_text("last")
+        cp.take(sid)
+        assert reclaims == [1]                                  # the tenth
+        (ws / "f.txt").write_text("end")
+        cp.take(sid, only_if_changed=True)
+        assert reclaims == [1, 1]                               # the run's last checkpoint
+
+    asyncio.run(body())
+
+
+def test_the_next_model_call_does_not_wait_for_the_checkpoint(tmp_path, monkeypatch):
+    import time
+    calls, taken = [], []
+    script = two_edits()
+
+    async def chat(*args, **kwargs):
+        calls.append(time.monotonic())
+        return await script(*args, **kwargs)
+
+    real = checkpointer.Checkpointer.take
+
+    def slow_take(self, *args, **kwargs):
+        time.sleep(0.8)
+        taken.append(time.monotonic())
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(checkpointer.Checkpointer, "take", slow_take)
+
+    async def body():
+        m, s = await started(tmp_path, script=chat)
+        sid = s["id"]
+        assert calls[1] < taken[0]                   # the second model call began while the first snapshot ran
+        assert taken[0] < taken[1]                   # one at a time, in turn order
+        assert [c["turn"] for c in m.db.checkpoints(sid)] == [1, 2]       # all there once the session reads as done
+        seqs = [c["event_seq"] for c in m.db.checkpoints(sid)]
+        first_reply = [e["seq"] for e in m.db.events(sid) if e["type"] == "tool_result"][0]
+        assert seqs[0] >= first_reply and seqs[0] < [e["seq"] for e in m.db.events(sid) if e["type"] == "assistant"][1]
+        await m.rewind(sid, 1)                                              # rewind right after a mutating turn
+        assert (Path(s["workspace"]) / "app.py").read_text() == "VALUE = 2\n"
+        assert not (Path(s["workspace"]) / "extra.txt").exists()
 
     asyncio.run(body())

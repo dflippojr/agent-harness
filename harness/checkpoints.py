@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +46,7 @@ UNDO_PREFIX = "refs/harness/rewind-undo"     # the workspace as it was before a 
 STAGE_PREFIX = "refs/harness/staged"         # a new checkpoint until its database record commits
 REPLACED_PREFIX = "refs/harness/replaced"    # a rewound-past checkpoint a new one of its turn replaces, until then
 GITLINK = 0o160000           # index mode of a nested repository
+_INDEX_LOCKS: dict[str, threading.Lock] = {}     # one snapshot at a time per store: they share its index file
 
 
 @dataclass
@@ -163,8 +165,8 @@ class Store:
         checkpoint with the same turn number survives a snapshot that is then dropped. Returns "" without committing when the files
         are exactly `unless_tree`: staging them then wrote no object the repository did not already hold."""
         self.init()
-        with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
-            tree, self.files, self.bytes, _ = self._build(workspace, Path(tmp) / "index")
+        with _INDEX_LOCKS.setdefault(str(self.base), threading.Lock()):
+            tree = self._tree_kept(workspace)
             if unless_tree and tree == unless_tree:
                 return ""
             message = f"checkpoint {turn}\n\nHarness-Session: {sid}\nHarness-Turn: {turn}\nHead: {head}\nBranch: {branch}\n"
@@ -172,6 +174,27 @@ class Store:
         if publish:
             self._git(None, None, "update-ref", ref_name(sid, turn), sha)
         return sha
+
+    def _tree_kept(self, workspace: Path) -> str:
+        """The workspace's tree, staged into the store's own index, which survives between snapshots so `git add`
+        re-hashes only the files whose size or time changed. It is thrown away and rebuilt from nothing when it
+        cannot be trusted: a failed or interrupted git call, or a tracked file that is now ignored (a fresh index
+        never holds one)."""
+        index = self.base / "index"
+        for stale in self.base.glob("index.*"):      # leftovers of a nested build or an interrupted git
+            stale.unlink(missing_ok=True)
+        reused = index.is_file()
+        try:
+            if reused and self._git(workspace, index, "ls-files", "-c", "-i", "--exclude-standard", "-z").out:
+                index.unlink()
+            tree, self.files, self.bytes, _ = self._build(workspace, index)
+            return tree
+        except BaseException:
+            index.unlink(missing_ok=True)
+            raise
+        finally:
+            for stale in self.base.glob("index.*"):
+                stale.unlink(missing_ok=True)
 
     def stage(self, sid: str, turn: int, sha: str, context: bytes) -> None:
         """Hold a snapshot taken with `publish` False, with its `pack_context`ed model context, under temporary
@@ -241,7 +264,9 @@ class Store:
             (self.contexts / f"{turn}.json.gz").unlink(missing_ok=True)
 
     def reclaim(self) -> None:
-        """Drop objects no hidden ref reaches any more. Best effort: a failure only costs disk."""
+        """Drop objects no hidden ref reaches any more, and the kept index (about 90 bytes a file, rebuilt by the
+        next snapshot). Best effort: a failure only costs disk."""
+        (self.base / "index").unlink(missing_ok=True)
         if (self.repo / "HEAD").exists():
             self._git(None, None, "reflog", "expire", "--expire=now", "--all", check=False)
             self._git(None, None, "gc", "--prune=now", "--quiet", check=False)
@@ -432,11 +457,38 @@ def head_and_branch(workspace: Path) -> tuple[str, str]:
     HEAD. One isolated git call: each sets up a throwaway GIT_DIR, which costs several processes."""
     if not (workspace / ".git").exists():
         return "", ""
+    quick = _read_head(workspace)
+    if quick is not None:
+        return quick
     result = projects.git(workspace, "rev-parse", "HEAD", "--abbrev-ref", "HEAD", check=False)
     lines = result.out.split()
     if result.code != 0 or len(lines) != 2:
         return "", ""
     return lines[0], "" if lines[1] == "HEAD" else lines[1]     # git names a detached HEAD "HEAD", never a branch
+
+
+def _read_head(workspace: Path) -> tuple[str, str] | None:
+    """`head_and_branch` read from the repository's files, with no git process (about 0.4 s saved on this tower).
+    None when the layout is anything but a plain branch with a loose or packed ref, or a detached full sha; the
+    caller then asks git."""
+    try:
+        _, metadata, _ = projects._resolve_workspace_git(workspace)
+        head = (metadata / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref: refs/heads/"):
+            return (head, "") if len(head) in (40, 64) and all(c in "0123456789abcdef" for c in head) else None
+        ref = head[5:]
+        loose = metadata / ref
+        sha = loose.read_text(encoding="utf-8").strip() if loose.is_file() else ""
+        if not sha:
+            packed = metadata / "packed-refs"
+            for line in packed.read_text(encoding="utf-8").splitlines() if packed.is_file() else []:
+                if line.endswith(" " + ref) and not line.startswith(("#", "^")):
+                    sha = line.split(" ", 1)[0]
+        if len(sha) not in (40, 64) or not all(c in "0123456789abcdef" for c in sha):
+            return None                                     # unborn, or a symbolic or unusual ref
+        return sha, ref[len("refs/heads/"):]
+    except (OSError, UnicodeDecodeError, GitError):
+        return None
 
 
 def remove_store(base: Path) -> None:
