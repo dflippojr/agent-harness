@@ -9,6 +9,8 @@ import subprocess
 import threading
 from pathlib import Path
 
+from jsonschema import Draft202012Validator, SchemaError
+
 from harness.modules import ToolError, run_cmd
 
 MAX_MESSAGE = 1_000_000
@@ -82,6 +84,20 @@ class StdioClient:
         self._send({"method": method})
 
     def request(self, method, params):
+        # Covers blocked stdin writes as well as servers that never send a response.
+        timer = threading.Timer(RPC_TIMEOUT, self._kill)
+        timer.daemon = True
+        timer.start()
+        try:
+            return self._request(method, params)
+        finally:
+            timer.cancel()
+
+    def _kill(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+
+    def _request(self, method, params):
         with self.lock:
             self.counter += 1
             self._send({"id": self.counter, "method": method, "params": params})
@@ -95,22 +111,29 @@ class StdioClient:
                     raise ToolError("MCP server response timed out") from None
                 if isinstance(message, Exception):
                     raise message
-                if "method" in message:
-                    if "id" in message:
-                        self._send({"id": message["id"], "error": {"code": -32601, "message": "unsupported"}})
+                if self._server_message(message):
                     continue
-                if message.get("id") != self.counter or message.get("jsonrpc") != "2.0":
-                    raise ToolError("MCP response id or JSON-RPC version mismatch")
-                if "error" in message:
-                    raise ToolError("MCP server returned a protocol error")
-                result = message.get("result")
-                if not isinstance(result, dict):
-                    raise ToolError("MCP result must be an object")
-                return result
+                return self._result(message)
+
+    def _server_message(self, message):
+        if "method" not in message:
+            return False
+        if "id" in message:
+            self._send({"id": message["id"], "error": {"code": -32601, "message": "unsupported"}})
+        return True
+
+    def _result(self, message):
+        if message.get("id") != self.counter or message.get("jsonrpc") != "2.0":
+            raise ToolError("MCP response id or JSON-RPC version mismatch")
+        if "error" in message:
+            raise ToolError("MCP server returned a protocol error")
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise ToolError("MCP result must be an object")
+        return result
 
     def close(self):
-        if self.proc.poll() is None:
-            self.proc.kill()
+        self._kill()
         self.proc.wait(timeout=10)
         self.reader.join(timeout=2)
         self.proc.stdin.close()
@@ -141,29 +164,39 @@ class SessionTools:
             if initialized.get("protocolVersion") != "2024-11-05":
                 raise ToolError("unsupported MCP protocol version")
             client.notify("notifications/initialized")
-            cursor = None
-            seen_cursors = set()
-            while True:
-                page = await asyncio.to_thread(client.request, "tools/list", {"cursor": cursor} if cursor else {})
-                tools = page.get("tools")
-                if not isinstance(tools, list) or any(not isinstance(tool, dict) for tool in tools):
-                    raise ToolError("MCP tools must be a list of objects")
-                for tool in tools:
-                    name = tool.get("name", "")
-                    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-                        raise ToolError("invalid MCP tool name")
-                    full = f"mcp__{server['name']}__{name}"
-                    schema = tool.get("inputSchema")
-                    if full in self.tools or len(self.tools) >= MAX_TOOLS or not isinstance(schema, dict):
-                        raise ToolError("duplicate MCP tool, invalid schema or too many tools")
-                    self.tools[full] = (client, name, {"type": "function", "function": {
-                        "name": full, "description": str(tool.get("description", "")), "parameters": schema}})
-                cursor = page.get("nextCursor")
-                if not cursor:
-                    break
-                if not isinstance(cursor, str) or cursor in seen_cursors or len(self.tools) >= MAX_TOOLS:
-                    raise ToolError("invalid MCP tools pagination")
-                seen_cursors.add(cursor)
+            await self._list_tools(server, client)
+
+    async def _list_tools(self, server, client):
+        cursor = None
+        seen_cursors = set()
+        while True:
+            page = await asyncio.to_thread(client.request, "tools/list", {"cursor": cursor} if cursor else {})
+            tools = page.get("tools")
+            if not isinstance(tools, list) or any(not isinstance(tool, dict) for tool in tools):
+                raise ToolError("MCP tools must be a list of objects")
+            for tool in tools:
+                self._add_tool(server, client, tool)
+            cursor = page.get("nextCursor")
+            if not cursor:
+                return
+            if not isinstance(cursor, str) or cursor in seen_cursors or len(seen_cursors) >= MAX_TOOLS:
+                raise ToolError("invalid MCP tools pagination")
+            seen_cursors.add(cursor)
+
+    def _add_tool(self, server, client, tool):
+        name = tool.get("name", "")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            raise ToolError("invalid MCP tool name")
+        full = f"mcp__{server['name']}__{name}"
+        schema = tool.get("inputSchema")
+        if full in self.tools or len(self.tools) >= MAX_TOOLS or not isinstance(schema, dict):
+            raise ToolError("duplicate MCP tool, invalid schema or too many tools")
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError:
+            raise ToolError("invalid MCP input schema") from None
+        self.tools[full] = (client, name, {"type": "function", "function": {
+            "name": full, "description": str(tool.get("description", "")), "parameters": schema}})
 
     def schemas(self):
         return [value[2] for value in self.tools.values()]
@@ -178,10 +211,10 @@ class SessionTools:
         return json.dumps(result, ensure_ascii=False)
 
     async def close(self):
-        for server, client in self.clients:
+        clients, self.clients = self.clients, []
+        self.tools.clear()
+        for server, client in clients:
             try:
                 await run_cmd(["docker", "rm", "-f", container_name(self.session["id"], server)], timeout=30)
             finally:
                 await asyncio.to_thread(client.close)
-        self.clients.clear()
-        self.tools.clear()

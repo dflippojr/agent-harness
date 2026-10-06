@@ -713,8 +713,6 @@ class Runner:
                 return
             if not self.cfg.modules.local_model:
                 raise CliBackendError("the local model is disabled in this service profile")
-            if self.modules is not None:
-                await self.modules.prepare_session(s)
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
             await self._take_pending_cancel(sid, cancelled=True)
@@ -760,6 +758,8 @@ class Runner:
             await self._prepare_repo(s)
             self._snapshot_git_baseline(sid)
             self._repo_map_at_start(sid)
+            if self.modules is not None:
+                await self.modules.prepare_session(s)
         if s["status"] != "waiting_approval":  # _resolve_calls waits without holding the GPU
             await self._acquire(sid)
         await self._loop(sid)

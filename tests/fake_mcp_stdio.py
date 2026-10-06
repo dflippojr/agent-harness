@@ -21,6 +21,8 @@ for line in sys.stdin:
             tool["name"] = "bad/name"
         elif mode == "schema":
             tool["inputSchema"] = None
+        elif mode == "bad_schema":
+            tool["inputSchema"] = {"type": "not-a-type"}
         elif mode == "duplicate":
             result["tools"] *= 2
         elif mode == "empty_pages":
@@ -32,6 +34,9 @@ for line in sys.stdin:
     elif method == "tools/call":
         result = {"content": [{"type": "text", "text": request["params"]["arguments"].get("text", "")}],
                   "isError": mode == "tool_error"}
+        if mode == "env":
+            import os
+            result["content"][0]["text"] = os.environ.get("TOKEN", "") + ":" + os.environ.get("DAEMON_SECRET", "")
     elif mode == "timeout":
         import time
         time.sleep(10)

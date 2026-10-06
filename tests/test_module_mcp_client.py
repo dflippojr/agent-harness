@@ -158,7 +158,7 @@ def test_listing_call_and_cleanup(tmp_path, fake_transport, mode):
     asyncio.run(body())
 
 
-@pytest.mark.parametrize("mode", ["version", "invalid_tool", "schema", "duplicate", "empty_pages", "invalid_list",
+@pytest.mark.parametrize("mode", ["version", "invalid_tool", "schema", "bad_schema", "duplicate", "empty_pages", "invalid_list",
                                  "protocol_error", "id", "result", "malformed", "oversize", "nonobject"])
 def test_failed_listing_cleans_sidecar(tmp_path, fake_transport, mode):
     async def body():
@@ -183,16 +183,17 @@ def test_tool_error_and_timeout(fake_transport, monkeypatch):
         with pytest.raises((ToolError, OSError, ValueError)):
             await asyncio.to_thread(client.request, "closed", {})
         real = service.StdioClient(["unused", "timeout"])
-        with pytest.raises(ToolError, match="timed out"):
+        with pytest.raises(ToolError):
             await asyncio.to_thread(real.request, "wait", {})
         real.close()
     asyncio.run(body())
 
 
-def test_secrets_are_references_never_argv(tmp_path, fake_transport):
+def test_secrets_are_references_never_argv(tmp_path, fake_transport, monkeypatch):
     secret = tmp_path / "secret"
     secret.write_text("private-token", encoding="utf-8")
-    server = SERVER | {"env": {"TOKEN": {"secret_file": str(secret)}}}
+    server = SERVER | {"env": {"TOKEN": {"secret_file": str(secret)}}, "command": ["env"]}
+    monkeypatch.setenv("DAEMON_SECRET", "never-inherit")
     config._project_from_spec("demo", {"mcp_servers": [server]})
     argv = service.container_argv(SESSION, server, config.SandboxConfig())
     assert argv[argv.index("--env") + 1] == "TOKEN"
@@ -202,6 +203,8 @@ def test_secrets_are_references_never_argv(tmp_path, fake_transport):
     async def body():
         kit = service.SessionTools(SESSION, [server], config.SandboxConfig())
         await kit.start()
+        result = json.loads(await kit.call(NAME, {"text": "env"}))
+        assert result["content"][0]["text"] == "private-token:"
         await kit.close()
     asyncio.run(body())
 
@@ -239,3 +242,46 @@ def test_native_loop_approval_events_taint_metrics_and_cleanup(tmp_path, fake_tr
         finally:
             await m.stop()
     asyncio.run(body())
+
+
+def test_session_isolation_rule_overrides_and_cancellation(tmp_path, fake_transport):
+    async def body():
+        m = manager(tmp_path)
+        m.cfg.projects["scratch"].mcp_servers[0]["rules"] = [{"tool": NAME, "action": "allow"}]
+        assert m.runner.policy(SESSION).decide(NAME, {}).action == "allow"
+        await m.modules.prepare_session(SESSION)
+        other = SESSION | {"id": "second-session"}
+        await m.modules.prepare_session(other)
+        rt = m.modules.get("mcp_client")
+        assert rt.session_toolkit(SESSION) is not rt.session_toolkit(other)
+        assert service.container_name(SESSION["id"], SERVER) != service.container_name(other["id"], SERVER)
+        await m.modules.end_session(SESSION["id"])
+        assert rt.session_toolkit(other) is not None
+        await m.modules.stop()
+
+        m = manager(tmp_path / "cancel", packages=["harness_modules.mcp_client"], steps=[
+            Completion(tool_calls=[call(NAME, text="never run")])])
+        await m.start()
+        try:
+            s = m.create("echo")
+            for _ in range(500):
+                if m.db.pending_approvals(s["id"]):
+                    break
+                await asyncio.sleep(0.01)
+            assert m.db.pending_approvals(s["id"])
+            m.tasks[s["id"]].cancel()
+            await asyncio.gather(m.tasks[s["id"]], return_exceptions=True)
+            assert not m.modules.get("mcp_client").sessions
+            assert not m.db.get_session(s["id"])["taint"]
+            assert all(client.proc.poll() is not None for client in fake_transport[0])
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_request_limit(fake_transport, monkeypatch):
+    client = service.StdioClient(["unused", "normal"])
+    monkeypatch.setattr(service, "MAX_MESSAGE", 10)
+    with pytest.raises(ToolError, match="request exceeded"):
+        client.request("too big", {"text": "x" * 50})
+    client.close()

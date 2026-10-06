@@ -70,7 +70,8 @@ ALWAYS_ASK: dict[str, str] = {
 
 
 # Hosted Claude Code sees the daemon's own tools through the harness MCP server as mcp__harness__<tool> (#300). They are
-# decided as the native tool they name, so project rules and defaults apply unchanged. Other MCP servers aren't wired.
+# decided as the native tool they name, so project rules and defaults apply unchanged. Native client servers are
+# separately allowlisted per session and retain their full names for rules.
 MCP_SERVER = "harness"
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 
@@ -253,7 +254,8 @@ class Policy:
 
     def fingerprint(self) -> str:
         """Stable id of the ordered rule set the deterministic gate used."""
-        payload = json.dumps([self.rules, sorted(self.mcp_servers)], sort_keys=True, default=str).encode()
+        rules = [self.rules, sorted(self.mcp_servers)] if self.mcp_servers else self.rules
+        payload = json.dumps(rules, sort_keys=True, default=str).encode()
         return hashlib.sha256(payload).hexdigest()[:16]
 
     def decide(self, name: str, args: dict) -> Decision:
@@ -264,7 +266,9 @@ class Policy:
             if bare is None:
                 if not any(name.startswith(f"mcp__{server}__") and len(name) > len(f"mcp__{server}__")
                            for server in self.mcp_servers):
-                    return Decision(DENY, "MCP server is not configured for this session")
+                    reason = ("MCP server is not configured for this session" if self.mcp_servers
+                              else "only the harness MCP server is available to hosted sessions")
+                    return Decision(DENY, reason)
                 client = True
             else:
                 name, alias = bare, name

@@ -20,7 +20,7 @@ class McpRuntime(ModuleRuntime):
         if project is None or project.owner_id != "owner" or not project.mcp_servers:
             return
         servers = validate_mcp_servers(project.mcp_servers, project.owner_id)
-        kit = SessionTools(session, servers, self.cfg.sandbox)
+        kit = SessionTools(session, servers, self.manager.runner.sandbox(session).cfg)
         self.sessions[session["id"]] = kit
         try:
             await kit.start()
