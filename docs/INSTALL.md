@@ -253,7 +253,7 @@ A backup folder holds exactly:
 | `managed-config*.json` | the managed-config overlay from `<data_dir>` |
 
 It does not hold workspaces (a local git project's branches are already saved in its source repository),
-checkpoints, artifact files, `pre-migration/` snapshots, logs, image archives, model files or anything off this
+checkpoints, artifact files, `member-keys.key` (the key that opens members' stored API keys, #393: after a restore members add their API keys again), `pre-migration/` snapshots, logs, image archives, model files or anything off this
 machine. Copy the backup folder elsewhere yourself if you want an off-machine copy.
 
 Check a backup at any time; it changes nothing and can run while the daemon is up:

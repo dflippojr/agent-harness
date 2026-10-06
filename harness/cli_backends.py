@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from . import claude_token, cli_domains, credential_sources, end_users  # noqa: F401 - end_users registers its source
+from . import claude_token, cli_domains, credential_sources, end_users, member_keys  # noqa: F401 - these register their sources
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
 from .sandbox import run_cmd
@@ -36,6 +36,12 @@ class CliBackendError(Exception):
     def __init__(self, message: str = "", code: str = ""):
         super().__init__(message)
         self.code = code
+
+
+def session_key(end_user: str, api_key: str) -> str:
+    """The API key a session runs on. An App's end user never runs on a key of the App's or the owner's (#365); a
+    member's session runs on the member's own key and nothing else (#393)."""
+    return api_key if not end_user or member_keys.member_of(end_user) else ""
 
 
 async def ready_domain(name: str, backend: BackendConfig, app_id: str, api_key: str, end_user: str = "") -> None:
@@ -80,7 +86,7 @@ class ClaudeSession:
         self.system_prompt = system_prompt
         self.model = model or backend.model
         self.backend_session_id = backend_session_id
-        self.api_key = "" if end_user else api_key  # an end user's session never runs on a key of the App's or owner's
+        self.api_key = session_key(end_user, api_key)
         self.container = f"harness-{session_id}-claude"
         # With MCP the CLI shares the relay's network namespace: the relay's loopback port is reachable from this
         # container only, and egress still goes through the same network and proxy.
@@ -298,7 +304,7 @@ class CodexSession:
         self.system_prompt = system_prompt
         self.model = model or backend.model
         self.backend_session_id = backend_session_id
-        self.api_key = "" if end_user else api_key
+        self.api_key = session_key(end_user, api_key)
         self.container = f"harness-{session_id}-codex"
         self._popen = popen
         self._command_override = command

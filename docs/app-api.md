@@ -143,7 +143,7 @@ An enabled Tailscale member is a human principal on the same-origin `/api/v1` su
 `role`, opaque `user_id`, and usage. Members may create empty tower projects or clone credential-free public HTTPS
 repositories from github.com, gitlab.com, or codeberg.org into their own managed area (`POST /api/v1/projects`,
 ambient Tailscale human only — never an app token). They create, list, steer, cancel, approve, and review only
-their own local-model tower sessions, search only their own transcripts, and receive only their own live events.
+their own tower sessions (the local model, or Claude and Codex on their own API key), search only their own transcripts, and receive only their own live events.
 
 When the owner has turned on member GitHub sign-in ([`member-github-auth.md`](member-github-auth.md)), an
 ambient same-origin member (never a bearer token) manages **their own** connection:
@@ -154,7 +154,46 @@ resumes the attempt, `POST .../cancel` cancels it, and `DELETE /api/v1/me/github
 `POST /api/v1/projects` with `"github": true` clones a `https://github.com/<owner>/<repo>` URL with the member's
 own connection. It answers `not_connected` or `reconnect_required` (409) when the member must connect first.
 
-Members cannot use hosted-provider subscriptions, owner/app/device tokens, Mac runners, homelab or memory-library
+### Members' own API keys
+
+A member runs hosted **Claude Code** and **Codex** on their **own Anthropic / OpenAI API key** (#393), billed to their
+own provider account. Cursor is not available to members. The routes take the ambient same-origin member only (never a
+bearer token, the owner, an App or a guest) and carry no user id, so nobody manages another member's key:
+
+| Call | Does |
+| --- | --- |
+| `GET /api/v1/me/api-keys` | `{keys: [{backend, provider, env, configured, last4, updated_at}], billing_warning, usage}`: `last4` is all that is ever shown; `usage` is the member's session and token counts per backend |
+| `PUT /api/v1/me/api-keys/{claude\|codex}` | Body `{"key": "..."}`: store or replace. `400 invalid_key` when it doesn't look like that provider's key (the body is read by hand, so no error repeats it) |
+| `POST /api/v1/me/api-keys/{backend}/test` | One cheap provider call (list models) with the stored key: `{ok, checked, message}`. `409 member_api_key_required` without a key |
+| `DELETE /api/v1/me/api-keys/{backend}` | Deletes the key, stops the member's running sessions on that backend and removes their CLI state volume |
+
+A member's `POST /api/v1/sessions` with `backend` `claude` or `codex` runs on their key. Without one it is refused with
+`403 member_api_key_required` ("add your API key in your settings"); it never falls back to the owner's login,
+`CLAUDE_CODE_OAUTH_TOKEN` (#390) or keys. `GET /api/v1/backends` for a member still lists the local model only; the
+Web New task page adds Claude and Codex once a key is saved.
+
+**Storage.** The key is sealed with AES-GCM under a master key in `<data_dir>/member-keys.key` (created on first use).
+The database holds the ciphertext, bound to (member, backend), and the last four characters. The master key is not in
+nightly backups: after a restore members add their keys again. The key is never in config, logs, events, transcripts,
+backups in clear or any response.
+
+**Session wiring.** A member is treated like an App's end user of the Web domain ([End users' own
+logins](#end-users-own-logins)): the session's `end_user` is `member:<user_id>` (the prefix is reserved; an App naming
+it gets `400 invalid_end_user`), which gives the member their own hashed CLI state volume and the same read-only
+config. The container gets only `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (by name; the value rides the docker client's
+environment, not the command line), no login volume and no OAuth token. Member A's session mounts only A's volume.
+This is a credential source (`harness/credential_sources.py`), so per-member subscription logins could register beside
+it later without reworking storage or wiring.
+
+**Removal.** Deleting a key, or disabling the member's account, deletes it and stops their hosted sessions; new ones are
+refused. Claude Code keeps a short fingerprint of an API key it has used in its own state, so deleting the key also
+deletes the member's CLI state volume.
+
+**Terms.** Anthropic permits hosted Claude Code when each end user authenticates with their own API key, and forbids
+collecting or intermediating Claude.ai credentials, so per-member *subscription* tokens stay blocked ([`per-user-subscriptions-study.md`](per-user-subscriptions-study.md),
+#377; subscription logins for members: #365). API keys are the permitted route.
+
+Members cannot use the owner's hosted-provider subscriptions, owner/app/device tokens, Mac runners, homelab or memory-library
 tools, image generation, Remote Control, inference keys, scheduled jobs, app management, notifications, backups,
 or another user's data. Those capabilities are forced off in service/tool construction, not only in the UI.
 
@@ -165,12 +204,12 @@ member. Device and runner tokens gain no member authority.
 
 | Capability | owner | member | guest | app token | device/runner |
 | --- | --- | --- | --- | --- | --- |
-| Own sessions (create/list/steer/cancel/review) | yes | yes (local tower only) | read-only look around | own sessions, plus the owner's with `sessions:all` | inference only; no member sessions |
+| Own sessions (create/list/steer/cancel/review) | yes | yes (tower only; hosted Claude/Codex on their own API key) | read-only look around | own sessions, plus the owner's with `sessions:all` | inference only; no member sessions |
 | `/api/v1/me`, scoped projects/search/events | yes | own account | no | owner scope | no |
 | Create projects | yes | empty or public HTTPS allowlist | no | no | no |
 | `/api/admin/v1`, `ho-` owner tokens | yes | 403 | 403 | 403 | 403 |
 | App-tools-only sessions (`tools_only`) | no | no | no | own only, never `sessions:all` | no |
-| Hosted backends, images, jobs, runners, Remote Control | yes | no | no | scopes for images/remote_control only | no |
+| Hosted backends, images, jobs, runners, Remote Control | yes | Claude and Codex on their own API key only; no images, jobs, runners or Remote Control | no | scopes for images/remote_control only | no |
 | Homelab, memory library, notifications, backups, keys | yes | no | no | no | no |
 | Member prompts, transcripts, diffs, repo contents | no (aggregate metadata only) | own only | no | no | no |
 
@@ -643,6 +682,6 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
 | 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
-| 1.19 | 2026-10-05 | End users' own subscription logins (#365): `end_user` on session create and `/api/v1/end-users/{id}/logins/{backend}` (start, code, status, unlink), for `claude` and `codex` |
+| 1.19 | 2026-10-05 | End users' own subscription logins (#365): `end_user` on session create and `/api/v1/end-users/{id}/logins/{backend}` (start, code, status, unlink), for `claude` and `codex`. Members' own API keys (#393): `/api/v1/me/api-keys`, and a member's `backend` `claude` or `codex` runs on their own key; `member:` is reserved in `end_user` |
 | 1.18 | 2026-10-05 | `codex` runs App-tools-only sessions and is listed in `app_tools_only_backends`; hosted Codex sessions get the harness tools over MCP (#373) |
 | 1.16 | 2026-10-03 | `DELETE /api/v1/sessions/{id}` erases a session and everything tied to it; `retention_days` on create and an App default retention erase idle sessions; a revoked App's store and folder are erased after 7 days unless the owner undoes the revoke; App session files live in the App's folder (#330) |

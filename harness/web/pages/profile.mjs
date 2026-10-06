@@ -167,6 +167,7 @@ function accountCard(me, profile) {
       isMember() ? h("p", { class: "muted small" }, `${usage.running || 0} running · ${usage.queued || 0} queued`) : null),
     isMember() ? googleSignInCard() : null,
     isMember() ? githubConnectionCard() : null,
+    isMember() ? apiKeysCard() : null,
     h("div", { class: "card" },
       h("h3", {}, "Connection"),
       me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
@@ -215,6 +216,61 @@ function googleSignInCard() {
         getWebAuth()?.signed_in ? logout : null,
         view.linked ? unlink : null,
         !view.linked && view.available ? link : null));
+  };
+  void render();
+  return card;
+}
+
+// Issue #393: a household member's own Anthropic / OpenAI API keys for hosted Claude Code and Codex. The key goes to
+// the server once and never comes back; only its last four characters are shown.
+function apiKeysCard() {
+  const card = h("div", { class: "card" }, h("h3", {}, "Your API keys"), h("p", { class: "muted small" }, "Loading…"));
+  const render = async () => {
+    try { show(await api("/me/api-keys")); }
+    catch (e) { fill(card, h("h3", {}, "Your API keys"), h("p", { class: "note bad" }, e.message)); }
+  };
+  const call = (path, method, body) => async () => {
+    card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    try { return await api(path, { method, body }); }
+    catch (e) { toast(e.message, 6000); return null; }
+    finally { await render(); }
+  };
+  const row = (k, usage) => {
+    const input = h("input", { type: "password", autocomplete: "off", spellcheck: "false",
+      placeholder: k.configured ? "Paste a new key to replace it" : `${k.provider} API key (${k.env})` });
+    const result = h("p", { class: "muted small" });
+    const save = async () => {
+      const key = input.value;
+      input.value = "";
+      if (key.trim()) await call(`/me/api-keys/${k.backend}`, "PUT", { key })();
+    };
+    const test = async () => {
+      card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      try { const r = await api(`/me/api-keys/${k.backend}/test`, { method: "POST" }); result.textContent = r.message;
+        result.className = r.ok ? "muted small" : "note bad"; }
+      catch (e) { result.textContent = e.message; result.className = "note bad"; }
+      finally { card.querySelectorAll("button").forEach((b) => { b.disabled = false; }); }
+    };
+    return h("div", { style: "margin-top:12px" },
+      h("strong", {}, k.backend === "claude" ? "Claude Code" : "Codex"),
+      h("p", { class: "muted small" }, k.configured ? `${k.provider} key saved, ending …${k.last4}` : `No ${k.provider} key yet`),
+      k.configured ? h("p", { class: "muted small" },
+        `${usage?.sessions || 0} sessions · ${(usage?.prompt_tokens || 0) + (usage?.completion_tokens || 0)} tokens`) : null,
+      input,
+      h("div", { class: "row", style: "gap:8px;flex-wrap:wrap;margin-top:6px" },
+        h("button", { class: "btn primary small", type: "button", onclick: save }, k.configured ? "Replace" : "Save"),
+        k.configured ? h("button", { class: "btn small", type: "button", onclick: test }, "Test") : null,
+        k.configured ? h("button", { class: "btn bad small", type: "button", onclick: async () => {
+          if (confirm(`Delete your ${k.provider} key? Your running ${k.backend} sessions stop.`)) await call(`/me/api-keys/${k.backend}`, "DELETE")();
+        } }, "Delete") : null),
+      result);
+  };
+  const show = (st) => {
+    fill(card, h("h3", {}, "Your API keys"),
+      h("p", { class: "small" }, "Run Claude Code or Codex on your own provider account. Your key is stored encrypted, "
+        + "used only for your sessions, and never shown again. The owner's subscription is never used for you."),
+      h("p", { class: "muted small" }, st.billing_warning || ""),
+      st.keys.map((k) => row(k, st.usage?.[k.backend])));
   };
   void render();
   return card;

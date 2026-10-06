@@ -766,7 +766,7 @@ def _refuse_cross_site(request: Request) -> None:
         raise HarnessError(403, "cross-site requests cannot use GitHub sign-in")
 
 
-def _github_member(request: Request, *, mutate: bool = False) -> tuple:
+def _github_member(request: Request, *, mutate: bool = False, what: str = "GitHub account") -> tuple:
     """Issue #63: only an enabled, ambient same-origin household member acts on their own GitHub connection.
 
     Owner, app, device, guest, and bearer credentials are refused, and the routes carry no user id, so no
@@ -776,7 +776,7 @@ def _github_member(request: Request, *, mutate: bool = False) -> tuple:
     ident = getattr(request.state, "access", None)
     if (key.get("kind") != "member" or not key.get("bundled") or ident is None or ident.kind != "member"
             or not ident.bundled or ident.user_id != key.get("user_id")):
-        raise HarnessError(403, "only a signed-in household member can connect their own GitHub account")
+        raise HarnessError(403, f"only a signed-in household member can manage their own {what}")
     if not ident.allowed or not ident.enabled:
         raise HarnessError(403, "this household account is disabled")
     if mutate:
@@ -818,6 +818,38 @@ async def api_github_disconnect(request: Request):
         return await asyncio.to_thread(m.github_auth.disconnect, uid)
     except GitHubAuthError as e:
         raise _github_error(e) from None
+
+
+@route_table.get("/api/v1/me/api-keys")
+async def api_member_keys(request: Request):
+    """#393: a member's own provider API keys: what is set (last four characters only), the billing note and usage."""
+    m, uid = _github_member(request, what="API keys")
+    return await asyncio.to_thread(m.member_keys_status, uid)
+
+
+@route_table.put("/api/v1/me/api-keys/{backend}")
+async def api_member_key_set(backend: str, request: Request):
+    """Store or replace the key. The body is read by hand, so a validation error can never echo the key back."""
+    m, uid = _github_member(request, mutate=True, what="API keys")
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    key = body.get("key") if isinstance(body, dict) else None
+    out = await asyncio.to_thread(m.member_key_set, uid, backend, key if isinstance(key, str) else "")
+    return JSONResponse(out, headers={"Cache-Control": "no-store"})
+
+
+@route_table.post("/api/v1/me/api-keys/{backend}/test")
+async def api_member_key_test(backend: str, request: Request):
+    m, uid = _github_member(request, mutate=True, what="API keys")
+    return await asyncio.to_thread(m.member_key_test, uid, backend)
+
+
+@route_table.delete("/api/v1/me/api-keys/{backend}")
+async def api_member_key_delete(backend: str, request: Request):
+    m, uid = _github_member(request, mutate=True, what="API keys")
+    return await m.member_key_delete(uid, backend)
 
 
 @route_table.get("/api/v1/models")
@@ -1031,9 +1063,7 @@ async def create_session(body: CreateAppSession, request: Request):
     if key.get("kind") == "member":
         user_id = key["user_id"]
         app = None
-        if backend not in (None, "", "local"):
-            raise HarnessError(403, "household members can only use the local model")
-        backend = "local"
+        backend = backend or "local"   # Manager.create checks it: local, or Claude/Codex on the member's own key (#393)
     elif app is not None:
         user_id = "owner"
     blocks = [b.model_dump() for b in body.context]
