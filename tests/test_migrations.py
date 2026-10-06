@@ -12,7 +12,7 @@ import pytest
 
 from harness import doctor, migrations
 from harness.db import APP_SETTINGS_SCHEMA, SCHEMA, Database
-from harness.maintenance import Maintenance
+from harness_modules.backup.service import BackupService
 from harness.migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
 
 _REAL_DISCOVER = migrations.discover
@@ -307,10 +307,10 @@ def test_baseline_plus_migrations_equals_fresh_build(tmp_path):
     assert _version(legacy) == _version(fresh_real) == migrations.latest_version(_REAL_DISCOVER())
 
 
-def test_maintenance_backup_delegates_to_backup_sqlite(tmp_path):
+def test_backup_service_delegates_to_backup_sqlite(tmp_path):
     path = tmp_path / "harness.db"
     _seed_session(path)
-    maint = Maintenance.__new__(Maintenance)
+    maint = BackupService.__new__(BackupService)
     maint.cfg = SimpleNamespace(db_path=path)
     copy = tmp_path / "copy.sqlite3"
     maint._backup_db(copy)

@@ -451,7 +451,6 @@ ADMIN_COMMANDS = (
     ("config restart", "POST", "/config/restart", "restart the daemon to apply settings", _REVISION),
     ("maintenance status", "GET", "/maintenance", "show disk usage and maintenance state", ()),
     ("maintenance cleanup", "POST", "/maintenance/cleanup", "remove expired workspaces and data", ()),
-    ("maintenance backup", "POST", "/maintenance/backup", "back up the databases", ()),
     ("jobs list", "GET", "/jobs", "list scheduled jobs", ()),
     ("jobs show", "GET", "/jobs/{jid}", "show a scheduled job", ()),
     ("jobs create", "POST", "/jobs", "schedule a job", _JOB),

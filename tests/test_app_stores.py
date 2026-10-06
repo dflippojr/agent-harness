@@ -484,7 +484,7 @@ def test_the_nightly_backup_holds_one_file_per_app_store(tmp_path):
         for sid, app_id in (("own1", ""), ("a1", "k-aaaa"), ("a2", "k-aaaa"), ("b1", "k-bbbb")):
             m.db.insert_session(_session(sid, app_id))
         (Path(cfg.data_dir) / "apps" / "not an app").mkdir()
-        result = await m.maintenance.backup()
+        result = await m.modules.get("backup").service.backup()
         await m.stop()
         return result
 

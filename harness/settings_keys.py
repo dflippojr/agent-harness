@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,7 +26,6 @@ KEY_APP_MAX_COMPLETION_TOKENS = "app.sessions.max_completion_tokens"
 KEY_APP_CAPABILITIES = "app.capabilities"
 KEY_APP_NOTIFY_COMPLETION = "app.notify.completion"
 
-TIME_OF_DAY = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 
 
 def _require_url(value: str, label: str) -> list[str]:
@@ -78,15 +76,6 @@ def check_gpu_guard(cfg: Config) -> list[str]:
     return errors
 
 
-def check_backup(cfg: Config) -> list[str]:
-    if not cfg.backup.dir.strip():
-        return ["backup.dir is not configured"]
-    parent = Path(cfg.backup.dir).expanduser()
-    if not parent.parent.exists():
-        return ["backup.dir parent is missing"]
-    return []
-
-
 def check_skills(cfg: Config) -> list[str]:
     return []
 
@@ -104,8 +93,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
         cfg.endpoint.enabled = enabled
     elif name == "gpu_guard":
         cfg.gpu_guard.enabled = enabled
-    elif name == "backup":
-        cfg.backup.enabled = enabled
     elif name == "skills":
         cfg.skills.enabled = enabled
 
@@ -127,10 +114,6 @@ def apply_endpoint_queue(manager, old, new) -> None:
 def apply_jobs_poll(manager, old, new) -> None:
     if manager.jobs is not None:
         manager.jobs.poll_seconds = manager.cfg.jobs.poll_seconds
-
-
-def apply_backup_schedule(manager, old, new) -> None:
-    manager.maintenance.reschedule_backup()
 
 
 def _lt(a: float, b: float) -> bool:
@@ -424,25 +407,6 @@ def _set_jobs_poll(cfg: Config, value):
     cfg.jobs.poll_seconds = float(value)
 
 
-def _get_backup_at(cfg: Config):
-    return cfg.backup.at
-
-
-def _set_backup_at(cfg: Config, value):
-    text = str(value)
-    if not TIME_OF_DAY.fullmatch(text):
-        raise ValueError("backup.at must be HH:MM in 24-hour local time")
-    cfg.backup.at = text
-
-
-def _get_backup_keep(cfg: Config):
-    return cfg.backup.keep_days
-
-
-def _set_backup_keep(cfg: Config, value):
-    cfg.backup.keep_days = int(value)
-
-
 def _get_smart_enabled(cfg: Config):
     return bool(cfg.smart_approvals.enabled)
 
@@ -683,17 +647,6 @@ STATIC_ADMIN: list[SettingSpec] = [
            "How often scheduled jobs are checked.",
            "Jobs", 30, _get_jobs_poll, _set_jobs_poll, 5, 300, ("jobs", "poll_seconds"),
            modules=("jobs",), live_apply=apply_jobs_poll),
-    SettingSpec(
-        key="backup.at", label="Backup time", help="Local time (HH:MM) for the nightly backup.",
-        category="Backup", value_type="string", default="03:30", scope="admin", apply_mode="live",
-        getter=_get_backup_at, setter=_set_backup_at, bounds=Bounds(pattern=TIME_OF_DAY.pattern),
-        yaml_path=("backup", "at"), modules=("backup",),
-        live_apply=apply_backup_schedule, live_undo=apply_backup_schedule,
-    ),
-    _int("backup.keep_days", "Backup retention (days)",
-         "Delete dated backup folders older than this.",
-         "Backup", 14, _get_backup_keep, _set_backup_keep, 1, 365, ("backup", "keep_days"),
-         modules=("backup",)),
     _bool("smart_approvals.enabled", SMART_APPROVALS,
           "Runtime enable for the hosted smart-approval reviewer. Does not configure a secret_ref.",
           SMART_APPROVALS, False, _get_smart_enabled, _set_smart_enabled,
@@ -739,10 +692,6 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for pausing the model while a game or Plex transcode needs the GPU.",
           "Features", False, _enable_get("gpu_guard"), _enable_set("gpu_guard"), ("gpu_guard", "enabled"),
           apply_mode="daemon_restart", modules=("gpu_guard",), enable_check=check_gpu_guard),
-    _bool("backup.enabled", "Backups",
-          "Runtime enable for the nightly backup. Does not change the backup directory.",
-          "Features", False, _enable_get("backup"), _enable_set("backup"), ("backup", "enabled"),
-          apply_mode="daemon_restart", modules=("backup",), enable_check=check_backup),
     _bool("skills.enabled", "Instruction skills",
           "Runtime enable for owner-approved instruction skills. Does not install the skills module.",
           "Features", False, _enable_get("skills"), _enable_set("skills"), ("skills", "enabled"),
@@ -755,8 +704,6 @@ STATIC_ADMIN: list[SettingSpec] = [
             ("data_dir",)),
     _hidden("paths.repos_dir", "Repository directory", "Host-side clones for local:<name> git_clone.", "Paths",
             ("repos_dir",)),
-    _hidden("backup.dir", "Backup directory", "Where nightly backups are written.", "Backup",
-            ("backup", "dir"), modules=("backup",)),
     _hidden("smart_approvals.secret_ref", "Smart-approval secret",
             "Opaque name of the hosted reviewer key file. Managed in local configuration.",
             SMART_APPROVALS, ("smart_approvals", "secret_ref")),

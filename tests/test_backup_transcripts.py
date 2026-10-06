@@ -12,7 +12,7 @@ import pytest
 from harness import storage
 from harness.config import BackupConfig
 from harness.db import Database
-from harness.maintenance import Maintenance
+from harness_modules.backup.service import BackupService
 from test_daemon import make_cfg
 
 
@@ -27,7 +27,7 @@ def maintenance(tmp_path):
                            "display_name": user_id, "enabled": 0 if user_id == "u-second" else 1,
                            "disk_quota_bytes": 0, "max_running": 1, "max_queued": 1,
                            "created_at": 1, "updated_at": 1, "last_activity_at": 0})
-    m = Maintenance(cfg, db, None)
+    m = BackupService(cfg, db)
     yield m
     db.close()
 
@@ -61,7 +61,7 @@ def test_all_transcripts_and_retention_and_persisted_result(maintenance):
     assert result["warnings"] == []
     assert result["removed"] == ["2020-01-01"]
     assert not old.exists()
-    assert Maintenance(m.cfg, m.db, None).last_backup == result
+    assert BackupService(m.cfg, m.db).last_backup == result
     dest = Path(result["path"])
     archives = ["transcripts.zip", "transcripts/users/u-first.zip", "transcripts/users/u-second.zip",
                 "transcripts/apps/k-aaaa.zip", "transcripts/apps/k-bbbb.zip"]

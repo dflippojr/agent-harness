@@ -63,6 +63,16 @@ _PUBLIC = {
     "job_summary": ("harness.jobs", "summary"),  # until jobs is itself a module
     "require_url": ("harness.settings_keys", "_require_url"),
     "require_readable_file": ("harness.settings_keys", "_require_readable_file"),
+    "migrations": ("harness.migrations", None),
+    "storage": ("harness.storage", None),
+    "APP_STORE_FILE": ("harness.app_stores", "APP_STORE_FILE"),
+    "WEB_APP_ID": ("harness.app_stores", "WEB_APP_ID"),
+    "app_dir": ("harness.app_stores", "app_dir"),
+    "remove_tree": ("harness.maintenance", "remove_tree"),
+    "backup_sqlite": ("harness.sqlite_backup", "backup_sqlite"),
+    "OWNER_USER_ID": ("harness.principal", "OWNER_USER_ID"),
+    "ROOT": ("harness.config", "ROOT"),
+    "ManagedStore": ("harness.managed_config", "ManagedStore"),
 }
 
 
@@ -71,7 +81,8 @@ def __getattr__(name: str):
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     # Not cached: a test that patches the core attribute (gpu_guard.MEMORY_POLL_SECONDS) reaches the module too.
-    return getattr(importlib.import_module(target[0]), target[1])
+    module = importlib.import_module(target[0])
+    return module if target[1] is None else getattr(module, target[1])
 
 
 @dataclass(frozen=True)

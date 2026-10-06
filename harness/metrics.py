@@ -308,11 +308,6 @@ def _canary_metrics(m: Manager, out: _Out) -> None:
 
 
 def _maintenance_metrics(m: Manager, out: _Out) -> None:
-    backup = m.maintenance.last_backup
-    if backup.get("ok_at"):
-        out.metric("harness_backup_last_success_timestamp_seconds", "gauge", "Last successful backup.",
-                   [({}, backup["ok_at"])])
-        out.metric("harness_backup_size_bytes", "gauge", "Size of the last backup.", [({}, backup.get("bytes", 0))])
     if m.maintenance.last_report.get("at"):
         out.metric("harness_cleanup_last_run_timestamp_seconds", "gauge", "Last cleanup run.",
                    [({}, m.maintenance.last_report["at"])])

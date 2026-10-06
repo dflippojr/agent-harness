@@ -10,11 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from harness import backup_restore, storage
-from harness.backup_restore import RestoreRefused, restore, verify
+from harness import storage
+from harness_modules.backup import restore as backup_restore
+from harness_modules.backup.restore import RestoreRefused, restore, verify
 from harness.config import BackupConfig
 from harness.db import Database
-from harness.maintenance import Maintenance
+from harness_modules.backup.service import BackupService
 from harness.manager import Manager
 from test_app_stores import _session
 from test_daemon import Completion, Script, make_cfg
@@ -62,7 +63,7 @@ async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
     # Revoked and erased after the store was written: the backup still holds its store and transcripts.
     m.db.revoke_api_key(apps["gone"])
     m.db.mark_app_erased(apps["gone"])
-    result = await m.maintenance.backup()
+    result = await m.modules.get("backup").service.backup()
     await m.stop()
     m.db.close()
     return Path(result["path"]), apps
@@ -161,7 +162,7 @@ def backed_up(tmp_path):
     db = Database(cfg.db_path)
     db.insert_session(_session("s1"))
     _write(storage.transcripts_dir(cfg, "owner") / "nested" / "s1.md", "x" * 4000)
-    result = asyncio.run(Maintenance(cfg, db, None).backup())
+    result = asyncio.run(BackupService(cfg, db).backup())
     db.close()
     return cfg, Path(result["path"])
 
