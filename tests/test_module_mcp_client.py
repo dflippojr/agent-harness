@@ -319,3 +319,42 @@ def test_client_prefix_can_overlap_the_harness_alias(tmp_path, fake_transport):
         finally:
             await m.stop()
     asyncio.run(body())
+
+
+def test_timeout_does_not_include_waiting_for_rpc_lock(fake_transport, monkeypatch):
+    async def body():
+        kit = service.SessionTools(SESSION, [SERVER], config.SandboxConfig())
+        await kit.start()
+        client = fake_transport[0][0]
+        monkeypatch.setattr(service, "RPC_TIMEOUT", 0.5)
+        client.lock.acquire()
+        pending = asyncio.create_task(kit.call(NAME, {"text": "queued"}))
+        try:
+            await asyncio.sleep(1)
+            assert client.proc.poll() is None
+        finally:
+            client.lock.release()
+        assert json.loads(await pending)["content"][0]["text"] == "queued"
+        await kit.close()
+    asyncio.run(body())
+
+
+def test_cleanup_failure_still_closes_every_sidecar(fake_transport, monkeypatch):
+    async def body():
+        kit = service.SessionTools(SESSION, [SERVER, SERVER | {"name": "second"}], config.SandboxConfig())
+        await kit.start()
+        attempted = []
+
+        async def fail_first(argv, **kwargs):
+            attempted.append(argv[-1])
+            if len(attempted) == 1:
+                raise OSError("docker failed")
+            return 0, "", ""
+
+        monkeypatch.setattr(service, "run_cmd", fail_first)
+        with pytest.raises(ToolError, match="cleanup failed"):
+            await kit.close()
+        assert len(attempted) == 2
+        assert not kit.clients and not kit.tools
+        assert all(client.proc.poll() is not None for client in fake_transport[0])
+    asyncio.run(body())

@@ -92,33 +92,29 @@ class StdioClient:
 
     def request(self, method, params):
         # Covers blocked stdin writes as well as servers that never send a response.
-        timer = threading.Timer(RPC_TIMEOUT, self._kill)
-        timer.daemon = True
-        timer.start()
-        try:
-            return self._request(method, params)
-        finally:
-            timer.cancel()
+        with self.lock:
+            timer = threading.Timer(RPC_TIMEOUT, self._kill)
+            timer.daemon = True
+            timer.start()
+            try:
+                return self._request(method, params)
+            finally:
+                timer.cancel()
 
     def _kill(self):
         if self.proc.poll() is None:
             self.proc.kill()
 
     def _request(self, method, params):
-        with self.lock:
-            self.counter += 1
-            self._send({"id": self.counter, "method": method, "params": params})
-            # Notifications are ignored; server-initiated requests get a refusal (no sampling, roots or elicitation).
-            import time
-            deadline = time.monotonic() + RPC_TIMEOUT
-            while True:
-                try:
-                    message = self.messages.get(timeout=max(0, deadline - time.monotonic()))
-                except queue.Empty:
-                    raise ToolError("MCP server response timed out") from None
-                if isinstance(message, Exception):
-                    raise message
-                return self._result(message)
+        self.counter += 1
+        self._send({"id": self.counter, "method": method, "params": params})
+        try:
+            message = self.messages.get(timeout=RPC_TIMEOUT)
+        except queue.Empty:
+            raise ToolError("MCP server response timed out") from None
+        if isinstance(message, Exception):
+            raise message
+        return self._result(message)
 
     def _server_message(self, message):
         if "method" not in message:
@@ -218,8 +214,15 @@ class SessionTools:
     async def close(self):
         clients, self.clients = self.clients, []
         self.tools.clear()
+        errors = []
         for server, client in clients:
             try:
                 await run_cmd(["docker", "rm", "-f", container_name(self.session["id"], server)], timeout=30)
-            finally:
+            except Exception as exc:
+                errors.append(exc)
+            try:
                 await asyncio.to_thread(client.close)
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise ToolError("MCP sidecar cleanup failed") from errors[0]
