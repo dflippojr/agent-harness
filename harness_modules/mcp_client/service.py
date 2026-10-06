@@ -52,6 +52,7 @@ class StdioClient:
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.messages = queue.Queue(maxsize=16)
         self.lock = threading.Lock()
+        self.write_lock = threading.Lock()
         self.counter = 0
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
@@ -65,8 +66,10 @@ class StdioClient:
                 message = json.loads(line)
                 if not isinstance(message, dict):
                     raise ValueError("MCP response must be an object")
+                if self._server_message(message):
+                    continue  # drain notifications even between calls; they never occupy the response queue
                 self.messages.put_nowait(message)
-        except (ValueError, OSError, queue.Full) as exc:
+        except (ValueError, OSError, ToolError, queue.Full) as exc:
             self.proc.kill()
             try:
                 self.messages.put_nowait(ToolError(str(exc)))
@@ -77,11 +80,12 @@ class StdioClient:
         data = (json.dumps({"jsonrpc": "2.0", **message}) + "\n").encode()
         if len(data) > MAX_MESSAGE:
             raise ToolError("MCP request exceeded the message limit")
-        try:
-            self.proc.stdin.write(data)
-            self.proc.stdin.flush()
-        except (OSError, ValueError):
-            raise ToolError("MCP server stdin is closed") from None
+        with self.write_lock:
+            try:
+                self.proc.stdin.write(data)
+                self.proc.stdin.flush()
+            except (OSError, ValueError):
+                raise ToolError("MCP server stdin is closed") from None
 
     def notify(self, method):
         self._send({"method": method})
@@ -114,8 +118,6 @@ class StdioClient:
                     raise ToolError("MCP server response timed out") from None
                 if isinstance(message, Exception):
                     raise message
-                if self._server_message(message):
-                    continue
                 return self._result(message)
 
     def _server_message(self, message):

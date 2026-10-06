@@ -139,7 +139,7 @@ def test_module_absent_off_and_native_only(tmp_path, fake_transport):
     asyncio.run(body())
 
 
-@pytest.mark.parametrize("mode", ["normal", "pagination", "notification"])
+@pytest.mark.parametrize("mode", ["normal", "pagination", "notification", "noisy"])
 def test_listing_call_and_cleanup(tmp_path, fake_transport, mode):
     async def body():
         m = manager(tmp_path)
@@ -151,6 +151,9 @@ def test_listing_call_and_cleanup(tmp_path, fake_transport, mode):
         assert m.modules.gate_for(kit) is MODULE.tools and not MODULE.tools.mcp
         assert kit.schemas()[0]["function"]["name"] == NAME
         assert json.loads(await kit.call(NAME, {"text": "ok"}))["content"][0]["text"] == "ok"
+        # A healthy server may send many notifications while the native loop is waiting for another model turn.
+        await asyncio.sleep(0.05)
+        assert json.loads(await kit.call(NAME, {"text": "again"}))["content"][0]["text"] == "again"
         with pytest.raises(ToolError):
             await kit.call("unknown", {})
         assert len(fake_transport[0]) == 1

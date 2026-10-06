@@ -41,8 +41,9 @@ for line in sys.stdin:
         import time
         time.sleep(10)
         continue
-    if mode == "notification":
-        print(json.dumps({"jsonrpc": "2.0", "method": "notifications/message", "params": {}}), flush=True)
+    if mode in ("notification", "noisy"):
+        for _ in range(32 if mode == "noisy" else 1):
+            print(json.dumps({"jsonrpc": "2.0", "method": "notifications/message", "params": {}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "id": "server", "method": "roots/list"}), flush=True)
     response = {"jsonrpc": "2.0", "id": request["id"], "result": result}
     if mode == "protocol_error":
@@ -60,3 +61,6 @@ for line in sys.stdin:
     elif mode == "nonobject":
         response = []
     print(json.dumps(response), flush=True)
+    if mode == "noisy":
+        for _ in range(32):
+            print(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}), flush=True)
