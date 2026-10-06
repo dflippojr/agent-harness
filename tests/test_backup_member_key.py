@@ -14,7 +14,7 @@ from harness.config import BackupConfig
 from harness.db import Database
 from harness.member_keys import MemberKeys
 from harness_modules.backup import member_key, settings
-from harness_modules.backup.restore import plan, restore
+from harness_modules.backup.restore import RestoreRefused, apply, plan, restore
 from harness_modules.backup.runtime import doctor
 from harness_modules.backup.service import BackupService
 from test_daemon import make_cfg
@@ -131,6 +131,32 @@ def test_private_write_failure_cleans_up(tmp_path, monkeypatch):
     assert not list(tmp_path.iterdir())
     with pytest.raises(ValueError, match="32-byte"):
         member_key.fingerprint(base64.b64encode(b"short"))
+
+
+def test_dry_run_and_apply_preserve_previous_key(snapshot):
+    _, target, folder, _ = snapshot
+    target.data_dir.mkdir(parents=True)
+    existing = target.data_dir / member_key.KEY_FILE
+    member_key.write_private(existing, base64.b64encode(b"e" * 32))
+    original = existing.read_bytes()
+    restore(target, folder, out=lambda *_: None)
+    assert existing.read_bytes() == original and not target.db_path.exists()
+    previous = restore(target, folder, apply_changes=True, out=lambda *_: None)
+    assert (previous / member_key.KEY_FILE).read_bytes() == original
+    assert existing.read_bytes() != original
+
+
+def test_key_changed_after_plan_rolls_back(snapshot):
+    _, target, folder, key = snapshot
+    target.data_dir.mkdir(parents=True)
+    existing = target.data_dir / member_key.KEY_FILE
+    member_key.write_private(existing, base64.b64encode(b"e" * 32))
+    original = existing.read_bytes()
+    p = plan(target, folder)
+    key.write_bytes(base64.b64encode(b"x" * 32))
+    with pytest.raises(RestoreRefused, match="changed after planning"):
+        apply(target, p)
+    assert existing.read_bytes() == original and not target.db_path.exists()
 
 
 def test_doctor_reports_copy_and_warning(snapshot, monkeypatch):
