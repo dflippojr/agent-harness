@@ -526,10 +526,15 @@ class Runner:
     def memory_low(self) -> bool:
         return self.ram is not None and self.ram.low()
 
-    async def _memory_gate(self, sid: str, what: str) -> None:
+    def model_load_low(self) -> bool:
+        """Would loading the model leave available RAM under the threshold?"""
+        return self.ram is not None and self.ram.load_low()
+
+    async def _memory_gate(self, sid: str, what: str, *, load: bool = False) -> None:
         """Before adding load (loading the model, starting a worker container): wait while available RAM is under
         the resource guard's threshold. The session and the phone hear about it once per wait."""
-        if not self.memory_low():
+        low = self.model_load_low if load else self.memory_low
+        if not low():
             return
         from .gpu_guard import MEMORY_POLL_SECONDS, describe_memory
         started = time.monotonic()
@@ -537,14 +542,14 @@ class Runner:
         await self.bus.aemit(sid, "waiting_memory", {"reason": describe_memory(status), "waiting_for": what,
                                                      "available_bytes": status["available_bytes"],
                                                      "threshold_bytes": status["threshold_bytes"]})
-        while self.memory_low():
+        while low():
             await asyncio.sleep(MEMORY_POLL_SECONDS)
         await self.bus.aemit(sid, "memory_recovered", {"seconds": round(time.monotonic() - started)})
 
     async def _memory_wait(self, sid: str, model) -> None:
         """A parked or sleeping model waits for memory before it loads."""
-        if self.memory_low() and await self.warmer.state(model) in (SLEEPING, UNLOADED):
-            await self._memory_gate(sid, "local model")
+        if self.model_load_low() and await self.warmer.state(model) in (SLEEPING, UNLOADED):
+            await self._memory_gate(sid, "local model", load=True)
 
     async def _model_call(self, sid: str, *args, **kwargs) -> llm.Completion:
         """self.chat, gated on the GPU guard. A call cut off because the guard stopped the model server (a game

@@ -190,6 +190,7 @@ gpu_guard:
   pause_flag: C:/AI/llama-server.paused   # also in ops/llama-server/run-qwen.ps1
   lazy_load: true
   min_available_ram_gb: 4          # 0 turns the RAM check off
+  model_ram_gb: 14                 # a model load waits unless available RAM minus this stays above the minimum
   load_now_default_minutes: 60     # "Load local model now" window; idle unload is suspended during it
   keepalive_seconds: 300           # keep under llama-server's --sleep-idle-seconds (600)
 

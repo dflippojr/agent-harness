@@ -775,7 +775,7 @@ async def _load_now(m, body: GpuHoldRequest | None) -> None:
     duration = body.duration_seconds if body and body.duration_seconds else minutes * 60
     if not 60 <= duration <= 24 * 60 * 60:
         raise HarnessError(400, "duration_seconds must be between 60 and 86400")
-    if m.runner.memory_low() and not (body and body.force):
+    if m.runner.model_load_low() and not (body and body.force):
         from .gpu_guard import describe_memory
         raise HarnessError(409, f"low memory: {describe_memory(m.guard.memory.status())}; loading the model "
                                 "takes about 14 GB more. Send force to load anyway", code="low_memory")

@@ -277,7 +277,8 @@ class Manager:
         guard, warmer = self.guard, self.warmer
         warmer.control = lambda: guard.control  # tests swap the guard's control after construction
         warmer.managed_model = cfg.models[cfg.default_model].name
-        warmer.memory_low = lambda: guard.memory.low()
+        warmer.memory_low = lambda: guard.memory.load_low()
+        warmer.read_available = guard.memory.available
         warmer.keepalive_seconds = cfg.gpu_guard.keepalive_seconds
         guard.on_change = warmer.notify
         guard.park = warmer.park

@@ -162,6 +162,9 @@ class GpuGuardConfig:
     # Below this much available physical memory the harness doesn't load the model, start a worker container or
     # start a ComfyUI job; the work waits with a `waiting_memory` reason. 0 turns the RAM check off.
     min_available_ram_gb: float = 4
+    # What loading the model adds to physical memory (Phase 0: 12.5 to 14.7 GB private bytes). A load waits unless
+    # available RAM minus this stays at or above min_available_ram_gb. 0 checks the RAM as it is before the load.
+    model_ram_gb: float = 14
     load_now_default_minutes: int = 60    # default window for "Load local model now" (idle unload suspended)
     keepalive_seconds: float = 300        # a pinned model gets a one-token request this often; keep under the idle unload
     drain_timeout_seconds: float = 300    # longest wait for the current model turn before the server is stopped

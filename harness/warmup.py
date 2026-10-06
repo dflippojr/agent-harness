@@ -40,7 +40,9 @@ class ModelWarmer:
         self.blocked = lambda: False  # the GPU guard has the model server stopped; don't wake it
         self.control: Callable[[], object | None] = lambda: None  # gpu_guard.ServerControl, when the harness parks it
         self.managed_model = ""       # the model served by that server (cfg.default_model)
-        self.memory_low = lambda: False
+        self.memory_low = lambda: False  # loading the model now would leave RAM under the guard's threshold
+        self.read_available: Callable[[], int | None] = lambda: None  # available physical bytes, sampled during a load
+        self.load_min_available: int | None = None  # lowest reading during the most recent load
         self.keepalive_seconds = 300.0
         self.pinned_until: float | None = None  # epoch seconds; "Load local model now" keeps it loaded until then
         self._keepalive: asyncio.Task | None = None
@@ -163,13 +165,24 @@ class ModelWarmer:
         finally:
             self._unparking.discard(task)
 
+    def _sample_available(self) -> None:
+        try:
+            now = self.read_available()
+        except Exception:  # a metric must never break a load
+            return
+        if now is not None and (self.load_min_available is None or now < self.load_min_available):
+            self.load_min_available = now
+
     async def _load(self, model: ModelConfig, ctl) -> None:
         started = time.monotonic()
+        self.load_min_available = None
+        self._sample_available()
         log.info("loading %s (removing the pause flag)", model.name)
         await ctl.start()
         deadline = started + HEALTH_TIMEOUT_SECONDS
         while (remaining := deadline - time.monotonic()) > 0:
             self._changed.clear()
+            self._sample_available()
             if self._held():
                 ctl.write_flag()  # the GPU was taken or the model unloaded meanwhile: llama-server must not start
                 log.info("loading %s stopped: the guard or an image batch holds the GPU, or it was unloaded", model.name)
@@ -178,6 +191,7 @@ class ModelWarmer:
                 log.info("loading %s stopped: the model was unloaded", model.name)
                 return
             if await ctl.healthy():
+                self._sample_available()
                 log.info("loaded %s in %.0f s", model.name, time.monotonic() - started)
                 return
             try:  # /health has no push; a guard change (notify) cuts the wait short
