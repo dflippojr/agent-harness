@@ -548,7 +548,7 @@ def test_app_tool_arguments_and_results_never_reach_logs_spans_or_the_audit_log(
 
 def test_an_apps_approvals_never_reach_the_owners_phone_or_one_tap_links(tmp_path):
     """The ntfy push and its approve/deny link are owner credentials; an App decides its own approvals."""
-    from harness.notify import Notifier
+    from harness_modules.notifications.service import Notifier
     steps = [Completion(tool_calls=[call("write_file", 0, path="secret/a.txt", content="x")]),
              Completion(content="done")]
     cfg = make_cfg(tmp_path, rules=RULES)

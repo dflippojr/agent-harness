@@ -545,7 +545,7 @@ async def me(request: Request):
         },
         "usage": usage,
         "notify": {"enabled": False, "topic": ""} if guest or member else {
-            "enabled": cfg.notify.enabled, "topic": cfg.notify.topic,
+            "enabled": cfg.module_effective("notifications"), "topic": cfg.notify.topic,
         },
     }
 
@@ -1506,19 +1506,6 @@ def _save_template(m: Manager, tid: str, body: Template) -> dict:
         raise HarnessError(400, f"unknown model {body.model!r}")
     m.db.upsert_template({"id": tid, **body.model_dump()})
     return m.db.get_template(tid)
-
-
-# notifications
-@api_router.post("/notify/test")
-async def notify_test(request: Request):
-    m = mgr(request)
-    if not m.cfg.notify.enabled:
-        raise HarnessError(400, "notifications are disabled in config/harness.yaml")
-    payload = {"topic": m.cfg.notify.topic, "title": "Agent harness", "message": "Test notification 👋",
-               "tags": ["robot"], "click": m.notifier.link("/")}
-    async with httpx.AsyncClient(timeout=15) as client:
-        await m.notifier.publish(client, payload)
-    return {"sent": True}
 
 
 # event streams

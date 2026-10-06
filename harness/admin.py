@@ -117,7 +117,6 @@ ADMIN_PATHS = frozenset({
     "/jobs/{jid}/run",
     "/templates",
     "/templates/{tid}",
-    "/notify/test",
     "/events",
     "/keys",
     "/keys/{kid}",

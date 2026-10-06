@@ -206,7 +206,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | **Principal model** ([`principal.py`](harness/principal.py), [`access.py`](harness/access.py)) | Owner, household member, time-boxed guest, app, and device identities, all keyed by opaque `user_id`. A login can hold only one role. Members get separate projects, storage roots, and quotas. |
 | **Path containment** ([`storage.py`](harness/storage.py)) | Rejects symlinks, Windows junctions/reparse points, traversal, and case/Unicode tricks that would resolve outside an account's root. Quota measurement never follows links. |
 | **Hardened snippet runner** ([`snippets.py`](harness/snippets.py)) | Code snippets from chat run in a digest-pinned container with no mounts, no network, and a read-only root filesystem. Compiler and program output come back on separate streams, so a program can't pass its own output off as compiler output. |
-| **Phone approvals without a login** ([`notify.py`](harness/notify.py)) | ntfy action buttons carry a per-approval secret. A decided notification is replaced in place, using the approval id as the sequence id. |
+| **Phone approvals without a login** ([`notifications`](harness_modules/notifications/service.py)) | ntfy action buttons carry a per-approval secret. A decided notification is replaced in place, using the approval id as the sequence id. |
 
 ### GPU scheduling
 

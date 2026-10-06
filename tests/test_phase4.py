@@ -26,7 +26,7 @@ from harness.config import Project, RunnerConfig
 from harness.fileops import FileOps, ToolError
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
-from harness.notify import Notifier
+from harness_modules.notifications.service import Notifier
 from harness.remote import RunnerError, RunnerHub
 
 from test_daemon import Script, call, events, make_cfg, wait_status

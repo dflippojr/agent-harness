@@ -82,15 +82,6 @@ def check_gpu_guard(cfg: Config) -> list[str]:
     return errors
 
 
-def check_notifications(cfg: Config) -> list[str]:
-    errors = _require_url(cfg.notify.server, "notify.server")
-    if not cfg.notify.topic.strip():
-        errors.append("notify.topic is not configured")
-    if cfg.notify.token_file:
-        errors.extend(_require_readable_file(cfg.notify.token_file, "notify.token_file"))
-    return errors
-
-
 def check_backup(cfg: Config) -> list[str]:
     if not cfg.backup.dir.strip():
         return ["backup.dir is not configured"]
@@ -109,9 +100,7 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
     ``cfg.installed`` — those are installer/profile selection. Effective
     capability is ``module_effective(cfg, name)`` (installed AND enabled).
     """
-    if name == "notifications":
-        cfg.notify.enabled = enabled
-    elif name == "web":
+    if name == "web":
         cfg.web.enabled = enabled
     elif name == "search":
         cfg.search.enabled = enabled
@@ -128,8 +117,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
 
 
 def _get_module_enabled(cfg: Config, name: str) -> bool:
-    if name == "notifications":
-        return cfg.notify.enabled
     section = getattr(cfg, name)
     return bool(section.enabled)
 
@@ -762,11 +749,6 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for pausing the model while a game or Plex transcode needs the GPU.",
           "Features", False, _enable_get("gpu_guard"), _enable_set("gpu_guard"), ("gpu_guard", "enabled"),
           apply_mode="daemon_restart", modules=("gpu_guard",), enable_check=check_gpu_guard),
-    _bool("notifications.enabled", "Notifications",
-          "Runtime enable for ntfy notifications. Does not configure a server or topic.",
-          "Features", False, _enable_get("notifications"), _enable_set("notifications"),
-          ("notify", "enabled"), apply_mode="daemon_restart", modules=("notifications",),
-          enable_check=check_notifications),
     _bool("backup.enabled", "Backups",
           "Runtime enable for the nightly backup. Does not change the backup directory.",
           "Features", False, _enable_get("backup"), _enable_set("backup"), ("backup", "enabled"),
@@ -785,12 +767,6 @@ STATIC_ADMIN: list[SettingSpec] = [
             ("repos_dir",)),
     _hidden("backup.dir", "Backup directory", "Where nightly backups are written.", "Backup",
             ("backup", "dir"), modules=("backup",)),
-    _hidden("notify.server", "Notification server", "ntfy server URL.", "Notifications",
-            ("notify", "server"), modules=("notifications",)),
-    _hidden("notify.topic", "Notification topic", "ntfy topic name.", "Notifications",
-            ("notify", "topic"), modules=("notifications",)),
-    _hidden("notify.token_file", "Notification token file", "File holding the ntfy write token.",
-            "Notifications", ("notify", "token_file"), modules=("notifications",)),
     _hidden("smart_approvals.secret_ref", "Smart-approval secret",
             "Opaque name of the hosted reviewer key file. Managed in local configuration.",
             SMART_APPROVALS, ("smart_approvals", "secret_ref")),

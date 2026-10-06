@@ -62,7 +62,7 @@ def test_images_is_discovered_from_the_harness_modules_namespace():
 
 def test_images_registers_everything_through_the_interface(tmp_path):
     m = images_manager(tmp_path)
-    assert [module.name for module in modules.present(m.cfg)] == ["images"]
+    assert "images" in [module.name for module in modules.present(m.cfg)]
     app = create_app(m)
     assert set(OWNER_ROUTES) | set(APP_ROUTES) <= route_paths(app)
     # tool: offered to the owner's sessions, with the module's gate deciding how it is called
@@ -183,10 +183,13 @@ def test_core_never_imports_a_module_package():
 
 
 def test_a_module_imports_only_the_core_interface_and_itself():
-    package = ROOT / modules.NAMESPACE / "images"
-    for path in package.rglob("*.py"):
-        for name in _imports(path):
-            top = name.split(".")[0]
-            if top == "harness":
-                assert name == "harness.modules", f"{path.name} imports {name}"
-            assert top != modules.NAMESPACE or name.startswith(f"{modules.NAMESPACE}.images"), (path.name, name)
+    packages = [p for p in sorted((ROOT / modules.NAMESPACE).iterdir()) if (p / "__init__.py").exists()]
+    assert {p.name for p in packages} >= {"images", "notifications"}
+    for package in packages:
+        for path in package.rglob("*.py"):
+            for name in _imports(path):
+                top = name.split(".")[0]
+                if top == "harness":
+                    assert name == "harness.modules", f"{path.name} imports {name}"
+                assert top != modules.NAMESPACE or name.startswith(f"{modules.NAMESPACE}.{package.name}"), (
+                    path.name, name)

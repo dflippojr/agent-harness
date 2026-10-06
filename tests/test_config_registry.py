@@ -393,7 +393,7 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
     import time
 
     from harness.config import Project
-    from harness.notify import Notifier
+    from harness_modules.notifications.service import Notifier
     from harness.runner import ACTIVE
 
     client, manager = _client(tmp_path)
@@ -472,7 +472,7 @@ def test_never_patched_app_keeps_inherited_tools_and_notifications(tmp_path):
     """An app that never PATCHed /api/v1/config has no app_settings row; sessions still
     inherit project tools and completion notifications."""
     from harness.config import Project
-    from harness.notify import Notifier
+    from harness_modules.notifications.service import Notifier
 
     client, manager = _client(tmp_path)
     manager.cfg.projects["lab"] = Project(
@@ -507,7 +507,7 @@ def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
     """Sessions created before app_defaults existed store '{}'; after upgrade they must
     not lock capabilities to [] / notify to never while the token is still active."""
     from harness.config import Project
-    from harness.notify import Notifier
+    from harness_modules.notifications.service import Notifier
 
     client, manager = _client(tmp_path)
     manager.cfg.projects["lab"] = Project(
@@ -544,7 +544,7 @@ def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
 def test_active_app_follows_live_config_patch(tmp_path):
     """While the token is active, a later PATCH applies to in-flight sessions."""
     from harness.config import Project
-    from harness.notify import Notifier
+    from harness_modules.notifications.service import Notifier
 
     client, manager = _client(tmp_path)
     manager.cfg.projects["lab"] = Project(
