@@ -1016,9 +1016,9 @@ class Database:
         )
         self.conn.execute("DELETE FROM meta WHERE key = 'search_index'")
 
-    # session search (search.py)
+    # session search (the index: search_index.py; queries: harness_modules/search)
     def _index_event(self, sid: str, seq: int, ts: float, type_: str, data: dict, user_id: str | None = None) -> None:
-        from .search import event_text
+        from .search_index import event_text
         item = event_text(type_, data)
         if item and item[1].strip():
             uid = user_id if user_id is not None else self._session_user_id(sid)
@@ -1030,7 +1030,7 @@ class Database:
     @_writes
     def _build_search_index(self) -> None:
         """Index events written before search existed (or by an older index version). Runs once."""
-        from .search import INDEX_VERSION
+        from .search_index import INDEX_VERSION
         with self.lock:
             row = self.conn.execute("SELECT value FROM meta WHERE key = 'search_index'").fetchone()
             if row and row["value"] == INDEX_VERSION:

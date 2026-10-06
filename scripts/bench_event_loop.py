@@ -31,7 +31,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from harness import config as config_mod  # noqa: E402
-from harness import metrics, search, telemetry  # noqa: E402
+from harness import metrics, telemetry  # noqa: E402
+from harness_modules.search import service as search  # noqa: E402
 from harness.config import Config, ModelConfig, Project, SandboxConfig  # noqa: E402
 from harness.db import Database  # noqa: E402
 from harness.manager import Manager  # noqa: E402

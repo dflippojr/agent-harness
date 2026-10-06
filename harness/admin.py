@@ -92,7 +92,6 @@ ADMIN_PATHS = frozenset({
     "/chats/snippet-languages",
     "/chats/{ref}/snippets",
     "/chats/{ref}/snippets/{run_id}/cancel",
-    "/search",
     "/memory",
     "/memory/profile",
     "/skills",

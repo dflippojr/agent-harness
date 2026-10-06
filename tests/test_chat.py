@@ -18,7 +18,7 @@ from harness.manager import HarnessError, Manager
 from harness.principal import Principal
 from harness.policy import ChatPolicy
 from harness.runner import Runner
-from harness.search import SessionSearch, search
+from harness_modules.search.service import SessionSearch, search
 
 from test_api import LOGIN, make_client, wait_for
 from test_daemon import Script, make_cfg

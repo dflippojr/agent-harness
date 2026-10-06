@@ -24,7 +24,6 @@ DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
 # Core switches whose on/off is ``cfg.<section>.enabled``.
 MODULE_ENABLE_SECTIONS = {
     "web": "web",
-    "search": "search",
     "jobs": "jobs",
     "endpoint": "endpoint",
     "gpu_guard": "gpu_guard",

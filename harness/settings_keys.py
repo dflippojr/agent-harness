@@ -56,10 +56,6 @@ def check_web(cfg: Config) -> list[str]:
     return errors
 
 
-def check_search(cfg: Config) -> list[str]:
-    return []
-
-
 def check_jobs(cfg: Config) -> list[str]:
     return []
 
@@ -102,8 +98,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
     """
     if name == "web":
         cfg.web.enabled = enabled
-    elif name == "search":
-        cfg.search.enabled = enabled
     elif name == "jobs":
         cfg.jobs.enabled = enabled
     elif name == "endpoint":
@@ -733,10 +727,6 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for web_search / web_fetch. Does not install the web module.",
           "Features", False, _enable_get("web"), _enable_set("web"), ("web", "enabled"),
           apply_mode="daemon_restart", modules=("web",), enable_check=check_web),
-    _bool("search.enabled", "Session search",
-          "Runtime enable for session search. Does not install the search module.",
-          "Features", False, _enable_get("search"), _enable_set("search"), ("search", "enabled"),
-          apply_mode="daemon_restart", modules=("search",), enable_check=check_search),
     _bool("jobs.enabled", "Scheduled jobs",
           "Runtime enable for scheduled jobs. Does not install the jobs module.",
           "Features", False, _enable_get("jobs"), _enable_set("jobs"), ("jobs", "enabled"),

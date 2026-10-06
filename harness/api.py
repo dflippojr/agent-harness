@@ -1036,19 +1036,6 @@ async def skill_export(slug: str, request: Request):
     return skill_op(lambda: store.export_bundle(slug))
 
 
-@api_router.get("/search")
-async def search_sessions(request: Request, q: str = "", project: str = "", limit: int = 20):
-    """Full-text search over past sessions. Passages mark matches with \\u0002 ... \\u0003."""
-    from . import search
-    m = mgr(request)
-    if request.state.access.role == "guest":
-        return {"query": q, "mode": "all", "results": []}
-    if not m.cfg.search.enabled:
-        raise HarnessError(400, "session search is disabled in config/harness.yaml")
-    return await asyncio.to_thread(search.search, m.db, q, project, max(1, min(limit, 50)),
-                                   "", owner_id(request))
-
-
 @api_router.post("/sessions", status_code=201)
 async def create_session(body: CreateSession, request: Request):
     m = mgr(request)

@@ -19,7 +19,7 @@ from harness.app_stores import APP_STORE_FILE, SESSION_TABLES, WEB_APP_ID, WEB_M
 from harness.db import Database
 from harness.llm import Completion
 from harness.manager import Manager
-from harness.search import SessionSearch
+from harness_modules.search.service import SessionSearch
 
 from test_app_stores import _fill, _key, _session, rows, rows_of, session_ids
 from test_daemon import Script, call, make_cfg, wait_status

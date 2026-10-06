@@ -16,7 +16,7 @@ from harness.manager import Manager
 from harness import cli_domains
 from harness.mcp_server import (RELAY_PORT, RELAY_SCRIPT, TOKEN_ENV, McpRelay, McpServer, McpTokens,
                                 codex_mcp_overrides, mcp_config, relay_node_args)
-from harness.search import SessionSearch
+from harness_modules.search.service import SessionSearch
 from harness.policy import ALLOW, ASK, DENY, ChatPolicy, Policy, mcp_harness_tool
 from test_daemon import events, make_cfg, wait_status
 
@@ -345,7 +345,8 @@ def _mcp_manager(tmp_path, plan, rules=None):
     manager = Manager(cfg)
     web = FakeWeb()
     manager.runner.web = web
-    manager.runner.sessions = manager.runner.sessions or SessionSearch(manager.db)
+    search = manager.modules.get("search")
+    search.service = search.service or SessionSearch(manager.db)
     made = []
 
     class RelayedClaude(ClaudeSession):  # the docker path starts the relay; the test command must do it itself
@@ -561,7 +562,8 @@ def _codex_manager(tmp_path, plan, rules=None, **backend):
     manager = Manager(cfg)
     web = FakeWeb()
     manager.runner.web = web
-    manager.runner.sessions = manager.runner.sessions or SessionSearch(manager.db)
+    search = manager.modules.get("search")
+    search.service = search.service or SessionSearch(manager.db)
     made = []
 
     class RelayedCodex(CodexSession):  # the docker path starts the relay; the test command must do it itself

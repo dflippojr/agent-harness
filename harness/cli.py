@@ -514,7 +514,6 @@ ADMIN_COMMANDS = (
     ("sessions fork", "POST", "/sessions/{ref}/checkpoints/{turn}/fork", "start a session from a checkpoint",
      ("prompt",)),
     ("sessions clear-taint", "POST", "/sessions/{ref}/taint/clear", "clear a session's untrusted-content taint", ()),
-    ("search", "GET", "/search", "search sessions", ("q", "--project", "--limit:int")),
     ("github items", "GET", "/github/projects/{project}/items", "list a project's GitHub issues and PRs",
      ("--page:int", "--q")),
     ("github item", "GET", "/github/projects/{project}/items/{number}", "show a GitHub issue or PR", ()),
