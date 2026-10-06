@@ -840,9 +840,12 @@ class Database:
         return [_row(r) for r in rows]
 
     @_writes
-    def add_checkpoint(self, sid: str, turn: int, sha: str, head: str, branch: str) -> None:
+    def add_checkpoint(self, sid: str, turn: int, sha: str, head: str, branch: str,
+                       event_seq: int | None = None) -> None:
+        """`event_seq` is the last event the checkpoint covers; None means the log's end right now."""
         with self.lock:
-            seq = self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?", (sid,)).fetchone()[0]
+            seq = event_seq if event_seq is not None else self.conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?", (sid,)).fetchone()[0]
             self.conn.execute("INSERT OR REPLACE INTO checkpoints (session_id, turn, sha, head, branch, event_seq, "
                               "hidden, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
                               (sid, turn, sha, head, branch, seq, time.time()))

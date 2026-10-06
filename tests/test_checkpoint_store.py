@@ -113,14 +113,42 @@ def test_scratch_workspace_without_git(tmp_path):
     assert (ws / "d" / "a.txt").read_text() == "a" and not (ws / "z.txt").exists()
 
 
-def test_head_and_branch_is_one_isolated_git_call(repo, monkeypatch):
+def test_head_and_branch_reads_the_repository_files_without_git(repo, monkeypatch):
+    ws, _ = repo
+    want = sh(ws, "rev-parse", "HEAD").strip()
+    calls = []
+    real = projects.git
+    monkeypatch.setattr(projects, "git", lambda *a, **k: calls.append(a) or real(*a, **k))
+    assert checkpoints.head_and_branch(ws) == (want, "agent/x")
+    assert calls == []              # a git process costs about 0.4 s here, and a snapshot runs every turn
+    sh(ws, "pack-refs", "--all")    # the branch now lives in packed-refs only
+    assert checkpoints.head_and_branch(ws) == (want, "agent/x") and calls == []
+    sh(ws, "checkout", "-q", "--detach")
+    assert checkpoints.head_and_branch(ws) == (want, "") and calls == []
+
+
+def test_head_and_branch_asks_git_for_what_it_cannot_read(repo, monkeypatch):
     ws, _ = repo
     calls = []
     real = projects.git
     monkeypatch.setattr(projects, "git", lambda *a, **k: calls.append(a) or real(*a, **k))
-    head, branch = checkpoints.head_and_branch(ws)
-    assert len(calls) == 1          # each isolated call costs several processes; a snapshot runs every turn
-    assert head == sh(ws, "rev-parse", "HEAD").strip() and branch == "agent/x"
+    monkeypatch.setattr(checkpoints, "_read_head", lambda *_: None)
+    assert checkpoints.head_and_branch(ws)[1] == "agent/x" and len(calls) == 1
+
+
+def test_snapshots_reuse_the_index_and_drop_files_that_became_ignored(repo):
+    ws, store = repo
+    first = store.snapshot(ws, "x", 1, "", "")
+    assert (store.base / "index").is_file()
+    (ws / "edit.txt").write_text("changed")
+    (ws / "new.txt").write_text("n")
+    second = store.snapshot(ws, "x", 2, "", "")
+    names = sh(store.repo.parent, "--git-dir", str(store.repo), "ls-tree", "-r", "--name-only", second).split()
+    assert "new.txt" in names and first != second
+    (ws / ".gitignore").write_text("new.txt\n")                 # tracked in the kept index, ignored from now on
+    third = store.snapshot(ws, "x", 3, "", "")
+    names = sh(store.repo.parent, "--git-dir", str(store.repo), "ls-tree", "-r", "--name-only", third).split()
+    assert "new.txt" not in names and ".gitignore" in names
 
 
 def test_head_and_branch_of_an_unborn_branch_is_empty(tmp_path):
