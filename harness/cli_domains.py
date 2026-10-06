@@ -46,6 +46,7 @@ class Layout:
     ro_files: tuple[tuple[str, str], ...] = ()  # (path under state_dir, source file under cli_home/<backend>/)
     ro_dirs: tuple[str, ...] = ()       # paths under state_dir, mounted as empty read-only directories
     state_subdirs: tuple[str, ...] = ()  # created and handed to the agent user before the first session
+    managed_files: tuple[tuple[str, str], ...] = ()  # (absolute path in the container, source file under cli_home/<backend>/)
 
     @property
     def per_app_login(self) -> bool:
@@ -57,7 +58,10 @@ LAYOUTS = {
         state_dir="/home/agent/.claude", login_dir="/home/agent/.claude-login",
         env=("CLAUDE_CONFIG_DIR=/home/agent/.claude", "CLAUDE_SECURESTORAGE_CONFIG_DIR=/home/agent/.claude-login"),
         ro_files=(("settings.json", "settings.json"), ("CLAUDE.md", "CLAUDE.md")),
-        ro_dirs=("agents", "commands", "skills", "plugins", "hooks", "output-styles", "rules")),
+        ro_dirs=("agents", "commands", "skills", "plugins", "hooks", "output-styles", "rules"),
+        # Managed settings outrank project settings: allowManagedHooksOnly ignores `hooks` in the workspace's
+        # .claude/settings.json and settings.local.json (#388), and the workspace CLAUDE.md still loads.
+        managed_files=(("/etc/claude-code/managed-settings.json", "managed-settings.json"),)),
     "codex": Layout(
         state_dir="/home/agent/.codex", login_dir="",
         env=("CODEX_HOME=/home/agent/.codex",),
@@ -119,6 +123,8 @@ def docker_args(backend: str, cfg, app_id: str = "") -> list[str]:
     for target, source in layout.ro_files:
         args += ["--mount", f"type=bind,source={CLI_HOME / backend / source},"
                             f"target={layout.state_dir}/{target},readonly"]
+    for target, source in layout.managed_files:
+        args += ["--mount", f"type=bind,source={CLI_HOME / backend / source},target={target},readonly"]
     for target in layout.ro_dirs:
         args += ["--mount", f"type=tmpfs,target={layout.state_dir}/{target},tmpfs-mode=0555"]
     return args

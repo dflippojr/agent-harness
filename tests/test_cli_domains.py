@@ -326,3 +326,79 @@ def test_erase_and_app_drop_reach_the_volumes(tmp_path):
         asyncio.run(cli_domains.drop_app_volumes(backends, "app-never-ran"))
     finally:
         _remove_volumes(state, login)
+
+
+_RECORDING_API = r"""
+import http.server, pathlib
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('content-length', 0)))
+        with open('/tmp/requests.log', 'ab') as f:
+            f.write(body + bytes([10]))
+        self.send_response(400); self.send_header('content-type', 'application/json'); self.end_headers()
+        self.wfile.write(b'{"type":"error","error":{"type":"invalid_request_error","message":"stub"}}')
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', 8080), H).serve_forever()
+"""
+
+
+def _claude_session_script(tmp_path: Path, script: str) -> str:
+    """Run `script` in a worker-shaped Claude container (the real flags and mounts, no network, stub API)."""
+    cfg = BackendConfig(enabled=True, image=IMAGE, network="none", volume=f"t388-{uuid.uuid4().hex[:10]}")
+    session = ClaudeSession(session_id=f"t388-{uuid.uuid4().hex[:8]}", workspace=tmp_path, backend=cfg,
+                            sandbox=SandboxConfig(), system_prompt="system")
+    command = session.command()
+    command = command[:command.index(IMAGE) + 1] + ["sh", "-c", script]
+    command[command.index("--network") + 1] = "none"
+    command[2:2] = ["-e", "ANTHROPIC_BASE_URL=http://127.0.0.1:8080", "-e", "ANTHROPIC_API_KEY=sk-ant-t388"]
+    volumes = {cli_domains.state_volume("claude", cfg), cli_domains.login_volume("claude", cfg)}
+    try:
+        subprocess.run(cli_domains.prepare_command("claude", cfg), check=True, capture_output=True)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=180)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+    finally:
+        _remove_volumes(*volumes)
+
+
+def test_managed_settings_are_mounted_read_only_for_claude():
+    args = cli_domains.docker_args("claude", _standard("claude"), "k-1")
+    mounts = [args[at + 1] for at, arg in enumerate(args) if arg == "--mount"]
+    managed = [m for m in mounts if m.endswith("target=/etc/claude-code/managed-settings.json,readonly")]
+    assert len(managed) == 1 and managed[0].startswith("type=bind")
+    source = Path(managed[0].split("source=")[1].split(",target=")[0])
+    assert json.loads(source.read_text(encoding="utf-8")) == {"allowManagedHooksOnly": True}
+    for backend in ("codex", "cursor"):
+        assert "/etc/claude-code" not in " ".join(cli_domains.docker_args(backend, _standard(backend)))
+
+
+@needs_docker
+def test_workspace_hooks_do_not_run_and_the_workspace_claude_md_still_loads(tmp_path):
+    hook = ('{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"id -u > /workspace/%s"}]}]}}')
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(hook % "ran-settings", encoding="utf-8")
+    (tmp_path / ".claude" / "settings.local.json").write_text(hook % "ran-local", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("WORKSPACE-MARKER-t388", encoding="utf-8")
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"x": {
+        "command": "sh", "args": ["-c", "id -u > /workspace/ran-mcp; sleep 30"]}}}), encoding="utf-8")
+    (tmp_path / "recording_api.py").write_text(_RECORDING_API, encoding="utf-8")
+    for path in [tmp_path, *tmp_path.rglob("*")]:
+        path.chmod(0o777 if path.is_dir() else 0o666)
+    out = _claude_session_script(tmp_path, (
+        "python3 /workspace/recording_api.py & sleep 1; "
+        "echo hi | timeout 90 claude -p --output-format stream-json --verbose --model claude-sonnet-5-5 "
+        "--mcp-config '{\"mcpServers\":{}}' --strict-mcp-config >/dev/null 2>&1; "
+        "ls /workspace; grep -c WORKSPACE-MARKER-t388 /tmp/requests.log"))
+    names = out.split()
+    assert not {"ran-settings", "ran-local", "ran-mcp"} & set(names), out
+    assert int(names[-1]) >= 1, out  # CLAUDE.md reached the model's prompt
+
+
+@needs_docker
+def test_a_session_cannot_change_or_delete_the_managed_settings(tmp_path):
+    out = _claude_session_script(tmp_path, (
+        "f=/etc/claude-code/managed-settings.json; "
+        "(echo '{}' > $f) 2>/dev/null && echo WROTE; rm -f $f 2>/dev/null; mv $f $f.x 2>/dev/null; "
+        "cat $f"))
+    assert "WROTE" not in out
+    assert json.loads(out) == {"allowManagedHooksOnly": True}
