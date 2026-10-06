@@ -93,10 +93,31 @@ show_token_status() {
     else echo "token: present, expiry unknown"; fi
 }
 
+mount_args=(-v "$volume:$auth_dir")
+tty_args=(-it)
+command=("${login_cmd[@]}")
+case $mode in
+    status) tty_args=(); command=("${status_cmd[@]}") ;;
+    logout) command=("${logout_cmd[@]}") ;;
+    token)
+        # The owner's long-lived token (#390), for the owner's own sessions only. No volume: setup-token only prints it.
+        [[ $backend == claude ]] || { echo "--token is for claude only" >&2; exit 64; }
+        mount_args=(); env_args=(); command=(claude setup-token) ;;
+esac
+
+if [[ $mode != token ]]; then
+    docker volume create "$volume" >/dev/null
+    # A volume mounted where the image has no directory starts out root's; hand it to the agent user.
+    docker run --rm --network none --user 0:0 -v "$volume:/login" "$image" chown 1000:1000 /login
+fi
+
+run_in_sandbox() {
+    docker run --rm "${tty_args[@]}" --network "harness-cli-$backend"         -e "HTTPS_PROXY=http://harness-egress-$backend:8888"         -e "HTTP_PROXY=http://harness-egress-$backend:8888" -e NO_PROXY=localhost,127.0.0.1         "${env_args[@]}" "${mount_args[@]}" "$image" "${command[@]}"
+}
+
 if [[ $mode == token ]]; then
-    # The owner's long-lived token (#390), for the owner's own sessions only. No volume: setup-token only prints it.
-    [[ $backend == claude ]] || { echo "--token is for claude only" >&2; exit 64; }
-    docker run --rm -it --network "harness-cli-claude" -e "HTTPS_PROXY=http://harness-egress-claude:8888"         -e "HTTP_PROXY=http://harness-egress-claude:8888" -e NO_PROXY=localhost,127.0.0.1 "$image" claude setup-token
+    run_in_sandbox
+    # setup-token printed the token: store what the owner pastes back (owner-only file, expiry beside it).
     read -r -s -p "Paste the token it printed (input hidden): " pasted
     echo
     [[ -n $pasted ]] || { echo "no token entered" >&2; exit 1; }
@@ -106,21 +127,8 @@ if [[ $mode == token ]]; then
     show_token_status
     exit 0
 fi
-docker volume create "$volume" >/dev/null
-# A volume mounted where the image has no directory starts out root's; hand it to the agent user.
-docker run --rm --network none --user 0:0 -v "$volume:/login" "$image" chown 1000:1000 /login
 
-tty_args=(-it)
-command=("${login_cmd[@]}")
-if [[ $mode == status ]]; then
-    tty_args=()
-    command=("${status_cmd[@]}")
-elif [[ $mode == logout ]]; then
-    command=("${logout_cmd[@]}")
-fi
-
-if [[ $mode == status && $backend == claude ]]; then trap show_token_status EXIT; fi
-docker run --rm "${tty_args[@]}" --network "harness-cli-$backend" \
-    -e "HTTPS_PROXY=http://harness-egress-$backend:8888" \
-    -e "HTTP_PROXY=http://harness-egress-$backend:8888" -e NO_PROXY=localhost,127.0.0.1 \
-    "${env_args[@]}" -v "$volume:$auth_dir" "$image" "${command[@]}"
+status=0
+run_in_sandbox || status=$?
+if [[ $mode == status && $backend == claude ]]; then show_token_status; fi
+exit "$status"
