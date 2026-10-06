@@ -65,7 +65,11 @@ def test_round_trip_decrypts_and_keeps_key_separate(snapshot):
             descriptor = manifest.read_text(encoding="utf-16-le").splitlines()[1]
             assert descriptor.startswith("D:P")  # protected, no inherited access
             assert descriptor.count("(") == 1  # exactly one access rule
-            assert f"(A;;FA;;;{sid})" in descriptor  # daemon account, full access
+            assert "(A;;FA;;;" in descriptor  # one allow rule, full access
+            # Built-in accounts can use an SDDL alias (e.g. LA); ask Windows to resolve the SID.
+            found = subprocess.run(["icacls", str(path), "/findsid", f"*{sid}"], check=True,
+                                   capture_output=True, text=True)
+            assert str(path) in found.stdout  # the single rule belongs to the daemon account
     else:
         assert restored.stat().st_mode & 0o777 == 0o600
         assert key.stat().st_mode & 0o777 == 0o600
