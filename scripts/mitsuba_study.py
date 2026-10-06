@@ -214,12 +214,17 @@ def render(prompt: str, tag: str) -> dict:
     base = f"http://127.0.0.1:{COMFY_PORT}"
     t0 = time.time()
     pid = http("POST", f"{base}/prompt", {"prompt": g})["prompt_id"]
-    while True:
+    while time.time() - t0 < 600:
         h = http("GET", f"{base}/history/{pid}")
-        if pid in h and h[pid].get("outputs"):
-            img = h[pid]["outputs"]["9"]["images"][0]
+        entry = h.get(pid)
+        if entry and entry.get("status", {}).get("status_str") == "error":
+            raise SystemExit(f"ComfyUI job failed for {tag}: {entry['status']}")
+        if entry and entry.get("outputs"):
+            img = entry["outputs"]["9"]["images"][0]
             break
         time.sleep(0.5)
+    else:
+        raise SystemExit(f"ComfyUI job for {tag} did not finish in 600 s")
     data = http("GET", f"{base}/view?filename={img['filename']}&subfolder={img['subfolder']}&type={img['type']}")
     (RUN / "images").mkdir(exist_ok=True)
     (RUN / "images" / f"{tag}.png").write_bytes(data)
