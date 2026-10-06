@@ -185,3 +185,31 @@ def test_doctor_reports_copy_and_warning(snapshot, monkeypatch):
     key.unlink()
     doctor(report, SimpleNamespace(port=0))
     assert "No key copy available" in lines[-1][1]
+
+
+@pytest.mark.parametrize("damage", ["invalid", "short", "unreadable"])
+def test_bad_source_key_keeps_database_backup_usable(snapshot, monkeypatch, damage, caplog):
+    cfg, target, folder, _ = snapshot
+    source = cfg.data_dir / member_key.KEY_FILE
+    if damage == "unreadable":
+        read = Path.read_bytes
+        def guarded(path):
+            if path == source:
+                raise PermissionError("synthetic denial")
+            return read(path)
+        monkeypatch.setattr(Path, "read_bytes", guarded)
+    else:
+        source.write_bytes(b"invalid" if damage == "invalid" else base64.b64encode(b"short"))
+    db = Database(cfg.db_path)
+    try:
+        result = asyncio.run(BackupService(cfg, db).backup())
+    finally:
+        db.close()
+    assert result["ok_at"] and result["member_key_path"] == ""
+    assert "source key is unreadable or invalid" in result["warnings"][0]
+    assert "source key is unreadable or invalid" in caplog.text
+    assert member_key.expected_fingerprint(folder / "harness.sqlite3") == ""
+    lines = []
+    restore(target, folder, apply_changes=True, out=lines.append)
+    assert target.db_path.is_file()
+    assert any("members must re-add" in line for line in lines)

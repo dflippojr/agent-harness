@@ -121,11 +121,13 @@ class BackupService:
         tmp.mkdir(parents=True)
         db_copy = tmp / "harness.sqlite3"
         self._backup_db(db_copy)
-        member_key = snapshot_key(self.cfg, root, db_copy)
+        warnings: list[str] = []
+        member_key = snapshot_key(self.cfg, root, db_copy, warnings)
+        for warning in warnings:
+            log.warning(warning)
         if member_key:
             log.warning(WARNING)
         app_stores = self._backup_app_stores(tmp / "apps")
-        warnings: list[str] = []
         transcript_archives = self._archive_transcripts(
             storage.transcripts_dir(self.cfg, OWNER_USER_ID), tmp / "transcripts.zip", warnings, owner=True)
         transcript_archives += self._backup_other_transcripts(tmp / "transcripts", warnings)

@@ -66,7 +66,7 @@ def write_private(path: Path, content: bytes) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def snapshot_key(cfg, root: Path, database: Path) -> Path | None:
+def snapshot_key(cfg, root: Path, database: Path, warnings: list[str]) -> Path | None:
     directory = key_dir(cfg, root)
     source = Path(cfg.data_dir) / KEY_FILE
     with closing(sqlite3.connect(database)) as conn:
@@ -74,8 +74,13 @@ def snapshot_key(cfg, root: Path, database: Path) -> Path | None:
         conn.commit()
     if not source.exists():
         return None
-    content = source.read_bytes()
-    digest = fingerprint(content)
+    try:
+        content = source.read_bytes()
+        digest = fingerprint(content)
+    except (OSError, ValueError):
+        warnings.append("Member key backup skipped: the source key is unreadable or invalid; "
+                        "members may need to re-add their API keys after restore.")
+        return None
     dest = directory / f"{digest}.key"
     write_private(dest, content)
     with closing(sqlite3.connect(database)) as conn:
