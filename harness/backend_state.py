@@ -57,7 +57,7 @@ def _volume_exists(volume: str) -> bool:
     return result.returncode == 0
 
 
-def _probe_subscription(name: str, cfg, app_id: str = "") -> bool:
+def _probe_subscription(name: str, cfg, app_id: str = "", end_user: str = "") -> bool:
     from . import cli_domains
     commands = {
         "claude": ["claude", "auth", "status"],
@@ -66,12 +66,14 @@ def _probe_subscription(name: str, cfg, app_id: str = "") -> bool:
     }
     if name not in commands:
         return False
-    # An App's own login (#371): don't create its volume just to find it empty.
-    if app_id and cli_domains.needs_app_login(name) and not _volume_exists(cli_domains.login_volume(name, cfg, app_id)):
+    # An end user's own login (#365) and an App's (#371): don't create the volume just to find it empty.
+    if end_user and not _volume_exists(cli_domains.end_user_volume(name, app_id, end_user)):
+        return False
+    if not end_user and app_id and cli_domains.needs_app_login(name) and not _volume_exists(cli_domains.login_volume(name, cfg, app_id)):
         return False
     command = ["docker", "run", "--rm", "--network", cfg.network,
                "-e", f"HTTPS_PROXY={cfg.proxy}", "-e", "NODE_USE_ENV_PROXY=1",
-               *cli_domains.probe_args(name, cfg, app_id), cfg.image, *commands[name]]
+               *cli_domains.probe_args(name, cfg, app_id, end_user), cfg.image, *commands[name]]
     try:
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -116,6 +118,27 @@ def app_login_ready(name: str, cfg, app_id: str) -> bool:
     ok = _probe_subscription(name, cfg, app_id)
     _auth_cache[key] = (now + _AUTH_TTL, ok)
     return ok
+
+
+_eu_cache: dict[tuple[str, str, str], float] = {}  # (backend, app, end user) -> until when "signed in" stands
+
+
+def end_user_login_ready(name: str, cfg, app_id: str, end_user: str) -> bool:
+    """Whether the end user's own login on `name` is signed in (#365). A recent "yes" stands for the TTL; a "no" is
+    always probed again, so a session right after the person finishes signing in isn't refused."""
+    key = (name, app_id, end_user)
+    if _eu_cache.get(key, 0) > time.time():
+        return True
+    ok = _probe_subscription(name, cfg, app_id, end_user)
+    if ok:
+        _eu_cache[key] = time.time() + _AUTH_TTL
+    else:
+        _eu_cache.pop(key, None)
+    return ok
+
+
+def forget_end_user_login(name: str, app_id: str, end_user: str) -> None:
+    _eu_cache.pop((name, app_id, end_user), None)
 
 
 def subscription_status(name: str, cfg, app_id: str = "") -> bool:

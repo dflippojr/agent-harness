@@ -51,7 +51,7 @@ SDK_OPERATIONS = {
 SDK_REQUEST_FIELDS = {
     SDK_OPERATIONS["pair"]: {"code"},
     SDK_OPERATIONS["create_session"]: {"prompt", "project", "backend", "model", "title", "context", "tools",
-                                       "metadata", "tools_only", "retention_days"},
+                                       "metadata", "tools_only", "retention_days", "end_user"},
     SDK_OPERATIONS["send"]: {"content"},
     SDK_OPERATIONS["add_context"]: {"context"},
     SDK_OPERATIONS["submit_tool_result"]: {"output", "ok"},
@@ -329,15 +329,33 @@ class Harness:
     def create_session(self, prompt: str, project: str | None = None, context: dict[str, str] | None = None,
                        tools: list[Tool] | None = None, metadata: dict | None = None, title: str | None = None,
                        model: str | None = None, backend: str = "local", tools_only: bool = False,
-                       retention_days: float | None = None) -> Session:
+                       retention_days: float | None = None, end_user: str | None = None) -> Session:
         """`tools_only=True` starts an App-tools-only session: the model gets only `tools` (no workspace, project,
         built-in or CLI tools). It takes no project; backends that can't do it refuse with
-        app_tools_only_unsupported. `retention_days` erases the session once it has been idle that long."""
+        app_tools_only_unsupported. `retention_days` erases the session once it has been idle that long. `end_user`
+        runs the session on that person's own Claude or Codex login (see `start_end_user_login`), or is refused with
+        end_user_login_required."""
         body = {"prompt": prompt, "project": project if project is not None or tools_only else "scratch",
                 "backend": backend, "metadata": metadata or {}, "title": title, "model": model,
                 "context": [{"title": k, "content": v} for k, v in (context or {}).items()],
-                "tools": [t.spec() for t in tools or []], "tools_only": tools_only, "retention_days": retention_days}
+                "tools": [t.spec() for t in tools or []], "tools_only": tools_only, "retention_days": retention_days,
+                "end_user": end_user}
         return self._call("POST", "/sessions", json=body)
+
+    # end users' own subscription logins (#365)
+    def start_end_user_login(self, end_user: str, backend: str) -> dict:
+        """Start the CLI's own sign-in: `{attempt_id, verification_url, user_code?, needs_code}` for a popup."""
+        return self._call("POST", f"/end-users/{end_user}/logins/{backend}")
+
+    def submit_end_user_login_code(self, end_user: str, backend: str, attempt_id: str, code: str) -> dict:
+        """Claude only: pass the one-time code the person pasted. It is single use."""
+        return self._call("POST", f"/end-users/{end_user}/logins/{backend}/{attempt_id}/code", json={"code": code})
+
+    def end_user_login(self, end_user: str, backend: str) -> dict:
+        return self._call("GET", f"/end-users/{end_user}/logins/{backend}")
+
+    def unlink_end_user(self, end_user: str, backend: str) -> None:
+        self._call("DELETE", f"/end-users/{end_user}/logins/{backend}")
 
     def session(self, sid: str) -> Session:
         return self._call("GET", f"/sessions/{sid}")

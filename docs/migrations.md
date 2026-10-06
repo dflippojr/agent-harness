@@ -115,3 +115,6 @@ move `<data dir>/apps/app-web/` aside, and start the older harness.
 
 Step 0050 (`app_retention`) adds `sessions.retention_days` and, on the App registry (`api_keys`), `retention_days`,
 `erase_after` and `erased_at` (#330 decision 5).
+
+Step 0051 (`end_users`) adds the `end_users` registry table (read through `db.for_app(app_id)`, so it lives in the App's
+own store and goes with `drop_app`), `sessions.end_user` and `usage.end_user` (#365).

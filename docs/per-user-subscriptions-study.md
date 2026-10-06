@@ -10,6 +10,11 @@ extraction, not a byte-for-byte copy. Where a page could not be read (HTTP 403) 
 **unverified**. This is a research note, not legal advice, and the owner should read the primary pages before
 committing to a verdict that carries risk (the links are in each section).
 
+> **Update 2026-10-05 (owner's decisions on #365):** v1 is **Claude and Codex**; Cursor is out. The owner ruled the
+> Claude paste-back relay acceptable (user-triggered pairing, unmodified binary) and accepts Anthropic's Commercial
+> Terms on their own. The verdict table below is the study's original reading and is kept for the record.
+> Implementation: `docs/app-api.md` ("End users' own logins") and `docs/phase8a-design.md`.
+
 ## Verdict (the v1 backend list for #365)
 
 | Backend | Terms allow per-user, third-party-App use? | Login display-only? | Verdict |

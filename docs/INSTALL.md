@@ -48,6 +48,12 @@ all platforms. Codex needs one more login per App that uses it (`login.ps1 codex
 `login.sh codex --app <app id>`): its credential can't be kept apart from its session history, which stays separate
 per App (docs/phase8a-design.md, "Per-domain CLI state").
 
+**Letting an App's end users use their own Claude plan (owner step, #365).** Hosting Claude Code for other people
+"requires agreeing to our Commercial Terms of Service" (Anthropic's legal and compliance page). Before an App starts
+Claude sign-ins for its end users, confirm: *I have accepted Anthropic's Commercial Terms of Service for hosting
+Claude Code, and each end user signs in to the unmodified Claude Code with their own plan.* The harness does not
+check this. The API is in `docs/app-api.md` ("End users' own logins").
+
 Docker (Docker Desktop on Windows/macOS) and at least one provider login are the operational minimum. The installer configures Claude, Codex,
 and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example
 `-EnableModules jobs,backup`. `endpoint`, `images`, `image_edit`, and `gpu_guard` automatically opt into `local_model` and restore

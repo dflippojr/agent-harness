@@ -372,6 +372,28 @@ plan, context compaction or a harness `mcpToolCall`.
   `docker run -it` with the volume. The app shows the command to run until `claude auth status` in the container
   reports a subscription login. If Claude Code gains a device-style flow later, switch to it.
 
+#### End users' own logins (#365)
+
+Superseding the Claude proposal above for an App's end users: the owner ruled (2026-10-05) that the paste-back code
+may be relayed, because the end user starts the pairing themselves from the App, signs in on Anthropic's own site and
+the Claude Code binary is unmodified. The relay is as narrow as it can be (`harness/end_users.py`): the App's popup
+shows the URL, the person pastes the code, and the daemon writes it once to the waiting `claude auth login`'s stdin,
+never to disk, logs, events, the database or a response. Checked offline against the pinned 2.1.272 in a
+network-less container: `claude auth login` with piped stdin and no TTY prints the sign-in URL and `Paste code here if
+prompted >`, then reads the code from stdin. Codex stays display-only (`codex login --device-auth`).
+
+- **Volume:** `harness-eu-<backend>-<24 hex of sha256([app, end user])>`, one per (App, end user, backend), holding the
+  login and the CLI's state. For Claude the login directory moves inside it (`CLAUDE_SECURESTORAGE_CONFIG_DIR=
+  /home/agent/.claude/.login`), so no shared login volume and no token is mounted. The same read-only config and
+  managed settings apply.
+- **Credential source:** `harness/credential_sources.py` is the pluggable seam: a source selects a session, supplies its
+  container args and secret env, checks readiness (refusing with a stable code) and names a lock key. `EndUserLogin`
+  is the first; a per-member API-key source (#393) registers the same way. A source never falls back.
+- **Concurrency (decision 5):** at most one running session per (App, end user, backend); the next queues
+  (`credential_sources.KeyedLocks`, taken in `Runner._run_cli` before the backend slot). Chosen over a per-session
+  copy of the credential, which would fork the refresh token. Codex gets the same lock: its `auth.json` refreshes
+  in place and two app-servers could race it alike.
+
 #### Claude: the owner's long-lived token (#390)
 
 The shared Claude login (`harness-login-claude`) broke within hours: its OAuth refresh token rotates on use, so two
