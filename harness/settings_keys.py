@@ -27,7 +27,6 @@ KEY_APP_CAPABILITIES = "app.capabilities"
 KEY_APP_NOTIFY_COMPLETION = "app.notify.completion"
 
 
-
 def _require_url(value: str, label: str) -> list[str]:
     if not value.strip():
         return [f"{label} is not configured"]
@@ -52,10 +51,6 @@ def check_web(cfg: Config) -> list[str]:
         return errors
     errors.extend(_require_url(cfg.web.searxng_url, "web.searxng_url"))
     return errors
-
-
-def check_jobs(cfg: Config) -> list[str]:
-    return []
 
 
 def check_endpoint(cfg: Config) -> list[str]:
@@ -83,8 +78,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
     """
     if name == "web":
         cfg.web.enabled = enabled
-    elif name == "jobs":
-        cfg.jobs.enabled = enabled
     elif name == "endpoint":
         cfg.endpoint.enabled = enabled
     elif name == "gpu_guard":
@@ -103,11 +96,6 @@ def apply_cleanup_interval(manager, old, new) -> None:
 def apply_endpoint_queue(manager, old, new) -> None:
     manager.runner.gate.max_waiting = manager.cfg.endpoint.max_waiting
     manager.runner.gate.fair_seconds = manager.cfg.endpoint.agent_fair_seconds
-
-
-def apply_jobs_poll(manager, old, new) -> None:
-    if manager.jobs is not None:
-        manager.jobs.poll_seconds = manager.cfg.jobs.poll_seconds
 
 
 def _lt(a: float, b: float) -> bool:
@@ -393,13 +381,6 @@ def _set_gpu_drain(cfg: Config, value):
     cfg.gpu_guard.drain_timeout_seconds = float(value)
 
 
-def _get_jobs_poll(cfg: Config):
-    return cfg.jobs.poll_seconds
-
-
-def _set_jobs_poll(cfg: Config, value):
-    cfg.jobs.poll_seconds = float(value)
-
 
 def _get_smart_enabled(cfg: Config):
     return bool(cfg.smart_approvals.enabled)
@@ -637,10 +618,6 @@ STATIC_ADMIN: list[SettingSpec] = [
            "Longest wait for the current model turn before the server is stopped.",
            GPU_GUARD, 300, _get_gpu_drain, _set_gpu_drain, 30, 1800,
            ("gpu_guard", "drain_timeout_seconds"), modules=("gpu_guard",)),
-    _float("jobs.poll_seconds", "Job polling interval (seconds)",
-           "How often scheduled jobs are checked.",
-           "Jobs", 30, _get_jobs_poll, _set_jobs_poll, 5, 300, ("jobs", "poll_seconds"),
-           modules=("jobs",), live_apply=apply_jobs_poll),
     _bool("smart_approvals.enabled", SMART_APPROVALS,
           "Runtime enable for the hosted smart-approval reviewer. Does not configure a secret_ref.",
           SMART_APPROVALS, False, _get_smart_enabled, _set_smart_enabled,
@@ -674,10 +651,6 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for web_search / web_fetch. Does not install the web module.",
           "Features", False, _enable_get("web"), _enable_set("web"), ("web", "enabled"),
           apply_mode="daemon_restart", modules=("web",), enable_check=check_web),
-    _bool("jobs.enabled", "Scheduled jobs",
-          "Runtime enable for scheduled jobs. Does not install the jobs module.",
-          "Features", False, _enable_get("jobs"), _enable_set("jobs"), ("jobs", "enabled"),
-          apply_mode="daemon_restart", modules=("jobs",), enable_check=check_jobs),
     _bool("endpoint.enabled", "Inference endpoint",
           "Runtime enable for the OpenAI/Anthropic-compatible endpoint.",
           "Features", False, _enable_get("endpoint"), _enable_set("endpoint"), ("endpoint", "enabled"),

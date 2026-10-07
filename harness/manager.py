@@ -244,10 +244,6 @@ class Manager:
             self.remote_control = RemoteControl(cfg, cfg.remote_control, notify=self._remote_control_ready)
             self.remote_control.discovery.settings = self.settings
             self.runner.remote_control = self.remote_control
-        self.jobs = None
-        if module_effective(cfg, "jobs"):
-            from .jobs import JobScheduler
-            self.jobs = JobScheduler(self.db, self.create, active=self._is_active, poll_seconds=cfg.jobs.poll_seconds)
         self.guard = None
         self.canary = None
         if cfg.canary.enabled:
@@ -347,8 +343,6 @@ class Manager:
         for s in self.db.sessions_with_status(*ACTIVE):
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
-        if self.jobs is not None:
-            self.jobs.start()
         if self.canary is not None:
             self.canary.start()
         if getattr(self, "settings", None) is not None:
@@ -370,8 +364,6 @@ class Manager:
         self.hub.close()
         await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
         await asyncio.to_thread(self.end_user_logins.close)  # a sign-in in flight ends with the daemon
-        if self.jobs is not None:
-            await self.jobs.stop()
         if self.canary is not None:
             await self.canary.stop()
         tasks = list(self.tasks.values())

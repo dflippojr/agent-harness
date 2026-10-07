@@ -690,7 +690,7 @@ def _member_me(m, key: dict, ident) -> dict:
         "capabilities": {
             "admin": False, "local_sessions": True, "hosted_backends": False,
             **principal_capabilities(m.cfg, False),
-            "jobs": False, "runners": False, "accounts": False,
+            "runners": False, "accounts": False,
         },
         "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
                   "disk_note": quota_message(used, limit) if limit else "",
@@ -714,7 +714,7 @@ async def api_me(request: Request):
             "capabilities": {
                 "admin": owner_key(key), "local_sessions": True, "hosted_backends": owner_key(key),
                 **principal_capabilities(m.cfg, owner_key(key), key.get("scope_set", ())),
-                "jobs": owner_key(key), "runners": owner_key(key), "accounts": owner_key(key),
+                "runners": owner_key(key), "accounts": owner_key(key),
             }}
 
 

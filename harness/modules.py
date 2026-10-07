@@ -74,7 +74,8 @@ _PUBLIC = {
     "setting_int": ("harness.settings_keys", "_int"),
     "setting_float": ("harness.settings_keys", "_float"),
     "setting_bool": ("harness.settings_keys", "_bool"),
-    "job_summary": ("harness.jobs", "summary"),  # until jobs is itself a module
+    "job_summary": ("harness.job_results", "summary"),
+    "parse_job_status": ("harness.job_results", "parse_status"),
     "require_url": ("harness.settings_keys", "_require_url"),
     "require_readable_file": ("harness.settings_keys", "_require_readable_file"),
     "migrations": ("harness.migrations", None),

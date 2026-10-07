@@ -24,7 +24,6 @@ DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
 # Core switches whose on/off is ``cfg.<section>.enabled``.
 MODULE_ENABLE_SECTIONS = {
     "web": "web",
-    "jobs": "jobs",
     "endpoint": "endpoint",
     "gpu_guard": "gpu_guard",
     "remote_control": "remote_control",
@@ -285,7 +284,7 @@ class RemoteControlConfig:
 
 @dataclass
 class JobsConfig:
-    """Scheduled jobs (jobs.py): recurring agent tasks on cron schedules, managed from the app."""
+    """Scheduled jobs add-on: recurring agent tasks on cron schedules, managed from the app."""
     enabled: bool = False
     poll_seconds: float = 30
 
