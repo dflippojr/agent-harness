@@ -250,7 +250,7 @@ default_model: qwen3.8-35b-a3b-distill
 The file must already be at `C:/AI/models/Qwen3.8-35B-A3B-Q4_K_M.gguf`: revision
 `b1f9d1dcc3de8aa867669b0ab919384aeeb9b8d5` of `empero-ai/Qwen3.8-35B-A3B-Distill-GGUF`, 21,713,462,944 bytes, SHA-256
 `196103269085bc54c9b8f49ed21e9f53e1b56b465e8b796c6d8e31e06f63cfa5`. If it is missing, the supervisor logs it and
-serves Qwen3.6 instead. It loads with `--load-mode none` (#405).
+serves Qwen3.6 instead. Both models load with `--load-mode none` (#405).
 
 To apply it, unload the running model and restart the daemon so both sides pick up the line:
 

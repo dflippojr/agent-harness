@@ -19,8 +19,7 @@ $localModels = [ordered]@{
     'qwen3.6-35b-a3b'         = @{ path = 'C:/AI/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf'; args = @() }
     # empero-ai/Qwen3.8-35B-A3B-Distill-GGUF, revision b1f9d1dcc3de8aa867669b0ab919384aeeb9b8d5, SHA-256
     # 196103269085bc54c9b8f49ed21e9f53e1b56b465e8b796c6d8e31e06f63cfa5 (docs/qwen38-distill-study.md, #174, #413).
-    # --load-mode none: see #405 / PR #420.
-    'qwen3.8-35b-a3b-distill' = @{ path = 'C:/AI/models/Qwen3.8-35B-A3B-Q4_K_M.gguf'; args = @('--load-mode', 'none') }
+    'qwen3.8-35b-a3b-distill' = @{ path = 'C:/AI/models/Qwen3.8-35B-A3B-Q4_K_M.gguf'; args = @() }
 }
 $fallbackModel = 'qwen3.6-35b-a3b'
 $configDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\config"))

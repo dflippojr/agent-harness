@@ -85,7 +85,7 @@ BASE = "default_model: qwen3.6-35b-a3b\nmodels:\n  qwen3.6-35b-a3b: {}\n"
 def test_serves_the_base_default(tmp_path):
     out = _probe(tmp_path, BASE)
     assert "-m " in out and "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --alias qwen3.6-35b-a3b --host 127.0.0.1" in out
-    assert "--load-mode" not in out
+    assert out.count("--load-mode none") == 1
     assert "LOG" not in out
 
 
@@ -93,7 +93,7 @@ def test_serves_the_base_default(tmp_path):
 def test_one_local_line_switches_and_removing_it_rolls_back(tmp_path):
     out = _probe(tmp_path, BASE, local="# owner\ndefault_model: \"qwen3.8-35b-a3b-distill\"  # #413\n")
     assert "Qwen3.8-35B-A3B-Q4_K_M.gguf --alias qwen3.8-35b-a3b-distill --host 127.0.0.1" in out
-    assert out.rstrip().endswith("--sleep-idle-seconds 600 --load-mode none")
+    assert out.count("--load-mode none") == 1
 
 
 @needs_powershell
