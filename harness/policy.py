@@ -70,7 +70,8 @@ ALWAYS_ASK: dict[str, str] = {
 
 
 # Hosted Claude Code sees the daemon's own tools through the harness MCP server as mcp__harness__<tool> (#300). They are
-# decided as the native tool they name, so project rules and defaults apply unchanged. Other MCP servers aren't wired.
+# decided as the native tool they name, so project rules and defaults apply unchanged. Native client servers are
+# separately allowlisted per session and retain their full names for rules.
 MCP_SERVER = "harness"
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 
@@ -238,10 +239,11 @@ def _target_outside_scratch(target: str) -> bool:
 
 class Policy:
     def __init__(self, project_rules: list[dict] | None = None, repo: bool = False,
-                 workspace_root: Path | None = None):
+                 workspace_root: Path | None = None, mcp_servers=()):
         """`workspace_root` is the host folder bind-mounted at /workspace; with it, Claude Code reads that pass
         through a symlink or junction there are asked, not allowed. Without it only the lexical check applies."""
         self.workspace_root = Path(workspace_root) if workspace_root else None
+        self.mcp_servers = frozenset(mcp_servers)
         cleaned = []
         for rule in project_rules or []:
             if rule.get("action") not in (ALLOW, ASK, DENY):
@@ -252,16 +254,31 @@ class Policy:
 
     def fingerprint(self) -> str:
         """Stable id of the ordered rule set the deterministic gate used."""
-        payload = json.dumps(self.rules, sort_keys=True, default=str).encode()
+        rules = [self.rules, sorted(self.mcp_servers)] if self.mcp_servers else self.rules
+        payload = json.dumps(rules, sort_keys=True, default=str).encode()
         return hashlib.sha256(payload).hexdigest()[:16]
 
     def decide(self, name: str, args: dict) -> Decision:
-        alias = ""
-        if name.startswith("mcp__"):
-            bare = mcp_harness_tool(name)
-            if bare is None:
-                return Decision(DENY, "only the harness MCP server is available to hosted sessions")
-            name, alias = bare, name
+        # Configured client names may themselves contain __, including harness__docs. Their complete prefix takes
+        # precedence over the hosted harness relay alias; the literal server name harness remains reserved.
+        bare = None if self.is_mcp_client_tool(name) else mcp_harness_tool(name)
+        client = name.startswith("mcp__") and bare is None
+        if client and not self.is_mcp_client_tool(name):
+            reason = ("MCP server is not configured for this session" if self.mcp_servers
+                      else "only the harness MCP server is available to hosted sessions")
+            return Decision(DENY, reason)
+        alias = name if bare else ""
+        name = bare or name
+        decision = self._rule_decision(name, args, alias)
+        if decision is not None:
+            return decision
+        if name in ALWAYS_ASK:
+            return Decision(ASK, ALWAYS_ASK[name])
+        if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
+            return Decision(ASK, "deletes files outside the scratch area")
+        return Decision(ASK, "owner-configured MCP tool requires approval") if client else Decision(ALLOW)
+
+    def _rule_decision(self, name: str, args: dict, alias: str) -> Decision | None:
         for rule in self.rules:
             root = self.workspace_root
             if _matches(rule, name, args, root) or (alias and _matches(rule, alias, args, root)):
@@ -269,11 +286,11 @@ class Policy:
                     break
                 return Decision(rule["action"], rule.get("reason", ""),
                                 smart_eligible=bool(rule.get("smart_eligible")))
-        if name in ALWAYS_ASK:
-            return Decision(ASK, ALWAYS_ASK[name])
-        if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
-            return Decision(ASK, "deletes files outside the scratch area")
-        return Decision(ALLOW)
+        return None
+
+    def is_mcp_client_tool(self, name: str) -> bool:
+        return any(name.startswith(f"mcp__{server}__") and len(name) > len(f"mcp__{server}__")
+                   for server in self.mcp_servers)
 
 
 CHAT_ALLOWED_TOOLS = frozenset({"web_search", "web_fetch", "WebSearch", "WebFetch"})

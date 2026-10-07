@@ -106,6 +106,18 @@ module's only link back is `harness.modules`.
 `manager.<module name>` returns the runtime's `service` (None while switched off or absent), for code written before
 modules; new core code goes through `manager.modules`.
 
+Session-specific native toolkits (#260): `ToolGate.per_session=True` selects
+`runtime.session_toolkit(session)` through `ModuleHost.toolkits(session)`. The native loop awaits
+`prepare_session(session)` before its first listing and calls `end_session(sid)` on completion, cancellation or
+failure. These hooks default to no-ops. `owns_toolkit(kit)` lets a runtime associate cached per-session toolkits
+with its gate for dispatch and tracing. A per-session toolkit is excluded from sessionless listings; set
+`mcp=False` to exclude it from hosted sessions. The owner-pinned MCP client uses this interface; see
+[`mcp-client.md`](mcp-client.md). Its core configuration names (`Project.mcp_servers`, `ModulesConfig.mcp_client`
+and validation in `harness/mcp_config.py`) remain in core so file validation works with the package absent.
+Toolkits may supply `validate_args(name, args)` to return validated arguments or raise `ToolError` before policy
+and approval; otherwise the native argument checker applies. MCP uses full JSON Schema validation with external
+schema retrieval disabled, including support for zero-argument schemas and local references.
+
 ## Writing a module
 
 Host tools that belong to tower workspaces use `ModuleRuntime.workspace_toolkit(project, defaults, member)`.
@@ -181,3 +193,7 @@ These are names, not imports, and move with the config and storage split in stag
   `mcp=False` preserves its exclusion from hosted MCP tools. Absent skills add no routes, settings, metrics or tools.
   Import paths moved from `harness.skills`, `harness.skill_review`, and `harness.skill_validate` to
   `harness_modules.skills.service`, `harness_modules.skills.skill_review`, and `harness_modules.skills.skill_validate`.
+
+Toolkits may expose `mutating_tools`, a collection of full tool names evaluated for the current session.
+The host combines it with `ToolGate.mutating` for native checkpoints and workspace quota enforcement.
+MCP client toolkits conservatively mark every tool on a server with a `rw` workspace grant as mutating.

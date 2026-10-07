@@ -19,8 +19,10 @@ WEB_SEARCH_TOOLS = ("web_search", "WebSearch")
 ALWAYS_TAINT_ASK = ("restart_service", "rebuild_service", "memory_write")
 
 
-def source_for(name: str, args: dict) -> tuple[str, str] | None:
+def source_for(name: str, args: dict, *, mcp_client: bool = False) -> tuple[str, str] | None:
     """(kind, origin) when a successful call to this tool brings untrusted content into the session."""
+    if mcp_client or (name.startswith("mcp__") and not name.startswith("mcp__harness__")):
+        return "mcp", name
     if name in WEB_FETCH_TOOLS:
         host = urlparse(str(args.get("url") or "")).hostname
         return "web_fetch", host or "a web page"

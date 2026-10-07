@@ -240,11 +240,15 @@ The publisher lists:
 
 - `required_capabilities.profile`: `full`, `service`, or `any`;
 - `required_capabilities.modules`: subset of `local_model`, `homelab`, `memory_library`, `images`, `image_edit`,
-  `jobs`, `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, `backup`, `skills`;
+  `jobs`, `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, `backup`, `skills`,
+  `mcp_client`;
 - `required_backends`: subset of `local`, `claude`, `codex`, `cursor`.
 
 `image_edit` is an opt-in module (~20 GB Qwen-Image-Edit). It is never part of an ordinary install and
 depends on `images` / `local_model`.
+
+`mcp_client` is also opt-in: Apps cannot configure its servers. Only owner project files can pin its stdio images;
+it offers tools to native owner sessions through the harness policy and approval flow (#260).
 
 Discovery uses `GET /api/v1` / `GET /health` `capabilities` and authenticated `GET /api/v1/backends`
 `provider_policy`. An app must degrade or refuse when a backend is `allowed: false`. It must not scrape

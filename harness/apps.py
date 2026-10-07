@@ -370,7 +370,7 @@ def validate_tools(tools: list[AppTool], reserved: set[str]) -> list[dict]:
     for t in tools:
         if not TOOL_NAME.fullmatch(t.name):
             raise ValueError(f"tool name {t.name!r} must match {TOOL_NAME.pattern}")
-        if t.name in reserved or t.name in seen:
+        if t.name.startswith("mcp__") or t.name in reserved or t.name in seen:
             raise ValueError(f"tool name {t.name!r} is already taken")
         params = _tool_parameters(t)
         seen.add(t.name)

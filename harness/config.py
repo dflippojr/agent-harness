@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_FILE = "projects.yaml"
 MODULE_NAMES = (
     "local_model", "homelab", "memory_library", "images", "image_edit", "jobs", "gpu_guard", "runners",
-    "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills",
+    "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills", "mcp_client",
 )
 # Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
-OPT_IN_MODULES = frozenset({"image_edit"})
+OPT_IN_MODULES = frozenset({"image_edit", "mcp_client"})
 # extra_model_paths root shared by installer, doctor, and image components (Z-Image / quality / image_edit).
 DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
 # Core switches whose on/off is ``cfg.<section>.enabled``.
@@ -396,6 +396,7 @@ class ModulesConfig:
     notifications: bool = True
     backup: bool = True
     skills: bool = True
+    mcp_client: bool = False
 
 
 @dataclass
@@ -439,6 +440,7 @@ class Project:
     managed: bool = False        # loaded from data_dir/projects.yaml rather than checked-in config
     tool_output: dict = field(default_factory=dict)  # optional overlay on Config.tool_output
     verify: list = field(default_factory=list)       # list[VerifyCheck]; empty → verify returns an error
+    mcp_servers: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -552,7 +554,10 @@ _PROJECT_WRITE_LOCK = threading.RLock()
 
 def _project_from_spec(name: str, spec: dict | None, *, owner_id: str = "owner", managed: bool = False) -> Project:
     spec = spec or {}
+    from .mcp_config import validate_servers
+    servers = validate_servers(spec.get("mcp_servers", []), str(spec.get("owner_id") or owner_id))
     return Project(
+        mcp_servers=servers,
         name=name,
         description=str(spec.get("description") or ""),
         instructions=str(spec.get("instructions") or ""),

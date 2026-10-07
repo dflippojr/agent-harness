@@ -24,7 +24,7 @@ from .checkpointer import Checkpointer
 from .checkpoints import MUTATING_TOOLS
 from .cli_backends import (CODEX_TOOLS_ONLY_ITEMS, ELICITATION, ClaudeSession, CliBackendError, CodexSession,
                            CursorSession)
-from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit
+from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit, module_effective
 from .db import Database, finish_then_cancel
 from .mcp_server import MCP_BACKENDS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
@@ -256,7 +256,7 @@ class Runner:
         web = self.web_overrides.get(s["id"], self.web)
         if web is not None and self._kit_allowed(project, "web", defaults, "web"):
             kits.append(web)
-        for gate, kit in self._module_toolkits():
+        for gate, kit in self._module_toolkits(s):
             allowed = (gate.eligible(kit, s) if gate.eligible is not None
                        else self._kit_allowed(project, gate.project_flag, defaults, gate.capability))
             if (gate.members or not member) and allowed:
@@ -271,15 +271,15 @@ class Runner:
         """The project (when there is one) enables the toolkit and app.capabilities doesn't narrow it away."""
         return (project is None or getattr(project, flag, False)) and app_allows(defaults, capability)
 
-    def _module_toolkits(self) -> list:
+    def _module_toolkits(self, session=None) -> list:
         """(ToolGate, toolkit) for each present, switched-on add-on module that offers tools (harness/modules.py)."""
-        return self.modules.toolkits() if self.modules is not None else []
+        return self.modules.toolkits(session) if self.modules is not None else []
 
     def _module_gate(self, kit):
         return self.modules.gate_for(kit) if self.modules is not None and kit is not None else None
 
-    def _module_mutating(self) -> frozenset:
-        return self.modules.mutating_tools() if self.modules is not None else frozenset()
+    def _module_mutating(self, session=None) -> frozenset:
+        return self.modules.mutating_tools(session) if self.modules is not None else frozenset()
 
     def _app_defaults_for_session(self, s: dict) -> dict:
         if self.settings is None:
@@ -385,7 +385,11 @@ class Runner:
         if s.get("kind") == TOOLS_ONLY:
             return AppToolsPolicy(t["name"] for t in (s.get("app_tools") or []))
         project = self.project_for(s)
-        return Policy(project.rules if project else [], repo=bool(project and project.repo),
+        servers = (project.mcp_servers if project and project.owner_id == OWNER_USER_ID
+                   and session_user_id(s) == OWNER_USER_ID and s.get("backend", "local") == "local"
+                   and s.get("target", "tower") == "tower" and module_effective(self.cfg, "mcp_client") else [])
+        rules = (project.rules if project else []) + [r for server in servers for r in server.get("rules", [])]
+        return Policy(rules, repo=bool(project and project.repo), mcp_servers=[server["name"] for server in servers],
                       workspace_root=Path(s["workspace"]) if s.get("workspace") else None)
 
     def quota_mb(self, s: dict) -> int:
@@ -737,6 +741,8 @@ class Runner:
             await self._end_run(sid)
         finally:
             await asyncio.shield(self._stop_cli(sid))
+            if self.modules is not None:
+                await asyncio.shield(self.modules.end_session(sid))
             self.scheduler.release(sid)
             self.user_cancelled.discard(sid)
             self._unended.discard(sid)
@@ -752,6 +758,8 @@ class Runner:
             await self._prepare_repo(s)
             self._snapshot_git_baseline(sid)
             self._repo_map_at_start(sid)
+            if self.modules is not None:
+                await self.modules.prepare_session(s)
         if s["status"] != "waiting_approval":  # _resolve_calls waits without holding the GPU
             await self._acquire(sid)
         await self._loop(sid)
@@ -1838,10 +1846,11 @@ class Runner:
         sid = s["id"]
         fn = call.get("function") or {}
         name = fn.get("name", "")
-        if name in MUTATING_TOOLS:
+        mutating = name in MUTATING_TOOLS or name in self._module_mutating(s)
+        if mutating:
             await self._join_checkpoint(sid)    # the last turn's snapshot must read the files before this changes them
         if executing.get("id") == call["id"]:
-            if name in MUTATING_TOOLS:                          # it may have changed files before it was cut off
+            if mutating:                                          # it may have changed files before it was cut off
                 mutated.append(name)
             await self._record_result(sid, call, name, INTERRUPTED, ok=False)
             return None, None
@@ -1881,7 +1890,9 @@ class Runner:
                                                  f"{', '.join(schemas)}.", ok=False)
             return None, None
         try:
-            args = validate_args(schemas[name], args)
+            kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
+            validator = getattr(kit, "validate_args", None)
+            args = validator(name, args) if validator is not None else validate_args(schemas[name], args)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
             await self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)
@@ -1891,11 +1902,11 @@ class Runner:
             output = await self._authorize(s, call, name, args, ws)
             executed = output is None
             if executed:
-                if name in MUTATING_TOOLS:
+                if mutating:
                     mutated.append(name)
                 output = await self._execute(sid, call, name, args, ws, max_chars=max(2000, budget))
             span.set({"harness.ok": executed, "harness.output_chars": len(output)})
-        if executed and (name in ("run_shell", "git_clone", "write_file") or name in self._module_mutating()) \
+        if executed and (name in ("run_shell", "git_clone", "write_file") or name in self._module_mutating(s)) \
                 and await self._over_quota(sid):
             await self._skip_rest(sid, rest, "Not run: the workspace is over its disk quota.")
             return True, None
@@ -2143,7 +2154,8 @@ class Runner:
         return max(decisions, key=lambda d: rank.get(d.action, 1))
 
     def _taint_from_result(self, s: dict, name: str, args: dict) -> None:
-        source = taint.source_for(name, args)
+        policy = self.policy(s) if name.startswith("mcp__") else None
+        source = taint.source_for(name, args, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
         if source is None and s.get("kind") == TOOLS_ONLY and name in {t["name"] for t in s.get("app_tools") or []}:
             source = ("app_tool", f"app tool {name}")  # free text from the App's data, e.g. bank descriptions (#329)
         if source is None and name == "session_read":
