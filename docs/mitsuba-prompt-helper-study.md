@@ -99,7 +99,7 @@ Both splits below were read with `-lv 4` at 8K:
 | **`--fit-target 256` (used)** | 41 | **15** | 14,341 MiB | **6,973 MiB** | 15,703 MiB |
 
 With option (a), two fewer expert layers go to RAM, and about 780 MiB of weights moves from RAM to VRAM. Together with
-`--load-mode none` (no mmap page-in), Qwen kept 11.2 GB or more available for the whole run. The first attempt
+`--load-mode none` (no mmap page-in), Qwen kept at least 11.15 GB available for the whole run. The first attempt
 fell to 1.90 GB after two prompts.
 
 ### Prompt writing: (b) Qwen vs (c) Mitsuba
