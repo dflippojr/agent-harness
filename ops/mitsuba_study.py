@@ -331,9 +331,10 @@ def phase_handover_cpu() -> None:
     comfy_start()
     res = {}
     try:
+        # Distinct prompts: ComfyUI returns a cached result for an identical graph, which would time nothing.
         render(PROMPTS[0], "warm_cpu")
         t0 = time.time()
-        render(PROMPTS[0], "flux_warm")
+        render(PROMPTS[1], "flux_warm")
         res["flux_warm_s"] = round(time.time() - t0, 1)
         t0 = time.time()
         info = start_server("mitsuba", gpu=False)
@@ -342,7 +343,7 @@ def phase_handover_cpu() -> None:
         res["one_prompt"] = chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": PROMPTS[0]}])
         res["mitsuba_cpu_load_plus_prompt_s"] = round(time.time() - t0, 1)
         t0 = time.time()
-        render(PROMPTS[0], "flux_warm_after_cpu")
+        render(PROMPTS[2], "flux_warm_after_cpu")
         res["flux_warm_with_mitsuba_cpu_resident_s"] = round(time.time() - t0, 1)
         res["avail_ram_gb"], res["vram_mb"] = round(avail_gb(), 2), vram_mb()
     finally:
