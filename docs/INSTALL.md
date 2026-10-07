@@ -235,6 +235,35 @@ git pull
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
+## Switch the local model (tower)
+
+`config/harness.yaml` lists two local models on the same llama-server (127.0.0.1:8090): `qwen3.6-35b-a3b` (the
+default) and `qwen3.8-35b-a3b-distill` (empero-ai's distill, adopted in #413 from the
+[#174 study](qwen38-distill-study.md); same speed, memory and tool-call reliability). The supervisor
+`ops/llama-server/run-qwen.ps1` loads whichever one is `default_model`, re-reading the config before each server start,
+so the switch is one line in the untracked `config/harness.local.yaml`:
+
+```yaml
+default_model: qwen3.8-35b-a3b-distill
+```
+
+The file must already be at `C:/AI/models/Qwen3.8-35B-A3B-Q4_K_M.gguf`: revision
+`b1f9d1dcc3de8aa867669b0ab919384aeeb9b8d5` of `empero-ai/Qwen3.8-35B-A3B-Distill-GGUF`, 21,713,462,944 bytes, SHA-256
+`196103269085bc54c9b8f49ed21e9f53e1b56b465e8b796c6d8e31e06f63cfa5`. If it is missing, the supervisor logs it and
+serves Qwen3.6 instead. It loads with `--load-mode none` (#405).
+
+To apply it, unload the running model and restart the daemon so both sides pick up the line:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8100/gpu/unload
+powershell -ExecutionPolicy Bypass -File ops\harness\restart-daemon.ps1
+```
+
+The next turn (or Actions -> Load local model now) loads the new model; `C:\AI\logs\llama-server-supervisor.log`
+names it on each start. **Rollback:** delete the line (or set `default_model: qwen3.6-35b-a3b`) and run the same two
+commands. Leave Settings -> Backends -> local on the default: a different pick there changes the name the harness
+sends, not the file the server loads.
+
 ## Backups and restore
 
 With the `backup` module on (the default), the daemon writes `backup.dir/<YYYY-MM-DD>/` every night at `backup.at`

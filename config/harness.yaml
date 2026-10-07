@@ -58,6 +58,13 @@ models:
     context_tokens: 65536
     max_tokens: 8192                  # Qwen can think for 600+ tokens before answering
     sampling: {temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.0}
+  # Adopted in #413 (study: docs/qwen38-distill-study.md). Same server: run-qwen.ps1 loads whichever model is
+  # default_model, so switch with `default_model: qwen3.8-35b-a3b-distill` in harness.local.yaml (docs/INSTALL.md).
+  qwen3.8-35b-a3b-distill:
+    base_url: http://127.0.0.1:8090
+    context_tokens: 65536
+    max_tokens: 8192
+    sampling: {temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.0}
 
 sandbox:
   image: agent-harness-sandbox:py312
