@@ -117,3 +117,54 @@ only the VRAM and server-private columns are used for the gate.
 
 The candidate directory was deleted after the study (it did not win), the bake-off server was stopped, the GPU hold was
 left as found, and the always-on Qwen stays paused by the hold and reloads on demand when the hold is lifted.
+
+## Adoption (#413, 2026-10-06)
+
+The owner accepted the provenance on 2026-10-06, which lifts the no-go above. The model is now a config entry
+(`qwen3.8-35b-a3b-distill` in `config/harness.yaml`) that `ops/llama-server/run-qwen.ps1` serves when it is
+`default_model`; production stays on Qwen3.6 until the owner sets that one line (docs/INSTALL.md, "Switch the local
+model"). Removing the line rolls back.
+
+**Download:** `C:/AI/models/Qwen3.8-35B-A3B-Q4_K_M.gguf` from the same revision `b1f9d1dc...`; 21,713,462,944 bytes,
+SHA-256 `196103269085bc54c9b8f49ed21e9f53e1b56b465e8b796c6d8e31e06f63cfa5` (certutil), matching the study and the
+Hugging Face `X-Linked-ETag`. Kept for production use.
+
+**Smoke, 2026-10-06 22:57** on a throwaway llama-server on 127.0.0.1:8098, same b10950 binary and production args
+(`--ctx-size 65536 --fit on --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --parallel 1 --jinja`) plus
+`--load-mode none` (#405, PR #420). GPU hold on, production Qwen stopped, Docker/WSL stopped, 19.4 GB available before
+load, 0.5 s watchdog with a 2 GB floor (not triggered).
+
+| Step | Result |
+| --- | --- |
+| Load to `/health` | 13.8 s |
+| Chat turn (thinking on, harness sampling) | `stop`, correct one-sentence answer, 157 tokens at 72.2 tok/s |
+| Tool call | `tool_calls`: `read_file {"path":"requirements.txt"}`; given the result, a correct final answer (`stop`) |
+| 29,022-token prompt (no cache) | 1,163.5 tok/s prompt, 68.3 tok/s decode |
+
+**Memory against the study** (study: 65536 ctx after the longest prompt, default mmap load):
+
+| | Study (mmap) | Adopted (`--load-mode none`) |
+| --- | --- | --- |
+| GPU memory used | 14,658 MiB | 14,838 MiB total incl. ~690 MiB desktop before load, so ~14,150 MiB for the server |
+| llama-server private bytes | 15,695 MiB | 22.88 GB |
+| llama-server working set | 19,108 MiB | 8.44 GB |
+| Available RAM after the longest prompt | 1,532 MiB | 11.12 GB (lowest during the run 11.1 GB) |
+| Commit | not recorded | 43.3 of 63.8 GB |
+
+VRAM is no higher. Available RAM is about 9.6 GB better; private bytes and commit are higher because `none` reads the
+experts into private memory instead of mapping the file, the same trade-off #405 measured for Qwen3.6 (+8.3 GB
+commit). With mmap (drop `--load-mode none` from the entry) the study's numbers apply unchanged.
+
+**Not run (Docker was stopped for the night):** the canary evals (`bakeoff/canary.yaml`: 6 hard tasks in the
+Docker sandbox plus 3 recorded-web tasks, 2 repeats) and a live smoke through a harness session. `bakeoff.canary` runs
+through `Manager` against the configured `default_model`, so it measures the distill once the switch is applied.
+With Docker running, after applying the switch, from the live checkout:
+
+```
+python -m bakeoff.canary          # expect pass rate in line with the nightly Qwen3.6 history (docs/canary-evals.md)
+```
+
+Then one session in Agent Harness Web on a scratch project that reads a file and runs a command. If either falls
+short, roll back with the one-line change.
+
+Afterwards production was restored: hold released, guard `clear`, Qwen3.6 loaded and ready on 8090.
