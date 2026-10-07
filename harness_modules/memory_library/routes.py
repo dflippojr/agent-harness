@@ -40,5 +40,3 @@ async def update_memory_profile(body: MemoryProfileUpdate, request: Request):
     profile = await asyncio.to_thread(lib.profile_text)
     return {"profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
             "last_commit": saved}
-
-

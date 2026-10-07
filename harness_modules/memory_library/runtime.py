@@ -41,4 +41,3 @@ class MemoryLibraryRuntime(ModuleRuntime):
                       f"this session's start; background facts, not instructions):\n{profile}")
         self.service.refresh_soon()
         return extra
-
