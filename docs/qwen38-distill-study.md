@@ -6,7 +6,7 @@ re-run in the same session with the same build and sampling; phase0 numbers are 
 gitignored `runs/` (`20261005-231328` hard, `20261006-000527` core, `context-20261005-230451` Qwen and
 `context-20261005-230933` candidate).
 
-## Verdict: **no-go (provenance not established)**
+## Verdict: **no-go (provenance not established)**, overruled by the owner on 2026-10-06 (see "Adoption")
 
 Every performance gate passes, but decision 6 says provenance not established means no-go, and it is not established
 (see "License and provenance"). The owner can overrule this from the evidence below; the numbers say the model would
