@@ -168,5 +168,3 @@ def _save_template(m, tid: str, body: Template) -> dict:
         raise HarnessError(400, f"unknown model {body.model!r}")
     m.db.upsert_template({"id": tid, **body.model_dump()})
     return m.db.get_template(tid)
-
-

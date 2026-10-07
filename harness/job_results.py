@@ -65,5 +65,3 @@ def summary(answer: str, limit: int = 300) -> str:
             return prose if len(prose) <= limit else prose[: limit - 1] + "…"
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
-
-
