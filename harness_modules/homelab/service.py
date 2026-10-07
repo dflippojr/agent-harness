@@ -16,9 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from .config import HomelabConfig
-from .sandbox import run_cmd
-from .tools import ToolError
+from harness.modules import HomelabConfig, run_cmd, ToolError
 
 TOOLS = ("homelab_services", "container_logs", "read_service_config", "prometheus_query", "restart_service",
          "rebuild_service")
@@ -98,6 +96,9 @@ class Homelab:
 
     def __init__(self, cfg: HomelabConfig):
         self.cfg = cfg
+
+    def schemas(self):
+        return schemas(self.cfg)
 
     def _service(self, name: str):
         svc = self.cfg.services.get(name)

@@ -26,7 +26,6 @@ from .cli_backends import (CODEX_TOOLS_ONLY_ITEMS, ELICITATION, ClaudeSession, C
                            CursorSession)
 from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit
 from .db import Database, finish_then_cancel
-from .homelab import Homelab
 from .mcp_server import MCP_BACKENDS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
 from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED,
@@ -68,8 +67,6 @@ Work methodically: look around before editing, prefer `search` over reading larg
 When the task is complete, reply with your final answer (or call `finish`). Don't answer until the work is done and verified. The user often reads answers on a phone, so lead with the result."""
 
 MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the workspace (a separate clone of the user's repository, so their own checkout is never touched) on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches, don't change git config, and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
-
-HOMELAB_PROMPT = """Homelab access: you can inspect the allowlisted services on this server with homelab_services, container_logs, read_service_config, and prometheus_query, ask to restart one with restart_service, and, after a code or Dockerfile change has been merged into a stack, ask to rebuild it with rebuild_service (the user approves restarts and rebuilds). These run on the host; the Linux sandbox can't reach Docker or the services. Diagnose from state and logs before proposing a restart, and afterwards check that the service stayed up."""
 
 ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit")
 # Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
@@ -238,11 +235,11 @@ class Runner:
         from . import storage
         user_id = session_user_id(s)
         member = user_id != OWNER_USER_ID
-        homelab = (Homelab(self.cfg.homelab)
-                   if project and project.homelab and not member and app_allows(defaults, "homelab") else None)
+        kits = [kit for rt in self.modules or ()
+                if (kit := rt.workspace_toolkit(project, defaults, member)) is not None]
         repos = storage.repos_dir(self.cfg, user_id)
         budget = self._member_clone_budget(user_id) if member else None
-        return Workspace(Path(s["workspace"]), self.sandbox(s), repos, model.context_tokens, homelab,
+        return Workspace(Path(s["workspace"]), self.sandbox(s), repos, model.context_tokens, host_toolkits=kits,
                          public_clone_only=member, clone_max_bytes=budget,
                          tool_output=limits, verify_checks=checks)
 

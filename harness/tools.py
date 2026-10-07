@@ -165,7 +165,7 @@ class Workspace:
 
     target = "tower"
 
-    def __init__(self, root: Path, sandbox: Sandbox, repos_dir: Path, context_tokens: int, homelab=None,
+    def __init__(self, root: Path, sandbox: Sandbox, repos_dir: Path, context_tokens: int, host_toolkits=(),
                  public_clone_only: bool = False, clone_max_bytes: int | None = None,
                  tool_output: ToolOutputConfig | None = None, verify_checks: list | None = None):
         self.tool_output = tool_output or ToolOutputConfig()
@@ -177,7 +177,7 @@ class Workspace:
         self.root = self.files.root
         self.sandbox = sandbox
         self.repos_dir = repos_dir
-        self.homelab = homelab  # homelab.Homelab for projects with homelab: true
+        self.host_toolkits = tuple(host_toolkits)
         self.public_clone_only = public_clone_only
         self.clone_max_bytes = clone_max_bytes
         self.read_lines = self.files.read_lines
@@ -256,9 +256,8 @@ class Workspace:
 
     def schemas(self) -> list[dict]:
         extra = []
-        if self.homelab is not None:
-            from .homelab import schemas
-            extra = schemas(self.homelab.cfg)
+        for kit in self.host_toolkits:
+            extra.extend(kit.schemas())
         limits = self.tool_output
         return tool_schemas(self.read_lines, search_matches=limits.search_matches,
                             read_file_lines_max=limits.read_file_lines_max,
@@ -272,8 +271,9 @@ class Workspace:
         return await run_verify(self.verify_checks, exec_cmd, self.tool_output.verify_summary_chars)
 
     async def call(self, name: str, args: dict) -> str:
-        if self.homelab is not None and name in self.homelab.tool_names:
-            return await self.homelab.call(name, args)
+        for kit in self.host_toolkits:
+            if name in kit.tool_names:
+                return await kit.call(name, args)
         if name == "verify":
             return await self.verify()
         if name in ("run_shell", "git_clone"):

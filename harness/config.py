@@ -31,7 +31,7 @@ MODULE_ENABLE_SECTIONS = {
     "remote_control": "remote_control",
 }
 # Core switches the installer selects and nothing turns off at runtime.
-INSTALL_ONLY_MODULES = frozenset({"local_model", "homelab", "runners"})
+INSTALL_ONLY_MODULES = frozenset({"local_model", "runners"})
 # The switches the core implements itself. Every other name in MODULE_NAMES belongs to an add-on module
 # (harness/modules.py): the installer may write it whether or not the package is there, so the profile accepts it,
 # and it only takes effect when a discovered module answers to it.

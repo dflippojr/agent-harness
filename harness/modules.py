@@ -31,6 +31,8 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    "HomelabConfig": ("harness.config", "HomelabConfig"),
+    "app_allows": ("harness.settings", "app_allows"),
     "SkillsConfig": ('harness.config', 'SkillsConfig'),
     "ModelConfig": ('harness.config', 'ModelConfig'),
     "resolve_path": ('harness.fileops', 'resolve_path'),
@@ -176,6 +178,14 @@ class ModuleRuntime:
     # agent tools (see Module.tools): an object with tool_names, schemas() and call(name, args, ...)
     def toolkit(self) -> Any:
         return None
+
+    def workspace_toolkit(self, project, defaults, member):
+        """Optional host toolkit for a tower workspace; None when this session is ineligible."""
+        return None
+
+    def project_prompt(self, project, defaults) -> str:
+        """Additional project guidance for a non-chat session."""
+        return ""
 
     # GPU and resources: a module that takes the whole GPU (and stops the language model) reports it here.
     @property
