@@ -31,6 +31,9 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    "MemoryLibraryConfig": ("harness.config", "MemoryLibraryConfig"),
+    "truncate_middle": ("harness.fileops", "truncate_middle"),
+    "write_text_within": ("harness.fileops", "write_text_within"),
     "HomelabConfig": ("harness.config", "HomelabConfig"),
     "app_allows": ("harness.settings", "app_allows"),
     "SkillsConfig": ('harness.config', 'SkillsConfig'),
@@ -186,6 +189,10 @@ class ModuleRuntime:
     def project_prompt(self, project, defaults) -> str:
         """Additional project guidance for a non-chat session."""
         return ""
+
+    def session_prompt(self, project, defaults, app) -> str:
+        """Project guidance with the calling App, so private context can be withheld from Apps."""
+        return self.project_prompt(project, defaults)
 
     # GPU and resources: a module that takes the whole GPU (and stops the language model) reports it here.
     @property

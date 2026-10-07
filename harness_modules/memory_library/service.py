@@ -27,9 +27,7 @@ import re
 import time
 from pathlib import Path
 
-from .config import MemoryLibraryConfig
-from .fileops import ToolError, truncate_middle, write_text_within
-from .sandbox import run_cmd
+from harness.modules import MemoryLibraryConfig, ToolError, truncate_middle, write_text_within, run_cmd
 
 log = logging.getLogger("harness.memory_library")
 

@@ -6,7 +6,8 @@ interface ([`harness/modules.py`](../harness/modules.py)) and how to write a mod
 ([`harness_modules/notifications/`](../harness_modules/notifications/)) the second, session search
 ([`harness_modules/search/`](../harness_modules/search/)) the third and the nightly backup
 ([`harness_modules/backup/`](../harness_modules/backup/)) the fourth and instruction skills
-([`harness_modules/skills/`](../harness_modules/skills/)) the fifth; the other optional features move
+([`harness_modules/skills/`](../harness_modules/skills/)) the fifth, followed by homelab and the memory library
+([`harness_modules/memory_library/`](../harness_modules/memory_library/)); the other optional features move
 one module per PR in stage (c).
 
 ## Rules
@@ -62,6 +63,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     __init__.py runtime.py routes.py settings.py service.py restore.py
   skills/                owner-approved instructions (formerly harness/skills.py, skill_review.py, skill_validate.py)
     __init__.py runtime.py routes.py settings.py service.py skill_review.py skill_validate.py
+  memory_library/        personal memory tools, approved writes and frozen session profiles (formerly harness/memory_library.py)
+    __init__.py runtime.py routes.py settings.py service.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
@@ -108,7 +111,8 @@ modules; new core code goes through `manager.modules`.
 Host tools that belong to tower workspaces use `ModuleRuntime.workspace_toolkit(project, defaults, member)`.
 The core calls this hook only for tower workspaces; a returned toolkit supplies `schemas()`, `tool_names` and
 `call()`. `ModuleRuntime.project_prompt(project, defaults)` can add project-specific guidance to non-chat
-sessions. Both hooks default to nothing when a module does not contribute them.
+sessions. `session_prompt(project, defaults, app)` delegates to `project_prompt` by default and lets modules
+with personal context withhold it from Apps. These hooks contribute nothing by default.
 
 1. Make `harness_modules/<name>/__init__.py` with `MODULE = Module(name=..., switches=(...), ...)`. Keep it light:
    point at the heavy parts with small functions that import them on demand.
@@ -120,6 +124,16 @@ sessions. Both hooks default to nothing when a module does not contribute them.
 ## What stage (b) leaves in the core
 
 These are names, not imports, and move with the config and storage split in stages (c) and (f):
+
+- Memory library: `MemoryLibraryConfig`, the `memory_library:` YAML section, profile switch, project flag,
+  App capability and discovery path remain core names, along with the access and mandatory write-approval
+  policy rules. All YAML keys, API paths and `harness memory ...` commands are unchanged; no deprecation is
+  needed. The service import moves from `harness.memory_library` to `harness_modules.memory_library.service`.
+  The add-on owns the read/write tools, clone refresh, frozen personal profile, owner/admin routes, CLI rows
+  and `memory_library.enabled` registry setting. The service is available as `manager.memory_library` instead
+  of `manager.runner.memory`. Absent packages contribute no routes, settings, tools or prompts; present but
+  switched-off packages keep their management routes and settings. Members never receive the tools and Apps
+  never receive the personal profile. Approved writes still require the exact reviewed diff.
 
 - Homelab: `HomelabConfig`, the `homelab:` YAML section, profile switch, project flag, App capability,
   discovery path and restart/rebuild approval rules stay in the core. Configuration keys and agent tool names

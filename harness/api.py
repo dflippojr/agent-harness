@@ -164,11 +164,6 @@ class SmartApprovalsUpdate(BaseModel):
     mode: str
 
 
-class MemoryProfileUpdate(BaseModel):
-    content: str
-    summary: str = "Update agent profile"
-
-
 class Job(BaseModel):
     name: str
     prompt: str
@@ -876,38 +871,6 @@ async def queue(request: Request):
 async def list_sessions(request: Request, limit: int = 50):
     m = mgr(request)
     return [m.list_summary(s) for s in m.db.list_sessions(limit, owner_id=owner_id(request))]
-
-
-@api_router.get("/memory")
-async def memory(request: Request):
-    """The agent profile new sessions get, and the latest change agents saved to the memory library."""
-    m = mgr(request)
-    lib, cfg = m.runner.memory, m.cfg.memory_library
-    if lib is None:
-        return {"enabled": False}
-    profile = await asyncio.to_thread(lib.profile_text)
-    return {"enabled": True, "writes": cfg.writes, "categories": cfg.categories, "profile_path": cfg.profile_path,
-            "profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
-            "last_commit": lib.last_commit, "refresh_error": lib.refresh_error}
-
-
-@api_router.put("/memory/profile")
-async def update_memory_profile(body: MemoryProfileUpdate, request: Request):
-    """Owner edit of the agent profile from Settings. Commits and pushes like an approved memory write."""
-    from .fileops import ToolError
-    m = mgr(request)
-    lib, cfg = m.runner.memory, m.cfg.memory_library
-    if lib is None:
-        raise HarnessError(400, "the memory library is disabled in config/harness.yaml")
-    if not cfg.profile_path:
-        raise HarnessError(400, "memory_library.profile_path is not set")
-    try:
-        saved = await lib.owner_write(cfg.profile_path, body.content, body.summary)
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-    profile = await asyncio.to_thread(lib.profile_text)
-    return {"profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
-            "last_commit": saved}
 
 
 @api_router.post("/sessions", status_code=201)
