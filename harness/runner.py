@@ -190,7 +190,6 @@ class Runner:
         self.ram = None                         # gpu_guard.MemoryWatch (the guard's RAM check), set with the guard
         self.generating: set[str] = set()       # sessions loading the model or calling it (the guard waits for them)
         self.gpu_paused_sessions: set[str] = set()
-        self.memory = None                      # memory_library.MemoryLibrary, set by the manager when enabled
         self.web = None                         # web_tools.WebTools, set by the manager when enabled
         self.web_overrides: dict = {}           # session id -> WebTools (the canary replays a recorded web, #265)
         self.yields: dict[str, int] = {}        # low-priority session id -> times it stepped aside (guard or a real session)
@@ -254,8 +253,6 @@ class Runner:
         defaults = self._app_defaults_for_session(s)
         member = session_user_id(s) != OWNER_USER_ID
         kits = []
-        if not member and self.memory is not None and self._kit_allowed(project, "memory_library", defaults, "memory_library"):
-            kits.append(self.memory)
         web = self.web_overrides.get(s["id"], self.web)
         if web is not None and self._kit_allowed(project, "web", defaults, "web"):
             kits.append(web)
@@ -326,7 +323,7 @@ class Runner:
         s = self.db.get_session(sid)
         if s is None or s.get("kind") == "chat" or s.get("backend") not in MCP_BACKENDS:
             return []
-        served = [k for k in (self.memory, self.web_overrides.get(sid, self.web)) if k is not None]
+        served = [k for k in (self.web_overrides.get(sid, self.web),) if k is not None]
         served += [kit for gate, kit in self._module_toolkits() if gate.mcp]
         schemas = [schema for kit in self.daemon_toolkits(s) if kit in served for schema in kit.schemas()]
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:

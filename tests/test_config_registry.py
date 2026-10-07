@@ -340,7 +340,7 @@ def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
         name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
-    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.modules.get("memory_library").service = _Toolkit(("memory_index", "memory_search", "memory_read"))
     manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.modules.get("search").toolkit = _Toolkit(("session_search", "session_read")).itself  # search kit
     with client:
@@ -401,7 +401,7 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
-    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.modules.get("memory_library").service = _Toolkit(("memory_index", "memory_search", "memory_read"))
     manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.modules.get("search").toolkit = _Toolkit(("session_search", "session_read")).itself  # search kit
     with client:
@@ -479,7 +479,7 @@ def test_never_patched_app_keeps_inherited_tools_and_notifications(tmp_path):
         name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
-    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.modules.get("memory_library").service = _Toolkit(("memory_index", "memory_search", "memory_read"))
     manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.modules.get("search").toolkit = _Toolkit(("session_search", "session_read")).itself  # search kit
     with client:
@@ -514,7 +514,7 @@ def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
         name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
-    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.modules.get("memory_library").service = _Toolkit(("memory_index", "memory_search", "memory_read"))
     manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.modules.get("search").toolkit = _Toolkit(("session_search", "session_read")).itself  # search kit
     with client:
@@ -551,7 +551,7 @@ def test_active_app_follows_live_config_patch(tmp_path):
         name="lab", homelab=True, web=True, memory_library=True, images=True, session_search=True,
     )
     manager.runner.web = _Toolkit(("web_search", "web_fetch"))
-    manager.runner.memory = _Toolkit(("memory_index", "memory_search", "memory_read"))
+    manager.modules.get("memory_library").service = _Toolkit(("memory_index", "memory_search", "memory_read"))
     manager.modules.get("images").toolkit = _Toolkit(("generate_image",)).itself  # the images module's kit
     manager.modules.get("search").toolkit = _Toolkit(("session_search", "session_read")).itself  # search kit
     with client:

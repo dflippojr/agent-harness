@@ -162,7 +162,7 @@ import subprocess  # noqa: E402
 import pytest  # noqa: E402
 
 from harness.config import MemoryLibraryConfig  # noqa: E402
-from harness.memory_library import MemoryLibrary, sensitive_hits  # noqa: E402
+from harness_modules.memory_library.service import MemoryLibrary, sensitive_hits  # noqa: E402
 from harness.policy import ALLOW, ASK, DENY, Policy  # noqa: E402
 
 
@@ -306,7 +306,7 @@ def test_profile_frozen_per_session_and_not_given_to_apps(tmp_path):
     async def body():
         m = Manager(cfg, chat=Script(steps))
         await m.start(maintenance=False)
-        await m.runner.memory.refresh(force=True)
+        await m.memory_library.refresh(force=True)
         first = m.create("remember my GitHub account")
         system = m.db.get_session(first["id"])["context"][0]["content"]
         assert "User profile (agent-profile.md" in system

@@ -27,7 +27,6 @@ MODULE_ENABLE_SECTIONS = {
     "jobs": "jobs",
     "endpoint": "endpoint",
     "gpu_guard": "gpu_guard",
-    "memory_library": "memory_library",
     "remote_control": "remote_control",
 }
 # Core switches the installer selects and nothing turns off at runtime.
@@ -199,7 +198,7 @@ class TelemetryConfig:
 
 @dataclass
 class MemoryLibraryConfig:
-    """The user's memory library for agents (memory_library.py): reads, approved writes, and the agent profile."""
+    """The user's memory library for agents (harness_modules/memory_library/service.py): reads, approved writes, and the agent profile."""
     enabled: bool = False
     repo: str = ""                      # git URL or path; the daemon keeps its own clone
     clone_dir: str = "D:/Agents/memory-library"

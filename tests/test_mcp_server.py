@@ -696,7 +696,7 @@ def test_memory_writes_over_mcp_ask_with_the_diff_and_run_once_under_the_approve
         sid = m.create("x", backend="claude")["id"]
         await wait_status(m, sid, "failed")
         await asyncio.gather(*m.tasks.values())
-        memory = m.runner.memory = FakeMemory()
+        memory = m.modules.get("memory_library").service = FakeMemory()
         s, cli, args = m.db.get_session(sid), FakeCli(), {"path": "notes.md", "content": "hi", "summary": "note"}
         name = "mcp__harness__memory_write"
         approval = await m.runner._ask_cli_policy(s, cli, "req-1", {"tool_name": name, "input": args}, name, args,

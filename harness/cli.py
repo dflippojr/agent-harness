@@ -472,8 +472,6 @@ ADMIN_COMMANDS = (
     ("remote-control promote", "POST", "/remote-control/discovery/scans/{scan_id}/candidates/{candidate_id}/promote",
      "add a scanned folder to Remote Control", ("slug", "confirmed_path", "confirmed_markers:list")),
     ("remote-control forget", "DELETE", "/remote-control/folders/{slug}", "remove a discovered folder", ()),
-    ("memory show", "GET", "/memory", "show the memory library", ()),
-    ("memory set-profile", "PUT", "/memory/profile", "replace the agent profile", ("content", "--summary")),
     ("sessions rename", "PATCH", "/sessions/{ref}", "rename a session", ("title",)),
     ("sessions rerun", "POST", "/sessions/{ref}/rerun", "start a new session with the same prompt", ()),
     ("sessions approvals", "GET", "/sessions/{ref}/approvals", "list a session's approvals", ()),
@@ -523,7 +521,7 @@ _GROUP_HELP = {
     "gpu": "GPU hold", "resources": "resource guard and local model", "smart-approvals": "smart approvals",
     "config": "daemon settings", "maintenance": "disk cleanup and backups",
     "jobs": "scheduled jobs", "templates": "task templates",
-    "remote-control": "Remote Control folders", "memory": "memory library",
+    "remote-control": "Remote Control folders",
     "sessions": "session review, checkpoints and comments", "github": "GitHub issues and PRs", "chats": "chats",
 }
 

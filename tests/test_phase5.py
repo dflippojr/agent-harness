@@ -574,7 +574,7 @@ def test_metrics_and_backup(tmp_path):
 def test_memory_library_only_exposes_allowed_categories(tmp_path):
     import pytest
     from harness.config import MemoryLibraryConfig
-    from harness.memory_library import MemoryLibrary
+    from harness_modules.memory_library.service import MemoryLibrary
     from harness.tools import ToolError
 
     root = tmp_path / "lib"
@@ -620,7 +620,7 @@ def test_memory_tools_reach_sessions_and_rebuild_asks(tmp_path):
         script = Script([Completion(tool_calls=[call("memory_search", 0, pattern="editor")]),
                          Completion(content="Helix")])
         m = Manager(cfg, chat=script)
-        m.runner.memory._refreshed = 1e18
+        m.memory_library._refreshed = 1e18
         await m.start(maintenance=False)
         s = m.create("which editor?")
         await wait_status(m, s["id"], "done")
