@@ -555,7 +555,8 @@ def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
         assert again["drafts"] == [] and again["already_drafted"] == 1  # no duplicate drafts
         assert again["message"].startswith("The findings in the diff already have draft comments")
         assert client.post(f"/sessions/{sid}/review-comments/send").status_code == 200
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        # Final git/checkpoint work continues after the terminal status is written.
+        wait_for(lambda: m.db.get_session(sid)["status"] == "done" and sid not in m.tasks)
         sent = [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"][-1]
         assert "deploy.sh, line 2" in sent and "aws-access-token" in sent and KEY not in sent
 
