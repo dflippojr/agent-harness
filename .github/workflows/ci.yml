@@ -80,7 +80,7 @@ jobs:
     # and Windows paths. Docker-image and GPU tests skip on the hosted runner.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -153,7 +153,7 @@ jobs:
             throw 'SONARCLOUD_TOKEN is required for SonarCloud analysis.'
           }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.sonar-token.outputs.available == 'true'
         with:
           # Full history so SonarCloud can blame lines and find the PR base.
