@@ -2,7 +2,7 @@
 
 **Verdict: no-go at gate 1 (license).** Viggle-Turbo is a derivative of Qwen-Image-2.1 and ships under the same Qwen
 Research License, byte for byte. That license grants use for "research or evaluation purposes only", which #176
-([`docs/qwen-image-2.1-study.md`](qwen-image-2.1-study.md), PR #423) already found does not cover personal
+(`docs/qwen-image-2.1-study.md`, added in [PR #423](https://github.com/dflippojr/agent-harness/pull/423)) already found does not cover personal
 self-hosted use as a harness image model. Per decision 1 of the issue, the study stops after the license read-out.
 The runtime-fit and quality-grid stages did not run. No weights were downloaded, no GPU hold was taken, and nothing
 in `images` settings, ComfyUI or `C:/AI/comfy-models` changed.
