@@ -2,7 +2,8 @@
 # "AgentHarness-LlamaServer" scheduled task (see install-task.ps1). Restarts the server if it exits.
 # At logon it parks the server (creates the pause flag) instead of loading the model: the harness daemon removes the
 # flag when something needs the model (docs/resource-guard.md). -LoadAtLogon restores the old eager start.
-param([switch]$LoadAtLogon)
+# It serves the harness's default_model (see $localModels); -Model pins one instead.
+param([switch]$LoadAtLogon, [string]$Model = '')
 $ErrorActionPreference = 'Stop'
 
 $exe = 'C:\AI\llama.cpp\b10950\llama-server.exe'
@@ -10,9 +11,20 @@ $logDir = 'C:\AI\logs'
 $serverLog = Join-Path $logDir 'llama-server-qwen.log'
 $supervisorLog = Join-Path $logDir 'llama-server-supervisor.log'
 
-$serverArgs = @(
-    '-m', 'C:/AI/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf',
-    '--alias', 'qwen3.6-35b-a3b',
+# The local models this server can run, keyed by their name in config/harness.yaml `models`. The supervisor serves
+# the harness's default_model, read again before every server start: config/harness.local.yaml wins over
+# config/harness.yaml. So switching models, and rolling back, is that one config line (docs/INSTALL.md, "Switch the
+# local model"). A name not listed here, or a missing file, falls back to $fallbackModel.
+$localModels = [ordered]@{
+    'qwen3.6-35b-a3b'         = @{ path = 'C:/AI/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf'; args = @() }
+    # empero-ai/Qwen3.8-35B-A3B-Distill-GGUF, revision b1f9d1dcc3de8aa867669b0ab919384aeeb9b8d5, SHA-256
+    # 196103269085bc54c9b8f49ed21e9f53e1b56b465e8b796c6d8e31e06f63cfa5 (docs/qwen38-distill-study.md, #174, #413).
+    'qwen3.8-35b-a3b-distill' = @{ path = 'C:/AI/models/Qwen3.8-35B-A3B-Q4_K_M.gguf'; args = @() }
+}
+$fallbackModel = 'qwen3.6-35b-a3b'
+$configDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\config"))
+
+$commonArgs = @(
     '--host', '127.0.0.1',            # never exposed; Prometheus reaches it via host.docker.internal
     '--port', '8090',
     '--ctx-size', '65536',             # 64K costs ~2% decode vs 32K with no extra VRAM/RAM (docs/phase0-results.md)
@@ -41,6 +53,30 @@ if (-not $mutex.WaitOne(0)) { exit 0 }
 
 function Log($msg) { "$(Get-Date -Format s) $msg" | Add-Content $supervisorLog }
 
+# The first top-level default_model in harness.local.yaml, then harness.yaml; '' when neither has one.
+function Get-ConfiguredModel {
+    foreach ($name in 'harness.local.yaml', 'harness.yaml') {
+        $file = Join-Path $configDir $name
+        if (-not (Test-Path $file)) { continue }
+        $match = Select-String -Path $file -Pattern '^default_model:\s*["'']?([^"''\s#]+)' | Select-Object -First 1
+        if ($match) { return $match.Matches[0].Groups[1].Value }
+    }
+    return ''
+}
+
+function Get-ServerArgs {
+    $name = if ($Model) { $Model } else { Get-ConfiguredModel }
+    if (-not $localModels.Contains($name)) {
+        Log "model '$name' is not in run-qwen.ps1's list; serving $fallbackModel"
+        $name = $fallbackModel
+    } elseif (-not (Test-Path $localModels[$name].path)) {
+        Log "model file $($localModels[$name].path) is missing; serving $fallbackModel"
+        $name = $fallbackModel
+    }
+    $spec = $localModels[$name]
+    return @('-m', $spec.path, '--alias', $name) + $commonArgs + $spec.args
+}
+
 # The harness daemon's resource guard (harness/gpu_guard.py) creates this file and stops the server while a game or
 # a Plex hardware transcode needs the GPU, and leaves it in place afterwards until something needs the model.
 # Don't start the server until the file is gone. Keep in sync with gpu_guard.pause_flag in config/harness.yaml.
@@ -60,7 +96,8 @@ while ($true) {
     }
     if ($loggedPause) { Log 'pause flag removed'; $loggedPause = $false }
     if (Test-Path $serverLog) { Move-Item $serverLog "$serverLog.prev" -Force }
-    Log 'starting llama-server'
+    $serverArgs = Get-ServerArgs
+    Log "starting llama-server ($($serverArgs[3]))"
     $proc = Start-Process $exe -ArgumentList $serverArgs -WindowStyle Hidden -PassThru -RedirectStandardError $serverLog
     $proc.WaitForExit()
     Log "llama-server exited with code $($proc.ExitCode); restarting in 15s"
