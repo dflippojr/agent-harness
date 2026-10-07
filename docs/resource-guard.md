@@ -162,23 +162,47 @@ for a fixed prompt. It changes nothing on the machine.
 | Modified page list | 0.1 |
 | llama-server | not running (parked) |
 
-### A/B: default mmap vs `--load-mode none` (to run)
+### A/B: default mmap vs `--load-mode none` (#405, 2026-10-06 20:45)
+
+Measured on a throwaway llama-server on port 8097 with the same b10950 binary, GGUF and `run-qwen.ps1` args. The
+GPU hold was on, production was parked, and Docker/WSL was stopped for the night (20.4 GB available before each load).
+`ops/llama-server/bench-first-request.ps1` waits for `/health` and takes a `measure-memory.ps1` row. It then sends a
+fixed 6,360-token excerpt of `docs/*.md` (6,372 prompt tokens with the template) as the first request, with no prompt
+cache, and sends it again as the second request. A watchdog stops the server below 2 GB available.
+
+| | mmap (default `auto`) | `--load-mode none` (2 runs) |
+| --- | --- | --- |
+| Load to `/health` | 39.5 s (38.3 s) | 14.2 s, 14.2 s |
+| Available while loaded | 6.57 GB | 12.08, 11.91 GB |
+| Lowest available during the run | **1.73 GB, then the watchdog stopped it** (0.61 GB in an earlier run with 14.8 GB free) | 11.55, 11.35 GB |
+| Committed / limit | 33.1 / 63.8 GB | 41.4 / 63.8 GB |
+| llama-server private / working set | 15.07 / 13.87 GB | 23.36 / 8.86 GB |
+| First request, 6,372 tokens | not finished: available fell from 6.6 to 1.7 GB in 6 s while it paged experts in | **5.66 s at 1,125 tok/s**, 5.33 s at 1,195 tok/s |
+| Second request, same prompt | n/a | 1,156 and 1,232 tok/s |
+| Decode | 56-70 tok/s (production logs) | 64-74 tok/s |
+
+Production's own first requests after a load, from `C:\AI\logs\llama-server-qwen.log*` with the method in #405 (mmap):
+6,388 tokens in 42.8 s at **149 tok/s** (2026-10-06 08:00, load 72.5 s), 36.9 s at 173 tok/s (10-05) and 45.8 s at
+139 tok/s (10-04).
+
+What the numbers say: with mmap, `--fit` reads the GPU tensors through the mapping, and those file pages stay in the
+working set (13.9 GB at `/health`). The first prompt then faults in the CPU expert pages on top of that. That is the
+slow first prompt and the 08:00 dip to 0.17 GB. With `none` the GPU tensors are copied and released, and only the CPU
+part (~9 GB) stays resident.
+
+mmap plus a warm-up request was not run. The warm-up is the same page-in that took available RAM under the 2 GB floor
+in the mmap run, so it would only move the 40 s, not remove it.
 
 b10950's `--load-mode` accepts `auto` (mmap unless a device can't), `none`, `mmap`, `mlock`, `mmap+mlock` and `dio`.
-To compare:
+The interim decision (#311) kept `auto` because mmap'd expert pages are file-backed and Windows can drop them under
+pressure. The numbers above overturn it.
 
-1. With the queue idle, take `measure-memory.ps1 -Label mmap-parked`.
-2. Load the model (Actions → Resources → Load local model now), wait for "Loaded", then run
-   `-Label mmap-loaded -Bench`.
-3. Add `'--load-mode', 'none'` to `$serverArgs` in `run-qwen.ps1`, unload, and repeat as `none-parked` and
-   `none-loaded -Bench`.
-4. Optionally repeat the loaded reading while something heavy runs, to see whether Windows trims the mmap working
-   set.
+**Decision: `--load-mode none`** (in `run-qwen.ps1`). It is clearly faster (first prompt 7-8x, load 2.8x) and leaves
+about 5.5 GB *more* RAM available while loaded. The cost is commit: about 8.3 GB more (private 23.4 GB, of which only
+8.9 GB is resident). Over 14 days commit peaked at 55.8 of 63.8 GB with the mmap model. A similar peak with `none`
+would reach the commit limit, so watch `harness_resource_commit_bytes` and enlarge the page file if it gets close.
+The installers (`install/`) keep the default; they weren't measured on those machines.
 
-These steps restart the live model server, so they need the owner at the tower. They weren't run unattended.
-
-**Interim decision: keep the default (`auto` = mmap).** With mmap, the CPU-offloaded expert pages are file-backed. They
-count toward the working set but not toward private commit, and Windows can drop them under pressure and re-read them
-from the GGUF. With `none` the same ~14 GB becomes private memory that counts against commit and can only be paged to
-the page file. So mmap should behave better under memory pressure, possibly at some decode speed when pages have been
-dropped. Record the A/B numbers above and revisit this decision if `none` is markedly faster without commit trouble.
+The guard is unchanged. A load still needs available RAM minus `model_ram_gb` (14) at or above
+`min_available_ram_gb` (4). With `none` a load actually takes about 9 GB of available RAM, so 14 stays a
+conservative estimate. A load that would leave less than 4 GB still waits.

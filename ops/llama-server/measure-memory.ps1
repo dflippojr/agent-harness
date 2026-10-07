@@ -1,5 +1,5 @@
 # One memory reading of the tower and llama-server, for docs/resource-guard.md (#311). Run it before and after a
-# model load, once with the default mmap load and once with '--load-mode none' added to run-qwen.ps1's $serverArgs.
+# model load (run-qwen.ps1 uses --load-mode none since #405; bench-first-request.ps1 compares load modes).
 # With -Bench it also sends one fixed prompt and records llama-server's own prompt/decode speed.
 # Appends one JSON line to C:\AI\logs\memory-measurements.jsonl and prints it. Changes nothing on the machine.
 param(

@@ -20,6 +20,10 @@ $serverArgs = @(
     '--flash-attn', 'on',
     '--cache-type-k', 'q8_0',
     '--cache-type-v', 'q8_0',
+    # Read the weights at load instead of mmap: the first prompt after a load ran at 149-173 tok/s while mmap paged
+    # the CPU experts in; with 'none' it runs at ~1,150 tok/s, loads in 14 s instead of 40, and leaves more RAM
+    # available. It costs ~8 GB more commit charge (docs/resource-guard.md, #405).
+    '--load-mode', 'none',
     '--parallel', '1',
     '--jinja',
     '--metrics',
