@@ -30,7 +30,8 @@ MITSUBA = WORK / "Mitsuba-ComfyUI-27B-v1.18-PQ2_0.gguf"
 MMPROJ = WORK / "mmproj-Q8_0.gguf"
 QWEN = Path("C:/AI/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf")
 COMFY_DIR = Path("C:/AI/ComfyUI")
-PORT, COMFY_PORT, SEED, CTX = 8081, 8189, 307, 8192
+# 8189 is taken by tailscaled on the tower; 8191 is free.
+PORT, COMFY_PORT, SEED, CTX = 8081, 8191, 307, 8192
 RAM_FLOOR_GB = 2.0
 
 SYSTEM = (
@@ -108,8 +109,10 @@ def http(method: str, url: str, body: dict | None = None, timeout: float = 600):
 def start_server(name: str, gpu: bool = True) -> dict:
     exe, model, extra = {
         "mitsuba": (FORK, MITSUBA, ["--mmproj", str(MMPROJ), "--no-mmproj-offload", "--reasoning", "off",
-                                    "--cache-type-k", "q4_0", "--cache-type-v", "q4_0"]),
-        "qwen": (STOCK, QWEN, ["--fit", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"]),
+                                    "--cache-type-k", "q4_0", "--cache-type-v", "q4_0", "--load-mode", "none"]),
+        # Owner's option (a): spill fewer expert layers to RAM (--fit-target 256, as #170); --load-mode none per #405.
+        "qwen": (STOCK, QWEN, ["--fit", "on", "--fit-target", "256", "--cache-type-k", "q8_0", "--cache-type-v",
+                               "q8_0", "--load-mode", "none"]),
     }[name]
     args = [str(exe), "-m", str(model), "--host", "127.0.0.1", "--port", str(PORT), "--flash-attn", "on",
             "--parallel", "1", "--jinja", "-c", str(CTX), "--temperature", "0.6", "--top-k", "20", "--top-p", "0.95",
@@ -277,11 +280,25 @@ def phase_describe() -> None:
     save("describe.json", {"load": info, "avail_ram_after_gb": ram, "vram_after_mb": vram, "captions": out})
 
 
+def wait_vram_below(mb: int, limit: float = 60) -> float:
+    t0 = time.time()
+    while vram_mb() > mb and time.time() - t0 < limit:
+        time.sleep(0.2)
+    return round(time.time() - t0, 1)
+
+
 def phase_handover() -> None:
-    """FLUX cold -> Mitsuba load + one prompt -> unload -> FLUX again, on the GPU path."""
-    comfy_start()
+    """Qwen unload -> FLUX cold -> Mitsuba load + one prompt -> unload -> FLUX again, on the GPU path."""
     res = {}
     try:
+        info = start_server("qwen")
+        proc = info.pop("proc")
+        t0 = time.time()
+        kill_all()
+        proc.wait()
+        wait_vram_below(1500)
+        res["qwen_unload_s"] = round(time.time() - t0, 1)
+        comfy_start()
         render(PROMPTS[0], "warm")
         free_comfy()
         t0 = time.time()
@@ -309,11 +326,38 @@ def phase_handover() -> None:
     print(res)
 
 
+def phase_handover_cpu() -> None:
+    """CPU offload path: FLUX stays resident while Mitsuba (-ngl 0) writes one prompt, then FLUX renders warm."""
+    comfy_start()
+    res = {}
+    try:
+        render(PROMPTS[0], "warm_cpu")
+        t0 = time.time()
+        render(PROMPTS[0], "flux_warm")
+        res["flux_warm_s"] = round(time.time() - t0, 1)
+        t0 = time.time()
+        info = start_server("mitsuba", gpu=False)
+        info.pop("proc")
+        res["mitsuba_cpu_load"] = info
+        res["one_prompt"] = chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": PROMPTS[0]}])
+        res["mitsuba_cpu_load_plus_prompt_s"] = round(time.time() - t0, 1)
+        t0 = time.time()
+        render(PROMPTS[0], "flux_warm_after_cpu")
+        res["flux_warm_with_mitsuba_cpu_resident_s"] = round(time.time() - t0, 1)
+        res["avail_ram_gb"], res["vram_mb"] = round(avail_gb(), 2), vram_mb()
+    finally:
+        kill_all()
+    res["min_avail_ram_gb"] = round(_low["min"], 2)
+    save("handover-cpu.json", res)
+    print(res)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     phases = {"write-qwen": lambda: phase_write("qwen"), "write-mitsuba": lambda: phase_write("mitsuba"),
               "write-mitsuba-cpu": lambda: phase_write("mitsuba", gpu=False), "images": phase_images,
-              "describe": phase_describe, "handover": phase_handover}
+              "describe": phase_describe, "handover": phase_handover,
+              "handover-cpu": phase_handover_cpu}
     ap.add_argument("phase", choices=sorted(phases))
     ns = ap.parse_args()
     guard()
