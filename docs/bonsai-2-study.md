@@ -16,7 +16,7 @@ This is the second attempt. The first, on the same night, stopped on low RAM bef
 Bonsai 2 decodes at **71-82% of Qwen's speed** at all six perf points. The fixed gate is 90%. The gate applies to both
 the replacement and the companion role, so neither role passes. Two extra runs were made to check that the miss is
 not caused by a setting: the vendor's preferred packing for Ada cards (PTQ1_0) and an f16 KV cache. They reach at
-most 85%. The hard-suite and 5-task core gates could not run tonight (they need Docker; see "Not run").
+most 85.4%. The hard-suite and 5-task core gates could not run tonight (they need Docker; see "Not run").
 Passing them cannot rescue the verdict, so no re-run is proposed. No follow-up implementation issue is proposed.
 
 The memory result is large: VRAM + server private memory is **51% lower** at 32K (VRAM alone is 43% lower), and the
@@ -91,7 +91,7 @@ smaller setting. The context, quant and KV type stay the same as in #174. Only `
 
 That is one fewer expert layer spilled to RAM and about 760 MiB less CPU-side weight memory at each context. The cost
 is about 760 MiB more VRAM. `--load-mode none` (#405, `docs/resource-guard.md`, PR #420) was used for both servers.
-Qwen then loaded in about 14.6 s with no mmap page-in, and available RAM never fell below 11.7 GB. #174 used the
+Qwen then loaded in about 14.6 s with no mmap page-in, and available RAM never fell below 11,669 MiB. #174 used the
 default mmap load, so its RAM dipped under 1 GB at long prompts.
 
 The protocol and commands are the same as #174 (`docs/qwen38-distill-study.md`). The Qwen flags differ from #174 in
