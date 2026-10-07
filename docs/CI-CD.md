@@ -47,7 +47,13 @@ reserved for deployment; tests and SonarCloud use GitHub-hosted Windows, and aut
 
 The `sonar` job in `.github/workflows/ci.yml` is the analysis. It runs on GitHub-hosted `windows-latest` against
 SonarCloud organization `dflippojr`, project key `dflippojr_agent-harness` (`sonar-project.properties`), host
-`https://sonarcloud.io`, using the repository Actions secret `SONARCLOUD_TOKEN`. The `test` job installs `pytest-cov`
+`https://sonarcloud.io`, using the repository secret `SONARCLOUD_TOKEN`: the Actions store for ordinary PRs and
+`main` pushes, and the **Dependabot** store for Dependabot PRs. Fork PRs skip the Sonar job. If a same-repository
+Dependabot PR has no token yet, the job emits a notice and a summary explicitly stating that analysis was not
+performed, and skips the scanner. Add an authorized analysis token in GitHub Settings → Secrets and variables →
+Dependabot → New repository secret, named exactly `SONARCLOUD_TOKEN`, then rerun the Dependabot PR workflow and
+verify analysis for its head commit in SonarCloud. A missing token on an ordinary PR or `main` push fails the
+Sonar job. The `test` job installs `pytest-cov`
 and `pytest-xdist` as extras (not in `requirements.txt`), logs `NUMBER_OF_PROCESSORS` to confirm the hosted 4-vCPU
 shape, then runs `python -m pytest tests -q -n 4 --dist loadfile` with pytest-cov Cobertura output
 (`coverage.xml`), which `sonar` downloads before scanning. Both jobs use `windows-latest`, so the absolute source paths
@@ -69,11 +75,25 @@ issue #191 is run 35911097047). Pushing a branch without a pull request does not
 
 SonarCloud **Automatic Analysis must stay OFF**. This workflow is the analysis; turning Automatic Analysis on would
 duplicate and fight it. To rotate the token, create a new SonarCloud user token, replace the repo Actions secret
-`SONARCLOUD_TOKEN`, then confirm a `sonar` check on a pull request or a `main` push. The old `SONAR_TOKEN` and
+`SONARCLOUD_TOKEN` in both the Actions and Dependabot stores, then confirm analysis on an ordinary pull request,
+a `main` push, and a real Dependabot PR. A green notice-only job is not evidence of analysis. The old `SONAR_TOKEN` and
 `SONAR_HOST_URL` secrets are already deleted and must not be reintroduced.
 
 Local SonarQube on `localhost:9000`, published by `ops/tailscale/serve.ps1` as `https://<tower>.ts.net:9000`, is
 local-only. CI does not depend on it.
+
+## Scheduled dependency updates
+
+`.github/dependabot.yml` schedules weekly updates for pip requirements at `/` (`requirements.txt`,
+`requirements-repomap.txt`, and `requirements-telemetry.txt`), Dockerfiles in `/sandbox`, `/ops/egress`, and
+`/reference/{hermes,openclaw,opencode,openhands}`, Docker Compose at `/ops/observability`, and GitHub Actions at `/`.
+Dependabot's Dockerfile discovery includes `sandbox/cli.Dockerfile`; its Compose filename pattern includes
+`ops/observability/docker-compose.tempo.yml` ([Docker fetcher](https://github.com/dependabot/dependabot-core/blob/main/docker/lib/dependabot/docker/file_fetcher.rb),
+[Compose fetcher](https://github.com/dependabot/dependabot-core/blob/main/docker/lib/dependabot/docker_compose/file_fetcher.rb)).
+`ops/egress/compose.yaml` uses only a locally built image, so external image updates come from its Dockerfile.
+After this configuration reaches `main`, verify update jobs and representative PRs under GitHub's dependency graph
+Dependabot page. Verify a real Dependabot PR's SonarCloud analysis at its head commit; a missing-token notice does
+not satisfy that verification.
 
 ## Automated review backends
 
