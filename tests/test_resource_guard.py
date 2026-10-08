@@ -101,6 +101,53 @@ def test_manual_resume_does_not_load_the_model():
     asyncio.run(body())
 
 
+def _guard_with_ram(gb, want):
+    guard, _, control, scheduler, _ = make_guard(lazy_load=True, resume_after_seconds=999, min_available_ram_gb=4,
+                                                 model_ram_gb=14)
+    ram = FakeRam(gb)
+    guard.memory = MemoryWatch(4, model_gb=14, read=ram, ttl=0)
+    guard.want_model = lambda: want
+    return guard, control, scheduler, ram
+
+
+def test_resume_with_load_low_keeps_the_flag_and_reports_why():
+    async def body():
+        guard, control, scheduler, ram = _guard_with_ram(9, True)
+        guard.pause()
+        await guard.check()
+        assert guard.state == PAUSED
+        guard.resume()
+        await guard.check()
+        assert guard.state == PAUSED and control.starts == 0 and control.flag and scheduler.paused
+        assert "9.0 GB RAM available" in guard.status()["memory_hold"]
+        ram.available = 30 * GIB  # RAM frees up: the next check admits the load
+        await guard.check()
+        assert control.starts == 1 and not control.flag and guard.status()["memory_hold"] == ""
+    asyncio.run(body())
+
+
+def test_resume_with_enough_ram_and_a_waiting_request_removes_the_flag():
+    async def body():
+        guard, control, _, _ = _guard_with_ram(30, True)
+        guard.pause()
+        await guard.check()
+        guard.resume()
+        await guard.check()
+        assert control.starts == 1 and not control.flag
+    asyncio.run(body())
+
+
+def test_resume_with_no_waiting_request_stays_parked_even_with_enough_ram():
+    async def body():
+        guard, control, _, _ = _guard_with_ram(30, False)
+        guard.pause()
+        await guard.check()
+        guard.resume()
+        await guard.check()
+        assert guard.state == CLEAR and control.starts == 0 and control.flag
+    asyncio.run(body())
+
+
 def test_daemon_start_with_parked_model_stays_clear_and_parked():
     async def body():
         guard, _, control, scheduler, log = make_guard(lazy_load=True, poll_seconds=3600)
