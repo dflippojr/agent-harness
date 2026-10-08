@@ -474,6 +474,13 @@ checkout), which is how you confirm the resolved SHA is the one running.
 
 ### Dispatch
 
+The supported Python floor is `requires-python = ">=3.12"` in `pyproject.toml`. Staging uses Python 3.12,
+matching CI and production. During a deploy, after stopping the staging slot, `deploy-staging.ps1` calls
+`staging-python.ps1` to rebuild a missing or incompatible venv with `uv venv --python 3.12 --seed --clear`.
+The staging runner needs `uv` on PATH (it can download Python 3.12); alternatively, pass `-BootstrapPython`
+with the full path to a Python 3.12 interpreter. Compatible venvs are preserved. Rebuild only through the
+staging scripts; after merging a Python-version change, the owner or dispatcher must redeploy staging.
+
 Manual `workflow_dispatch` only; there is no pull-request label auto-deploy. Set exactly one of `branch` or
 `pr_number`, or dispatch `reset` on its own. The SHA is resolved at job start and printed: if the pull-request head
 moves afterwards the run still deploys the SHA it resolved, and says so. There is one slot, so a successful dispatch

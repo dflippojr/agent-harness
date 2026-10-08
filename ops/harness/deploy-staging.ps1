@@ -14,7 +14,8 @@ guarded by Assert-StagingTarget, and a failure at any stage stops staging and le
 
 A deploy always starts from a clean slot: staging is stopped, staging data (and therefore every staging token) is
 deleted, then the resolved commit is started. The owner's harness.local.yaml overlay, the staging logs, the staging
-checkout, and the staging virtual environment survive.
+checkout, and compatible staging virtual environments survive. Missing or incompatible virtual environments
+are rebuilt on Python 3.12 through staging-python.ps1 (uv by default).
 #>
 param(
     [ValidatePattern('^([0-9a-f]{40})?$')][string]$Commit = '',
@@ -23,7 +24,7 @@ param(
     [string]$StagingDataDir = '',
     [string]$Repository = '',
     [string]$ReleaseRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
-    [string]$BootstrapPython = 'python',
+    [string]$BootstrapPython = '',
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -31,6 +32,7 @@ $ErrorActionPreference = 'Stop'
 # Dot-sourcing a script runs its param block in this scope, so capture the switch before that can reset it.
 $planOnly = [bool]$DryRun
 . (Join-Path $PSScriptRoot 'staging-common.ps1')
+. (Join-Path $PSScriptRoot 'staging-python.ps1')
 . (Join-Path $PSScriptRoot 'reset-staging.ps1')
 
 if ($StagingDir) { $StagingCheckout = $StagingDir }
@@ -107,9 +109,7 @@ try {
     Write-Host "[staging] checkout at $Commit"
 
     $stagingPython = Join-Path $StagingVenv 'Scripts\python.exe'
-    if (-not (Test-Path -LiteralPath $stagingPython)) {
-        Run $BootstrapPython @('-m', 'venv', $StagingVenv)
-    }
+    Initialize-StagingPython -Venv $StagingVenv -BootstrapPython $BootstrapPython -DryRun:$planOnly
     if (-not $planOnly -and -not (Test-Path -LiteralPath $stagingPython)) {
         throw "staging Python is missing: $stagingPython"
     }
