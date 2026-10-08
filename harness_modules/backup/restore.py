@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ROOT, WEB_APP_ID, app_dir,
                             migrations, remove_tree, storage)
 
+from . import audit
 from .member_key import KEY_FILE, expected_fingerprint, fingerprint, key_dir, write_private
 
 CONFIG_FILES = ("harness.yaml", "harness.local.yaml", "projects.yaml")
@@ -54,7 +55,7 @@ class RestoreRefused(RuntimeError):
 @dataclass
 class Item:
     """One thing a restore puts in place: a file copied to `dest`, or a zip extracted into the folder `dest`."""
-    kind: str        # "store", "transcripts" or "config"
+    kind: str        # "store", "transcripts", "config", "member_key" or "audit"
     source: Path
     dest: Path
     label: str
@@ -65,6 +66,7 @@ class Plan:
     folder: Path
     items: list[Item] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 # verification
@@ -163,6 +165,12 @@ def verify(folder: Path) -> list[str]:
         problem = _zip_problem(path)
         if problem:
             problems.append(f"{path.relative_to(folder).as_posix()} {problem}")
+    snapshot = folder / audit.AUDIT_FILE
+    if snapshot.exists() or snapshot.is_symlink():  # absent in historical backups
+        try:
+            audit.read_snapshot(snapshot)
+        except audit.AuditError as e:
+            problems.append(f"{audit.AUDIT_FILE} {e}")
     return problems
 
 
@@ -210,6 +218,7 @@ def plan(cfg, folder: Path, *, include_config: bool = False, config_dir: Path | 
         else:
             p.warnings.append(f"skipped App {path.stem}'s transcripts: the App no longer exists in the restored "
                               "main store")
+    _plan_audit(data, folder, p)
     if include_config:
         config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
         for name in CONFIG_FILES:
@@ -218,6 +227,32 @@ def plan(cfg, folder: Path, *, include_config: bool = False, config_dir: Path | 
         for path in sorted(folder.glob("managed-config*.json")):
             p.items.append(Item("config", path, data / path.name, f"managed config {path.name}"))
     return p
+
+
+def _plan_audit(data: Path, folder: Path, p: Plan) -> None:
+    """The audit snapshot is history, not configuration: kept regardless of --include-config, never merged into an
+    active trail. Always archived by digest; also made active when there is no active trail."""
+    snapshot = folder / audit.AUDIT_FILE
+    if not snapshot.exists():
+        return
+    content = audit.read_snapshot(snapshot)
+    archive = data / audit.RESTORED_DIR
+    target = archive / audit.digest(content) / audit.AUDIT_FILE
+    for path in (archive, target.parent, target):
+        if path.exists() or path.is_symlink():
+            if audit.storage.is_reparse_point(path):
+                raise RestoreRefused(f"{path} is a symlink or reparse point")
+    if target.exists():
+        if not target.is_file() or target.read_bytes() != content:
+            raise RestoreRefused(f"{target} exists with different bytes; nothing was changed")
+        p.notes.append(f"audit snapshot already archived at {target}")
+    else:
+        p.items.append(Item("audit", snapshot, target, "config audit snapshot (archived by digest)"))
+    active = data / audit.AUDIT_FILE
+    if active.exists() or active.is_symlink():
+        p.notes.append(f"active {active} left untouched; the snapshot is archived for owner-only review")
+    else:
+        p.items.append(Item("audit", snapshot, active, "config audit trail (none was active)"))
 
 
 def _plan_member_key(cfg, folder: Path, p: Plan) -> None:
@@ -288,6 +323,8 @@ def daemon_running(cfg) -> str:
 # applying
 def _occupied(item: Item) -> list[Path]:
     """The live paths `item` replaces: a store and its WAL files, a whole transcripts folder, or a config file."""
+    if item.kind == "audit":
+        return []  # history is only ever added, never replaced
     if item.kind == "store":
         paths = [item.dest] + [item.dest.with_name(item.dest.name + s) for s in SQLITE_SIDECARS]
     else:
@@ -315,6 +352,7 @@ def apply(cfg, p: Plan, now: float | None = None) -> Path:
     previous.mkdir(parents=True)
     moved: list[tuple[Path, Path]] = []
     created: list[Path] = []
+    cleanup: list[Path] = []   # created plus any new folders above them, for rollback
     try:
         for item in p.items:
             for path in _occupied(item):
@@ -323,9 +361,21 @@ def apply(cfg, p: Plan, now: float | None = None) -> Path:
                 shutil.move(str(path), str(target))
                 moved.append((path, target))
         for item in p.items:
+            top = item.dest.parent
+            while not top.parent.exists():
+                top = top.parent
+            if not item.dest.parent.exists():
+                cleanup.append(top)
             item.dest.parent.mkdir(parents=True, exist_ok=True)
             created.append(item.dest)
-            if item.kind == "transcripts":
+            cleanup.append(item.dest)
+            if item.kind == "audit":
+                content = audit.read_snapshot(item.source)
+                if item.dest.parent.parent.name == audit.RESTORED_DIR and                         item.dest.parent.name != audit.digest(content):
+                    raise RestoreRefused("audit snapshot changed after planning")
+                with open(item.dest, "xb") as f:
+                    f.write(content)
+            elif item.kind == "transcripts":
                 item.dest.mkdir()
                 with zipfile.ZipFile(item.source) as archive:
                     archive.extractall(item.dest)
@@ -337,7 +387,7 @@ def apply(cfg, p: Plan, now: float | None = None) -> Path:
             else:
                 shutil.copy2(item.source, item.dest)
     except BaseException:
-        _roll_back(created, moved)
+        _roll_back(cleanup, moved)
         if not any(previous.rglob("*")):
             remove_tree(previous)
         raise
@@ -374,6 +424,8 @@ def restore(cfg, folder: Path, *, apply_changes: bool = False, include_config: b
     p = plan(cfg, folder, include_config=include_config, config_dir=config_dir)
     for warning in p.warnings:
         out(f"WARN  {warning}")
+    for note in p.notes:
+        out(f"NOTE  {note}")
     for item in p.items:
         verb = "replace" if _occupied(item) else "create "
         what = "folder" if item.kind == "transcripts" else "file"

@@ -18,6 +18,7 @@ from pathlib import Path
 from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ROOT, ManagedStore, app_dir, backup_sqlite,
                              remove_tree, storage)
 
+from .audit import AUDIT_FILE, AuditError, stable_prefix
 from .member_key import WARNING, snapshot_key
 
 log = logging.getLogger("harness.backup")
@@ -143,6 +144,7 @@ class BackupService:
         managed = ManagedStore(self.cfg.data_dir)
         for path in managed.overlay_files():
             shutil.copy2(path, tmp / path.name)
+        self._backup_audit(tmp)
         remove_tree(dest)
         tmp.rename(dest)
 
@@ -151,6 +153,15 @@ class BackupService:
         return {"ok_at": now, "path": str(dest), "bytes": size, "removed": removed, "error": "",
                 "app_stores": app_stores, "transcript_archives": transcript_archives, "warnings": warnings,
                 "member_key_path": str(member_key) if member_key else ""}
+
+    def _backup_audit(self, tmp: Path) -> None:
+        """Snapshot the config audit trail's stable prefix (#469). Absent is fine; unusable fails the backup."""
+        try:
+            data = stable_prefix(Path(self.cfg.data_dir) / AUDIT_FILE)
+        except AuditError as e:
+            raise RuntimeError(f"{AUDIT_FILE} backup failed: {e}") from None
+        if data is not None:
+            (tmp / AUDIT_FILE).write_bytes(data)
 
     @staticmethod
     def _skip_transcript_link(path: Path, warnings: list[str]) -> bool:
