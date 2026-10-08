@@ -88,6 +88,48 @@ def test_notification_identity_and_idempotency(manager):
     assert token not in json.dumps(record)
 
 
+@pytest.mark.parametrize("token_kind", ["invalid", "revoked", "app", "owner_without_admin"])
+def test_legacy_stray_token_preserves_ambient_owner(manager, token_kind):
+    approval(manager)
+    if token_kind == "invalid":
+        secret = "invalid-token"
+    else:
+        key, secret = manager.db.create_api_key("test", "sessions", kind="app" if token_kind == "app" else "owner")
+        if token_kind == "revoked":
+            manager.db.revoke_api_key(key["id"])
+    headers = {"Authorization": "Bearer " + secret}
+    with TestClient(create_app(manager)) as client:
+        # Admin authentication still rejects the token before attribution runs.
+        rejected = client.post(PREFIX + "/sessions/session1/approvals/a-test",
+                               json={"decision": "approve"}, headers=headers)
+        assert rejected.status_code in (401, 403)
+        response = client.post("/sessions/session1/approvals/a-test",
+                               json={"decision": "approve"}, headers=headers)
+        assert response.status_code == 200, response.text
+        pair(manager, "approval.decide", audit_context.owner_context(None, "legacy_api"))
+        job = client.post("/jobs", json={"name": "test", "prompt": "test", "cron": "@daily"}, headers=headers)
+        assert job.status_code == 201, job.text
+        record = rows(manager, "job.create")[-1]
+        assert (record["actor_id"], record["actor_kind"], record["key_id"], record["source"]) == (
+            "owner", "owner", "", "legacy_api")
+
+
+@pytest.mark.parametrize("path", ["", PREFIX, "/api/v1"])
+def test_rejected_approval_audit_failure_preserves_conflict(manager, monkeypatch, caplog, path):
+    approval(manager)
+    manager.decide("session1", "a-test", True, context=CTX)
+    fail_write(monkeypatch, manager.db, "failure")
+    _, secret = manager.db.create_api_key("test", "admin sessions approvals", kind="owner")
+    with TestClient(create_app(manager)) as client:
+        response = client.post(path + "/sessions/session1/approvals/a-test", json={"decision": "deny"},
+                               headers={"Authorization": "Bearer " + secret})
+        assert response.status_code == 409, response.text
+    assert manager.db.get_approval("a-test")["status"] == "approved"
+    pair(manager, "approval.decide")
+    assert "audit record unavailable for an already-decided approval" in caplog.text
+    assert SENTINEL not in caplog.text
+
+
 @pytest.mark.parametrize("action", ["merge", "push", "discard"])
 def test_review_fake_publish(manager, monkeypatch, action):
     effect = AsyncMock(return_value=manager.db.get_session("session1"))

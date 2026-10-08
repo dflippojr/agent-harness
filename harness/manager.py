@@ -1634,8 +1634,12 @@ class Manager:
             raise HarnessError(404, f"no approval {approval_id} in session {sid}")
         if approval["status"] != "pending":
             if operation_audit.owner_session(self.db.get_session(sid)):
-                operation_audit.append(self.db, context or audit_context.AuditContext("unknown"), approval_id,
-                                       "approval.decide", "failure", {"session_id": sid, "reason": "already_decided"})
+                try:
+                    operation_audit.append(self.db, context or audit_context.AuditContext("unknown"), approval_id,
+                                           "approval.decide", "failure", {"session_id": sid, "reason": "already_decided"})
+                except Exception:
+                    # A rejected retry has no effect to settle; preserve the conflict response.
+                    log.warning("audit record unavailable for an already-decided approval")
             raise HarnessError(409, f"approval is already {approval['status']}")
         status = "approved" if approve else "denied"
 

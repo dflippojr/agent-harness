@@ -147,6 +147,7 @@ operation id and stores aggregate removed/kept/expired counts, never erased sess
 An already-decided approval returns 409 and records one `failure` row with only the known target and
 `already_decided` reason (a failed request, no new tool decision or cross-store effect);
 a repeated notification press remains harmless and never claims another successful decision.
+If the refusal audit write fails, a content-free warning is logged and the response remains 409.
 
 A failed first audit commit returns 503 `audit_unavailable` and prevents starting the action. If an action
 settles but its audit commit fails, the actual state remains and the started row stays unresolved.

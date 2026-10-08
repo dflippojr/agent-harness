@@ -7,7 +7,7 @@ import re
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 
-from .audit_context import AuditContext, access_context, owner_context
+from .audit_context import AuditContext
 from .principal import OWNER_USER_ID, session_user_id
 
 log = logging.getLogger(__name__)
@@ -59,13 +59,9 @@ def clean_metadata(action, metadata):
 
 
 def request_context(request, manager):
-    """Only validated bearer keys or middleware identities; never attribution headers."""
-    path = request.scope.get("harness_original_path", request.url.path)
-    source = "admin_api" if path.startswith("/api/admin/v1") else "legacy_api"
-    if request.headers.get("authorization"):
-        from .admin import require_admin
-        return owner_context(require_admin(request, lambda _: manager), source)
-    return access_context(request.state.access, source)
+    """Attribute an already-authorized request without changing its authentication contract."""
+    from .credential_audit import request_context as credential_context
+    return credential_context(request, manager)
 
 
 def owner_session(session):
