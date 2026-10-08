@@ -2,143 +2,10 @@
 // hold, and spaces the gallery below Generate. (#186)
 import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
+import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
-class Emitter {
-  constructor() { this._l = {}; }
-  addEventListener(type, fn) { (this._l[type] ||= []).push(fn); }
-  removeEventListener(type, fn) { this._l[type] = (this._l[type] || []).filter((f) => f !== fn); }
-  dispatchEvent(ev) {
-    for (const fn of [...(this._l[ev.type] || [])]) fn.call(this, ev);
-    return true;
-  }
-}
-
-class Node extends Emitter {}
-class El extends Node {
-  constructor(tag, attrs = {}) {
-    super();
-    this.tagName = String(tag).toUpperCase();
-    this.childNodes = [];
-    this.attributes = { ...attrs };
-    this.className = attrs.class || "";
-    this.id = attrs.id || "";
-    this.hidden = !!attrs.hidden;
-    this.value = attrs.value || "";
-    this.href = attrs.href || "";
-    this.type = attrs.type || "";
-    this.disabled = false;
-    this.defaultValue = this.value;
-    this.checked = false;
-    this.selected = !!attrs.selected;
-    this.options = [];
-    this.style = { _p: {}, setProperty(k, v) { this._p[k] = v; }, removeProperty(k) { delete this._p[k]; }, getPropertyValue(k) { return this._p[k] || ""; } };
-    this.dataset = {};
-    this.classList = {
-      _sync: () => { this.classList._s = new Set(String(this.className || "").split(/\s+/).filter(Boolean)); },
-      _s: new Set(String(attrs.class || "").split(/\s+/).filter(Boolean)),
-      add: (c) => { this.classList._sync(); this.classList._s.add(c); this.className = [...this.classList._s].join(" "); },
-      remove: (c) => { this.classList._sync(); this.classList._s.delete(c); this.className = [...this.classList._s].join(" "); },
-      toggle: (c, force) => {
-        this.classList._sync();
-        const on = force === undefined ? !this.classList._s.has(c) : !!force;
-        if (on) this.classList.add(c); else this.classList.remove(c);
-        return on;
-      },
-      contains: (c) => { this.classList._sync(); return this.classList._s.has(c); },
-    };
-    this._text = "";
-    this.parentNode = null;
-  }
-  get firstElementChild() { return this.childNodes.find((c) => c instanceof El) || null; }
-  get isConnected() { return !!this.parentNode; }
-  get textContent() {
-    if (this.childNodes.length) {
-      return this.childNodes.map((c) => (typeof c === "string" ? c : c.textContent)).join("");
-    }
-    return this._text;
-  }
-  set textContent(v) { this._text = String(v); this.childNodes = []; }
-  get innerHTML() { return this.textContent; }
-  set innerHTML(v) { this.textContent = v; }
-  append(...nodes) {
-    for (const n of nodes.flat()) {
-      if (n === null || n === undefined || n === false) continue;
-      if (n instanceof El) n.parentNode = this;
-      this.childNodes.push(n instanceof El ? n : String(n));
-    }
-    if (this.tagName === "SELECT" && !this.value) {
-      const opt = this.childNodes.find((c) => c instanceof El && c.tagName === "OPTION");
-      if (opt) this.value = opt.value || opt.attributes.value || "";
-    }
-  }
-  replaceChildren(...nodes) { this.childNodes = []; this.append(...nodes); }
-  remove() { this.removed = true; }
-  click() { this.dispatchEvent({ type: "click" }); }
-  focus() {}
-  blur() {}
-  closest() { return null; }
-  querySelector() { return null; }
-  querySelectorAll() { return []; }
-  setAttribute(k, v) {
-    this.attributes[k] = v;
-    if (k === "id") this.id = v;
-    if (k === "href") this.href = v;
-    if (k === "value") this.value = v;
-    if (k === "class") this.className = v;
-    if (k === "type") this.type = v;
-    if (k === "hidden") this.hidden = true;
-  }
-}
-
-const byId = {};
-const make = (tag, id, extra = {}) => {
-  const el = new El(tag, { id, ...extra });
-  if (id) byId[id] = el;
-  return el;
-};
-
-const feature = make("select", "feature-nav");
-for (const value of ["agents", "jobs", "images"]) {
-  const opt = new El("option", { value });
-  opt.value = value;
-  feature.options.push(opt);
-}
-feature.value = "agents";
-
-const doc = new Emitter();
-doc.documentElement = new El("html");
-doc.documentElement.dataset = {};
-doc.body = new El("body");
-doc.hidden = false;
-doc.visibilityState = "visible";
-doc.getElementById = (id) => byId[id] || null;
-doc.querySelector = (sel) => {
-  if (sel === 'link[rel="apple-touch-icon"]' || sel === 'link[rel="icon"]') return new El("link");
-  if (sel === "#app") return byId.app;
-  return null;
-};
-doc.querySelectorAll = (sel) => (sel === "input, textarea, select" ? [feature] : []);
-doc.createElement = (tag) => new El(tag);
-doc.createTextNode = (t) => String(t);
-
-make("main", "app");
-make("h1", "title");
-make("button", "back");
-make("span", "conn");
-make("a", "profile-icon");
-make("button", "menu-btn");
-make("nav", "nav-drawer");
+const { byId, make, doc, feature } = createDocument();
 byId["nav-drawer"].hidden = true;
-byId["nav-drawer"].querySelectorAll = () => [];
-byId["nav-drawer"].querySelector = () => null;
-make("div", "drawer-scrim");
-make("div", "drawer-chats");
-make("span", "drawer-profile-icon");
-make("div", "fab-host");
-make("a", "fab");
-make("header", "bar");
-make("div", "guest-banner");
-make("div", "toast");
 
 const historyStack = ["#/"];
 const loc = {
@@ -164,15 +31,6 @@ const loc = {
     this.onHashReplace?.();
   },
 };
-const storage = () => {
-  const m = new Map();
-  return {
-    getItem: (k) => (m.has(k) ? m.get(k) : null),
-    setItem: (k, v) => m.set(k, String(v)),
-    removeItem: (k) => m.delete(k),
-  };
-};
-
 const jsonResp = (body, status = 200) => ({
   ok: status >= 200 && status < 300,
   status,
@@ -231,10 +89,7 @@ const fakeFetch = async (url) => {
   return jsonResp({});
 };
 
-class FakeEventSource extends Emitter {
-  constructor(url) { super(); this.url = String(url); this.readyState = 1; this.onopen = null; }
-  close() { this.readyState = 2; }
-}
+const FakeEventSource = fakeEventSource();
 
 const win = new Emitter();
 Object.assign(win, {
