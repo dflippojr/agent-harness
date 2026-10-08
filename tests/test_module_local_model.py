@@ -81,10 +81,57 @@ def test_images_refuses_gpu_takeover_without_supervision(tmp_path):
     cfg.module_packages = ['harness_modules.images']
     cfg.images.enabled = True
     cfg.images.work_dir = str(tmp_path / 'images')
+    cfg.images.comfy_dir = str(tmp_path / 'comfy')
+    cfg.images.models_dir = str(tmp_path / 'models')
     m = Manager(cfg, chat=Script([Completion(content='ok')]))
-    with pytest.raises(RuntimeError, match='requires the local_model supervision module'):
-        asyncio.run(m.images._run_batch(None))
+    from harness.fileops import ToolError
+    for submit in (lambda: m.images.submit('lighthouse'),
+                   lambda: m.images.submit_upscale('missing', '2x'),
+                   lambda: m.images.submit_edit('missing', 'lighthouse', b''),
+                   lambda: asyncio.run(m.images.warmup())):
+        with pytest.raises(ToolError, match='requires the local_model supervision module'):
+            submit()
+    with TestClient(create_app(m)) as client:
+        for path, payload in [('/images', {'prompt': 'lighthouse'}), ('/images/warmup', {})]:
+            response = client.post(path, json=payload)
+            assert response.status_code == 400 and 'supervision module' in response.json()['detail']
+    assert not m.images.queue.qsize() and not m.images.db.list_images()
     assert not m.runner.gate.exclusive
+    m.db.close()
+
+
+def test_recovered_images_fail_visibly_without_supervision(tmp_path):
+    m = manager(tmp_path)
+    m.cfg.images.enabled = True
+    m.cfg.images.work_dir = str(tmp_path / 'images')
+    m.cfg.images.comfy_dir = str(tmp_path / 'comfy')
+    m.cfg.images.models_dir = str(tmp_path / 'models')
+    # Build the service with supervision, then model the next startup after the package is removed.
+    rt = m.modules.get('images')
+    rt.init()
+    svc = m.images
+    async def run():
+        jobs = [svc.submit('lighthouse'), svc.submit('cabin')]
+        events = [svc._done[job['id']] for job in jobs]
+        svc.control = None
+        async def no_probe():
+            raise AssertionError('absent supervision must not probe ComfyUI')
+        svc.comfy.ready = no_probe
+        notifications = []
+        svc.notify = notifications.append
+        svc.start()
+        try:
+            for job in jobs:
+                result = await asyncio.wait_for(svc.wait(job['id']), 2)
+                assert result['status'] == 'failed' and 'supervision module' in result['error']
+                assert result['finished_at'] is not None
+            assert all(event.is_set() for event in events)
+            assert len(notifications) == 2
+            await svc._run_batch(None)
+            assert svc.phase == 'idle' and not svc._keep_warm and not m.runner.gate.exclusive
+        finally:
+            await svc.stop()
+    asyncio.run(run())
     m.db.close()
 
 
@@ -141,6 +188,8 @@ def test_resource_wiring_independent_of_discovery_order(tmp_path, packages):
     cfg.module_packages = packages
     cfg.images.enabled = True
     cfg.images.work_dir = str(tmp_path / 'images')
+    cfg.images.comfy_dir = str(tmp_path / 'comfy')
+    cfg.images.models_dir = str(tmp_path / 'models')
     cfg.gpu_guard.enabled = True
     m = Manager(cfg, chat=Script([Completion(content='ok')]))
     assert m.images.control is not None
