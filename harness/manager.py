@@ -1095,6 +1095,7 @@ class Manager:
     @namespace_audit.failures("session.rerun")
     def rerun(self, ref: str, *, context=None) -> dict:
         """Start a fresh session with the same task, project, and model."""
+        from .apps import AppTool
         s = self.get(ref)
         if s.get("kind") == TOOLS_ONLY:  # its tools live in the App, which has to send them again
             raise HarnessError(409, "an App-tools-only session can't be rerun; start a new one with its tools")
@@ -1105,7 +1106,8 @@ class Manager:
                            skills=[item["slug"] for item in (s.get("skills") or []) if item.get("slug")],
                            skill_missing="skip", context=context,
                            app=self.db.get_api_key(s["app_id"]) if s.get("app_id") else None,
-                           app_tools=s.get("app_tools"), app_context="", app_metadata=s.get("app_metadata"),
+                           app_tools=[AppTool.model_validate(tool) for tool in (s.get("app_tools") or [])],
+                           app_context="", app_metadata=s.get("app_metadata"),
                            retention_days=s.get("retention_days"), end_user=s.get("end_user", ""))
         namespace_audit.record(self.db, s, context, "session.rerun")
         return result

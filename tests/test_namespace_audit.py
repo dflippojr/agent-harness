@@ -492,3 +492,23 @@ def test_login_poll_cannot_observe_completion_before_audit_settles(monkeypatch):
     assert result["state"] == "completed"
     assert result["error"] == {"code": "audit_record_incomplete", "operation_id": "completion-operation",
                                "may_have_completed": True, "retryable": False}
+
+
+def test_app_rerun_reconstructs_stored_tools_and_tool_result_audit(setup):
+    m, client, _, apps, headers = setup
+    tool = {"name": "lookup", "description": PRIVATE,
+            "parameters": {"type": "object", "properties": {}}, "timeout_seconds": 60}
+    response = client.post("/api/v1/sessions", headers=headers[0], json={"prompt": PRIVATE, "tools": [tool]})
+    sid = response.json()["id"]
+    again = client.post(f"/api/v1/sessions/{sid}/rerun", headers=headers[0])
+    assert again.status_code == 201, again.text
+    new_sid = again.json()["id"]
+    assert m.db.get_session(new_sid)["app_tools"] == m.db.get_session(sid)["app_tools"]
+    assert m.db.app_of(new_sid) == apps[0][0]["id"]
+    m.db.insert_app_tool_call(new_sid, "lookup-call", "lookup", {"secret": PRIVATE})
+    result = client.post(f"/api/v1/sessions/{new_sid}/tool_calls/lookup-call", headers=headers[0],
+                         json={"output": PRIVATE, "ok": False})
+    assert result.status_code == 200, result.text
+    row = page(client, headers[0], action="tool_result.submit")["items"][0]
+    assert row["target_id"] == "lookup-call" and row["target_kind"] == "call"
+    assert PRIVATE not in json.dumps(row)
