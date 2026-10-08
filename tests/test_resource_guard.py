@@ -607,7 +607,10 @@ def test_diagnostics_without_a_guard_and_with_images_holding_the_gpu(tmp_path, m
     async def body():
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
         m.guard = None
-        m.images = type("Images", (), {"gpu_taken": True})()
+        m.modules.get("images").service = type("Images", (), {"gpu_taken": True})()
+        async def ready(model):
+            return "ready"
+        m.warmer.state = ready
         diag = await resources.diagnostics(m)
         assert diag["guard"] == {"enabled": False, "state": "clear"}
         assert diag["vram"]["holders"] == ["llama-server", "ComfyUI"] and diag["vram"]["used_bytes"] is None

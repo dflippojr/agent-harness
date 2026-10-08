@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from harness_modules.images.store import ImageStore
+
 import asyncio
 import io
 import time
@@ -98,7 +100,7 @@ def test_generate_does_not_upscale_by_default(tmp_path):
         job = await m.images.wait(m.images.submit("a red cube")["id"])
         assert job["status"] == "done"
         assert job["requested_upscale"] == "none"
-        assert m.db.image_children(job["id"]) == []
+        assert ImageStore(m.db).image_children(job["id"]) == []
         assert all(not any(n.get("class_type") == "ImageUpscaleWithModel" for n in g.values()) for g in state["graphs"])
         listing = m.images.status()
         assert listing["upscale"]["default"] == "none"
@@ -116,8 +118,8 @@ def test_gallery_upscale_preserves_source_and_dimensions(tmp_path):
         # replace with a real PNG so alpha merge and size checks are meaningful
         real = rgba_png(parent["width"] and 48, 32)
         m.images.path(parent).write_bytes(real)
-        m.db.update_image(parent["id"], width=48, height=32)
-        parent = m.db.get_image(parent["id"])
+        ImageStore(m.db).update_image(parent["id"], width=48, height=32)
+        parent = ImageStore(m.db).get_image(parent["id"])
         child = m.images.submit_upscale(parent["id"], "2x")
         child = await m.images.wait(child["id"])
         assert child["status"] == "done"
@@ -144,7 +146,7 @@ def test_generate_plus_upscale_holds_gpu_once(tmp_path):
         gen = await m.images.wait(job["id"])
         assert gen["status"] == "done"
         assert gen["requested_upscale"] == "2x"
-        child = m.db.find_image_upscale(gen["id"], "2x")
+        child = ImageStore(m.db).find_image_upscale(gen["id"], "2x")
         assert child is not None
         child = await m.images.wait(child["id"])
         assert child["status"] == "done"
@@ -171,7 +173,7 @@ def test_failed_phone_generate_with_upscale_notifies(tmp_path):
         assert failed["status"] == "failed"
         assert "out of memory" in failed["error"]
         assert notifications == [failed]
-        assert m.db.image_children(job["id"]) == []
+        assert ImageStore(m.db).image_children(job["id"]) == []
         await m.stop()
     asyncio.run(body())
 
@@ -195,10 +197,10 @@ def test_dimension_cap_and_oom_failure(tmp_path):
         m, _, _ = image_manager(tmp_path, weights=True, fail_upscale=True)
         await m.start(maintenance=False)
         parent = await m.images.wait(m.images.submit("tiny")["id"])
-        m.db.update_image(parent["id"], width=8000, height=8000)
+        ImageStore(m.db).update_image(parent["id"], width=8000, height=8000)
         with pytest.raises(ToolError, match="pixel cap"):
             m.images.submit_upscale(parent["id"], "4x")
-        m.db.update_image(parent["id"], width=48, height=32)
+        ImageStore(m.db).update_image(parent["id"], width=48, height=32)
         m.images.path(parent).write_bytes(rgb_png(48, 32))
         child = await m.images.wait(m.images.submit_upscale(parent["id"], "2x")["id"])
         assert child["status"] == "failed"
@@ -231,8 +233,8 @@ def test_upscale_api_authorization_and_app_default(tmp_path):
         gh = {"Tailscale-User-Login": guest}
         assert client.post(f"/images/{job['id']}/upscale", json={"upscale": "2x"}, headers=gh).status_code == 403
         owner = {"Tailscale-User-Login": login}
-        m.images.path(m.db.get_image(job["id"])).write_bytes(rgb_png(32, 32))
-        m.db.update_image(job["id"], width=32, height=32)
+        m.images.path(ImageStore(m.db).get_image(job["id"])).write_bytes(rgb_png(32, 32))
+        ImageStore(m.db).update_image(job["id"], width=32, height=32)
         up = client.post(f"/images/{job['id']}/upscale", json={"upscale": "2x"}, headers=owner)
         assert up.status_code == 201
         for _ in range(200):
@@ -265,7 +267,7 @@ def test_agent_generate_image_upscale_saves_derived(tmp_path):
         assert result["ok"]
         assert "upscaled 2x" in result["output"]
         saved = Image.open(tmp_path / "data" / "workspaces" / s["id"] / "assets" / "icon.png")
-        jobs = m.db.list_images()
+        jobs = ImageStore(m.db).list_images()
         gen = next(j for j in jobs if j["operation"] == "generate")
         child = next(j for j in jobs if j["operation"] == "upscale")
         assert saved.size == (child["width"], child["height"])
@@ -279,10 +281,10 @@ def test_restart_recovers_pending_upscale(tmp_path):
         m, _, _ = image_manager(tmp_path, weights=True)
         await m.start(maintenance=False)
         parent = await m.images.wait(m.images.submit("recover me", upscale="2x")["id"])
-        child = m.db.find_image_upscale(parent["id"], "2x")
+        child = ImageStore(m.db).find_image_upscale(parent["id"], "2x")
         await m.images.wait(child["id"])
         await m.stop()
-        m.db.update_image(child["id"], status="running")
+        ImageStore(m.db).update_image(child["id"], status="running")
         m.images._task = None
         m.images.start()
         recovered = await m.images.wait(child["id"])

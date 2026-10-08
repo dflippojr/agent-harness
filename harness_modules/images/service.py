@@ -30,6 +30,8 @@ by GET /images/{id}.png.
 
 from __future__ import annotations
 
+from .store import ImageStore
+
 import asyncio
 import base64
 import hashlib
@@ -496,7 +498,7 @@ class ImageService:
         self.control = control         # gpu_guard.ServerControl for the language model server
         self.memory_low: Callable[[], bool] = lambda: False  # the resource guard's RAM check (set by the manager)
         self.want_model: Callable[[], bool] = lambda: True   # reload Qwen after a batch (False: leave it parked)
-        self.db = db
+        self.db = db if isinstance(db, ImageStore) else ImageStore(db)
         self.runner = runner
         self.comfy = ComfyProcess(cfg)
         self.notify = notify           # callable(job) for finished phone jobs

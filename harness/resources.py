@@ -143,8 +143,7 @@ async def diagnostics(m) -> dict:
     holders = []
     if model.get("server_state") in ("ready", "waking"):
         holders.append("llama-server")
-    if m.images is not None and m.images.gpu_taken:
-        holders.append("ComfyUI")
+    holders.extend(m.modules.gpu_holders())
     return {
         "as_of": time.time(),
         "vram": {"used_bytes": gpu and gpu["vram_used"], "total_bytes": gpu and gpu["vram_total"],

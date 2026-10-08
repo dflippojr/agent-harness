@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from harness_modules.images.store import ImageStore
+
 import asyncio
 import io
 import threading
@@ -78,10 +80,10 @@ def seed_done_image(m, *, iid="aaaaaaaaaaaa", width=64, height=64, operation="ge
            "model": "fast", "aspect_ratio": "1:1", "resolution": "standard",
            "width": width, "height": height, "seed": 1, "parent_id": "",
            "operation": operation, "status": "done", "created_at": 1, "scale": 4 if operation == "upscale" else 1}
-    m.db.insert_image(job)
+    ImageStore(m.db).insert_image(job)
     m.images.images_dir.mkdir(parents=True, exist_ok=True)
     m.images.path(job).write_bytes(png_rgb())
-    return m.db.get_image(iid)
+    return ImageStore(m.db).get_image(iid)
 
 
 def test_normalize_rejects_unsupported_and_empty_mask():
@@ -355,7 +357,7 @@ def test_image_paths_reject_database_id_traversal(tmp_path):
               "model": image_edit.EDIT_MODEL_ID, "aspect_ratio": "1:1", "resolution": "upload",
               "width": 64, "height": 64, "seed": 0, "parent_id": "",
               "operation": image_edit.OPERATION_UPLOAD, "status": "done", "created_at": 1}
-    m.db.insert_image(parent)
+    ImageStore(m.db).insert_image(parent)
 
     mask = png_mask()
     with pytest.raises(ToolError, match="invalid image id"):
@@ -491,7 +493,7 @@ def test_guest_gallery_limit_is_applied_after_private_filter(tmp_path):
     for image in (row("public-old01", "generate", 1), row("public-old02", "generate", 2),
                   row("private-new1", "upload", 3), row("private-new2", "edit", 4),
                   row("private-new3", "upload", 5)):
-        m.db.insert_image(image)
+        ImageStore(m.db).insert_image(image)
 
     with TestClient(create_app(m)) as client:
         guest = client.get("/images?limit=2", headers={"Tailscale-User-Login": "buddy@example.com"})
@@ -505,7 +507,7 @@ def test_delete_queued_image_makes_wait_return_deleted(tmp_path):
         job = m.images.submit("delete before the worker starts")
         result = await m.images.delete(job["id"])
         assert result == {"deleted": job["id"], "parent_id": ""}
-        assert m.db.get_image(job["id"]) is None
+        assert ImageStore(m.db).get_image(job["id"]) is None
         assert await m.images.wait(job["id"]) == {
             "id": job["id"], "status": "deleted", "error": "image was deleted"}
 
@@ -537,7 +539,7 @@ def test_delete_running_image_waits_for_worker_before_removing_files(tmp_path):
         release.set()
         result = await asyncio.wait_for(deleting, timeout=2)
         assert result == {"deleted": job["id"], "parent_id": ""}
-        assert m.db.get_image(job["id"]) is None
+        assert ImageStore(m.db).get_image(job["id"]) is None
         assert not m.images.path(job).exists()
         assert await m.images.wait(job["id"]) == {
             "id": job["id"], "status": "deleted", "error": "image was deleted"}
@@ -653,8 +655,8 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
         m2.images.images_dir.mkdir(parents=True, exist_ok=True)
         m2.images.source_path(restart_job).write_bytes(m2.images.path(parent2).read_bytes())
         m2.images.mask_path(restart_job).write_bytes(png_mask(parent2["width"], parent2["height"]))
-        m2.db.insert_image(restart_job)
-        m2.db.update_image(restart_id, status="running")
+        ImageStore(m2.db).insert_image(restart_job)
+        ImageStore(m2.db).update_image(restart_id, status="running")
         await m2.start(maintenance=False)
         recovered = await m2.images.wait(restart_id)
         assert recovered["status"] == "done"
@@ -676,10 +678,10 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
         archived = backup / live.name
         archived.write_bytes(live.read_bytes())
         await m.images.delete(done["id"], backup_dir=tmp_path / "backups")
-        assert m.db.get_image(done["id"]) is None
+        assert ImageStore(m.db).get_image(done["id"]) is None
         assert not live.exists()
         assert archived.exists()
-        assert m.db.get_image(parent["id"]) is not None
+        assert ImageStore(m.db).get_image(parent["id"]) is not None
         await m.stop()
         await m2.stop()
     asyncio.run(body())

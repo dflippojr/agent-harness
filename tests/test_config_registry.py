@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from harness_modules.images.store import ImageStore
+
 import json
 import os
 import threading
@@ -944,7 +946,7 @@ def _assert_image_edit_surfaces(manager, *, on: bool, installed: bool, yaml_enab
     assert manager.cfg.capabilities()["modules"]["image_edit"] is on
     assert manager.images is not None
     assert manager.images.edit_enabled is on
-    manager.db.insert_image({
+    ImageStore(manager.db).insert_image({
         "id": "aaaaaaaaaaaa", "session_id": "", "source": "phone", "prompt": "seed", "model": "fast",
         "aspect_ratio": "1:1", "resolution": "standard", "width": 64, "height": 64, "seed": 1,
         "parent_id": "", "operation": "generate", "status": "done", "created_at": 1,

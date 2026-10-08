@@ -30,9 +30,9 @@ APP_ROUTES = ("/api/v1/images", "/api/v1/images/{iid}", "/api/v1/images/{iid}/up
 SESSION = {"id": "s1", "kind": "agent", "project": "scratch", "owner_id": "owner", "app_id": ""}
 
 
-def images_manager(tmp_path, *, packages=None) -> Manager:
+def images_manager(tmp_path, *, packages=None, enabled=True) -> Manager:
     cfg = make_cfg(tmp_path)
-    cfg.images = config.ImagesConfig(enabled=True, work_dir=str(tmp_path / "img"))
+    cfg.images = config.ImagesConfig(enabled=enabled, work_dir=str(tmp_path / "img"))
     cfg.module_packages = packages
     return Manager(cfg, chat=Script([Completion(content="hi")]))
 

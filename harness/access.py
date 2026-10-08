@@ -29,7 +29,6 @@ MAINTENANCE = "/maintenance"
 SKILLS = "/skills"
 CHATS = "/chats"
 JOBS = "/jobs"
-IMAGES = "/images"
 MEMORY = "/memory"
 TEMPLATES = "/templates"
 SMART_APPROVALS = "/smart-approvals"
@@ -38,17 +37,16 @@ ADMIN_API = "/api/admin"
 OWNER_GET_PREFIXES = (KEYS, METRICS, MAINTENANCE, SKILLS, CHATS)
 RUNNER_PREFIX = "/runners/"
 MEMBER_FORBIDDEN_PREFIXES = (
-    KEYS, METRICS, MAINTENANCE, JOBS, IMAGES, "/gpu", "/resources",
+    KEYS, METRICS, MAINTENANCE, JOBS, "/gpu", "/resources",
     "/remote-control", MEMORY, TEMPLATES, "/notify", "/pairing-codes",
-    "/runner-pairing-codes", SMART_APPROVALS, ADMIN_API, "/api/v1/images",
+    "/runner-pairing-codes", SMART_APPROVALS, ADMIN_API,
     "/api/v1/remote-control", SKILLS, CHATS,
 )
-MEMBER_FORBIDDEN_EXACT = frozenset({CHATS, KEYS, METRICS, MAINTENANCE, JOBS, IMAGES, "/gpu", "/resources",
+MEMBER_FORBIDDEN_EXACT = frozenset({CHATS, KEYS, METRICS, MAINTENANCE, JOBS, "/gpu", "/resources",
                                     MEMORY, TEMPLATES, "/notify/test", SMART_APPROVALS})
 # First match wins; a forbidden prefix matching none of these gets a generic message.
 MEMBER_FORBIDDEN_DETAILS = (
     ((JOBS,), "members cannot use scheduled jobs"),
-    ((IMAGES, "/api/v1/images"), "members cannot use image generation"),
     (("/gpu", "/resources"), "members cannot change GPU or machine settings"),
     (("/remote-control", "/api/v1/remote-control"), "members cannot use Remote Control"),
     ((MEMORY,), "members cannot use the memory library"),
@@ -98,7 +96,7 @@ def guest_forbidden(access: Access, method: str, path: str) -> str | None:
     return "demo access is read-only"
 
 
-def member_forbidden(access: Access, method: str, path: str) -> str | None:
+def member_forbidden(access: Access, method: str, path: str, cfg=None) -> str | None:
     """Return an error detail if this member request is refused, else None.
 
     Members use the account-scoped session surface. Server authorization is authoritative even when
@@ -110,6 +108,11 @@ def member_forbidden(access: Access, method: str, path: str) -> str | None:
         return access.detail or "this household account is disabled"
     if path == ADMIN_API or path.startswith(ADMIN_API + "/"):
         return "members cannot use the owner API"
+    if cfg is not None:
+        from .modules import member_forbidden as module_refusal
+        detail = module_refusal(cfg, path)
+        if detail:
+            return detail
     if path == "/runners" or path.startswith(RUNNER_PREFIX):
         # GET /runners is the status list; /runners/{name}/… is poll/results (runner tokens, not members).
         return "members cannot use Mac or other runners"

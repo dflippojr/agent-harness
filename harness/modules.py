@@ -31,6 +31,9 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    "database_reads": ("harness.db", "_reads"),
+    "database_writes": ("harness.db", "_writes"),
+    "AsyncDatabase": ("harness.db", "AsyncDatabase"),
     "GpuExclusive": ("harness.scheduler", "GpuExclusive"),
     "QueueFull": ("harness.scheduler", "QueueFull"),
     "SLEEPING": ("harness.warmup", "SLEEPING"),
@@ -158,6 +161,7 @@ class Module:
     # Routes. Each callable returns a harness.api.RouteTable; the core installs it on the matching surface.
     owner_routes: Callable[[], Any] | None = None   # daemon routes (/images …) behind the owner/guest/member guard
     admin_paths: frozenset[str] = frozenset()       # owner routes also served under /api/admin/v1
+    member_forbidden: tuple[tuple[tuple[str, ...], str], ...] = ()  # path prefixes and refusal detail
     app_routes: Callable[[], Any] | None = None     # App API (/api/v1/…); handlers call app_auth for their scope
     public_routes: Callable[[], Any] | None = None  # public bootstrap routes (downloads, code redemption)
     app_scopes: dict[str, str] = field(default_factory=dict)        # App token scopes it adds (``images``)
@@ -250,6 +254,10 @@ class ModuleRuntime:
     def busy(self) -> bool:
         """Work queued or running: background GPU work (skill review) waits for it."""
         return False
+
+    def gpu_holders(self) -> tuple[str, ...]:
+        """Names shown in machine diagnostics while this module owns the GPU."""
+        return ()
 
     def gpu_hold(self) -> None:
         """The GPU guard paused: stop taking the GPU."""
@@ -378,6 +386,12 @@ def admin_paths(cfg) -> frozenset[str]:
     return frozenset(path for module in present(cfg) for path in module.admin_paths)
 
 
+def member_forbidden(cfg, path: str) -> str | None:
+    """Present add-ons own their member access rules, including while switched off."""
+    return next((detail for module in present(cfg) for prefixes, detail in module.member_forbidden
+                 if any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)), None)
+
+
 class ModuleHost:
     """The present modules' runtimes for one Manager, in discovery order."""
 
@@ -456,6 +470,9 @@ class ModuleHost:
 
     def busy(self) -> bool:
         return any(rt.gpu_taken or rt.busy() for rt in self)
+
+    def gpu_holders(self) -> list[str]:
+        return [name for rt in self for name in rt.gpu_holders()]
 
     def gpu_hold(self) -> None:
         for rt in self:

@@ -255,7 +255,7 @@ async def app_image_upscale(iid: str, body: AppImageUpscaleRequest, request: Req
     svc = images_runtime(request).service
     if svc is None:
         raise HarnessError(400, "image generation is disabled on this harness")
-    parent = manager(request).db.get_image(iid.removesuffix(".png"))
+    parent = svc.db.get_image(iid.removesuffix(".png"))
     if parent is None or image_edit.is_private(parent):
         raise HarnessError(404, NO_SUCH_IMAGE)
     try:
@@ -269,8 +269,7 @@ async def app_image_upscale(iid: str, body: AppImageUpscaleRequest, request: Req
 async def app_image_status(iid: str, request: Request):
     app_auth(request, "images")
     svc = images_runtime(request).service
-    db = manager(request).db
-    job = db.get_image(iid.removesuffix(".png")) if svc else None
+    job = svc.db.get_image(iid.removesuffix(".png")) if svc else None
     if job is None:
         raise HarnessError(404, NO_SUCH_IMAGE)
     if image_edit.is_private(job):
@@ -279,7 +278,7 @@ async def app_image_status(iid: str, request: Request):
         if job["status"] != "done":
             raise HarnessError(404, IMAGE_NOT_READY)
         return FileResponse(svc.path(job), media_type="image/png")
-    children = [child for child in db.image_children(job["id"]) if not image_edit.is_private(child)]
+    children = [child for child in svc.db.image_children(job["id"]) if not image_edit.is_private(child)]
     return {**job, "url": f"/api/v1/images/{job['id']}.png" if job["status"] == "done" else None,
             "children": [{"id": c["id"], "scale": c.get("scale"), "status": c["status"],
                           "upscale_model": c.get("upscale_model") or ""} for c in children]}

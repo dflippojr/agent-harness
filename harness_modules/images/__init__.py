@@ -52,6 +52,7 @@ MODULE = Module(
     runtime_enabled=_runtime_enabled,
     runtime=_runtime,
     owner_routes=_owner_routes,
+    member_forbidden=((("/images", "/api/v1/images"), "members cannot use image generation"),),
     admin_paths=frozenset({
         "/images",
         "/images/uploads",

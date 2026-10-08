@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from harness_modules.images.store import ImageStore
+
 import asyncio
 import ipaddress
 import json
@@ -557,7 +559,7 @@ def test_agent_generate_image_tool_saves_into_workspace(tmp_path):
         assert result["ok"]
         assert "assets/icon.png" in result["output"]
         assert (tmp_path / "data" / "workspaces" / s["id"] / "assets" / "icon.png").read_bytes() == PNG
-        job = m.db.list_images()[0]
+        job = ImageStore(m.db).list_images()[0]
         assert job["source"] == "agent"
         assert job["session_id"] == s["id"]
         bad = await m.images.call("generate_image", {"prompt": "x", "filename": "../../escape.png"},
@@ -641,7 +643,7 @@ def test_missing_lightning_lora_disables_only_quality_fast(tmp_path):
     assert "will not fall back" in status["modes"]["quality-fast"]["setup"]
     with pytest.raises(ToolError, match="quality-fast needs the Apache-2.0"):
         m.images.submit("a poster", model="quality-fast")
-    assert m.db.list_images() == []
+    assert ImageStore(m.db).list_images() == []
 
 
 def test_quality_fast_job_records_lora_and_shares_the_gpu_batch(tmp_path):
@@ -927,7 +929,7 @@ def test_agent_generate_image_saves_into_mac_workspace(tmp_path):
         assert "assets/icon.png" in result["output"]
         assert (tmp_path / "mac-workspaces" / s["id"] / "assets" / "icon.png").read_bytes() == PNG
         assert not (tmp_path / "data" / "workspaces").exists() or not any((tmp_path / "data" / "workspaces").rglob("*.png"))
-        job = m.db.list_images()[0]
+        job = ImageStore(m.db).list_images()[0]
         assert job["source"] == "agent"
         assert job["session_id"] == s["id"]
         assert "put_file" in runner.seen_ops

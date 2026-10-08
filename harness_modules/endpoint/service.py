@@ -282,7 +282,7 @@ def _capabilities_payload(m) -> dict:
                    for mc in available_models(m)],
         "features": {"streaming": True, "tool_calls": True, "reasoning": True,
                      "embeddings": embeddings_enabled(m),
-                     "images": bool(m.images)},
+                     **m.modules.features()},
         "model_aliases": m.cfg.endpoint.model_aliases,
         "gpu": {"shared_with_agents": True, "guard_state": m.guard.state if m.guard else "clear"},
     }
