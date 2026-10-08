@@ -366,7 +366,7 @@ def test_owner_write_that_fails_leaves_the_profile_whole(tmp_path):
 from datetime import datetime  # noqa: E402
 
 from harness.config import JobsConfig  # noqa: E402
-from harness.jobs import Cron, CronError, JobScheduler, parse_status  # noqa: E402
+from harness_modules.jobs.service import Cron, CronError, JobScheduler, parse_status  # noqa: E402
 from harness_modules.notifications.service import Notifier  # noqa: E402
 
 
@@ -406,7 +406,7 @@ def test_parse_status():
     assert parse_status("x\n**STATUS: ATTENTION: ntfy is down**") == ("attention", "ntfy is down")
     assert parse_status("STATUS: ATTENTION earlier\n...\nSTATUS: OK") == ("ok", "")
     assert parse_status("no status here") == ("", "")
-    from harness.jobs import summary
+    from harness_modules.jobs.service import summary
     report = "## Services\n| name | state |\n|---|---|\n| ntfy | up |\n\nAll 6 services are running with 0 restarts.\n\nSTATUS: OK"
     assert summary(report) == "All 6 services are running with 0 restarts."
     assert summary("x" * 500).endswith("…")
@@ -414,7 +414,7 @@ def test_parse_status():
 
 
 def test_status_line_edges_and_linear_scan():
-    from harness.jobs import summary
+    from harness_modules.jobs.service import summary
     # Leading non-word characters may span lines: the blank line and the rule go with the STATUS line.
     assert summary("Done and dusted, all good here.\n\n---\n\n**STATUS: OK**") == "Done and dusted, all good here."
     assert parse_status("the STATUS: OK line") == ("", "")  # not at the start of a line
@@ -433,7 +433,7 @@ def jobs_cfg(tmp_path):
 
 
 def add_job(m, **fields):
-    from harness.jobs import new_job_id, validate
+    from harness_modules.jobs.service import new_job_id, validate
     job = validate({"name": "Morning check", "prompt": "check things", "cron": "0 8 * * *", **fields},
                    m.cfg.projects, m.cfg.models)
     job["id"] = new_job_id()

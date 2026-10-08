@@ -2803,7 +2803,7 @@ class Runner:
         s = self.db.get_session(sid)
         extra, fields, quotes = {}, {}, []
         if s.get("job_id"):  # scheduled job: the answer's last STATUS line decides how loudly to notify (jobs.py)
-            from .jobs import parse_status
+            from .job_results import parse_status
             job_status, reason = parse_status(s["answer"]) if s["status"] == "done" else ("", "")
             fields["job_status"] = job_status
             extra = {"job_id": s["job_id"], "job_status": job_status, "job_reason": reason}

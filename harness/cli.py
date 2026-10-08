@@ -367,9 +367,6 @@ def watch(sid: str, args, after: int = 0) -> int:
 # ":int", ":float", ":bool" (true/false), ":flag" (no value), ":list" (zero or more values), ":pairs" (key=value,
 # JSON values) or ":file" (a multipart upload). GET fields go in the query string, others in the JSON body (in the
 # form when the row uploads a file). --set key=value and --json '{...}' add fields a row doesn't name.
-_JOB = ("name", "prompt", "cron", "--project", "--backend", "--model", "--notify", "--enabled:bool",
-        "--catch_up_minutes:int")
-_TEMPLATE = ("name", "prompt", "--project", "--backend", "--model")
 _REVISION = ("--revision:int", "--confirm:flag", "--dry_run:flag")
 ADMIN_COMMANDS = (
     ("me", "GET", "/me", "show the identity the server sees", ()),
@@ -451,17 +448,6 @@ ADMIN_COMMANDS = (
     ("config restart", "POST", "/config/restart", "restart the daemon to apply settings", _REVISION),
     ("maintenance status", "GET", "/maintenance", "show disk usage and maintenance state", ()),
     ("maintenance cleanup", "POST", "/maintenance/cleanup", "remove expired workspaces and data", ()),
-    ("jobs list", "GET", "/jobs", "list scheduled jobs", ()),
-    ("jobs show", "GET", "/jobs/{jid}", "show a scheduled job", ()),
-    ("jobs create", "POST", "/jobs", "schedule a job", _JOB),
-    ("jobs update", "PUT", "/jobs/{jid}", "replace a scheduled job", _JOB),
-    ("jobs delete", "DELETE", "/jobs/{jid}", "delete a scheduled job", ()),
-    ("jobs run", "POST", "/jobs/{jid}/run", "run a scheduled job now", ()),
-    ("jobs preview", "GET", "/jobs/preview", "show a cron expression's next runs", ("cron",)),
-    ("templates list", "GET", "/templates", "list task templates", ()),
-    ("templates create", "POST", "/templates", "save a task template", _TEMPLATE),
-    ("templates update", "PUT", "/templates/{tid}", "replace a task template", _TEMPLATE),
-    ("templates delete", "DELETE", "/templates/{tid}", "delete a task template", ()),
     ("remote-control list", "GET", "/remote-control", "list Remote Control folders and sessions", ()),
     ("remote-control launch", "POST", "/remote-control/{project}", "start Remote Control in a folder", ()),
     ("remote-control stop", "POST", "/remote-control/{project}/stop", "stop Remote Control in a folder", ()),
@@ -520,7 +506,6 @@ _GROUP_HELP = {
     "runner-pairing-codes": "Mac pairing codes", "models": "local models", "backends": "model backends",
     "gpu": "GPU hold", "resources": "resource guard and local model", "smart-approvals": "smart approvals",
     "config": "daemon settings", "maintenance": "disk cleanup and backups",
-    "jobs": "scheduled jobs", "templates": "task templates",
     "remote-control": "Remote Control folders",
     "sessions": "session review, checkpoints and comments", "github": "GitHub issues and PRs", "chats": "chats",
 }

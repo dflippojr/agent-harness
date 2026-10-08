@@ -166,7 +166,7 @@ These are names, not imports, and move with the config and storage split in stag
 - Notifications (`notify:` YAML section and `NotifyConfig`, the `notifications` switch, `/me`'s `notify` block,
   `access.py`'s `/notify` rule) stay in the core as names. Core code that sends a notification (canary, Remote
   Control, the image module) goes through `Manager.notifier`, a stand-in that drops everything while the module is
-  absent. The module reaches `harness.jobs.summary` through `harness.modules.job_summary` until jobs is a module.
+  absent. The module reaches the shared result protocol through `harness.modules.job_summary`.
   The old config keys (`notify.*`, `notifications.enabled`) are unchanged.
 - Session search: the FTS5 `search_index` table, its indexing as events are written and `Database.search_events`
   stay in the core (`harness/search_index.py`, `harness/db.py`), because the index lives in the session database and
@@ -193,6 +193,16 @@ These are names, not imports, and move with the config and storage split in stag
   `mcp=False` preserves its exclusion from hosted MCP tools. Absent skills add no routes, settings, metrics or tools.
   Import paths moved from `harness.skills`, `harness.skill_review`, and `harness.skill_validate` to
   `harness_modules.skills.service`, `harness_modules.skills.skill_review`, and `harness_modules.skills.skill_validate`.
+
+- Jobs: `JobsConfig`, the `jobs:` YAML section and profile switch, the jobs/templates tables and database
+  methods, scheduled-session fields, and the `/jobs` and `/templates` access rules remain core names.
+  `harness/job_results.py` is the shared STATUS and notification-summary protocol: the runner still records
+  results for existing scheduled sessions even when the jobs package is absent, and notifications does not
+  import the jobs add-on. Scheduling, owner/admin routes, settings and CLI rows live in `harness_modules/jobs`.
+  The service import moves from `harness.jobs` to `harness_modules.jobs.service`. YAML keys, registry keys,
+  API paths and `harness jobs ...` / `harness templates ...` commands are unchanged; no deprecation is needed.
+  An absent/uninstalled package contributes no routes, settings or capabilities. A present package with
+  `jobs.enabled: false` keeps cron preview, template management and registry settings; scheduling is disabled.
 
 Toolkits may expose `mutating_tools`, a collection of full tool names evaluated for the current session.
 The host combines it with `ToolGate.mutating` for native checkpoints and workspace quota enforcement.
