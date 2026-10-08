@@ -18,7 +18,9 @@ REASONS = frozenset({"manual", "retention", "revoked_app", "account_erasure"})
 def key_context(key):
     if key.get("kind") == "member":
         return audit_context.AuditContext(key["user_id"], "member", "" if key.get("bundled") else key.get("id", ""), "app_api")
-    return audit_context.AuditContext(key["id"], "app", key["id"], "app_api")
+    if key.get("kind") == "owner":
+        return audit_context.owner_context(None if key.get("bundled") else key, "app_api")
+    return audit_context.AuditContext(key["id"], "device" if key.get("kind") == "device" else "app", key["id"], "app_api")
 
 
 def namespace(session):
@@ -34,7 +36,7 @@ def clean(metadata):
             out[key] = value
         elif key == "decision" and value in ("approved", "denied"):
             out[key] = value
-        elif key == "reason" and value in REASONS:
+        elif key == "reason" and isinstance(value, str) and value in REASONS:
             out[key] = value
         elif key == "subject_trust" and value == "caller_asserted":
             out[key] = value
@@ -66,10 +68,11 @@ def record(db, session, context, action, *, target=None, kind="session", outcome
 def failures(action):
     """Rejected/interrupting service actions on a known session carry truthful content-free outcomes."""
     def decorate(fn):
-        def failure(manager, ref, context, exc):
+        def failure(manager, ref, context, exc, kind=None):
             session = manager.db.get_session(ref)
             if session:
-                record(manager.db, session, context, action,
+                label = "session.context" if action == "session.message" and kind == "app_context" else action
+                record(manager.db, session, context, label,
                        outcome="unknown" if isinstance(exc, asyncio.CancelledError) else "failure")
 
         @functools.wraps(fn)
@@ -85,7 +88,7 @@ def failures(action):
             try:
                 return await fn(manager, ref, *args, **kwargs)
             except (Exception, asyncio.CancelledError) as exc:
-                await asyncio.to_thread(failure, manager, ref, kwargs.get("context"), exc)
+                await asyncio.to_thread(failure, manager, ref, kwargs.get("context"), exc, kwargs.get("kind"))
                 raise
         return asynchronous if inspect.iscoroutinefunction(fn) else sync
     return decorate

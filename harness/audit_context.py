@@ -154,7 +154,7 @@ def clean_metadata(action: str, metadata: dict | None) -> dict:
         from .namespace_audit import clean
         out = clean(metadata)
         data = metadata or {}
-        if data.get("category") in {"app", "account"}:
+        if isinstance(data.get("category"), str) and data["category"] in {"app", "account"}:
             out["category"] = data["category"]
         if isinstance(data.get("operation_id"), str) and _ID.fullmatch(data["operation_id"]):
             out["operation_id"] = data["operation_id"]

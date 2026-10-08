@@ -644,7 +644,7 @@ def _build_parser() -> argparse.ArgumentParser:
     groups = {"projects": projects, "runner": runner}
     _add_admin_commands(sub, groups)
     private = groups["audit"].add_parser("private", help="read this App/member's private operational trail")
-    for field in ("--limit:int", "--before_id:int", "--target_id", "--action", "--outcome", "--since:float", "--until:float"):
+    for field in ("--limit:int", "--before_id:int", "--target_id", "--actor_id", "--key_id", "--action", "--outcome", "--since:float", "--until:float"):
         _add_field(private, field)
     private.set_defaults(private_audit=True)
     return parser

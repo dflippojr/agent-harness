@@ -1103,7 +1103,8 @@ async def delete_session(ref: str, request: Request):
 
 @route_table.get("/api/v1/audit")
 async def scoped_audit(request: Request, limit: int = 200, before_id: int | None = None,
-                       target_id: str | None = None, action: str | None = None, outcome: str | None = None,
+                       target_id: str | None = None, actor_id: str | None = None, key_id: str | None = None,
+                       action: str | None = None, outcome: str | None = None,
                        since: float | None = None, until: float | None = None):
     m = mgr(request)
     key = auth(request, "sessions")
@@ -1114,6 +1115,8 @@ async def scoped_audit(request: Request, limit: int = 200, before_id: int | None
     else:
         raise HarnessError(403, "private audit is available only to its App or member")
     return await store.aio.namespace_audit_page(scope, limit, before_id, target_id=target_id, action=action,
+                                                actor_id=actor_id, key_id=key_id,
+                                                login_days=key.get("retention_days") or 30,
                                                 outcome=outcome, since=since, until=until)
 
 

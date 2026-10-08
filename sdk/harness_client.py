@@ -33,6 +33,7 @@ JSON_MEDIA_TYPE = "application/json"
 
 # Used by validate_openapi() and CI. Paths use the server's OpenAPI templates, not formatted runtime ids.
 SDK_OPERATIONS = {
+    "audit": ("get", "/api/v1/audit"),
     "info": ("get", "/api/v1"), "pair": ("post", "/api/v1/pair"),
     "backends": ("get", "/api/v1/backends"), "create_session": ("post", "/api/v1/sessions"),
     "sessions": ("get", "/api/v1/sessions"), "session": ("get", "/api/v1/sessions/{ref}"),
@@ -221,6 +222,7 @@ class Harness:
         self.base = base_url.rstrip("/")
         self.token = token
         self.origin = origin
+        self.audit_warning = ""
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         if origin:
             headers["Origin"] = origin
@@ -265,6 +267,7 @@ class Harness:
 
     def _call(self, method: str, path: str, **kwargs) -> Any:
         resp = self.client.request(method, f"/api/v1{path}", **kwargs)
+        self.audit_warning = resp.headers.get("X-Agent-Harness-Audit-Warning", "")
         if resp.status_code >= 400:
             self._raise_response(resp)
         return resp.json() if resp.headers.get("content-type", "").startswith(JSON_MEDIA_TYPE) else resp.content

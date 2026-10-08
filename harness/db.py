@@ -2162,12 +2162,16 @@ class Database:
 
     @_reads
     def namespace_audit_page(self, namespace: str, limit: int = 200, before_id: int | None = None, *,
-                             target_id: str | None = None, action: str | None = None,
+                             target_id: str | None = None, actor_id: str | None = None, key_id: str | None = None,
+                             action: str | None = None, login_days: float = 30,
                              outcome: str | None = None, since: float | None = None,
                              until: float | None = None) -> dict:
         limit = max(1, min(int(limit), 500))
-        where, args = ["namespace = ?", "(expires_at IS NULL OR expires_at > ?)"], [namespace, time.time()]
+        now = time.time()
+        where = ["namespace = ?", "(expires_at IS NULL OR expires_at > ?)", "(session_id <> '' OR ts > ?)"]
+        args = [namespace, now, now - min(30, login_days or 30) * 86400]
         for column, operator, value in (("id", "<", before_id), ("target_id", "=", target_id),
+                                         ("actor_id", "=", actor_id), ("key_id", "=", key_id),
                                          ("action", "=", action), ("outcome", "=", outcome),
                                          ("ts", ">=", since), ("ts", "<", until)):
             if value is not None:

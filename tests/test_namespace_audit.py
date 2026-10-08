@@ -1,5 +1,6 @@
 """#471 private namespaces, content minimization and external-effect failure evidence. Temp data only."""
 import asyncio
+import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -224,3 +225,153 @@ def test_sdk_incomplete_is_not_retryable():
         Harness._raise_response(response)
     assert not caught.value.retryable
     assert caught.value.may_have_completed and caught.value.operation_id == "receipt-id"
+
+
+def test_failed_known_action_has_truthful_outcome(setup):
+    _, client, _, _, headers = setup
+    sid = create(client, headers[0])
+    response = client.post(f"/api/v1/sessions/{sid}/messages", headers=headers[0], json={"content": " "})
+    assert response.status_code == 400
+    rows = page(client, headers[0], action="session.message")["items"]
+    assert len(rows) == 1 and rows[0]["outcome"] == "failure"
+
+
+def test_interrupted_erase_survives_restart_blocks_automatic_repeat(setup, monkeypatch):
+    m, _, _, apps, headers = setup
+    scope = apps[0][0]["id"]
+    async def interrupted():
+        async with namespace_audit.erase_operation(m.db, scope, None, "app", "retention", 1):
+            raise asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(interrupted())
+    reopened = Database(m.db.main.path)
+    try:
+        with pytest.raises(HarnessError) as caught:
+            namespace_audit.refuse_unresolved_erase(SimpleNamespace(main=reopened), scope)
+        assert caught.value.may_have_completed
+        assert reopened.audit_page(action="namespace.erase")["items"][0]["actor_kind"] == "system"
+    finally:
+        reopened.close()
+
+
+def test_login_finish_truthful_and_settlement_error_visible(setup, monkeypatch):
+    m, client, _, apps, headers = setup
+    scope = apps[0][0]["id"]
+    store = namespace_audit.LoginStore(m.db, scope, "delegated-user", backend="claude")
+    context = namespace_audit.key_context(apps[0][0])
+    attempt = SimpleNamespace(attempt_id="known-attempt", state="completed", audit_incomplete="")
+    store.finish(context, "operation-a")(attempt)
+    row = page(client, headers[0], action="login.finish")["items"][0]
+    assert row["outcome"] == "ok" and row["metadata"]["subject_trust"] == "caller_asserted"
+    assert row["metadata"]["backend"] == "claude"
+    assert row["actor_id"] == scope
+    def fail(*args, **kwargs):
+        raise OSError(PRIVATE)
+    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    store.finish(context, "operation-b")(attempt)
+    assert attempt.audit_incomplete == "operation-b"
+
+
+def test_erase_app_drops_private_audit_and_only_receipts_remain(setup, monkeypatch):
+    m, client, _, apps, headers = setup
+    scope = apps[0][0]["id"]
+    sid = create(client, headers[0])
+    effect = AsyncMock()
+    monkeypatch.setattr("harness.cli_domains.drop_app_volumes", effect)
+    m.db.revoke_api_key(scope)
+    asyncio.run(m.erase_app(scope))
+    assert not m.db.store_path(scope).exists()
+    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    assert len(rows) == 2
+    assert all(r["actor_id"] == "system" and r["metadata"]["reason"] == "revoked_app" for r in rows)
+    assert sid not in json.dumps(rows) and PRIVATE not in json.dumps(rows)
+
+
+def test_checksums_and_record_does_not_resurrect_erased_detail(setup):
+    m, client, _, apps, headers = setup
+    sid = create(client, headers[0])
+    session = m.db.get_session(sid)
+    store = m.db.for_app(apps[0][0]["id"])
+    row = dict(store.conn.execute("SELECT * FROM namespace_audit").fetchone())
+    values = [row[k] for k in ("ts", "namespace", "session_id", "actor_id", "actor_kind", "key_id", "source",
+                              "target_id", "target_kind", "action", "outcome", "metadata", "expires_at")]
+    assert row["checksum"] == hashlib.sha256(json.dumps(values, separators=(',', ':')).encode()).hexdigest()
+    m.db.delete_session(sid)
+    namespace_audit.record(m.db, session, None, "session.cancel")
+    assert page(client, headers[0])["items"] == []
+    assert m.db.web.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
+
+
+def test_concurrent_delete_runs_effect_once_and_refuses_message(setup, monkeypatch):
+    m, client, _, _, headers = setup
+    sid = create(client, headers[0])
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def effect(session):
+            entered.set()
+            await release.wait()
+        fake = AsyncMock(side_effect=effect)
+        monkeypatch.setattr(m, "_erase_cli_history", fake)
+        first = asyncio.create_task(m.erase_session(sid))
+        await entered.wait()
+        second = asyncio.create_task(m.erase_session(sid))
+        with pytest.raises(HarnessError, match="erasure"):
+            await m.send(sid, PRIVATE)
+        release.set()
+        assert await asyncio.gather(first, second) == [True, False]
+        fake.assert_awaited_once()
+    asyncio.run(run())
+    assert len(m.db.main.audit_page(action="namespace.erase")["items"]) == 2
+
+
+def test_shortened_app_login_retention_applies_to_reads_immediately(setup, monkeypatch):
+    m, client, _, apps, headers = setup
+    key = apps[0][0]
+    now = time.time()
+    store = m.db.for_app(key["id"])
+    store.insert_namespace_audit(key["id"], "", namespace_audit.key_context(key), "attempt", "login",
+                                 "login.start", "started", {}, 30)
+    m.db.set_app_retention(key["id"], 1)
+    monkeypatch.setattr("harness.db.time.time", lambda: now + 2 * DAY)
+    assert page(client, headers[0])["items"] == []
+    asyncio.run(m.sweep_app_data(now + 2 * DAY))
+    assert store.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
+
+
+def test_sdk_audit_cursor_filters_and_gap_warning():
+    seen = []
+    def respond(request):
+        seen.append(request)
+        return httpx.Response(200, json={"items": [], "next_before_id": None},
+                              headers={"X-Agent-Harness-Audit-Warning": "audit_gap"})
+    with Harness("https://unused.invalid") as sdk:
+        sdk.client.close()
+        sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(respond))
+        assert sdk.audit(limit=10, before_id=42, action="login.finish")["items"] == []
+        assert seen[0].url.path == "/api/v1/audit" and seen[0].url.params["before_id"] == "42"
+        assert sdk.audit_warning == "audit_gap"
+
+
+def test_cli_private_reader_uses_scoped_api(monkeypatch, capsys):
+    from harness import cli
+    seen = []
+    monkeypatch.setattr("sys.argv", ["harness", "audit", "private", "--limit", "10", "--before-id", "42",
+                                    "--actor-id", "app-a", "--key-id", "app-a"])
+    monkeypatch.setattr(cli, "configure", lambda path: {})
+    monkeypatch.setattr(cli, "api", lambda method, path, **kwargs: seen.append((method, path, kwargs)) or {"items": []})
+    assert cli.main() == 0
+    assert seen == [("GET", "/audit", {"prefix": "/api/v1", "params": {
+        "limit": 10, "before_id": 42, "actor_id": "app-a", "key_id": "app-a"}})]
+    assert '"items"' in capsys.readouterr().out
+
+
+def test_metadata_allowlist_and_actor_truth():
+    assert namespace_audit.clean({"fields": ["prompt", "output", PRIVATE], "count": True,
+                                   "sessions": -1, "reason": [PRIVATE], "decision": PRIVATE,
+                                   "subject_trust": "verified", "secret": PRIVATE}) == {"fields": ["output", "prompt"]}
+    assert namespace_audit.clean({"count": 3, "sessions": 2, "reason": "retention", "decision": "approved",
+                                  "subject_trust": "caller_asserted"}) == {
+                                      "count": 3, "sessions": 2, "reason": "retention", "decision": "approved",
+                                      "subject_trust": "caller_asserted"}
+    assert namespace_audit.key_context({"id": "device-a", "kind": "device"}).actor_kind == "device"
+    assert namespace_audit.key_context({"id": "", "kind": "owner", "bundled": True}).actor_id == "owner"

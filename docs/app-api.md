@@ -5,13 +5,13 @@
 `GET /api/v1/audit` returns `{items, next_before_id}` for the authenticated App's store, or for the authenticated
 member alone in Web's store. It requires the `sessions` scope. Owner and device tokens cannot use this private
 reader. `sessions:all` grants no additional audit visibility. There is no HTTP audit edit/delete operation.
-Filters are `target_id`, `action`, `outcome`, `since` (inclusive server epoch seconds), `until` (exclusive),
+Filters are `target_id`, `actor_id`, `key_id`, `action`, `outcome`, `since` (inclusive server epoch seconds), `until` (exclusive),
 `limit` (1–500), and `before_id`. Results sort by immutable id descending; pass `next_before_id` to continue.
 Foreign target ids return an empty page. Owner review reads aggregate lifecycle metadata in the main store only;
 it never opens private stores to answer an audit query.
 
 Use `Harness.audit(limit=100, action="session.message")` in the Python SDK. Use `harness audit private` with an
-App token or the existing authenticated member transport for CLI review; `--before-id`, `--target-id`, `--action`,
+App token or the existing authenticated member transport for CLI review; `--before-id`, `--target-id`, `--actor-id`, `--key-id`, `--action`,
 `--outcome`, `--since` and `--until` have the same meanings. `harness audit list` remains the owner's main-store
 reader. No new Web review page is included.
 
@@ -44,7 +44,8 @@ Provider login and erasure require a durable `started` intent before effects. Fa
 unresolved aggregate erasure blocks subsequent erasures in that namespace, including maintenance, because retaining
 the affected private session id in main would violate the erasure contract. The machine owner must inspect local
 and provider state before resolving such evidence offline. Ordinary actions keep working on an audit gap, with
-`X-Agent-Harness-Audit-Warning: audit_gap` and a content-free server warning; the missing evidence is not invented.
+`X-Agent-Harness-Audit-Warning: audit_gap` and a content-free server warning; the SDK exposes the last response's
+warning as `Harness.audit_warning`. The missing evidence is not invented.
 
 Audit is append-only through application writes except lifecycle erasure and retention; per-row SHA-256 checksums
 in private stores help offline inspection. The machine owner remains trusted: these are not tamper-proof storage.

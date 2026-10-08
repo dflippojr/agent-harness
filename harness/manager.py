@@ -924,7 +924,7 @@ class Manager:
         return {"checkpoints": items, "can_rewind": supported and not hosted, "can_fork": supported, "hosted": hosted,
                 "parent_id": s.get("parent_id", ""), "fork_turn": s.get("fork_turn", 0)}
 
-    OPERATIONS = {"rewind": "a rewind", "fork": "a fork", "review": "a merge, push or discard"}
+    OPERATIONS = {"rewind": "a rewind", "fork": "a fork", "review": "a merge, push or discard", "erase": "an erasure"}
 
     def _refuse_during_operation(self, sid: str) -> None:
         op = self.operations.get(sid)
@@ -1732,7 +1732,23 @@ class Manager:
             await asyncio.to_thread(namespace_audit.refuse_unresolved_erase, self.db, scope)
             async with namespace_audit.erase_operation(self.db, scope, context,
                                                       "app" if s.get("app_id") else "account", reason, 1):
-                return await self._erase_session(sid)
+                async with self._erase_claim(sid):
+                    return await self._erase_session(sid)
+
+    @contextlib.asynccontextmanager
+    async def _erase_claim(self, sid):
+        claimed = False
+        def claim():
+            nonlocal claimed
+            self._refuse_during_operation(sid)
+            self.operations[sid] = "erase"
+            claimed = True
+        try:
+            await self.db.for_session(sid).awrite(claim)
+            yield
+        finally:
+            if claimed:
+                self.operations.pop(sid, None)
 
     async def _erase_session(self, sid: str) -> bool:
         """Erase session `sid` and everything tied to it: stop it if it runs, remove its sandbox, its hosted CLI's own
@@ -1778,7 +1794,7 @@ class Manager:
             try:
                 remove_tree(storage.require_contained(Path(s["workspace"]), dirs["workspaces"]))
             except storage.ContainmentError:
-                log.warning("not removing the workspace of %s: it is outside the workspaces root", s["id"])
+                log.warning("not removing a session workspace outside the workspaces root")
         remove_tree(dirs["checkpoints"] / s["id"])
         (dirs["transcripts"] / f"{s['id']}.md").unlink(missing_ok=True)
 
@@ -1787,7 +1803,10 @@ class Manager:
             await asyncio.to_thread(namespace_audit.refuse_unresolved_erase, self.db, app_id)
             async with namespace_audit.erase_operation(self.db, app_id, context, "app", reason,
                                                       len(self.db.app_session_ids(app_id))):
-                await self._erase_app(app_id)
+                async with contextlib.AsyncExitStack() as claims:
+                    for sid in self.db.app_session_ids(app_id):
+                        await claims.enter_async_context(self._erase_claim(sid))
+                    await self._erase_app(app_id)
 
     async def _erase_app(self, app_id: str) -> None:
         """Erase a revoked App's store and folder and its hosted CLIs' state and login volumes (#371), leaving a
@@ -1825,7 +1844,7 @@ class Manager:
                 await self.erase_app(row["id"])
                 report["apps_erased"].append(row["id"])
             except Exception:  # noqa: BLE001 - the next sweep tries again
-                log.exception("could not erase App %s", row["id"])
+                log.warning("App erasure incomplete; inspect aggregate receipt")
         defaults = {k["id"]: k.get("retention_days") for k in self.db.main.list_api_keys()}
         for app_id in defaults:
             if not self.db.store_path(app_id).is_file() or app_id == "app-web":
