@@ -432,26 +432,45 @@ class Harness:
             if e.status != 409:  # 409: already answered (e.g. after a reconnect)
                 raise
 
+    def _drive(self, sid: str, by_name: dict[str, Tool], result: RunResult, on_event: Callable[[dict], None] | None,
+               after: int = 0, confirm_replays: bool = False) -> RunResult:
+        handled: set[str] = set()
+        for call in self.pending_tool_calls(sid):
+            self._serve_tool_call(sid, by_name, handled, call)
+        for event in self.events(sid, after=after):
+            result.events.append(event)
+            if on_event:
+                on_event(event)
+            if event["type"] == "app_tool_call":
+                call = {**event["data"]}
+                # a replayed event may describe a call that was answered or expired since
+                if call["call_id"] not in handled and (
+                        not confirm_replays
+                        or any(c["call_id"] == call["call_id"] for c in self.pending_tool_calls(sid))):
+                    self._serve_tool_call(sid, by_name, handled, call)
+            if event["type"] == "run_finished":
+                break
+        result.session = self.session(sid)
+        return result
+
     def run(self, prompt: str, tools: list[Tool] | None = None, on_event: Callable[[dict], None] | None = None,
             **create_args) -> RunResult:
         """Create a session and serve its tool calls until it ends."""
         by_name = {t.name: t for t in tools or []}
         s = self.create_session(prompt, tools=tools, **create_args)
-        result = RunResult(session=s)
-        handled: set[str] = set()
+        return self._drive(s["id"], by_name, RunResult(session=s), on_event)
 
-        for call in self.pending_tool_calls(s["id"]):
-            self._serve_tool_call(s["id"], by_name, handled, call)
-        for event in self.events(s["id"]):
-            result.events.append(event)
-            if on_event:
-                on_event(event)
-            if event["type"] == "app_tool_call":
-                self._serve_tool_call(s["id"], by_name, handled, {**event["data"]})
-            if event["type"] == "run_finished":
-                break
-        result.session = self.session(s["id"])
-        return result
+    def attach(self, sid: str, tools: list[Tool] | None = None,
+               on_event: Callable[[dict], None] | None = None) -> RunResult:
+        """Attach to an existing session's current run: serve its pending App tool calls and return the result.
+
+        Sends and creates nothing. A finished session is returned as is. Only one driver should own a session."""
+        s = self.session(sid)
+        result = RunResult(session=s)
+        if s.get("status") in ("done", "failed", "cancelled"):
+            return result
+        return self._drive(sid, {t.name: t for t in tools or []}, result, on_event,
+                           after=s.get("last_event_seq") or 0, confirm_replays=True)
 
     # images
     def generate_image(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", wait: bool = True,
