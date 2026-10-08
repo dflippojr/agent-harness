@@ -1136,6 +1136,43 @@ async def chat_events(ref: str, request: Request, after: int = 0, follow: bool =
     return conversation_event_stream(request, sid, after, follow)
 
 
+def _key_origins(body: dict, kind: str) -> list:
+    if not body.get("origins"):
+        return []
+    if kind != "owner":
+        raise HarnessError(400, "browser origins on manually minted keys are owner-only; pair app tokens")
+    raw_origins = body["origins"]
+    if not isinstance(raw_origins, list) or not all(isinstance(value, str) for value in raw_origins):
+        raise HarnessError(400, "origins must be a list of browser origins")
+    from .apps import normalize_origin
+    try:
+        return list(dict.fromkeys(normalize_origin(value) for value in raw_origins))
+    except ValueError as e:
+        raise HarnessError(400, str(e))
+
+
+@api_router.get("/keys")
+async def list_keys(request: Request):
+    return mgr(request).db.list_api_keys()
+
+
+@api_router.post("/keys", status_code=201)
+async def create_key(request: Request):
+    body = await request.json()
+    from .admin import parse_key_spec
+    name, scopes, kind = parse_key_spec(body)
+    origins = _key_origins(body, kind)
+    row, key = mgr(request).db.create_api_key(name, scopes, kind, origins)
+    return {**row, "key": key}
+
+
+@api_router.delete("/keys/{kid}", status_code=204)
+async def revoke_key(kid: str, request: Request):
+    if not mgr(request).db.revoke_api_key(kid):
+        raise HarnessError(404, "no such active key")
+    return Response(status_code=204)
+
+
 def create_app(manager: Manager | None = None) -> FastAPI:
     # Built now, not in the lifespan: which add-on modules are present decides which routes exist.
     manager = manager or Manager(config_mod.load())
@@ -1157,8 +1194,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     app.add_exception_handler(HarnessError, harness_error)
     web_router.install(app)
     app.mount("/static", StaticFiles(directory=WEB), name="static")
-    from . import apps, endpoint, modules
-    endpoint.register(app, mgr)
+    from . import apps, modules
     apps.register(app, manager.cfg)
     api_router.install(app)
     modules.install_routes(app, manager.cfg, "owner")

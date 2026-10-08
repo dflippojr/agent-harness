@@ -26,12 +26,10 @@ import re
 import time
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .config import ModelConfig
-from .manager import HarnessError
-from .scheduler import GpuExclusive, QueueFull
+from harness.modules import ModelConfig, GpuExclusive, QueueFull
 
 log = logging.getLogger("harness.endpoint")
 
@@ -159,7 +157,7 @@ async def _acquire_slot(m, flavor: str, path: str, finish) -> tuple[object | Non
 async def _ensure_model(m, model, flavor: str, finish) -> JSONResponse | None:
     """Load the local model if it's parked (resource guard lazy loading), or the 503 to send while RAM is short or
     while it's parked and can't load (a NO_GPU route during a GPU hold; GPU routes got their 503 at the slot)."""
-    from .warmup import SLEEPING, UNLOADED
+    from harness.modules import SLEEPING, UNLOADED
     if m.warmer.parked(model) and m.warmer.blocked():
         finish(503)
         held = m.guard is not None and (m.guard.active or m.guard.manual)
@@ -288,65 +286,3 @@ def _capabilities_payload(m) -> dict:
         "model_aliases": m.cfg.endpoint.model_aliases,
         "gpu": {"shared_with_agents": True, "guard_state": m.guard.state if m.guard else "clear"},
     }
-
-
-def _key_origins(body: dict, kind: str) -> list:
-    if not body.get("origins"):
-        return []
-    if kind != "owner":
-        raise HarnessError(400, "browser origins on manually minted keys are owner-only; pair app tokens")
-    raw_origins = body["origins"]
-    if not isinstance(raw_origins, list) or not all(isinstance(value, str) for value in raw_origins):
-        raise HarnessError(400, "origins must be a list of browser origins")
-    from .apps import normalize_origin
-    try:
-        return list(dict.fromkeys(normalize_origin(value) for value in raw_origins))
-    except ValueError as e:
-        raise HarnessError(400, str(e))
-
-
-def register(app: FastAPI, mgr) -> None:
-    @app.get("/v1/models")
-    async def v1_models(request: Request):
-        m = mgr(request)
-        if not m.cfg.endpoint.enabled:
-            return error(flavor_of(request), 404, "not_found_error", "the inference endpoint is disabled")
-        if authenticate(m, request) is None:
-            return error(flavor_of(request), 401, "authentication_error", BAD_KEY)
-        return _models_payload(m)
-
-    @app.get("/v1/capabilities")
-    async def v1_capabilities(request: Request):
-        m = mgr(request)
-        if not m.cfg.endpoint.enabled or authenticate(m, request) is None:
-            return error("openai", 401, "authentication_error", BAD_KEY)
-        return _capabilities_payload(m)
-
-    def route_handler(path: str):
-        async def handler(request: Request):
-            return await proxy(mgr(request), request, path)
-        return handler
-
-    for path in ROUTES:
-        app.add_api_route(path, route_handler(path), methods=["POST"], include_in_schema=False)
-
-
-    # key management (web app / local CLI; protected like the rest of the daemon, not by API keys)
-    @app.get("/keys")
-    async def list_keys(request: Request):
-        return mgr(request).db.list_api_keys()
-
-    @app.post("/keys", status_code=201)
-    async def create_key(request: Request):
-        body = await request.json()
-        from .admin import parse_key_spec
-        name, scopes, kind = parse_key_spec(body)
-        origins = _key_origins(body, kind)
-        row, key = mgr(request).db.create_api_key(name, scopes, kind, origins)
-        return {**row, "key": key}
-
-    @app.delete("/keys/{kid}", status_code=204)
-    async def revoke_key(kid: str, request: Request):
-        if not mgr(request).db.revoke_api_key(kid):
-            raise HarnessError(404, "no such active key")
-        return Response(status_code=204)

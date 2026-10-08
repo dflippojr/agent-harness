@@ -69,6 +69,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     __init__.py runtime.py routes.py service.py mac_client.py
   remote_control/        Claude Remote Control and owner-only folder discovery (formerly harness/remote_control.py)
     __init__.py runtime.py routes.py settings.py service.py folder_discovery.py discovery_paths.py discovery_api.py
+  endpoint/              OpenAI/Anthropic inference, request accounting and embeddings proxy (formerly harness/endpoint.py)
+    __init__.py runtime.py routes.py settings.py service.py metrics.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
@@ -192,8 +194,17 @@ These are names, not imports, and move with the config and storage split in stag
 - `db.py` and its migrations: the `images` table.
 - `access.py`: members are refused `/images` paths (harmless when the routes are absent).
 - `checkpoints.MUTATING_TOOLS` lists `generate_image`; the module also declares it through `ToolGate.mutating`.
-- `resources.py` and `endpoint.py` read `manager.images` for the ComfyUI GPU holder and the `/v1` `features.images`
+- `resources.py` and `harness_modules/endpoint/service.py` read `manager.images` for the ComfyUI GPU holder and the `/v1` `features.images`
   flag.
+- Endpoint: `EndpointConfig`, the `endpoint:` YAML section and profile switch, the shared `InferenceGate`,
+  `endpoint_requests` table and database accounting methods remain core names. `/keys`, its admin API and CLI
+  stay in core because Apps and owner credentials need them without inference. All URLs, auth, response shapes,
+  configuration keys and CLI commands are unchanged; no deprecation is needed. The add-on owns the `/v1` inference
+  and discovery routes, embeddings proxy, request logging, `endpoint.*` settings, queue initialization and
+  `harness_endpoint_*` metrics. Absent/uninstalled endpoint packages contribute no inference routes, settings or
+  metrics; a present but disabled module retains settings and the existing disabled responses. The import path
+  moved from `harness.endpoint` to `harness_modules.endpoint.service`. The image capability still reads
+  `manager.images`; image-name cleanup is reserved for a later PR.
 - Notifications (`notify:` YAML section and `NotifyConfig`, the `notifications` switch, `/me`'s `notify` block,
   `access.py`'s `/notify` rule) stay in the core as names. Core code that sends a notification (canary, Remote
   Control, the image module) goes through `Manager.notifier`, a stand-in that drops everything while the module is

@@ -53,15 +53,6 @@ def check_web(cfg: Config) -> list[str]:
     return errors
 
 
-def check_endpoint(cfg: Config) -> list[str]:
-    errors = []
-    if not module_installed(cfg, "local_model"):
-        errors.append("endpoint requires the local_model module")
-    if not cfg.models:
-        errors.append("endpoint requires a configured local model")
-    return errors
-
-
 def check_gpu_guard(cfg: Config) -> list[str]:
     errors = []
     if not module_installed(cfg, "local_model"):
@@ -78,8 +69,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
     """
     if name == "web":
         cfg.web.enabled = enabled
-    elif name == "endpoint":
-        cfg.endpoint.enabled = enabled
     elif name == "gpu_guard":
         cfg.gpu_guard.enabled = enabled
 
@@ -91,11 +80,6 @@ def _get_module_enabled(cfg: Config, name: str) -> bool:
 
 def apply_cleanup_interval(manager, old, new) -> None:
     manager.maintenance.reschedule()
-
-
-def apply_endpoint_queue(manager, old, new) -> None:
-    manager.runner.gate.max_waiting = manager.cfg.endpoint.max_waiting
-    manager.runner.gate.fair_seconds = manager.cfg.endpoint.agent_fair_seconds
 
 
 def _lt(a: float, b: float) -> bool:
@@ -331,30 +315,6 @@ def _get_quote(cfg: Config):
 
 def _set_quote(cfg: Config, value):
     cfg.web.quote_check = bool(value)
-
-
-def _get_max_waiting(cfg: Config):
-    return cfg.endpoint.max_waiting
-
-
-def _set_max_waiting(cfg: Config, value):
-    cfg.endpoint.max_waiting = int(value)
-
-
-def _get_fair(cfg: Config):
-    return cfg.endpoint.agent_fair_seconds
-
-
-def _set_fair(cfg: Config, value):
-    cfg.endpoint.agent_fair_seconds = float(value)
-
-
-def _get_req_timeout(cfg: Config):
-    return cfg.endpoint.request_timeout_seconds
-
-
-def _set_req_timeout(cfg: Config, value):
-    cfg.endpoint.request_timeout_seconds = float(value)
 
 
 def _get_gpu_poll(cfg: Config):
@@ -594,18 +554,6 @@ STATIC_ADMIN: list[SettingSpec] = [
     _bool("web.quote_check", "Quote checking",
           "Require quoted passages in final answers to appear in something the agent read.",
           "Web", True, _get_quote, _set_quote, ("web", "quote_check"), modules=("web",)),
-    _int("endpoint.max_waiting", "Endpoint queue depth",
-         "Inference requests waiting for the GPU before new ones get 429.",
-         "Endpoint", 4, _get_max_waiting, _set_max_waiting, 0, 32, ("endpoint", "max_waiting"),
-         modules=("endpoint",), live_apply=apply_endpoint_queue),
-    _float("endpoint.agent_fair_seconds", "Agent fairness (seconds)",
-           "After an agent turn waits this long, new endpoint requests queue behind it.",
-           "Endpoint", 90, _get_fair, _set_fair, 10, 600, ("endpoint", "agent_fair_seconds"),
-           modules=("endpoint",), live_apply=apply_endpoint_queue),
-    _float("endpoint.request_timeout_seconds", "Endpoint request timeout (seconds)",
-           "Give up on a hung inference request after this long.",
-           "Endpoint", 1800, _get_req_timeout, _set_req_timeout, 30, 7200,
-           ("endpoint", "request_timeout_seconds"), modules=("endpoint",)),
     _float("gpu_guard.poll_seconds", "GPU guard poll (seconds)",
            "How often the GPU guard looks for games or Plex transcodes.",
            GPU_GUARD, 10, _get_gpu_poll, _set_gpu_poll, 2, 60, ("gpu_guard", "poll_seconds"),
@@ -651,10 +599,6 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for web_search / web_fetch. Does not install the web module.",
           "Features", False, _enable_get("web"), _enable_set("web"), ("web", "enabled"),
           apply_mode="daemon_restart", modules=("web",), enable_check=check_web),
-    _bool("endpoint.enabled", "Inference endpoint",
-          "Runtime enable for the OpenAI/Anthropic-compatible endpoint.",
-          "Features", False, _enable_get("endpoint"), _enable_set("endpoint"), ("endpoint", "enabled"),
-          apply_mode="daemon_restart", modules=("endpoint",), enable_check=check_endpoint),
     _bool("gpu_guard.enabled", GPU_GUARD,
           "Runtime enable for pausing the model while a game or Plex transcode needs the GPU.",
           "Features", False, _enable_get("gpu_guard"), _enable_set("gpu_guard"), ("gpu_guard", "enabled"),

@@ -205,8 +205,6 @@ class Manager:
         self.settings.apply_overlay()
         self.settings.manager = self
         self.runner.settings = self.settings
-        self.runner.gate.max_waiting = cfg.endpoint.max_waiting
-        self.runner.gate.fair_seconds = cfg.endpoint.agent_fair_seconds
         self._init_modules(cfg, chat)
         self._init_services(cfg)
 

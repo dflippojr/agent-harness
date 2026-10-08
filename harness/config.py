@@ -24,7 +24,6 @@ DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
 # Core switches whose on/off is ``cfg.<section>.enabled``.
 MODULE_ENABLE_SECTIONS = {
     "web": "web",
-    "endpoint": "endpoint",
     "gpu_guard": "gpu_guard",
 }
 # Core switches the installer selects and nothing turns off at runtime.
@@ -333,7 +332,7 @@ class CanaryConfig:
 
 @dataclass
 class EndpointConfig:
-    """OpenAI/Anthropic-compatible inference endpoint for other tools (endpoint.py)."""
+    """OpenAI/Anthropic-compatible inference endpoint for other tools (harness_modules/endpoint)."""
     enabled: bool = False
     default_model: str = ""                 # model for unknown names; default: the harness default model
     model_aliases: dict[str, str] = field(default_factory=dict)  # fnmatch pattern -> configured model
