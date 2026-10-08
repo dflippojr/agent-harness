@@ -150,7 +150,7 @@ class Module:
     owner_routes: Callable[[], Any] | None = None   # daemon routes (/images …) behind the owner/guest/member guard
     admin_paths: frozenset[str] = frozenset()       # owner routes also served under /api/admin/v1
     app_routes: Callable[[], Any] | None = None     # App API (/api/v1/…); handlers call app_auth for their scope
-    public_routes: Callable[[], Any] | None = None  # unauthenticated routes (none today)
+    public_routes: Callable[[], Any] | None = None  # public bootstrap routes (downloads, code redemption)
     app_scopes: dict[str, str] = field(default_factory=dict)        # App token scopes it adds (``images``)
     app_capabilities: dict[str, str] = field(default_factory=dict)  # app.capabilities value -> the scope it needs
     # Agent tools: the runtime's ``toolkit()`` supplies schemas and handlers; this says when it is offered.
