@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import stat
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -316,3 +318,80 @@ def test_isolated_call_spawns_at_most_two_git_processes(tmp_path, monkeypatch):
     result = git(repo, "config", "--get", "remote.origin.url")
     assert result.out.strip() == "https://example.com/x.git"
     assert len(calls) <= 2, calls
+
+
+def test_concurrent_git_calls_serialize_copy_run_copy(tmp_path, monkeypatch):
+    """A reader copying back must not overwrite refs created by a concurrent call (#426)."""
+    import harness.projects as projects
+
+    repo = make_repo(tmp_path / "repo")
+    metadata = repo / ".git"
+    copying_back = threading.Event()
+    release_copy = threading.Event()
+    second_resolved = threading.Event()
+    overlapping_copy = threading.Event()
+    real_copy = projects._copy_git_state
+    real_resolve = projects._resolve_workspace_git
+
+    def resolve(work):
+        result = real_resolve(work)
+        if copying_back.is_set():
+            second_resolved.set()
+        return result
+
+    def copy_state(src, dst):
+        if dst == metadata and not copying_back.is_set():
+            copying_back.set()
+            assert release_copy.wait(10), "test did not release copy-back"
+        elif src == metadata and copying_back.is_set() and not release_copy.is_set():
+            overlapping_copy.set()
+        real_copy(src, dst)
+
+    monkeypatch.setattr(projects, "_resolve_workspace_git", resolve)
+    monkeypatch.setattr(projects, "_copy_git_state", copy_state)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(git, repo, "status", "--porcelain")
+        try:
+            assert copying_back.wait(10), "first call did not reach copy-back"
+            # An equivalent path must use the same metadata lock.
+            second = pool.submit(git, repo / ".", "update-ref", "refs/heads/concurrent", "HEAD")
+            assert second_resolved.wait(10), "second call did not resolve metadata"
+            overlapped = overlapping_copy.wait(0.5)
+        finally:
+            release_copy.set()
+        assert first.result(timeout=10).code == 0
+        assert second.result(timeout=10).code == 0
+    assert not overlapped, "copy-in overlapped another call's copy-out"
+    assert sh(repo, "rev-parse", "concurrent").stdout == sh(repo, "rev-parse", "HEAD").stdout
+
+
+def test_git_state_lock_is_per_canonical_metadata_dir(tmp_path):
+    import harness.projects as projects
+
+    metadata = tmp_path / "repo" / ".git"
+    metadata.mkdir(parents=True)
+    lock = projects._git_state_lock(metadata)
+    assert projects._git_state_lock(metadata / ".." / ".git") is lock
+    other = projects._git_state_lock(tmp_path / "other" / ".git")
+    with lock:
+        assert other.acquire(blocking=False)
+        other.release()
+
+
+def test_git_state_lock_released_after_command_exception(tmp_path, monkeypatch):
+    import harness.projects as projects
+
+    repo = make_repo(tmp_path / "repo")
+    real_run = projects._run
+
+    def fail_command(args, **kwargs):
+        if "--git-dir" in args:
+            raise subprocess.TimeoutExpired("git", 1)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(projects, "_run", fail_command)
+    with pytest.raises(subprocess.TimeoutExpired):
+        git(repo, "status")
+    monkeypatch.setattr(projects, "_run", real_run)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(git, repo, "status", "--porcelain").result(timeout=10).code == 0
