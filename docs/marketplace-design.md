@@ -24,7 +24,7 @@ Contracts this design is written against (shipped on `main` as of 2026-09-17):
 | Additive versioning | [`app-api.md`](app-api.md) § Versioning | path-major, additive-within-v1 |
 | First-party Control Center (not a catalog app) | [`control-center.md`](control-center.md) | owner token `ho-`, not `ha-` |
 
-A later public launch must repeat the [provider-policy review](#provider-policy-matrix) against live official
+A later public launch must repeat the [provider-policy review](#13-provider-policy-matrix) against live official
 sources. The 2026-09-17 matrix is evidence for this design, not permission to ship.
 
 ## 1. Product boundary

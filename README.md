@@ -23,7 +23,7 @@ git branch for you to review and merge.
 
 | Stack | Scale | Quality gates |
 | --- | --- | --- |
-| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~41K lines · 870+ tests in 88 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
+| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~50K lines · 1,700+ tests in 148 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
 
 ---
 
@@ -153,9 +153,8 @@ agent-harness/
 │   ├── principal.py       owner / member / guest / app / device identity model
 │   ├── settings*.py       typed configuration registry
 │   ├── managed_config.py  crash-safe config overlay: pending → active → last-known-good
-│   ├── images.py          ComfyUI image generation and GPU hand-off
-│   ├── remote.py          runner protocol (at-least-once over long-poll)
 │   └── web/               Agent Harness Web: vanilla JS PWA with a service worker
+├── harness_modules/       optional add-ons behind the module interface: images, runners, search, endpoint, jobs, backup, ... (docs/modules.md)
 ├── macrunner/             Mac Runner: stdlib-only Python 3.9, launchd, sandbox-exec profile
 ├── sdk/                   single-file Python SDK (depends only on httpx) + example app
 ├── bakeoff/               model and harness benchmarks, hidden-test tasks, recorded-web suite
@@ -213,7 +212,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | Technique | What it does and why |
 | --- | --- |
 | **Session-long GPU slot** ([`scheduler.py`](harness/scheduler.py)) | A session holds the model slot for its whole run instead of per generation, because interleaving would evict llama-server's prompt cache (a cold 29K-token prompt costs ~33 s). The slot is released while the session waits on a human or an app. |
-| **InferenceGate** ([`endpoint.py`](harness/endpoint.py), [`images`](harness_modules/images/service.py)) | One lock arbitrates agent turns, external `/v1` requests (which go ahead of the next agent turn), and image jobs (which take the gate exclusively, swap the LLM out for ComfyUI, and swap it back). |
+| **InferenceGate** ([`endpoint`](harness_modules/endpoint/service.py), [`images`](harness_modules/images/service.py)) | One lock arbitrates agent turns, external `/v1` requests (which go ahead of the next agent turn), and image jobs (which take the gate exclusively, swap the LLM out for ComfyUI, and swap it back). |
 | **Tiled upscaling** ([`upscale.py`](harness_modules/images/upscale.py)) | Real-ESRGAN runs in tiles so 2×/4× upscales fit in 16 GB. Oversized outputs are refused before any memory is allocated. |
 | **Predictive warm-up** ([`warmup.py`](harness_modules/local_model/warmup.py)) | Selecting the local model checks `/props` for a sleeping model (without waking it) and warms it, so the model is usually loaded before the task is typed. |
 

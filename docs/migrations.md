@@ -121,3 +121,7 @@ own store and goes with `drop_app`), `sessions.end_user` and `usage.end_user` (#
 
 Step 0052 (`member_api_keys`) adds the `member_api_keys` table to the main store: one AES-GCM-sealed provider API key per
 (member, backend) plus its last four characters (#393). The master key is `<data_dir>/member-keys.key`, outside the database.
+
+Step 0053 (`audit_context`) adds `actor_kind`, `key_id`, `source`, `target_kind` and `metadata` to `account_audit`, so each
+household/security audit row records who (credential, entry point) made the change. Rows written before it read as
+`unknown`; no attribution is invented for them (#467).
