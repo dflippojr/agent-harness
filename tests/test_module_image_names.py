@@ -23,8 +23,7 @@ from test_modules import images_manager
     ([], True, False),
 ])
 def test_image_contributions_present_disabled_absent(tmp_path, packages, enabled, present):
-    m = images_manager(tmp_path, packages=packages)
-    m.cfg.images.enabled = enabled
+    m = images_manager(tmp_path, packages=packages, enabled=enabled)
     member = SimpleNamespace(role="member", allowed=True)
     for path in ("/images", "/images/abc", "/api/v1/images/abc"):
         assert access.member_forbidden(member, "GET", path, m.cfg) == (
@@ -36,6 +35,7 @@ def test_image_contributions_present_disabled_absent(tmp_path, packages, enabled
     assert m.modules.gpu_holders() == []
     if present:
         rt = m.modules.get("images")
+        assert (rt.service is not None) is enabled
         rt.service = SimpleNamespace(gpu_taken=True)
         assert m.modules.gpu_holders() == ["ComfyUI"]
         rt.service = None
@@ -85,7 +85,10 @@ def test_image_store_transactions_filters_and_legacy_rows(tmp_path):
         assert store.get_image("parent")["provenance"] == {"model": "fast"}
         store.update_image("parent", provenance="invalid")
         assert store.get_image("parent")["provenance"] == {}
+        store.update_image("parent", provenance="")
+        assert store.get_image("parent")["provenance"] == {}
         assert store._image_row({"provenance": None}) == {"provenance": {}}
+        assert store._image_row({"provenance": {"seed": 1}}) == {"provenance": {"seed": 1}}
         assert store.get_image("missing") is None
 
         def failing_transaction():
