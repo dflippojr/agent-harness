@@ -56,7 +56,7 @@ def record(db, session, context, action, *, target=None, kind="session", outcome
         def commit():
             if store.get_session(session["id"]) is not None:
                 store.insert_namespace_audit(scope, session["id"], context or audit_context.SYSTEM,
-                                             target or session["id"], kind, action, outcome, data)
+                                             session["id"] if target is None else target, kind, action, outcome, data)
         store.write(commit)
     except Exception:
         warning = gap.get()
@@ -68,11 +68,13 @@ def record(db, session, context, action, *, target=None, kind="session", outcome
 def failures(action):
     """Rejected/interrupting service actions on a known session carry truthful content-free outcomes."""
     def decorate(fn):
-        def failure(manager, ref, context, exc, kind=None):
+        def failure(manager, ref, context, exc, kind=None, approval_id=None):
             session = manager.db.get_session(ref)
             if session:
                 label = "session.context" if action == "session.message" and kind == "app_context" else action
+                target, target_kind = failure_target(manager.db, session, action, approval_id)
                 record(manager.db, session, context, label,
+                       target=target, kind=target_kind,
                        outcome="unknown" if isinstance(exc, asyncio.CancelledError) else "failure")
 
         @functools.wraps(fn)
@@ -80,7 +82,8 @@ def failures(action):
             try:
                 return fn(manager, ref, *args, **kwargs)
             except Exception as exc:
-                failure(manager, ref, kwargs.get("context"), exc)
+                failure(manager, ref, kwargs.get("context"), exc,
+                        approval_id=args[0] if args else kwargs.get("approval_id"))
                 raise
 
         @functools.wraps(fn)
@@ -92,6 +95,17 @@ def failures(action):
                 raise
         return asynchronous if inspect.iscoroutinefunction(fn) else sync
     return decorate
+
+
+def failure_target(db, session, action, approval_id):
+    if action != "approval.decide":
+        return None, "session"
+    store = db.for_app(session.get("app_id") or "")
+    approval = store.get_approval(approval_id) if approval_id else None
+    if approval and approval["session_id"] == session["id"]:
+        return approval["id"], "approval"
+    # Do not persist unverified caller targets or correlate a sibling member's approval.
+    return "", "approval"
 
 
 class LoginStore:

@@ -152,7 +152,7 @@ def clean_metadata(action: str, metadata: dict | None) -> dict:
     """Keep only allowlisted, safely-typed values for `action`; drop everything else without storing it."""
     if action == "namespace.erase":
         from .namespace_audit import clean
-        out = clean(metadata)
+        out = clean({key: value for key, value in (metadata or {}).items() if key in {"count", "reason"}})
         data = metadata or {}
         if isinstance(data.get("category"), str) and data["category"] in {"app", "account"}:
             out["category"] = data["category"]

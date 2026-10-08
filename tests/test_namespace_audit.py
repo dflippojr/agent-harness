@@ -425,3 +425,21 @@ def test_partial_provider_erase_does_not_replay_or_leak_exception(setup, monkeyp
     rows = m.db.main.audit_page(action="namespace.erase")["items"]
     assert [r["outcome"] for r in rows] == ["unknown", "started"]
     assert PRIVATE not in caplog.text and sid not in caplog.text
+
+
+def test_failed_approval_uses_verified_approval_target_and_drops_guesses(setup):
+    m, client, _, _, headers = setup
+    sid = create(client, headers[0])
+    m.db.insert_approval({"id": "known-approval", "session_id": sid, "tool_call_id": "call", "tool": "shell",
+                          "args": {}, "reason": PRIVATE, "detail": PRIVATE, "status": "pending"})
+    url = f"/api/v1/sessions/{sid}/approvals/known-approval"
+    assert client.post(url, headers=headers[0], json={"decision": "deny"}).status_code == 200
+    assert client.post(url, headers=headers[0], json={"decision": "deny"}).status_code == 409
+    rows = page(client, headers[0], target_id="known-approval")["items"]
+    assert [r["outcome"] for r in rows] == ["failure", "ok"]
+    assert all(r["target_kind"] == "approval" for r in rows)
+    assert client.post(f"/api/v1/sessions/{sid}/approvals/{PRIVATE}", headers=headers[0],
+                       json={"decision": "deny"}).status_code == 404
+    unknown = page(client, headers[0], action="approval.decide")["items"][0]
+    assert unknown["target_id"] == "" and unknown["target_kind"] == "approval"
+    assert PRIVATE not in json.dumps(unknown)
