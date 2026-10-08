@@ -25,7 +25,7 @@ from .config import Config
 from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
-from .remote import RunnerError, RunnerHub, RunnerOffline
+from .runner_contract import RunnerError, NoRunnerHub, RunnerOffline
 from .runner import (ACTIVE, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT,
                      SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
@@ -164,7 +164,7 @@ class Manager:
         self.scheduler = GpuScheduler(self._queue_changed, eligible=self._scheduler_eligible)
         self.stream_epoch: dict[str, int] = {}
         self.warmer = ModelWarmer()
-        self.hub = RunnerHub(cfg.runners, keep_awake=self._keep_awake)
+        self.hub = NoRunnerHub()
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
         # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
@@ -361,7 +361,6 @@ class Manager:
 
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
-        self.hub.close()
         await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
         await asyncio.to_thread(self.end_user_logins.close)  # a sign-in in flight ends with the daemon
         if self.canary is not None:
@@ -812,6 +811,8 @@ class Manager:
         if remote:
             if member:
                 raise HarnessError(403, "household members can only run sessions on the tower")
+            if target not in self.hub.state:
+                raise HarnessError(400, "runners module is unavailable for this target")
             free_gb = self.hub.state[target].info.get("free_gb")
             minimum = self.cfg.runners[target].min_free_gb
             if free_gb is not None and free_gb < minimum:
@@ -1935,57 +1936,6 @@ class Manager:
 
     def revoke_app_provider_credential(self, cid: str) -> bool:
         return self.db.revoke_app_provider_credential(cid)
-
-    # owner-approved Agent Harness for Mac pairing (issue #16)
-    def _runner_token(self, name: str, create: bool = False) -> str:
-        runner = self.cfg.runners.get(name)
-        if runner is None:
-            raise HarnessError(404, f"unknown runner {name!r}")
-        if not runner.token_file:
-            raise HarnessError(400, f"runner {name!r} has no token_file configured")
-        path = Path(runner.token_file).expanduser()
-        try:
-            token = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
-            if not token and create:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                token = secrets.token_urlsafe(32)
-                path.write_text(token + "\n", encoding="utf-8")
-                try:
-                    os.chmod(path, 0o600)
-                except OSError:
-                    pass
-        except OSError as exc:
-            raise HarnessError(500, f"runner token file is unavailable: {exc}") from exc
-        if not token:
-            raise HarnessError(500, f"runner token file for {name!r} is empty")
-        return token
-
-    def create_runner_pairing_code(self, name: str, runner: str, ttl_seconds: int) -> tuple[dict, str]:
-        self._runner_token(runner, create=True)
-        return self.db.create_runner_pairing_code(name, runner, ttl_seconds)
-
-    def redeem_runner_pairing_code(self, code: str, request_base_url: str) -> tuple[dict | None, str]:
-        pairing, key, owner_token, error = self.db.redeem_runner_pairing_code(code)
-        if pairing is None or key is None:
-            return None, error
-        name = pairing["runner"]
-        runner = self.cfg.runners.get(name)
-        if runner is None:
-            return None, "paired runner is no longer configured"
-        runner_token = self._runner_token(name, create=True)
-        server = self.cfg.public_url or request_base_url.rstrip("/")
-        return {
-            "server": server,
-            "owner_token": owner_token,
-            "owner_key": key,
-            "runner": {
-                "server": server,
-                "name": name,
-                "token": runner_token,
-                "repo_roots": ["~/Projects"],
-                "min_free_gb": runner.min_free_gb,
-            },
-        }, ""
 
     def _scheduler_eligible(self, sid: str) -> bool:
         s = self.db.get_session(sid)

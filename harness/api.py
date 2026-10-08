@@ -40,7 +40,6 @@ log = logging.getLogger("harness.api")
 WEB = Path(__file__).parent / "web"
 # Session-list stream: status-level events only, no tool output or token deltas.
 GLOBAL_TYPES = {"session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"}
-RUNNER_BODY_LIMIT = 16 * 2**20  # a result carries at most a capped command output or file read
 
 
 class CreateSession(BaseModel):
@@ -129,20 +128,6 @@ class CreateChat(BaseModel):
 class Decision(BaseModel):
     decision: str  # approve | deny
     note: str = ""
-
-
-class RunnerPoll(BaseModel):
-    instance: str
-    inflight: list[str] = []
-    info: dict = {}
-
-
-class RunnerResult(BaseModel):
-    id: str
-    ok: bool
-    value: object = None
-    error: str = ""
-    kind: str = "internal"
 
 
 class GpuHoldRequest(BaseModel):
@@ -416,27 +401,6 @@ async def manifest():
     return FileResponse(WEB / "manifest.webmanifest", media_type="application/manifest+json")
 
 
-@web_router.get("/mac-client/install.sh", include_in_schema=False)
-async def mac_client_installer():
-    return FileResponse(Path(__file__).parent.parent / "macrunner" / "install.sh",
-                        media_type="text/x-shellscript", headers={"Cache-Control": "no-cache"})
-
-
-@web_router.get("/mac-client/package.tar.gz", include_in_schema=False)
-async def mac_client_package():
-    from .mac_client import package_bytes
-    return Response(package_bytes(), media_type="application/gzip", headers={
-        "Content-Disposition": 'attachment; filename="agent-harness-mac.tar.gz"',
-        "Cache-Control": "no-cache",
-    })
-
-
-@web_router.get("/mac-client/manifest.json", include_in_schema=False)
-async def mac_client_manifest():
-    from .mac_client import package_manifest
-    return JSONResponse(package_manifest(), headers={"Cache-Control": "no-cache"})
-
-
 # API
 @api_router.get("/health")
 async def health(request: Request):
@@ -500,7 +464,6 @@ async def me(request: Request):
             "local_sessions": ident.role in ("owner", "member"),
             "hosted_backends": ident.role == "owner",
             **principal_capabilities(cfg, ident.role == "owner"),
-            "runners": ident.role == "owner",
             "accounts": ident.role == "owner",
         },
         "usage": usage,
@@ -576,65 +539,6 @@ def _require_same_origin(request: Request, m: Manager) -> None:
 def _log_safe(value: object) -> str:
     """A client-supplied value as one log line: newlines and other control characters are escaped."""
     return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in str(value))
-
-
-# runners (the MacBook): outbound long-polling, authenticated with a per-runner bearer token
-def runner_auth(request: Request, name: str) -> Manager:
-    m = mgr(request)
-    runner = m.hub.state.get(name)
-    if runner is None:
-        raise HarnessError(404, "unknown runner")
-    if not m.hub.authorized(runner.name, request.headers.get("authorization")):
-        # The configured name, not the URL's copy of it; the client address can come from proxy headers.
-        log.warning("refused runner %s request from %s", runner.name,
-                    _log_safe(request.client.host if request.client else "?"))
-        raise HarnessError(401, "bad runner token")
-    return m
-
-
-@api_router.get("/runners")
-async def runners(request: Request):
-    return mgr(request).hub.status()
-
-
-@api_router.post("/runners/{name}/poll")
-async def runner_poll(name: str, body: RunnerPoll, request: Request):
-    m = runner_auth(request, name)
-    return await m.hub.poll(name, body.instance, body.inflight, body.info)
-
-
-@api_router.post("/runners/{name}/results")
-async def runner_result(name: str, body: RunnerResult, request: Request):
-    m = runner_auth(request, name)
-    if int(request.headers.get("content-length") or 0) > RUNNER_BODY_LIMIT:
-        raise HarnessError(413, "result too large")
-    return {"accepted": m.hub.result(name, body.id, body.ok, body.value, body.error, body.kind)}
-
-
-@api_router.post("/runners/{name}/update")
-async def runner_update(name: str, request: Request):
-    m = mgr(request)
-    from .admin import require_admin
-    require_admin(request, mgr)
-    if name not in m.hub.state:
-        raise HarnessError(404, "unknown runner")
-    state = m.hub.state[name]
-    protocol = state.info.get("protocol")
-    public = m.cfg.public_url or str(request.base_url).rstrip("/")
-    fallback = (f"Run `harness update` on the Mac. If that command is unavailable, run "
-                f"`curl -fsSL {public}/mac-client/install.sh | bash -s -- --server {public}`.")
-    if not m.hub.online(name):
-        raise HarnessError(409, f"runner is offline. {fallback}")
-    try:
-        remote_update_supported = 2 <= int(protocol) <= compat.PROTOCOLS["runner"]["max"]
-    except (TypeError, ValueError):
-        remote_update_supported = False
-    if not remote_update_supported:
-        raise HarnessError(409, f"runner is too old for remote update. {fallback}")
-    try:
-        return await m.hub.call(name, "update_client", {}, timeout=300, wait_if_offline=False)
-    except Exception as exc:
-        raise HarnessError(409, f"Mac client update failed: {exc}. {fallback}") from exc
 
 
 @api_router.get("/models")

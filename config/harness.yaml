@@ -134,7 +134,7 @@ homelab:
     ntfy: {stack: ntfy}
     harness-demo: {stack: harness-demo}   # disposable service for exercising the restart flow
 
-# Machines that run tool calls for projects with `target: <name>` (harness/remote.py). The model stays here; the
+# Machines that run tool calls for projects with `target: <name>` (harness_modules/runners/service.py). The model stays here; the
 # runner (macrunner/, installed with ops/macbook/deploy.ps1) connects out to this daemon and authenticates with
 # the token in token_file. Its sandbox and allowed project directories are set on the runner itself.
 runners:

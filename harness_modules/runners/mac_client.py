@@ -8,9 +8,8 @@ import io
 import json
 import tarfile
 from functools import lru_cache
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from harness.modules import ROOT
 FILES = (
     ("macrunner/harness_runner.py", "app/harness_runner.py"),
     ("macrunner/sandbox.sb", "app/sandbox.sb"),
@@ -52,12 +51,12 @@ def package_bytes() -> bytes:
 
 
 def _module_commands() -> bytes:
-    from .modules import cli_groups, cli_rows
+    from harness.modules import cli_groups, cli_rows
     return json.dumps({"rows": cli_rows(), "groups": cli_groups()}, sort_keys=True).encode("utf-8")
 
 
 def package_manifest() -> dict:
-    from .compat import BUILD_ID, CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
+    from harness.modules import BUILD_ID, CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
     package = package_bytes()
     return {
         "schema": 1,
