@@ -674,12 +674,14 @@ async def get_compare(group: str, request: Request):
 @api_router.post("/compare/{group}/pick")
 async def pick_compare(group: str, body: PickWinner, request: Request):
     m = require_owner(request)
-    return await m.compare_pick(group, body.winner, body.action, body.discard_rest, owner_id(request))
+    return await m.compare_pick(group, body.winner, body.action, body.discard_rest, owner_id(request),
+                                context=operation_audit.request_context(request, m))
 
 
 @api_router.post("/compare/{group}/discard")
 async def discard_compare(group: str, request: Request):
-    return await require_owner(request).compare_discard(group, owner_id(request))
+    m = require_owner(request)
+    return await m.compare_discard(group, owner_id(request), context=operation_audit.request_context(request, m))
 
 
 @api_router.get("/sessions/{ref}")

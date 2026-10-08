@@ -77,7 +77,7 @@ def test_pick_reviews_winner_and_discards_rest(tmp_path):
     view = run(m.create_compare("p", CHOICES, "repo"))
     calls = []
 
-    async def fake_review(sid, action):
+    async def fake_review(sid, action, *, context=None):
         calls.append((sid, action))
         m.db.update_session(sid, review={"merge": "merged", "push": "pushed", "discard": "discarded"}[action])
 
@@ -96,7 +96,7 @@ def test_failed_later_member_discards_the_earlier_ones(tmp_path):
     m.cfg.backends["codex"].enabled = False
     discarded = []
 
-    async def fake_review(sid, action):
+    async def fake_review(sid, action, *, context=None):
         discarded.append((sid, action))
         m.db.update_session(sid, review="discarded")
 
@@ -121,7 +121,7 @@ def test_rollback_covers_non_harness_errors_and_failed_discard(tmp_path):
             raise RuntimeError("boom")
         return real(*a, **kw)
 
-    async def bad_review(sid, action):
+    async def bad_review(sid, action, *, context=None):
         raise HarnessError(409, "never checked out")
 
     m.create, m.review = flaky, bad_review
@@ -141,7 +141,7 @@ def test_pick_retry_skips_merged_winner_and_reports_discard_failures(tmp_path):
     a, b = (r["id"] for r in view["members"])
     calls, fail = [], {"on": True}
 
-    async def fake_review(sid, action):
+    async def fake_review(sid, action, *, context=None):
         calls.append((sid, action))
         if action == "discard" and fail["on"]:
             raise HarnessError(500, "disk")
@@ -166,7 +166,7 @@ def test_pick_that_does_not_complete_discards_nobody(tmp_path, action):
     a, b = (r["id"] for r in view["members"])
     calls = []
 
-    async def fake_review(sid, act):
+    async def fake_review(sid, act, *, context=None):
         calls.append((sid, act))
         # a conflicted merge returns normally with review="" ; a failed push raises
         if act == "push":
@@ -190,7 +190,7 @@ def test_pick_after_conflict_can_succeed_on_retry(tmp_path):
     a, b = (r["id"] for r in view["members"])
     state = {"ok": False}
 
-    async def fake_review(sid, act):
+    async def fake_review(sid, act, *, context=None):
         if act == "merge":
             m.db.update_session(sid, review="merged" if state["ok"] else "")
         else:
@@ -211,7 +211,7 @@ def test_group_discard_continues_past_a_failure(tmp_path):
     a, b = (r["id"] for r in view["members"])
     seen = []
 
-    async def fake_review(sid, action):
+    async def fake_review(sid, action, *, context=None):
         seen.append(sid)
         if sid == a:
             raise HarnessError(500, "disk")
@@ -234,7 +234,7 @@ def test_rollback_falls_back_when_discard_fails_for_a_checked_out_member(tmp_pat
             raise RuntimeError("boom")
         return real(*a, **kw)
 
-    async def broken_review(sid, action):
+    async def broken_review(sid, action, *, context=None):
         raise HarnessError(502, "remote unreachable")  # not the never-checked-out refusal
 
     m.create, m.review = flaky, broken_review
@@ -453,10 +453,10 @@ def test_discard_retry_after_a_failure_finishes_the_group(tmp_path, monkeypatch)
         src, m, group, a, b, c = await running_group(tmp_path, monkeypatch)
         real, fail = m.review, {"on": True}
 
-        async def flaky(ref, action):
+        async def flaky(ref, action, *, context=None):
             if fail["on"] and ref == b:
                 raise HarnessError(500, "disk")
-            return await real(ref, action)
+            return await real(ref, action, context=context)
 
         m.review = flaky
         with pytest.raises(HarnessError) as e:

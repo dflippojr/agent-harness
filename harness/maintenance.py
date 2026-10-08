@@ -91,7 +91,7 @@ class Maintenance:
         async with self._lock:
             scheduled = context is None
             context = context or audit_context.AuditContext("system", "system", "", "maintenance")
-            with operation_audit.operation(self.db, context, uuid.uuid4().hex, "maintenance.cleanup",
+            async with operation_audit.async_operation(self.db, context, uuid.uuid4().hex, "maintenance.cleanup",
                                            {"trigger": "scheduled" if scheduled else "manual"},
                                            scheduled=scheduled) as audit:
                 now = now or time.time()

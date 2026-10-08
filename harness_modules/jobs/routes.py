@@ -83,7 +83,7 @@ async def create_job(body: Job, request: Request):
     def save():
         m.db.insert_job(job)
         operation_audit.append(m.db, context, job["id"], "job.create", "ok",
-                               {"fields": list(body.model_fields), "enabled": job["enabled"]})
+                               {"fields": list(Job.model_fields), "enabled": job["enabled"]})
     m.db.write(save)
     return job_view(m, m.db.get_job(job["id"]))
 
@@ -116,7 +116,7 @@ async def update_job(jid: str, body: Job, request: Request):
     def save():
         m.db.update_job(jid, **job)
         operation_audit.append(m.db, context, jid, "job.update", "ok",
-                               {"fields": [k for k in body.model_fields if old.get(k) != job.get(k)],
+                               {"fields": [k for k in Job.model_fields if old.get(k) != job.get(k)],
                                 "enabled": job["enabled"]})
     m.db.write(save)
     return job_view(m, m.db.get_job(jid), runs=15)

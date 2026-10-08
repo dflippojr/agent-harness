@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -221,3 +222,173 @@ def test_auto_decision_is_system(manager):
                 "args": {"command": SENTINEL}, "reason": SENTINEL}
     manager.runner._persist_ask("session1", existing, {"status": "approved", "smart": {}})
     pair(manager, "approval.auto_decide", audit_context.AuditContext("system", "system", "", "agent"))
+
+
+@pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
+def test_job_mutation_aliases(manager, path, source, monkeypatch):
+    m = manager
+    key, secret = m.db.create_api_key("test", "admin", kind="owner")
+    headers = {"Authorization": "Bearer " + secret}
+    body = {"name": SENTINEL, "prompt": SENTINEL, "cron": "@daily"}
+    with TestClient(create_app(m)) as client:
+        response = client.post(path + "/jobs", json=body, headers=headers)
+        assert response.status_code == 201, response.text
+        jid = response.json()["id"]
+        assert client.put(path + "/jobs/" + jid, json={**body, "enabled": False}, headers=headers).status_code == 200
+        changed = rows(m, "job.update")[-1]
+        assert changed["metadata"]["fields"] == ["enabled"]
+        assert changed["metadata"]["enabled"] is False
+        assert changed["metadata"]["operation_id"]
+        assert client.post(path + "/jobs/" + jid + "/run", headers=headers).status_code == 201
+        assert client.delete(path + "/jobs/" + jid, headers=headers).status_code == 204
+        for action in ("job.create", "job.update", "job.delete", "job.run"):
+            records = rows(m, action)
+            assert records[-1]["key_id"] == key["id"]
+            assert records[-1]["source"] == source
+            assert SENTINEL not in json.dumps(records)
+        assert client.delete(path + "/jobs/guessed", headers=headers).status_code == 404
+        assert len(rows(m, "job.delete")) == 1
+        fail_write(monkeypatch, m.db, "ok")
+        with pytest.raises(OSError):
+            client.post(path + "/jobs", json=body, headers=headers)
+        assert m.db.list_jobs() == []  # mutation and audit share the main writer transaction
+
+
+@pytest.mark.parametrize("kind", ["fork", "rewind"])
+@pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
+def test_checkpoint_aliases(manager, monkeypatch, kind, path, source):
+    m = manager
+    key, secret = m.db.create_api_key("test", "admin", kind="owner")
+    monkeypatch.setattr(m, "_idle_for_checkpoint", AsyncMock(return_value=m.db.get_session("session1")))
+    if kind == "fork":
+        seed(m.db, "new-session", "scratch", SENTINEL, [])
+        monkeypatch.setattr(m, "_fork", AsyncMock(return_value="new-session"))
+        monkeypatch.setattr(m, "_spawn", lambda _: None)
+    else:
+        cp = m.runner.checkpointer
+        monkeypatch.setattr(cp, "restore", lambda *a: SimpleNamespace(saved={}))
+        monkeypatch.setattr(cp, "commit_rewind", lambda *a: None)
+        monkeypatch.setattr(cp, "release", lambda *a: None)
+    with TestClient(create_app(m)) as client:
+        response = client.post(path + "/sessions/session1/checkpoints/2/" + kind,
+                               json={"prompt": SENTINEL}, headers={"Authorization": "Bearer " + secret})
+        assert response.status_code in (200, 201), response.text
+        record = pair(m, "checkpoint." + kind, audit_context.owner_context(key, source))
+        assert record["metadata"]["turn"] == 2
+        if kind == "fork":
+            assert record["metadata"]["resulting_session_id"] == "new-session"
+
+
+@pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api"), ("/api/v1", "app_api")])
+@pytest.mark.parametrize("action", ["merge", "push", "discard"])
+def test_review_aliases_and_error_contract(manager, monkeypatch, path, source, action):
+    m = manager
+    key, secret = m.db.create_api_key("test", "admin sessions", kind="owner")
+    monkeypatch.setattr(m, "_review", AsyncMock(return_value=m.db.get_session("session1")))
+    with TestClient(create_app(m)) as client:
+        response = client.post(path + "/sessions/session1/review/" + action,
+                               headers={"Authorization": "Bearer " + secret})
+        assert response.status_code == 200, response.text
+        pair(m, "review." + action, audit_context.owner_context(key, source))
+        fail_write(monkeypatch, m.db, "ok")
+        response = client.post(path + "/sessions/session1/review/" + action,
+                               headers={"Authorization": "Bearer " + secret})
+        assert response.status_code == 503
+        error = response.json()["error"]
+        assert error["code"] == "audit_record_incomplete"
+        assert error["may_have_completed"] and not error["retryable"]
+        assert error["operation_id"] == rows(m, "review." + action)[-1]["metadata"]["operation_id"]
+
+
+@pytest.mark.parametrize("outcome", ["started", "ok"])
+def test_cleanup_write_failure_preserves_effect(manager, monkeypatch, outcome):
+    service = manager.maintenance
+    effect = AsyncMock()
+    monkeypatch.setattr(service, "_containers", effect)
+    monkeypatch.setattr(service, "_workspaces", lambda *a: None)
+    monkeypatch.setattr(service, "_remote_workspaces", AsyncMock())
+    service.app_sweep = None
+    fail_write(monkeypatch, manager.db, outcome)
+    with pytest.raises(HarnessError):
+        asyncio.run(service.cleanup(context=CTX))
+    assert effect.await_count == (0 if outcome == "started" else 1)
+    if outcome == "ok":
+        assert service.last_report
+        assert [r["outcome"] for r in rows(manager, "maintenance.cleanup")] == ["started"]
+
+
+def test_async_cancellation_preserves_intent(manager):
+    async def body():
+        with pytest.raises(asyncio.CancelledError):
+            async with operation_audit.async_operation(manager.db, CTX, "session1", "review.push"):
+                raise asyncio.CancelledError()
+    asyncio.run(body())
+    assert [r["outcome"] for r in rows(manager, "review.push")] == ["started"]
+
+
+@pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
+def test_taint_and_maintenance_route_contexts(manager, monkeypatch, path, source):
+    m = manager
+    key, secret = m.db.create_api_key("test", "admin", kind="owner")
+    headers = {"Authorization": "Bearer " + secret}
+    cleanup = m.maintenance
+    monkeypatch.setattr(cleanup, "_containers", AsyncMock())
+    monkeypatch.setattr(cleanup, "_workspaces", lambda *a: None)
+    monkeypatch.setattr(cleanup, "_remote_workspaces", AsyncMock())
+    cleanup.app_sweep = None
+    backup = m.modules.get("backup").service
+    monkeypatch.setattr(backup, "_backup_sync", lambda _: {"path": SENTINEL, "bytes": 1, "removed": []})
+    monkeypatch.setattr(backup, "_write_backup_status", lambda: None)
+    with TestClient(create_app(m)) as client:
+        for endpoint in ("/sessions/session1/taint/clear", "/maintenance/cleanup", "/maintenance/backup"):
+            response = client.post(path + endpoint, headers=headers)
+            assert response.status_code == 200, response.text
+        for action in ("session.taint_clear", "maintenance.cleanup", "maintenance.backup"):
+            pair(m, action, audit_context.owner_context(key, source))
+
+
+@pytest.mark.parametrize("scheduled", [False, True])
+@pytest.mark.parametrize("terminal_fails", [False, True])
+def test_failed_effect_and_settlement(manager, monkeypatch, caplog, scheduled, terminal_fails):
+    if terminal_fails:
+        fail_write(monkeypatch, manager.db, "unknown")
+    expected = HarnessError if terminal_fails and not scheduled else ValueError
+    with pytest.raises(expected):
+        with operation_audit.operation(manager.db, CTX, "session1", "review.push", scheduled=scheduled):
+            raise ValueError(SENTINEL)
+    assert SENTINEL not in caplog.text
+    assert [r["outcome"] for r in rows(manager, "review.push")] == (
+        ["started"] if terminal_fails else ["started", "unknown"])
+
+
+def test_safe_metadata_types_and_unknown_source():
+    assert audit_context.AuditContext("owner", source=SENTINEL).source == "unknown"
+    assert audit_context.clean_metadata("job.update", {"fields": SENTINEL, "enabled": 1}) == {}
+    assert audit_context.clean_metadata("checkpoint.rewind", {"turn": 2**53, "session_id": 42}) == {}
+    assert audit_context.clean_metadata("maintenance.cleanup", {"removed": 3}) == {"removed": 3}
+
+
+def test_scheduled_backup_audit_gap_keeps_success(manager, monkeypatch, caplog):
+    service = BackupService(manager.cfg, manager.db)
+    calls = []
+    monkeypatch.setattr(service, "_backup_sync", lambda _: calls.append(1) or {"path": "fake", "bytes": 1, "removed": []})
+    monkeypatch.setattr(service, "_write_backup_status", lambda: None)
+    fail_write(monkeypatch, manager.db, "ok")
+    assert asyncio.run(service.backup())["bytes"] == 1
+    assert service.last_backup["bytes"] == 1 and calls == [1]
+    assert "audit settlement unavailable" in caplog.text
+    assert [r["outcome"] for r in rows(manager, "maintenance.backup")] == ["started"]
+
+
+def test_compare_preserves_review_initiator(manager, monkeypatch):
+    m = manager
+    seed(m.db, "session2", "scratch", SENTINEL, [])
+    for sid in ("session1", "session2"):
+        m.db.update_session(sid, compare_group="group1")
+    async def review(sid, action):
+        m.db.update_session(sid, review="merged" if action == "merge" else "discarded")
+        return m.db.get_session(sid)
+    monkeypatch.setattr(m, "_review", review)
+    asyncio.run(m.compare_pick("group1", "session1", "merge", True, context=CTX))
+    assert pair(m, "review.merge")["target_id"] == "session1"
+    assert pair(m, "review.discard")["target_id"] == "session2"

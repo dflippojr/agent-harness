@@ -130,6 +130,37 @@ ambient Tailscale/localhost identity, every allowlisted owner login is `owner`, 
 `metadata` is an allowlist per action (changed field names, numeric limits and their old/new values, booleans,
 stable reason codes); login and display-name values, secrets, paths, URLs and free text are never stored.
 
+Owner operation audit (#470) covers approval decisions and smart auto-approval in owner Web sessions,
+Review merge/push/discard, taint clear, checkpoint rewind/fork, owner jobs and cleanup/backup. The legacy,
+admin and owner-key App routes carry the authenticated initiator; the executing agent is the separate
+`session_id`. Notification buttons prove possession of an owner approval capability: actor `owner`,
+source `notification_link`, empty key id, no link token or named-human claim. Auto-approval has a system
+actor and source `agent`. Scheduled jobs use system/`job`; periodic maintenance uses system/`maintenance`.
+Manual requests retain their authenticated key and API source. Member and other App session detail is
+outside this main-store owner trail; each namespace's contract belongs to #471.
+
+Job create/update/delete and their metadata audit share the main-store transaction. Updates record only
+registered changed-field names and the enabled boolean, never job names, prompts, cron values or paths.
+Cross-store session operations, job runs and maintenance commit `started` with a generated `operation_id`
+before effects, then append one `ok` or conservative `unknown` settlement. Maintenance targets a generated
+operation id and stores aggregate removed/kept/expired counts, never erased session ids or filenames.
+An already-decided approval returns 409 and records only the known target and `already_decided` reason;
+a repeated notification press remains harmless and never claims another successful decision.
+
+A failed first audit commit returns 503 `audit_unavailable` and prevents starting the action. If an action
+settles but its audit commit fails, the actual state remains and the started row stays unresolved.
+Request callers receive 503 `audit_record_incomplete`, `operation_id`, `may_have_completed: true` and
+`retryable: false`; inspect the session, job or maintenance status before deciding whether to retry.
+Scheduled work logs a content-free warning without repeating an effect. Cancellation or a crash can leave
+unresolved started evidence, including a worker thread still in flight. This is neither distributed rollback
+nor an exactly-once promise. Existing Review gates, session events and checkpoint undo behavior still apply.
+
+Use `harness audit list --action approval.decide` or `--action job.run`, or the equivalent admin query,
+to reconstruct initiator and executing session after a restart. Match settlements to starts by
+`metadata.operation_id`; a start without a settlement is unresolved, not success. These owner operations
+use the existing 365-day main-store audit retention. Restoring an older backup rolls this trail back too;
+there is no independent journal that survives a restore.
+
 Audit rows are inserted in the same transaction as the account change they describe, so a failed audit write
 (503 `audit_unavailable`) leaves the account unchanged. No route updates or deletes audit rows, and erasing a
 session or account does not cascade to them. Rows older than 365 days are pruned when a new row is inserted. The

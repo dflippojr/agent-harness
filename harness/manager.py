@@ -956,7 +956,7 @@ class Manager:
                                     "fork from a checkpoint instead")
         cp = self.runner.checkpointer
         async with self._exclusive(sid, "rewind", CHECKPOINT_IDLE):
-            with operation_audit.operation(self.db, context, sid, "checkpoint.rewind",
+            async with operation_audit.async_operation(self.db, context, sid, "checkpoint.rewind",
                                            {"session_id": sid, "turn": int(turn)},
                                            enabled=operation_audit.owner_session(s)):
                 try:
@@ -999,7 +999,7 @@ class Manager:
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
         async with self._exclusive(sid, "fork", CHECKPOINT_IDLE):
-            with operation_audit.operation(self.db, context, sid, "checkpoint.fork",
+            async with operation_audit.async_operation(self.db, context, sid, "checkpoint.fork",
                                            {"session_id": sid, "turn": int(turn)},
                                            enabled=operation_audit.owner_session(self.db.get_session(sid))) as audit:
                 new_sid = await self._fork(sid, int(turn), prompt)
@@ -1383,11 +1383,11 @@ class Manager:
             self.compare_busy.discard(key)
 
     async def compare_pick(self, group: str, winner: str, action: str, discard_rest: bool,
-                           owner_id: str = "owner") -> dict:
+                           owner_id: str = "owner", *, context=None) -> dict:
         with self._compare_exclusive(group, owner_id):
-            return await self._compare_pick(group, winner, action, discard_rest, owner_id)
+            return await self._compare_pick(group, winner, action, discard_rest, owner_id, context)
 
-    async def _compare_pick(self, group: str, winner: str, action: str, discard_rest: bool, owner_id: str) -> dict:
+    async def _compare_pick(self, group: str, winner: str, action: str, discard_rest: bool, owner_id: str, context=None) -> dict:
         members = self.db.group_sessions(group, owner_id)
         if winner not in {s["id"] for s in members}:
             raise HarnessError(404, "the winner is not a member of this group")
@@ -1395,7 +1395,7 @@ class Manager:
             raise HarnessError(400, "action must be merge or push")
         # retry-safe: a winner already merged/pushed by an earlier attempt is not merged/pushed again
         if next(s for s in members if s["id"] == winner)["review"] not in ("merged", "pushed"):
-            await self.review(winner, action)
+            await self.review(winner, action, context=context)
             # a merge that hit a conflict returns normally with no review state; never discard on an unverified pick
             current = self.db.get_session(winner)
             if current["review"] not in ("merged", "pushed"):
@@ -1403,22 +1403,22 @@ class Manager:
                                         f"({current['review_detail'] or 'no detail'}); "
                                         f"the other members were left untouched")
         if discard_rest:
-            failed = await self._compare_discard([s for s in members if s["id"] != winner])
+            failed = await self._compare_discard([s for s in members if s["id"] != winner], context)
             if failed:
                 raise HarnessError(500, f"winner {action}ed but could not discard: {failed}; retry to finish")
         return self.compare_view(group, owner_id)
 
-    async def compare_discard(self, group: str, owner_id: str = "owner") -> dict:
+    async def compare_discard(self, group: str, owner_id: str = "owner", *, context=None) -> dict:
         members = self.db.group_sessions(group, owner_id)
         if not members:
             raise HarnessError(404, "no compare group matches that id")
         with self._compare_exclusive(group, owner_id):
-            failed = await self._compare_discard(members)
+            failed = await self._compare_discard(members, context)
         if failed:
             raise HarnessError(500, f"could not discard: {failed}; retry to finish")
         return self.compare_view(group, owner_id)
 
-    async def _compare_discard(self, members: list[dict]) -> dict[str, str]:
+    async def _compare_discard(self, members: list[dict], context=None) -> dict[str, str]:
         """Discard every member that still can be; return {session id: error} for those that failed."""
         failed = {}
         for member in members:
@@ -1426,17 +1426,19 @@ class Manager:
             try:
                 if self.db.get_session(sid)["review"] in ("merged", "pushed", "discarded"):
                     continue
-                await self._compare_drop(sid)
+                await self._compare_drop(sid, context)
             except Exception as e:
+                if getattr(e, "code", "") == "audit_record_incomplete":
+                    raise
                 failed[sid] = str(e)
         return failed
 
-    async def _compare_drop(self, sid: str) -> None:
+    async def _compare_drop(self, sid: str, context=None) -> None:
         """End a member's run, then discard its branch and workspace. review() refuses a session that is still
         working, and refuses one that was never checked out (it has no branch anywhere to delete)."""
         await self._compare_stop(sid)
         try:
-            await self.review(sid, "discard")
+            await self.review(sid, "discard", context=context)
         except HarnessError as e:
             s = self.db.get_session(sid)
             if e.status != 409 or s["base_commit"] or s["status"] in ACTIVE:
@@ -1496,7 +1498,7 @@ class Manager:
         async with self._exclusive(sid, "review", REVIEW_BUSY):
             if action not in ("merge", "push", "discard"):
                 raise HarnessError(404, "unknown review action")
-            with operation_audit.operation(self.db, context, sid, "review." + action, {"session_id": sid},
+            async with operation_audit.async_operation(self.db, context, sid, "review." + action, {"session_id": sid},
                                            enabled=operation_audit.owner_session(self.db.get_session(sid))):
                 return await self._review(sid, action)
 
@@ -1630,6 +1632,11 @@ class Manager:
         approval = self.db.get_approval(approval_id)
         if approval is None or approval["session_id"] != sid:
             raise HarnessError(404, f"no approval {approval_id} in session {sid}")
+        if approval["status"] != "pending":
+            if operation_audit.owner_session(self.db.get_session(sid)):
+                operation_audit.append(self.db, context or audit_context.AuditContext("unknown"), approval_id,
+                                       "approval.decide", "denied", {"session_id": sid, "reason": "already_decided"})
+            raise HarnessError(409, f"approval is already {approval['status']}")
         status = "approved" if approve else "denied"
 
         def decide() -> None:

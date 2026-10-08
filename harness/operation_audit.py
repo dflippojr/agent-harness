@@ -5,7 +5,7 @@ import asyncio
 import logging
 import re
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from .audit_context import AuditContext, access_context, owner_context
 from .principal import OWNER_USER_ID, session_user_id
@@ -18,6 +18,22 @@ SESSION_ACTIONS = frozenset({"approval.decide", "approval.auto_decide", "review.
 ACTIONS = SESSION_ACTIONS | {"job.create", "job.update", "job.delete", "job.run", "maintenance.cleanup",
                               "maintenance.backup"}
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+ENUMS = {"decision": {"approved", "denied"}, "reviewer_mode": {"off", "shadow", "auto"},
+         "trigger": {"manual", "scheduled"}, "reason": {"already_decided"}}
+
+
+def _clean_value(key, value):
+    if key in {"operation_id", "session_id", "resulting_session_id"}:
+        return value if isinstance(value, str) and _ID.fullmatch(value) else None
+    if key in ENUMS:
+        return value if isinstance(value, str) and value in ENUMS[key] else None
+    if key == "fields":
+        if isinstance(value, (list, tuple)):
+            return sorted({v for v in value if isinstance(v, str) and v in JOB_FIELDS})
+        return None
+    if key == "enabled":
+        return value if isinstance(value, bool) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**53 else None
 
 
 def clean_metadata(action, metadata):
@@ -25,7 +41,7 @@ def clean_metadata(action, metadata):
     if action in SESSION_ACTIONS:
         allowed.add("session_id")
     if action.startswith("approval."):
-        allowed.update({"decision", "reviewer_mode"})
+        allowed.update({"decision", "reviewer_mode", "reason"})
     if action.startswith("checkpoint."):
         allowed.update({"turn", "resulting_session_id"})
     if action.startswith("job."):
@@ -33,25 +49,12 @@ def clean_metadata(action, metadata):
     if action.startswith("maintenance."):
         allowed.update({"trigger", "removed", "kept", "expired"})
     out = {}
-    enums = {"decision": {"approved", "denied"}, "reviewer_mode": {"off", "shadow", "auto"},
-             "trigger": {"manual", "scheduled"}}
     for key, value in (metadata or {}).items():
         if key not in allowed:
             continue
-        if key in {"operation_id", "session_id", "resulting_session_id"}:
-            if isinstance(value, str) and _ID.fullmatch(value):
-                out[key] = value
-        elif key in enums:
-            if isinstance(value, str) and value in enums[key]:
-                out[key] = value
-        elif key == "fields":
-            if isinstance(value, (list, tuple)):
-                out[key] = sorted({v for v in value if isinstance(v, str) and v in JOB_FIELDS})
-        elif key == "enabled":
-            if isinstance(value, bool):
-                out[key] = value
-        elif isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**53:
-            out[key] = value
+        cleaned = _clean_value(key, value)
+        if cleaned is not None:
+            out[key] = cleaned
     return out
 
 
@@ -70,10 +73,11 @@ def owner_session(session):
 
 
 def append(db, context, target, action, outcome, metadata=None):
-    kind = "approval" if action.startswith("approval.") else "job" if action.startswith("job.") else (
-        "operation" if action.startswith("maintenance.") else "session")
+    kind = {"approval": "approval", "job": "job", "maintenance": "operation"}.get(action.split(".")[0], "session")
+    data = dict(metadata or {})
+    data.setdefault("operation_id", uuid.uuid4().hex)
     db.insert_audit(context.actor_id, target, action, outcome, context=context, target_kind=kind,
-                    metadata=metadata)
+                    metadata=data)
 
 
 def _incomplete(operation_id):
@@ -116,6 +120,7 @@ def operation(db, context, target, action, metadata=None, *, scheduled=False, en
             log.warning("audit settlement unavailable: %s", data["operation_id"])
             if not scheduled:
                 raise _incomplete(data["operation_id"]) from None
+
         raise
     else:
         try:
@@ -124,3 +129,21 @@ def operation(db, context, target, action, metadata=None, *, scheduled=False, en
             log.warning("audit settlement unavailable: %s", data["operation_id"])
             if not scheduled:
                 raise _incomplete(data["operation_id"]) from None
+
+
+@asynccontextmanager
+async def async_operation(*args, **kwargs):
+    """The same protocol without blocking the event loop on the main-store writer.
+
+    Finish queued audit commits on cancellation; an interrupted action itself stays unresolved.
+    """
+    from .db import finish_then_cancel
+    scope = operation(*args, **kwargs)
+    data = await finish_then_cancel(asyncio.to_thread(scope.__enter__))
+    try:
+        yield data
+    except BaseException as exc:
+        await finish_then_cancel(asyncio.to_thread(scope.__exit__, type(exc), exc, exc.__traceback__))
+        raise
+    else:
+        await finish_then_cancel(asyncio.to_thread(scope.__exit__, None, None, None))
