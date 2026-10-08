@@ -39,6 +39,9 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 RELAY_SCRIPT = Path(__file__).with_name("mcp_relay.js")
 # The CLIs that get the endpoint (#300 Claude Code, #373 Codex). Cursor has no host approval to hang a grant on.
 MCP_BACKENDS = ("claude", "codex")
+# The shell and file tools a split-mode session (#427) gets from the harness server in place of its CLI's own; they are
+# the native loop's tools of these names, so policy rules, approvals and network grants apply to them unchanged.
+SPLIT_TOOLS = ("run_shell", "read_file", "write_file", "edit_file", "search", "list_files")
 # The id of the call the CLI is making, in the tools/call _meta; grants are matched on it when present. Claude Code
 # sends its tool_use id, Codex its call id (the mcpToolCall item id the approval was asked under).
 TOOL_USE_META = "claudecode/toolUseId"
