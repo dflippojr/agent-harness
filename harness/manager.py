@@ -12,6 +12,7 @@ import shutil
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -168,7 +169,8 @@ class Manager:
         self.hub = NoRunnerHub()
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
-        self.erase_locks: dict[str, asyncio.Lock] = {}
+        # Active context managers/waiters retain their lock; idle erased namespaces retain no cache entry.
+        self.erase_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
         # with the idle check, released when they end. In memory, so a daemon restart clears a stale claim.
         self.operations: dict[str, str] = {}

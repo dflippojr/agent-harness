@@ -322,6 +322,7 @@ def test_concurrent_delete_runs_effect_once_and_refuses_message(setup, monkeypat
         fake.assert_awaited_once()
     asyncio.run(run())
     assert len(m.db.main.audit_page(action="namespace.erase")["items"]) == 2
+    assert not m.erase_locks  # waiters retained the same lock, but erased namespaces are not cached forever
 
 
 def test_shortened_app_login_retention_applies_to_reads_immediately(setup, monkeypatch):
@@ -395,6 +396,7 @@ def test_member_erasure_leaves_only_account_receipt(setup):
     sid = create(client, auth)
     ctx = audit_context.AuditContext(members[0]["user_id"], "member", "", "app_api")
     asyncio.run(m.erase_session(sid, context=ctx))
+    assert not m.erase_locks
     assert page(client, auth)["items"] == []
     rows = m.db.main.audit_page(action="namespace.erase")["items"]
     assert all(r["target_kind"] == "account" and r["target_id"] == members[0]["user_id"] for r in rows)
@@ -443,3 +445,17 @@ def test_failed_approval_uses_verified_approval_target_and_drops_guesses(setup):
     unknown = page(client, headers[0], action="approval.decide")["items"][0]
     assert unknown["target_id"] == "" and unknown["target_kind"] == "approval"
     assert PRIVATE not in json.dumps(unknown)
+
+
+def test_cross_origin_app_can_read_audit_gap_warning(setup, monkeypatch):
+    m, client, _, _, _ = setup
+    _, secret = m.db.main.create_api_key("paired-browser", "sessions", "app", ["https://app.example"])
+    def fail(*args, **kwargs):
+        raise OSError(PRIVATE)
+    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    response = client.post("/api/v1/sessions", json={"prompt": PRIVATE},
+                           headers={"Authorization": "Bearer " + secret, "Origin": "https://app.example"})
+    assert response.status_code == 201
+    assert response.headers["Access-Control-Allow-Origin"] == "https://app.example"
+    assert response.headers["X-Agent-Harness-Audit-Warning"] == "audit_gap"
+    assert "X-Agent-Harness-Audit-Warning" in response.headers["Access-Control-Expose-Headers"]

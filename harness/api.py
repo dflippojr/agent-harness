@@ -349,6 +349,7 @@ async def guard(request: Request, call_next):
         namespace_audit.gap.reset(warning_token)
     if warnings:
         response.headers["X-Agent-Harness-Audit-Warning"] = "audit_gap"
+        response.headers["Access-Control-Expose-Headers"] = "X-Agent-Harness-Audit-Warning"
     if compatibility and compatibility["state"] == "transition":
         response.headers["X-Agent-Harness-Deprecation"] = "missing_client_version"
         response.headers["Warning"] = '299 agent-harness "client version header will be required after this transition release"'
