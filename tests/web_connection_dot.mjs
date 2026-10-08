@@ -2,145 +2,9 @@
 // routes that have no page stream, and that a real disconnect/reconnect still works.
 import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
+import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
-class Emitter {
-  constructor() { this._l = {}; }
-  addEventListener(type, fn) { (this._l[type] ||= []).push(fn); }
-  removeEventListener(type, fn) { this._l[type] = (this._l[type] || []).filter((f) => f !== fn); }
-  dispatchEvent(ev) {
-    for (const fn of [...(this._l[ev.type] || [])]) fn.call(this, ev);
-    return true;
-  }
-}
-
-class Node extends Emitter {}
-class El extends Node {
-  constructor(tag, attrs = {}) {
-    super();
-    this.tagName = String(tag).toUpperCase();
-    this.childNodes = [];
-    this.attributes = { ...attrs };
-    this.className = attrs.class || "";
-    this.id = attrs.id || "";
-    this.hidden = false;
-    this.value = attrs.value || "";
-    this.href = attrs.href || "";
-    this.type = attrs.type || "";
-    this.disabled = false;
-    this.defaultValue = this.value;
-    this.defaultChecked = false;
-    this.checked = false;
-    this.selected = false;
-    this.options = [];
-    this.style = {
-      _p: {},
-      width: "",
-      setProperty(k, v) { this._p[k] = v; },
-      removeProperty(k) { delete this._p[k]; },
-      getPropertyValue(k) { return this._p[k] || ""; },
-    };
-    this.dataset = {};
-    this.classList = {
-      _s: new Set(this.className.split(/\s+/).filter(Boolean)),
-      add: (c) => { this.classList._s.add(c); this.className = [...this.classList._s].join(" "); },
-      remove: (c) => { this.classList._s.delete(c); this.className = [...this.classList._s].join(" "); },
-      toggle: (c, force) => {
-        const on = force === undefined ? !this.classList._s.has(c) : !!force;
-        if (on) this.classList.add(c); else this.classList.remove(c);
-        return on;
-      },
-      contains: (c) => this.classList._s.has(c),
-    };
-    this.offsetHeight = 48;
-    this._text = "";
-  }
-  get textContent() {
-    if (this.childNodes.length) {
-      return this.childNodes.map((c) => (typeof c === "string" ? c : c.textContent)).join("");
-    }
-    return this._text;
-  }
-  set textContent(v) { this._text = String(v); this.childNodes = []; }
-  get innerHTML() { return this.textContent; }
-  set innerHTML(v) { this.textContent = v; }
-  get firstElementChild() { return this.childNodes.find((c) => c instanceof El) || null; }
-  append(...nodes) {
-    for (const n of nodes.flat()) {
-      if (n === null || n === undefined || n === false) continue;
-      this.childNodes.push(n instanceof El ? n : String(n));
-    }
-    if (this.tagName === "SELECT" && !this.value) {
-      const opt = this.childNodes.find((c) => c instanceof El && c.tagName === "OPTION");
-      if (opt) this.value = opt.value || opt.attributes.value || "";
-    }
-  }
-  replaceChildren(...nodes) { this.childNodes = []; this.append(...nodes); }
-  remove() { this.removed = true; }
-  click() { this.dispatchEvent({ type: "click" }); }
-  querySelector() { return null; }
-  querySelectorAll() { return []; }
-  getContext() {
-    return {
-      fillRect() {}, fillText() {},
-      fillStyle: "", font: "", textAlign: "", textBaseline: "",
-    };
-  }
-  toDataURL() { return "data:image/png;base64,"; }
-  setAttribute(k, v) { this.attributes[k] = v; if (k === "id") this.id = v; }
-}
-
-const byId = {};
-const make = (tag, id, extra = {}) => {
-  const el = new El(tag, { id, ...extra });
-  if (id) byId[id] = el;
-  return el;
-};
-
-const feature = make("select", "feature-nav");
-for (const value of ["agents", "jobs", "images"]) {
-  const opt = new El("option", { value });
-  opt.value = value;
-  feature.options.push(opt);
-}
-feature.value = "agents";
-
-const doc = new Emitter();
-doc.documentElement = new El("html");
-doc.documentElement.dataset = {};
-doc.documentElement.scrollHeight = 1200;
-doc.body = new El("body");
-doc.hidden = false;
-doc.visibilityState = "visible";
-doc.getElementById = (id) => byId[id] || null;
-doc.querySelector = (sel) => {
-  if (sel === 'link[rel="apple-touch-icon"]' || sel === 'link[rel="icon"]') return new El("link");
-  if (sel === ".composer" || sel === ".session-chrome") return null;
-  if (sel === "#app") return byId.app;
-  return null;
-};
-doc.querySelectorAll = (sel) => {
-  if (sel === ".jump") return [];
-  if (sel === "input, textarea, select") return [feature];
-  return [];
-};
-doc.createElement = (tag) => new El(tag);
-doc.createTextNode = (t) => String(t);
-
-make("main", "app");
-make("h1", "title");
-make("button", "back");
-make("span", "conn");
-make("a", "profile-icon");
-make("button", "menu-btn");
-make("nav", "nav-drawer");
-make("div", "drawer-scrim");
-make("div", "drawer-chats");
-make("span", "drawer-profile-icon");
-make("div", "fab-host");
-make("a", "fab");
-make("header", "bar");
-make("div", "guest-banner");
-make("div", "toast");
+const { byId, make, doc, feature } = createDocument();
 
 const loc = {
   href: "http://localhost/#/",
@@ -156,15 +20,6 @@ const loc = {
     this.onHashReplace?.();
   },
 };
-const storage = () => {
-  const m = new Map();
-  return {
-    getItem: (k) => (m.has(k) ? m.get(k) : null),
-    setItem: (k, v) => m.set(k, String(v)),
-    removeItem: (k) => m.delete(k),
-  };
-};
-
 const jsonResp = (body, status = 200) => ({
   ok: status >= 200 && status < 300,
   status,
@@ -232,25 +87,7 @@ const fakeFetch = async (url) => {
 };
 
 const sources = [];
-class FakeEventSource extends Emitter {
-  constructor(url) {
-    super();
-    this.url = String(url);
-    this.readyState = 1;
-    this.onopen = null;
-    this.onerror = null;
-    sources.push(this);
-    setTimeout(() => { if (this.readyState === 1) this.onopen?.(); }, 0);
-  }
-  close() { this.readyState = FakeEventSource.CLOSED; }
-  fail() {
-    this.readyState = FakeEventSource.CLOSED;
-    this.onerror?.();
-  }
-}
-FakeEventSource.CONNECTING = 0;
-FakeEventSource.OPEN = 1;
-FakeEventSource.CLOSED = 2;
+const FakeEventSource = fakeEventSource(sources);
 
 const win = new Emitter();
 Object.assign(win, {

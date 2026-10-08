@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 # Imported by the harnesses; this loader has no tests of its own.
-HELPERS = {"web_app_loader.mjs"}
+HELPERS = {"web_app_loader.mjs", "web_stub_dom.mjs"}
 
 
 def test_web_harnesses_have_pytest_wrappers():

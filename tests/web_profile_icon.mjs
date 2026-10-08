@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createContext } from "node:vm";
 import { profileIconHidden } from "../harness/web/lib/layout.mjs";
 import { runApp } from "./web_app_loader.mjs";
+import { El as BaseEl, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cssSrc = readFileSync(join(root, "harness/web/style.css"), "utf8");
@@ -35,140 +36,20 @@ assert(/#profile-icon/.test(cssSrc) && /flex:\s*0 0 auto/.test(cssSrc),
 assert(/@media \(max-width: 420px\)/.test(cssSrc) && /#bar \{ gap: 6px; \}/.test(cssSrc),
   "phone-width bar gap must stay tight so the icon does not crowd the title");
 
-class Emitter {
-  constructor() { this._l = {}; }
-  addEventListener(type, fn) { (this._l[type] ||= []).push(fn); }
-  removeEventListener(type, fn) { this._l[type] = (this._l[type] || []).filter((f) => f !== fn); }
-  dispatchEvent(ev) {
-    for (const fn of [...(this._l[ev.type] || [])]) fn.call(this, ev);
-    return true;
-  }
-}
-
-class Node extends Emitter {}
-class El extends Node {
-  constructor(tag, attrs = {}) {
-    super();
-    this.tagName = String(tag).toUpperCase();
-    this.childNodes = [];
-    this.attributes = { ...attrs };
-    this.className = attrs.class || "";
-    this.id = attrs.id || "";
-    this.hidden = false;
-    this.value = attrs.value || "";
-    this.href = attrs.href || "";
-    this.type = attrs.type || "";
-    this.disabled = false;
-    this.style = {
-      _p: {},
-      setProperty(k, v) { this._p[k] = v; },
-      removeProperty(k) { delete this._p[k]; },
-      getPropertyValue(k) { return this._p[k] || ""; },
-    };
-    this.dataset = {};
-    this.classList = {
-      _s: new Set(this.className.split(/\s+/).filter(Boolean)),
-      add: (c) => { this.classList._s.add(c); this.className = [...this.classList._s].join(" "); },
-      remove: (c) => { this.classList._s.delete(c); this.className = [...this.classList._s].join(" "); },
-      toggle: (c, force) => {
-        const on = force === undefined ? !this.classList._s.has(c) : !!force;
-        if (on) this.classList.add(c); else this.classList.remove(c);
-        return on;
-      },
-      contains: (c) => this.classList._s.has(c),
-    };
-    this.offsetHeight = 48;
+class El extends BaseEl {
+  constructor(tag, attrs) {
+    super(tag, attrs);
     this.offsetWidth = 44;
-    this._text = "";
-    this.parentNode = null;
-    this.options = [];
   }
-  get isConnected() { return !!this.parentNode; }
-  get textContent() {
-    if (this.childNodes.length) return this.childNodes.map((c) => (typeof c === "string" ? c : c.textContent)).join("");
-    return this._text;
-  }
-  set textContent(v) { this._text = String(v); this.childNodes = []; }
-  get innerHTML() { return this.textContent; }
-  set innerHTML(v) { this.textContent = v; }
-  append(...nodes) {
-    for (const n of nodes.flat()) {
-      if (n === null || n === undefined || n === false) continue;
-      if (n instanceof El) n.parentNode = this;
-      this.childNodes.push(n instanceof El ? n : String(n));
-    }
-  }
-  replaceChildren(...nodes) { this.childNodes = []; this.append(...nodes); }
-  remove() { this.removed = true; }
-  click() { this.dispatchEvent({ type: "click" }); }
-  focus() {}
-  blur() {}
-  querySelector(sel) {
-    if (sel === ".drawer-recent") return this._drawerRecent || null;
-    return null;
-  }
-  querySelectorAll() { return []; }
-  setAttribute(k, v) { this.attributes[k] = v; if (k === "id") this.id = v; }
-  removeAttribute(k) { delete this.attributes[k]; }
 }
 
-const byId = {};
-const make = (tag, id, extra = {}) => {
-  const el = new El(tag, { id, ...extra });
-  if (id) byId[id] = el;
-  return el;
-};
-
-const feature = make("select", "feature-nav");
-for (const value of ["chat", "agents", "jobs", "images"]) {
-  const opt = new El("option", { value });
-  opt.value = value;
-  feature.options.push(opt);
-}
-feature.value = "chat";
-
-const doc = new Emitter();
-doc.documentElement = new El("html");
-doc.documentElement.style = { setProperty() {}, removeProperty() {}, getPropertyValue() { return ""; } };
-doc.documentElement.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
-doc.body = new El("body");
-doc.hidden = false;
-doc.visibilityState = "visible";
-doc.getElementById = (id) => byId[id] || null;
-doc.querySelector = (sel) => {
-  if (sel === 'link[rel="apple-touch-icon"]' || sel === 'link[rel="icon"]') return new El("link");
-  if (sel === ".composer" || sel === ".session-chrome") return null;
-  if (sel === "#app") return byId.app;
-  return null;
-};
-doc.querySelectorAll = (sel) => {
-  if (sel === ".jump") return [];
-  return [];
-};
-doc.createElement = (tag) => new El(tag);
-doc.createTextNode = (t) => String(t);
-doc.addEventListener = (...a) => Emitter.prototype.addEventListener.call(doc, ...a);
-
-const drawer = make("nav", "nav-drawer");
+const { byId, make, doc, feature } = createDocument({ ElClass: El, features: ["chat", "agents", "jobs", "images"], feature: "chat", focusables: false });
+const drawer = byId["nav-drawer"];
 drawer._drawerRecent = new El("div", { class: "drawer-recent" });
 drawer.hidden = true;
-
-make("main", "app");
-make("h1", "title");
-make("button", "back");
-make("span", "conn");
-const profileIcon = make("a", "profile-icon", { href: "#/profile" });
+const profileIcon = byId["profile-icon"];
 profileIcon.href = "#/profile";
 profileIcon.hidden = true;
-make("button", "menu-btn");
-make("div", "drawer-scrim");
-make("div", "drawer-chats");
-make("span", "drawer-profile-icon");
-make("div", "fab-host");
-make("a", "fab");
-make("header", "bar");
-make("div", "guest-banner");
-make("div", "toast");
 
 const loc = {
   href: "http://localhost/#/",
@@ -186,15 +67,6 @@ const loc = {
     this.onHashReplace?.();
   },
 };
-const storage = () => {
-  const m = new Map();
-  return {
-    getItem: (k) => (m.has(k) ? m.get(k) : null),
-    setItem: (k, v) => m.set(k, String(v)),
-    removeItem: (k) => m.delete(k),
-  };
-};
-
 const jsonResp = (body, status = 200) => ({
   ok: status >= 200 && status < 300,
   status,
@@ -257,10 +129,7 @@ const fakeFetch = async (url) => {
   return jsonResp({});
 };
 
-class FakeEventSource extends Emitter {
-  constructor() { super(); this.readyState = 1; }
-  close() { this.readyState = 2; }
-}
+const FakeEventSource = fakeEventSource();
 
 const win = new Emitter();
 Object.assign(win, {
