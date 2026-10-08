@@ -52,10 +52,6 @@ ADMIN_PATHS = frozenset({
     "/resources",
     "/resources/diagnostics",
     "/resources/{action}",
-    "/remote-control",
-    "/remote-control/{project}",
-    "/remote-control/{project}/trust",
-    "/remote-control/{project}/stop",
     "/queue",
     "/sessions",
     "/sessions/{ref}",
@@ -231,7 +227,7 @@ class GitHubResetRequest(BaseModel):
     confirm: bool = False
 
 
-def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS) -> list[dict]:
+def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS, cfg=None) -> list[dict]:
     operations: list[dict] = []
     existing = [route for route in app.routes if isinstance(route, APIRoute) and route.path in paths]
     missing = paths - {route.path for route in existing}
@@ -258,8 +254,10 @@ def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS) 
     ])
     from . import config_api
     operations.extend(config_api.register_admin(app, mgr, require_admin))
-    from . import discovery_api
-    operations.extend(discovery_api.register(app, mgr, require_admin))
+    from .modules import present
+    for module in present(cfg) if cfg is not None else ():
+        if module.register_admin:
+            operations.extend(module.register_admin(app, mgr, require_admin))
     from . import google_signin_api
     operations.extend(google_signin_api.register(app, mgr))
     operations.sort(key=lambda row: (row["path"], row["method"]))
@@ -283,11 +281,11 @@ async def _apply_account_update(svc, actor: str, user_id: str, body: AccountUpda
     return row
 
 
-def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset()) -> None:
+def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=None) -> None:
     """``module_paths``: the present add-on modules' owner routes to serve here too (Module.admin_paths)."""
     paths = ADMIN_PATHS | module_paths
     matchers = [_template_re(path) for path in paths]
-    operations = _collect_operations(app, mgr, paths)
+    operations = _collect_operations(app, mgr, paths, cfg)
 
     @app.get(PREFIX)
     async def admin_root(request: Request):

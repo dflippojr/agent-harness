@@ -675,64 +675,6 @@ async def gpu_action(action: str, request: Request, body: GpuHoldRequest | None 
     return await _resources_status(m)
 
 
-# Claude Code Remote Control servers (remote_control.py)
-def remote_control(m):
-    if m.remote_control is None:
-        raise HarnessError(400, "Remote Control launches are disabled (remote_control.enabled in harness.yaml)")
-    return m.remote_control
-
-
-def rc_owner_surface(request):
-    return request.scope.get('harness_original_path', '').startswith('/api/admin/v1/')
-
-
-@api_router.get("/remote-control")
-async def rc_status(request: Request):
-    m = mgr(request)
-    if m.remote_control is None:
-        return {"enabled": False, "projects": []}
-    if request.state.access.role == "guest":
-        return {"enabled": True, "projects": []}
-    owner = rc_owner_surface(request)
-    result = {"enabled": True, "projects": m.remote_control.status(include_owner_only=owner)}
-    if owner:
-        import sys
-        from .folder_discovery import LIMITS
-        result['discovery'] = dict(supported=sys.platform == 'win32',
-                                   enabled=m.cfg.remote_control.discovery.enabled, limits=dict(LIMITS))
-    return result
-
-
-@api_router.post("/remote-control/{project}")
-async def rc_launch(project: str, request: Request):
-    from .fileops import ToolError
-    rc = remote_control(mgr(request))
-    try:
-        return await rc.launch(project, started_by=getattr(request.state.access, 'user_id', '') or 'owner',
-                               include_owner_only=rc_owner_surface(request))
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-
-
-@api_router.post("/remote-control/{project}/trust")
-async def rc_trust(project: str, request: Request):
-    from .fileops import ToolError
-    try:
-        return remote_control(mgr(request)).open_trust_prompt(project, include_owner_only=rc_owner_surface(request),
-                                                            actor=getattr(request.state.access, 'user_id', '') or 'owner')
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-
-
-@api_router.post("/remote-control/{project}/stop")
-async def rc_stop(project: str, request: Request):
-    from .fileops import ToolError
-    try:
-        return await remote_control(mgr(request)).stop(project, include_owner_only=rc_owner_surface(request))
-    except ToolError as e:
-        raise HarnessError(404, str(e))
-
-
 @api_router.get("/queue")
 async def queue(request: Request):
     m = mgr(request)
@@ -1222,7 +1164,7 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     modules.install_routes(app, manager.cfg, "owner")
     modules.install_routes(app, manager.cfg, "public")
     from . import admin
-    admin.register(app, mgr, modules.admin_paths(manager.cfg))
+    admin.register(app, mgr, modules.admin_paths(manager.cfg), manager.cfg)
     # Keep /static for installed bundled clients, while making harness/web directly deployable at a static-site root.
     # This catch-all mount is last so daemon/API routes always win.
     app.mount("/", StaticFiles(directory=WEB), name="web-root")

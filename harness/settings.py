@@ -22,7 +22,7 @@ APPLY_MODES = ("live", "daemon_restart", "installer_only")
 VALUE_TYPES = ("bool", "int", "float", "string", "enum", "string_list", "discovery_root_list")
 SENSITIVITIES = ("public", "redact", "hidden")
 # The core's App capabilities; add-on modules add theirs (Module.app_capabilities).
-APP_CAPABILITIES = ("web", "search", "memory_library", "remote_control", "homelab")
+APP_CAPABILITIES = ("web", "search", "memory_library", "homelab")
 
 
 def app_allows(defaults: dict, capability: str) -> bool:
@@ -100,6 +100,7 @@ class SettingSpec:
     live_apply: LiveHook | None = None
     live_undo: LiveHook | None = None
     enable_check: Callable[[Config], list[str]] | None = None
+    normalize_change: Callable[[Config, Any], Any] | None = None
 
 
 @dataclass

@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from harness.discovery_paths import DiscoveryError, Identity, WindowsDirectories, beneath, lexical
-from harness.folder_discovery import FolderDiscovery, FolderStore, LIMITS, MARKERS, SUFFIXES
-from harness.remote_control import RemoteControl, RemoteControlError
+from harness_modules.remote_control.discovery_paths import DiscoveryError, Identity, WindowsDirectories, beneath, lexical
+from harness_modules.remote_control.folder_discovery import FolderDiscovery, FolderStore, LIMITS, MARKERS, SUFFIXES
+from harness_modules.remote_control.service import RemoteControl, RemoteControlError
 from harness.fileops import ToolError
 from harness.settings_keys import build_registry
 from harness.settings_service import SettingsError, SettingsService
@@ -377,7 +377,7 @@ async def test_managed_isolation_revalidation_and_removal(tmp_path, monkeypatch)
 
 
 def test_authorization_on_every_discovery_endpoint(tmp_path, monkeypatch):
-    from harness import discovery_api
+    from harness_modules.remote_control import discovery_api
     monkeypatch.setattr(discovery_api, 'sys', SimpleNamespace(platform='win32'))
     from test_admin import make_client, bearer, PREFIX
     from harness.config import GuestAccess
@@ -449,7 +449,7 @@ async def test_scanner_never_reads_files_or_runs_commands_or_network(tmp_path, m
 
 @run_async
 async def test_add_trust_and_launch_are_separate_and_revalidate(tmp_path, monkeypatch):
-    from harness import remote_control
+    from harness_modules.remote_control import service as remote_control
     service, fs = discovery(tmp_path)
     fs.tree['C:\\Projects'] = [('package.json', False, False)]
     launches = []
@@ -586,7 +586,7 @@ async def test_removed_managed_slug_does_not_hide_configured_folder(tmp_path, mo
 @pytest.mark.parametrize('owner', [True, False])
 @run_async
 async def test_same_slug_trust_prompts_are_isolated_by_kind(tmp_path, monkeypatch, owner):
-    from harness import remote_control
+    from harness_modules.remote_control import service as remote_control
     service, fs = discovery(tmp_path)
     rc = service.rc
     fs.tree['C:\Projects'] = [('package.json', False, False)]
@@ -639,7 +639,7 @@ async def test_folder_changing_mid_check_marks_only_that_folder_unavailable(tmp_
 
 @run_async
 async def test_configured_folder_vanishing_after_trust_prompt_returns_unavailable_view(tmp_path, monkeypatch):
-    from harness import remote_control
+    from harness_modules.remote_control import service as remote_control
     service, _ = discovery(tmp_path)
     rc = service.rc
     local = tmp_path / 'local'
@@ -662,7 +662,7 @@ async def test_configured_folder_vanishing_after_trust_prompt_returns_unavailabl
 
 @run_async
 async def test_configured_folder_vanishing_after_launch_returns_unavailable_view(tmp_path, monkeypatch):
-    from harness import remote_control
+    from harness_modules.remote_control import service as remote_control
     service, _ = discovery(tmp_path)
     rc = service.rc
     local = tmp_path / 'local'

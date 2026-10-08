@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .discovery_paths import DiscoveryError
-from .manager import HarnessError
+from harness.modules import HarnessError
 import sys
 
 PREFIX = '/api/admin/v1/remote-control'

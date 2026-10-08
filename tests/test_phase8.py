@@ -199,7 +199,7 @@ from pathlib import Path as _Path  # noqa: E402
 from harness.config import Project, RemoteControlConfig  # noqa: E402
 from harness.fileops import ToolError  # noqa: E402
 from harness.policy import ALLOW, ASK, Policy  # noqa: E402
-from harness.remote_control import RemoteControl, parse_log, STOP_TIMEOUT  # noqa: E402
+from harness_modules.remote_control.service import RemoteControl, parse_log, STOP_TIMEOUT  # noqa: E402
 
 FAKE_LOG = ("· Connecting · repo · HEAD\n\x1b[1A\x1b[J· Connected · repo · HEAD\n    Capacity: 1/4 · New sessions\n"
             "    \x1b]8;;https://claude.ai/code/session_01AbC?from=cli\x07demo\x1b]8;;\x07\n"
@@ -277,7 +277,7 @@ def test_remote_control_launch_status_stop(tmp_path):
 
 
 def test_remote_control_stop_ignores_vanished_processes(tmp_path, monkeypatch):
-    import harness.remote_control as rc_module
+    import harness_modules.remote_control.service as rc_module
 
     rc, _, _ = _rc_setup(tmp_path)
     rc._save({"repo": {"pid": 4242, "created": 1.0, "started_at": 1.0, "log": "",
@@ -349,7 +349,7 @@ def test_remote_control_refuses_untrusted_and_reports_failures(tmp_path):
 
 
 def test_remote_control_opens_trust_prompt_in_exact_folder(tmp_path, monkeypatch):
-    import harness.remote_control as rc_module
+    import harness_modules.remote_control.service as rc_module
 
     rc, repo, _ = _rc_setup(tmp_path, trusted=False)
     calls = []
@@ -392,7 +392,7 @@ def test_remote_control_opens_trust_prompt_in_exact_folder(tmp_path, monkeypatch
 
 
 def test_remote_control_trust_web_endpoint(tmp_path, monkeypatch):
-    import harness.remote_control as rc_module
+    import harness_modules.remote_control.service as rc_module
 
     rc, _, _ = _rc_setup(tmp_path, trusted=False)
 
@@ -422,7 +422,7 @@ def test_remote_control_tool_always_asks():
 def test_remote_control_tool_attached_only_to_owner_tower_session(tmp_path):
     rc, _, _ = _rc_setup(tmp_path)
     manager = Manager(rc.cfg, chat=Script([Completion(content="unused")]))
-    manager.runner.remote_control = rc
+    manager.modules.get("remote_control").service = rc
     owner = {
         "id": "owner-tower", "project": "repo", "target": "tower", "model": "fake",
         "workspace": str(tmp_path / "workspace"), "owner_id": "owner", "app_id": "",
