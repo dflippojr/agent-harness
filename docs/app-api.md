@@ -25,7 +25,7 @@ prompts, context, titles, tool arguments/results, arbitrary App metadata, creden
 conversation ids, paths or exception text. Private metadata can still reveal activity; it is not owner-visible.
 
 Login lifecycle is private too: `login.start` records launch, `login.code_submit` records code submission (never
-the code), `login.finish` records the process's actual completed/failed/expired/cancelled result, and `login.unlink`
+the code), `login.finish` records the process's actual success or failure (including expiry/cancellation), and `login.unlink`
 records unlink. A successful launch/submission does not imply successful provider authentication. The server stamps
 intent before launch/submission/unlink. A restart may leave an intent or launched attempt without terminal evidence;
 inspect it rather than infer success. A terminal audit failure appears as `audit_record_incomplete`, an operation id,

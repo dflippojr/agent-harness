@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -459,3 +460,35 @@ def test_cross_origin_app_can_read_audit_gap_warning(setup, monkeypatch):
     assert response.headers["Access-Control-Allow-Origin"] == "https://app.example"
     assert response.headers["X-Agent-Harness-Audit-Warning"] == "audit_gap"
     assert "X-Agent-Harness-Audit-Warning" in response.headers["Access-Control-Expose-Headers"]
+
+
+def test_login_poll_cannot_observe_completion_before_audit_settles(monkeypatch):
+    from harness.end_users import Attempt, EndUserLogins
+    from concurrent.futures import TimeoutError
+    entered, release, reading = threading.Event(), threading.Event(), threading.Event()
+    def finish(attempt):
+        entered.set()
+        assert release.wait(5)
+        attempt.audit_incomplete = "completion-operation"
+    monkeypatch.setattr("harness.backend_state.forget_end_user_login", lambda *args: None)
+    logins = EndUserLogins(SimpleNamespace(), command=lambda *args: [])
+    attempt = Attempt("attempt", "app", "delegated", "claude", time.time() + 60,
+                      process=SimpleNamespace(wait=lambda **kwargs: 0), state="waiting", on_finish=finish)
+    def read():
+        reading.set()
+        return logins._view(attempt)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        terminal = pool.submit(logins._watch, attempt)
+        assert entered.wait(5)
+        view = pool.submit(read)
+        try:
+            assert reading.wait(5)
+            with pytest.raises(TimeoutError):
+                view.result(timeout=0.05)
+        finally:
+            release.set()
+        terminal.result(timeout=5)
+        result = view.result(timeout=5)
+    assert result["state"] == "completed"
+    assert result["error"] == {"code": "audit_record_incomplete", "operation_id": "completion-operation",
+                               "may_have_completed": True, "retryable": False}

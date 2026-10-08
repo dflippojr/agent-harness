@@ -167,7 +167,7 @@ class EndUserLogins:
         if not await asyncio.to_thread(attempt.seen.wait, URL_WAIT_SECONDS) or not attempt.url:
             await asyncio.to_thread(self._end, attempt, "failed")
             raise LoginError(502, "login_failed", f"{backend.title()} did not offer a sign-in URL")
-        return self._view(attempt)
+        return await asyncio.to_thread(self._view, attempt)
 
     @staticmethod
     def check(backend: str, end_user: str) -> None:
@@ -241,16 +241,16 @@ class EndUserLogins:
                 attempt.state = "completed" if code == 0 else "failed"
             if attempt.state == "completed":
                 backend_state.forget_end_user_login(attempt.backend, attempt.app_id, attempt.end_user)
-        if was_live and attempt.on_finish:
-            attempt.on_finish(attempt)
+            if was_live and attempt.on_finish:
+                attempt.on_finish(attempt)
 
     def _end(self, attempt: Attempt, state: str) -> None:
         with attempt.lock:
             if not attempt.live:
                 return
             attempt.state = state
-        if attempt.on_finish:
-            attempt.on_finish(attempt)
+            if attempt.on_finish:
+                attempt.on_finish(attempt)
         proc = attempt.process
         try:
             if proc is not None and proc.poll() is None:
@@ -309,10 +309,16 @@ class EndUserLogins:
         except (OSError, ValueError) as e:
             await asyncio.to_thread(self._end, attempt, "failed")
             raise LoginError(502, "login_failed", "the sign-in process is no longer running") from e
-        return self._view(attempt)
+        return await asyncio.to_thread(self._view, attempt)
 
     # --- state -------------------------------------------------------------------------------------------------
     def _view(self, attempt: Attempt) -> dict:
+        # A terminal state and its settlement error become visible together, so polling clients cannot miss a gap.
+        with attempt.lock:
+            return self._locked_view(attempt)
+
+    @staticmethod
+    def _locked_view(attempt: Attempt) -> dict:
         view = {"attempt_id": attempt.attempt_id, "backend": attempt.backend, "state": attempt.state,
                 "verification_url": attempt.url, "needs_code": attempt.needs_code,
                 "expires_in": max(0, int(attempt.deadline - time.time()))}
@@ -340,7 +346,8 @@ class EndUserLogins:
         self.check(backend, end_user)
         linked = await asyncio.to_thread(backend_state.end_user_login_ready, backend, self.cfg.backends[backend],
                                          app_id, end_user)
-        return {"backend": backend, "linked": linked, "attempt": self.attempt_state(app_id, end_user, backend)}
+        attempt = await asyncio.to_thread(self.attempt_state, app_id, end_user, backend)
+        return {"backend": backend, "linked": linked, "attempt": attempt}
 
     # --- revocation --------------------------------------------------------------------------------------------
     async def unlink(self, app_id: str, end_user: str, backend: str) -> None:
