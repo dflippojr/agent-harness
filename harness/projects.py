@@ -53,6 +53,8 @@ _SAFE_REMOTE_KEYS = {"url", "pushurl", "fetch", "mirror", "prune", "tagopt", "pr
 _SAFE_BRANCH_KEYS = {"remote", "merge", "pushremote", "rebase", "description"}
 _STATE_FILES = ("HEAD", "packed-refs", "FETCH_HEAD", "ORIG_HEAD", "shallow")
 _STATE_DIRS = ("refs", "logs")
+# threading.Lock supports weak references since Python 3.2; idle workspace locks can be reclaimed.
+# https://docs.python.org/3.12/library/weakref.html
 _GIT_STATE_LOCKS: WeakValueDictionary = WeakValueDictionary()
 _GIT_STATE_LOCKS_GUARD = threading.Lock()
 
