@@ -219,7 +219,7 @@ def test_cli_config_paths_must_stay_under_the_harness_home(tmp_path, monkeypatch
 
 
 def test_private_json_never_writes_through_a_file_at_the_temp_name(tmp_path):
-    """Issue #221: whatever already sits at `<name>.new` is replaced, not written through."""
+    """Issue #221: a file or link sitting at a guessable temp name is never written through."""
     outside = tmp_path / "outside.txt"
     outside.write_text("keep\n", encoding="utf-8")
     target = tmp_path / "client" / "config.json"
@@ -228,7 +228,7 @@ def test_private_json_never_writes_through_a_file_at_the_temp_name(tmp_path):
     cli._write_private_json(target, {"token": "ho-secret"})
     assert json.loads(target.read_text(encoding="utf-8")) == {"token": "ho-secret"}
     assert outside.read_text(encoding="utf-8") == "keep\n"
-    assert not target.with_name("config.json.new").exists()
+    assert target.with_name("config.json.new").stat().st_nlink == 2  # the planted link is left alone
     if os.name == "posix":
         assert target.stat().st_mode & 0o777 == 0o600
 

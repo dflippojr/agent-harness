@@ -31,7 +31,6 @@ import math
 import os
 import re
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -39,7 +38,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from harness.modules import GpuGuardConfig, ModelConfig, run_cmd
+from harness.modules import GpuGuardConfig, ModelConfig, run_cmd, write_atomic
 
 log = logging.getLogger("harness.gpu_guard")
 
@@ -486,12 +485,7 @@ class GpuGuard:
                    "manual_duration_seconds": self.manual_duration_seconds}
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp_name = tempfile.mkstemp(prefix=self._state_path.name + ".", suffix=".tmp",
-                                            dir=str(self._state_path.parent))
-            tmp = Path(tmp_name)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
-            os.replace(tmp, self._state_path)
+            write_atomic(self._state_path, json.dumps(payload), private=True)
         except OSError:
             log.warning("GPU guard: could not persist manual hold to %s", self._state_path, exc_info=True)
 

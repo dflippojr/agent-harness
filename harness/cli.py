@@ -16,10 +16,12 @@ from urllib.parse import quote
 import httpx
 
 try:
+    from .atomic_io import write_atomic
     from .compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
     from .updater import apply_update
     from . import modules as _modules
 except ImportError:  # installed native bundle imports these as sibling modules
+    from harness_atomic_io import write_atomic
     from harness_compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
     from harness_update import apply_update
     _modules = None
@@ -75,12 +77,7 @@ def _write_private_json(path: Path, data: dict) -> None:
     file or link already sitting at its name is removed rather than written through."""
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".new")
-    tmp.unlink(missing_ok=True)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with open(fd, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(data, indent=2) + "\n")
-    tmp.replace(path)
+    write_atomic(path, json.dumps(data, indent=2) + "\n", private=True)
 
 
 def pair_native(server: str, code: str, client_path: Path, runner_path: Path) -> dict:

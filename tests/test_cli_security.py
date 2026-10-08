@@ -101,11 +101,11 @@ def test_credentials_are_created_fresh_and_private_before_any_token_is_written(t
         sizes.append(os.path.getsize(path))   # still empty when it is created
         return fd
 
-    monkeypatch.setattr(cli.os, "open", spy_open)
+    monkeypatch.setattr("harness.atomic_io.os.open", spy_open)
     cli._write_private_json(target, {"token": "ho-secret"})
     assert len(opened) == 1
     path, flags, mode = opened[0]
-    assert path.endswith("config.json.new")
+    assert ".config.json." in path and path.endswith(".tmp")
     assert flags & os.O_EXCL
     assert flags & os.O_CREAT
     assert mode == 0o600

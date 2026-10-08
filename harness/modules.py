@@ -126,6 +126,7 @@ _PUBLIC = {
     "backup_sqlite": ("harness.sqlite_backup", "backup_sqlite"),
     "OWNER_USER_ID": ("harness.principal", "OWNER_USER_ID"),
     "ROOT": ("harness.config", "ROOT"),
+    "write_atomic": ("harness.atomic_io", "write_atomic"),
     "ManagedStore": ("harness.managed_config", "ManagedStore"),
 }
 

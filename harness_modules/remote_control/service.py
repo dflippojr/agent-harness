@@ -31,7 +31,7 @@ from pathlib import Path
 
 import psutil
 
-from harness.modules import Config, RemoteControlConfig, ToolError
+from harness.modules import Config, RemoteControlConfig, ToolError, write_atomic
 from .discovery_paths import Identity
 
 log = logging.getLogger("harness.remote_control")
@@ -101,9 +101,7 @@ class RemoteControl:
 
     def _save(self, state: dict) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
-        os.replace(tmp, self.state_path)
+        write_atomic(self.state_path, json.dumps(state, indent=1))
 
     @staticmethod
     def _alive(entry: dict) -> bool:
