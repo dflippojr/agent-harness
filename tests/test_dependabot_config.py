@@ -36,6 +36,6 @@ def test_nonstandard_container_manifest_names_are_discoverable():
     # Keep the real filenames covered: discovery must not require duplicate manifests.
     assert re.search(r"dockerfile|containerfile", "cli.Dockerfile", re.I)
     assert (ROOT / "sandbox/cli.Dockerfile").is_file()
-    assert re.search(r"(docker-)?compose(-[\w]+)?(?>\.[\w-]+)?\.ya?ml", "docker-compose.tempo.yml", re.I)
+    assert re.search(r"(docker-)?compose(-[\w]+)?(?:\.[\w-]+)?\.ya?ml", "docker-compose.tempo.yml", re.I)
     compose = yaml.safe_load((ROOT / "ops/observability/docker-compose.tempo.yml").read_text(encoding="utf-8"))
     assert compose["services"]["tempo"]["image"].startswith("grafana/tempo:")
