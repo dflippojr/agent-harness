@@ -20,5 +20,3 @@ def endpoint_metrics(m, out, db) -> None:
     gate = m.runner.gate
     out.metric("harness_endpoint_active", "gauge", "Endpoint requests running and waiting now.",
                [({"state": "running"}, gate.endpoint_active), ({"state": "waiting"}, gate.endpoint_waiting)])
-
-

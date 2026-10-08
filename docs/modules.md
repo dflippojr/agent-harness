@@ -69,6 +69,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     __init__.py runtime.py routes.py service.py mac_client.py
   remote_control/        Claude Remote Control and owner-only folder discovery (formerly harness/remote_control.py)
     __init__.py runtime.py routes.py settings.py service.py folder_discovery.py discovery_paths.py discovery_api.py
+  endpoint/              OpenAI/Anthropic inference, request accounting and embeddings proxy (formerly harness/endpoint.py)
+    __init__.py runtime.py routes.py settings.py service.py metrics.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while

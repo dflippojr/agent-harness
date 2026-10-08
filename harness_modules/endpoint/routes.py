@@ -28,5 +28,3 @@ def route_handler(path: str):
 
 for path in ROUTES:
     public_routes.post(path, include_in_schema=False)(route_handler(path))
-
-
