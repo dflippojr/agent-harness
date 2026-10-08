@@ -168,3 +168,12 @@ def test_retention_prunes_on_insert(tmp_path, monkeypatch):
     db.insert_audit("owner", "new", "quota", "ok")
     assert [r["target_id"] for r in db.audit_page()["items"]] == ["new"]
     db.close()
+
+
+def test_failed_create_leaves_no_directories(hh, monkeypatch):
+    client, m = hh
+    before = set(p.name for p in m.cfg.data_dir.rglob("u-*"))
+    monkeypatch.setattr(Database, "insert_audit", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("x")))
+    r = client.post(f"{PREFIX}/accounts", json={"login": "dave@example.com", "display_name": "D"}, headers=H(OWNER))
+    assert r.status_code == 503
+    assert set(p.name for p in m.cfg.data_dir.rglob("u-*")) == before

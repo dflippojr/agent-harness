@@ -10,13 +10,14 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+import shutil
 import time
 
 from . import audit_context
 from .manager import HarnessError
 from .principal import (AUDIT_RETENTION_DAYS, DEFAULT_DISK_QUOTA_BYTES, DEFAULT_MAX_QUEUED,
                         DEFAULT_MAX_RUNNING, OWNER_USER_ID)
-from .storage import account_usage_bytes, ensure_user_dirs
+from .storage import account_usage_bytes, ensure_user_dirs, user_root
 
 LOGIN_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}$")
 NAME_MAX = 80
@@ -133,7 +134,11 @@ class AccountService:
             self._audit(actor_id, user_id, "create", "ok", metadata={
                 "fields": ["disk_quota_bytes", "max_running", "max_queued"], "new_disk_quota_bytes": quota,
                 "new_max_running": running, "new_max_queued": queued})
-        self._apply(commit)
+        try:
+            self._apply(commit)
+        except BaseException:
+            shutil.rmtree(user_root(self._cfg(), user_id), ignore_errors=True)  # a brand-new id: nothing else lives here
+            raise
         return self.public_account(row)
 
     def rename(self, actor_id: str, user_id: str, display_name: str) -> dict:
@@ -174,7 +179,7 @@ class AccountService:
         def commit() -> None:
             self._db().update_account(user_id, enabled=int(enabled))
             self._audit(actor_id, user_id, "enable" if enabled else "disable", "ok",
-                        metadata={"fields": ["enabled"], "old_enabled": was, "new_enabled": enabled})
+                        metadata={"fields": ["enabled"], "old_enabled": not enabled, "new_enabled": enabled})
         await self._db().awrite(commit)
         if not enabled:
             await self.m.disable_member(user_id, actor_id=audit_context.coerce(actor_id).actor_id)
@@ -187,9 +192,10 @@ class AccountService:
             raise HarnessError(400, "disk quota must be at least 1 byte")
 
         def commit() -> None:
+            current = self._db().account_by_id(user_id) or account  # read inside the transaction
             self._db().update_account(user_id, disk_quota_bytes=quota)
             self._audit(actor_id, user_id, "quota", "ok", metadata={
-                "fields": ["disk_quota_bytes"], "old_disk_quota_bytes": int(account["disk_quota_bytes"]),
+                "fields": ["disk_quota_bytes"], "old_disk_quota_bytes": int(current["disk_quota_bytes"]),
                 "new_disk_quota_bytes": quota})
         self._apply(commit)
         return self.public_account(self._db().account_by_id(user_id))
@@ -207,12 +213,12 @@ class AccountService:
                 raise HarnessError(400, "max_queued must be at least 1")
             fields["max_queued"] = int(max_queued)
         if fields:
-            metadata: dict = {"fields": list(fields)}
-            for name, value in fields.items():
-                metadata["old_" + name] = int(account[name])
-                metadata["new_" + name] = value
-
             def commit() -> None:
+                current = self._db().account_by_id(user_id) or account  # read inside the transaction
+                metadata: dict = {"fields": list(fields)}
+                for name, value in fields.items():
+                    metadata["old_" + name] = int(current[name])
+                    metadata["new_" + name] = value
                 self._db().update_account(user_id, **fields)
                 self._audit(actor_id, user_id, "concurrency", "ok", metadata=metadata)
             self._apply(commit)
