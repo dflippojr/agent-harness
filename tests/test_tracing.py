@@ -342,16 +342,27 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch,
         m, exporter = daemon()
         if delay_resume:
             emit = m.bus.aemit
+            held = asyncio.Event()
 
             async def delayed_emit(session_id, event, data):
                 if event == "resumed":
-                    # Force the recovery boundary beyond the tolerance, even on CI/coverage.
-                    await asyncio.sleep(MAX_GAP_NS / 1_000_000_000 + 0.1)
+                    # Force the recovery boundary beyond the tolerance, even on CI/coverage. The test releases
+                    # it, so the length of the gap is a floor rather than a race against the rest of the run.
+                    held.set()
+                    await release.wait()
                 await emit(session_id, event, data)
 
+            release = asyncio.Event()
             monkeypatch.setattr(m.bus, "aemit", delayed_emit)
         await m.start()
-        await asyncio.sleep(0.2)
+        if delay_resume:
+            await asyncio.wait_for(held.wait(), 30)
+            await asyncio.sleep(MAX_GAP_NS / 1_000_000_000 + 0.1)
+            release.set()
+        # Decide only once the resumed turn is parked on the approval, so the span tree never depends on
+        # whether the decision landed before or after the wait began.
+        while not m.runner.approval_events:
+            await asyncio.sleep(0.01)
         m.decide(sid, None, approve=True)
         await wait_status(m, sid, "done")
         await m.stop()
