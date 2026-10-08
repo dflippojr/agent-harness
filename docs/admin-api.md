@@ -136,6 +136,31 @@ session or account does not cascade to them. Rows older than 365 days are pruned
 table is not tamper-evident: a host administrator can edit the SQLite file, and restoring a backup rolls the
 history back to that snapshot.
 
+### Credential, pairing and provider-grant history (#468)
+
+The same audit table records who issued, revoked or restored a credential and who changed a billing grant. One row per
+committed change, written in the same transaction as the change (an audit failure returns 503 `audit_unavailable` and
+the key, pairing, App policy, grant or member ciphertext is unchanged; no new token is returned). The admin aliases and
+the compatibility routes share one handler, so a change is never logged twice.
+
+| Action | Written by | Target and metadata |
+| --- | --- | --- |
+| `key.create`, `key.revoke` | `POST /keys`, `DELETE /keys/{kid}` | opaque key id; `kind`, scope names |
+| `pairing.create`, `pairing.revoke`, `pairing.redeem` | `/pairing-codes`, `POST /api/v1/pair` | pairing and key ids; scope names |
+| `runner_pairing.create`, `.revoke`, `.redeem` | `/runner-pairing-codes`, `POST /api/v1/runner-pair` | pairing and key ids |
+| `app.restore`, `app.retention` | `POST .../apps/{id}/restore`, `PUT .../apps/{id}/retention` | App id; old/new retention days (or null) |
+| `provider_grant.set`, `provider_grant.revoke` | `.../provider-credentials` | grant, previous grant and App ids; backend, policy, changed field names |
+| `member_key.set`, `.delete`, `.test` | `/api/v1/me/api-keys/{backend}` | member id; backend, configured/replaced; outcome `ok`, `rejected`, `unavailable` or `noop` |
+
+A successful pairing redemption is attributed to the key it minted (`actor_kind` `app` or `device`, `key_id` = the new
+key), which proves possession of the bootstrap code and not a person; the metadata links the approved pairing id. An
+unknown, expired, reused or origin-mismatched attempt records `unknown` with a `reason` enum only, never the submitted
+code, origin, name or guessed id, and at most 200 such rows per action per hour (further ones are dropped, so an
+unauthenticated caller cannot grow the table). An unknown target (a mistyped id) leaves `target_id` empty; a retry on an
+already-revoked key records `noop` with `reason: already_revoked`. Secret values, secret references, file paths, model
+lists, ciphertext, last-four snippets, token prefixes and hashes are never stored. These rows hold registry/account
+metadata only, so erasing an App's payload leaves them (365-day retention, as for the other admin and credential events).
+
 The durable owner scope remains `user_id = owner`. SQLite stores non-secret account metadata only: never Tailscale
 session material, provider credentials, GitHub tokens, or Google tokens.
 

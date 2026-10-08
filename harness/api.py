@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict
 
 from . import access as access_mod
 from . import compat
+from . import credential_audit
 from . import config as config_mod
 from . import efficiency
 from . import google_signin
@@ -1072,15 +1073,43 @@ async def list_keys(request: Request):
 async def create_key(request: Request):
     body = await request.json()
     from .admin import parse_key_spec
-    name, scopes, kind = parse_key_spec(body)
-    origins = _key_origins(body, kind)
-    row, key = mgr(request).db.create_api_key(name, scopes, kind, origins)
+    m = mgr(request)
+    ctx = credential_audit.request_context(request, m)
+    try:
+        name, scopes, kind = parse_key_spec(body)
+        origins = _key_origins(body, kind)
+    except HarnessError:
+        await m.db.main.awrite(credential_audit.record, m.db, ctx, "key.create", "", "denied", "api_key",
+                               {"reason": "invalid_request"})
+        raise
+
+    def commit():
+        row, key = m.db.main.create_api_key(name, scopes, kind, origins)
+        credential_audit.record(m.db, ctx, "key.create", row["id"], "ok", "api_key",
+                                {"key_id": row["id"], "kind": kind, "scopes": scopes.split()})
+        return row, key
+    row, key = await m.db.main.awrite(commit)
     return {**row, "key": key}
 
 
 @api_router.delete("/keys/{kid}", status_code=204)
 async def revoke_key(kid: str, request: Request):
-    if not mgr(request).db.revoke_api_key(kid):
+    m = mgr(request)
+    ctx = credential_audit.request_context(request, m)
+
+    def commit() -> bool:
+        before = m.db.main.get_api_key(kid)
+        if m.db.main.revoke_api_key(kid):
+            credential_audit.record(m.db, ctx, "key.revoke", kid, "ok", "api_key",
+                                    {"key_id": kid, "kind": before["kind"] if before else None})
+            return True
+        # Unknown (or never-revocable) id: nothing the caller supplied is stored. A known, already-revoked key is.
+        known = before is not None and before.get("kind") != "web"
+        credential_audit.record(m.db, ctx, "key.revoke", kid if known else "", "noop", "api_key",
+                                {"reason": "already_revoked" if known else "not_found",
+                                 **({"key_id": kid, "kind": before["kind"]} if known else {})})
+        return False
+    if not await m.db.main.awrite(commit):
         raise HarnessError(404, "no such active key")
     return Response(status_code=204)
 

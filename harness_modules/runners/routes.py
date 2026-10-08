@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from harness.modules import (HarnessError, RouteTable, manager as mgr, runtime,
-                             require_admin, log_safe, compat, API_VERSION, ROOT)
+                             require_admin, log_safe, compat, API_VERSION, ROOT, credential_audit)
 
 log = logging.getLogger("harness.runners")
 RUNNER_BODY_LIMIT = 16 * 2**20
@@ -117,14 +117,18 @@ async def create_runner_pairing_code(body: RunnerPairingCodeRequest, request: Re
     runner = body.runner.strip()
     if not name or not runner:
         raise HarnessError(400, "name and runner are required")
-    row, code = runtime(request, "runners").create_runner_pairing_code(name, runner, body.ttl_seconds)
+    m = mgr(request)
+    row, code = runtime(request, "runners").create_runner_pairing_code(
+        name, runner, body.ttl_seconds, credential_audit.request_context(request, m))
     return JSONResponse({**row, "code": code}, status_code=201,
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
 @owner_routes.delete("/runner-pairing-codes/{pid}", status_code=204)
 async def revoke_runner_pairing_code(pid: str, request: Request):
-    if not mgr(request).db.revoke_runner_pairing_code(pid):
+    m = mgr(request)
+    if not runtime(request, "runners").revoke_runner_pairing_code(
+            pid, credential_audit.request_context(request, m)):
         raise HarnessError(404, "no such active runner pairing code")
 
 

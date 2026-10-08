@@ -555,23 +555,23 @@ class Manager:
         return {"sessions": usage["sessions"], "prompt_tokens": usage["prompt_tokens"],
                 "completion_tokens": usage["completion_tokens"]}
 
-    def member_key_set(self, user_id: str, backend: str, key: str) -> dict:
+    def member_key_set(self, user_id: str, backend: str, key: str, ctx=None) -> dict:
         try:
-            self.member_keys.set(user_id, backend, key)
+            self.member_keys.set(user_id, backend, key, ctx)
         except member_keys.MemberKeyError as e:
             raise self._key_error(e) from e
         return self.member_keys_status(user_id)
 
-    def member_key_test(self, user_id: str, backend: str) -> dict:
+    def member_key_test(self, user_id: str, backend: str, ctx=None) -> dict:
         try:
-            return self.member_keys.test(user_id, backend)
+            return self.member_keys.test(user_id, backend, ctx)
         except member_keys.MemberKeyError as e:
             raise self._key_error(e) from e
 
-    async def member_key_delete(self, user_id: str, backend: str) -> dict:
+    async def member_key_delete(self, user_id: str, backend: str, ctx=None) -> dict:
         """Remove the key: the member's running sessions on that backend stop and their CLI state is deleted."""
         try:
-            self.member_keys.delete(user_id, backend)
+            await asyncio.to_thread(self.member_keys.delete, user_id, backend, ctx)
         except member_keys.MemberKeyError as e:
             raise self._key_error(e) from e
         await self._stop_member_sessions(user_id, (backend,))

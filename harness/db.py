@@ -1449,6 +1449,12 @@ class Database:
                                      "AND expires_at > ?", (time.time(), pid, time.time())).rowcount == 1
 
     @_reads
+    def pairing_id_for_key(self, key_id: str) -> str:
+        with self.lock:
+            row = self.conn.execute("SELECT id FROM pairing_codes WHERE key_id = ?", (key_id,)).fetchone()
+        return row["id"] if row else ""
+
+    @_reads
     def pairing_origin_active(self, origin: str) -> bool:
         with self.lock:
             row = self.conn.execute("SELECT 1 FROM pairing_codes WHERE origin = ? AND used_at IS NULL "
@@ -2111,6 +2117,13 @@ class Database:
             )
             # Retention (365 days) is applied here, on insertion; nothing else deletes audit rows.
             self.conn.execute("DELETE FROM account_audit WHERE ts < ?", (now - 365 * 86400,))
+
+    @_reads
+    def unknown_denials_since(self, action: str, since: float) -> int:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM account_audit WHERE action = ? AND outcome = 'denied' "
+                "AND actor_kind = 'unknown' AND ts >= ?", (action, since)).fetchone()[0]
 
     @_reads
     def list_audit(self, limit: int = 200) -> list[dict]:

@@ -7,6 +7,7 @@ callers are `unknown` and the supplied token is neither stored nor hashed.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from .principal import OWNER_USER_ID
@@ -33,6 +34,39 @@ METADATA_ALLOWLIST: dict[str, frozenset[str]] = {
     "quota": frozenset({"fields", "old_disk_quota_bytes", "new_disk_quota_bytes"}),
     "concurrency": frozenset({"fields", *(k for k in _LIMITS if "max_" in k)}),
 }
+
+# Credential, pairing and provider-grant lifecycle (#468). Metadata is opaque ids, enums, booleans, scope and field
+# names: never a secret, code, origin, URL, secret reference, path or model list.
+CREDENTIAL_REASONS = frozenset({"invalid_request", "not_found", "already_revoked", "unknown_code", "code_used",
+                                "code_expired", "origin_mismatch", "runner_unavailable", "unsupported_backend",
+                                "invalid_key", "no_key", "grace_over", "audit_unavailable"})
+KEY_KINDS = frozenset({"owner", "app", "device", "web", "member"})
+POLICIES = frozenset({"subscription", "api_key", "subscription_then_api_key"})
+MEMBER_KEY_OUTCOMES = frozenset({"ok", "rejected", "unavailable", "noop"})
+GRANT_FIELDS = frozenset({"backend", "policy", "models", "secret_ref"})
+_CRED_ID_KEYS = ("key_id", "pairing_id", "app_id", "grant_id", "previous_grant_id")
+_CRED_BOOL_KEYS = ("configured", "replaced")
+_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_NAME = re.compile(r"[a-z][a-z0-9_:.-]{0,39}")
+_BACKEND = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+_CRED_COMMON = frozenset({*_CRED_ID_KEYS, "reason"})
+METADATA_ALLOWLIST.update({
+    "key.create": _CRED_COMMON | {"kind", "scopes"},
+    "key.revoke": _CRED_COMMON | {"kind"},
+    "pairing.create": _CRED_COMMON | {"scopes"},
+    "pairing.revoke": _CRED_COMMON,
+    "pairing.redeem": _CRED_COMMON | {"kind", "scopes"},
+    "runner_pairing.create": _CRED_COMMON,
+    "runner_pairing.revoke": _CRED_COMMON,
+    "runner_pairing.redeem": _CRED_COMMON | {"kind"},
+    "app.restore": _CRED_COMMON | {"kind"},
+    "app.retention": _CRED_COMMON | {"old_retention_days", "new_retention_days"},
+    "provider_grant.set": _CRED_COMMON | {"backend", "policy", "fields", "replaced"},
+    "provider_grant.revoke": _CRED_COMMON | {"backend", "policy"},
+    "member_key.set": _CRED_COMMON | {"backend", "configured", "replaced", "result"},
+    "member_key.delete": _CRED_COMMON | {"backend", "configured", "result"},
+    "member_key.test": _CRED_COMMON | {"backend", "configured", "result"},
+})
 
 
 @dataclass(frozen=True)
@@ -77,12 +111,59 @@ def _int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and abs(value) < 2 ** 53
 
 
+def _clean_credential(key: str, value, out: dict) -> bool:
+    """Handle the #468 metadata keys; returns False for a key that belongs to the account actions."""
+    if key in _CRED_ID_KEYS:
+        if isinstance(value, str) and _ID.fullmatch(value):
+            out[key] = value
+    elif key == "reason":
+        if value in CREDENTIAL_REASONS:
+            out[key] = value
+    elif key == "kind":
+        if value in KEY_KINDS:
+            out[key] = value
+    elif key == "policy":
+        if value in POLICIES:
+            out[key] = value
+    elif key == "result":
+        if value in MEMBER_KEY_OUTCOMES:
+            out[key] = value
+    elif key == "backend":
+        if isinstance(value, str) and _BACKEND.fullmatch(value):
+            out[key] = value
+    elif key in _CRED_BOOL_KEYS:
+        if isinstance(value, bool):
+            out[key] = value
+    elif key == "scopes":
+        if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+            names = sorted({v for v in value if _NAME.fullmatch(v)})[:20]
+            if names:
+                out[key] = names
+    elif key in ("old_retention_days", "new_retention_days"):
+        if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)
+                             and 0 < value <= 36500):
+            out[key] = value
+    else:
+        return False
+    return True
+
+
 def clean_metadata(action: str, metadata: dict | None) -> dict:
     """Keep only allowlisted, safely-typed values for `action`; drop everything else without storing it."""
     allowed = METADATA_ALLOWLIST.get(action, frozenset())
     out: dict = {}
+    credential = "." in action
     for key, value in (metadata or {}).items():
         if key not in allowed:
+            continue
+        if credential:
+            if key == "fields":
+                if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+                    names = sorted({v for v in value if v in GRANT_FIELDS})
+                    if names:
+                        out[key] = names
+            else:
+                _clean_credential(key, value, out)
             continue
         if key == "fields":
             if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):

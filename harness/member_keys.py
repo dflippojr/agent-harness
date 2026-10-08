@@ -33,7 +33,7 @@ import httpx
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from . import cli_domains, credential_sources
+from . import cli_domains, credential_audit, credential_sources
 from .credential_sources import CredentialRefused
 
 log = logging.getLogger("harness.member_keys")
@@ -174,32 +174,70 @@ class MemberKeys:
         if backend not in BACKENDS:
             raise MemberKeyError(400, "unsupported_backend", "API keys are for claude (Anthropic) and codex (OpenAI)")
 
-    def set(self, user_id: str, backend: str, key: str) -> dict:
+    def _audit(self, ctx, user_id: str, action: str, outcome: str, metadata: dict) -> None:
+        """One audit row (#468): ids, the backend and booleans only; never the key, its ciphertext or last four."""
+        credential_audit.record(self.db, ctx or credential_audit.member_context(user_id), action, user_id, outcome,
+                                "member", metadata)
+
+    def _write(self, fn):
+        return getattr(self.db, "main", self.db).write(fn)
+
+    def set(self, user_id: str, backend: str, key: str, ctx=None) -> dict:
         """Store or replace the member's key. Nothing about the key is echoed back but its last four characters."""
-        self._backend(backend)
+        try:
+            self._backend(backend)
+        except MemberKeyError:
+            self._audit(ctx, user_id, "member_key.set", "denied", {"reason": "unsupported_backend"})
+            raise
         key = (key or "").strip()
         if not _KEY_SHAPE.fullmatch(key):
+            self._audit(ctx, user_id, "member_key.set", "denied", {"backend": backend, "reason": "invalid_key"})
             raise MemberKeyError(400, "invalid_key",
                                  f"that does not look like an {BACKENDS[backend]['provider']} API key")
-        self.db.set_member_api_key(user_id, backend, self._seal(user_id, backend, key), key[-4:])
+        sealed = self._seal(user_id, backend, key)  # encrypted first; the stored change and its audit commit together
+
+        def commit() -> None:
+            replaced = self.db.member_api_key(user_id, backend) is not None
+            self.db.set_member_api_key(user_id, backend, sealed, key[-4:])
+            self._audit(ctx, user_id, "member_key.set", "ok",
+                        {"backend": backend, "configured": True, "replaced": replaced})
+        self._write(commit)
         return self.status(user_id)
 
-    def delete(self, user_id: str, backend: str) -> dict:
-        self._backend(backend)
-        self.db.delete_member_api_keys(user_id, backend)
+    def delete(self, user_id: str, backend: str, ctx=None) -> dict:
+        try:
+            self._backend(backend)
+        except MemberKeyError:
+            self._audit(ctx, user_id, "member_key.delete", "denied", {"reason": "unsupported_backend"})
+            raise
+
+        def commit() -> None:
+            removed = self.db.delete_member_api_keys(user_id, backend)
+            self._audit(ctx, user_id, "member_key.delete", "ok" if removed else "noop",
+                        {"backend": backend, "configured": False})
+        self._write(commit)
         return self.status(user_id)
 
     def purge(self, user_id: str) -> int:
         """Delete every key of the member (the account is removed or cut off)."""
         return self.db.delete_member_api_keys(user_id)
 
-    def test(self, user_id: str, backend: str) -> dict:
+    def test(self, user_id: str, backend: str, ctx=None) -> dict:
         """One cheap validation call with the stored key."""
-        self._backend(backend)
+        try:
+            self._backend(backend)
+        except MemberKeyError:
+            self._audit(ctx, user_id, "member_key.test", "denied", {"reason": "unsupported_backend"})
+            raise
         key = self.get(user_id, backend)
         if not key:
+            self._audit(ctx, user_id, "member_key.test", "noop",
+                        {"backend": backend, "configured": False, "result": "noop"})
             raise MemberKeyError(409, REQUIRED, f"add your {BACKENDS[backend]['provider']} API key first")
         ok, why = self._probe(backend, key)
+        result = "ok" if ok is True else "rejected" if ok is False else "unavailable"
+        self._audit(ctx, user_id, "member_key.test", result,
+                    {"backend": backend, "configured": True, "result": result})
         return {"backend": backend, "ok": ok is True, "checked": ok is not None,
                 "message": "The key works." if ok else why}
 
