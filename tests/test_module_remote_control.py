@@ -87,9 +87,10 @@ def test_folders_yaml_key_survives_extraction(tmp_path):
         encoding='utf-8')
     (cfg_dir / 'harness.local.yaml').write_text(
         'remote_control:\n  folders:\n    separate: C:/Projects/separate\n', encoding='utf-8')
-    cfg = config.load(cfg_dir)
+    cfg = config.load(cfg_dir, data_dir=tmp_path / "data")
     assert cfg.remote_control.folders == {'separate': 'C:/Projects/separate'}
     assert cfg.remote_control.enabled
+    assert (tmp_path / "data" / "managed-config.lock").is_file()
 
 
 def test_routes_use_fake_service_and_preserve_error_codes(tmp_path):
