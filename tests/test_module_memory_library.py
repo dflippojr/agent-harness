@@ -145,3 +145,87 @@ def test_read_limits_search_errors_and_proposals(tmp_path):
     path.unlink()
     assert "No readable files" in lib.memory_index()
     assert lib.profile_file() is None
+
+
+def _git(cwd, *args):
+    import subprocess
+    subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True,
+                   capture_output=True)
+
+
+def _library(tmp_path):
+    remote, seed = tmp_path / "remote.git", tmp_path / "seed"
+    import subprocess
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+    subprocess.run(["git", "clone", "-q", str(remote), str(seed)], check=True, capture_output=True)
+    (seed / "categories" / "projects").mkdir(parents=True)
+    (seed / "categories" / "projects" / "a.md").write_text("# A\n")
+    _git(seed, "add", "."), _git(seed, "commit", "-qm", "one"), _git(seed, "push", "-q", "origin", "HEAD:main")
+    m = manager(tmp_path)
+    cfg = m.cfg.memory_library
+    cfg.repo, cfg.clone_dir = str(remote), str(tmp_path / "library")
+    lib = service.MemoryLibrary(cfg, db=m.db)
+    alerts = []
+    lib.alert = lambda *a: alerts.append(a)
+    return lib, seed, alerts
+
+
+def _push_upstream(seed, name="b.md"):
+    (seed / "categories" / "projects" / name).write_text("# B\n")
+    _git(seed, "add", "."), _git(seed, "commit", "-qm", "two"), _git(seed, "push", "-q", "origin", "HEAD:main")
+
+
+def test_dirty_untracked_and_diverged_clones_are_distinct_states(tmp_path):
+    lib, seed, alerts = _library(tmp_path)
+
+    async def check():
+        await lib.refresh(force=True)
+        assert lib.refresh_state == "ok" and lib.last_success and not lib.failures
+        _push_upstream(seed)
+        (lib.root / "categories" / "projects" / "a.md").write_text("# A\nlocal\n")
+        (lib.root / "categories" / "projects" / "new file.md").write_text("x")
+        for n in range(3):
+            await lib.refresh(force=True)
+            assert lib.refresh_state == "dirty" and lib.failures == n + 1
+        assert sorted(lib.changed_paths) == ["categories/projects/a.md", "categories/projects/new file.md"]
+        assert "local changes" in lib.refresh_error
+        assert (lib.root / "categories" / "projects" / "a.md").read_text() == "# A\nlocal\n"  # never discarded
+        assert len(alerts) == 1  # once per episode
+        await lib.refresh(force=True)
+        assert len(alerts) == 1
+        _git(lib.root, "checkout", "--", "."), (lib.root / "categories" / "projects" / "new file.md").unlink()
+        await lib.refresh(force=True)
+        assert lib.refresh_state == "ok" and lib.failures == 0 and not lib.changed_paths
+        assert (lib.root / "categories" / "projects" / "b.md").is_file()
+        # diverged: a local commit plus a new upstream commit
+        (lib.root / "categories" / "projects" / "c.md").write_text("c")
+        _git(lib.root, "add", "."), _git(lib.root, "commit", "-qm", "local")
+        _push_upstream(seed, "d.md")
+        await lib.refresh(force=True)
+        assert lib.refresh_state == "diverged" and "cannot fast-forward" in lib.refresh_error
+    asyncio.run(check())
+
+
+def test_writes_refuse_a_dirty_clone_and_metrics_report_state(tmp_path):
+    lib, seed, _ = _library(tmp_path)
+
+    class Out:
+        rows = {}
+        def metric(self, name, kind, help_, rows):
+            self.rows[name] = rows
+
+    async def check():
+        await lib.refresh(force=True)
+        (lib.root / "categories" / "projects" / "a.md").write_text("# A\nlocal\n")
+        with pytest.raises(service.ToolError, match="uncommitted"):
+            await lib._sync_for_write()
+        assert "local" in (lib.root / "categories" / "projects" / "a.md").read_text()
+        await lib.refresh(force=True)
+    asyncio.run(check())
+    from harness_modules.memory_library.runtime import MemoryLibraryRuntime
+    rt = MemoryLibraryRuntime.__new__(MemoryLibraryRuntime)
+    rt.service, out = lib, Out()
+    rt.metrics(out, None)
+    assert out.rows["harness_memory_library_refresh_ok"] == [({}, 0)]
+    assert ({"state": "dirty"}, 1) in out.rows["harness_memory_library_refresh_state"]
+    assert out.rows["harness_memory_library_changed_paths"] == [({}, 1)]

@@ -21,7 +21,9 @@ async def memory(request: Request):
     profile = await asyncio.to_thread(lib.profile_text)
     return {"enabled": True, "writes": cfg.writes, "categories": cfg.categories, "profile_path": cfg.profile_path,
             "profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
-            "last_commit": lib.last_commit, "refresh_error": lib.refresh_error}
+            "last_commit": lib.last_commit, "refresh_error": lib.refresh_error,
+            "refresh_state": lib.refresh_state, "changed_paths": lib.changed_paths,
+            "refresh_failures": lib.failures, "last_success": lib.last_success}
 
 
 @owner_routes.put("/memory/profile")

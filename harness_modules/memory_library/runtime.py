@@ -1,4 +1,5 @@
 """Memory tools and frozen personal context for eligible owner sessions."""
+import time
 from harness.modules import ModuleRuntime, app_allows
 from .service import MemoryLibrary
 
@@ -16,6 +17,32 @@ class MemoryLibraryRuntime(ModuleRuntime):
     def init(self):
         if self.effective():
             self.service = MemoryLibrary(self.cfg.memory_library, db=self.manager.db)
+            self.service.alert = self._alert
+
+    def _alert(self, state: str, paths: list[str], error: str) -> None:
+        notifier = self.manager.notifier
+        if notifier is None or not notifier.enabled:
+            return
+        detail = f"changed: {', '.join(paths[:5])}" if paths else error
+        notifier.send({"topic": self.cfg.notify.topic, "title": f"Memory library is stuck ({state})",
+                       "message": f"The clone has not refreshed for {self.service.failures} tries. {detail}"[:300],
+                       "tags": ["warning"]})
+
+    def metrics(self, out, db):
+        lib = self.service
+        if lib is None or not lib.refresh_state:
+            return
+        out.metric("harness_memory_library_refresh_ok", "gauge", "1 when the last memory library refresh succeeded.",
+                   [({}, 1 if lib.refresh_state == "ok" else 0)])
+        out.metric("harness_memory_library_refresh_state", "gauge", "Last refresh outcome.",
+                   [({"state": st}, 1 if lib.refresh_state == st else 0) for st in ("ok", "dirty", "diverged", "failed")])
+        out.metric("harness_memory_library_refresh_failures", "gauge", "Consecutive failed refreshes.",
+                   [({}, lib.failures)])
+        out.metric("harness_memory_library_changed_paths", "gauge", "Uncommitted or untracked paths in the clone.",
+                   [({}, len(lib.changed_paths))])
+        if lib.last_success:
+            out.metric("harness_memory_library_last_success_age_seconds", "gauge",
+                       "Seconds since the last successful refresh.", [({}, max(0.0, time.time() - lib.last_success))])
 
     def start(self):
         if self.service is not None:
