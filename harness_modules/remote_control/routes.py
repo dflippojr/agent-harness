@@ -5,7 +5,7 @@ from harness.modules import RouteTable, manager, HarnessError, ToolError, app_au
 owner_routes = RouteTable()
 app_routes = RouteTable()
 
-# Claude Code Remote Control servers (remote_control.py)
+# Claude Code Remote Control servers
 def remote_control(m):
     if m.remote_control is None:
         raise HarnessError(400, "Remote Control launches are disabled (remote_control.enabled in harness.yaml)")
@@ -61,8 +61,6 @@ async def rc_stop(project: str, request: Request):
         return await remote_control(manager(request)).stop(project, include_owner_only=rc_owner_surface(request))
     except ToolError as e:
         raise HarnessError(404, str(e))
-
-
 @app_routes.get("/api/v1/remote-control")
 async def app_rc_status(request: Request):
     m = manager(request)
@@ -95,5 +93,4 @@ async def app_rc_stop(project: str, request: Request):
         return await m.remote_control.stop(project)
     except ToolError as e:
         raise HarnessError(404, str(e))
-
 

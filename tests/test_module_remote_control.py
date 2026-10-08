@@ -1,11 +1,14 @@
 """Remote Control extraction contracts. No Claude processes or real connections."""
 import pytest
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from harness import cli, config
 from harness.api import create_app
 from harness.manager import Manager
 from harness_modules.remote_control import LIMITS, settings
+from harness_modules.remote_control import MODULE
+from harness_modules.remote_control.service import RemoteControlError
 from test_daemon import make_cfg, Script
 from harness.llm import Completion
 
@@ -87,3 +90,61 @@ def test_folders_yaml_key_survives_extraction(tmp_path):
     cfg = config.load(cfg_dir)
     assert cfg.remote_control.folders == {'separate': 'C:/Projects/separate'}
     assert cfg.remote_control.enabled
+
+
+def test_routes_use_fake_service_and_preserve_error_codes(tmp_path):
+    m = rc_manager(tmp_path)
+
+    class Fake:
+        def status(self, include_owner_only=False):
+            return [{'project': 'fake', 'owner': include_owner_only}]
+
+        async def launch(self, project, **kwargs):
+            if project == 'bad':
+                raise RemoteControlError('fake launch failure')
+            return dict(project=project, **kwargs)
+
+        def open_trust_prompt(self, project, **kwargs):
+            if project == 'bad':
+                raise RemoteControlError('fake trust failure')
+            return dict(project=project, **kwargs)
+
+        async def stop(self, project, **kwargs):
+            if project == 'bad':
+                raise RemoteControlError('fake stop failure')
+            return dict(project=project, **kwargs)
+
+    m.modules.get('remote_control').service = Fake()
+    app_record = m.db.create_api_key('rc-test', 'remote_control', kind='app')
+    # create_api_key returns the record and the raw bearer token.
+    headers = {'Authorization': 'Bearer ' + app_record[1]}
+    with TestClient(create_app(m)) as client:
+        assert client.get('/remote-control').json()['enabled']
+        owner = client.get('/api/admin/v1/remote-control').json()
+        assert owner['projects'][0]['owner']
+        assert owner['discovery']['limits'] == LIMITS
+        assert client.post('/api/admin/v1/remote-control/fake').json()['include_owner_only']
+        assert client.post('/api/admin/v1/remote-control/fake/trust').json()['include_owner_only']
+        assert client.post('/api/admin/v1/remote-control/fake/stop').json()['include_owner_only']
+        assert client.get('/api/v1/remote-control', headers=headers).json()['projects'][0]['owner'] is False
+        assert client.post('/api/v1/remote-control/fake', headers=headers).json()['started_by'] == 'app:rc-test'
+        assert client.post('/api/v1/remote-control/fake/stop', headers=headers).status_code == 200
+        for prefix, extra in [('/remote-control', {}), ('/api/v1/remote-control', headers)]:
+            assert client.post(prefix + '/bad', headers=extra).status_code == 400
+            assert client.post(prefix + '/bad/stop', headers=extra).status_code == 404
+        assert client.post('/remote-control/bad/trust').status_code == 400
+        m.modules.get('remote_control').service = None
+        assert client.get('/api/v1/remote-control', headers=headers).json()['enabled'] is False
+        assert client.post('/api/v1/remote-control/fake', headers=headers).status_code == 400
+        assert client.post('/api/v1/remote-control/fake/stop', headers=headers).status_code == 400
+
+
+def test_tool_gate_honors_owner_defaults_and_excludes_apps_and_runners():
+    session = {'target': 'tower', 'app_id': ''}
+    kit = SimpleNamespace(discovery=SimpleNamespace(settings=None))
+    assert MODULE.tools.eligible(kit, session)
+    assert not MODULE.tools.mcp and not MODULE.tools.members
+    assert not MODULE.tools.eligible(kit, {**session, 'app_id': 'app-test'})
+    assert not MODULE.tools.eligible(kit, {**session, 'target': 'macbook'})
+    kit.discovery.settings = SimpleNamespace(app_defaults_for_session=lambda _: {'app.capabilities': ['web']})
+    assert not MODULE.tools.eligible(kit, session)
