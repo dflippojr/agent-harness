@@ -39,8 +39,9 @@ def test_service_profile_is_hosted_only_and_discovers_capabilities(tmp_path, mon
         assert health["capabilities"]["required"]["approvals"] is True
         assert health["capabilities"]["hosted_backends"] == ["claude", "codex", "cursor"]
         assert "api_key" not in str(health["capabilities"])
-        assert client.get("/models/status").json() == []
-        assert client.post("/models/warm").status_code == 400
+        # An absent supervision add-on contributes no warm-up or status routes (#334).
+        assert client.get("/models/status").status_code == 404
+        assert client.post("/models/warm").status_code in (404, 405)
         rejected = client.post("/sessions", json={"prompt": "local is off"})
         assert rejected.status_code == 400
         assert "local model is disabled" in rejected.json()["detail"]
