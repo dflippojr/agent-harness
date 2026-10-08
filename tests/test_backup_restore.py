@@ -402,8 +402,13 @@ def test_apply_failure_rolls_back_audit_artifacts(tmp_path, monkeypatch):
     data = Path(cfg.data_dir)
     (data / AUDIT).unlink()
     before = _hashes(data)
+    real = backup_restore.shutil.copy2
+
     def boom(src, dst, *a, **k):
-        raise OSError("injected")
+        if Path(dst).name == "x.yaml":
+            assert (data / "restored-audits").is_dir()  # the audit artifacts exist when the failure hits
+            raise OSError("injected")
+        return real(src, dst, *a, **k)
     monkeypatch.setattr(backup_restore.shutil, "copy2", boom)
     # audit items are planned last-but-config, so the failure lands after they are created
     p = backup_restore.plan(cfg, folder)
