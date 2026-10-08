@@ -926,12 +926,12 @@ class Manager:
         return {"checkpoints": items, "can_rewind": supported and not hosted, "can_fork": supported, "hosted": hosted,
                 "parent_id": s.get("parent_id", ""), "fork_turn": s.get("fork_turn", 0)}
 
-    OPERATIONS = {"rewind": "a rewind", "fork": "a fork", "review": "a merge, push or discard", "erase": "an erasure"}
+    OPERATION_LABELS = {"rewind": "a rewind", "fork": "a fork", "review": "a merge, push or discard", "erase": "an erasure"}
 
     def _refuse_during_operation(self, sid: str) -> None:
         op = self.operations.get(sid)
         if op:
-            raise HarnessError(409, f"{self.OPERATIONS[op]} of this session is in progress; retry when it finishes")
+            raise HarnessError(409, f"{self.OPERATION_LABELS[op]} of this session is in progress; retry when it finishes")
 
     def _refuse_unsettled(self, s: dict) -> None:
         if s["id"] in self.unsettled or s["run"].get(checkpoints.UNSETTLED):

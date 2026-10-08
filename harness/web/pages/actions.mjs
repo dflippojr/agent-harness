@@ -664,7 +664,7 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
             ev.target.disabled = true;
             try {
               const r = await api("/maintenance/cleanup", { method: "POST" });
-              toast(`Removed ${r.containers_removed.length} containers, ${r.workspaces_removed.length + r.orphans_removed.length} workspaces`);
+              toast(`Removed ${r.containers_removed} containers, ${r.workspaces_removed + r.orphans_removed} workspaces`);
               void load();
             } catch (e) { toast(e.message); }
             ev.target.disabled = false;

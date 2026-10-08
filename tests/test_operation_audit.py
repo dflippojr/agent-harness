@@ -248,7 +248,11 @@ def test_maintenance_aggregates(manager, monkeypatch, kind, manual):
         monkeypatch.setattr(service, "_backup_sync", lambda _: {"path": SENTINEL, "bytes": 1, "removed": [SENTINEL]})
         monkeypatch.setattr(service, "_write_backup_status", lambda: None)
         effect = service.backup
-    asyncio.run(effect(context=CTX if manual else None))
+    report = asyncio.run(effect(context=CTX if manual else None))
+    if kind == "cleanup":
+        assert SENTINEL not in json.dumps(report)
+        assert report == service.last_report
+        assert report["sessions_expired"] == 1
     record = pair(manager, "maintenance." + kind, ctx)
     assert record["metadata"]["removed"] == (2 if kind == "cleanup" else 1)
     assert record["metadata"]["trigger"] == ("manual" if manual else "scheduled")
