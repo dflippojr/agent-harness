@@ -410,6 +410,7 @@ class GpuGuard:
         self._paused_at = 0.0
         self._clear_since: float | None = None
         self._resume_now = False
+        self.memory_hold = ""  # set while RAM admission keeps a wanted resume parked
         self._drain_deadline = 0.0
         self._resume_started = 0.0
         self._wake = asyncio.Event()
@@ -432,7 +433,7 @@ class GpuGuard:
                                       if self._clear_since is not None else None),
                 "plex_error": getattr(self.detector, "plex_error", ""),
                 "lazy_load": self.cfg.lazy_load, "parked": self.state == CLEAR and self.control.flagged(),
-                "memory": self.memory.status()}
+                "memory": self.memory.status(), "memory_hold": self.memory_hold}
 
     def start(self) -> None:
         if not self.cfg.enabled or self._task is not None:
@@ -587,10 +588,17 @@ class GpuGuard:
             self._finish_resume()
         elif (self.state == PAUSED and not self.busy()
               and (startup or self._resume_now or now - self._clear_since >= self.cfg.resume_after_seconds)):
-            self._resume_now = False
             if self.cfg.lazy_load and not self.want_model():
+                self._resume_now = False
+                self.memory_hold = ""
                 self._finish_resume()  # the flag stays: the model loads when something needs it
                 return
+            if self.memory.load_low():
+                # Removing the flag makes the supervisor load the model at once; stay parked until RAM admits it.
+                self.memory_hold = describe_memory(self.memory.status())
+                return
+            self._resume_now = False
+            self.memory_hold = ""
             await self.control.start()
             self._resume_started = now
             self._set(RESUMING)
@@ -601,6 +609,7 @@ class GpuGuard:
     async def _hold(self, now: float) -> None:
         self._clear_since = None
         self._resume_now = False
+        self.memory_hold = ""
         if self.state == PAUSED and not self.manual and self.signals:
             self.reasons = list(self.signals)
         if self.state in (CLEAR, RESUMING):
