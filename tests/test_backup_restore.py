@@ -286,3 +286,151 @@ def test_the_cli_verifies_and_dry_runs_against_the_configured_data_dir(backed_up
     assert backup_restore.main(["restore", str(folder), "--apply"]) == 1
     assert "Refused, nothing changed" in capsys.readouterr().err
     assert _hashes(Path(cfg.data_dir)) == before
+
+
+# the configuration audit trail (#469)
+AUDIT = "config-audit.jsonl"
+RECORDS = b'{"actor":"owner","rev":1}\n{"actor":"app-1","rev":2}\n'
+
+
+def _audit_backup(tmp_path, content: bytes = RECORDS):
+    cfg = _cfg(tmp_path)
+    if content is not None:
+        (Path(cfg.data_dir)).mkdir(parents=True, exist_ok=True)
+        (Path(cfg.data_dir) / AUDIT).write_bytes(content)
+    folder, _ = asyncio.run(_seed_and_back_up(cfg))
+    return cfg, folder
+
+
+def test_backup_keeps_complete_prefix_and_restore_to_fresh_dir_retains_it(tmp_path):
+    cfg, folder = _audit_backup(tmp_path, RECORDS + b'{"actor":"parti')
+    assert (folder / AUDIT).read_bytes() == RECORDS
+    assert verify(folder) == []
+    (Path(cfg.data_dir) / AUDIT).unlink()
+    restore(cfg, folder, apply_changes=True, out=_quiet)
+    digest = hashlib.sha256(RECORDS).hexdigest()
+    assert (Path(cfg.data_dir) / AUDIT).read_bytes() == RECORDS
+    assert (Path(cfg.data_dir) / "restored-audits" / digest / AUDIT).read_bytes() == RECORDS
+
+
+def test_restore_over_newer_trail_keeps_it_and_is_idempotent(tmp_path):
+    cfg, folder = _audit_backup(tmp_path)
+    newer = RECORDS + b'{"actor":"owner","rev":3}\n'
+    active = Path(cfg.data_dir) / AUDIT
+    active.write_bytes(newer)
+    restore(cfg, folder, apply_changes=True, out=_quiet)  # no --include-config
+    archived = Path(cfg.data_dir) / "restored-audits" / hashlib.sha256(RECORDS).hexdigest() / AUDIT
+    assert active.read_bytes() == newer and archived.read_bytes() == RECORDS
+    before = _hashes(Path(cfg.data_dir) / "restored-audits")
+    lines: list[str] = []
+    previous = restore(cfg, folder, apply_changes=True, out=lines.append)
+    assert _hashes(Path(cfg.data_dir) / "restored-audits") == before and active.read_bytes() == newer
+    assert AUDIT not in (previous / backup_restore.MANIFEST).read_text().split("Put in place")[1]
+
+
+def test_mismatched_archive_refuses_before_any_change(tmp_path):
+    cfg, folder = _audit_backup(tmp_path)
+    archived = Path(cfg.data_dir) / "restored-audits" / hashlib.sha256(RECORDS).hexdigest() / AUDIT
+    _write(archived, "tampered")
+    before = _hashes(Path(cfg.data_dir))
+    with pytest.raises(RestoreRefused):
+        restore(cfg, folder, apply_changes=True, out=_quiet)
+    assert _hashes(Path(cfg.data_dir)) == before
+
+
+def test_dry_run_lists_audit_destinations_and_changes_nothing(tmp_path):
+    cfg, folder = _audit_backup(tmp_path)
+    (Path(cfg.data_dir) / AUDIT).unlink()
+    before = _hashes(Path(cfg.data_dir))
+    lines: list[str] = []
+    restore(cfg, folder, out=lines.append)
+    assert sum(AUDIT in line for line in lines) == 2
+    assert _hashes(Path(cfg.data_dir)) == before
+
+
+def test_old_backup_without_trail_still_verifies_and_restores(tmp_path):
+    cfg, folder = _audit_backup(tmp_path, None)
+    assert not (folder / AUDIT).exists() and verify(folder) == []
+    restore(cfg, folder, apply_changes=True, out=_quiet)
+    assert not (Path(cfg.data_dir) / "restored-audits").exists()
+
+
+def test_invalid_snapshot_fails_verify_and_restore_without_leaking_content(tmp_path):
+    cfg, folder = _audit_backup(tmp_path)
+    (folder / AUDIT).write_bytes(b'{"secret-token":1}\nnot json secret-token\n')
+    problems = verify(folder)
+    assert problems and "secret-token" not in "".join(problems)
+    before = _hashes(Path(cfg.data_dir))
+    with pytest.raises(RestoreRefused):
+        restore(cfg, folder, apply_changes=True, out=_quiet)
+    assert _hashes(Path(cfg.data_dir)) == before
+    (folder / AUDIT).write_bytes(b"[1]\n")
+    assert verify(folder)
+
+
+def test_backup_fails_on_malformed_or_non_file_trail(tmp_path):
+    for bad in (b'{"a":1}\nsecret-token garbage\n', b"\xff\xfe\n"):
+        cfg = _cfg(tmp_path / str(len(bad)))
+        Path(cfg.data_dir).mkdir(parents=True, exist_ok=True)
+        (Path(cfg.data_dir) / AUDIT).write_bytes(bad)
+        with pytest.raises(RuntimeError) as e:
+            asyncio.run(_seed_and_back_up(cfg))
+        assert "secret-token" not in str(e.value)
+    cfg = _cfg(tmp_path / "dir")
+    (Path(cfg.data_dir) / AUDIT).mkdir(parents=True)
+    with pytest.raises(RuntimeError):
+        asyncio.run(_seed_and_back_up(cfg))
+
+
+def test_symlinked_trail_is_rejected(tmp_path):
+    from harness_modules.backup import audit
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_bytes(RECORDS)
+    link = tmp_path / AUDIT
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(audit.AuditError):
+        audit.stable_prefix(link)
+    with pytest.raises(audit.AuditError):
+        audit.read_snapshot(link)
+
+
+def test_apply_failure_rolls_back_audit_artifacts(tmp_path, monkeypatch):
+    cfg, folder = _audit_backup(tmp_path)
+    data = Path(cfg.data_dir)
+    (data / AUDIT).unlink()
+    before = _hashes(data)
+    real = backup_restore.shutil.copy2
+
+    def boom(src, dst, *a, **k):
+        if Path(dst).name == "x.yaml":
+            assert (data / "restored-audits").is_dir()  # the audit artifacts exist when the failure hits
+            raise OSError("injected")
+        return real(src, dst, *a, **k)
+    monkeypatch.setattr(backup_restore.shutil, "copy2", boom)
+    # audit items are planned last-but-config, so the failure lands after they are created
+    p = backup_restore.plan(cfg, folder)
+    p.items.append(backup_restore.Item("config", folder / "harness.sqlite3", data / "x.yaml", "x"))
+    with pytest.raises(OSError):
+        backup_restore.apply(cfg, p)
+    assert _hashes(data) == before and not (data / "restored-audits").exists()
+
+
+def test_empty_or_unterminated_only_trail_backs_up_as_empty_snapshot(tmp_path):
+    for n, content in enumerate((b"", b'{"actor":"parti')):
+        cfg, folder = _audit_backup(tmp_path / str(n), content)
+        assert (folder / AUDIT).read_bytes() == b"" and verify(folder) == []
+
+
+def test_snapshot_changed_between_plan_and_apply_is_refused(tmp_path):
+    cfg, folder = _audit_backup(tmp_path)
+    data = Path(cfg.data_dir)
+    (data / AUDIT).unlink()
+    p = backup_restore.plan(cfg, folder)
+    (folder / AUDIT).write_bytes(b'{"other":1}\n')
+    before = _hashes(data)
+    with pytest.raises(RestoreRefused):
+        backup_restore.apply(cfg, p)
+    assert _hashes(data) == before

@@ -188,7 +188,8 @@ Stable error codes: `unknown_key`, `invalid_value`, `validation_error`, `revisio
 `data_dir/config-audit.jsonl` records actor kind/id, timestamp, revision, action, keys, and
 before/after values only for explicitly non-sensitive settings. Hidden and path-like keys are
 redacted even if a bug marks them writable. Credentials, secret/file contents, authorization
-headers, machine-specific paths, and raw request bodies are never logged.
+headers, machine-specific paths, and raw request bodies are never logged. The file has no rotation. Nightly backups carry a
+complete-line prefix of it and restore archives it (see `docs/INSTALL.md`, "Backups and restore").
 
 ## Adding a key
 

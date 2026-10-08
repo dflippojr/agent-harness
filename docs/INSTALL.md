@@ -280,10 +280,19 @@ A backup folder holds exactly:
 | `transcripts/apps/<app_id>.zip` | each App's transcripts, when it has any |
 | `config/` | `harness.yaml`, `harness.local.yaml`, `projects.yaml` from the install's `config` folder |
 | `managed-config*.json` | the managed-config overlay from `<data_dir>` |
+| `config-audit.jsonl` | the configuration audit trail (who changed which setting), when `<data_dir>` has one |
 
 It does not hold workspaces (a local git project's branches are already saved in its source repository),
 checkpoints, artifact files, `pre-migration/` snapshots, logs, image archives, model files or anything off this
 machine. Copy the backup folder elsewhere yourself if you want an off-machine copy.
+
+**Configuration audit trail (#469).** The backup copies a stable prefix of `<data_dir>/config-audit.jsonl`: the file's
+length is captured first and only complete lines inside it are kept, so a record appended (or half-written) during the
+copy belongs to the next backup. It is not a cross-file transaction with the database and overlay snapshots, and it is
+not tamper evidence. A missing file is normal; a symlink, an unreadable file or a line that isn't a UTF-8 JSON object
+fails the backup (the message never quotes record content). The active trail has no rotation, and snapshots follow
+`backup.keep_days` like the rest of the dated folder. The SQLite audit history restores with the database snapshot.
+Review is owner-only and local: read the active file or a restored snapshot.
 
 `member-keys.key` is copied separately (#414), with owner-only permissions (a protected owner-only ACL on Windows,
 mode 600 elsewhere). Set `backup.member_key_dir` in local YAML to choose its directory; unset defaults to
@@ -326,6 +335,12 @@ configured port, or something holds a store's write lock). It restores into the 
   must re-add their API keys if the existing key cannot decrypt them. Older backups without a fingerprint also
   warn and leave the existing key in place;
 - the owner's, members' and Apps' transcripts. Each transcripts folder is replaced as a whole;
+- the configuration audit snapshot, with or without `--include-config` (it is history, not configuration). It is
+  always archived at `<data_dir>/restored-audits/<sha256>/config-audit.jsonl`; if no active `config-audit.jsonl`
+  exists it is also restored there, otherwise the active file's bytes are left untouched. Records are never merged
+  or deduplicated. Re-running the same restore is a no-op for the archive; an existing archive with different bytes
+  refuses the restore. Restoring an older backup therefore rolls the *active* trail back only when none existed, and
+  archives (never deletes) newer history; archives are not pruned by `backup.keep_days`;
 - with `--include-config` only: the `config` files and the managed-config overlay. They are left out by default
   because they may hold another machine's paths.
 
