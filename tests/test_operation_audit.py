@@ -68,6 +68,9 @@ def test_approval_aliases(manager, path, source, approve):
         assert retry.status_code == 409
         result = rows(m, "approval.decide")
         assert len([r for r in result if r["outcome"] == "ok"]) == 1
+        assert result[-1]["outcome"] == "failure"
+        assert result[-1]["metadata"]["reason"] == "already_decided"
+        assert "decision" not in result[-1]["metadata"]
         success = next(r for r in result if r["outcome"] == "ok")
         assert success["source"] == source
         assert success["key_id"] == key["id"]

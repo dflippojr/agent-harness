@@ -144,7 +144,8 @@ registered changed-field names and the enabled boolean, never job names, prompts
 Cross-store session operations, job runs and maintenance commit `started` with a generated `operation_id`
 before effects, then append one `ok` or conservative `unknown` settlement. Maintenance targets a generated
 operation id and stores aggregate removed/kept/expired counts, never erased session ids or filenames.
-An already-decided approval returns 409 and records only the known target and `already_decided` reason;
+An already-decided approval returns 409 and records one `failure` row with only the known target and
+`already_decided` reason (a failed request, no new tool decision or cross-store effect);
 a repeated notification press remains harmless and never claims another successful decision.
 
 A failed first audit commit returns 503 `audit_unavailable` and prevents starting the action. If an action

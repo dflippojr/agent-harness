@@ -1635,7 +1635,7 @@ class Manager:
         if approval["status"] != "pending":
             if operation_audit.owner_session(self.db.get_session(sid)):
                 operation_audit.append(self.db, context or audit_context.AuditContext("unknown"), approval_id,
-                                       "approval.decide", "denied", {"session_id": sid, "reason": "already_decided"})
+                                       "approval.decide", "failure", {"session_id": sid, "reason": "already_decided"})
             raise HarnessError(409, f"approval is already {approval['status']}")
         status = "approved" if approve else "denied"
 
