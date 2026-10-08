@@ -11,3 +11,6 @@ htmlcov/
 runs/
 config/*.local.yaml
 scripts/*.log
+
+# Lock file the managed-config writer creates during tests
+data/managed-config.lock
