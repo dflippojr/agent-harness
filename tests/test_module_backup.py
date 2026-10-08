@@ -22,7 +22,7 @@ from harness_modules.backup.runtime import doctor
 from test_daemon import Script, make_cfg
 from test_modules import route_paths
 
-KEYS = ("backup.enabled", "backup.at", "backup.keep_days", "backup.dir")
+KEYS = ("backup.enabled", "backup.at", "backup.keep_days", "backup.dir", "backup.member_key_dir")
 
 
 def make(tmp_path, packages=None, enabled=False) -> Manager:
