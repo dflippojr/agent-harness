@@ -31,6 +31,10 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    "GpuExclusive": ("harness.scheduler", "GpuExclusive"),
+    "QueueFull": ("harness.scheduler", "QueueFull"),
+    "SLEEPING": ("harness.warmup", "SLEEPING"),
+    "UNLOADED": ("harness.warmup", "UNLOADED"),
     "RemoteControlConfig": ("harness.config", "RemoteControlConfig"),
     "PROJECT_NAME": ("harness.config", "PROJECT_NAME"),
     "Envelope": ("harness.managed_config", "Envelope"),
