@@ -59,6 +59,7 @@ class Item:
     source: Path
     dest: Path
     label: str
+    digest: str = ""  # audit items: the SHA-256 of the bytes that were validated and shown
 
 
 @dataclass
@@ -235,9 +236,13 @@ def _plan_audit(data: Path, folder: Path, p: Plan) -> None:
     snapshot = folder / audit.AUDIT_FILE
     if not snapshot.exists():
         return
-    content = audit.read_snapshot(snapshot)
+    try:
+        content = audit.read_snapshot(snapshot)
+    except audit.AuditError as e:
+        raise RestoreRefused(f"{audit.AUDIT_FILE} {e}") from None
     archive = data / audit.RESTORED_DIR
-    target = archive / audit.digest(content) / audit.AUDIT_FILE
+    digest = audit.digest(content)
+    target = archive / digest / audit.AUDIT_FILE
     for path in (archive, target.parent, target):
         if path.exists() or path.is_symlink():
             if audit.storage.is_reparse_point(path):
@@ -247,12 +252,12 @@ def _plan_audit(data: Path, folder: Path, p: Plan) -> None:
             raise RestoreRefused(f"{target} exists with different bytes; nothing was changed")
         p.notes.append(f"audit snapshot already archived at {target}")
     else:
-        p.items.append(Item("audit", snapshot, target, "config audit snapshot (archived by digest)"))
+        p.items.append(Item("audit", snapshot, target, "config audit snapshot (archived by digest)", digest))
     active = data / audit.AUDIT_FILE
     if active.exists() or active.is_symlink():
         p.notes.append(f"active {active} left untouched; the snapshot is archived for owner-only review")
     else:
-        p.items.append(Item("audit", snapshot, active, "config audit trail (none was active)"))
+        p.items.append(Item("audit", snapshot, active, "config audit trail (none was active)", digest))
 
 
 def _plan_member_key(cfg, folder: Path, p: Plan) -> None:
@@ -371,7 +376,7 @@ def apply(cfg, p: Plan, now: float | None = None) -> Path:
             cleanup.append(item.dest)
             if item.kind == "audit":
                 content = audit.read_snapshot(item.source)
-                if item.dest.parent.parent.name == audit.RESTORED_DIR and                         item.dest.parent.name != audit.digest(content):
+                if audit.digest(content) != item.digest:
                     raise RestoreRefused("audit snapshot changed after planning")
                 with open(item.dest, "xb") as f:
                     f.write(content)

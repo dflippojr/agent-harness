@@ -417,3 +417,15 @@ def test_empty_or_unterminated_only_trail_backs_up_as_empty_snapshot(tmp_path):
     for n, content in enumerate((b"", b'{"actor":"parti')):
         cfg, folder = _audit_backup(tmp_path / str(n), content)
         assert (folder / AUDIT).read_bytes() == b"" and verify(folder) == []
+
+
+def test_snapshot_changed_between_plan_and_apply_is_refused(tmp_path):
+    cfg, folder = _audit_backup(tmp_path)
+    data = Path(cfg.data_dir)
+    (data / AUDIT).unlink()
+    p = backup_restore.plan(cfg, folder)
+    (folder / AUDIT).write_bytes(b'{"other":1}\n')
+    before = _hashes(data)
+    with pytest.raises(RestoreRefused):
+        backup_restore.apply(cfg, p)
+    assert _hashes(data) == before
