@@ -10,7 +10,7 @@ import pytest
 
 from harness import changes, projects
 from harness.manager import HarnessError, Manager
-from harness.remote import RunnerError
+from harness_modules.runners.service import RunnerError
 from test_daemon import Script
 from harness.llm import Completion
 from test_phase3 import make_repo, sh

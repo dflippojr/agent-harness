@@ -31,6 +31,26 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    'RunnerConfig': ('harness.config', 'RunnerConfig'),
+    'ToolOutputConfig': ('harness.config', 'ToolOutputConfig'),
+    'runner_compatibility': ('harness.compat', 'runner_compatibility'),
+    'PROTOCOLS': ('harness.compat', 'PROTOCOLS'),
+    'BUILD_ID': ('harness.compat', 'BUILD_ID'),
+    'CLIENT_PROTOCOLS': ('harness.compat', 'CLIENT_PROTOCOLS'),
+    'MAC_CLIENT_VERSION': ('harness.compat', 'MAC_CLIENT_VERSION'),
+    'compat': ('harness.compat', None),
+    'API_VERSION': ('harness.apps', 'API_VERSION'),
+    'require_admin': ('harness.admin', 'require_admin'),
+    'log_safe': ('harness.api', '_log_safe'),
+    'FILE_TOOLS': ('harness.fileops', 'FILE_TOOLS'),
+    'MAX_PUT_BYTES': ('harness.fileops', 'MAX_PUT_BYTES'),
+    'shell_result': ('harness.tools', 'shell_result'),
+    'tool_schemas': ('harness.tools', 'tool_schemas'),
+    'ToolOutput': ('harness.verify', 'ToolOutput'),
+    'run_verify': ('harness.verify', 'run_verify'),
+    'RunnerError': ('harness.runner_contract', 'RunnerError'),
+    'RunnerOffline': ('harness.runner_contract', 'RunnerOffline'),
+    'RemoteWorkspaceContract': ('harness.runner_contract', 'RemoteWorkspace'),
     "MemoryLibraryConfig": ("harness.config", "MemoryLibraryConfig"),
     "truncate_middle": ("harness.fileops", "truncate_middle"),
     "write_text_within": ("harness.fileops", "write_text_within"),
@@ -130,7 +150,7 @@ class Module:
     owner_routes: Callable[[], Any] | None = None   # daemon routes (/images …) behind the owner/guest/member guard
     admin_paths: frozenset[str] = frozenset()       # owner routes also served under /api/admin/v1
     app_routes: Callable[[], Any] | None = None     # App API (/api/v1/…); handlers call app_auth for their scope
-    public_routes: Callable[[], Any] | None = None  # unauthenticated routes (none today)
+    public_routes: Callable[[], Any] | None = None  # public bootstrap routes (downloads, code redemption)
     app_scopes: dict[str, str] = field(default_factory=dict)        # App token scopes it adds (``images``)
     app_capabilities: dict[str, str] = field(default_factory=dict)  # app.capabilities value -> the scope it needs
     # Agent tools: the runtime's ``toolkit()`` supplies schemas and handlers; this says when it is offered.

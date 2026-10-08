@@ -12,7 +12,8 @@ import io
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import compat, mac_client, remote, updater
+from harness import compat, updater
+from harness_modules.runners import mac_client, service as remote
 from harness.api import create_app
 from harness.config import RunnerConfig
 from harness.manager import Manager

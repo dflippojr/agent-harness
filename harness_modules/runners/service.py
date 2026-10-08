@@ -26,12 +26,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .config import RunnerConfig, ToolOutputConfig
-from .compat import runner_compatibility
-from .compat import PROTOCOLS
-from .fileops import FILE_TOOLS, MAX_PUT_BYTES, ToolError
-from .tools import shell_result, tool_schemas
-from .verify import ToolOutput, run_verify
+from harness.modules import (
+    RunnerConfig, ToolOutputConfig, runner_compatibility, PROTOCOLS,
+    FILE_TOOLS, MAX_PUT_BYTES, ToolError, shell_result, tool_schemas, ToolOutput, run_verify,
+    RunnerError, RunnerOffline, RemoteWorkspaceContract,
+)
 
 log = logging.getLogger("harness.remote")
 
@@ -39,19 +38,6 @@ ONLINE_SECONDS = 45       # a runner that hasn't polled for this long is offline
 POLL_HOLD_SECONDS = 25    # how long a poll waits for work before returning empty
 REDELIVER_SECONDS = 20    # a handed-out request the runner doesn't report as in flight is resent after this
 TOOL_TIMEOUT_SECONDS = 180
-
-
-class RunnerOffline(Exception):
-    pass
-
-
-class RunnerError(Exception):
-    """The runner couldn't carry out a request. `kind` is tool | git | restarted | timeout | internal."""
-
-    def __init__(self, message: str, kind: str = "internal", status: int = 409):
-        super().__init__(message)
-        self.kind = kind
-        self.status = status
 
 
 @dataclass
@@ -88,6 +74,12 @@ class RunnerHub:
     def startup_grace(self) -> float:
         """Seconds left in which a runner that was connected before a daemon restart is expected back."""
         return max(0.0, ONLINE_SECONDS - (time.monotonic() - self.started))
+
+    def sandbox(self, target, sid):
+        return RemoteSandbox(self, target, sid)
+
+    def workspace(self, target, sid, context_tokens, **kwargs):
+        return RemoteWorkspace(self, target, sid, context_tokens, **kwargs)
 
     # auth
     def token(self, name: str) -> str:
@@ -257,7 +249,7 @@ class RunnerHub:
         st.work.set()
 
 
-class RemoteWorkspace:
+class RemoteWorkspace(RemoteWorkspaceContract):
     """Tools for a session whose target is a runner. Same schemas as the tower; every call goes to the runner."""
 
     homelab = None

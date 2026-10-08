@@ -41,8 +41,6 @@ ADMIN_PATHS = frozenset({
     "/me",
     "/profile",
     "/projects",
-    "/runners",
-    "/runners/{name}/update",
     "/models",
     "/models/status",
     "/models/warm",
@@ -99,8 +97,6 @@ ADMIN_PATHS = frozenset({
     "/keys/{kid}",
     "/pairing-codes",
     "/pairing-codes/{pid}",
-    "/runner-pairing-codes",
-    "/runner-pairing-codes/{pid}",
 })
 
 

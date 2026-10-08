@@ -1,5 +1,5 @@
 """Tools v1. File tools run host-side against the bind-mounted workspace; commands run in the sandbox.
-MacBook sessions use the same schemas through harness.remote.RemoteWorkspace."""
+MacBook sessions use the same schemas through the runners add-on's RemoteWorkspace."""
 
 from __future__ import annotations
 

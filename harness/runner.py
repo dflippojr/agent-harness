@@ -31,7 +31,7 @@ from .principal import OWNER_USER_ID, session_user_id
 from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED,
                      AppToolsPolicy, ChatPolicy, Decision, Policy, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
-from .remote import RemoteSandbox, RemoteWorkspace, RunnerError, RunnerHub
+from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
@@ -162,9 +162,9 @@ def _without_unstored_artifact(output: str, digest: str) -> str:
 
 class Runner:
     def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat,
-                 warmer: ModelWarmer | None = None, hub: RunnerHub | None = None):
+                 warmer: ModelWarmer | None = None, hub=None):
         self.cfg = cfg
-        self.hub = hub or RunnerHub(cfg.runners)
+        self.hub = hub if hub is not None else NoRunnerHub()
         self.github_auth = None  # MemberGitHub, set by the Manager (issue #63)
         self.member_keys = None  # MemberKeys, set by the Manager (issue #393)
         self.warmer = warmer or ModelWarmer()
@@ -207,9 +207,9 @@ class Runner:
         self._mcp_grants: dict[str, list[dict]] = {}
 
     # helpers
-    def sandbox(self, s: dict) -> Sandbox | RemoteSandbox:
+    def sandbox(self, s: dict):
         if s["target"] != "tower":
-            return RemoteSandbox(self.hub, s["target"], s["id"])
+            return self.hub.sandbox(s["target"], s["id"])
         if s["id"] not in self._sandboxes:
             project = self.project_for(s)
             sb_cfg = self.cfg.sandbox
@@ -228,7 +228,7 @@ class Runner:
         limits = resolve_tool_output(self.cfg, project)
         checks = list(project.verify) if project else []
         if s["target"] != "tower":
-            return RemoteWorkspace(self.hub, s["target"], s["id"], model.context_tokens,
+            return self.hub.workspace(s["target"], s["id"], model.context_tokens,
                                    tool_output=limits, verify_checks=checks)
         defaults = self._app_defaults_for_session(s)
         from . import storage

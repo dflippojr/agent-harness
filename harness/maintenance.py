@@ -29,7 +29,7 @@ from .config import Config
 from .db import Database
 from .principal import OWNER_USER_ID
 from .storage import checkpoints_dir
-from .remote import RunnerError
+from .runner_contract import RunnerError
 from .runner import ACTIVE, Runner, dir_size
 from .sandbox import run_cmd
 

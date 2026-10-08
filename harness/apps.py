@@ -213,16 +213,6 @@ class PairRequest(BaseModel):
     code: str = Field(min_length=8, max_length=200)
 
 
-class RunnerPairingCodeRequest(BaseModel):
-    name: str = Field(default="Agent Harness for Mac", min_length=1, max_length=60)
-    runner: str = Field(default="macbook", min_length=1, max_length=60)
-    ttl_seconds: int = Field(default=PAIRING_TTL_SECONDS, ge=60, le=PAIRING_TTL_SECONDS)
-
-
-class RunnerPairRequest(BaseModel):
-    code: str = Field(min_length=8, max_length=200)
-
-
 class CapabilitiesResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     profile: str
@@ -329,14 +319,6 @@ class AcceptedResponse(BaseModel):
 class PairResponse(BaseModel):
     token: str
     app: dict
-    api_version: str
-
-
-class RunnerPairResponse(BaseModel):
-    server: str
-    owner_token: str
-    owner_key: dict
-    runner: dict
     api_version: str
 
 
@@ -593,30 +575,6 @@ async def revoke_pairing_code(pid: str, request: Request):
         raise HarnessError(404, "no such active pairing code")
 
 
-@route_table.get("/runner-pairing-codes")
-async def runner_pairing_codes(request: Request):
-    """Owner view. Native pairing codes and runner tokens are never included."""
-    return mgr(request).db.list_runner_pairing_codes()
-
-
-@route_table.post("/runner-pairing-codes", status_code=201)
-async def create_runner_pairing_code(body: RunnerPairingCodeRequest, request: Request):
-    m = mgr(request)
-    name = body.name.strip()
-    runner = body.runner.strip()
-    if not name or not runner:
-        raise HarnessError(400, "name and runner are required")
-    row, code = m.create_runner_pairing_code(name, runner, body.ttl_seconds)
-    return JSONResponse({**row, "code": code}, status_code=201,
-                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
-
-
-@route_table.delete("/runner-pairing-codes/{pid}", status_code=204)
-async def revoke_runner_pairing_code(pid: str, request: Request):
-    if not mgr(request).db.revoke_runner_pairing_code(pid):
-        raise HarnessError(404, "no such active runner pairing code")
-
-
 @route_table.post("/api/v1/pair", status_code=201, response_model=PairResponse)
 async def pair_browser(body: PairRequest, request: Request):
     raw_origin = request.headers.get("origin", "")
@@ -630,16 +588,6 @@ async def pair_browser(body: PairRequest, request: Request):
     if key is None:
         raise HarnessError(400, error)
     return JSONResponse({"token": secret, "app": key, "api_version": API_VERSION}, status_code=201,
-                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
-
-
-@route_table.post("/api/v1/runner-pair", status_code=201, response_model=RunnerPairResponse)
-async def pair_runner(body: RunnerPairRequest, request: Request):
-    """Redeem an owner-approved native Mac code without browser-origin authority."""
-    paired, error = mgr(request).redeem_runner_pairing_code(body.code, str(request.base_url))
-    if paired is None:
-        raise HarnessError(400, error)
-    return JSONResponse({**paired, "api_version": API_VERSION}, status_code=201,
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
@@ -659,7 +607,6 @@ async def api_root(request: Request):
                 "app_tools_only_backends": [b["name"] for b in (local_view(m), *backends) if b["app_tools_only"]], "context": True, "events": "sse",
                 **m.modules.features(),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
-                "runner_pairing": bool(m.cfg.runners),
                 "remote_control": m.remote_control is not None, "browser_pairing": True,
                 "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
             **await m.modules.app_root()}
@@ -690,7 +637,7 @@ def _member_me(m, key: dict, ident) -> dict:
         "capabilities": {
             "admin": False, "local_sessions": True, "hosted_backends": False,
             **principal_capabilities(m.cfg, False),
-            "runners": False, "accounts": False,
+            "accounts": False,
         },
         "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
                   "disk_note": quota_message(used, limit) if limit else "",
@@ -714,7 +661,7 @@ async def api_me(request: Request):
             "capabilities": {
                 "admin": owner_key(key), "local_sessions": True, "hosted_backends": owner_key(key),
                 **principal_capabilities(m.cfg, owner_key(key), key.get("scope_set", ())),
-                "runners": owner_key(key), "accounts": owner_key(key),
+                "accounts": owner_key(key),
             }}
 
 

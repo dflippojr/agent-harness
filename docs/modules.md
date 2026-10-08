@@ -65,6 +65,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     __init__.py runtime.py routes.py settings.py service.py skill_review.py skill_validate.py
   memory_library/        personal memory tools, approved writes and frozen session profiles (formerly harness/memory_library.py)
     __init__.py runtime.py routes.py settings.py service.py
+  runners/               remote transport, native pairing and Mac bundle (formerly harness/remote.py, mac_client.py)
+    __init__.py runtime.py routes.py service.py mac_client.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
@@ -81,7 +83,7 @@ module's only link back is `harness.modules`.
 | `owner_routes()` | A `RouteTable` installed with the core's daemon routes, behind the same owner/guest/member guard. Handlers call `require_owner` where the route is owner-only. |
 | `admin_paths` | Owner routes also served under `/api/admin/v1` (owner credential required) and listed in its `operations`. |
 | `app_routes()` | A `RouteTable` of `/api/v1/...` routes. Handlers call `app_auth(request, scope)`. |
-| `public_routes()` | Unauthenticated routes (none today). |
+| `public_routes()` | Public bootstrap routes, such as the Mac downloads and one-time runner pairing (the pairing code authorizes redemption). |
 | `app_scopes`, `app_capabilities` | App token scopes it adds, and `app.capabilities` values (`{capability: scope}`). |
 | `tools` (`ToolGate`), `tool_names` | When the runtime's `toolkit()` is offered to a session: project flag, App capability, members, MCP for hosted sessions, whether it writes into the workspace (`workspace_root` / runner `put_bytes`), which tools mutate files (quota and checkpoints), the telemetry span, the system-prompt section (`prompt`) a session gets with it. `tool_names` are reserved against App tools. |
 | `settings()` | `SettingSpec`s with defaults, bounds, `enable_check`s and named getters/setters, merged into the registry. |
@@ -136,6 +138,18 @@ with personal context withhold it from Apps. These hooks contribute nothing by d
 ## What stage (b) leaves in the core
 
 These are names, not imports, and move with the config and storage split in stages (c) and (f):
+
+- Runners: `RunnerConfig`, the `runners:` YAML section and profile switch, remote project targets, token-file
+  discovery, pairing-code database tables/methods, access rules and compatibility metadata remain core names.
+  `harness/runner_contract.py` provides shared failure types, a remote-workspace marker and the local-only
+  `NoRunnerHub` fallback. The add-on owns transport, remote workspaces/sandboxes, native pairing, Mac downloads,
+  admin routes, capabilities and CLI rows. Core session execution and maintenance call the runtime's hub;
+  absent/uninstalled runners add no routes, settings or capabilities and remote starts fail before allocating
+  a workspace. Runners retain their installer-only switch (there is no new runtime enable setting).
+  YAML keys, registry keys, commands, URLs, bearer tokens and runner protocol versions are unchanged, so existing
+  paired clients need no re-pairing. Imports move from `harness.remote` and `harness.mac_client` to
+  `harness_modules.runners.service` and `harness_modules.runners.mac_client`. The standalone `macrunner/`
+  payload and the shared CLI/updater stay at their existing paths; bundle command rows include the add-on.
 
 - Memory library: `MemoryLibraryConfig`, the `memory_library:` YAML section, profile switch, project flag,
   App capability and discovery path remain core names, along with the access and mandatory write-approval

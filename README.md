@@ -221,7 +221,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 
 | Technique | What it does and why |
 | --- | --- |
-| **Long-poll runner protocol** ([`remote.py`](harness/remote.py), [`harness_runner.py`](macrunner/harness_runner.py)) | The Mac connects out and long-polls, so it needs no inbound port and no dependencies (stock Python 3.9). Delivery is at-least-once: re-sent requests are answered from the runner's result cache, and a restarted runner fails the work it can't vouch for. |
+| **Long-poll runner protocol** ([`service.py`](harness_modules/runners/service.py), [`harness_runner.py`](macrunner/harness_runner.py)) | The Mac connects out and long-polls, so it needs no inbound port and no dependencies (stock Python 3.9). Delivery is at-least-once: re-sent requests are answered from the runner's result cache, and a restarted runner fails the work it can't vouch for. |
 | **Native macOS sandboxing** ([`sandbox.sb`](macrunner/sandbox.sb)) | Shell commands run under `sandbox-exec`: writes limited to the workspace and build caches, credentials and personal folders unreadable, no network unless approved. |
 | **Protocol-versioned clients** ([`compat.py`](harness/compat.py), [docs](docs/compatibility.md)) | Wire protocols are versioned separately from releases. The server accepts current and previous versions. Skew returns `426 client_update_required` or `426 daemon_update_required` while health and update discovery stay reachable. |
 | **Transactional self-update** ([`updater.py`](harness/updater.py)) | The Mac client downloads only from its own server, verifies size and SHA-256, swaps the runtime atomically, keeps credentials and config, and rolls back on failure. |

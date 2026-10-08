@@ -20,14 +20,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import remote
+from harness_modules.runners import service as remote
 from harness.api import create_app
 from harness.config import Project, RunnerConfig
 from harness.fileops import FileOps, ToolError
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness_modules.notifications.service import Notifier
-from harness.remote import RunnerError, RunnerHub
+from harness_modules.runners.service import RunnerError, RunnerHub
 
 from test_daemon import Script, call, events, make_cfg, wait_status
 from test_phase3 import make_repo, sh
