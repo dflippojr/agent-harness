@@ -150,6 +150,15 @@ def _clean_credential(key: str, value, out: dict) -> bool:
 
 def clean_metadata(action: str, metadata: dict | None) -> dict:
     """Keep only allowlisted, safely-typed values for `action`; drop everything else without storing it."""
+    if action == "namespace.erase":
+        from .namespace_audit import clean
+        out = clean({key: value for key, value in (metadata or {}).items() if key in {"count", "reason"}})
+        data = metadata or {}
+        if isinstance(data.get("category"), str) and data["category"] in {"app", "account"}:
+            out["category"] = data["category"]
+        if isinstance(data.get("operation_id"), str) and _ID.fullmatch(data["operation_id"]):
+            out["operation_id"] = data["operation_id"]
+        return out
     from .operation_audit import ACTIONS, clean_metadata as clean_operation
     if action in ACTIONS:
         return clean_operation(action, metadata)

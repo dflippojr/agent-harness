@@ -1,5 +1,60 @@
 # Agent Harness App API (v1)
 
+## Private operational audit (1.20, #471)
+
+`GET /api/v1/audit` returns `{items, next_before_id}` for the authenticated App's store, or for the authenticated
+member alone in Web's store. It requires the `sessions` scope. Owner and device tokens cannot use this private
+reader. `sessions:all` grants no additional audit visibility. There is no HTTP audit edit/delete operation.
+Filters are `target_id`, `actor_id`, `key_id`, `action`, `outcome`, `since` (inclusive server epoch seconds), `until` (exclusive),
+`limit` (1–500), and `before_id`. Results sort by immutable id descending; pass `next_before_id` to continue.
+Foreign target ids return an empty page. Owner review reads aggregate lifecycle metadata in the main store only;
+it never opens private stores to answer an audit query.
+
+Use `Harness.audit(limit=100, action="session.message")` in the Python SDK. Use `harness audit private` with an
+App token or the existing authenticated member transport for CLI review; `--before-id`, `--target-id`, `--actor-id`, `--key-id`, `--action`,
+`--outcome`, `--since` and `--until` have the same meanings. `harness audit list` remains the owner's main-store
+reader. No new Web review page is included.
+
+Rows record server time, the authenticated actor/key and entry point, scoped opaque target, action and outcome,
+plus field names/counts and safe enums. Session create/message/context/rename/rerun/cancel, approval decisions and
+App tool-result submissions and automatic approval decisions are recorded. Automatic decisions identify the system
+with source `agent`. Session mutations and rows share the private writer transaction where
+possible. System work has an explicit system identity. An App's `end_user` is a separate `subject` marked
+`subject_trust: caller_asserted`; provider sign-in does not verify that App-supplied human label. Rows never store
+prompts, context, titles, tool arguments/results, arbitrary App metadata, credentials, codes, URLs/claims, provider
+conversation ids, paths or exception text. Private metadata can still reveal activity; it is not owner-visible.
+
+Login lifecycle is private too: `login.start` records launch, `login.code_submit` records code submission (never
+the code), `login.finish` records the process's actual success or failure (including expiry/cancellation), and `login.unlink`
+records unlink. A successful launch/submission does not imply successful provider authentication. The server stamps
+intent before launch/submission/unlink. A restart may leave an intent or launched attempt without terminal evidence;
+inspect it rather than infer success. A terminal audit failure appears as `audit_record_incomplete`, an operation id,
+`may_have_completed: true`, and `retryable: false` in the error or polled attempt. The SDK preserves these fields.
+
+Session rows live and die with their session, including explicit erasure and retention. Non-session login rows
+expire after at most 30 days, or a shorter App retention policy, and are excluded from reads as soon as expired;
+insertion and maintenance physically prune them. This limit does not change the 365-day admin/credential policy.
+The approved erasure exception is a 365-day, content-free main-store aggregate receipt: App/account id, category,
+count, server timestamp, authenticated actor/key, reason (`manual`, `retention`, `revoked_app`, `account_erasure`)
+and outcome. Its fresh correlation id identifies the receipt operation only; it is never a copied session, tool,
+end-user or login-attempt id. Erasing an App removes its store, including its detailed trail.
+
+Provider login and erasure require a durable `started` intent before effects. Failed intent returns 503
+`audit_unavailable` and prevents the effect. Failed settlement preserves intent and reports 503
+`audit_record_incomplete`, operation id and `may_have_completed`; do not automatically repeat the action. An
+unresolved aggregate erasure blocks subsequent erasures in that namespace, including maintenance, because retaining
+the affected private session id in main would violate the erasure contract. The machine owner must inspect local
+and provider state before resolving such evidence offline. Ordinary actions keep working on an audit gap, with
+`X-Agent-Harness-Audit-Warning: audit_gap` and a content-free server warning; the SDK exposes the last response's
+warning as `Harness.audit_warning`. The missing evidence is not invented.
+
+Audit is append-only through application writes except lifecycle erasure and retention; per-row SHA-256 checksums
+in private stores help offline inspection. The machine owner remains trusted: these are not tamper-proof storage.
+Live erasure removes the detailed trail from live stores. Old backups retain earlier rows until backup rotation;
+restoring an older backup rolls the trail back too, with no independent surviving journal. Hosted providers may
+retain their own copies under their policies; local erasure and CLI-history removal do not promise deletion of
+provider-controlled copies. Session-create idempotency tombstones (#462) are separate.
+
 An **Agent Harness App** is a third-party integration that starts agent sessions, gives them context, lends them
 tools, and follows their progress. Base path: `/api/v1`, on Agent Harness Server's address
 (`http://127.0.0.1:8100` locally, `https://<pc>.<tailnet>.ts.net` on a tailnet). FastAPI also serves the

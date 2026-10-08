@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import hashlib
 import json
 import queue
 import secrets
@@ -626,7 +627,9 @@ class Database:
         if self._closed:
             raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
         future: Future = Future()
-        self._writer.jobs.put((future, fn, args, kwargs))
+        # Request-local audit warnings must reach writer transactions without leaking to the next queued request.
+        context = contextvars.copy_context()
+        self._writer.jobs.put((future, context.run, (fn, *args), kwargs))
         return future
 
     def _open_reader(self) -> tuple[sqlite3.Connection, TimedLock]:
@@ -875,6 +878,7 @@ class Database:
     @_writes
     def delete_session(self, sid: str) -> None:
         with self._tx():
+            self.conn.execute("DELETE FROM namespace_audit WHERE session_id = ?", (sid,))
             for table in ("events", "approvals", "review_comments", "secret_dismissals", "artifacts", "checkpoints",
                           "app_tool_calls", "smart_reviews"):
                 self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
@@ -2133,6 +2137,55 @@ class Database:
                 "ORDER BY ts DESC, id DESC LIMIT ?", (max(1, min(limit, 500)),)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    @_writes
+    def insert_namespace_audit(self, namespace: str, session_id: str, context, target: str, kind: str,
+                               action: str, outcome: str, metadata: dict, days: float = 30) -> None:
+        now = time.time()
+        values = (now, namespace, session_id, context.actor_id, context.actor_kind, context.key_id, context.source,
+                  target, kind, action, outcome, json.dumps(metadata, sort_keys=True, separators=(',', ':')),
+                  None if session_id else now + min(30, days) * 86400)
+        checksum = hashlib.sha256(json.dumps(values, separators=(',', ':')).encode()).hexdigest()
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO namespace_audit (ts, namespace, session_id, actor_id, actor_kind, key_id, source, "
+                "target_id, target_kind, action, outcome, metadata, expires_at, checksum) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (*values, checksum))
+            self.conn.execute("DELETE FROM namespace_audit WHERE expires_at <= ?", (now,))
+
+    @_writes
+    def prune_namespace_audit(self, now: float | None = None, days: float = 30) -> None:
+        now = time.time() if now is None else now
+        with self.lock:
+            self.conn.execute("DELETE FROM namespace_audit WHERE session_id = '' AND "
+                              "(expires_at <= ? OR ts <= ?)", (now, now - min(30, days or 30) * 86400))
+
+    @_reads
+    def namespace_audit_page(self, namespace: str, limit: int = 200, before_id: int | None = None, *,
+                             target_id: str | None = None, actor_id: str | None = None, key_id: str | None = None,
+                             action: str | None = None, login_days: float = 30,
+                             outcome: str | None = None, since: float | None = None,
+                             until: float | None = None) -> dict:
+        limit = max(1, min(int(limit), 500))
+        now = time.time()
+        where = ["namespace = ?", "(expires_at IS NULL OR expires_at > ?)", "(session_id <> '' OR ts > ?)"]
+        args = [namespace, now, now - min(30, login_days or 30) * 86400]
+        for column, operator, value in (("id", "<", before_id), ("target_id", "=", target_id),
+                                         ("actor_id", "=", actor_id), ("key_id", "=", key_id),
+                                         ("action", "=", action), ("outcome", "=", outcome),
+                                         ("ts", ">=", since), ("ts", "<", until)):
+            if value is not None:
+                where.append(f"{column} {operator} ?")
+                args.append(value)
+        with self.lock:
+            rows = self.conn.execute("SELECT id, ts, actor_id, actor_kind, key_id, source, target_id, "
+                                     "target_kind, action, outcome, metadata FROM namespace_audit WHERE "
+                                     + " AND ".join(where) + " ORDER BY id DESC LIMIT ?",
+                                     [*args, limit + 1]).fetchall()
+        items = [dict(row) for row in rows[:limit]]
+        for item in items:
+            item["metadata"] = json.loads(item["metadata"])
+        return {"items": items, "next_before_id": items[-1]["id"] if len(rows) > limit else None}
 
     @_reads
     def audit_page(self, limit: int = 200, before_id: int | None = None, *, actor_id: str | None = None,

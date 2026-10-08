@@ -277,12 +277,12 @@ def test_cleanup_removes_old_workspaces_keeps_unsaved(tmp_path, monkeypatch):
         old = time.time() - 7200
         os.utime(orphan, (old, old))
         fresh = await m.maintenance.cleanup()
-        assert fresh["workspaces_removed"] == []
-        assert fresh["orphans_removed"] == ["orphan123"]
+        assert fresh["workspaces_removed"] == 0
+        assert fresh["orphans_removed"] == 1
 
         report = await m.maintenance.cleanup(now=time.time() + 15 * 86400)
-        assert sorted(report["workspaces_removed"]) == sorted([scratch["id"], local["id"]])
-        assert report["kept"] == [{"session": url["id"], "reason": "branch was never pushed"}]
+        assert report["workspaces_removed"] == 2
+        assert report["kept"] == 1
         assert sh(src, "show", f"{local['branch']}:late.txt") == "late"
         assert m.db.get_session(local["id"])["workspace_removed"] == 1
         assert (await m.changes(local["id"]))["removed"]

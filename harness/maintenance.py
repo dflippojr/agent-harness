@@ -105,14 +105,16 @@ class Maintenance:
                 await self._containers(now, report)
                 await asyncio.to_thread(self._workspaces, now, report)
                 await self._remote_workspaces(now, report)
-                self.last_report = report
                 if any(report[k] for k in ("containers_removed", "workspaces_removed", "orphans_removed",
                                            "apps_erased", "sessions_expired")):
                     log.info("cleanup: %s", {k: len(v) for k, v in report.items() if isinstance(v, list)})
+                # Preserve aggregate effect evidence even if audit settlement fails.
+                self.last_report = {key: len(value) if isinstance(value, list) else value
+                                    for key, value in report.items()}
                 audit.update(removed=sum(len(report[k]) for k in (
                     "containers_removed", "workspaces_removed", "orphans_removed", "apps_erased")),
                     kept=len(report["kept"]), expired=len(report["sessions_expired"]))
-            return report
+            return self.last_report
 
     async def _containers(self, now: float, report: dict) -> None:
         code, out, _ = await run_cmd(["docker", "ps", "-a", "--filter", "label=agent-harness.session",

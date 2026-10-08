@@ -38,6 +38,7 @@ def _rows(client, **params) -> dict:
 def test_legacy_rows_survive_migration(tmp_path):
     path = tmp_path / "x.sqlite3"
     db = Database(path)
+    db.conn.execute("DROP TABLE namespace_audit")  # recreate an actual v52 schema, before private trails
     db.conn.execute("DROP TABLE account_audit")
     db.conn.execute("CREATE TABLE account_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,"
                     " actor_id TEXT NOT NULL, target_id TEXT NOT NULL, action TEXT NOT NULL,"

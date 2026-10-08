@@ -35,13 +35,13 @@ from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
 from .policy import TOOLS_ONLY
-from . import audit_context, compat, credential_audit
+from . import audit_context, compat, credential_audit, namespace_audit
 
 NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.19"
+API_VERSION = "1.20"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -412,8 +412,14 @@ class AppToolBroker:
             raise ToolError(row["output"] or f"{name} failed in the app")
         return row["output"]
 
-    def submit(self, sid: str, call_id: str, output: str, ok: bool) -> bool:
-        if not self.db.finish_app_tool_call(sid, call_id, "done", output, ok):
+    def submit(self, sid: str, call_id: str, output: str, ok: bool, *, context=None) -> bool:
+        def commit():
+            if not self.db.finish_app_tool_call(sid, call_id, "done", output, ok):
+                return False
+            namespace_audit.record(self.db, self.db.get_session(sid), context, "tool_result.submit", target=call_id,
+                                   kind="call", metadata={"fields": ["output", "ok"]})
+            return True
+        if not self.db.for_session(sid).write(commit):
             return False
         self.bus.emit(sid, "app_tool_result", {"call_id": call_id, "ok": ok, "chars": len(output)})
         event = self._events.get(f"{sid}:{call_id}")
@@ -1021,7 +1027,8 @@ async def create_session(body: CreateAppSession, request: Request):
                  title=body.title, app=app, app_context=context_text(key["name"], blocks) if blocks else "",
                  app_tools=body.tools, app_metadata=body.metadata, owner_id=user_id,
                  kind=TOOLS_ONLY if body.tools_only else "agent",
-                 retention_days=body.retention_days if app is not None else None, end_user=end_user)
+                 retention_days=body.retention_days if app is not None else None, end_user=end_user,
+                 context=namespace_audit.key_context(key))
     return view(m, s)
 
 
@@ -1039,7 +1046,8 @@ async def start_end_user_login(end_user: str, backend: str, request: Request):
     """Start the CLI's own sign-in for one of the App's end users (#365): `{verification_url, user_code?, needs_code,
     attempt_id, ...}`. The App shows the URL (and the user code) in a popup."""
     m, app_id = end_user_app(request)
-    return JSONResponse(await m.end_user_login_start(app_id, end_user, backend), status_code=201,
+    return JSONResponse(await m.end_user_login_start(app_id, end_user, backend,
+                        context=namespace_audit.key_context(auth(request, "sessions"))), status_code=201,
                         headers={"Cache-Control": "no-store"})
 
 
@@ -1053,7 +1061,8 @@ async def submit_end_user_login_code(end_user: str, backend: str, attempt_id: st
     except ValueError:
         body = None
     code = body.get("code") if isinstance(body, dict) else None
-    out = await m.end_user_login_code(app_id, end_user, backend, attempt_id, code)
+    out = await m.end_user_login_code(app_id, end_user, backend, attempt_id, code,
+                                    context=namespace_audit.key_context(auth(request, "sessions")))
     return JSONResponse(out, headers={"Cache-Control": "no-store"})
 
 
@@ -1067,7 +1076,8 @@ async def end_user_login_status(end_user: str, backend: str, request: Request):
 @route_table.delete("/api/v1/end-users/{end_user}/logins/{backend}", status_code=204)
 async def unlink_end_user_login(end_user: str, backend: str, request: Request):
     m, app_id = end_user_app(request)
-    await m.end_user_unlink(app_id, end_user, backend)
+    await m.end_user_unlink(app_id, end_user, backend,
+                            context=namespace_audit.key_context(auth(request, "sessions")))
 
 
 @route_table.delete("/api/v1/sessions/{ref}", status_code=204)
@@ -1088,7 +1098,26 @@ async def delete_session(ref: str, request: Request):
         raise
     if s.get("app_id") != mine:
         raise HarnessError(404, NO_SUCH_SESSION)
-    await m.erase_session(s["id"])
+    await m.erase_session(s["id"], context=namespace_audit.key_context(key))
+
+
+@route_table.get("/api/v1/audit")
+async def scoped_audit(request: Request, limit: int = 200, before_id: int | None = None,
+                       target_id: str | None = None, actor_id: str | None = None, key_id: str | None = None,
+                       action: str | None = None, outcome: str | None = None,
+                       since: float | None = None, until: float | None = None):
+    m = mgr(request)
+    key = auth(request, "sessions")
+    if key.get("kind") == "app":
+        store, scope = m.db.for_app(key["id"]), key["id"]
+    elif key.get("kind") == "member":
+        store, scope = m.db.for_app(""), key["user_id"]
+    else:
+        raise HarnessError(403, "private audit is available only to its App or member")
+    return await store.aio.namespace_audit_page(scope, limit, before_id, target_id=target_id, action=action,
+                                                actor_id=actor_id, key_id=key_id,
+                                                login_days=key.get("retention_days") or 30,
+                                                outcome=outcome, since=since, until=until)
 
 
 @route_table.get("/api/v1/sessions", response_model=list[SessionResponse])
@@ -1117,22 +1146,25 @@ async def get_session(ref: str, request: Request):
 @route_table.put("/api/v1/sessions/{ref}", response_model=SessionResponse)
 async def patch_session(ref: str, body: AppSessionUpdate, request: Request):
     m = mgr(request)
-    s = own_session(request, auth(request, "sessions"), ref)
-    return view(m, m.rename(s["id"], body.title))
+    key = auth(request, "sessions")
+    s = own_session(request, key, ref)
+    return view(m, m.rename(s["id"], body.title, context=namespace_audit.key_context(key)))
 
 
 @route_table.post("/api/v1/sessions/{ref}/rerun", status_code=201, response_model=SessionResponse)
 async def rerun_session(ref: str, request: Request):
     m = mgr(request)
-    s = own_session(request, auth(request, "sessions"), ref)
-    return view(m, m.rerun(s["id"]))
+    key = auth(request, "sessions")
+    s = own_session(request, key, ref)
+    return view(m, m.rerun(s["id"], context=namespace_audit.key_context(key)))
 
 
 @route_table.post("/api/v1/sessions/{ref}/messages", response_model=SessionResponse)
 async def send(ref: str, body: AppMessage, request: Request):
     m = mgr(request)
-    s = own_session(request, auth(request, "sessions"), ref)
-    return view(m, await m.send(s["id"], body.content))
+    key = auth(request, "sessions")
+    s = own_session(request, key, ref)
+    return view(m, await m.send(s["id"], body.content, context=namespace_audit.key_context(key)))
 
 
 @route_table.post("/api/v1/sessions/{ref}/context", response_model=SessionResponse)
@@ -1143,14 +1175,16 @@ async def add_context(ref: str, body: AppContext, request: Request):
     blocks = [b.model_dump() for b in body.context]
     if not blocks or sum(len(b["content"]) for b in blocks) > MAX_CONTEXT_CHARS:
         raise HarnessError(400, f"send 1+ context blocks, at most {MAX_CONTEXT_CHARS} characters in total")
-    return view(m, await m.send(s["id"], context_text(key["name"], blocks), kind="app_context"))
+    return view(m, await m.send(s["id"], context_text(key["name"], blocks), kind="app_context",
+                               context=namespace_audit.key_context(key)))
 
 
 @route_table.post("/api/v1/sessions/{ref}/cancel", response_model=SessionResponse)
 async def cancel(ref: str, request: Request):
     m = mgr(request)
-    s = own_session(request, auth(request, "sessions"), ref)
-    return view(m, await m.cancel(s["id"]))
+    key = auth(request, "sessions")
+    s = own_session(request, key, ref)
+    return view(m, await m.cancel(s["id"], context=namespace_audit.key_context(key)))
 
 
 @route_table.get("/api/v1/sessions/{ref}/tool_calls", response_model=list[AppToolCallResponse])
@@ -1169,7 +1203,7 @@ async def tool_result(ref: str, call_id: str, body: ToolResult, request: Request
         raise HarnessError(403, "only the app that registered the tool can return its result")
     if len(body.output) > 200_000:
         raise HarnessError(413, "tool output is larger than 200,000 characters")
-    if not m.app_tools.submit(s["id"], call_id, body.output, body.ok):
+    if not m.app_tools.submit(s["id"], call_id, body.output, body.ok, context=namespace_audit.key_context(key)):
         raise HarnessError(409, "no pending call with that id")
     return {"accepted": True}
 
@@ -1189,14 +1223,15 @@ async def decide(ref: str, approval_id: str, body: AppDecision, request: Request
     if key.get("kind") == "member":
         if body.decision not in ("approve", "deny"):
             raise HarnessError(400, "decision must be approve or deny")
-        return m.decide(s["id"], approval_id, body.decision == "approve", body.note)
+        return m.decide(s["id"], approval_id, body.decision == "approve", body.note,
+                        context=namespace_audit.key_context(key))
     if not owner_key(key) and s.get("app_id") != key["id"]:
         raise HarnessError(403, "apps can only decide approvals in their own sessions")
     if body.decision not in ("approve", "deny"):
         raise HarnessError(400, "decision must be approve or deny")
     return m.decide(s["id"], approval_id, body.decision == "approve",
                     note=f"[{key['name']}] {body.note}".strip(),
-                    context=audit_context.owner_context(key, "app_api") if owner_key(key) else None)
+                    context=audit_context.owner_context(key, "app_api") if owner_key(key) else namespace_audit.key_context(key))
 
 
 @route_table.post("/api/v1/sessions/{ref}/events/ticket", status_code=201, response_model=EventTicketResponse)

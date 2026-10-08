@@ -1,5 +1,12 @@
 # Agent Harness Server owner API (admin v1)
 
+App/member operational trails (#471) are private: the owner `/audit` reader never traverses their stores or returns
+session/tool/login-attempt ids or delegated end-user subjects. It includes only approved aggregate `namespace.erase`
+receipts retained for 365 days, with App/account id, category, count, authenticated actor/key, reason, timestamp,
+outcome and a fresh receipt correlation id. `started` without `ok` means completion remains unresolved; `unknown`
+does not prove no effect happened. Inspect before repeating an external erase. See the [private audit contract](app-api.md#private-operational-audit-120-471)
+for scoped reads, retention, failure responses, live erasure, backup rotation/restore and provider-controlled copies.
+
 Machine-owner operations for Agent Harness Web and other first-party operator surfaces. Agent Harness Apps keep
 using [`/api/v1`](app-api.md); they cannot call this surface, even with every App scope.
 
@@ -251,7 +258,7 @@ Each App's sessions live in its own store and folder (`<data_dir>/apps/<app_id>/
   positive number of days (at most 36500). `GET /keys` shows it as `retention_days`.
 - **The sweep.** The maintenance cleanup (every `cleanup.interval_minutes`, hourly by default; also
   `POST /maintenance/cleanup`) erases expired sessions exactly as the App's `DELETE` would, whether or not the App
-  is online. Its report adds `sessions_expired` and `apps_erased` (ids).
+  is online. Its report includes `sessions_expired` and `apps_erased` counts. All cleanup result categories and the saved `last_cleanup` report contain counts rather than session, container or workspace identifiers.
 - **Revoke.** `DELETE /keys/{kid}` on an App or device key kills its token at once and schedules the erasure of its
   whole store and folder 7 days later: `GET /keys` shows `revoked_at` and `erase_after` (Unix seconds), and the Apps
   card lists it under "Revoked: data to be erased" with the date. Owner keys have no erasure.
