@@ -30,6 +30,8 @@ def _check_link(path: Path, what: str) -> None:
 
 def validate(data: bytes) -> None:
     """Raise AuditError unless every line of `data` is a UTF-8 JSON object (blank lines are not allowed)."""
+    if not data:
+        return  # an empty trail has no records
     for number, line in enumerate(data.split(b"\n")[:-1] if data.endswith(b"\n") else data.split(b"\n"), 1):
         try:
             record = json.loads(line.decode("utf-8"))
