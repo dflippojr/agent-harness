@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from harness_modules.images.store import ImageStore
+
 import asyncio
 import hashlib
 import json
@@ -784,7 +786,7 @@ def test_old_image_rows_remain_readable(tmp_path):
     db.conn.execute(
         "INSERT INTO images (id, source, prompt, model, aspect_ratio, width, height, seed, status, created_at) "
         "VALUES ('oldimg', 'phone', 'a lamp', 'fast', '1:1', 1024, 1024, 1, 'done', 1)")
-    row = db.get_image("oldimg")
+    row = ImageStore(db).get_image("oldimg")
     assert row["model"] == "fast"
     assert row["provenance"] == {}
     db.close()
@@ -1127,8 +1129,8 @@ def test_queue_gpu_cleanup_on_timeout_cancel_reject_and_restart(tmp_path):
         running = {"id": "abcdef012345", "session_id": "", "source": "phone", "prompt": "resume",
                    "model": "fast", "aspect_ratio": "1:1", "resolution": "standard",
                    "width": 1024, "height": 1024, "seed": 1, "provenance": {}}
-        m.db.insert_image(running)
-        m.db.update_image("abcdef012345", status="running")
+        ImageStore(m.db).insert_image(running)
+        ImageStore(m.db).update_image("abcdef012345", status="running")
         await m.start(maintenance=False)
         done = await m.images.wait("abcdef012345")
         assert done["status"] == "done"

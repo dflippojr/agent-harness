@@ -267,7 +267,7 @@ def _access_refusal(request: Request, m: Manager, ident, login: str | None,
     if guest_block:
         log.warning("refused guest %s %s from %s (%s)", request.method, request.url.path, login, guest_block)
         return JSONResponse({"detail": guest_block}, status_code=403, headers=cors_headers)
-    member_block = access_mod.member_forbidden(ident, request.method, request.url.path)
+    member_block = access_mod.member_forbidden(ident, request.method, request.url.path, m.cfg)
     if member_block:
         log.warning("refused member %s %s from %s (%s)", request.method, request.url.path, login, member_block)
         m.db.insert_audit(ident.user_id, ident.user_id, "cross_user", "denied", member_block)

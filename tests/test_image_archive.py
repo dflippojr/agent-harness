@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from harness_modules.images.store import ImageStore
+
 import asyncio
 import hashlib
 import json
@@ -36,16 +38,16 @@ def completed_image(m: Manager, iid: str = "abc123", *, created_at: float | None
     job = {"id": iid, "session_id": "", "source": "phone", "prompt": "a small blue house",
            "model": "fast", "aspect_ratio": "1:1", "resolution": "standard", "width": 1024,
            "height": 1024, "seed": 42}
-    m.db.insert_image(job)
+    ImageStore(m.db).insert_image(job)
     if created_at is not None:
-        m.db.update_image(iid, created_at=created_at)
-    m.db.update_image(iid, status="done", finished_at=time.time(), bytes=len(content))
-    saved = m.db.get_image(iid)
+        ImageStore(m.db).update_image(iid, created_at=created_at)
+    ImageStore(m.db).update_image(iid, status="done", finished_at=time.time(), bytes=len(content))
+    saved = ImageStore(m.db).get_image(iid)
     if write_source:
         source = m.modules.get("images").archive.source(saved)
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(content)
-    return m.db.get_image(iid)
+    return ImageStore(m.db).get_image(iid)
 
 
 def test_archive_success_metadata_idempotency_and_interrupted_partial(tmp_path):
@@ -62,13 +64,13 @@ def test_archive_success_metadata_idempotency_and_interrupted_partial(tmp_path):
         "dimensions": {"width": 1024, "height": 1024}, "seed": 42, "bytes": len(PNG),
         "sha256": hashlib.sha256(PNG).hexdigest(),
     }
-    row = m.db.get_image("abc123")
+    row = ImageStore(m.db).get_image("abc123")
     assert row["archived_at"]
     assert row["archive_bytes"] == len(PNG)
     assert row["sha256"] == first["sha256"]
     png_mtime, metadata_mtime, archived_at = png.stat().st_mtime_ns, sidecar.stat().st_mtime_ns, row["archived_at"]
     assert m.modules.get("images").archive.archive(row)["sha256"] == first["sha256"]
-    assert (png.stat().st_mtime_ns, sidecar.stat().st_mtime_ns, m.db.get_image("abc123")["archived_at"]) == (
+    assert (png.stat().st_mtime_ns, sidecar.stat().st_mtime_ns, ImageStore(m.db).get_image("abc123")["archived_at"]) == (
         png_mtime, metadata_mtime, archived_at)
 
     png.unlink()
@@ -100,8 +102,8 @@ def test_reconcile_repairs_corruption_and_reports_hash_mismatch_and_missing_sour
     assert report["archived"] == 1
     assert report["missing"] == 2
     assert report["errors"] == 2
-    assert "SHA-256" in m.db.get_image("second")["archive_error"]
-    assert "missing" in m.db.get_image("third")["archive_error"]
+    assert "SHA-256" in ImageStore(m.db).get_image("second")["archive_error"]
+    assert "missing" in ImageStore(m.db).get_image("third")["archive_error"]
     assert any("second" in warning for warning in report["warnings"])
 
 
@@ -147,7 +149,7 @@ def test_retention_requires_preview_and_never_deletes_live_gallery(tmp_path):
     assert old_source.is_file()
     assert not m.modules.get("images").archive.paths(old)[0].exists()
     assert m.modules.get("images").archive.paths(recent)[0].exists()
-    assert m.db.get_image("old")["archive_deleted_at"] is not None
+    assert ImageStore(m.db).get_image("old")["archive_deleted_at"] is not None
     # Reconciliation honors an explicit retention deletion instead of silently restoring it.
     assert m.modules.get("images").archive.reconcile()["archived"] == 1
 

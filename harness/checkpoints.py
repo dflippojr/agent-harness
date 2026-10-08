@@ -34,7 +34,7 @@ from .projects import GitError
 log = logging.getLogger("harness.checkpoints")
 
 CAP = 50                      # visible checkpoints kept per session
-MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_delegated_edit", "generate_image")
+MUTATING_TOOLS = ("run_shell", "write_file", "edit_file", "git_clone", "apply_delegated_edit")
 # The run fields a turn writes (update_state, update_notes) that the next turn reads (`new_run` carries them, and
 # compaction re-injects them): a checkpoint keeps them with its context, and rewind and fork restore them.
 TURN_RUN_KEYS = ("state", "notes")

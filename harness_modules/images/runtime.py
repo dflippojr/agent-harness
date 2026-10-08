@@ -59,6 +59,9 @@ class ImagesRuntime(ModuleRuntime):
     def busy(self) -> bool:
         return self.service is not None and self.service.phase != "idle"
 
+    def gpu_holders(self) -> tuple[str, ...]:
+        return ("ComfyUI",) if self.gpu_taken else ()
+
     def gpu_hold(self) -> None:
         if self.service is not None:
             self.service.hold()

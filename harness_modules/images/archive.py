@@ -6,6 +6,8 @@ inside) dated database snapshots so each PNG is stored once rather than once per
 
 from __future__ import annotations
 
+from .store import ImageStore
+
 import hashlib
 import json
 import os
@@ -25,7 +27,7 @@ class ImageArchiveError(RuntimeError):
 class ImageArchive:
     def __init__(self, cfg: Config, db: Database):
         self.cfg = cfg
-        self.db = db
+        self.db = db if isinstance(db, ImageStore) else ImageStore(db)
         self.enabled = bool(cfg.backup.enabled and cfg.images.enabled)
         self.root = Path(cfg.backup.dir) / "images"
         self.last_reconciliation: dict = {}

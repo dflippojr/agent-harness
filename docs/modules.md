@@ -83,6 +83,7 @@ module's only link back is `harness.modules`.
 | --- | --- |
 | `name`, `switches` | `switches[0]` decides presence; every switch gets a `capabilities.modules.<switch>` entry and a hidden `modules.<switch>` registry key while present. |
 | `runtime_enabled(cfg, switch)` | The runtime switch behind a profile switch (`cfg.images.enabled`). `module_effective` = installed AND this. |
+| `member_forbidden` | Path prefixes and member refusal messages, applied only while the module is present (including switched off). |
 | `runtime(manager, module)` | Builds a `ModuleRuntime` (below) for each Manager. |
 | `owner_routes()` | A `RouteTable` installed with the core's daemon routes, behind the same owner/guest/member guard. Handlers call `require_owner` where the route is owner-only. |
 | `admin_paths` | Owner routes also served under `/api/admin/v1` (owner credential required) and listed in its `operations`. |
@@ -107,6 +108,7 @@ module's only link back is `harness.modules`.
 | `toolkit()` | The object with `tool_names`, `schemas()` and `call()`; offered per `Module.tools`. |
 | `gpu_taken`, `busy()`, `gpu_hold()`, `gpu_resume(ids)` | GPU interaction: the model warmer stays parked while `gpu_taken`; skill review waits while `busy()`; the GPU guard's pause and resume. |
 | `features()`, `app_root()` | `/api/v1` `features` entries and extra top-level keys (`image_modes`). |
+| `gpu_holders()` | GPU-holder names for machine diagnostics; the core aggregates all present runtimes. |
 | `metrics(out, db)` | Prometheus lines on `/metrics`. |
 
 `manager.<module name>` returns the runtime's `service` (None while switched off or absent), for code written before
@@ -191,11 +193,14 @@ These are names, not imports, and move with the config and storage split in stag
   `MODULE_NAMES` and `ModulesConfig`, `Project.images`, and `DEFAULT_IMAGES_MODELS_DIR`. Config loads before any
   module is discovered and the installer writes these switches, so the core still parses them; it only gives them
   effect when a present module answers to them.
-- `db.py` and its migrations: the `images` table.
-- `access.py`: members are refused `/images` paths (harmless when the routes are absent).
-- `checkpoints.MUTATING_TOOLS` lists `generate_image`; the module also declares it through `ToolGate.mutating`.
-- `resources.py` and `harness_modules/endpoint/service.py` read `manager.images` for the ComfyUI GPU holder and the `/v1` `features.images`
-  flag.
+- `db.py` and its frozen baseline migrations retain the historical `images` table and columns, so existing
+  databases and backups keep their schema even while the add-on is absent. Live image queries moved to
+  `harness_modules/images/store.py`: `ImageStore(db)` uses the core's writer queue, transactions and pooled readers.
+  Database image methods are now methods of that store. The module's service and archive wrap the shared database.
+- Images owns its member access rules through `Module.member_forbidden`, the `generate_image` mutation name
+  through `ToolGate.mutating`, and the ComfyUI holder through `ModuleRuntime.gpu_holders`. Resources aggregates
+  holders, and endpoint aggregates `features()`, without naming images. An absent package contributes none of them;
+  a present disabled package still refuses member access and reports false image features.
 - Endpoint: `EndpointConfig`, the `endpoint:` YAML section and profile switch, the shared `InferenceGate`,
   `endpoint_requests` table and database accounting methods remain core names. `/keys`, its admin API and CLI
   stay in core because Apps and owner credentials need them without inference. All URLs, auth, response shapes,
@@ -203,8 +208,8 @@ These are names, not imports, and move with the config and storage split in stag
   and discovery routes, embeddings proxy, request logging, `endpoint.*` settings, queue initialization and
   `harness_endpoint_*` metrics. Absent/uninstalled endpoint packages contribute no inference routes, settings or
   metrics; a present but disabled module retains settings and the existing disabled responses. The import path
-  moved from `harness.endpoint` to `harness_modules.endpoint.service`. The image capability still reads
-  `manager.images`; image-name cleanup is reserved for a later PR.
+  moved from `harness.endpoint` to `harness_modules.endpoint.service`. Its discovery features include contributions
+  from all present modules through `ModuleHost.features()`.
 - Notifications (`notify:` YAML section and `NotifyConfig`, the `notifications` switch, `/me`'s `notify` block,
   `access.py`'s `/notify` rule) stay in the core as names. Core code that sends a notification (canary, Remote
   Control, the image module) goes through `Manager.notifier`, a stand-in that drops everything while the module is
