@@ -269,3 +269,16 @@ These are names, not imports, and move with the config and storage split in stag
 Toolkits may expose `mutating_tools`, a collection of full tool names evaluated for the current session.
 The host combines it with `ToolGate.mutating` for native checkpoints and workspace quota enforcement.
 MCP client toolkits conservatively mark every tool on a server with a `rw` workspace grant as mutating.
+
+## Memory library clone health
+
+The memory library keeps its own git clone (`memory_library.clone_dir`). Agents and people must change it only through
+the module's write path (approved `memory_edit`/`memory_write`, or the Settings profile editor); edits made directly in
+the clone are never discarded or committed automatically.
+
+A refresh reports one of `ok`, `dirty` (uncommitted or untracked files), `diverged` (local commits and new remote
+commits) or `failed`. `GET /memory` returns `refresh_state`, `changed_paths` (names only), `refresh_failures` and
+`last_success`. `/metrics` exposes `harness_memory_library_refresh_ok`, `..._refresh_state`, `..._refresh_failures`,
+`..._changed_paths` and `..._last_success_age_seconds`. With notifications on, three failed refreshes in a row send
+one ntfy alert per episode, which clears when a refresh succeeds. Writes are refused while the clone has uncommitted
+changes.

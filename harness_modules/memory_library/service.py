@@ -103,6 +103,10 @@ def sensitive_hits(diff: str) -> list[str]:
     return [kind for kind, pattern in SENSITIVE if re.search(pattern, added, re.IGNORECASE)]
 
 
+ALERT_AFTER = 3          # consecutive failed refreshes before one alert per episode
+CHANGED_PATHS_CAP = 50
+
+
 class MemoryLibrary:
     tool_names = TOOLS
     wants_session = True
@@ -115,6 +119,14 @@ class MemoryLibrary:
         self._lock = asyncio.Lock()
         self.refresh_error = ""
         self.last_commit: dict = {}
+        # Refresh outcome: "" before the first refresh, then ok | dirty | diverged | failed. Changed paths are names
+        # only. `alert` is called once per episode of ALERT_AFTER consecutive failures (set by the runtime).
+        self.refresh_state = ""
+        self.changed_paths: list[str] = []
+        self.failures = 0
+        self.last_success: float = 0.0
+        self.alert = None
+        self._alerted = False
 
     def schemas(self) -> list[dict]:
         return schemas(self.cfg)
@@ -143,14 +155,65 @@ class MemoryLibrary:
             self.root.parent.mkdir(parents=True, exist_ok=True)
             code, out, err = await run_cmd(["git", "clone", "-q", "--", self.cfg.repo, str(self.root)], timeout=300,
                                            env=GIT_ENV)
+            state = "ok" if code == 0 else "failed"
+            paths: list[str] = []
         else:
-            code, out, err = await self._git("pull", "-q", "--ff-only", timeout=120)
+            state, paths, code, out, err = await self._pull_checked()
         self._refreshed = time.monotonic()
         self.refresh_error = "" if code == 0 else (err or out).strip()[:300]
+        self._record(state, paths)
         if code != 0:
             log.warning("memory library refresh failed: %s", self.refresh_error)
             if not self.root.is_dir():
                 raise ToolError(f"the memory library couldn't be cloned: {self.refresh_error}")
+
+    async def _changed_paths(self) -> list[str]:
+        """Paths with uncommitted edits or untracked files in the clone (names only, capped)."""
+        code, out, _ = await self._git("status", "--porcelain", "-z", "--untracked-files=all")
+        if code != 0:
+            return []
+        paths, parts = [], out.split("\x00")
+        i = 0
+        while i < len(parts):
+            entry = parts[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            paths.append(entry[3:])
+            if entry[0] in "RC":
+                i += 1  # a rename or copy lists the original path next
+        return paths[:CHANGED_PATHS_CAP]
+
+    async def _pull_checked(self) -> tuple[str, list[str], int, str, str]:
+        """Pull only when the clone is clean and can fast-forward; otherwise name what stands in the way."""
+        paths = await self._changed_paths()
+        if paths:
+            return "dirty", paths, 1, "", (f"the clone has local changes that a pull would not overwrite: "
+                                           f"{', '.join(paths[:5])}" + (" ..." if len(paths) > 5 else ""))
+        code, out, err = await self._git("fetch", "-q", "origin", timeout=120)
+        if code == 0:
+            code, counts, _ = await self._git("rev-list", "--left-right", "--count", "HEAD...@{u}")
+            if code == 0:
+                ahead, behind = (int(n) for n in counts.split()[:2])
+                if ahead and behind:
+                    return "diverged", [], 1, "", (f"the clone has {ahead} local commit(s) and is {behind} behind "
+                                                   "the remote, so it cannot fast-forward")
+        code, out, err = await self._git("pull", "-q", "--ff-only", timeout=120)
+        return ("ok" if code == 0 else "failed"), [], code, out, err
+
+    def _record(self, state: str, paths: list[str]) -> None:
+        self.refresh_state, self.changed_paths = state, paths
+        if state == "ok":
+            self.failures, self._alerted = 0, False
+            self.last_success = time.time()
+            return
+        self.failures += 1
+        if self.failures >= ALERT_AFTER and not self._alerted and self.alert is not None:
+            self._alerted = True
+            try:
+                self.alert(state, paths, self.refresh_error)
+            except Exception:  # noqa: BLE001 - an alert problem must not break refresh
+                log.exception("memory library alert failed")
 
     async def _git(self, *args: str, timeout: float = 120) -> tuple[int, str, str]:
         return await run_cmd(["git", "-C", str(self.root), *args], timeout=timeout, env=GIT_ENV)
@@ -329,6 +392,11 @@ class MemoryLibrary:
         """Bring the clone to the remote's state, dropping anything local (a push that failed earlier)."""
         if not (self.root / ".git").is_dir():
             await self._refresh(force=True)
+        paths = await self._changed_paths()
+        if paths:  # edits made outside this module may be the owner's data: never reset them away
+            raise ToolError("the memory library clone has uncommitted changes made outside the approval flow "
+                            f"({', '.join(paths[:5])}), so this change was not saved. Tell the user to commit or "
+                            "move them.")
         await self._git("fetch", "-q", "origin", timeout=120)
         await self._reset()
         self._refreshed = time.monotonic()
