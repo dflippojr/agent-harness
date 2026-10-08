@@ -1,11 +1,15 @@
 version: 2
 updates:
   - package-ecosystem: pip
+    assignees:
+      - dflippojr
     directory: /
     schedule:
       interval: weekly
 
   - package-ecosystem: docker
+    assignees:
+      - dflippojr
     directories:
       # Dockerfile discovery also includes cli.Dockerfile.
       - /sandbox
@@ -18,6 +22,8 @@ updates:
       interval: weekly
 
   - package-ecosystem: docker-compose
+    assignees:
+      - dflippojr
     # Discovers docker-compose.tempo.yml. ops/egress/compose.yaml only uses
     # the locally built agent-harness-egress image, so it has no update job.
     directory: /ops/observability
@@ -25,6 +31,8 @@ updates:
       interval: weekly
 
   - package-ecosystem: github-actions
+    assignees:
+      - dflippojr
     directory: /
     schedule:
       interval: weekly
