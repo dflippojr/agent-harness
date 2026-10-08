@@ -22,7 +22,7 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
-from harness.modules import parse_job_status as parse_status, job_summary as summary
+from harness.modules import parse_job_status as parse_status, job_summary as summary, operation_audit, audit_context
 
 log = logging.getLogger("harness.jobs")
 
@@ -207,16 +207,21 @@ class JobScheduler:
                 self._reschedule(job, now, error=str(e)[:300])
         return started
 
-    def run(self, job: dict, now: float | None = None, manual: bool = False) -> str:
+    def run(self, job: dict, now: float | None = None, manual: bool = False, *, context=None) -> str:
         now = now or time.time()
         prompt = f"{job['prompt'].strip()}\n\n{STATUS_PROMPT}"
         stamp = time.strftime("%b %d %H:%M", time.localtime(now))
-        s = self.create(prompt, project=job["project"], backend=job.get("backend") or "local",
-                        model=job["model"] or None,
-                        title=f"⏰ {job['name']} · {stamp}", job_id=job["id"])
-        self.db.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="",
-                           **({} if manual else {"next_run_at": Cron(job["cron"]).next_after(now)}))
-        log.info("job %s started session %s%s", job["id"], s["id"], " (run now)" if manual else "")
+        context = context if manual else audit_context.AuditContext("system", "system", "", "job")
+        with operation_audit.operation(self.db, context, job["id"], "job.run",
+                                       {"trigger": "manual" if manual else "scheduled"},
+                                       scheduled=not manual) as audit:
+            s = self.create(prompt, project=job["project"], backend=job.get("backend") or "local",
+                            model=job["model"] or None,
+                            title=f"⏰ {job['name']} · {stamp}", job_id=job["id"])
+            self.db.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="",
+                               **({} if manual else {"next_run_at": Cron(job["cron"]).next_after(now)}))
+            log.info("job %s started session %s%s", job["id"], s["id"], " (run now)" if manual else "")
+            audit["resulting_session_id"] = s["id"]
         return s["id"]
 
     def _reschedule(self, job: dict, now: float, skipped: str = "", error: str = "") -> None:

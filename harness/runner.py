@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, taint, telemetry
+from . import audit_context, operation_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, taint, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -433,7 +433,12 @@ class Runner:
                 self.bus.emit(sid, "approval_auto_approved", {"id": existing["id"], **(record or {})})
             else:
                 self.bus.emit(sid, "approval_requested", public)
-        self.db.for_session(sid).write(persist_ask)
+        with operation_audit.operation(
+                self.db, audit_context.AuditContext("system", "system", "", "agent"),
+                existing["id"], "approval.auto_decide",
+                {"session_id": sid, "decision": "approved", "reviewer_mode": (record or {}).get("mode")},
+                enabled=existing["status"] == "approved" and operation_audit.owner_session(self.db.get_session(sid))):
+            self.db.for_session(sid).write(persist_ask)
         return existing
 
     def _member_clone_budget(self, user_id: str) -> int | None:

@@ -31,7 +31,7 @@ from .runner import (ACTIVE, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, RE
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import checkpoints, llm, member_keys, projects, secret_scan, telemetry
+from . import audit_context, operation_audit, checkpoints, llm, member_keys, projects, secret_scan, telemetry
 
 log = logging.getLogger("harness.manager")
 
@@ -948,7 +948,7 @@ class Manager:
             raise HarnessError(409, CHECKPOINT_IDLE)
         return s
 
-    async def rewind(self, ref: str, turn: int) -> dict:
+    async def rewind(self, ref: str, turn: int, *, context=None) -> dict:
         sid = self.resolve_id(ref)
         s = await self._idle_for_checkpoint(sid)
         if s.get("backend", "local") != "local":
@@ -956,24 +956,27 @@ class Manager:
                                     "fork from a checkpoint instead")
         cp = self.runner.checkpointer
         async with self._exclusive(sid, "rewind", CHECKPOINT_IDLE):
-            try:
-                done = await asyncio.to_thread(cp.restore, sid, int(turn))
-            except projects.GitError as e:
-                raise HarnessError(e.status, str(e)) from e
-            # All or nothing: the files are restored; if recording that fails, they are put back before the hold
-            # ends, so the next send never runs the later conversation against the earlier files.
-            def record() -> None:
-                cp.commit_rewind(sid, int(turn), done.saved)
-                self.db.after_commit(lambda: self.unsettled.discard(sid))
-            try:
-                await self.db.for_session(sid).awrite(record)
-            except Exception as e:  # noqa: BLE001 - any failure to record is undone, then raised
-                error, undone = await asyncio.to_thread(cp.undo_rewind, done, e)
-                if not undone:
-                    await self._unsettle(sid)
-                raise HarnessError(error.status, str(error)) from e
-            finally:
-                await asyncio.to_thread(cp.release, done)
+            async with operation_audit.async_operation(self.db, context, sid, "checkpoint.rewind",
+                                           {"session_id": sid, "turn": int(turn)},
+                                           enabled=operation_audit.owner_session(s)):
+                try:
+                    done = await asyncio.to_thread(cp.restore, sid, int(turn))
+                except projects.GitError as e:
+                    raise HarnessError(e.status, str(e)) from e
+                # All or nothing: the files are restored; if recording that fails, they are put back before the hold
+                # ends, so the next send never runs the later conversation against the earlier files.
+                def record() -> None:
+                    cp.commit_rewind(sid, int(turn), done.saved)
+                    self.db.after_commit(lambda: self.unsettled.discard(sid))
+                try:
+                    await self.db.for_session(sid).awrite(record)
+                except Exception as e:  # noqa: BLE001 - any failure to record is undone, then raised
+                    error, undone = await asyncio.to_thread(cp.undo_rewind, done, e)
+                    if not undone:
+                        await self._unsettle(sid)
+                    raise HarnessError(error.status, str(error)) from e
+                finally:
+                    await asyncio.to_thread(cp.release, done)
         return self.db.get_session(sid)
 
     async def _unsettle(self, sid: str) -> None:
@@ -989,15 +992,19 @@ class Manager:
         except Exception:  # noqa: BLE001 - the in-memory mark still refuses sends
             log.exception("could not record the failed rewind of %s", sid)
 
-    async def fork(self, ref: str, turn: int, prompt: str) -> dict:
+    async def fork(self, ref: str, turn: int, prompt: str, *, context=None) -> dict:
         """A new session that starts from a checkpoint: its own workspace, branch and model context."""
         sid = self.resolve_id(ref)
         await self._idle_for_checkpoint(sid)
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
         async with self._exclusive(sid, "fork", CHECKPOINT_IDLE):
-            new_sid = await self._fork(sid, int(turn), prompt)
-        self._spawn(new_sid)
+            async with operation_audit.async_operation(self.db, context, sid, "checkpoint.fork",
+                                           {"session_id": sid, "turn": int(turn)},
+                                           enabled=operation_audit.owner_session(self.db.get_session(sid))) as audit:
+                new_sid = await self._fork(sid, int(turn), prompt)
+                audit["resulting_session_id"] = new_sid
+                self._spawn(new_sid)
         return self.db.get_session(new_sid)
 
     async def _fork(self, sid: str, turn: int, prompt: str) -> str:
@@ -1376,11 +1383,11 @@ class Manager:
             self.compare_busy.discard(key)
 
     async def compare_pick(self, group: str, winner: str, action: str, discard_rest: bool,
-                           owner_id: str = "owner") -> dict:
+                           owner_id: str = "owner", *, context=None) -> dict:
         with self._compare_exclusive(group, owner_id):
-            return await self._compare_pick(group, winner, action, discard_rest, owner_id)
+            return await self._compare_pick(group, winner, action, discard_rest, owner_id, context)
 
-    async def _compare_pick(self, group: str, winner: str, action: str, discard_rest: bool, owner_id: str) -> dict:
+    async def _compare_pick(self, group: str, winner: str, action: str, discard_rest: bool, owner_id: str, context=None) -> dict:
         members = self.db.group_sessions(group, owner_id)
         if winner not in {s["id"] for s in members}:
             raise HarnessError(404, "the winner is not a member of this group")
@@ -1388,7 +1395,7 @@ class Manager:
             raise HarnessError(400, "action must be merge or push")
         # retry-safe: a winner already merged/pushed by an earlier attempt is not merged/pushed again
         if next(s for s in members if s["id"] == winner)["review"] not in ("merged", "pushed"):
-            await self.review(winner, action)
+            await self.review(winner, action, context=context)
             # a merge that hit a conflict returns normally with no review state; never discard on an unverified pick
             current = self.db.get_session(winner)
             if current["review"] not in ("merged", "pushed"):
@@ -1396,22 +1403,22 @@ class Manager:
                                         f"({current['review_detail'] or 'no detail'}); "
                                         f"the other members were left untouched")
         if discard_rest:
-            failed = await self._compare_discard([s for s in members if s["id"] != winner])
+            failed = await self._compare_discard([s for s in members if s["id"] != winner], context)
             if failed:
                 raise HarnessError(500, f"winner {action}ed but could not discard: {failed}; retry to finish")
         return self.compare_view(group, owner_id)
 
-    async def compare_discard(self, group: str, owner_id: str = "owner") -> dict:
+    async def compare_discard(self, group: str, owner_id: str = "owner", *, context=None) -> dict:
         members = self.db.group_sessions(group, owner_id)
         if not members:
             raise HarnessError(404, "no compare group matches that id")
         with self._compare_exclusive(group, owner_id):
-            failed = await self._compare_discard(members)
+            failed = await self._compare_discard(members, context)
         if failed:
             raise HarnessError(500, f"could not discard: {failed}; retry to finish")
         return self.compare_view(group, owner_id)
 
-    async def _compare_discard(self, members: list[dict]) -> dict[str, str]:
+    async def _compare_discard(self, members: list[dict], context=None) -> dict[str, str]:
         """Discard every member that still can be; return {session id: error} for those that failed."""
         failed = {}
         for member in members:
@@ -1419,17 +1426,19 @@ class Manager:
             try:
                 if self.db.get_session(sid)["review"] in ("merged", "pushed", "discarded"):
                     continue
-                await self._compare_drop(sid)
+                await self._compare_drop(sid, context)
             except Exception as e:
+                if getattr(e, "code", "") == "audit_record_incomplete":
+                    raise
                 failed[sid] = str(e)
         return failed
 
-    async def _compare_drop(self, sid: str) -> None:
+    async def _compare_drop(self, sid: str, context=None) -> None:
         """End a member's run, then discard its branch and workspace. review() refuses a session that is still
         working, and refuses one that was never checked out (it has no branch anywhere to delete)."""
         await self._compare_stop(sid)
         try:
-            await self.review(sid, "discard")
+            await self.review(sid, "discard", context=context)
         except HarnessError as e:
             s = self.db.get_session(sid)
             if e.status != 409 or s["base_commit"] or s["status"] in ACTIVE:
@@ -1483,11 +1492,15 @@ class Manager:
         return result
 
     # review of a git project's session branch
-    async def review(self, ref: str, action: str) -> dict:
+    async def review(self, ref: str, action: str, *, context=None) -> dict:
         """merge (local projects), push (URL projects), or discard. Runs host-side with the user's git setup."""
         sid = self.resolve_id(ref)
         async with self._exclusive(sid, "review", REVIEW_BUSY):
-            return await self._review(sid, action)
+            if action not in ("merge", "push", "discard"):
+                raise HarnessError(404, "unknown review action")
+            async with operation_audit.async_operation(self.db, context, sid, "review." + action, {"session_id": sid},
+                                           enabled=operation_audit.owner_session(self.db.get_session(sid))):
+                return await self._review(sid, action)
 
     async def _review(self, sid: str, action: str) -> dict:
         s = self.db.get_session(sid)
@@ -1605,9 +1618,10 @@ class Manager:
             raise HarnessError(404, "unknown approval link")
         if approval["status"] != "pending":
             return public_approval(approval)  # a repeated button press is harmless
-        return self.decide(approval["session_id"], approval["id"], approve, note="")
+        return self.decide(approval["session_id"], approval["id"], approve, note="",
+                           context=audit_context.AuditContext("owner", "owner", "", "notification_link"))
 
-    def decide(self, ref: str, approval_id: str | None, approve: bool, note: str = "") -> dict:
+    def decide(self, ref: str, approval_id: str | None, approve: bool, note: str = "", *, context=None) -> dict:
         sid = self.resolve_id(ref)
         pending = self.db.pending_approvals(sid)
         if approval_id is None:
@@ -1618,19 +1632,31 @@ class Manager:
         approval = self.db.get_approval(approval_id)
         if approval is None or approval["session_id"] != sid:
             raise HarnessError(404, f"no approval {approval_id} in session {sid}")
+        if approval["status"] != "pending":
+            if operation_audit.owner_session(self.db.get_session(sid)):
+                try:
+                    operation_audit.append(self.db, context or audit_context.AuditContext("unknown"), approval_id,
+                                           "approval.decide", "failure", {"session_id": sid, "reason": "already_decided"})
+                except Exception:
+                    # A rejected retry has no effect to settle; preserve the conflict response.
+                    log.warning("audit record unavailable for an already-decided approval")
+            raise HarnessError(409, f"approval is already {approval['status']}")
         status = "approved" if approve else "denied"
 
         def decide() -> None:
             if not self.db.decide_approval(approval_id, status, note):
                 raise HarnessError(409, f"approval is already {self.db.get_approval(approval_id)['status']}")
             self.bus.emit(sid, "approval_decided", {"id": approval_id, "status": status, "note": note})
-        self.db.for_session(sid).write(decide)
-        event = self.runner.approval_events.get(approval_id)
-        if event:
-            event.set()
+        with operation_audit.operation(self.db, context, approval_id, "approval.decide",
+                                       {"session_id": sid, "decision": status},
+                                       enabled=operation_audit.owner_session(self.db.get_session(sid))):
+            self.db.for_session(sid).write(decide)
+            event = self.runner.approval_events.get(approval_id)
+            if event:
+                event.set()
         return public_approval(self.db.get_approval(approval_id))
 
-    def clear_taint(self, ref: str) -> dict:
+    def clear_taint(self, ref: str, *, context=None) -> dict:
         """Owner action: forget the untrusted sources this session has read, and record that it happened."""
         sid = self.resolve_id(ref)
         s = self.db.get_session(sid)
@@ -1639,7 +1665,9 @@ class Manager:
         def clear_taint() -> None:
             self.db.update_session(sid, taint=[])
             self.bus.emit(sid, "taint_cleared", {"cleared": [t["origin"] for t in cleared]})
-        self.db.for_session(sid).write(clear_taint)
+        with operation_audit.operation(self.db, context, sid, "session.taint_clear", {"session_id": sid},
+                                       enabled=operation_audit.owner_session(s)):
+            self.db.for_session(sid).write(clear_taint)
         return self.db.get_session(sid)
 
     async def cancel(self, ref: str) -> dict:

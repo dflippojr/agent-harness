@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
-from . import access as access_mod
+from . import operation_audit, access as access_mod
 from . import compat
 from . import credential_audit
 from . import config as config_mod
@@ -373,6 +373,8 @@ async def harness_error(request: Request, exc: HarnessError):
     body = {"detail": str(exc), "error": {
         "code": exc.code, "message": str(exc), "retryable": exc.status == 429 or exc.status >= 500,
     }}
+    if getattr(exc, "operation_id", None):
+        body["error"].update(operation_id=exc.operation_id, may_have_completed=True, retryable=False)
     if getattr(exc, "keys", None):
         body["error"]["keys"] = exc.keys
     if getattr(exc, "details", None):
@@ -672,12 +674,14 @@ async def get_compare(group: str, request: Request):
 @api_router.post("/compare/{group}/pick")
 async def pick_compare(group: str, body: PickWinner, request: Request):
     m = require_owner(request)
-    return await m.compare_pick(group, body.winner, body.action, body.discard_rest, owner_id(request))
+    return await m.compare_pick(group, body.winner, body.action, body.discard_rest, owner_id(request),
+                                context=operation_audit.request_context(request, m))
 
 
 @api_router.post("/compare/{group}/discard")
 async def discard_compare(group: str, request: Request):
-    return await require_owner(request).compare_discard(group, owner_id(request))
+    m = require_owner(request)
+    return await m.compare_discard(group, owner_id(request), context=operation_audit.request_context(request, m))
 
 
 @api_router.get("/sessions/{ref}")
@@ -714,13 +718,13 @@ async def session_checkpoints(ref: str, request: Request):
 @api_router.post("/sessions/{ref}/checkpoints/{turn}/rewind")
 async def rewind_checkpoint(ref: str, turn: int, request: Request):
     m, sid, _ = owned_session(request, ref)
-    return m.summary(await m.rewind(sid, turn))
+    return m.summary(await m.rewind(sid, turn, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/checkpoints/{turn}/fork", status_code=201)
 async def fork_checkpoint(ref: str, turn: int, body: ForkRequest, request: Request):
     m, sid, _ = owned_session(request, ref)
-    return m.summary(await m.fork(sid, turn, body.prompt))
+    return m.summary(await m.fork(sid, turn, body.prompt, context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/sessions/{ref}/changes")
@@ -773,7 +777,7 @@ async def dismiss_secret_finding(ref: str, fingerprint: str, body: SecretDismiss
 async def review(ref: str, action: str, request: Request):
     """merge | push | discard the session's git branch."""
     m, sid, _ = owned_session(request, ref)
-    return m.summary(await m.review(sid, action))
+    return m.summary(await m.review(sid, action, context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/maintenance")
@@ -783,7 +787,8 @@ async def maintenance(request: Request):
 
 @api_router.post("/maintenance/cleanup")
 async def maintenance_cleanup(request: Request):
-    return await require_owner(request).maintenance.cleanup()
+    m = require_owner(request)
+    return await m.maintenance.cleanup(context=operation_audit.request_context(request, m))
 
 
 @api_router.get("/sessions/{ref}/approvals")
@@ -799,7 +804,7 @@ async def decide(ref: str, approval_id: str, body: Decision, request: Request):
         raise HarnessError(400, "decision must be approve or deny")
     m, sid, _ = owned_session(request, ref)
     return m.decide(sid, None if approval_id == "pending" else approval_id,
-                    body.decision == "approve", body.note)
+                    body.decision == "approve", body.note, context=operation_audit.request_context(request, m))
 
 
 @api_router.post("/a/{token}/{decision}")
@@ -899,7 +904,7 @@ async def cancel_chat(ref: str, request: Request):
 @api_router.post("/sessions/{ref}/taint/clear")
 async def clear_taint(ref: str, request: Request):
     m = require_owner(request)
-    return m.summary(m.clear_taint(ref))
+    return m.summary(m.clear_taint(ref, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/cancel")

@@ -22,9 +22,10 @@ import os
 import shutil
 import stat
 import time
+import uuid
 from pathlib import Path
 
-from . import projects
+from . import projects, audit_context, operation_audit
 from .config import Config
 from .db import Database
 from .principal import OWNER_USER_ID
@@ -86,23 +87,31 @@ class Maintenance:
             await asyncio.sleep(self.cfg.cleanup.interval_minutes * 60)
 
     # cleanup
-    async def cleanup(self, now: float | None = None) -> dict:
+    async def cleanup(self, now: float | None = None, *, context=None) -> dict:
         async with self._lock:
-            now = now or time.time()
-            report = {"at": now, "containers_removed": [], "workspaces_removed": [], "orphans_removed": [],
-                      "kept": [], "apps_erased": [], "sessions_expired": []}
-            if self.app_sweep is not None:  # first, so the sweep below removes the containers of what it erased
-                try:
-                    report.update(await self.app_sweep(now))
-                except Exception:  # noqa: BLE001 - the rest of the cleanup still runs
-                    log.exception("App data sweep failed")
-            await self._containers(now, report)
-            await asyncio.to_thread(self._workspaces, now, report)
-            await self._remote_workspaces(now, report)
-            self.last_report = report
-            if any(report[k] for k in ("containers_removed", "workspaces_removed", "orphans_removed",
-                                       "apps_erased", "sessions_expired")):
-                log.info("cleanup: %s", {k: v for k, v in report.items() if k != "at"})
+            scheduled = context is None
+            context = context or audit_context.AuditContext("system", "system", "", "maintenance")
+            async with operation_audit.async_operation(self.db, context, uuid.uuid4().hex, "maintenance.cleanup",
+                                           {"trigger": "scheduled" if scheduled else "manual"},
+                                           scheduled=scheduled) as audit:
+                now = now or time.time()
+                report = {"at": now, "containers_removed": [], "workspaces_removed": [], "orphans_removed": [],
+                          "kept": [], "apps_erased": [], "sessions_expired": []}
+                if self.app_sweep is not None:  # first, so the sweep below removes the containers of what it erased
+                    try:
+                        report.update(await self.app_sweep(now))
+                    except Exception:  # noqa: BLE001 - the rest of the cleanup still runs
+                        log.exception("App data sweep failed")
+                await self._containers(now, report)
+                await asyncio.to_thread(self._workspaces, now, report)
+                await self._remote_workspaces(now, report)
+                self.last_report = report
+                if any(report[k] for k in ("containers_removed", "workspaces_removed", "orphans_removed",
+                                           "apps_erased", "sessions_expired")):
+                    log.info("cleanup: %s", {k: len(v) for k, v in report.items() if isinstance(v, list)})
+                audit.update(removed=sum(len(report[k]) for k in (
+                    "containers_removed", "workspaces_removed", "orphans_removed", "apps_erased")),
+                    kept=len(report["kept"]), expired=len(report["sessions_expired"]))
             return report
 
     async def _containers(self, now: float, report: dict) -> None:

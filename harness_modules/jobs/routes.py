@@ -5,7 +5,7 @@ import uuid
 from fastapi import Request
 from pydantic import BaseModel
 
-from harness.modules import HarnessError, RouteTable, manager
+from harness.modules import HarnessError, RouteTable, manager, operation_audit
 
 NO_SUCH_JOB = "no such job"
 owner_routes = RouteTable()
@@ -79,7 +79,12 @@ async def create_job(body: Job, request: Request):
         raise HarnessError(400, str(e))
     job["id"] = new_job_id()
     job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
-    m.db.insert_job(job)
+    context = operation_audit.request_context(request, m)
+    def save():
+        m.db.insert_job(job)
+        operation_audit.append(m.db, context, job["id"], "job.create", "ok",
+                               {"fields": list(Job.model_fields), "enabled": job["enabled"]})
+    m.db.write(save)
     return job_view(m, m.db.get_job(job["id"]))
 
 
@@ -107,14 +112,25 @@ async def update_job(jid: str, body: Job, request: Request):
     except ValueError as e:
         raise HarnessError(400, str(e))
     job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
-    m.db.update_job(jid, **job)
+    context = operation_audit.request_context(request, m)
+    def save():
+        m.db.update_job(jid, **job)
+        operation_audit.append(m.db, context, jid, "job.update", "ok",
+                               {"fields": [k for k in Job.model_fields if old.get(k) != job.get(k)],
+                                "enabled": job["enabled"]})
+    m.db.write(save)
     return job_view(m, m.db.get_job(jid), runs=15)
 
 
 @owner_routes.delete("/jobs/{jid}", status_code=204)
 async def delete_job(jid: str, request: Request):
-    if not jobs_on(request).db.delete_job(jid):
-        raise HarnessError(404, NO_SUCH_JOB)
+    m = jobs_on(request)
+    context = operation_audit.request_context(request, m)
+    def remove():
+        if not m.db.delete_job(jid):
+            raise HarnessError(404, NO_SUCH_JOB)
+        operation_audit.append(m.db, context, jid, "job.delete", "ok")
+    m.db.write(remove)
 
 
 @owner_routes.post("/jobs/{jid}/run", status_code=201)
@@ -126,7 +142,7 @@ async def run_job(jid: str, request: Request):
         raise HarnessError(404, NO_SUCH_JOB)
     if job["last_session_id"] and m._is_active(job["last_session_id"]):
         raise HarnessError(409, "the previous run is still going")
-    sid = m.jobs.run(job, manual=True)
+    sid = m.jobs.run(job, manual=True, context=operation_audit.request_context(request, m))
     return m.summary(m.db.get_session(sid))
 
 
