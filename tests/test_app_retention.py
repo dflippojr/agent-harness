@@ -338,7 +338,8 @@ def test_the_maintenance_cleanup_runs_the_app_sweep(tmp_path):
         return report, gone
 
     report, gone = asyncio.run(body())
-    assert report["sessions_expired"] == ["a1"] and gone
+    assert report["sessions_expired"] == 1 and gone
+    assert "a1" not in str(report)
 
 
 # revoke -------------------------------------------------------------------------------------------------------------
