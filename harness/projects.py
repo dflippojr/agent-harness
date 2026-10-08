@@ -28,9 +28,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from weakref import WeakValueDictionary
 
 if TYPE_CHECKING:  # the MacBook runner imports this module without the daemon's config (or PyYAML)
     from .config import Project
@@ -51,6 +53,19 @@ _SAFE_REMOTE_KEYS = {"url", "pushurl", "fetch", "mirror", "prune", "tagopt", "pr
 _SAFE_BRANCH_KEYS = {"remote", "merge", "pushremote", "rebase", "description"}
 _STATE_FILES = ("HEAD", "packed-refs", "FETCH_HEAD", "ORIG_HEAD", "shallow")
 _STATE_DIRS = ("refs", "logs")
+_GIT_STATE_LOCKS: WeakValueDictionary = WeakValueDictionary()
+_GIT_STATE_LOCKS_GUARD = threading.Lock()
+
+
+def _git_state_lock(metadata: Path):
+    """Share a lock for aliases of a metadata directory, without retaining idle workspaces."""
+    key = os.path.normcase(str(_resolve(metadata)))
+    with _GIT_STATE_LOCKS_GUARD:
+        lock = _GIT_STATE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _GIT_STATE_LOCKS[key] = lock
+        return lock
 
 
 class GitError(Exception):
@@ -288,7 +303,9 @@ def git(repo: Path | str | None, *args: str, timeout: float = 600, check: bool =
             raise
         return GitResult(1, "", str(e))
 
-    with tempfile.TemporaryDirectory(prefix="harness-git-") as raw_tmp:
+    # Copy-in and copy-out are one transaction: concurrent readers also copy back
+    # stale refs and can collide with open files on Windows. Keep other repos independent.
+    with _git_state_lock(metadata), tempfile.TemporaryDirectory(prefix="harness-git-") as raw_tmp:
         tmp, hooks = Path(raw_tmp) / "git", Path(raw_tmp) / "hooks"
         hooks.mkdir(parents=True)
         tmp.mkdir()
