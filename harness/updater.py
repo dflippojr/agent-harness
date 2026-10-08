@@ -16,8 +16,10 @@ import urllib.parse
 import urllib.request
 
 try:  # package import in the repo/runner bundle; top-level import in the installed CLI bundle
+    from .atomic_io import write_atomic
     from .compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
 except ImportError:  # pragma: no cover - exercised by the installed artifact
+    from harness_atomic_io import write_atomic
     from harness_compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
 
 
@@ -60,9 +62,7 @@ _PLIST_STRING_RE = re.compile(r"<string>([^<]*)</string>")
 def _write_result(base: Path, result: dict) -> None:
     path = base / "runner" / "last-update.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".new")
-    temp.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temp, path)
+    write_atomic(path, json.dumps(result, indent=2, sort_keys=True) + "\n")
 
 
 def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:

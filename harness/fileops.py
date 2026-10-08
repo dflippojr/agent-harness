@@ -10,6 +10,8 @@ import os
 import re
 from pathlib import Path
 
+from .atomic_io import write_atomic
+
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 MAX_PUT_BYTES = 32 * 1024 * 1024  # binary files the daemon may send to a runner (ComfyUI PNGs are much smaller)
 OUTPUT_CAP = 1_000_000  # characters of command output kept in the sandbox / Mac runner
@@ -115,15 +117,7 @@ def write_text_within(root: Path, target: Path, text: str) -> Path:
     if dest == root_r or not dest.is_relative_to(root_r):
         raise ToolError(f"{target} is outside {root}")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.{os.getpid()}-{os.urandom(4).hex()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-    try:
-        with open(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, dest)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    write_atomic(dest, text)
     return dest
 
 

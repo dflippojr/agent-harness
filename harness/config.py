@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from .atomic_io import write_atomic
+
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_FILE = "projects.yaml"
 MODULE_NAMES = (
@@ -610,9 +612,7 @@ def add_project(cfg: Config, project: Project) -> Project:
         if project.name in saved:
             raise ValueError(f"project {project.name!r} already exists")
         saved[project.name] = _project_spec(project)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(yaml.safe_dump({"projects": saved}, sort_keys=False, allow_unicode=True), encoding="utf-8")
-        tmp.replace(path)
+        write_atomic(path, yaml.safe_dump({"projects": saved}, sort_keys=False, allow_unicode=True))
         cfg.projects[project.name] = project
     return project
 
