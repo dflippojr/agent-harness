@@ -25,7 +25,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 
 from . import access as access_mod
-from . import audit_context
+from . import audit_context, credential_audit
 from . import compat
 from .manager import HarnessError
 
@@ -305,16 +305,50 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.post(PREFIX + "/provider-credentials", status_code=201)
     async def set_provider_credential(body: ProviderCredentialRequest, request: Request):
-        require_admin(request, mgr)
+        key = require_admin(request, mgr)
         manager = mgr(request)
-        row = manager.set_app_provider_credential(body.app_id, body.backend, body.secret_ref,
-                                                  body.policy, body.models)
+        ctx = _context(request, key)
+
+        def commit():
+            previous = manager.db.main.app_provider_credential(body.app_id, body.backend)
+            row = manager.set_app_provider_credential(body.app_id, body.backend, body.secret_ref,
+                                                      body.policy, body.models)
+            fields = ["backend", "policy", "models", "secret_ref"] if previous is None else [
+                f for f in ("policy", "models", "secret_ref") if previous.get(f) != row.get(f)]
+            meta = {"grant_id": row["id"], "app_id": body.app_id, "backend": body.backend, "policy": row["policy"],
+                    "fields": fields, "replaced": previous is not None}
+            if previous is not None:
+                meta["previous_grant_id"] = previous["id"]
+            credential_audit.record(manager.db, ctx, "provider_grant.set", row["id"], "ok", "provider_grant", meta)
+            return row
+        try:
+            row = await manager.db.main.awrite(commit)
+        except HarnessError as e:
+            if e.code != "audit_unavailable":  # a refused request; the audit failure itself is the error otherwise
+                reason = "not_found" if e.status == 404 else "invalid_request"
+                await manager.db.main.awrite(credential_audit.record, manager.db, ctx, "provider_grant.set", "",
+                                             "denied", "provider_grant", {"reason": reason})
+            raise
         return next(item for item in manager.provider_credentials() if item["id"] == row["id"])
 
     @app.delete(PREFIX + "/provider-credentials/{credential_id}", status_code=204)
     async def revoke_provider_credential(credential_id: str, request: Request):
-        require_admin(request, mgr)
-        if not mgr(request).revoke_app_provider_credential(credential_id):
+        key = require_admin(request, mgr)
+        manager = mgr(request)
+        ctx = _context(request, key)
+
+        def commit() -> bool:
+            grant = manager.db.main.app_provider_credential_by_id(credential_id)
+            if manager.revoke_app_provider_credential(credential_id):
+                credential_audit.record(manager.db, ctx, "provider_grant.revoke", credential_id, "ok",
+                                        "provider_grant", {"grant_id": credential_id, "app_id": grant["app_id"],
+                                                           "backend": grant["backend"], "policy": grant["policy"]})
+                return True
+            known = grant is not None
+            credential_audit.record(manager.db, ctx, "provider_grant.revoke", credential_id if known else "", "noop",
+                                    "provider_grant", {"reason": "already_revoked" if known else "not_found"})
+            return False
+        if not await manager.db.main.awrite(commit):
             raise HarnessError(404, "no active provider credential with that id")
 
     # #330 decision 5: an App's default retention, and the erasures that revoking Apps scheduled.
@@ -325,16 +359,43 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.post(PREFIX + "/apps/{app_id}/restore")
     async def restore_app(app_id: str, request: Request):
-        require_admin(request, mgr)
-        row, key = mgr(request).restore_app(app_id)
+        admin_key = require_admin(request, mgr)
+        m = mgr(request)
+        ctx = _context(request, admin_key)
+
+        def commit():
+            try:
+                row, token = m.restore_app(app_id)
+            except HarnessError as e:
+                if e.status != 404:
+                    raise
+                credential_audit.record(m.db, ctx, "app.restore", "", "noop", "api_key", {"reason": "grace_over"})
+                return None, None
+            credential_audit.record(m.db, ctx, "app.restore", app_id, "ok", "api_key",
+                                    {"key_id": app_id, "app_id": app_id, "kind": row.get("kind")})
+            return row, token
+        row, key = await m.db.main.awrite(commit)
+        if row is None:
+            raise HarnessError(404, "no App with a pending erasure has that id")
         return JSONResponse({**row, "key": key},
                             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     @app.put(PREFIX + "/apps/{app_id}/retention")
     async def set_app_retention(app_id: str, body: AppRetentionRequest, request: Request):
-        require_admin(request, mgr)
+        admin_key = require_admin(request, mgr)
         m = mgr(request)
-        if not m.db.set_app_retention(app_id, body.retention_days):
+        ctx = _context(request, admin_key)
+
+        def commit() -> bool:
+            before = m.db.main.get_api_key(app_id)
+            if m.db.main.set_app_retention(app_id, body.retention_days):
+                credential_audit.record(m.db, ctx, "app.retention", app_id, "ok", "api_key", {
+                    "app_id": app_id, "old_retention_days": before.get("retention_days"),
+                    "new_retention_days": body.retention_days})
+                return True
+            credential_audit.record(m.db, ctx, "app.retention", "", "noop", "api_key", {"reason": "not_found"})
+            return False
+        if not await m.db.main.awrite(commit):
             raise HarnessError(404, "no App or device key has that id")
         return next(k for k in m.db.list_api_keys() if k["id"] == app_id)
 

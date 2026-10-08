@@ -167,6 +167,8 @@ bearer token, the owner, an App or a guest) and carry no user id, so nobody mana
 | `POST /api/v1/me/api-keys/{backend}/test` | One cheap provider call (list models) with the stored key: `{ok, checked, message}`. `409 member_api_key_required` without a key |
 | `DELETE /api/v1/me/api-keys/{backend}` | Deletes the key, stops the member's running sessions on that backend and removes their CLI state volume |
 
+Each set, replace, delete and test writes one owner-reviewable audit row (`member_key.*`: member id, backend, configured/replaced and the outcome only; never the key, ciphertext, last four or provider response) in the same transaction as the stored change. See [admin-api.md](admin-api.md#credential-pairing-and-provider-grant-history-468).
+
 A member's `POST /api/v1/sessions` with `backend` `claude` or `codex` runs on their key. Without one it is refused with
 `403 member_api_key_required` ("add your API key in your settings"); it never falls back to the owner's login,
 `CLAUDE_CODE_OAUTH_TOKEN` (#390) or keys. `GET /api/v1/backends` for a member still lists the local model only; the

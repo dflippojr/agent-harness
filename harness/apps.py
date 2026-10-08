@@ -35,7 +35,7 @@ from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
 from .policy import TOOLS_ONLY
-from . import compat
+from . import compat, credential_audit
 
 NO_SUCH_SESSION = "no session matches that id"
 
@@ -554,21 +554,41 @@ async def create_pairing_code(body: PairingCodeRequest, request: Request):
         raise HarnessError(400, "name is required")
     known = all_scopes(m.cfg)
     unknown = [scope for scope in body.scopes if scope not in known]
+    ctx = credential_audit.request_context(request, m)
     if unknown or not body.scopes:
+        await m.db.main.awrite(credential_audit.record, m.db, ctx, "pairing.create", "", "denied", "pairing",
+                               {"reason": "invalid_request"})
         raise HarnessError(400, f"unknown or empty scopes; known: {', '.join(known)}")
     try:
         origin = normalize_origin(body.origin)
     except ValueError as e:
+        await m.db.main.awrite(credential_audit.record, m.db, ctx, "pairing.create", "", "denied", "pairing",
+                               {"reason": "invalid_request"})
         raise HarnessError(400, str(e))
-    row, code = m.db.create_pairing_code(name, origin,
-                                         " ".join(dict.fromkeys(body.scopes)), body.ttl_seconds)
+    scopes = " ".join(dict.fromkeys(body.scopes))
+
+    def commit():
+        row, code = m.db.main.create_pairing_code(name, origin, scopes, body.ttl_seconds)
+        credential_audit.record(m.db, ctx, "pairing.create", row["id"], "ok", "pairing",
+                                {"pairing_id": row["id"], "scopes": scopes.split()})
+        return row, code
+    row, code = await m.db.main.awrite(commit)
     return JSONResponse({**row, "code": code}, status_code=201,
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
 @route_table.delete("/pairing-codes/{pid}", status_code=204)
 async def revoke_pairing_code(pid: str, request: Request):
-    if not mgr(request).db.revoke_pairing_code(pid):
+    m = mgr(request)
+    ctx = credential_audit.request_context(request, m)
+
+    def commit() -> bool:
+        if m.db.main.revoke_pairing_code(pid):
+            credential_audit.record(m.db, ctx, "pairing.revoke", pid, "ok", "pairing", {"pairing_id": pid})
+            return True
+        credential_audit.record(m.db, ctx, "pairing.revoke", "", "noop", "pairing", {"reason": "not_found"})
+        return False
+    if not await m.db.main.awrite(commit):
         raise HarnessError(404, "no such active pairing code")
 
 
@@ -581,7 +601,21 @@ async def pair_browser(body: PairRequest, request: Request):
         origin = normalize_origin(raw_origin)
     except ValueError as e:
         raise HarnessError(403, str(e))
-    key, secret, error = mgr(request).db.redeem_pairing_code(body.code, origin)
+    m = mgr(request)
+
+    def commit():
+        key, secret, error = m.db.main.redeem_pairing_code(body.code, origin)
+        if key is None:  # no supplied code, origin or guessed id is recorded: only which kind of refusal it was
+            credential_audit.record(m.db, credential_audit.unknown_context(), "pairing.redeem", "", "denied",
+                                    "pairing", {"reason": credential_audit.pairing_reason(error)})
+        else:
+            pid = m.db.main.pairing_id_for_key(key["id"])
+            credential_audit.record(m.db, credential_audit.device_context(key["id"], key["kind"]),
+                                    "pairing.redeem", key["id"], "ok", "api_key",
+                                    {"key_id": key["id"], "pairing_id": pid, "kind": key["kind"],
+                                     "scopes": key["scopes"].split()})
+        return key, secret, error
+    key, secret, error = await m.db.main.awrite(commit)
     if key is None:
         raise HarnessError(400, error)
     return JSONResponse({"token": secret, "app": key, "api_version": API_VERSION}, status_code=201,
@@ -780,20 +814,21 @@ async def api_member_key_set(backend: str, request: Request):
     except ValueError:
         body = None
     key = body.get("key") if isinstance(body, dict) else None
-    out = await asyncio.to_thread(m.member_key_set, uid, backend, key if isinstance(key, str) else "")
+    out = await asyncio.to_thread(m.member_key_set, uid, backend, key if isinstance(key, str) else "",
+                                  credential_audit.member_context(uid))
     return JSONResponse(out, headers={"Cache-Control": "no-store"})
 
 
 @route_table.post("/api/v1/me/api-keys/{backend}/test")
 async def api_member_key_test(backend: str, request: Request):
     m, uid = _github_member(request, mutate=True, what="API keys")
-    return await asyncio.to_thread(m.member_key_test, uid, backend)
+    return await asyncio.to_thread(m.member_key_test, uid, backend, credential_audit.member_context(uid))
 
 
 @route_table.delete("/api/v1/me/api-keys/{backend}")
 async def api_member_key_delete(backend: str, request: Request):
     m, uid = _github_member(request, mutate=True, what="API keys")
-    return await m.member_key_delete(uid, backend)
+    return await m.member_key_delete(uid, backend, credential_audit.member_context(uid))
 
 
 @route_table.get("/api/v1/models")
