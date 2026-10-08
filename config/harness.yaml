@@ -73,6 +73,7 @@ sandbox:
   pids: 512
   network: harness-sandbox        # internal: no route out, no container-to-container traffic
   egress_network: harness-egress  # attached only while an approved network command runs
+  idle_stop_seconds: 0            # >0: stop an idle container after this many seconds (and while a session waits on an approval or the GPU guard); the next command restarts it (#428)
 
 # Hosted CLI session backends (Phase 8a). Credentials remain in provider Docker volumes and are never read by the
 # daemon. Run `ops/backends/login.ps1 <backend>` yourself before enabling one.

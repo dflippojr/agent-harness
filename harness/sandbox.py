@@ -182,6 +182,8 @@ class Sandbox:
         self.cfg = cfg
         self.name = f"harness-{session_id}"
         self._lock = asyncio.Lock()
+        self._idle_timer: asyncio.Task | None = None
+        self._idle_stopped = False   # we stopped it (not a crash), so the next start owes the model a notice
 
     async def _state(self) -> str | None:
         code, out, _ = await run_cmd(["docker", "inspect", "-f", "{{.State.Status}}", self.name], timeout=30)
@@ -216,9 +218,50 @@ class Sandbox:
             raise SandboxUnavailable(f"could not start sandbox container: {(err or out).strip()[:500]}")
         return "created"
 
-    async def exec(self, command: str, timeout: int = 120, network: bool = False) -> tuple[int, str]:
+    def _cancel_idle_timer(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def arm_idle_stop(self) -> None:
+        """(Re)start the idle timer; a no-op unless sandbox.idle_stop_seconds is set. Needs a running loop."""
+        self._cancel_idle_timer()
+        if self.cfg.idle_stop_seconds > 0:
+            self._idle_timer = asyncio.get_running_loop().create_task(self._idle_stop_after())
+
+    async def _idle_stop_after(self) -> None:
+        await asyncio.sleep(self.cfg.idle_stop_seconds)
+        self._idle_timer = None
+        await self.stop_if_idle()
+
+    async def stop_if_idle(self) -> bool:
+        """Stop the container unless a command holds the lock (or idle stopping is off). Used when the session waits
+        on an approval or the GPU guard, and by the idle timer. exec restarts it."""
+        if self.cfg.idle_stop_seconds <= 0 or self._lock.locked():
+            return False
         async with self._lock:
-            await self.ensure_running()
+            if await self._state() != "running":
+                return False
+            self._cancel_idle_timer()
+            await self.stop()
+            self._idle_stopped = True
+            return True
+
+    async def exec(self, command: str, timeout: int = 120, network: bool = False) -> tuple[int, str]:
+        self._cancel_idle_timer()
+        try:
+            return await self._exec(command, timeout, network)
+        finally:
+            self.arm_idle_stop()
+
+    async def _exec(self, command: str, timeout: int, network: bool) -> tuple[int, str]:
+        notice = ""
+        async with self._lock:
+            started = await self.ensure_running()
+            if self._idle_stopped and started != "running":
+                notice = ("[sandbox restarted after an idle stop: processes you started earlier (servers, watchers) "
+                          "are no longer running; /workspace is intact.]\n")
+            self._idle_stopped = False
             if network:
                 code, out, err = await run_cmd(
                     ["docker", "network", "connect", self.cfg.egress_network, self.name], timeout=30)
@@ -235,12 +278,14 @@ class Sandbox:
                 if network:
                     await asyncio.shield(run_cmd(
                         ["docker", "network", "disconnect", "-f", self.cfg.egress_network, self.name], timeout=30))
-        output = out + (("\n" + err) if err else "")
+        output = notice + out + (("\n" + err) if err else "")
         if code == 124:
             output += f"\n[command timed out after {timeout}s]"
         return code, output
 
     async def stop(self) -> None:
+        self._cancel_idle_timer()
+        self._idle_stopped = False
         await run_cmd(["docker", "stop", "-t", "2", self.name], timeout=60)
 
     async def restart(self) -> None:

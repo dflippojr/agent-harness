@@ -217,6 +217,19 @@ class Runner:
             self._sandboxes[s["id"]] = Sandbox(s["id"], Path(s["workspace"]), sb_cfg)
         return self._sandboxes[s["id"]]
 
+    async def _park_sandbox(self, sid: str) -> None:
+        """The session is about to wait on the owner or the GPU guard: stop its idle container (#428). Best effort;
+        the next command restarts it."""
+        s = self.db.get_session(sid)
+        if s is None or s.get("backend", "local") != "local":
+            return
+        sb = self.sandbox(s)
+        if hasattr(sb, "stop_if_idle"):
+            try:
+                await sb.stop_if_idle()
+            except Exception:
+                log.warning("could not park the sandbox of %s", sid, exc_info=True)
+
     def project_for(self, s: dict):
         from . import catalog
         return catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
@@ -523,6 +536,8 @@ class Runner:
             if low:
                 self.yields[sid] = self.yields.get(sid, 0) + 1  # the canary restarts a task it was suspended in
             self.scheduler.release(sid)
+            if self.guard is not None and self.guard.active:
+                await self._park_sandbox(sid)
             await self._acquire(sid, front=not low)
 
     def memory_low(self) -> bool:
@@ -2098,6 +2113,7 @@ class Runner:
         if existing["status"] == "pending":
             self.scheduler.release(sid)
             await self.aset_status(sid, "waiting_approval")
+            await self._park_sandbox(sid)
             with telemetry.span("approval_wait") as span:
                 existing = await self._wait_approval(existing["id"])
                 span.set({"harness.approval_status": existing["status"]})
