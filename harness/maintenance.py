@@ -108,12 +108,12 @@ class Maintenance:
                 if any(report[k] for k in ("containers_removed", "workspaces_removed", "orphans_removed",
                                            "apps_erased", "sessions_expired")):
                     log.info("cleanup: %s", {k: len(v) for k, v in report.items() if isinstance(v, list)})
+                # Preserve aggregate effect evidence even if audit settlement fails.
+                self.last_report = {key: len(value) if isinstance(value, list) else value
+                                    for key, value in report.items()}
                 audit.update(removed=sum(len(report[k]) for k in (
                     "containers_removed", "workspaces_removed", "orphans_removed", "apps_erased")),
                     kept=len(report["kept"]), expired=len(report["sessions_expired"]))
-            # Owner-visible maintenance evidence contains counts, never private or erased targets.
-            self.last_report = {key: len(value) if isinstance(value, list) else value
-                                for key, value in report.items()}
             return self.last_report
 
     async def _containers(self, now: float, report: dict) -> None:
