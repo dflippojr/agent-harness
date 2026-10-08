@@ -1,5 +1,5 @@
 # Optional (#259): OpenTelemetry traces, harness/telemetry.py. Imported lazily, only when telemetry.otlp_endpoint
 # is set; the base and service profiles do not need it. See docs/observability.md.
 opentelemetry-api>=1.30
-opentelemetry-sdk>=1.30
+opentelemetry-sdk>=1.45.0
 opentelemetry-exporter-otlp-proto-http>=1.30
