@@ -366,7 +366,7 @@ def test_templates_rerun_and_changes(tmp_path):
 
 
 def test_sleeping_model_is_announced_and_warmed(tmp_path):
-    from harness.warmup import READY, SLEEPING
+    from harness_modules.local_model.warmup import READY, SLEEPING
 
     client, m, sent = make_client(tmp_path, [Completion(content="hello")])
     states = {"now": SLEEPING}

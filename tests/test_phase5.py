@@ -7,7 +7,7 @@ import json
 import time
 
 from harness.config import GpuGuardConfig
-from harness.gpu_guard import CLEAR, MANUAL_HOLD_FILE, PAUSED, PAUSING, RESUMING, GpuGuard, find_games, hw_transcodes
+from harness_modules.local_model.service import CLEAR, MANUAL_HOLD_FILE, PAUSED, PAUSING, RESUMING, GpuGuard, find_games, hw_transcodes
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.scheduler import GpuScheduler

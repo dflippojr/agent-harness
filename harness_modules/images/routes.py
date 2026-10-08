@@ -133,7 +133,10 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
 @owner_routes.post("/images/warmup")
 async def warmup_images(request: Request):
     """Start ComfyUI without a checkpoint. Called when the owner opens the Images tab."""
-    return await images_service(request).warmup()
+    try:
+        return await images_service(request).warmup()
+    except ToolError as e:
+        raise HarnessError(400, str(e))
 
 
 @owner_routes.post("/images/cooldown")

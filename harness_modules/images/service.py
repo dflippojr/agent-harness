@@ -600,7 +600,8 @@ class ImageService:
 
     def start(self) -> None:
         if self._task is None:
-            asyncio.get_running_loop().create_task(self._stop_stray())
+            if self.control is not None:
+                asyncio.get_running_loop().create_task(self._stop_stray())
             for job in self.db.list_images(status=("queued", "running")):  # interrupted by a daemon restart
                 self.db.update_image(job["id"], status="queued")
                 self._done.setdefault(job["id"], asyncio.Event())
@@ -798,10 +799,15 @@ class ImageService:
             upscale_mod.check_dimensions(width, height, scale, upscale_mod.max_pixels(self.cfg))
         return resolution, requested
 
+    def _require_control(self) -> None:
+        if self.control is None:
+            raise ToolError("image generation requires the local_model supervision module")
+
     # jobs
     def submit(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", resolution: str = "auto",
                source: str = "phone", session_id: str = "", seed: int | None = None,
                upscale: str = "none") -> dict:
+        self._require_control()
         prompt = prompt.strip()
         if not prompt:
             raise ToolError("prompt is empty")
@@ -822,6 +828,7 @@ class ImageService:
 
     def submit_upscale(self, parent_id: str, upscale: str, source: str = "phone", session_id: str = "") -> dict:
         """Queue a 2×/4× Real-ESRGAN job from a completed gallery PNG. Idempotent per parent+scale."""
+        self._require_control()
         requested = upscale_mod.parse_choice(upscale)
         if requested == "none":
             raise ToolError("upscale must be 2x or 4x")
@@ -922,6 +929,7 @@ class ImageService:
     def submit_edit(self, parent_id: str, prompt: str, mask: bytes, feather: int | str = 0,
                     source: str = "phone", seed: int | None = None) -> dict:
         """Queue a masked edit. Source and mask are copied onto the new row before GPU work starts."""
+        self._require_control()
         edit = self._require_edit()
         prompt = prompt.strip()
         if not prompt:
@@ -1054,6 +1062,7 @@ class ImageService:
 
     async def warmup(self) -> dict:
         """Owner opened the Images tab: start ComfyUI without a checkpoint so Generate skips the boot."""
+        self._require_control()
         self._keep_warm = True
         if self.phase == "idle":
             self.queue.put_nowait(None)
@@ -1096,6 +1105,18 @@ class ImageService:
 
     async def _run_batch(self, first: str | None) -> None:
         """Take the GPU over, run queued jobs (or sit warm until Generate), then give the GPU back."""
+        if self.control is None:
+            # Recovered work can predate removal of the supervision package. Settle it visibly and wake waiters.
+            self._keep_warm = False
+            self.phase = "idle"
+            if self._live_job(first):
+                self.db.update_image(first, status="failed", finished_at=time.time(),
+                                     error="image generation requires the local_model supervision module")
+                self._release_waiters(first)
+                job = self.db.get_image(first)
+                if self.notify and job["source"] == "phone":
+                    self.notify(job)
+            return
         guard = self.runner.guard
         self.phase = "waiting"
         paused = lambda: guard is not None and (guard.active or guard.manual)  # noqa: E731
@@ -1148,12 +1169,11 @@ class ImageService:
 
     async def _wait_for_memory(self, paused: Callable[[], bool]) -> bool:
         """Hold ComfyUI while available RAM is under the guard's threshold. False if the GPU guard paused first."""
-        from harness.modules import MEMORY_POLL_SECONDS
         if self.memory_low():
             self.phase = "waiting_memory"
             log.info("image batch waiting for memory")
         while self.memory_low() and not paused():
-            await asyncio.sleep(MEMORY_POLL_SECONDS)
+            await asyncio.sleep(self.runner.ram.poll_seconds if self.runner.ram is not None else 5)
         return not paused()
 
     async def _drain_queue(self, first: str | None, paused: Callable[[], bool]) -> None:

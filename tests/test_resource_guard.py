@@ -8,11 +8,11 @@ import time
 import pytest
 
 from harness.config import GpuGuardConfig
-from harness.gpu_guard import CLEAR, GIB, PAUSED, MemoryWatch
-from harness.gpu_guard import memory_reading as real_memory_reading  # before conftest's plenty_of_ram patches it
+from harness_modules.local_model.service import CLEAR, GIB, PAUSED, MemoryWatch
+from harness_modules.local_model.service import memory_reading as real_memory_reading  # before conftest's plenty_of_ram patches it
 from harness.llm import Completion
 from harness.manager import Manager
-from harness.warmup import LOW_MEMORY, PAUSED as MODEL_PAUSED, READY, UNLOADED, WAKING, ModelWarmer
+from harness_modules.local_model.warmup import LOW_MEMORY, PAUSED as MODEL_PAUSED, READY, UNLOADED, WAKING, ModelWarmer
 
 from test_daemon import Script, events, make_cfg, wait_status
 from test_phase5 import GAME, FakeControl, FakeDetect, make_guard
@@ -245,7 +245,7 @@ def test_load_samples_min_available_for_the_metric(tmp_path):
 
 
 def test_session_waits_for_memory_before_loading_then_continues(tmp_path, monkeypatch):
-    from harness import gpu_guard
+    from harness_modules.local_model import service as gpu_guard
     monkeypatch.setattr(gpu_guard, "MEMORY_POLL_SECONDS", 0.02)
 
     async def body():
@@ -272,7 +272,7 @@ def test_session_waits_for_memory_before_loading_then_continues(tmp_path, monkey
 
 
 def test_worker_container_start_waits_for_memory(tmp_path, monkeypatch):
-    from harness import gpu_guard
+    from harness_modules.local_model import service as gpu_guard
     monkeypatch.setattr(gpu_guard, "MEMORY_POLL_SECONDS", 0.02)
 
     async def body():
@@ -297,7 +297,7 @@ def test_cli_run_checks_memory_before_starting_a_container():
 
 
 def test_image_batch_waits_for_memory_and_stays_parked(tmp_path, monkeypatch):
-    from harness import gpu_guard
+    from harness_modules.local_model import service as gpu_guard
     from test_phase6 import image_manager
     monkeypatch.setattr(gpu_guard, "MEMORY_POLL_SECONDS", 0.02)
 
@@ -475,7 +475,7 @@ def test_count_tokens_wakes_a_parked_model_and_gets_503_during_a_hold(tmp_path):
 
 
 def test_a_hold_stops_a_load_waiting_on_health_without_polling(tmp_path, monkeypatch):
-    import harness.warmup as warmup
+    import harness_modules.local_model.warmup as warmup
     monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)  # only the guard's notify can end the wait
 
     async def body():
@@ -493,7 +493,7 @@ def test_a_hold_stops_a_load_waiting_on_health_without_polling(tmp_path, monkeyp
 
 
 def test_load_gives_up_when_health_never_answers(tmp_path, monkeypatch):
-    import harness.warmup as warmup
+    import harness_modules.local_model.warmup as warmup
     monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 0.01)
     monkeypatch.setattr(warmup, "HEALTH_TIMEOUT_SECONDS", 0.05)
 
@@ -508,7 +508,7 @@ def test_load_gives_up_when_health_never_answers(tmp_path, monkeypatch):
 
 # diagnostics probes (harness/resources.py, gpu_guard.memory_reading, doctor): best-effort readings
 def test_gpu_reading_parses_nvidia_smi_and_caches(monkeypatch):
-    from harness import resources
+    from harness_modules.local_model import resources
     outputs = ["1024, 8192, 37\n", "not, a, number\n", None]
     monkeypatch.setattr(resources, "_run", lambda args, timeout=5: outputs.pop(0))
     monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
@@ -520,12 +520,12 @@ def test_gpu_reading_parses_nvidia_smi_and_caches(monkeypatch):
 
 
 def test_run_returns_none_when_the_tool_is_missing():
-    from harness import resources
+    from harness_modules.local_model import resources
     assert resources._run(["definitely-not-a-real-tool-311"]) is None
 
 
 def test_container_memory_sums_harness_containers(monkeypatch):
-    from harness import resources
+    from harness_modules.local_model import resources
     out = "harness-worker-1\t1.5GiB / 31GiB\nharness-sandbox\t512MiB / 31GiB\nother\t9GiB / 31GiB\n"
     monkeypatch.setattr(resources, "_run", lambda args, timeout=5: out)
     assert resources.container_memory() == int(1.5 * GIB) + 512 * resources.MIB
@@ -534,7 +534,7 @@ def test_container_memory_sums_harness_containers(monkeypatch):
 
 
 def test_parse_size_units():
-    from harness.resources import MIB, parse_size
+    from harness_modules.local_model.resources import MIB, parse_size
     assert parse_size("12kB") == 12000 and parse_size("512MiB") == 512 * MIB and parse_size("2GB") == 2 * 1000 ** 3
     assert parse_size("10B") == 10
     assert parse_size("xGiB") == 0 and parse_size("12 parsecs") == 0
@@ -542,7 +542,7 @@ def test_parse_size_units():
 
 def test_process_memory_sums_matching_processes(monkeypatch):
     import psutil
-    from harness import resources
+    from harness_modules.local_model import resources
 
     class Proc:
         def __init__(self, name, rss=None, broken=False):
@@ -564,7 +564,7 @@ def test_process_memory_sums_matching_processes(monkeypatch):
 
 def test_cpu_and_daemon_probes_survive_psutil_errors(monkeypatch):
     import psutil
-    from harness import resources
+    from harness_modules.local_model import resources
 
     def boom(*a, **k):
         raise RuntimeError("no counters")
@@ -577,7 +577,7 @@ def test_cpu_and_daemon_probes_survive_psutil_errors(monkeypatch):
 
 def test_memory_reading_without_psutil_or_off_windows(monkeypatch):
     import psutil
-    from harness import gpu_guard
+    from harness_modules.local_model import service as gpu_guard
     monkeypatch.setattr(gpu_guard.sys, "platform", "linux")
     reading = real_memory_reading()
     assert reading["available"] > 0 and reading["total"] >= reading["available"] and reading["commit"] is None
@@ -587,18 +587,28 @@ def test_memory_reading_without_psutil_or_off_windows(monkeypatch):
     monkeypatch.setattr(psutil, "virtual_memory", boom)
     assert real_memory_reading() is None
     assert MemoryWatch(4, read=lambda: None, ttl=0).status()["available_bytes"] is None
-    from harness.gpu_guard import describe_memory
+    from harness_modules.local_model.service import describe_memory
     assert describe_memory({"available_bytes": None}) == "low memory"
 
 
 @pytest.mark.skipif(__import__("sys").platform != "win32", reason="GlobalMemoryStatusEx is Windows-only")
-def test_memory_reading_reports_commit_on_windows():
+def test_memory_reading_reports_commit_on_windows(monkeypatch):
+    import ctypes
+
+    def memory_status(pointer):
+        status = pointer._obj
+        status.ullTotalPageFile = 160 * GIB
+        status.ullAvailPageFile = 128 * GIB
+        return 1
+
+    from types import SimpleNamespace
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_: SimpleNamespace(GlobalMemoryStatusEx=memory_status))
     reading = real_memory_reading()
-    assert reading["commit_limit"] >= reading["commit"] > 0
+    assert reading["commit_limit"] == 160 * GIB and reading["commit"] == 32 * GIB
 
 
 def test_diagnostics_without_a_guard_and_with_images_holding_the_gpu(tmp_path, monkeypatch):
-    from harness import resources
+    from harness_modules.local_model import resources
     monkeypatch.setattr(resources, "gpu_reading", lambda cached=False: None)
     monkeypatch.setattr(resources, "cpu_load", lambda: None)
     monkeypatch.setattr(resources, "container_memory", lambda prefix="harness-": None)
@@ -634,10 +644,12 @@ def test_doctor_reports_the_resource_guard(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(doctor.httpx, "get", get)
     (tmp_path / "llama.paused").write_text("x")
     r = doctor.Report()
-    doctor.check_daemon(r, cfg)
+    from harness_modules.local_model.doctor import check_guard
+    check_guard(r, cfg)
     assert "model parked until needed; RAM low, new work waits" in capsys.readouterr().out
     gpu["lazy_load"] = False
-    doctor.check_daemon(r, cfg)
+    from harness_modules.local_model.doctor import check_guard
+    check_guard(r, cfg)
     assert r.warned == 1 and "exists but the guard is clear" in capsys.readouterr().out
 
 
@@ -735,7 +747,7 @@ def guarded_image_manager(tmp_path, control):
 
 
 def test_image_takeover_during_a_load_keeps_the_pause_flag(tmp_path, monkeypatch):
-    import harness.warmup as warmup
+    import harness_modules.local_model.warmup as warmup
     monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)  # only a notify ends the /health wait
 
     async def body():
@@ -780,7 +792,7 @@ def test_a_load_queued_before_an_image_takeover_leaves_the_flag(tmp_path):
 
 
 def test_guard_hold_during_a_load_keeps_the_pause_flag(tmp_path, monkeypatch):
-    import harness.warmup as warmup
+    import harness_modules.local_model.warmup as warmup
     monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
 
     async def body():
@@ -803,7 +815,7 @@ def test_guard_hold_during_a_load_keeps_the_pause_flag(tmp_path, monkeypatch):
 def test_unload_during_a_load_now_aborts_it_and_keeps_the_model_unloaded(tmp_path, monkeypatch):
     """Load local model now, then Unload now while the flag's unlink is still landing: the unload goes through
     park, which aborts the load, so the flag stays, the pin is gone and nothing restarts the server."""
-    import harness.warmup as warmup
+    import harness_modules.local_model.warmup as warmup
     monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
 
     async def body():
@@ -827,7 +839,7 @@ def test_unload_during_a_load_now_aborts_it_and_keeps_the_model_unloaded(tmp_pat
 
 
 def test_unload_during_the_health_wait_stops_the_load(tmp_path, monkeypatch):
-    import harness.warmup as warmup
+    import harness_modules.local_model.warmup as warmup
     monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
 
     async def body():
@@ -884,7 +896,7 @@ def test_hold_ending_after_the_paused_session_ended_leaves_model_unloaded(tmp_pa
 def _fake_llama_processes(monkeypatch, procs):
     """`procs`: (pid, name, cmdline) tuples as psutil would report them; taskkill calls land in the returned list."""
     import psutil
-    import harness.gpu_guard as gpu_guard
+    import harness_modules.local_model.service as gpu_guard
     alive = {pid: (name, cmd) for pid, name, cmd in procs}
     killed = []
 
@@ -904,7 +916,7 @@ def _fake_llama_processes(monkeypatch, procs):
 
 
 def test_server_port_reads_the_command_line():
-    from harness.gpu_guard import server_port
+    from harness_modules.local_model.service import server_port
     assert server_port(["llama-server.exe", "-m", "x.gguf", "--port", "8090"]) == 8090
     assert server_port(["llama-server", "--port=8091"]) == 8091
     # -p is --prompt in llama-server, never the port, and a prompt never hides a later --port
@@ -917,7 +929,7 @@ def test_server_port_reads_the_command_line():
 
 
 def test_park_stops_a_llama_server_that_is_not_listening_yet(tmp_path, monkeypatch):
-    from harness.gpu_guard import ServerControl
+    from harness_modules.local_model.service import ServerControl
     cfg = make_cfg(tmp_path)
     cfg.gpu_guard = GpuGuardConfig(enabled=True, pause_flag=str(tmp_path / "llama-server.paused"))
     model = cfg.models[cfg.default_model]

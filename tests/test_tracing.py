@@ -14,7 +14,7 @@ from harness import telemetry
 from harness.config import TelemetryConfig
 from harness.llm import Completion
 from harness.manager import Manager
-from harness.warmup import READY
+from harness_modules.local_model.warmup import READY
 from test_daemon import Script, call, make_cfg, wait_status
 from waits import timeout_scale
 

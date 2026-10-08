@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from harness.modules import ModuleRuntime, ServerControl
+from harness.modules import ModuleRuntime
 
 from .archive import ImageArchive
 
@@ -25,7 +25,7 @@ class ImagesRuntime(ModuleRuntime):
         from .service import ImageService
         cfg, m = self.cfg, self.manager
         self.service = ImageService(cfg.images, m.db, m.runner,
-                                    ServerControl(cfg.gpu_guard, cfg.models[cfg.default_model]),
+                                    m.modules.model_control(),
                                     notify=self._finished, archive=self.archive,
                                     edit_enabled=self.effective("image_edit"))
 

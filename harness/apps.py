@@ -35,7 +35,6 @@ from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
 from .policy import TOOLS_ONLY
-from .warmup import LOW_MEMORY, PAUSED
 from . import compat
 
 NO_SUCH_SESSION = "no session matches that id"
@@ -50,7 +49,6 @@ SCOPES = {
     SESSIONS_ALL: "read every session, not only the app's own",
     "approvals": "approve or deny tool calls in the app's own sessions",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
-    MODELS_WARM: "start loading the local model ahead of a chat (refused while the GPU or RAM guard says no)",
 }
 TOOL_NAME = re.compile(r"^[a-zA-Z]\w{2,48}$", re.ASCII)
 MAX_CONTEXT_CHARS = 60_000
@@ -804,33 +802,6 @@ async def api_models(request: Request):
     auth(request, "sessions")
     return [{"name": model.name, "context_tokens": model.context_tokens,
              "default": model.name == m.cfg.default_model} for model in m.cfg.models.values()]
-
-
-@route_table.get("/api/v1/models/status")
-async def api_models_status(request: Request):
-    m = mgr(request)
-    auth(request, "sessions")
-    return [{"name": mc.name, "state": await m.warmer.state(mc), "waking_seconds": m.warmer.waking_for(mc)}
-            for mc in m.cfg.models.values()]
-
-
-@route_table.post("/api/v1/models/warm")
-async def api_models_warm(request: Request):
-    m = mgr(request)
-    key = auth(request, "sessions")
-    app = key.get("kind") == "app"
-    if app and MODELS_WARM not in key["scope_set"]:
-        raise HarnessError(403, f"this token lacks the {MODELS_WARM!r} scope")
-    if not m.cfg.modules.local_model:
-        raise HarnessError(400, "the local model is disabled by this service profile")
-    model = m.cfg.models[m.cfg.default_model]
-    state = await m.warmer.warm(model)
-    # An App is refused, never queued, while a guard holds the model back (#329); the owner's app shows the state.
-    if app and state == PAUSED:
-        raise HarnessError(409, "the GPU guard has the GPU for other work; the local model can't load now", "gpu_held")
-    if app and state == LOW_MEMORY:
-        raise HarnessError(409, "RAM on the server is low; the local model won't load now", "low_memory")
-    return {"name": model.name, "state": state}
 
 
 @route_table.get("/api/v1/profile")

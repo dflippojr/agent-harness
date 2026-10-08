@@ -31,13 +31,22 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    "GpuGuardConfig": ("harness.config", "GpuGuardConfig"),
+    "ACTIVE": ("harness.runner", "ACTIVE"),
+    "doctor_run": ("harness.doctor", "run"),
+    "EXPECTED_WAKE_SECONDS": ("harness.local_inference", "EXPECTED_WAKE_SECONDS"),
+    "LOW_MEMORY": ("harness.local_inference", "LOW_MEMORY"),
+    "UNREACHABLE": ("harness.local_inference", "UNREACHABLE"),
+    "PAUSED": ("harness.local_inference", "PAUSED"),
+    "WAKING": ("harness.local_inference", "WAKING"),
+    "READY": ("harness.local_inference", "READY"),
     "database_reads": ("harness.db", "_reads"),
     "database_writes": ("harness.db", "_writes"),
     "AsyncDatabase": ("harness.db", "AsyncDatabase"),
     "GpuExclusive": ("harness.scheduler", "GpuExclusive"),
     "QueueFull": ("harness.scheduler", "QueueFull"),
-    "SLEEPING": ("harness.warmup", "SLEEPING"),
-    "UNLOADED": ("harness.warmup", "UNLOADED"),
+    "SLEEPING": ("harness.local_inference", "SLEEPING"),
+    "UNLOADED": ("harness.local_inference", "UNLOADED"),
     "RemoteControlConfig": ("harness.config", "RemoteControlConfig"),
     "PROJECT_NAME": ("harness.config", "PROJECT_NAME"),
     "Envelope": ("harness.managed_config", "Envelope"),
@@ -91,8 +100,6 @@ _PUBLIC = {
     "use_live_app_settings": ("harness.settings", "use_live_app_settings"),
     "ToolError": ("harness.fileops", "ToolError"),
     "run_cmd": ("harness.sandbox", "run_cmd"),
-    "ServerControl": ("harness.gpu_guard", "ServerControl"),
-    "MEMORY_POLL_SECONDS": ("harness.gpu_guard", "MEMORY_POLL_SECONDS"),
     "HarnessError": ("harness.manager", "HarnessError"),
     "RouteTable": ("harness.api", "RouteTable"),
     "require_owner": ("harness.api", "require_owner"),
@@ -127,7 +134,7 @@ def __getattr__(name: str):
     target = _PUBLIC.get(name)
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    # Not cached: a test that patches the core attribute (gpu_guard.MEMORY_POLL_SECONDS) reaches the module too.
+    # Not cached: patches to a public core attribute reach its consumers too.
     module = importlib.import_module(target[0])
     return module if target[1] is None else getattr(module, target[1])
 
@@ -208,6 +215,13 @@ class ModuleRuntime:
     # lifecycle
     def init(self) -> None:
         """Create services. Runs once, after the settings overlay."""
+
+    def after_init(self) -> None:
+        """Wire services after every module has initialized."""
+
+    def model_control(self):
+        """Optional supervised model control for exclusive GPU consumers."""
+        return None
 
     def wire_resources(self, guard, warmer) -> None:
         """The resource guard is on: take its RAM check and lazy-load preference."""
@@ -411,6 +425,9 @@ class ModuleHost:
     def get(self, name: str) -> ModuleRuntime | None:
         return self.runtimes.get(name)
 
+    def model_control(self):
+        return next((control for rt in self if (control := rt.model_control()) is not None), None)
+
     def backup_participant(self):
         """Maintenance takes one backup participant (the image archive today)."""
         return next((rt.backup for rt in self if rt.backup is not None), None)
@@ -418,6 +435,8 @@ class ModuleHost:
     def init(self) -> None:
         for rt in self:
             rt.init()
+        for rt in self:
+            rt.after_init()
 
     def wire_resources(self, guard, warmer) -> None:
         for rt in self:

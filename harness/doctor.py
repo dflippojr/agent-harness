@@ -16,8 +16,6 @@ from pathlib import Path
 
 import httpx
 
-GPU_CHECK = "NVIDIA GPU"
-MODEL_CHECK = "Model server"
 GREEN, YELLOW, RED, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 
 
@@ -45,23 +43,6 @@ def run(args: list[str], timeout: float = 20) -> tuple[int, str]:
         return p.returncode, (p.stdout + p.stderr).strip()
     except (OSError, subprocess.TimeoutExpired) as e:
         return 127, str(e)
-
-
-def check_gpu(r: Report, cfg) -> None:
-    if not cfg.modules.local_model:
-        r.ok(GPU_CHECK, "not required by the service profile")
-        return
-    code, out = run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total,memory.used",
-                     "--format=csv,noheader"])
-    if code != 0:
-        r.fail(GPU_CHECK, "nvidia-smi not found or failed: install the NVIDIA driver")
-        return
-    name, driver, total, used = [x.strip() for x in out.splitlines()[0].split(",")]
-    mib = int(total.split()[0])
-    (r.ok if mib >= 15000 else r.warn)(GPU_CHECK, f"{name}, driver {driver}, {total} ({used} used)"
-                                       + ("" if mib >= 15000 else "; under 16 GB, use the gpt-oss model"))
-    if int(driver.split(".")[0]) < 580:
-        r.warn("NVIDIA driver", f"{driver}; the CUDA 13 build of llama.cpp needs 580 or newer")
 
 
 def check_data_dir(r: Report, cfg) -> None:
@@ -184,38 +165,18 @@ def check_docker(r: Report, cfg) -> None:
         check_provider_containers(r, cfg)
 
 
-def check_model_server(r: Report, cfg) -> None:
-    if not cfg.modules.local_model:
-        r.ok(MODEL_CHECK, "not installed by the hosted-provider service profile")
-        return
-    model = cfg.models[cfg.default_model]
-    try:
-        props = httpx.get(f"{model.base_url}/props", timeout=5).json()
-        n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
-        detail = f"{model.base_url}: {props.get('model_alias') or props.get('model_path', '?')}, n_ctx {n_ctx}"
-        if props.get("is_sleeping"):
-            detail += " (asleep; loads on the first request)"
-        if n_ctx and n_ctx < model.context_tokens:
-            r.warn(MODEL_CHECK, detail + f"; config expects {model.context_tokens}")
-        else:
-            r.ok(MODEL_CHECK, detail)
-    except (httpx.HTTPError, ValueError) as e:
-        paused = Path(cfg.gpu_guard.pause_flag).exists() if cfg.gpu_guard.enabled else False
-        (r.warn if paused else r.fail)(MODEL_CHECK, f"{model.base_url} not answering ({type(e).__name__})"
-                                       + ("; the resource guard has it paused or parked (unloaded until needed)"
-                                          if paused else ""))
-
-
 def check_daemon_profile(r: Report, cfg, base: str) -> None:
     """Health, plus model state or provider logins - whichever the profile runs."""
     health = httpx.get(f"{base}/health", timeout=5).json()
     if health.get("profile") != cfg.profile:
         raise ValueError(f"daemon reports profile {health.get('profile')!r}, expected {cfg.profile!r}")
-    if cfg.modules.local_model:
+    if cfg.module_effective("local_model"):
         state = httpx.get(f"{base}/models/status", timeout=10).json()[0]["state"]
         r.ok("Daemon", f"{base} up; model state {state}")
         return
     r.ok("Daemon", f"{base} up; {cfg.profile} profile")
+    if cfg.modules.local_model:
+        return  # The core local backend can use a server supervised outside the harness.
     backends = httpx.get(f"{base}/backends", timeout=100).json()
     logged_in = [backend["name"] for backend in backends if backend.get("logged_in")]
     (r.ok if logged_in else r.warn)(
@@ -227,16 +188,6 @@ def check_daemon(r: Report, cfg) -> None:
     base = f"http://127.0.0.1:{cfg.port}"
     try:
         check_daemon_profile(r, cfg, base)
-        gpu = httpx.get(f"{base}/gpu", timeout=5).json()
-        if gpu.get("enabled"):
-            flag = Path(cfg.gpu_guard.pause_flag).exists()
-            if flag and gpu["state"] == "clear" and not gpu.get("lazy_load"):
-                r.warn("Resource guard", f"pause flag {cfg.gpu_guard.pause_flag} exists but the guard is clear")
-            else:
-                parked = "; model parked until needed" if flag and gpu["state"] == "clear" else ""
-                memory = gpu.get("memory") or {}
-                low = "; RAM low, new work waits" if memory.get("low") else ""
-                r.ok("Resource guard", f"state {gpu['state']}{parked}{low}")
     except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
         r.fail("Daemon", f"{base} not answering ({type(e).__name__}); see {cfg.data_dir / 'logs'}")
 
@@ -333,14 +284,12 @@ def main(argv: list[str] | None = None) -> int:
         r.fail("Config", f"{type(e).__name__}: {e}")
         return 1
 
-    check_gpu(r, cfg)
     check_data_dir(r, cfg)
     check_schema_version(r, cfg)
     check_github_token(r, cfg)
     check_claude_token(r, cfg)
     check_canary(r, cfg)
     check_docker(r, cfg)
-    check_model_server(r, cfg)
     check_daemon(r, cfg)
     check_autostart(r, cfg, args)
     check_secret_scanner(r, cfg)

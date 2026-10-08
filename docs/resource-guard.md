@@ -2,7 +2,7 @@
 
 The tower has 31.8 GB of RAM and a 16 GB GPU, shared with Docker/WSL, Plex, games, several Claude/Codex sessions and a
 browser. The local model (Qwen3.6-35B-A3B, a MoE whose expert tensors stay in system RAM) costs about 14 GB of RAM when
-loaded. The resource guard (formerly the GPU guard, `harness/gpu_guard.py`) makes the harness share that better. It
+loaded. The resource guard (formerly the GPU guard, `harness_modules/local_model/service.py`) makes the harness share that better. It
 covers the VRAM triggers (games, Plex transcodes), a free-memory threshold, the manual hold, and manual load/unload in
 one place: **Actions → Resources**.
 

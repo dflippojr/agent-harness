@@ -4,8 +4,40 @@ from pathlib import Path
 
 import pytest
 
-from harness import backend_state, cli_domains, gpu_guard, metrics, secret_scan
-from harness.warmup import READY, ModelWarmer
+from harness import backend_state, cli_domains, metrics, secret_scan
+from harness_modules.local_model import service as gpu_guard
+from harness_modules.local_model.warmup import READY, ModelWarmer
+
+
+@pytest.fixture(autouse=True)
+def isolated_local_supervision(monkeypatch, tmp_path):
+    """Supervision tests use temporary flags and fake hardware/process readings only."""
+    import psutil
+    from types import SimpleNamespace
+    from harness_modules.local_model import resources
+
+    original_init = gpu_guard.ServerControl.__init__
+
+    def init(self, cfg, model):
+        original_init(self, cfg, model)
+        if str(self.flag).replace('\\', '/').lower().startswith('c:/ai/'):
+            self.flag = tmp_path / 'llama-server.paused'
+
+    async def fake_command(*args, **kwargs):
+        return 0, '', ''
+
+    original_run = resources._run
+
+    def run(args, timeout=5):
+        if args[0] == 'nvidia-smi':
+            return None
+        return original_run(args, timeout)
+
+    monkeypatch.setattr(gpu_guard.ServerControl, '__init__', init)
+    monkeypatch.setattr(gpu_guard, 'run_cmd', fake_command)
+    monkeypatch.setattr(psutil, 'process_iter', lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(available=64 * 1024**3, total=128 * 1024**3))
+    monkeypatch.setattr(resources, '_run', run)
 
 # One pinned gitleaks per machine, fetched once and checked against harness/gitleaks/pin.json (issue #263).
 SCANNER_TOOLS = Path(tempfile.gettempdir()) / "agent-harness-test-tools"

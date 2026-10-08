@@ -130,11 +130,6 @@ class Decision(BaseModel):
     note: str = ""
 
 
-class GpuHoldRequest(BaseModel):
-    duration_seconds: int | None = None
-    force: bool = False   # load: go ahead although available RAM is under the guard's threshold
-
-
 class ProfileUpdate(BaseModel):
     emoji: str
 
@@ -590,89 +585,6 @@ async def smart_approvals(request: Request):
 @api_router.put("/smart-approvals")
 async def update_smart_approvals(body: SmartApprovalsUpdate, request: Request):
     return require_owner(request).set_smart_approvals_mode(body.mode)
-
-
-@api_router.get("/models/status")
-async def models_status(request: Request):
-    m = mgr(request)
-    return [{"name": mc.name, "state": await m.warmer.state(mc), "waking_seconds": m.warmer.waking_for(mc)}
-            for mc in m.cfg.models.values()]
-
-
-@api_router.post("/models/warm")
-async def models_warm(request: Request):
-    """Load the default model if it's asleep. The web app calls this when it opens."""
-    m = mgr(request)
-    if not m.cfg.modules.local_model:
-        raise HarnessError(400, "the local model is disabled by this service profile")
-    model = m.cfg.models[m.cfg.default_model]
-    return {"name": model.name, "state": await m.warmer.warm(model)}
-
-
-# Resource guard (formerly the GPU guard; /gpu stays as an alias). docs/resource-guard.md
-async def _resources_status(m) -> dict:
-    from .resources import model_status
-    status = m.guard.status() if m.guard else {"enabled": False, "state": "clear", "signals": []}
-    return {**status, "model": await model_status(m),
-            "load_now_default_minutes": m.cfg.gpu_guard.load_now_default_minutes}
-
-
-@api_router.get("/gpu")
-@api_router.get("/resources")
-async def gpu(request: Request):
-    return await _resources_status(mgr(request))
-
-
-@api_router.get("/resources/diagnostics")
-async def resources_diagnostics(request: Request):
-    """One reading for Actions -> Resources (VRAM, RAM, GPU/CPU load, model and guard state). Not polled."""
-    from .resources import diagnostics
-    return await diagnostics(mgr(request))
-
-
-async def _load_now(m, body: GpuHoldRequest | None) -> None:
-    if not m.cfg.modules.local_model:
-        raise HarnessError(400, "the local model is disabled by this service profile")
-    if m.guard.active or m.guard.manual:
-        raise HarnessError(409, "the GPU is held; turn the hold off first")
-    minutes = m.cfg.gpu_guard.load_now_default_minutes
-    duration = body.duration_seconds if body and body.duration_seconds else minutes * 60
-    if not 60 <= duration <= 24 * 60 * 60:
-        raise HarnessError(400, "duration_seconds must be between 60 and 86400")
-    if m.runner.model_load_low() and not (body and body.force):
-        from .gpu_guard import describe_memory
-        raise HarnessError(409, f"low memory: {describe_memory(m.guard.memory.status())}; loading the model "
-                                "takes about 14 GB more. Send force to load anyway", code="low_memory")
-    await m.warmer.load_now(m.cfg.models[m.cfg.default_model], duration)
-
-
-@api_router.post("/gpu/{action}")
-@api_router.post("/resources/{action}")
-async def gpu_action(action: str, request: Request, body: GpuHoldRequest | None = None):
-    """pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the
-    model stays unloaded until something needs it). load: load the model now and keep it loaded for
-    duration_seconds. unload: unload it now without holding the queue."""
-    m = mgr(request)
-    if m.guard is None:
-        raise HarnessError(400, "the resource guard is disabled in config/harness.yaml")
-    if action == "load":
-        await _load_now(m, body)
-    elif action == "unload":
-        # Unpinned only if the unload goes ahead: a refused one keeps "Load local model now" and its keepalive.
-        if not await m.guard.unload(before_stop=m.warmer.unpin):
-            raise HarnessError(409, "a model turn is running or the GPU is held; try again when it's idle")
-    elif action == "pause":
-        duration = body.duration_seconds if body else None
-        if duration is not None and not 1 <= duration <= 24 * 60 * 60:
-            raise HarnessError(400, "duration_seconds must be between 1 and 86400")
-        m.guard.pause(duration)
-    elif action == "resume":
-        # Turning off the manual hold must not suppress a live game/Plex trigger. A direct resume while only an
-        # automatic trigger is active retains the legacy "resume anyway" operator action.
-        m.guard.resume(override_signals=not m.guard.manual)
-    else:
-        raise HarnessError(404, "unknown action")
-    return await _resources_status(m)
 
 
 @api_router.get("/queue")

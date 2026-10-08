@@ -12,7 +12,7 @@ import os
 import subprocess
 import time
 
-from . import gpu_guard
+from . import service as gpu_guard
 
 log = logging.getLogger("harness.resources")
 

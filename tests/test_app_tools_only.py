@@ -18,7 +18,7 @@ from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.mcp_server import McpRelay, relay_node_args
 from harness.policy import ALLOW, DENY, TOOLS_ONLY, AppToolsPolicy
-from harness.warmup import LOW_MEMORY, PAUSED, SLEEPING
+from harness_modules.local_model.warmup import LOW_MEMORY, PAUSED, SLEEPING
 
 from test_daemon import Script, call, events, make_cfg, wait_status
 from test_mcp_server import FAKE_MCP_CLAUDE, NODE, _codex_manager, _free_port, _log

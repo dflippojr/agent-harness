@@ -11,7 +11,6 @@ from .settings import (
     module_installed, parse_value,
 )
 
-GPU_GUARD = "GPU guard"
 SMART_APPROVALS = "Smart approvals"
 APP_DEFAULTS = "App defaults"
 KEY_COMPACTION_SUMMARIZE_AT = "compaction.summarize_at"
@@ -53,15 +52,6 @@ def check_web(cfg: Config) -> list[str]:
     return errors
 
 
-def check_gpu_guard(cfg: Config) -> list[str]:
-    errors = []
-    if not module_installed(cfg, "local_model"):
-        errors.append("gpu_guard requires the local_model module")
-    if not cfg.gpu_guard.pause_flag.strip():
-        errors.append("gpu_guard.pause_flag is not configured")
-    return errors
-
-
 def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
     """Switch ``cfg.<section>.enabled`` only. Never write ``cfg.modules`` or
     ``cfg.installed`` — those are installer/profile selection. Effective
@@ -69,8 +59,6 @@ def _set_module_enabled(cfg: Config, name: str, enabled: bool) -> None:
     """
     if name == "web":
         cfg.web.enabled = enabled
-    elif name == "gpu_guard":
-        cfg.gpu_guard.enabled = enabled
 
 
 def _get_module_enabled(cfg: Config, name: str) -> bool:
@@ -317,31 +305,6 @@ def _set_quote(cfg: Config, value):
     cfg.web.quote_check = bool(value)
 
 
-def _get_gpu_poll(cfg: Config):
-    return cfg.gpu_guard.poll_seconds
-
-
-def _set_gpu_poll(cfg: Config, value):
-    cfg.gpu_guard.poll_seconds = float(value)
-
-
-def _get_gpu_resume(cfg: Config):
-    return cfg.gpu_guard.resume_after_seconds
-
-
-def _set_gpu_resume(cfg: Config, value):
-    cfg.gpu_guard.resume_after_seconds = float(value)
-
-
-def _get_gpu_drain(cfg: Config):
-    return cfg.gpu_guard.drain_timeout_seconds
-
-
-def _set_gpu_drain(cfg: Config, value):
-    cfg.gpu_guard.drain_timeout_seconds = float(value)
-
-
-
 def _get_smart_enabled(cfg: Config):
     return bool(cfg.smart_approvals.enabled)
 
@@ -554,18 +517,6 @@ STATIC_ADMIN: list[SettingSpec] = [
     _bool("web.quote_check", "Quote checking",
           "Require quoted passages in final answers to appear in something the agent read.",
           "Web", True, _get_quote, _set_quote, ("web", "quote_check"), modules=("web",)),
-    _float("gpu_guard.poll_seconds", "GPU guard poll (seconds)",
-           "How often the GPU guard looks for games or Plex transcodes.",
-           GPU_GUARD, 10, _get_gpu_poll, _set_gpu_poll, 2, 60, ("gpu_guard", "poll_seconds"),
-           modules=("gpu_guard",)),
-    _float("gpu_guard.resume_after_seconds", "GPU resume delay (seconds)",
-           "The GPU must stay clear this long before the model is reloaded.",
-           GPU_GUARD, 180, _get_gpu_resume, _set_gpu_resume, 10, 1800,
-           ("gpu_guard", "resume_after_seconds"), modules=("gpu_guard",)),
-    _float("gpu_guard.drain_timeout_seconds", "GPU drain timeout (seconds)",
-           "Longest wait for the current model turn before the server is stopped.",
-           GPU_GUARD, 300, _get_gpu_drain, _set_gpu_drain, 30, 1800,
-           ("gpu_guard", "drain_timeout_seconds"), modules=("gpu_guard",)),
     _bool("smart_approvals.enabled", SMART_APPROVALS,
           "Runtime enable for the hosted smart-approval reviewer. Does not configure a secret_ref.",
           SMART_APPROVALS, False, _get_smart_enabled, _set_smart_enabled,
@@ -599,10 +550,7 @@ STATIC_ADMIN: list[SettingSpec] = [
           "Runtime enable for web_search / web_fetch. Does not install the web module.",
           "Features", False, _enable_get("web"), _enable_set("web"), ("web", "enabled"),
           apply_mode="daemon_restart", modules=("web",), enable_check=check_web),
-    _bool("gpu_guard.enabled", GPU_GUARD,
-          "Runtime enable for pausing the model while a game or Plex transcode needs the GPU.",
-          "Features", False, _enable_get("gpu_guard"), _enable_set("gpu_guard"), ("gpu_guard", "enabled"),
-          apply_mode="daemon_restart", modules=("gpu_guard",), enable_check=check_gpu_guard),
+
     _hidden("listen.host", "Listen address", "Bind address for the daemon HTTP server.", "Network",
             ("listen", "host")),
     _hidden("listen.port", "Listen port", "TCP port for the daemon HTTP server.", "Network",

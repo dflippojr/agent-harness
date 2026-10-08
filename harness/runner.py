@@ -38,7 +38,7 @@ from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
 from .tools import ToolError, Workspace, bound_shell_text, truncate_middle, validate_args
 from .verify import ToolOutput, bound_rendered, render_verify
-from .warmup import EXPECTED_WAKE_SECONDS, SLEEPING, UNLOADED, WAKING, ModelWarmer
+from .local_inference import EXPECTED_WAKE_SECONDS, SLEEPING, UNLOADED, WAKING, NoWarmer
 
 log = logging.getLogger("harness.runner")
 
@@ -162,12 +162,12 @@ def _without_unstored_artifact(output: str, digest: str) -> str:
 
 class Runner:
     def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat,
-                 warmer: ModelWarmer | None = None, hub=None):
+                 warmer=None, hub=None):
         self.cfg = cfg
         self.hub = hub if hub is not None else NoRunnerHub()
         self.github_auth = None  # MemberGitHub, set by the Manager (issue #63)
         self.member_keys = None  # MemberKeys, set by the Manager (issue #393)
-        self.warmer = warmer or ModelWarmer()
+        self.warmer = warmer or NoWarmer()
         self.db = db
         self.bus = bus
         self.scheduler = scheduler
@@ -489,9 +489,8 @@ class Runner:
         """Tell a session (and the phone) that the GPU is paused. Once per pause."""
         if sid in self.gpu_paused_sessions or self.guard is None:
             return
-        from .gpu_guard import describe
         self.gpu_paused_sessions.add(sid)
-        self.bus.emit(sid, "gpu_paused", {"reason": describe(self.guard.reasons), "reasons": self.guard.reasons,
+        self.bus.emit(sid, "gpu_paused", {"reason": self.guard.describe(self.guard.reasons), "reasons": self.guard.reasons,
                                           "resume_after_seconds": self.guard.cfg.resume_after_seconds})
 
     def gpu_paused_waiting(self) -> bool:
@@ -530,14 +529,13 @@ class Runner:
         low = self.model_load_low if load else self.memory_low
         if not low():
             return
-        from .gpu_guard import MEMORY_POLL_SECONDS, describe_memory
         started = time.monotonic()
         status = self.ram.status()
-        await self.bus.aemit(sid, "waiting_memory", {"reason": describe_memory(status), "waiting_for": what,
+        await self.bus.aemit(sid, "waiting_memory", {"reason": self.ram.describe(status), "waiting_for": what,
                                                      "available_bytes": status["available_bytes"],
                                                      "threshold_bytes": status["threshold_bytes"]})
         while low():
-            await asyncio.sleep(MEMORY_POLL_SECONDS)
+            await asyncio.sleep(self.ram.poll_seconds)
         await self.bus.aemit(sid, "memory_recovered", {"seconds": round(time.monotonic() - started)})
 
     async def _memory_wait(self, sid: str, model) -> None:

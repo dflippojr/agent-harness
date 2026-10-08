@@ -39,8 +39,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .config import GpuGuardConfig, ModelConfig
-from .sandbox import run_cmd
+from harness.modules import GpuGuardConfig, ModelConfig, run_cmd
 
 log = logging.getLogger("harness.gpu_guard")
 
@@ -227,6 +226,14 @@ def memory_reading() -> dict | None:
 
 
 class MemoryWatch:
+    @property
+    def poll_seconds(self):
+        return MEMORY_POLL_SECONDS
+
+    @staticmethod
+    def describe(status):
+        return describe_memory(status)
+
     """Is available RAM under the guard's threshold? Readings are cached for a couple of seconds."""
 
     def __init__(self, min_available_gb: float, read: Callable[[], dict | None] | None = None, ttl: float = 2.0,
@@ -367,6 +374,10 @@ class ServerControl:
 
 # ---------- guard ----------
 class GpuGuard:
+    @staticmethod
+    def describe(reasons):
+        return describe(reasons)
+
     def __init__(self, cfg: GpuGuardConfig, model: ModelConfig, scheduler, busy: Callable[[], bool],
                  detect: Callable[[], Awaitable[list[dict]]] | None = None, control: ServerControl | None = None,
                  on_pause: Callable[[list[dict]], None] | None = None,

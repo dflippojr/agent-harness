@@ -17,7 +17,7 @@ one module per PR in stage (c).
   never imports a module package (`tests/test_modules.py` scans `harness/` for it).
 - **Modules import the core only through `harness.modules`.** Its `_PUBLIC` table re-exports the core objects a
   module may use (`HarnessError`, `RouteTable`, `require_owner`, `app_auth`, `SettingSpec`, `ToolError`,
-  `ServerControl`, …). A module never imports another module. Both are enforced by a test.
+  `ModelConfig`, …). A module never imports another module. Both are enforced by a test.
 - **Absent means absent.** A module is *present* when its package is discovered and its first service-profile
   switch is installed (`cfg.installed.<switch>`, [#26](service-profile.md)). An absent module (service profile, or
   the package isn't there) adds no routes (they answer 404, or 405 from the static site for other methods), no
@@ -30,7 +30,7 @@ one module per PR in stage (c).
 A configured list: `module_packages` in `config/harness.yaml` (or `harness.local.yaml`), in load order:
 
 ```yaml
-module_packages: [harness_modules.images]   # [] runs the core alone
+module_packages: [harness_modules.images, harness_modules.local_model]   # [] runs the core alone
 ```
 
 Without the key the list is every package under the `harness_modules` namespace, so installing a module is putting
@@ -71,11 +71,26 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     __init__.py runtime.py routes.py settings.py service.py folder_discovery.py discovery_paths.py discovery_api.py
   endpoint/              OpenAI/Anthropic inference, request accounting and embeddings proxy (formerly harness/endpoint.py)
     __init__.py runtime.py routes.py settings.py service.py metrics.py
+  local_model/           llama-server supervision, warm-up, GPU holds and RAM admission (last stage c module)
+    __init__.py runtime.py routes.py settings.py service.py warmup.py resources.py metrics.py doctor.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
 `harness_modules/` stays here as add-on packages: nothing in either tree has to be pulled out of the other, and a
 module's only link back is `harness.modules`.
+
+The `local_model` add-on owns both `local_model` and `gpu_guard` profile switches. Warm-up remains available
+with `gpu_guard.enabled: false`; the GPU/RAM admission checks are off and their settings remain available.
+Removing the package removes `/models/status`, `/models/warm`, their App counterparts, and `/gpu` and `/resources`
+management routes. The local backend adapter, model catalog and `backends.local.model` setting stay in core:
+they can call an externally supervised server without the add-on. `harness/local_inference.py` holds the shared
+state vocabulary and `NoWarmer`, which performs no probes or supervision. Existing YAML and managed overlay
+names are unchanged. Stage (c) is complete with this extraction; stages (d)–(g) remain.
+
+Resource wiring runs in `ModuleRuntime.after_init()` after every runtime has initialized, so images receives RAM
+admission and lazy loading regardless of discovery order. Exclusive GPU consumers request server control through
+`ModuleHost.model_control()` / `ModuleRuntime.model_control()` rather than importing another module. Only the
+local-model module supplies that control. Images requires it when actually taking the GPU.
 
 ## What a module contributes
 

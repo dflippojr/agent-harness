@@ -215,7 +215,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | **Session-long GPU slot** ([`scheduler.py`](harness/scheduler.py)) | A session holds the model slot for its whole run instead of per generation, because interleaving would evict llama-server's prompt cache (a cold 29K-token prompt costs ~33 s). The slot is released while the session waits on a human or an app. |
 | **InferenceGate** ([`endpoint.py`](harness/endpoint.py), [`images`](harness_modules/images/service.py)) | One lock arbitrates agent turns, external `/v1` requests (which go ahead of the next agent turn), and image jobs (which take the gate exclusively, swap the LLM out for ComfyUI, and swap it back). |
 | **Tiled upscaling** ([`upscale.py`](harness_modules/images/upscale.py)) | Real-ESRGAN runs in tiles so 2×/4× upscales fit in 16 GB. Oversized outputs are refused before any memory is allocated. |
-| **Predictive warm-up** ([`warmup.py`](harness/warmup.py)) | Opening the web app checks `/props` for a sleeping model (without waking it) and warms it, so the model is usually loaded before the task is typed. |
+| **Predictive warm-up** ([`warmup.py`](harness_modules/local_model/warmup.py)) | Selecting the local model checks `/props` for a sleeping model (without waking it) and warms it, so the model is usually loaded before the task is typed. |
 
 ### Clients and remote execution
 
