@@ -1956,7 +1956,7 @@ class Runner:
             from .storage import account_usage_bytes, quota_message
             account = self.db.account_by_id(user_id)
             if account is not None:
-                used = account_usage_bytes(self.cfg, user_id)
+                used = await asyncio.to_thread(account_usage_bytes, self.cfg, user_id)
                 limit = int(account["disk_quota_bytes"])
                 if used >= limit:
                     message = (f"{quota_message(used, limit)}, so the run was stopped. Delete unused files "
