@@ -13,10 +13,11 @@ import json
 import logging
 import shutil
 import time
+import uuid
 from pathlib import Path
 
 from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ROOT, ManagedStore, app_dir, backup_sqlite,
-                             remove_tree, storage)
+                             remove_tree, storage, operation_audit, audit_context)
 
 from .audit import AUDIT_FILE, AuditError, stable_prefix
 from .member_key import WARNING, snapshot_key
@@ -31,6 +32,7 @@ class BackupService:
         self.participant = participant or (lambda: None)   # the image archive joins the backup (images module)
         self._backup_task: asyncio.Task | None = None
         self.last_backup: dict = self._read_backup_status()
+        self._lock = asyncio.Lock()
 
     def seed_participant(self) -> None:
         """Give the image archive the reconciliation the last backup recorded (it survives a restart)."""
@@ -98,21 +100,28 @@ class BackupService:
         except OSError:
             log.warning("could not write %s", self._backup_status_file)
 
-    async def backup(self) -> dict:
+    async def backup(self, *, context=None) -> dict:
         """Online copy of the SQLite database plus transcripts and project config into backup.dir/<date>, then
         delete dated folders older than keep_days."""
-        result = await asyncio.to_thread(self._backup_sync, time.time())
-        archive = self.participant()
-        if archive and archive.enabled:
-            # Image failures are warnings: the already-verified SQLite snapshot remains a successful backup.
-            try:
-                result["image_archive"] = await asyncio.to_thread(archive.reconcile)
-            except Exception as e:  # noqa: BLE001 - report archive health without invalidating the snapshot
-                result["image_archive"] = {"enabled": True, "errors": 1, "warnings": [str(e)]}
-        self.last_backup = result
-        self._write_backup_status()
-        log.info("backup written to %s (%d bytes)", result["path"], result["bytes"])
-        return result
+        async with self._lock:
+            scheduled = context is None
+            context = context or audit_context.AuditContext("system", "system", "", "maintenance")
+            with operation_audit.operation(self.db, context, uuid.uuid4().hex, "maintenance.backup",
+                                           {"trigger": "scheduled" if scheduled else "manual"},
+                                           scheduled=scheduled) as audit:
+                result = await asyncio.to_thread(self._backup_sync, time.time())
+                archive = self.participant()
+                if archive and archive.enabled:
+                    # Image failures are warnings: the already-verified SQLite snapshot remains a successful backup.
+                    try:
+                        result["image_archive"] = await asyncio.to_thread(archive.reconcile)
+                    except Exception as e:  # noqa: BLE001 - report archive health without invalidating the snapshot
+                        result["image_archive"] = {"enabled": True, "errors": 1, "warnings": [str(e)]}
+                self.last_backup = result
+                self._write_backup_status()
+                log.info("backup written to %s (%d bytes)", result["path"], result["bytes"])
+                audit["removed"] = len(result.get("removed", []))
+            return result
 
     def _backup_sync(self, now: float) -> dict:
         root = Path(self.cfg.backup.dir)

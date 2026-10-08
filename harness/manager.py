@@ -31,7 +31,7 @@ from .runner import (ACTIVE, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, RE
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import checkpoints, llm, member_keys, projects, secret_scan, telemetry
+from . import audit_context, operation_audit, checkpoints, llm, member_keys, projects, secret_scan, telemetry
 
 log = logging.getLogger("harness.manager")
 
@@ -948,7 +948,7 @@ class Manager:
             raise HarnessError(409, CHECKPOINT_IDLE)
         return s
 
-    async def rewind(self, ref: str, turn: int) -> dict:
+    async def rewind(self, ref: str, turn: int, *, context=None) -> dict:
         sid = self.resolve_id(ref)
         s = await self._idle_for_checkpoint(sid)
         if s.get("backend", "local") != "local":
@@ -956,24 +956,27 @@ class Manager:
                                     "fork from a checkpoint instead")
         cp = self.runner.checkpointer
         async with self._exclusive(sid, "rewind", CHECKPOINT_IDLE):
-            try:
-                done = await asyncio.to_thread(cp.restore, sid, int(turn))
-            except projects.GitError as e:
-                raise HarnessError(e.status, str(e)) from e
-            # All or nothing: the files are restored; if recording that fails, they are put back before the hold
-            # ends, so the next send never runs the later conversation against the earlier files.
-            def record() -> None:
-                cp.commit_rewind(sid, int(turn), done.saved)
-                self.db.after_commit(lambda: self.unsettled.discard(sid))
-            try:
-                await self.db.for_session(sid).awrite(record)
-            except Exception as e:  # noqa: BLE001 - any failure to record is undone, then raised
-                error, undone = await asyncio.to_thread(cp.undo_rewind, done, e)
-                if not undone:
-                    await self._unsettle(sid)
-                raise HarnessError(error.status, str(error)) from e
-            finally:
-                await asyncio.to_thread(cp.release, done)
+            with operation_audit.operation(self.db, context, sid, "checkpoint.rewind",
+                                           {"session_id": sid, "turn": int(turn)},
+                                           enabled=operation_audit.owner_session(s)):
+                try:
+                    done = await asyncio.to_thread(cp.restore, sid, int(turn))
+                except projects.GitError as e:
+                    raise HarnessError(e.status, str(e)) from e
+                # All or nothing: the files are restored; if recording that fails, they are put back before the hold
+                # ends, so the next send never runs the later conversation against the earlier files.
+                def record() -> None:
+                    cp.commit_rewind(sid, int(turn), done.saved)
+                    self.db.after_commit(lambda: self.unsettled.discard(sid))
+                try:
+                    await self.db.for_session(sid).awrite(record)
+                except Exception as e:  # noqa: BLE001 - any failure to record is undone, then raised
+                    error, undone = await asyncio.to_thread(cp.undo_rewind, done, e)
+                    if not undone:
+                        await self._unsettle(sid)
+                    raise HarnessError(error.status, str(error)) from e
+                finally:
+                    await asyncio.to_thread(cp.release, done)
         return self.db.get_session(sid)
 
     async def _unsettle(self, sid: str) -> None:
@@ -989,15 +992,19 @@ class Manager:
         except Exception:  # noqa: BLE001 - the in-memory mark still refuses sends
             log.exception("could not record the failed rewind of %s", sid)
 
-    async def fork(self, ref: str, turn: int, prompt: str) -> dict:
+    async def fork(self, ref: str, turn: int, prompt: str, *, context=None) -> dict:
         """A new session that starts from a checkpoint: its own workspace, branch and model context."""
         sid = self.resolve_id(ref)
         await self._idle_for_checkpoint(sid)
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
         async with self._exclusive(sid, "fork", CHECKPOINT_IDLE):
-            new_sid = await self._fork(sid, int(turn), prompt)
-        self._spawn(new_sid)
+            with operation_audit.operation(self.db, context, sid, "checkpoint.fork",
+                                           {"session_id": sid, "turn": int(turn)},
+                                           enabled=operation_audit.owner_session(self.db.get_session(sid))) as audit:
+                new_sid = await self._fork(sid, int(turn), prompt)
+                audit["resulting_session_id"] = new_sid
+                self._spawn(new_sid)
         return self.db.get_session(new_sid)
 
     async def _fork(self, sid: str, turn: int, prompt: str) -> str:
@@ -1483,11 +1490,15 @@ class Manager:
         return result
 
     # review of a git project's session branch
-    async def review(self, ref: str, action: str) -> dict:
+    async def review(self, ref: str, action: str, *, context=None) -> dict:
         """merge (local projects), push (URL projects), or discard. Runs host-side with the user's git setup."""
         sid = self.resolve_id(ref)
         async with self._exclusive(sid, "review", REVIEW_BUSY):
-            return await self._review(sid, action)
+            if action not in ("merge", "push", "discard"):
+                raise HarnessError(404, "unknown review action")
+            with operation_audit.operation(self.db, context, sid, "review." + action, {"session_id": sid},
+                                           enabled=operation_audit.owner_session(self.db.get_session(sid))):
+                return await self._review(sid, action)
 
     async def _review(self, sid: str, action: str) -> dict:
         s = self.db.get_session(sid)
@@ -1605,9 +1616,10 @@ class Manager:
             raise HarnessError(404, "unknown approval link")
         if approval["status"] != "pending":
             return public_approval(approval)  # a repeated button press is harmless
-        return self.decide(approval["session_id"], approval["id"], approve, note="")
+        return self.decide(approval["session_id"], approval["id"], approve, note="",
+                           context=audit_context.AuditContext("owner", "owner", "", "notification_link"))
 
-    def decide(self, ref: str, approval_id: str | None, approve: bool, note: str = "") -> dict:
+    def decide(self, ref: str, approval_id: str | None, approve: bool, note: str = "", *, context=None) -> dict:
         sid = self.resolve_id(ref)
         pending = self.db.pending_approvals(sid)
         if approval_id is None:
@@ -1624,13 +1636,16 @@ class Manager:
             if not self.db.decide_approval(approval_id, status, note):
                 raise HarnessError(409, f"approval is already {self.db.get_approval(approval_id)['status']}")
             self.bus.emit(sid, "approval_decided", {"id": approval_id, "status": status, "note": note})
-        self.db.for_session(sid).write(decide)
-        event = self.runner.approval_events.get(approval_id)
-        if event:
-            event.set()
+        with operation_audit.operation(self.db, context, approval_id, "approval.decide",
+                                       {"session_id": sid, "decision": status},
+                                       enabled=operation_audit.owner_session(self.db.get_session(sid))):
+            self.db.for_session(sid).write(decide)
+            event = self.runner.approval_events.get(approval_id)
+            if event:
+                event.set()
         return public_approval(self.db.get_approval(approval_id))
 
-    def clear_taint(self, ref: str) -> dict:
+    def clear_taint(self, ref: str, *, context=None) -> dict:
         """Owner action: forget the untrusted sources this session has read, and record that it happened."""
         sid = self.resolve_id(ref)
         s = self.db.get_session(sid)
@@ -1639,7 +1654,9 @@ class Manager:
         def clear_taint() -> None:
             self.db.update_session(sid, taint=[])
             self.bus.emit(sid, "taint_cleared", {"cleared": [t["origin"] for t in cleared]})
-        self.db.for_session(sid).write(clear_taint)
+        with operation_audit.operation(self.db, context, sid, "session.taint_clear", {"session_id": sid},
+                                       enabled=operation_audit.owner_session(s)):
+            self.db.for_session(sid).write(clear_taint)
         return self.db.get_session(sid)
 
     async def cancel(self, ref: str) -> dict:

@@ -31,6 +31,8 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    "operation_audit": ("harness.operation_audit", None),
+    "audit_context": ("harness.audit_context", None),
     "GpuGuardConfig": ("harness.config", "GpuGuardConfig"),
     "ACTIVE": ("harness.runner", "ACTIVE"),
     "doctor_run": ("harness.doctor", "run"),

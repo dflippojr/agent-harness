@@ -150,6 +150,9 @@ def _clean_credential(key: str, value, out: dict) -> bool:
 
 def clean_metadata(action: str, metadata: dict | None) -> dict:
     """Keep only allowlisted, safely-typed values for `action`; drop everything else without storing it."""
+    from .operation_audit import ACTIONS, clean_metadata as clean_operation
+    if action in ACTIONS:
+        return clean_operation(action, metadata)
     allowed = METADATA_ALLOWLIST.get(action, frozenset())
     out: dict = {}
     credential = "." in action

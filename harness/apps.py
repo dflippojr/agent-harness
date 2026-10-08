@@ -35,7 +35,7 @@ from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
 from .policy import TOOLS_ONLY
-from . import compat, credential_audit
+from . import audit_context, compat, credential_audit
 
 NO_SUCH_SESSION = "no session matches that id"
 
@@ -987,7 +987,7 @@ async def api_review(ref: str, action: str, request: Request):
     s = own_session(request, key, ref)
     if key.get("kind") == "app":
         raise HarnessError(403, "app tokens cannot review sessions")
-    return m.summary(await m.review(s["id"], action))
+    return m.summary(await m.review(s["id"], action, context=audit_context.owner_context(key, "app_api") if owner_key(key) else None))
 
 
 @route_table.post("/api/v1/sessions", status_code=201, response_model=SessionResponse)
@@ -1195,7 +1195,8 @@ async def decide(ref: str, approval_id: str, body: AppDecision, request: Request
     if body.decision not in ("approve", "deny"):
         raise HarnessError(400, "decision must be approve or deny")
     return m.decide(s["id"], approval_id, body.decision == "approve",
-                    note=f"[{key['name']}] {body.note}".strip())
+                    note=f"[{key['name']}] {body.note}".strip(),
+                    context=audit_context.owner_context(key, "app_api") if owner_key(key) else None)
 
 
 @route_table.post("/api/v1/sessions/{ref}/events/ticket", status_code=201, response_model=EventTicketResponse)
