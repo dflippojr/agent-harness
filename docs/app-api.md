@@ -17,7 +17,8 @@ reader. No new Web review page is included.
 
 Rows record server time, the authenticated actor/key and entry point, scoped opaque target, action and outcome,
 plus field names/counts and safe enums. Session create/message/context/rename/rerun/cancel, approval decisions and
-App tool-result submissions are recorded. Session mutations and rows share the private writer transaction where
+App tool-result submissions and automatic approval decisions are recorded. Automatic decisions identify the system
+with source `agent`. Session mutations and rows share the private writer transaction where
 possible. System work has an explicit system identity. An App's `end_user` is a separate `subject` marked
 `subject_trust: caller_asserted`; provider sign-in does not verify that App-supplied human label. Rows never store
 prompts, context, titles, tool arguments/results, arbitrary App metadata, credentials, codes, URLs/claims, provider

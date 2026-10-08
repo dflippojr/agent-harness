@@ -1753,8 +1753,8 @@ class Manager:
     async def _erase_session(self, sid: str) -> bool:
         """Erase session `sid` and everything tied to it: stop it if it runs, remove its sandbox, its hosted CLI's own
         copy of the conversation (#371), workspace, checkpoints and transcript, then its rows (events, tool calls and results, approvals, artifacts, checkpoints,
-        search entries). The rows go last, so an erase cut short is finished by the next one. False when there is no
-        such session (already erased)."""
+        search entries). Rows go last; an interrupted private erasure retains its unresolved aggregate evidence
+        and blocks automatic replay pending inspection. False when already erased."""
         s = self.db.get_session(sid)
         if s is None:
             return False
@@ -1843,7 +1843,7 @@ class Manager:
             try:
                 await self.erase_app(row["id"])
                 report["apps_erased"].append(row["id"])
-            except Exception:  # noqa: BLE001 - the next sweep tries again
+            except Exception:  # noqa: BLE001 - unresolved intent prevents repeating external effects
                 log.warning("App erasure incomplete; inspect aggregate receipt")
         defaults = {k["id"]: k.get("retention_days") for k in self.db.main.list_api_keys()}
         for app_id in defaults:
@@ -1858,7 +1858,7 @@ class Manager:
                 try:
                     await self.erase_session(r["id"], reason="retention")
                     report["sessions_expired"].append(r["id"])
-                except Exception:  # noqa: BLE001 - the next sweep tries again
+                except Exception:  # noqa: BLE001 - unresolved intent prevents repeating external effects
                     log.warning("expired session erasure incomplete; inspect aggregate receipt")
         return report
 

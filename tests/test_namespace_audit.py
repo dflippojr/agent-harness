@@ -375,3 +375,53 @@ def test_metadata_allowlist_and_actor_truth():
                                       "subject_trust": "caller_asserted"}
     assert namespace_audit.key_context({"id": "device-a", "kind": "device"}).actor_kind == "device"
     assert namespace_audit.key_context({"id": "", "kind": "owner", "bundled": True}).actor_id == "owner"
+
+
+def test_private_auto_approval_is_system_agent_and_never_in_main(setup):
+    m, client, _, _, headers = setup
+    sid = create(client, headers[0])
+    approval = {"id": "auto-approval", "session_id": sid, "tool_call_id": "call-auto", "tool": "shell",
+                "args": {"command": PRIVATE}, "reason": PRIVATE, "detail": PRIVATE, "status": "pending"}
+    m.runner._persist_ask(sid, approval, {"status": "approved"})
+    row = page(client, headers[0], action="approval.auto_decide")["items"][0]
+    assert (row["actor_id"], row["actor_kind"], row["source"]) == ("system", "system", "agent")
+    assert PRIVATE not in json.dumps(row)
+    assert m.db.main.audit_page(action="approval.auto_decide")["items"] == []
+
+
+def test_member_erasure_leaves_only_account_receipt(setup):
+    m, client, members, _, _ = setup
+    auth = {"Tailscale-User-Login": "alice@example.com"}
+    sid = create(client, auth)
+    ctx = audit_context.AuditContext(members[0]["user_id"], "member", "", "app_api")
+    asyncio.run(m.erase_session(sid, context=ctx))
+    assert page(client, auth)["items"] == []
+    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    assert all(r["target_kind"] == "account" and r["target_id"] == members[0]["user_id"] for r in rows)
+    assert sid not in json.dumps(rows) and PRIVATE not in json.dumps(rows)
+
+
+def test_retention_removes_private_rows_with_system_reason(setup):
+    m, client, _, apps, headers = setup
+    sid = create(client, headers[0])
+    m.db.set_app_retention(apps[0][0]["id"], 1)
+    asyncio.run(m.sweep_app_data(time.time() + 2 * DAY))
+    assert page(client, headers[0])["items"] == []
+    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    assert [r["outcome"] for r in rows] == ["ok", "started"]
+    assert all(r["metadata"]["reason"] == "retention" and r["actor_id"] == "system" for r in rows)
+    assert sid not in json.dumps(rows)
+
+
+def test_partial_provider_erase_does_not_replay_or_leak_exception(setup, monkeypatch, caplog):
+    m, client, _, apps, headers = setup
+    sid = create(client, headers[0])
+    m.db.set_app_retention(apps[0][0]["id"], 1)
+    effect = AsyncMock(side_effect=OSError(PRIVATE))
+    monkeypatch.setattr(m, "_erase_cli_history", effect)
+    asyncio.run(m.sweep_app_data(time.time() + 2 * DAY))
+    asyncio.run(m.sweep_app_data(time.time() + 3 * DAY))
+    effect.assert_awaited_once()
+    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    assert [r["outcome"] for r in rows] == ["unknown", "started"]
+    assert PRIVATE not in caplog.text and sid not in caplog.text

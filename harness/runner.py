@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import audit_context, operation_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, taint, telemetry
+from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, taint, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -431,6 +431,10 @@ class Runner:
                 self.bus.emit(sid, "smart_review", record)
             if existing["status"] == "approved":
                 self.bus.emit(sid, "approval_auto_approved", {"id": existing["id"], **(record or {})})
+                namespace_audit.record(self.db, self.db.get_session(sid),
+                                       audit_context.AuditContext("system", "system", "", "agent"),
+                                       "approval.auto_decide", target=existing["id"], kind="approval",
+                                       metadata={"decision": "approved"})
             else:
                 self.bus.emit(sid, "approval_requested", public)
         with operation_audit.operation(
