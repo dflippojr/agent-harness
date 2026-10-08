@@ -411,3 +411,9 @@ def test_apply_failure_rolls_back_audit_artifacts(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         backup_restore.apply(cfg, p)
     assert _hashes(data) == before and not (data / "restored-audits").exists()
+
+
+def test_empty_or_unterminated_only_trail_backs_up_as_empty_snapshot(tmp_path):
+    for n, content in enumerate((b"", b'{"actor":"parti')):
+        cfg, folder = _audit_backup(tmp_path / str(n), content)
+        assert (folder / AUDIT).read_bytes() == b"" and verify(folder) == []
