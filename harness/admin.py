@@ -325,8 +325,9 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             row = await manager.db.main.awrite(commit)
         except HarnessError as e:
             if e.code != "audit_unavailable":  # a refused request; the audit failure itself is the error otherwise
+                reason = "not_found" if e.status == 404 else "invalid_request"
                 await manager.db.main.awrite(credential_audit.record, manager.db, ctx, "provider_grant.set", "",
-                                             "denied", "provider_grant", {"reason": "invalid_request"})
+                                             "denied", "provider_grant", {"reason": reason})
             raise
         return next(item for item in manager.provider_credentials() if item["id"] == row["id"])
 

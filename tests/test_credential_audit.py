@@ -215,7 +215,11 @@ def test_provider_grant_set_replace_revoke_and_sentinels(hh):
                                    "replaced": False}
     assert sets[1]["metadata"]["previous_grant_id"] == first["id"] and sets[1]["metadata"]["replaced"] is True
     assert sets[1]["metadata"]["fields"] == ["models", "policy", "secret_ref"]
-    assert _by_action(client, "provider_grant.set", outcome="denied")[0]["target_id"] == ""
+    assert client.post(f"{PREFIX}/provider-credentials", json={**body, "app_id": "k-missing"},
+                       headers=H(OWNER)).status_code == 404
+    denied = _by_action(client, "provider_grant.set", outcome="denied")  # newest first
+    assert [r["metadata"]["reason"] for r in denied] == ["not_found", "invalid_request"]
+    assert all(r["target_id"] == "" for r in denied) and "k-missing" not in str(denied)
     assert [r["outcome"] for r in _by_action(client, "provider_grant.revoke")] == ["noop", "ok"]
     dump = _dump(client)
     for sentinel in (REF, SECRET_FILE_SENTINEL, "model-sentinel-1", "grant.key"):
