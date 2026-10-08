@@ -117,6 +117,7 @@ def test_pairing_lifecycle_race_and_safe_refusals(hh):
     assert client.post("/api/v1/pair", headers={"Origin": "https://evil.example"},
                        json={"code": code}).status_code == 400
     assert client.post("/api/v1/pair", headers={"Origin": ORIGIN}, json={"code": "hp-guessed-code"}).status_code == 400
+    client.post("/pairing-codes", json={"name": "keep", "origin": ORIGIN, "scopes": ["sessions"]})  # origin stays open
     results = []
 
     def redeem():
