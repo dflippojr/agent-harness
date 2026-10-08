@@ -145,11 +145,11 @@ def launchctl(*args: str, check: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(["launchctl", *args, domain], check=check, text=True)
 
 
-def api(method: str, path: str, retries: int = 30, **kwargs) -> dict | list | str:
+def api(method: str, path: str, retries: int = 30, *, prefix: str = ADMIN_PREFIX, **kwargs) -> dict | list | str:
     kwargs["headers"] = _headers(kwargs.get("headers"))
     for attempt in range(retries + 1):
         try:
-            resp = httpx.request(method, BASE + ADMIN_PREFIX + path, timeout=60, **kwargs)
+            resp = httpx.request(method, BASE + prefix + path, timeout=60, **kwargs)
             break
         except httpx.TransportError:
             if attempt == retries:
@@ -641,7 +641,12 @@ def _build_parser() -> argparse.ArgumentParser:
     logs = runner.add_parser("logs")
     logs.add_argument("--follow", action="store_true")
     logs.add_argument("--lines", type=int, default=80)
-    _add_admin_commands(sub, {"projects": projects, "runner": runner})
+    groups = {"projects": projects, "runner": runner}
+    _add_admin_commands(sub, groups)
+    private = groups["audit"].add_parser("private", help="read this App/member's private operational trail")
+    for field in ("--limit:int", "--before_id:int", "--target_id", "--action", "--outcome", "--since:float", "--until:float"):
+        _add_field(private, field)
+    private.set_defaults(private_audit=True)
     return parser
 
 
@@ -790,6 +795,10 @@ def main() -> int:
     if getattr(args, "runner_config", None) is not None:
         args.runner_config = _harness_file(parser, "--runner-config", args.runner_config)
     configure(args.config)
+    if getattr(args, "private_audit", False):
+        params = {name[2:]: value for name, value in vars(args).items() if name.startswith("f_") and value is not None}
+        print(json.dumps(api("GET", "/audit", prefix="/api/v1", params=params), indent=2))
+        return 0
     return _cmd_admin(args) if getattr(args, "admin", None) else _COMMANDS[args.cmd](args)
 
 

@@ -84,6 +84,8 @@ class Attempt:
     state: str = "starting"          # starting, waiting, submitted, completed, failed, expired, cancelled
     seen: threading.Event = field(default_factory=threading.Event)   # the URL (and a Codex user code) appeared
     lock: threading.Lock = field(default_factory=threading.Lock)
+    on_finish: Callable | None = None
+    audit_incomplete: str = ""
 
     @property
     def live(self) -> bool:
@@ -152,7 +154,7 @@ class EndUserLogins:
                 cfg.image, *LOGIN_COMMANDS[backend]]
 
     # --- start -------------------------------------------------------------------------------------------------
-    async def start(self, app_id: str, end_user: str, backend: str) -> dict:
+    async def start(self, app_id: str, end_user: str, backend: str, *, on_finish=None, attempt_id=None) -> dict:
         """Begin the CLI's own login for this end user: returns what the App's popup shows."""
         self.check(backend, end_user)
         cfg = self.cfg.backends[backend]
@@ -161,7 +163,7 @@ class EndUserLogins:
                 await cli_domains.prepare(backend, cfg, app_id, end_user)
             except RuntimeError as e:
                 raise LoginError(503, "end_user_unavailable", str(e)) from e
-        attempt = await asyncio.to_thread(self._begin, app_id, end_user, backend)
+        attempt = await asyncio.to_thread(self._begin, app_id, end_user, backend, on_finish, attempt_id)
         if not await asyncio.to_thread(attempt.seen.wait, URL_WAIT_SECONDS) or not attempt.url:
             await asyncio.to_thread(self._end, attempt, "failed")
             raise LoginError(502, "login_failed", f"{backend.title()} did not offer a sign-in URL")
@@ -175,7 +177,7 @@ class EndUserLogins:
         if not cli_domains.valid_end_user(end_user):
             raise LoginError(400, "invalid_end_user", "end user ids are 1-128 letters, digits and _.@:-")
 
-    def _begin(self, app_id: str, end_user: str, backend: str) -> Attempt:
+    def _begin(self, app_id: str, end_user: str, backend: str, on_finish=None, attempt_id=None) -> Attempt:
         with self._guard:
             self._expire()
             for old in [a for a in self._attempts.values()
@@ -183,9 +185,10 @@ class EndUserLogins:
                 self._end(old, "cancelled")  # a new attempt replaces the person's last one
             if sum(a.live for a in self._attempts.values()) >= MAX_LIVE_ATTEMPTS:
                 raise LoginError(429, "too_many_logins", "too many sign-ins are in progress; retry shortly")
-            attempt_id = secrets.token_urlsafe(16)
+            attempt_id = attempt_id or secrets.token_urlsafe(16)
             attempt = Attempt(attempt_id, app_id, end_user, backend, time.time() + ATTEMPT_SECONDS,
-                              container=f"harness-eulogin-{secrets.token_hex(6)}", needs_code=NEEDS_CODE[backend])
+                              container=f"harness-eulogin-{secrets.token_hex(6)}", needs_code=NEEDS_CODE[backend],
+                              on_finish=on_finish)
             command = self._command(backend, app_id, end_user, attempt_id, attempt.container)
             try:
                 attempt.process = self._popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -233,16 +236,21 @@ class EndUserLogins:
             self._end(attempt, "expired")
             return
         with attempt.lock:
+            was_live = attempt.live
             if attempt.live:
                 attempt.state = "completed" if code == 0 else "failed"
             if attempt.state == "completed":
                 backend_state.forget_end_user_login(attempt.backend, attempt.app_id, attempt.end_user)
+        if was_live and attempt.on_finish:
+            attempt.on_finish(attempt)
 
     def _end(self, attempt: Attempt, state: str) -> None:
         with attempt.lock:
             if not attempt.live:
                 return
             attempt.state = state
+        if attempt.on_finish:
+            attempt.on_finish(attempt)
         proc = attempt.process
         try:
             if proc is not None and proc.poll() is None:
@@ -262,11 +270,16 @@ class EndUserLogins:
                 self._attempts.pop(attempt.attempt_id, None)
 
     # --- the code ----------------------------------------------------------------------------------------------
-    async def submit_code(self, app_id: str, end_user: str, backend: str, attempt_id: str, code: str) -> dict:
-        """Write the pasted one-time code to the waiting login's stdin, once. It is not kept anywhere else."""
+    def owned_attempt(self, app_id: str, end_user: str, backend: str, attempt_id: str) -> Attempt:
+        """Resolve a known scoped target before recording intent; guessed caller strings are never audit ids."""
         attempt = self._attempts.get(attempt_id)
         if (attempt is None or (attempt.app_id, attempt.end_user, attempt.backend) != (app_id, end_user, backend)):
             raise LoginError(404, "no_such_attempt", "no sign-in attempt matches that id")  # not another App's either
+        return attempt
+
+    async def submit_code(self, app_id: str, end_user: str, backend: str, attempt_id: str, code: str) -> dict:
+        """Write the pasted one-time code to the waiting login's stdin, once. It is not kept anywhere else."""
+        attempt = self.owned_attempt(app_id, end_user, backend, attempt_id)
         if not attempt.needs_code:
             raise LoginError(409, "code_not_needed", f"{backend.title()}'s sign-in takes no code back")
         if not isinstance(code, str) or not _CODE.fullmatch(code):
@@ -305,6 +318,9 @@ class EndUserLogins:
                 "expires_in": max(0, int(attempt.deadline - time.time()))}
         if attempt.user_code:
             view["user_code"] = attempt.user_code
+        if attempt.audit_incomplete:
+            view["error"] = {"code": "audit_record_incomplete", "operation_id": attempt.audit_incomplete,
+                             "may_have_completed": True, "retryable": False}
         return view
 
     def attempt_state(self, app_id: str, end_user: str, backend: str) -> dict | None:

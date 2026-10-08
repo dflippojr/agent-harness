@@ -1,5 +1,12 @@
 # Agent Harness Server owner API (admin v1)
 
+App/member operational trails (#471) are private: the owner `/audit` reader never traverses their stores or returns
+session/tool/login-attempt ids or delegated end-user subjects. It includes only approved aggregate `namespace.erase`
+receipts retained for 365 days, with App/account id, category, count, authenticated actor/key, reason, timestamp,
+outcome and a fresh receipt correlation id. `started` without `ok` means completion remains unresolved; `unknown`
+does not prove no effect happened. Inspect before repeating an external erase. See the [private audit contract](app-api.md#private-operational-audit-120-471)
+for scoped reads, retention, failure responses, live erasure, backup rotation/restore and provider-controlled copies.
+
 Machine-owner operations for Agent Harness Web and other first-party operator surfaces. Agent Harness Apps keep
 using [`/api/v1`](app-api.md); they cannot call this surface, even with every App scope.
 

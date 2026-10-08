@@ -31,7 +31,7 @@ from .runner import (ACTIVE, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, RE
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import audit_context, operation_audit, checkpoints, llm, member_keys, projects, secret_scan, telemetry
+from . import audit_context, operation_audit, namespace_audit, checkpoints, llm, member_keys, projects, secret_scan, telemetry
 
 log = logging.getLogger("harness.manager")
 
@@ -168,6 +168,7 @@ class Manager:
         self.hub = NoRunnerHub()
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
+        self.erase_locks: dict[str, asyncio.Lock] = {}
         # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
         # with the idle check, released when they end. In memory, so a daemon restart clears a stale claim.
         self.operations: dict[str, str] = {}
@@ -393,20 +394,24 @@ class Manager:
         self.maintenance.remove_workspace(s["id"])
         self.db.delete_session(s["id"])
 
-    def rename(self, ref: str, title: str) -> dict:
+    @namespace_audit.failures("session.rename")
+    def rename(self, ref: str, title: str, *, context=None) -> dict:
         s = self.get(ref)
         title = " ".join((title or "").split())
         if not title:
             raise HarnessError(400, "title is empty")
         if len(title) > 120:
             raise HarnessError(400, "title is too long")
-        self.db.update_session(s["id"], title=title)
+        def commit():
+            self.db.update_session(s["id"], title=title)
+            namespace_audit.record(self.db, s, context, "session.rename", metadata={"fields": ["title"]})
+        self.db.for_session(s["id"]).write(commit)
         return self.db.get_session(s["id"])
 
     # operations
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
                backend: str | None = None, effort: str | None = None, title: str | None = None,
-               **options) -> dict:
+               context=None, **options) -> dict:
         """Start a session. Beyond the first seven arguments the keywords are `CreateOptions` fields."""
         opts = CreateOptions(**options)
         chat = opts.kind == "chat"
@@ -465,7 +470,7 @@ class Manager:
             "taint": list(opts.taint or []), "end_user": end_user,
             **({"retention_days": float(opts.retention_days)} if app and opts.retention_days else {}),
         }
-        self._insert_created(session, app, tools, opts.job_id, prompt)
+        self._insert_created(session, app, tools, opts.job_id, prompt, context=context)
         self._spawn(sid)
         return self.db.get_session(sid)
 
@@ -495,13 +500,19 @@ class Manager:
     def _login_error(e) -> HarnessError:
         return HarnessError(e.status, str(e), e.code)
 
-    async def end_user_login_start(self, app_id: str, end_user: str, backend: str) -> dict:
+    async def end_user_login_start(self, app_id: str, end_user: str, backend: str, *, context=None) -> dict:
         from .end_users import LoginError
         try:
             self.end_user_logins.check(backend, end_user)
             self._require_end_user_backend(backend)
-            await asyncio.to_thread(self.db.for_app(app_id).register_end_user, end_user)
-            return await self.end_user_logins.start(app_id, end_user, backend)
+            attempt_id = secrets.token_urlsafe(16)
+            async with namespace_audit.login_operation(self.db, app_id, end_user, context, "login.start",
+                                                       attempt_id, backend) as audit:
+                await asyncio.to_thread(self.db.for_app(app_id).register_end_user, end_user)
+                app = self.db.main.get_api_key(app_id) or {}
+                store = namespace_audit.LoginStore(self.db, app_id, end_user, app.get("retention_days"), backend)
+                return await self.end_user_logins.start(app_id, end_user, backend,
+                    on_finish=store.finish(context, audit["operation_id"]), attempt_id=attempt_id)
         except LoginError as e:
             raise self._login_error(e) from e
 
@@ -509,10 +520,14 @@ class Manager:
         if backend not in self.cfg.backends or not self.cfg.backends[backend].enabled:
             raise HarnessError(409, f"backend {backend!r} is not enabled on this server", "backend_unavailable")
 
-    async def end_user_login_code(self, app_id: str, end_user: str, backend: str, attempt_id: str, code: str) -> dict:
+    async def end_user_login_code(self, app_id: str, end_user: str, backend: str, attempt_id: str, code: str,
+                                  *, context=None) -> dict:
         from .end_users import LoginError
         try:
-            return await self.end_user_logins.submit_code(app_id, end_user, backend, attempt_id, code)
+            self.end_user_logins.owned_attempt(app_id, end_user, backend, attempt_id)
+            async with namespace_audit.login_operation(self.db, app_id, end_user, context, "login.code_submit",
+                                                       attempt_id, backend):
+                return await self.end_user_logins.submit_code(app_id, end_user, backend, attempt_id, code)
         except LoginError as e:
             raise self._login_error(e) from e
 
@@ -524,17 +539,18 @@ class Manager:
         except LoginError as e:
             raise self._login_error(e) from e
 
-    async def end_user_unlink(self, app_id: str, end_user: str, backend: str) -> None:
+    async def end_user_unlink(self, app_id: str, end_user: str, backend: str, *, context=None) -> None:
         """Sign an end user out of `backend`: their running sessions stop, the CLI's own logout runs and the volume
         holding their login and CLI state is deleted."""
         from .end_users import LoginError
         try:
             self.end_user_logins.check(backend, end_user)
-            for sid in self.db.app_session_ids(app_id):
-                s = self.db.get_session(sid)
-                if s and s.get("end_user") == end_user and s["backend"] == backend and s["status"] in ACTIVE:
-                    await self._stop_run(sid)
-            await self.end_user_logins.unlink(app_id, end_user, backend)
+            async with namespace_audit.login_operation(self.db, app_id, end_user, context, "login.unlink", backend=backend):
+                for sid in self.db.app_session_ids(app_id):
+                    s = self.db.get_session(sid)
+                    if s and s.get("end_user") == end_user and s["backend"] == backend and s["status"] in ACTIVE:
+                        await self._stop_run(sid)
+                await self.end_user_logins.unlink(app_id, end_user, backend)
         except LoginError as e:
             raise self._login_error(e) from e
 
@@ -597,7 +613,8 @@ class Manager:
             return self.settings.session_budgets(app)
         return self.cfg.max_turns, self.cfg.max_completion_tokens
 
-    def _insert_created(self, session: dict, app: dict | None, tools: list, job_id: str, prompt: str) -> None:
+    def _insert_created(self, session: dict, app: dict | None, tools: list, job_id: str, prompt: str,
+                        *, context=None) -> None:
         sid = session["id"]
 
         def insert_created() -> None:
@@ -608,6 +625,7 @@ class Manager:
                                                       if app else {}), **({"job_id": job_id} if job_id else {}),
                                                    **({"skills": session["skills"]} if session["skills"] else {})})
             self.bus.emit(sid, "user_message", {"content": prompt})
+            namespace_audit.record(self.db, session, context, "session.create", metadata={"fields": ["prompt"]})
         self.db.for_app(session["app_id"]).write(insert_created)
 
     @staticmethod
@@ -842,7 +860,8 @@ class Manager:
                     missing: str) -> tuple[str, list]:
         return self.modules.get("skills").add_skills(system, project, skills, session_meta, missing)
 
-    async def send(self, ref: str, content: str, kind: str = "user_message") -> dict:
+    @namespace_audit.failures("session.message")
+    async def send(self, ref: str, content: str, kind: str = "user_message", *, context=None) -> dict:
         sid = self.resolve_id(ref)
         if not content.strip():
             raise HarnessError(400, "message is empty")
@@ -882,6 +901,9 @@ class Manager:
                 self.bus.emit(sid, "status", {"status": "queued"})
             # With the commit, not after the await: a request cancelled mid-write still gets its run.
             self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))
+            namespace_audit.record(self.db, s, context,
+                                   "session.context" if kind == "app_context" else "session.message",
+                                   metadata={"fields": ["context" if kind == "app_context" else "content"]})
         await self.db.for_session(sid).awrite(deliver)
         return self.db.get_session(sid)
 
@@ -1068,17 +1090,23 @@ class Manager:
             raise
         return new_sid
 
-    def rerun(self, ref: str) -> dict:
+    @namespace_audit.failures("session.rerun")
+    def rerun(self, ref: str, *, context=None) -> dict:
         """Start a fresh session with the same task, project, and model."""
         s = self.get(ref)
         if s.get("kind") == TOOLS_ONLY:  # its tools live in the App, which has to send them again
             raise HarnessError(409, "an App-tools-only session can't be rerun; start a new one with its tools")
         backend = s.get("backend", "local")
         model = s["model"] if backend != "local" or s["model"] in self.cfg.models else None
-        return self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
+        result = self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
                            model=model, backend=backend, title=s["title"], owner_id=s.get("owner_id", "owner"),
                            skills=[item["slug"] for item in (s.get("skills") or []) if item.get("slug")],
-                           skill_missing="skip")
+                           skill_missing="skip", context=context,
+                           app=self.db.get_api_key(s["app_id"]) if s.get("app_id") else None,
+                           app_tools=s.get("app_tools"), app_context="", app_metadata=s.get("app_metadata"),
+                           retention_days=s.get("retention_days"), end_user=s.get("end_user", ""))
+        namespace_audit.record(self.db, s, context, "session.rerun")
+        return result
 
     async def remote(self, s: dict, op: str, params: dict, timeout: float = 300):
         """A request to a session's runner from a user action: fails fast instead of waiting for a sleeping Mac."""
@@ -1621,6 +1649,7 @@ class Manager:
         return self.decide(approval["session_id"], approval["id"], approve, note="",
                            context=audit_context.AuditContext("owner", "owner", "", "notification_link"))
 
+    @namespace_audit.failures("approval.decide")
     def decide(self, ref: str, approval_id: str | None, approve: bool, note: str = "", *, context=None) -> dict:
         sid = self.resolve_id(ref)
         pending = self.db.pending_approvals(sid)
@@ -1647,6 +1676,8 @@ class Manager:
             if not self.db.decide_approval(approval_id, status, note):
                 raise HarnessError(409, f"approval is already {self.db.get_approval(approval_id)['status']}")
             self.bus.emit(sid, "approval_decided", {"id": approval_id, "status": status, "note": note})
+            namespace_audit.record(self.db, self.db.get_session(sid), context, "approval.decide",
+                                   target=approval_id, kind="approval", metadata={"decision": status})
         with operation_audit.operation(self.db, context, approval_id, "approval.decide",
                                        {"session_id": sid, "decision": status},
                                        enabled=operation_audit.owner_session(self.db.get_session(sid))):
@@ -1670,7 +1701,8 @@ class Manager:
             self.db.for_session(sid).write(clear_taint)
         return self.db.get_session(sid)
 
-    async def cancel(self, ref: str) -> dict:
+    @namespace_audit.failures("session.cancel")
+    async def cancel(self, ref: str, *, context=None) -> dict:
         sid = self.resolve_id(ref)
         task = self.tasks.get(sid)
         s = self.db.get_session(sid)
@@ -1678,14 +1710,31 @@ class Manager:
             raise HarnessError(409, f"session is {s['status']}, nothing to cancel")
         if task is None:  # no live task (shouldn't happen); fix the record anyway
             await self.runner.aset_status(sid, "cancelled", stop_reason="cancelled")
+            await asyncio.to_thread(namespace_audit.record, self.db, s, context, "session.cancel")
             return self.db.get_session(sid)
         self.runner.user_cancelled.add(sid)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        await asyncio.to_thread(namespace_audit.record, self.db, s, context, "session.cancel")
         return self.db.get_session(sid)
 
     # erasing App data (#330 decision 5)
-    async def erase_session(self, sid: str) -> bool:
+    async def erase_session(self, sid: str, *, context=None, reason="manual") -> bool:
+        s = self.db.get_session(sid)
+        if s is None:
+            return False
+        scope = namespace_audit.namespace(s)
+        if not scope:
+            return await self._erase_session(sid)
+        async with self.erase_locks.setdefault(scope, asyncio.Lock()):
+            if self.db.get_session(sid) is None:
+                return False
+            await asyncio.to_thread(namespace_audit.refuse_unresolved_erase, self.db, scope)
+            async with namespace_audit.erase_operation(self.db, scope, context,
+                                                      "app" if s.get("app_id") else "account", reason, 1):
+                return await self._erase_session(sid)
+
+    async def _erase_session(self, sid: str) -> bool:
         """Erase session `sid` and everything tied to it: stop it if it runs, remove its sandbox, its hosted CLI's own
         copy of the conversation (#371), workspace, checkpoints and transcript, then its rows (events, tool calls and results, approvals, artifacts, checkpoints,
         search entries). The rows go last, so an erase cut short is finished by the next one. False when there is no
@@ -1701,7 +1750,7 @@ class Manager:
         await self._erase_cli_history(s)
         await asyncio.to_thread(self._erase_files, s)
         await asyncio.to_thread(self.db.delete_session, sid)
-        log.info("erased session %s", sid)
+        log.info("session erasure completed")
         return True
 
     async def _stop_run(self, sid: str) -> None:
@@ -1733,7 +1782,14 @@ class Manager:
         remove_tree(dirs["checkpoints"] / s["id"])
         (dirs["transcripts"] / f"{s['id']}.md").unlink(missing_ok=True)
 
-    async def erase_app(self, app_id: str) -> None:
+    async def erase_app(self, app_id: str, *, context=None, reason="revoked_app") -> None:
+        async with self.erase_locks.setdefault(app_id, asyncio.Lock()):
+            await asyncio.to_thread(namespace_audit.refuse_unresolved_erase, self.db, app_id)
+            async with namespace_audit.erase_operation(self.db, app_id, context, "app", reason,
+                                                      len(self.db.app_session_ids(app_id))):
+                await self._erase_app(app_id)
+
+    async def _erase_app(self, app_id: str) -> None:
         """Erase a revoked App's store and folder and its hosted CLIs' state and login volumes (#371), leaving a
         tombstone in the registry: its running sessions are stopped and their sandboxes removed first."""
         from . import cli_domains
@@ -1771,16 +1827,20 @@ class Manager:
             except Exception:  # noqa: BLE001 - the next sweep tries again
                 log.exception("could not erase App %s", row["id"])
         defaults = {k["id"]: k.get("retention_days") for k in self.db.main.list_api_keys()}
+        for app_id in defaults:
+            if not self.db.store_path(app_id).is_file() or app_id == "app-web":
+                continue
+            await asyncio.to_thread(self.db.for_app(app_id).prune_namespace_audit, now, defaults.get(app_id) or 30)
         for app_id in self.db.indexed_apps():
             for r in await asyncio.to_thread(self.db.for_app(app_id).session_activity):
                 days = r["retention_days"] or defaults.get(app_id)
                 if not days or r["active_at"] + float(days) * 86400 > now:
                     continue
                 try:
-                    await self.erase_session(r["id"])
+                    await self.erase_session(r["id"], reason="retention")
                     report["sessions_expired"].append(r["id"])
                 except Exception:  # noqa: BLE001 - the next sweep tries again
-                    log.exception("could not erase expired session %s", r["id"])
+                    log.warning("expired session erasure incomplete; inspect aggregate receipt")
         return report
 
     @staticmethod

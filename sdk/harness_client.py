@@ -248,13 +248,20 @@ class Harness:
     # plumbing
     @staticmethod
     def _raise_response(resp: httpx.Response) -> None:
+        error = {}
         try:
             payload = resp.json()
             detail = payload.get("detail", resp.text)
-            code = (payload.get("error") or {}).get("code", "")
+            error = payload.get("error") or {}
+            code = error.get("code", "")
         except ValueError:
             detail, code = resp.text, ""
-        raise HarnessError(resp.status_code, str(detail), str(code))
+        exc = HarnessError(resp.status_code, str(detail), str(code))
+        exc.operation_id = error.get("operation_id", "")
+        exc.may_have_completed = bool(error.get("may_have_completed"))
+        if exc.may_have_completed:
+            exc.retryable = False
+        raise exc
 
     def _call(self, method: str, path: str, **kwargs) -> Any:
         resp = self.client.request(method, f"/api/v1{path}", **kwargs)
@@ -264,6 +271,13 @@ class Harness:
 
     def info(self) -> dict:
         return self._call("GET", "")
+
+    def audit(self, limit: int = 200, before_id: int | None = None, **filters) -> dict:
+        """Read only this App/member's operational trail; opaque newest-first cursor and safe filters."""
+        params = {"limit": limit, **filters}
+        if before_id is not None:
+            params["before_id"] = before_id
+        return self._call("GET", "/audit", params=params)
 
     def capabilities(self) -> Capabilities:
         return self.info()["capabilities"]

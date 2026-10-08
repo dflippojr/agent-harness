@@ -55,7 +55,7 @@ _APP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # Rows tied to one session (by session_id) that live in its App's store. The search index is rebuilt there from the
 # events; `usage` (metadata) and `stream_tickets` (auth) stay in the main store.
 SESSION_TABLES = ("events", "artifacts", "approvals", "app_tool_calls", "smart_reviews", "review_comments",
-                  "secret_dismissals", "checkpoints")
+                  "secret_dismissals", "checkpoints", "namespace_audit")
 # Database methods whose first argument is a session id: they run on that session's store.
 _BY_SESSION = frozenset({
     "get_session", "get_session_for_user", "session_brief", "add_checkpoint", "checkpoints",

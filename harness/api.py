@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
-from . import operation_audit, access as access_mod
+from . import operation_audit, namespace_audit, access as access_mod
 from . import compat
 from . import credential_audit
 from . import config as config_mod
@@ -341,7 +341,14 @@ async def guard(request: Request, call_next):
     if _cross_site_refused(request, m, info):
         return JSONResponse({"detail": "cross-origin request refused"}, status_code=403,
                             headers=info.cors_headers)
-    response = await call_next(request)
+    warnings = []
+    warning_token = namespace_audit.gap.set(warnings)
+    try:
+        response = await call_next(request)
+    finally:
+        namespace_audit.gap.reset(warning_token)
+    if warnings:
+        response.headers["X-Agent-Harness-Audit-Warning"] = "audit_gap"
     if compatibility and compatibility["state"] == "transition":
         response.headers["X-Agent-Harness-Deprecation"] = "missing_client_version"
         response.headers["Warning"] = '299 agent-harness "client version header will be required after this transition release"'
@@ -616,7 +623,8 @@ async def list_sessions(request: Request, limit: int = 50):
 async def create_session(body: CreateSession, request: Request):
     m = mgr(request)
     s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
-                 model=body.model, title=body.title, owner_id=owner_id(request), skills=body.skills)
+                 model=body.model, title=body.title, owner_id=owner_id(request), skills=body.skills,
+                 context=operation_audit.request_context(request, m))
     return m.summary(s)
 
 
@@ -694,19 +702,19 @@ async def get_session(ref: str, request: Request):
 @api_router.put("/sessions/{ref}")
 async def patch_session(ref: str, body: SessionUpdate, request: Request):
     m, sid, _ = owned_session(request, ref)
-    return m.summary(m.rename(sid, body.title))
+    return m.summary(m.rename(sid, body.title, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/messages")
 async def send_message(ref: str, body: SendMessage, request: Request):
     m, sid, _ = owned_session(request, ref)
-    return m.summary(await m.send(sid, body.content))
+    return m.summary(await m.send(sid, body.content, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/rerun", status_code=201)
 async def rerun(ref: str, request: Request):
     m, sid, _ = owned_session(request, ref)
-    return m.summary(m.rerun(sid))
+    return m.summary(m.rerun(sid, context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/sessions/{ref}/checkpoints")
@@ -910,7 +918,7 @@ async def clear_taint(ref: str, request: Request):
 @api_router.post("/sessions/{ref}/cancel")
 async def cancel(ref: str, request: Request):
     m, sid, _ = owned_session(request, ref)
-    return m.summary(await m.cancel(sid))
+    return m.summary(await m.cancel(sid, context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/sessions/{ref}/transcript", response_class=PlainTextResponse)
