@@ -37,17 +37,16 @@ ADMIN_API = "/api/admin"
 OWNER_GET_PREFIXES = (KEYS, METRICS, MAINTENANCE, SKILLS, CHATS)
 RUNNER_PREFIX = "/runners/"
 MEMBER_FORBIDDEN_PREFIXES = (
-    KEYS, METRICS, MAINTENANCE, JOBS, "/gpu", "/resources",
+    KEYS, METRICS, MAINTENANCE, JOBS,
     "/remote-control", MEMORY, TEMPLATES, "/notify", "/pairing-codes",
     "/runner-pairing-codes", SMART_APPROVALS, ADMIN_API,
     "/api/v1/remote-control", SKILLS, CHATS,
 )
-MEMBER_FORBIDDEN_EXACT = frozenset({CHATS, KEYS, METRICS, MAINTENANCE, JOBS, "/gpu", "/resources",
+MEMBER_FORBIDDEN_EXACT = frozenset({CHATS, KEYS, METRICS, MAINTENANCE, JOBS,
                                     MEMORY, TEMPLATES, "/notify/test", SMART_APPROVALS})
 # First match wins; a forbidden prefix matching none of these gets a generic message.
 MEMBER_FORBIDDEN_DETAILS = (
     ((JOBS,), "members cannot use scheduled jobs"),
-    (("/gpu", "/resources"), "members cannot change GPU or machine settings"),
     (("/remote-control", "/api/v1/remote-control"), "members cannot use Remote Control"),
     ((MEMORY,), "members cannot use the memory library"),
     ((KEYS, "/pairing-codes", "/runner-pairing-codes"),

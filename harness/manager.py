@@ -20,7 +20,7 @@ from . import cli_domains, review_comments
 from . import review_comments
 from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
-from .warmup import ModelWarmer
+from .local_inference import NoWarmer
 from .config import Config
 from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
@@ -163,7 +163,8 @@ class Manager:
         self.bus = EventBus(self.db)
         self.scheduler = GpuScheduler(self._queue_changed, eligible=self._scheduler_eligible)
         self.stream_epoch: dict[str, int] = {}
-        self.warmer = ModelWarmer()
+        self.warmer = NoWarmer()
+        self.guard = None
         self.hub = NoRunnerHub()
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
@@ -233,51 +234,11 @@ class Manager:
             self.runner.web = WebTools(cfg.web)
 
     def _init_services(self, cfg: Config) -> None:
-        from .config import module_effective
         self.modules.init()
         self.runner.modules = self.modules
-        self.guard = None
         self.canary = None
         if cfg.canary.enabled:
             self.canary = self._build_canary()
-        if module_effective(cfg, "gpu_guard"):
-            from .gpu_guard import GpuGuard
-            self.guard = GpuGuard(cfg.gpu_guard, cfg.models[cfg.default_model], self.scheduler,
-                                  busy=lambda: bool(self.runner.generating) or self.runner.gate.busy
-                                  or self.runner.gate.exclusive,
-                                  on_pause=self._gpu_paused,
-                                  on_resume=self._gpu_resumed,
-                                  data_dir=cfg.data_dir)
-            self.runner.guard = self.guard
-            self.warmer.blocked = lambda: self.guard.active or self.guard.manual or self.modules.gpu_taken
-            self._wire_resources(cfg)
-        else:
-            self.warmer.blocked = lambda: self.modules.gpu_taken
-
-    def _wire_resources(self, cfg: Config) -> None:
-        """Lazy model loading and the RAM check (resource guard, docs/resource-guard.md)."""
-        guard, warmer = self.guard, self.warmer
-        warmer.control = lambda: guard.control  # tests swap the guard's control after construction
-        warmer.managed_model = cfg.models[cfg.default_model].name
-        warmer.memory_low = lambda: guard.memory.load_low()
-        warmer.read_available = guard.memory.available
-        warmer.keepalive_seconds = cfg.gpu_guard.keepalive_seconds
-        guard.on_change = warmer.notify
-        guard.park = warmer.park
-        # Work held by the pause (or a pinned model) reloads at the end of the hold; anything else loads on demand.
-        guard.want_model = lambda: warmer.pinned() or self.runner.gpu_paused_waiting()
-        self.runner.ram = guard.memory
-        self.modules.wire_resources(guard, warmer)
-
-    def _gpu_paused(self, reasons: list[dict]) -> None:
-        self.modules.gpu_hold()
-        for s in self.db.sessions_with_status(*ACTIVE):
-            if s.get("backend", "local") == "local" and s["status"] != "waiting_approval":
-                self.runner.note_gpu_pause(s["id"])
-
-    def _gpu_resumed(self, seconds: float) -> None:
-        self.modules.gpu_resume(self.scheduler.positions())
-        self.runner.gpu_resumed(seconds)
 
     def _build_canary(self):
         """The nightly regression canary (#265): runs bakeoff/canary.py's suite on this manager at 03:00."""
@@ -321,8 +282,6 @@ class Manager:
         self._scanner_boot = asyncio.create_task(self._bootstrap_scanner(), name="secret-scanner")
         if maintenance:
             self.maintenance.start()
-        if self.guard is not None:
-            self.guard.start()
         self.modules.start()
         self._end_interrupted_canary()
         for s in self.db.sessions_with_run_flag(END_PENDING):
@@ -365,8 +324,6 @@ class Manager:
             await asyncio.gather(self._scanner_boot, return_exceptions=True)
         await self.snippets.stop()
         await self.maintenance.stop()
-        if self.guard is not None:
-            await self.guard.stop()
         await self.modules.stop()
 
     def _spawn(self, sid: str, recovered: bool = False) -> None:

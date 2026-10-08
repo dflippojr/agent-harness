@@ -1096,6 +1096,8 @@ class ImageService:
 
     async def _run_batch(self, first: str | None) -> None:
         """Take the GPU over, run queued jobs (or sit warm until Generate), then give the GPU back."""
+        if self.control is None:
+            raise RuntimeError("image generation requires the local_model supervision module")
         guard = self.runner.guard
         self.phase = "waiting"
         paused = lambda: guard is not None and (guard.active or guard.manual)  # noqa: E731
@@ -1148,12 +1150,11 @@ class ImageService:
 
     async def _wait_for_memory(self, paused: Callable[[], bool]) -> bool:
         """Hold ComfyUI while available RAM is under the guard's threshold. False if the GPU guard paused first."""
-        from harness.modules import MEMORY_POLL_SECONDS
         if self.memory_low():
             self.phase = "waiting_memory"
             log.info("image batch waiting for memory")
         while self.memory_low() and not paused():
-            await asyncio.sleep(MEMORY_POLL_SECONDS)
+            await asyncio.sleep(self.runner.ram.poll_seconds if self.runner.ram is not None else 5)
         return not paused()
 
     async def _drain_queue(self, first: str | None, paused: Callable[[], bool]) -> None:

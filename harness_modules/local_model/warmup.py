@@ -22,13 +22,12 @@ from typing import Awaitable, Callable
 
 import httpx
 
-from .config import ModelConfig
+from harness.modules import (
+    ModelConfig, SLEEPING, WAKING, READY, UNREACHABLE, PAUSED, UNLOADED, LOW_MEMORY,
+)
 
 log = logging.getLogger("harness.warmup")
 
-SLEEPING, WAKING, READY, UNREACHABLE, PAUSED = "sleeping", "waking", "ready", "unreachable", "paused"
-UNLOADED, LOW_MEMORY = "unloaded", "low_memory"
-EXPECTED_WAKE_SECONDS = 60  # Qwen reloads took 13-57 s in Phase 0 and ~50 s in the Phase 2 exit test
 HEALTH_TIMEOUT_SECONDS = 300
 HEALTH_POLL_SECONDS = 2.0
 
