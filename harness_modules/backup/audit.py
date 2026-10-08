@@ -64,8 +64,12 @@ def stable_prefix(path: Path) -> bytes | None:
 def read_snapshot(path: Path) -> bytes:
     """A backup's snapshot, whole; the whole file must be complete valid lines."""
     _check_link(path, "the audit snapshot")
+    real = os.path.realpath(path)
+    if os.path.basename(real) != AUDIT_FILE or os.path.dirname(real) != os.path.realpath(path.parent):
+        raise AuditError("is not the expected snapshot file")
     try:
-        data = path.read_bytes()
+        with open(real, "rb") as f:
+            data = f.read()
     except OSError as e:
         raise AuditError(f"cannot be read: {type(e).__name__}") from None
     if data and not data.endswith(b"\n"):
