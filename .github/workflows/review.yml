@@ -102,7 +102,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Check out review tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: dflippojr/agent-harness
           # This repository reviews with its own tooling at the triggering commit;
@@ -134,7 +134,7 @@ jobs:
           "workspace=$workspace" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Check out PR head for review context
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', steps.pr.outputs.number) }}
           path: pr
