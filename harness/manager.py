@@ -238,12 +238,6 @@ class Manager:
         from .config import module_effective
         self.modules.init()
         self.runner.modules = self.modules
-        self.remote_control = None
-        if module_effective(cfg, "remote_control"):
-            from .remote_control import RemoteControl
-            self.remote_control = RemoteControl(cfg, cfg.remote_control, notify=self._remote_control_ready)
-            self.remote_control.discovery.settings = self.settings
-            self.runner.remote_control = self.remote_control
         self.guard = None
         self.canary = None
         if cfg.canary.enabled:
@@ -286,9 +280,6 @@ class Manager:
     def _gpu_resumed(self, seconds: float) -> None:
         self.modules.gpu_resume(self.scheduler.positions())
         self.runner.gpu_resumed(seconds)
-
-    def _remote_control_ready(self, payload: dict) -> None:
-        self.notifier.send({"topic": self.cfg.notify.topic, **payload})
 
     def _build_canary(self):
         """The nightly regression canary (#265): runs bakeoff/canary.py's suite on this manager at 03:00."""
@@ -881,12 +872,11 @@ class Manager:
         if not app_tools:
             return []
         from .apps import validate_tools
-        from . import remote_control, web_tools
+        from . import web_tools
         from .modules import discovered
         from .tools import tool_schemas
         reserved = ({t["function"]["name"] for t in tool_schemas(100)}
                     | set(web_tools.TOOLS)
-                    | set(remote_control.TOOLS)
                     | {name for module in discovered(self.cfg) for name in module.tool_names})
         try:
             return validate_tools(app_tools, reserved)

@@ -31,6 +31,11 @@ NAMESPACE = "harness_modules"
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
 _PUBLIC = {
+    "RemoteControlConfig": ("harness.config", "RemoteControlConfig"),
+    "PROJECT_NAME": ("harness.config", "PROJECT_NAME"),
+    "Envelope": ("harness.managed_config", "Envelope"),
+    "ManagedConfigError": ("harness.managed_config", "ManagedConfigError"),
+    "parse_envelope": ("harness.managed_config", "parse_envelope"),
     'RunnerConfig': ('harness.config', 'RunnerConfig'),
     'ToolOutputConfig': ('harness.config', 'ToolOutputConfig'),
     'runner_compatibility': ('harness.compat', 'runner_compatibility'),
@@ -158,6 +163,10 @@ class Module:
     tool_names: tuple[str, ...] = ()                # reserved: App tools may not take these names
     # Settings: SettingSpecs (with defaults, bounds and enable checks) the module owns in the registry.
     settings: Callable[[], list] | None = None
+    register_admin: Callable | None = None  # owner-only admin registration (app, mgr, require_admin)
+    settings_validators: tuple[Callable, ...] = ()
+    settings_change_validators: tuple[Callable, ...] = ()
+    settings_schema: dict[str, Any] = field(default_factory=dict)
     # CLI: rows in the harness.cli OPERATIONS format, and group help for their first word.
     cli: tuple[tuple, ...] = ()
     cli_groups: dict[str, str] = field(default_factory=dict)

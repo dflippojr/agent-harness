@@ -325,12 +325,12 @@ class SettingsService:
 
     # --- views -----------------------------------------------------------
     def admin_schema(self) -> dict[str, Any]:
-        from .folder_discovery import LIMITS
+        from .modules import present
         return {
             "schema_version": SCHEMA_VERSION,
             "supervised_restart": supervised_restart_supported(),
             "settings": [schema_entry(spec, self.cfg) for spec in self.registry.admin()],
-            "discovery_limits": dict(LIMITS),
+            **{k: v for module in present(self.cfg) for k, v in module.settings_schema.items()},
         }
 
     def app_schema(self, key: dict) -> dict[str, Any]:
@@ -798,9 +798,8 @@ class SettingsService:
                 continue
             try:
                 parsed[key] = parse_value(spec, value)
-                if spec.value_type == 'discovery_root_list' and parsed[key] is not RESET:
-                    from .discovery_paths import WindowsDirectories
-                    parsed[key] = [i.path for i in WindowsDirectories(self.cfg).roots(parsed[key])]
+                if spec.normalize_change and parsed[key] is not RESET:
+                    parsed[key] = spec.normalize_change(self.cfg, parsed[key])
             except ValueError as e:
                 errors[key] = {"code": "invalid_value", "message": str(e)}
         return parsed, errors

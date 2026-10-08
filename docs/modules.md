@@ -67,6 +67,8 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     __init__.py runtime.py routes.py settings.py service.py
   runners/               remote transport, native pairing and Mac bundle (formerly harness/remote.py, mac_client.py)
     __init__.py runtime.py routes.py service.py mac_client.py
+  remote_control/        Claude Remote Control and owner-only folder discovery (formerly harness/remote_control.py)
+    __init__.py runtime.py routes.py settings.py service.py folder_discovery.py discovery_paths.py discovery_api.py
 ```
 
 Modules sit beside the core, not inside it, so stage (f) can move `harness/` to the new repository unchanged while
@@ -138,6 +140,21 @@ with personal context withhold it from Apps. These hooks contribute nothing by d
 ## What stage (b) leaves in the core
 
 These are names, not imports, and move with the config and storage split in stages (c) and (f):
+
+- Remote Control: `RemoteControlConfig`, discovery configuration, the `remote_control:` YAML section
+  (especially `remote_control.folders` in `harness.local.yaml`), installer/profile switch, access rules,
+  mandatory approval policy and settings audit redaction remain core names. YAML keys, registry keys,
+  API URLs and `harness remote-control ...` commands are unchanged; no deprecation is needed.
+  `harness.remote_control` becomes `harness_modules.remote_control.service`; `folder_discovery`,
+  `discovery_paths` and `discovery_api` also move into that package. The add-on owns services, tools,
+  routes, settings and validators, scopes, discovery limits and CLI rows. Absent packages contribute
+  none; present but disabled packages keep their settings and routes. Remote Control servers still
+  survive daemon shutdown. Module registration never launches a connection.
+
+  `Module.register_admin(app, mgr, require_admin)` registers owner-only admin operations and returns
+  inventory rows. `settings_validators` and `settings_change_validators` contribute registry checks;
+  `settings_schema` adds admin schema metadata. `SettingSpec.normalize_change(cfg, value)` validates
+  and canonicalizes only incoming changes, so startup setters remain independent of the filesystem.
 
 - Runners: `RunnerConfig`, the `runners:` YAML section and profile switch, remote project targets, token-file
   discovery, pairing-code database tables/methods, access rules and compatibility metadata remain core names.

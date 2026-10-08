@@ -26,7 +26,6 @@ MODULE_ENABLE_SECTIONS = {
     "web": "web",
     "endpoint": "endpoint",
     "gpu_guard": "gpu_guard",
-    "remote_control": "remote_control",
 }
 # Core switches the installer selects and nothing turns off at runtime.
 INSTALL_ONLY_MODULES = frozenset({"local_model"})

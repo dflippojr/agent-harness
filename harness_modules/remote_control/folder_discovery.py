@@ -18,12 +18,11 @@ import os
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 
-from .config import PROJECT_NAME
+from harness.modules import PROJECT_NAME
 from .discovery_paths import DiscoveryError, EXCLUDED, Identity, WindowsDirectories, beneath, key, lexical
-from .managed_config import Envelope, ManagedConfigError, ManagedStore, parse_envelope
+from harness.modules import Envelope, ManagedConfigError, ManagedStore, parse_envelope
 
-LIMITS = dict(visited_directories=20_000, candidates=500, seconds=30, errors=50,
-              active_scans=1, expiry_seconds=900)
+from . import LIMITS
 MARKERS = frozenset({'.git', 'pyproject.toml', 'package.json', 'cargo.toml', 'go.mod', 'pom.xml',
                      'settings.gradle', 'settings.gradle.kts', 'build.gradle', 'build.gradle.kts',
                      'cmakelists.txt', 'meson.build'})
@@ -440,7 +439,7 @@ class FolderDiscovery:
             return dict(removed=True)
 
     def view(self, scan):
-        from .remote_control import _norm_path, trusted_folders
+        from .service import _norm_path, trusted_folders
         with self._guard:
             configured = self.configured_paths()
             managed = {key(e['identity']['path']) for e in self.entries().values()}

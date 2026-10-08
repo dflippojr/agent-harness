@@ -50,7 +50,6 @@ SCOPES = {
     SESSIONS_ALL: "read every session, not only the app's own",
     "approvals": "approve or deny tool calls in the app's own sessions",
     "inference": "use the OpenAI/Anthropic-compatible inference endpoint (/v1)",
-    "remote_control": "start and stop Claude Code Remote Control servers in project folders",
     MODELS_WARM: "start loading the local model ahead of a chat (refused while the GPU or RAM guard says no)",
 }
 TOOL_NAME = re.compile(r"^[a-zA-Z]\w{2,48}$", re.ASCII)
@@ -607,7 +606,7 @@ async def api_root(request: Request):
                 "app_tools_only_backends": [b["name"] for b in (local_view(m), *backends) if b["app_tools_only"]], "context": True, "events": "sse",
                 **m.modules.features(),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
-                "remote_control": m.remote_control is not None, "browser_pairing": True,
+                "browser_pairing": True,
                 "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
             **await m.modules.app_root()}
 
@@ -1274,40 +1273,6 @@ async def events(ref: str, request: Request, after: int = 0, follow: bool = True
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "Referrer-Policy": "no-referrer"})
-
-
-@route_table.get("/api/v1/remote-control")
-async def app_rc_status(request: Request):
-    m = mgr(request)
-    key = auth(request, "remote_control")
-    if key.get("kind") == "member":
-        raise HarnessError(403, "members cannot use Remote Control")
-    return {"enabled": m.remote_control is not None,
-            "projects": m.remote_control.status() if m.remote_control else []}
-
-
-@route_table.post("/api/v1/remote-control/{project}")
-async def app_rc_launch(project: str, request: Request):
-    m = mgr(request)
-    key = auth(request, "remote_control")
-    if m.remote_control is None:
-        raise HarnessError(400, "Remote Control launches are disabled on this harness")
-    try:
-        return await m.remote_control.launch(project, started_by=f"app:{key['name']}")
-    except ToolError as e:
-        raise HarnessError(400, str(e))
-
-
-@route_table.post("/api/v1/remote-control/{project}/stop")
-async def app_rc_stop(project: str, request: Request):
-    m = mgr(request)
-    auth(request, "remote_control")
-    if m.remote_control is None:
-        raise HarnessError(400, "Remote Control launches are disabled on this harness")
-    try:
-        return await m.remote_control.stop(project)
-    except ToolError as e:
-        raise HarnessError(404, str(e))
 
 
 def all_scopes(cfg=None) -> dict[str, str]:

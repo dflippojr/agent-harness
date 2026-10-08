@@ -31,8 +31,7 @@ from pathlib import Path
 
 import psutil
 
-from .config import Config, RemoteControlConfig
-from .fileops import ToolError
+from harness.modules import Config, RemoteControlConfig, ToolError
 from .discovery_paths import Identity
 
 log = logging.getLogger("harness.remote_control")
