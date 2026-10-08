@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 
 from fastapi import FastAPI, Request
@@ -24,6 +25,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 
 from . import access as access_mod
+from . import audit_context
 from . import compat
 from .manager import HarnessError
 
@@ -236,6 +238,7 @@ def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS, 
         {"method": "GET", "path": PREFIX + "/accounts"},
         {"method": "POST", "path": PREFIX + "/accounts"},
         {"method": "GET", "path": PREFIX + "/accounts/audit"},
+        {"method": "GET", "path": PREFIX + "/audit"},
         {"method": "GET", "path": PREFIX + "/accounts/{user_id}"},
         {"method": "PATCH", "path": PREFIX + "/accounts/{user_id}"},
         {"method": "GET", "path": PREFIX + "/github-member-auth"},
@@ -260,15 +263,15 @@ def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS, 
 async def _apply_account_update(svc, actor: str, user_id: str, body: AccountUpdateRequest) -> dict:
     row = None
     if body.display_name is not None:
-        row = svc.rename(actor, user_id, body.display_name)
+        row = await asyncio.to_thread(svc.rename, actor, user_id, body.display_name)
     if body.login is not None:
-        row = svc.rebind_login(actor, user_id, body.login)
+        row = await asyncio.to_thread(svc.rebind_login, actor, user_id, body.login)
     if body.enabled is not None:
         row = await svc.set_enabled(actor, user_id, body.enabled)
     if body.disk_quota_bytes is not None:
-        row = svc.set_quota(actor, user_id, body.disk_quota_bytes)
+        row = await asyncio.to_thread(svc.set_quota, actor, user_id, body.disk_quota_bytes)
     if body.max_running is not None or body.max_queued is not None:
-        row = svc.set_concurrency(actor, user_id, body.max_running, body.max_queued)
+        row = await asyncio.to_thread(svc.set_concurrency, actor, user_id, body.max_running, body.max_queued)
     if row is None:
         row = svc.public_account(svc._require(user_id))
     return row
@@ -335,9 +338,12 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             raise HarnessError(404, "no App or device key has that id")
         return next(k for k in m.db.list_api_keys() if k["id"] == app_id)
 
-    def _actor(request: Request) -> str:
-        ident = getattr(request.state, "access", None)
-        return ident.user_id if ident is not None else "owner"
+    def _actor(request: Request, key: dict | None) -> str:
+        return _context(request, key).actor_id
+
+    def _context(request: Request, key: dict | None):
+        """Audit context for a request `require_admin` accepted: a validated bearer key wins over ambient identity."""
+        return audit_context.owner_context(key)
 
     def _accounts(request: Request):
         from .accounts import AccountService
@@ -350,14 +356,34 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.post(PREFIX + "/accounts", status_code=201)
     async def create_account(body: AccountCreateRequest, request: Request):
-        require_admin(request, mgr)
-        return _accounts(request).create(_actor(request), body.login, body.display_name,
-                                         body.disk_quota_bytes, body.max_running, body.max_queued)
+        key = require_admin(request, mgr)
+        return await asyncio.to_thread(_accounts(request).create, _context(request, key), body.login,
+                                       body.display_name, body.disk_quota_bytes, body.max_running, body.max_queued)
 
     @app.get(PREFIX + "/accounts/audit")
     async def account_audit(request: Request, limit: int = 200):
         require_admin(request, mgr)
-        return mgr(request).db.list_audit(limit)
+        return await asyncio.to_thread(mgr(request).db.list_audit, limit)
+
+    @app.get(PREFIX + "/audit")
+    async def audit_review(request: Request, limit: int = 200, before_id: int | None = None,
+                           actor_id: str | None = None, key_id: str | None = None, target_id: str | None = None,
+                           action: str | None = None, outcome: str | None = None, since: float | None = None,
+                           until: float | None = None):
+        """Owner-only review of every retained audit row, newest first, with a cursor (#467)."""
+        require_admin(request, mgr)
+        if not 1 <= limit <= 500:
+            raise HarnessError(400, "limit must be between 1 and 500")
+        if before_id is not None and before_id < 1:
+            raise HarnessError(400, "before_id must be a positive row id")
+        for name, value in (("since", since), ("until", until)):
+            if value is not None and not math.isfinite(value):
+                raise HarnessError(400, f"{name} must be a finite timestamp")
+        if since is not None and until is not None and since >= until:
+            raise HarnessError(400, "since must be earlier than until")
+        return await asyncio.to_thread(
+            mgr(request).db.audit_page, limit, before_id, actor_id=actor_id, key_id=key_id, target_id=target_id,
+            action=action, outcome=outcome, since=since, until=until)
 
     @app.get(PREFIX + "/accounts/{user_id}")
     async def get_account(user_id: str, request: Request):
@@ -367,10 +393,9 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.patch(PREFIX + "/accounts/{user_id}")
     async def update_account(user_id: str, body: AccountUpdateRequest, request: Request):
-        require_admin(request, mgr)
+        key = require_admin(request, mgr)
         svc = _accounts(request)
-        actor = _actor(request)
-        return await _apply_account_update(svc, actor, user_id, body)
+        return await _apply_account_update(svc, _context(request, key), user_id, body)
 
     # Issue #63: the owner switches member GitHub sign-in on or off, sees each member's coarse state, and can
     # erase a member's credential. The owner cannot connect, test, list repositories, or use it.
@@ -385,21 +410,21 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
     @app.put(PREFIX + "/github-member-auth")
     async def set_github_member_auth(body: GitHubMemberAuthRequest, request: Request):
         from .github_auth import GitHubAuthError
-        require_admin(request, mgr)
+        key = require_admin(request, mgr)
         try:
-            return await asyncio.to_thread(mgr(request).github_auth.set_enabled, _actor(request), body.enabled)
+            return await asyncio.to_thread(mgr(request).github_auth.set_enabled, _actor(request, key), body.enabled)
         except GitHubAuthError as e:
             raise HarnessError(e.status, str(e), code=e.code) from None
 
     @app.post(PREFIX + "/accounts/{user_id}/github-connection/reset")
     async def reset_member_github(user_id: str, body: GitHubResetRequest, request: Request):
         from .github_auth import GitHubAuthError
-        require_admin(request, mgr)
+        key = require_admin(request, mgr)
         if not body.confirm:
             raise HarnessError(400, "confirm the erase-only reset")
         _accounts(request)._require(user_id)
         try:
-            await asyncio.to_thread(mgr(request).github_auth.disconnect, user_id, actor_id=_actor(request))
+            await asyncio.to_thread(mgr(request).github_auth.disconnect, user_id, actor_id=_actor(request, key))
         except GitHubAuthError as e:
             raise HarnessError(e.status, str(e), code=e.code) from None
         return mgr(request).github_auth.owner_view()

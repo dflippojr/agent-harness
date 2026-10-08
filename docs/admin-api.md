@@ -117,6 +117,25 @@ disk used/quota, running/queued counts, last activity, and limits. It never incl
 repo URLs, diffs, or transcript excerpts. `GET /api/admin/v1/accounts/audit` is owner-only (365-day retention) and
 stores actor/target opaque ids, action, outcome, and timestamp — not prompts, diffs, tokens, or headers.
 
+`GET /api/admin/v1/audit` (`harness audit list`) is the complete owner review of the same table: `{items,
+next_before_id}`, newest first by immutable row id, `limit` 1-500 (default 200), exclusive `before_id`, exact
+`actor_id`, `key_id`, `target_id`, `action` and `outcome` filters, and `since` (inclusive) / `until` (exclusive)
+timestamps. `next_before_id` is the page's last id, or `null` once exhausted; rows inserted meanwhile never repeat
+or skip rows already read. Each row adds `actor_kind` (`owner`, `owner_key`, `member`, `system`, `unknown`),
+`key_id` (the validated owner bearer key, else empty), `source` (the server entry point, e.g. `admin_api`),
+`target_kind` and a small `metadata` object. Rows from before this field existed read `unknown`/empty; no history
+is guessed. Attribution comes only from what the server authenticated: a valid owner bearer key wins over the
+ambient Tailscale/localhost identity, every allowlisted owner login is `owner`, and distinct owner keys differ by
+`key_id`. Caller-supplied actor or source headers are ignored, and a rejected credential is never recorded.
+`metadata` is an allowlist per action (changed field names, numeric limits and their old/new values, booleans,
+stable reason codes); login and display-name values, secrets, paths, URLs and free text are never stored.
+
+Audit rows are inserted in the same transaction as the account change they describe, so a failed audit write
+(503 `audit_unavailable`) leaves the account unchanged. No route updates or deletes audit rows, and erasing a
+session or account does not cascade to them. Rows older than 365 days are pruned when a new row is inserted. The
+table is not tamper-evident: a host administrator can edit the SQLite file, and restoring a backup rolls the
+history back to that snapshot.
+
 The durable owner scope remains `user_id = owner`. SQLite stores non-secret account metadata only: never Tailscale
 session material, provider credentials, GitHub tokens, or Google tokens.
 
