@@ -8,14 +8,8 @@ for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "s
   imports[name] = await import(`../harness/web/lib/${name}.mjs`);
 }
 const { h, fill, append, kids } = imports.dom;
+const { Emitter, Node } = await import("./web_stub_dom.mjs");
 
-class Emitter {
-  constructor() { this.listeners = {}; }
-  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
-  removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter((f) => f !== fn); }
-  emit(type, event = {}) { for (const fn of [...(this.listeners[type] || [])]) fn(event); }
-}
-class Node extends Emitter {}
 class El extends Node {
   constructor(tag = "div") {
     super();

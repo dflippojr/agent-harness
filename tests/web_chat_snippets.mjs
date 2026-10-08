@@ -4,107 +4,17 @@ import { createContext } from "node:vm";
 import { md as renderMd } from "../harness/web/lib/markdown.mjs";
 import { snippetLanguage } from "../harness/web/lib/snippets.mjs";
 import { runApp } from "./web_app_loader.mjs";
+import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
 const fail = (msg) => { throw new Error(msg); };
 
-class Emitter {
-  constructor() { this._l = {}; }
-  addEventListener(type, fn) { (this._l[type] ||= []).push(fn); }
-  removeEventListener(type, fn) { this._l[type] = (this._l[type] || []).filter((f) => f !== fn); }
-  dispatchEvent(ev) {
-    for (const fn of [...(this._l[ev.type] || [])]) fn.call(this, { currentTarget: this, target: this, preventDefault() {}, ...ev });
-    return true;
-  }
-}
-
-class Node extends Emitter {}
-class El extends Node {
-  constructor(tag) {
-    super();
-    this.tagName = String(tag).toUpperCase();
-    this.childNodes = [];
-    this.attributes = {};
-    this.className = "";
-    this.hidden = false;
-    this.disabled = false;
-    this.value = "";
-    this.style = { setProperty() {}, removeProperty() {}, getPropertyValue() { return ""; } };
-    this.dataset = {};
-    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
-    this.parentNode = null;
-    this.options = [];
-    this._text = "";
-    this._html = null;
-  }
-  get isConnected() { return !!this.parentNode; }
-  get textContent() {
-    if (this.childNodes.length) return this.childNodes.map((c) => (typeof c === "string" ? c : c.textContent)).join("");
-    return this._text;
-  }
-  set textContent(v) { this._text = String(v); this.childNodes = []; this._html = null; }
-  get innerHTML() { return this._html ?? this.textContent; }
-  set innerHTML(v) { this._html = String(v); this._text = String(v); this.childNodes = []; }
-  append(...nodes) {
-    for (const n of nodes.flat()) {
-      if (n === null || n === undefined || n === false) continue;
-      if (n instanceof El) n.parentNode = this;
-      this.childNodes.push(n instanceof El ? n : String(n));
-    }
-  }
-  prepend(...nodes) { const old = this.childNodes; this.childNodes = []; this.append(...nodes); this.childNodes.push(...old); }
-  replaceChildren(...nodes) { this.childNodes = []; this.append(...nodes); }
-  remove() {
-    if (this.parentNode) { const i = this.parentNode.childNodes.indexOf(this); if (i !== -1) this.parentNode.childNodes.splice(i, 1); }
-    this.parentNode = null;
-  }
-  after(node) {
-    const siblings = this.parentNode.childNodes;
-    siblings.splice(siblings.indexOf(this) + 1, 0, node);
-    node.parentNode = this.parentNode;
-  }
-  click() { this.dispatchEvent({ type: "click" }); }
-  focus() {}
-  blur() {}
-  querySelector() { return null; }
-  querySelectorAll() { return []; }
-  setAttribute(k, v) {
-    this.attributes[k] = v;
-    if (k === "id") this.id = v;
-    if (k === "hidden" || k === "disabled") this[k] = true;
-  }
-  getAttribute(k) { return this.attributes[k] ?? null; }
-}
-
-const byId = {};
-const make = (tag, id) => { const el = new El(tag); el.id = id; byId[id] = el; return el; };
-
-const doc = new Emitter();
-doc.documentElement = new El("html");
-doc.body = new El("body");
-doc.hidden = false;
-doc.visibilityState = "visible";
-doc.getElementById = (id) => byId[id] || null;
-doc.querySelector = (sel) => (sel === 'link[rel="apple-touch-icon"]' || sel === 'link[rel="icon"]' ? new El("link") : sel === "#app" ? byId.app : null);
-doc.querySelectorAll = () => [];
-doc.createElement = (tag) => new El(tag);
-doc.createTextNode = (t) => String(t);
+const { byId, doc } = createDocument({ features: [], feature: "chat", focusables: false });
 doc.addEventListener = () => {};
-
-const feature = make("select", "feature-nav");
-feature.value = "chat";
-const drawer = make("nav", "nav-drawer");
-drawer.querySelector = () => null;
-for (const id of ["app", "title", "back", "conn", "profile-icon", "menu-btn", "drawer-scrim", "drawer-chats",
-  "drawer-profile-icon", "fab-host", "fab", "bar", "guest-banner", "toast"]) make(id === "app" ? "main" : "div", id);
 
 const CHAT = "chatab12cd";
 const loc = {
   href: "http://localhost/#/", origin: "http://localhost", hash: "#/", protocol: "http:", pathname: "/",
   replace(url) { this.hash = String(url).startsWith("#") ? String(url) : `#${url}`; },
-};
-const storage = () => {
-  const m = new Map();
-  return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
 };
 const jsonResp = (body, status = 200) => ({
   ok: status >= 200 && status < 300, status,
@@ -129,13 +39,7 @@ const fakeFetch = async (url, opts = {}) => {
 };
 
 const streams = [];
-class FakeEventSource {
-  constructor(url) { this.url = url; this.readyState = 1; this.listeners = {}; streams.push(this); }
-  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
-  close() {}
-  emit(type, data, seq) { for (const fn of this.listeners[type] || []) fn({ data: JSON.stringify({ seq, type, data }) }); }
-}
-FakeEventSource.CLOSED = 2;
+const FakeEventSource = fakeEventSource(streams);
 
 const win = new Emitter();
 Object.assign(win, {

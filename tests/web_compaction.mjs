@@ -1,140 +1,24 @@
 // Session-page VM: mask compaction must not crash summary notes or ctxUsed (#248).
 import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
+import { El as BaseEl, Emitter, Node, createDocument, fakeEventSource, storage, walk } from "./web_stub_dom.mjs";
 
 const fail = (msg) => { throw new Error(msg); };
 
-class Emitter {
-  constructor() { this._l = {}; }
-  addEventListener(type, fn) { (this._l[type] ||= []).push(fn); }
-  removeEventListener(type, fn) { this._l[type] = (this._l[type] || []).filter((f) => f !== fn); }
-  dispatchEvent(ev) {
-    for (const fn of [...(this._l[ev.type] || [])]) fn.call(this, { currentTarget: this, target: this, preventDefault() {}, ...ev });
-    return true;
-  }
-}
-
-class Node extends Emitter {}
-class El extends Node {
-  constructor(tag, attrs = {}) {
-    super();
-    this.tagName = String(tag).toUpperCase();
-    this.childNodes = [];
-    this.attributes = { ...attrs };
-    this.id = attrs.id || "";
-    this.hidden = false;
-    this.value = attrs.value || "";
-    this.href = attrs.href || "";
-    this.type = attrs.type || "";
-    this.disabled = false;
-    this.options = [];
-    this.style = {
-      _p: {},
-      setProperty(k, v) { this._p[k] = v; },
-      removeProperty(k) { delete this._p[k]; },
-      getPropertyValue(k) { return this._p[k] || ""; },
-    };
-    this.dataset = {};
-    this.offsetHeight = 48;
+class El extends BaseEl {
+  constructor(tag, attrs) {
+    super(tag, attrs);
     this.scrollTop = 0;
     this.scrollHeight = 1200;
     this.clientHeight = 800;
-    this._text = "";
-    this._html = null;
-    this.parentNode = null;
-    this._className = "";
-    this.classList = {
-      _s: new Set(),
-      add: (c) => { this.classList._s.add(c); this._syncClass(); },
-      remove: (c) => { this.classList._s.delete(c); this._syncClass(); },
-      toggle: (c, force) => {
-        const on = force === undefined ? !this.classList._s.has(c) : !!force;
-        if (on) this.classList.add(c); else this.classList.remove(c);
-        return on;
-      },
-      contains: (c) => this.classList._s.has(c),
-    };
-    if (attrs.class) this.className = attrs.class;
   }
-  _syncClass() { this._className = [...this.classList._s].join(" "); }
-  get className() { return this._className; }
-  set className(v) {
-    this._className = String(v || "");
-    this.classList._s = new Set(this._className.split(/\s+/).filter(Boolean));
-  }
-  get isConnected() { return !!this.parentNode; }
-  get textContent() {
-    if (this.childNodes.length) return this.childNodes.map((c) => (typeof c === "string" ? c : c.textContent)).join("");
-    return this._text;
-  }
-  set textContent(v) { this._text = String(v); this.childNodes = []; this._html = null; }
-  get innerHTML() { return this._html ?? this.textContent; }
-  set innerHTML(v) { this._html = String(v); this._text = String(v); this.childNodes = []; }
-  append(...nodes) {
-    for (const n of nodes.flat()) {
-      if (n === null || n === undefined || n === false) continue;
-      if (n instanceof El) n.parentNode = this;
-      this.childNodes.push(n instanceof El ? n : String(n));
-    }
-  }
-  prepend(...nodes) { const old = this.childNodes; this.childNodes = []; this.append(...nodes); this.childNodes.push(...old); }
-  replaceChildren(...nodes) { this.childNodes = []; this.append(...nodes); }
-  remove() {
-    if (this.parentNode) {
-      const i = this.parentNode.childNodes.indexOf(this);
-      if (i !== -1) this.parentNode.childNodes.splice(i, 1);
-    }
-    this.parentNode = null;
-  }
-  click() { this.dispatchEvent({ type: "click" }); }
-  focus() {}
-  blur() {}
-  querySelector() { return null; }
-  querySelectorAll() { return []; }
-  setAttribute(k, v) {
-    this.attributes[k] = v;
-    if (k === "id") this.id = v;
-    if (k === "hidden" || k === "disabled") this[k] = true;
-    if (k === "class") this.className = v;
-  }
-  getAttribute(k) { return this.attributes[k] ?? null; }
 }
 
-const walk = (node, pred, out = []) => {
-  if (!(node instanceof El)) return out;
-  if (pred(node)) out.push(node);
-  for (const c of node.childNodes) walk(c, pred, out);
-  return out;
-};
-
-const byId = {};
-const make = (tag, id, extra = {}) => {
-  const el = new El(tag, { id, ...extra });
-  if (id) byId[id] = el;
-  return el;
-};
-
-const feature = make("select", "feature-nav");
-for (const value of ["agents", "chat", "jobs", "images"]) {
-  const opt = new El("option", { value });
-  opt.value = value;
-  feature.options.push(opt);
-}
-feature.value = "agents";
-
-const doc = new Emitter();
-doc.documentElement = new El("html");
-doc.documentElement.scrollHeight = 1200;
+const { byId, make, doc, feature } = createDocument({ ElClass: El, features: ["agents", "chat", "jobs", "images"] });
 doc.documentElement.clientHeight = 800;
 doc.documentElement.scrollTop = 0;
-doc.documentElement.style = { setProperty() {}, removeProperty() {}, getPropertyValue() { return ""; } };
-doc.documentElement.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
-doc.documentElement.dataset = {};
 doc.body = make("body");
 doc.scrollingElement = doc.documentElement;
-doc.hidden = false;
-doc.visibilityState = "visible";
-doc.getElementById = (id) => byId[id] || null;
 doc.querySelector = (sel) => {
   if (sel === 'link[rel="apple-touch-icon"]' || sel === 'link[rel="icon"]') return new El("link");
   if (sel === "#app") return byId.app;
@@ -155,24 +39,6 @@ doc.querySelectorAll = (sel) => {
   }
   return [];
 };
-doc.createElement = (tag) => new El(tag);
-doc.createTextNode = (t) => String(t);
-
-make("main", "app");
-make("h1", "title");
-make("button", "back");
-make("span", "conn");
-make("a", "profile-icon");
-make("button", "menu-btn");
-make("nav", "nav-drawer");
-make("div", "drawer-scrim");
-make("div", "drawer-chats");
-make("span", "drawer-profile-icon");
-make("div", "fab-host");
-make("a", "fab");
-make("header", "bar");
-make("div", "guest-banner");
-make("div", "toast");
 
 const loc = {
   href: "http://localhost/#/",
@@ -186,10 +52,6 @@ const loc = {
     this.hash = next;
     this.href = `http://localhost/${next}`;
   },
-};
-const storage = () => {
-  const m = new Map();
-  return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
 };
 const jsonResp = (body, status = 200) => ({
   ok: status >= 200 && status < 300, status,
@@ -217,25 +79,7 @@ const fakeFetch = async (url) => {
 };
 
 const sources = [];
-class FakeEventSource extends Emitter {
-  constructor(url) {
-    super();
-    this.url = String(url);
-    this.readyState = 1;
-    this.onopen = null;
-    this.onerror = null;
-    sources.push(this);
-    setTimeout(() => { if (this.readyState === 1) this.onopen?.(); }, 0);
-  }
-  close() { this.readyState = FakeEventSource.CLOSED; }
-  emit(type, data, seq, extra = {}) {
-    const msg = { data: JSON.stringify({ seq, type, data, ...extra }) };
-    for (const fn of [...(this._l[type] || [])]) fn.call(this, msg);
-  }
-}
-FakeEventSource.CONNECTING = 0;
-FakeEventSource.OPEN = 1;
-FakeEventSource.CLOSED = 2;
+const FakeEventSource = fakeEventSource(sources);
 
 const win = new Emitter();
 Object.assign(win, {

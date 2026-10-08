@@ -9,6 +9,8 @@ export class Emitter {
     for (const fn of [...(this._l[ev.type] || [])]) fn.call(this, { currentTarget: this, target: this, preventDefault() {}, ...ev });
     return true;
   }
+  // Lightweight dispatch for the lib/ harness: no event decoration, no `this` binding.
+  emit(type, event = {}) { for (const fn of [...(this._l[type] || [])]) fn(event); }
 }
 
 export class Node extends Emitter {}
