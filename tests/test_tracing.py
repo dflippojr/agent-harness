@@ -69,9 +69,9 @@ def _gaps(parent, children) -> list[tuple[str, str, int]]:
     return out
 
 
-def _assert_tiled(parent, children) -> None:
+def _assert_tiled(parent, children, *, resume_boundary=None) -> None:
     """`children` account for all of `parent`'s time: each lies inside it, siblings don't overlap, and no gap
-    between them is longer than MAX_GAP_NS."""
+    between them is longer than MAX_GAP_NS, except an explicitly identified resume boundary."""
     assert children, f"{parent.name} has no child spans"
     ordered = sorted(children, key=lambda c: c.start_time)
     for c in ordered:
@@ -79,8 +79,20 @@ def _assert_tiled(parent, children) -> None:
         assert parent.start_time - EDGE_NS <= c.start_time and c.end_time <= parent.end_time + EDGE_NS,             f"{c.name} outside {parent.name}"
     for a, b in zip(ordered, ordered[1:]):
         assert a.end_time <= b.start_time + EDGE_NS, f"{a.name} overlaps {b.name} under {parent.name}"
+    allowed = None
+    if resume_boundary is not None:
+        idle, setup = resume_boundary
+        assert parent.name == "session" and idle.name == "idle" and setup.name == "run_setup"
+        # Require both spans and their adjacency: removing setup must not exempt idle -> turn instead.
+        assert any(a is idle and b is setup for a, b in zip(ordered, ordered[1:]))
+        allowed = (idle.end_time, setup.start_time)
     gaps = _gaps(parent, ordered)
-    assert all(ms * 1_000_000 <= MAX_GAP_NS for _, _, ms in gaps), (parent.name, gaps)
+    cursor = parent.start_time
+    for child in ordered:
+        gap = (cursor, child.start_time)
+        assert gap == allowed or child.start_time - cursor <= MAX_GAP_NS, (parent.name, gaps)
+        cursor = max(cursor, child.end_time)
+    assert parent.end_time - cursor <= MAX_GAP_NS, (parent.name, gaps)
 
 
 # --- off by default ---
@@ -296,7 +308,8 @@ def test_scripted_session_produces_one_covering_trace(tmp_path):
     assert ckpt.attributes["harness.bytes"] >= 1 and "harness.skipped_reason" not in ckpt.attributes
 
 
-def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path):
+@pytest.mark.parametrize("delay_resume", [False, True], ids=["normal", "delayed-resume"])
+def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch, delay_resume):
     """A daemon restart mid-approval resolves the pending call under a `turn`, not straight under `session`."""
     cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "path": "secret/*", "action": "ask", "reason": "x"}])
     script = Script([
@@ -327,6 +340,16 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path):
 
     async def second(sid):
         m, exporter = daemon()
+        if delay_resume:
+            emit = m.bus.aemit
+
+            async def delayed_emit(session_id, event, data):
+                if event == "resumed":
+                    # Force the recovery boundary beyond the tolerance, even on CI/coverage.
+                    await asyncio.sleep(MAX_GAP_NS / 1_000_000_000 + 0.1)
+                await emit(session_id, event, data)
+
+            monkeypatch.setattr(m.bus, "aemit", delayed_emit)
         await m.start()
         await asyncio.sleep(0.2)
         m.decide(sid, None, approve=True)
@@ -350,7 +373,18 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path):
     root = next(sp for sp in after if sp.name == "session")
     children = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == root.context.span_id]
     assert not {c.name for c in children} & {"execute_tool", "approval_wait", "sandbox_exec"}
-    _assert_tiled(root, children)
+    idle = next(sp for sp in after if sp.name == "idle")
+    setup = next(sp for sp in after if sp.name == "run_setup")
+    # session_run records idle before recovery emits the async resumed event. Scheduling that event is
+    # allowed to take time; it is not model/tool work. Only this exact boundary may exceed the tolerance.
+    boundary = (idle, setup)
+    _assert_tiled(root, children, resume_boundary=boundary)
+    if delay_resume:
+        with pytest.raises(AssertionError):
+            _assert_tiled(root, children)  # injected delay really exceeded the original tolerance
+    for missing in (idle, setup):
+        with pytest.raises(AssertionError):
+            _assert_tiled(root, [c for c in children if c is not missing], resume_boundary=boundary)
 
 
 def test_sentinel_never_reaches_a_span(tmp_path):
