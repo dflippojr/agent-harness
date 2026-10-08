@@ -89,8 +89,8 @@ def test_baseline_is_frozen_at_45():
     assert BASELINE_VERSION == 45 and len(LEGACY_COLUMNS) == 45
     # the real steps are valid and gap-free from 0046: 0046_session_taint (#262), 0047_canary_results (#265),
     # 0048_canary_note (#316), 0049_checkpoints (#261), 0050_app_retention (#330), 0051_end_users (#365),
-    # 0052_member_api_keys (#393)
-    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52]
+    # 0052_member_api_keys (#393), 0053_audit_context (#467)
+    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52, 53]
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):

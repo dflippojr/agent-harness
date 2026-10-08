@@ -231,6 +231,7 @@ The CLI covers these as well.
 | Action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
 | Household audit log | GET | `/accounts/audit` | `harness accounts audit` |
+| Retained audit log (cursor, filters) | GET | `/audit` | `harness audit list` |
 | One member | GET | `/accounts/{user_id}` | `harness accounts show <user_id>` |
 | Apps waiting to be erased | GET | `/apps/erasures` | `harness apps erasures` |
 | App retention | PUT | `/apps/{app_id}/retention` | `harness apps retention <app_id>` |

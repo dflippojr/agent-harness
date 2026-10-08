@@ -2095,24 +2095,69 @@ class Database:
                               (time.time(), user_id))
 
     @_writes
-    def insert_audit(self, actor_id: str, target_id: str, action: str, outcome: str, detail: str = "") -> None:
+    def insert_audit(self, actor_id: str, target_id: str, action: str, outcome: str, detail: str = "", *,
+                     context=None, target_kind: str = "", metadata: dict | None = None) -> None:
+        """Append one audit row (joins the caller's transaction). `context` is an AuditContext built after
+        authentication; without one the row carries no credential/source attribution."""
+        from . import audit_context
+        ctx = context if context is not None else audit_context.AuditContext(actor_id)
+        now = time.time()
         with self.lock:
             self.conn.execute(
-                "INSERT INTO account_audit (ts, actor_id, target_id, action, outcome, detail) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (time.time(), actor_id, target_id, action, outcome, detail),
+                "INSERT INTO account_audit (ts, actor_id, target_id, action, outcome, detail, actor_kind, key_id, "
+                "source, target_kind, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, ctx.actor_id or actor_id, target_id, action, outcome, detail, ctx.actor_kind, ctx.key_id,
+                 ctx.source, target_kind, audit_context.dump_metadata(action, metadata)),
             )
-            cutoff = time.time() - 365 * 86400
-            self.conn.execute("DELETE FROM account_audit WHERE ts < ?", (cutoff,))
+            # Retention (365 days) is applied here, on insertion; nothing else deletes audit rows.
+            self.conn.execute("DELETE FROM account_audit WHERE ts < ?", (now - 365 * 86400,))
 
     @_reads
     def list_audit(self, limit: int = 200) -> list[dict]:
         with self.lock:
             rows = self.conn.execute(
                 "SELECT id, ts, actor_id, target_id, action, outcome, detail FROM account_audit "
-                "ORDER BY ts DESC LIMIT ?", (max(1, min(limit, 500)),)
+                "ORDER BY ts DESC, id DESC LIMIT ?", (max(1, min(limit, 500)),)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    @_reads
+    def audit_page(self, limit: int = 200, before_id: int | None = None, *, actor_id: str | None = None,
+                   key_id: str | None = None, target_id: str | None = None, action: str | None = None,
+                   outcome: str | None = None, since: float | None = None, until: float | None = None) -> dict:
+        """Newest-first page by immutable id; `next_before_id` is the last id of a full page that has more rows."""
+        limit = max(1, min(int(limit), 500))
+        where, args = [], []
+        if before_id is not None:
+            where.append("id < ?")
+            args.append(before_id)
+        for column, value in (("actor_id", actor_id), ("key_id", key_id), ("target_id", target_id),
+                              ("action", action), ("outcome", outcome)):
+            if value is not None:
+                where.append(f"{column} = ?")
+                args.append(value)
+        if since is not None:
+            where.append("ts >= ?")
+            args.append(since)
+        if until is not None:
+            where.append("ts < ?")
+            args.append(until)
+        sql = ("SELECT id, ts, actor_id, actor_kind, key_id, source, target_id, target_kind, action, outcome, "
+               "detail, metadata FROM account_audit")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self.lock:
+            rows = self.conn.execute(sql + " ORDER BY id DESC LIMIT ?", [*args, limit + 1]).fetchall()
+        more = len(rows) > limit
+        items = []
+        for row in rows[:limit]:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item["metadata"] or "{}")
+            except ValueError:
+                item["metadata"] = {}
+            items.append(item)
+        return {"items": items, "next_before_id": items[-1]["id"] if more and items else None}
 
     @_reads
     def get_member_project(self, user_id: str, slug: str) -> dict | None:
