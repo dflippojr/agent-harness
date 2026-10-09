@@ -95,6 +95,7 @@ backends:
     # oauth_token_file: D:/Agents/harness/secrets/claude-oauth-token
     # oauth_token_apps: []
     mcp: true                     # harness tools over MCP via a per-session relay sidecar (#300)
+    # tool_mode: builtin          # builtin | split (#427): split keeps the token out of the tool sandbox; see docs/hosted-cli-split-mode.md
   codex:
     enabled: true
     image: agent-harness-cli:1

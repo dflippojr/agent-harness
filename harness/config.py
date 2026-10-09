@@ -81,6 +81,9 @@ class SandboxConfig:
     idle_stop_seconds: float = 0   # stop the container after this long without a command (0 = never, #428)
 
 
+TOOL_MODES = ("builtin", "split")
+
+
 @dataclass
 class BackendConfig:
     """A hosted CLI used as a session backend (Phase 8a)."""
@@ -104,6 +107,10 @@ class BackendConfig:
     stop_at_utilization: float = 0.0
     # Claude Code and Codex: expose the daemon's tools over MCP through a per-session relay sidecar (#300, #373).
     mcp: bool = True
+    # "builtin": the CLI runs its own shell and file tools next to its token (the default). "split" (#427): the CLI
+    # container has the token and no workspace; shell and file work goes through the harness MCP server onto the
+    # session sandbox. Claude Code and Codex only, and it needs `mcp`.
+    tool_mode: str = "builtin"
 
 
 @dataclass
@@ -905,6 +912,11 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     homelab = _load_homelab(raw, selected)
     runners = _load_runners(raw, selected)
     backends = {name: BackendConfig(**(spec or {})) for name, spec in (raw.get("backends") or {}).items()}
+    for name, backend in backends.items():
+        if backend.tool_mode not in TOOL_MODES:
+            raise ValueError(f"backends.{name}.tool_mode must be one of {', '.join(TOOL_MODES)}")
+        if backend.tool_mode == "split" and (name not in ("claude", "codex") or not backend.mcp):
+            raise ValueError(f"backends.{name}.tool_mode split needs the claude or codex backend with mcp on")
     listen = raw.get("listen") or {}
     budgets = raw.get("budgets") or {}
     compaction = raw.get("compaction") or {}

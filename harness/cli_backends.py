@@ -30,6 +30,22 @@ NODE_USE_ENV_PROXY = "NODE_USE_ENV_PROXY=1"
 EMPTY_MCP_CONFIG = '{"mcpServers": {}}'
 
 
+# Claude Code built-ins that don't touch the environment, kept in split mode (#427). Everything else (Bash, Read, Edit,
+# Write, Glob, Grep, WebFetch, ...) is off: the harness MCP server does that work on the session sandbox.
+CLAUDE_SPLIT_TOOLS = "Task,TodoWrite"
+SPLIT_NOTE = ("\n\nYour shell and file tools are the harness tools mcp__harness__run_shell, read_file, write_file, "
+              "edit_file, search and list_files. They act on the project workspace; this container has no "
+              "workspace of its own.")
+
+
+def workspace_args(workspace: Path, split: bool) -> list[str]:
+    """The docker flags for the workspace. In split mode (#427) the CLI container has none: it keeps the provider
+    token and the state volume, and the files only exist in the session sandbox."""
+    if split:
+        return ["-w", WORKSPACE]
+    return ["--mount", f"type=bind,source={workspace},target=/workspace", "-w", WORKSPACE]
+
+
 class CliBackendError(Exception):
     """The provider CLI exited or stopped speaking valid JSONL. `code` is a stable failure code when there is one."""
 
@@ -75,12 +91,13 @@ class ClaudeSession:
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = ""):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False):
         self.session_id = session_id
         self.app_id = app_id  # the session's domain: "" for Web, else its App (#371)
         self.end_user = end_user  # the App's end user whose own login this session runs on (#365)
         self.workspace = workspace.resolve()
         self.tools_only = tools_only  # an App-tools-only session (#329): no built-in tools, only the MCP server's
+        self.split = split and not tools_only  # split mode (#427): token here, shell and files over MCP, no workspace
         self.backend = backend
         self.sandbox = sandbox
         self.system_prompt = system_prompt
@@ -112,8 +129,7 @@ class ClaudeSession:
             "-e", NO_PROXY,
             "-e", NODE_USE_ENV_PROXY,
             *cli_domains.docker_args("claude", self.backend, self.app_id, token=self._uses_token(), end_user=self.end_user),
-            "--mount", f"type=bind,source={self.workspace},target=/workspace",
-            "-w", WORKSPACE,
+            *workspace_args(self.workspace, self.split),
             "--memory", self.sandbox.memory,
             "--cpus", str(self.sandbox.cpus),
             "--pids-limit", str(self.sandbox.pids),
@@ -123,12 +139,15 @@ class ClaudeSession:
             "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
             "--permission-mode", "default" if self.tools_only else self.backend.permission_mode, "--model", self.model,
-            "--system-prompt" if self.tools_only else "--append-system-prompt", self.system_prompt,
+            "--system-prompt" if self.tools_only else "--append-system-prompt",
+            self.system_prompt + (SPLIT_NOTE if self.split else ""),
         ]
         if self.tools_only:
             # "" turns off every built-in tool (Bash, Read, Edit, WebFetch, Task...); MCP tools stay. Skills and slash
             # commands go too. can_use_tool still sees every call and denies anything but the App's tools.
             args += ["--tools", "", "--disable-slash-commands"]
+        elif self.split:
+            args += ["--tools", CLAUDE_SPLIT_TOOLS]
         if self.backend_session_id:
             args += ["--resume", self.backend_session_id]
         # Only the harness server, or none: --strict-mcp-config ignores any .mcp.json the workspace brings along and
@@ -277,6 +296,10 @@ CODEX_TOOLS_ONLY_OVERRIDES = (
         "skill_mcp_dependency_install")),
 )
 # Thread items an App-tools-only Codex session may produce. Anything else means a built-in tool ran: the run stops.
+# Split mode (#427) turns off the same tools, except the plan tool, which touches no environment. Lost in split mode:
+# view_image, apply_patch (edit_file replaces it), Codex's own multi-agent and web_search (web_search comes from the
+# harness server).
+CODEX_SPLIT_OVERRIDES = tuple(o for o in CODEX_TOOLS_ONLY_OVERRIDES if o != "tools.update_plan.enabled=false")
 CODEX_TOOLS_ONLY_ITEMS = ("userMessage", "hookPrompt", "agentMessage", "plan", "reasoning", "contextCompaction",
                           "mcpToolCall")
 # Answers Codex takes for an MCP tool call approval (an MCP elicitation), as opposed to command and file approvals.
@@ -289,7 +312,7 @@ class CodexSession:
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = ""):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False):
         self.session_id = session_id
         self.app_id = app_id
         self.end_user = end_user
@@ -299,6 +322,7 @@ class CodexSession:
         self.mcp = mcp
         self.mcp_token = mcp_token
         self.tools_only = tools_only
+        self.split = split and not tools_only  # split mode (#427), as for Claude Code
         self.backend = backend
         self.sandbox = sandbox
         self.system_prompt = system_prompt
@@ -323,6 +347,11 @@ class CodexSession:
         self.active_turn_id = ""
         self._turn_requests: set[int] = set()
 
+    @property
+    def no_environment(self) -> bool:
+        """Whether Codex starts with no environment, and so no shell, apply_patch or view_image."""
+        return self.tools_only or self.split
+
     def command(self) -> list[str]:
         if self._command_override is not None:
             return list(self._command_override)
@@ -335,8 +364,7 @@ class CodexSession:
             "-e", NO_PROXY,
             "-e", NODE_USE_ENV_PROXY,
             *cli_domains.docker_args("codex", self.backend, self.app_id, end_user=self.end_user),
-            "--mount", f"type=bind,source={self.workspace},target=/workspace",
-            "-w", WORKSPACE,
+            *workspace_args(self.workspace, self.split),
             "--memory", self.sandbox.memory,
             "--cpus", str(self.sandbox.cpus),
             "--pids-limit", str(self.sandbox.pids),
@@ -351,8 +379,8 @@ class CodexSession:
         ]
         if self.mcp:
             args += codex_mcp_overrides()
-        if self.tools_only:
-            for override in CODEX_TOOLS_ONLY_OVERRIDES:
+        if self.tools_only or self.split:
+            for override in (CODEX_TOOLS_ONLY_OVERRIDES if self.tools_only else CODEX_SPLIT_OVERRIDES):
                 args += ["-c", override]
         env_names = (["OPENAI_API_KEY"] if self.api_key else []) + ([TOKEN_ENV] if self.mcp else [])
         for name in env_names:  # by name only: the value comes from the docker client's environment
@@ -451,16 +479,19 @@ class CodexSession:
 
     async def initialize(self, prompt: str) -> None:
         init = {"clientInfo": {"name": "agent-harness", "version": "0.1.0"}}
-        if self.tools_only:  # `environments` is an experimental field in 0.154.0; nothing else here opts in
+        if self.no_environment:  # `environments` is an experimental field in 0.154.0; nothing else here opts in
             init["capabilities"] = {"experimentalApi": True}
         await self._request("initialize", init)
         await self._write({"method": "initialized"})
         common = {
             "cwd": WORKSPACE, "model": self.model, "approvalPolicy": self._approval_policy(),
-            "approvalsReviewer": "user", "sandbox": "read-only" if self.tools_only else "workspace-write",
+            "approvalsReviewer": "user", "sandbox": "read-only" if self.no_environment else "workspace-write",
         }
         if self.backend_session_id:
             result = await self._request("thread/resume", {**common, "threadId": self.backend_session_id})
+        elif self.split:
+            result = await self._request("thread/start", {
+                **common, "developerInstructions": self.system_prompt + SPLIT_NOTE, "environments": []})
         elif self.tools_only:
             # The App's prompt replaces Codex's coding-agent instructions, as --system-prompt does for Claude Code.
             result = await self._request("thread/start", {**common, "baseInstructions": self.system_prompt,
@@ -481,7 +512,7 @@ class CodexSession:
     def _approval_policy(self) -> str:
         # Codex itself refuses every MCP call under "never", so an App-tools-only session always asks (the harness
         # answers from AppToolsPolicy; nobody is prompted).
-        if self.tools_only:
+        if self.no_environment:
             return "on-request"
         return self.backend.permission_mode if self.backend.permission_mode in ("on-request", "never") else "on-request"
 
@@ -489,7 +520,7 @@ class CodexSession:
         params = {"threadId": self.backend_session_id, "input": [{"type": "text", "text": content}],
                   "cwd": WORKSPACE, "model": self.model, "effort": self.backend.effort,
                   "approvalPolicy": self._approval_policy(), "approvalsReviewer": "user"}
-        if self.tools_only:
+        if self.no_environment:
             # No environment for this turn and the ones after it: no shell, apply_patch, view_image or
             # request_permissions. Every turn/start says so again, so a resumed thread can't get one back.
             params["environments"] = []

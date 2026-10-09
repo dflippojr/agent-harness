@@ -26,7 +26,7 @@ from .cli_backends import (CODEX_TOOLS_ONLY_ITEMS, ELICITATION, ClaudeSession, C
                            CursorSession)
 from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit, module_effective
 from .db import Database, finish_then_cancel
-from .mcp_server import MCP_BACKENDS, McpRelay, McpServer, McpTokens
+from .mcp_server import MCP_BACKENDS, SPLIT_TOOLS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
 from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED,
                      AppToolsPolicy, ChatPolicy, Decision, Policy, mcp_harness_tool)
@@ -325,6 +325,22 @@ class Runner:
             schemas = schemas + self.app_tools.schemas(s)
         return schemas
 
+    def split_mode(self, s: dict) -> bool:
+        """Whether this hosted session runs in split mode (#427): the CLI keeps its token and has no workspace, and its
+        shell and file tools are the harness MCP server's, running on the session sandbox."""
+        backend = self.cfg.backends.get(s.get("backend", "local"))
+        return (backend is not None and backend.tool_mode == "split" and s.get("backend") in MCP_BACKENDS
+                and s.get("kind", "agent") == "agent" and bool(s.get("workspace")))
+
+    def split_workspace(self, s: dict) -> Workspace:
+        """The session's tools for split mode. A hosted CLI's model isn't one of the configured local models, so the
+        file tools size their reads by the default model's context."""
+        known = s["model"] in self.cfg.models
+        return self.workspace(s if known else {**s, "model": self.cfg.default_model})
+
+    def split_schemas(self, s: dict) -> list[dict]:
+        return [t for t in self.split_workspace(s).schemas() if t["function"]["name"] in SPLIT_TOOLS]
+
     def mcp_tool_schemas(self, sid: str) -> list[dict]:
         """The daemon tools a hosted Claude Code or Codex session may call over MCP: web, session search, memory
         library and images as enabled for its project and app, plus app-registered tools. Never remote control or
@@ -335,6 +351,8 @@ class Runner:
         served = [k for k in (self.web_overrides.get(sid, self.web),) if k is not None]
         served += [kit for gate, kit in self._module_toolkits() if gate.mcp]
         schemas = [schema for kit in self.daemon_toolkits(s) if kit in served for schema in kit.schemas()]
+        if self.split_mode(s):
+            schemas = self.split_schemas(s) + schemas
         if self.app_tools is not None and s.get("app_tools") and session_user_id(s) == OWNER_USER_ID:
             schemas = schemas + self.app_tools.schemas(s)
         return schemas
@@ -377,7 +395,31 @@ class Runner:
         self._taint_from_result(s, name, args)  # MCP results are untrusted content like the native tools' (#262)
         return (output.text if isinstance(output, ToolOutput) else str(output)), True
 
+    async def _split_call(self, s: dict, name: str, args: dict) -> str:
+        """A split-mode shell or file call: the same Workspace tools and Sandbox.exec the native loop runs, with the
+        same argument checks and output bound."""
+        ws = self.split_workspace(s)
+        schema = next(t for t in ws.schemas() if t["function"]["name"] == name)
+        try:
+            output = await ws.call(name, validate_args(schema, args))
+        except TypeError as e:
+            raise ToolError(f"bad arguments for {name}: {e}") from None
+        if name == "run_shell":
+            limits = resolve_tool_output(self.cfg, self.project_for(s))
+            output = truncate_middle(output, clamp_tool_limit(args.get("max_chars"), limits.run_shell_chars,
+                                                              limits.run_shell_chars_max))
+        elif name in ("write_file", "edit_file") and args.get("path"):
+            run = self.db.get_session(s["id"])["run"]
+            touched = list(run.get("files_touched") or [])
+            path = str(args["path"]).replace("\\", "/")
+            if path not in touched:
+                run["files_touched"] = (touched + [path])[:agent_state.FILES_MODIFIED_MAX]
+                self.db.update_session(s["id"], run=run)
+        return output
+
     async def _dispatch_mcp(self, s: dict, call_id: str, name: str, args: dict):
+        if name in SPLIT_TOOLS and self.split_mode(s):
+            return await self._split_call(s, name, args)
         if self.app_tools is not None and name in self.app_tools.names(s):
             return await self.app_tools.call(s, call_id, name, args)
         kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
@@ -954,6 +996,12 @@ class Runner:
         if backend_name in MCP_BACKENDS and backend.mcp and self.mcp_tool_schemas(sid):
             extra = {"mcp": self.mcp_relay_factory(session_id=sid, backend=frozen, server=self.mcp_server),
                      "mcp_token": self.mcp_tokens.mint(sid)}
+        if self.split_mode(s):
+            # Never fall back to the CLI's own shell next to its token: without the MCP server the run refuses.
+            if not extra:
+                raise CliBackendError(f"{backend_name} split mode needs the harness MCP server, which is off for this "
+                                      "session", "split_unavailable")
+            extra["split"] = True
         if s.get("kind") == TOOLS_ONLY:
             # Never run a hosted CLI with its built-in tools here: Claude Code gets --tools "", Codex no environment
             # and every other built-in tool off, and only the App's tools over MCP (the approval path still denies
@@ -1438,11 +1486,12 @@ class Runner:
     def _codex_tools_only_guard(cli: CodexSession, item: dict) -> None:
         """An App-tools-only Codex session starts with every built-in tool off. Should one run anyway (a Codex
         change the pinned-version notes missed), stop the run rather than let it go on."""
-        if not cli.tools_only:
+        if not (cli.tools_only or cli.split):
             return
         kind = str(item.get("type") or "")
         if kind not in CODEX_TOOLS_ONLY_ITEMS or (kind == "mcpToolCall" and item.get("server") != MCP_SERVER):
-            raise CliBackendError(f"Codex used a built-in tool ({kind}) in an App-tools-only session; stopped")
+            mode = "an App-tools-only" if cli.tools_only else "a split-mode"
+            raise CliBackendError(f"Codex used a built-in tool ({kind}) in {mode} session; stopped")
 
     async def _codex_request_approval(self, sid: str, cli: CodexSession, event: dict, params: dict,
                                       tool_names: dict[str, str], recovered: bool) -> None:
