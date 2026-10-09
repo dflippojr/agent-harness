@@ -334,16 +334,20 @@ def _is_bare(repo: Path) -> bool:
     return git(repo, "rev-parse", "--is-bare-repository", trusted=True).out.strip() == "true"
 
 
-def prepare(project: Project, workspace: Path, sid: str, shared: bool = False) -> dict:
+def prepare(project: Project, workspace: Path, sid: str, shared: bool = False, base_only: bool = False) -> dict:
     """Clone the project into the (empty) workspace and create the session branch. `shared` (local sources only)
-    borrows the source's objects through git alternates instead of copying them."""
+    borrows the source's objects through git alternates instead of copying them. `base_only` clones just the base
+    branch through the git transport, so the workspace holds neither other branches nor their objects."""
     src = project.repo
     if not is_url(src) and not Path(src).is_dir():
         raise GitError(f"project {project.name}: repository {src} doesn't exist", 400)
     workspace.mkdir(parents=True, exist_ok=True)
     if any(workspace.iterdir()):
         raise GitError(f"workspace {workspace} is not empty")
-    args = ["clone", "--shared" if shared else "--no-hardlinks", "--config", "core.autocrlf=false"]  # LF checkout
+    if base_only:
+        args = ["clone", "--no-local", "--single-branch", "--config", "core.autocrlf=false"]
+    else:
+        args = ["clone", "--shared" if shared else "--no-hardlinks", "--config", "core.autocrlf=false"]  # LF checkout
     if project.base_branch:
         args += ["--branch", project.base_branch]
     result = git(None, *args, "--", src, str(workspace), check=False)
@@ -363,13 +367,15 @@ def prepare(project: Project, workspace: Path, sid: str, shared: bool = False) -
     return {"branch": branch, "base_branch": base_branch, "base_commit": base_commit}
 
 
-def refresh_origin(project: Project, workspace: Path) -> str:
+def refresh_origin(project: Project, workspace: Path, base_branch: str = "") -> str:
     """Fetch the source so `origin/<base>` is current when the agent starts a run. Returns an error or ''.
 
-    Fetches from `project.repo`, not the workspace's `origin` URL, which the agent can rewrite.
+    Fetches from `project.repo`, not the workspace's `origin` URL, which the agent can rewrite. With `base_branch`,
+    only that branch is fetched.
     """
-    result = git(workspace, "fetch", "--quiet", "--prune", "--", project.repo, "+refs/heads/*:refs/remotes/origin/*",
-                 timeout=300, check=False)
+    refspec = (f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}" if base_branch
+               else "+refs/heads/*:refs/remotes/origin/*")
+    result = git(workspace, "fetch", "--quiet", "--prune", "--", project.repo, refspec, timeout=300, check=False)
     return "" if result.code == 0 else result.text[-500:]
 
 

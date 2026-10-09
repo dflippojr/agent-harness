@@ -164,7 +164,7 @@ Require a live app token (`ha-`) and the related scope. An app value may only na
 | --- | --- |
 | `app.default_backend` / `app.default_model` / `app.default_effort` | used only when a session request omits them |
 | `app.sessions.max_turns` / `app.sessions.max_completion_tokens` | capped by owner limits (`capped_by`) |
-| `app.capabilities` | subset of `web`, `search`, `memory_library`, `remote_control`, `homelab` (and `images` while that module is present) already granted, installed, and allowed |
+| `app.capabilities` | subset of `web`, `search`, `memory_library`, `remote_control`, `homelab` (and `images` while that module is present) already granted, installed, and allowed. Unset means every capability the token's scopes grant; `memory_library` and `homelab` need their own scope, which only the owner sets |
 | `app.notify.completion` | `inherit` or `never` |
 
 Owner, device, runner, guest, and anonymous credentials cannot impersonate app configuration.

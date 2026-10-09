@@ -935,6 +935,8 @@ const APP_SCOPES = {
   inference: "Use the inference endpoint",
   remote_control: "Start and stop Claude Remote Control in a project folder",
   "models:warm": "Start loading the local model ahead of a chat",
+  memory_library: "Read the memory library and propose edits to it",
+  homelab: "Use homelab tools (logs, service config, metrics) in homelab projects",
 };
 
 function appsCard(me) {

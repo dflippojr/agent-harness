@@ -442,6 +442,9 @@ class SettingsService:
         }
 
     def _effective_app_value(self, spec: SettingSpec, configured: Any, key: dict) -> tuple[Any, str | None]:
+        if spec.key == KEY_APP_CAPABILITIES and configured is None:
+            # Unset means everything the owner granted this token, never more than its scopes allow.
+            return sorted(self._allowed_app_capabilities(key)), None
         if configured is None:
             return configured, None
         checks = {
@@ -503,9 +506,7 @@ class SettingsService:
         mapping = {
             "web": ("sessions", "web"),
             "search": ("sessions", "search"),
-            "memory_library": ("sessions", "memory_library"),
             "remote_control": ("remote_control", "remote_control"),
-            "homelab": ("sessions", "homelab"),
         }
         from .modules import present
         for module in present(self.cfg):  # an add-on's capability needs its scope and its switch

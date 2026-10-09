@@ -470,9 +470,9 @@ def test_live_app_settings_discriminator_is_the_token_not_the_row():
     assert frozen_app_defaults(narrowed) == narrowed
 
 
-def test_never_patched_app_keeps_inherited_tools_and_notifications(tmp_path):
+def test_never_patched_app_keeps_granted_tools_and_notifications(tmp_path):
     """An app that never PATCHed /api/v1/config has no app_settings row; sessions still
-    inherit project tools and completion notifications."""
+    inherit the project tools its scopes grant, and completion notifications."""
     from harness.config import Project
     from harness_modules.notifications.service import Notifier
 
@@ -494,9 +494,10 @@ def test_never_patched_app_keeps_inherited_tools_and_notifications(tmp_path):
         assert created.status_code == 201, created.text
         s = manager.db.get_session(created.json()["id"])
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
-        assert {"web_search", "memory_index", "generate_image", "session_search"} <= kit_tools
+        assert {"web_search", "generate_image", "session_search"} <= kit_tools
+        assert "memory_index" not in kit_tools  # memory_library is its own scope
         ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
-        assert "restart_service" in ws_tools
+        assert "restart_service" not in ws_tools  # so is homelab
         note = Notifier(manager.cfg, manager.db).build({
             "session_id": s["id"], "type": "run_finished",
             "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},
@@ -532,9 +533,10 @@ def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
         s = manager.db.get_session(sid)
         assert s["app_defaults"] == {}
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
-        assert {"web_search", "memory_index", "generate_image", "session_search"} <= kit_tools
+        assert {"web_search", "generate_image", "session_search"} <= kit_tools
+        assert "memory_index" not in kit_tools
         ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
-        assert "restart_service" in ws_tools
+        assert "restart_service" not in ws_tools
         note = Notifier(manager.cfg, manager.db).build({
             "session_id": sid, "type": "run_finished",
             "data": {"status": "done", "stop_reason": "final_message", "answer": "hi"},
