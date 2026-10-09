@@ -98,6 +98,7 @@ jobs:
         run: |
           if ("${{ github.event_name }}" -eq "pull_request") {
             git fetch --depth=1 origin "${{ github.base_ref }}"
+            if ($LASTEXITCODE -ne 0) { throw "git fetch of the PR base failed" }
             python scripts/docs/build.py --check --base FETCH_HEAD
           } else {
             python scripts/docs/build.py --check
