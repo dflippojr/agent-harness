@@ -448,6 +448,7 @@ class Project:
     tool_output: dict = field(default_factory=dict)  # optional overlay on Config.tool_output
     verify: list = field(default_factory=list)       # list[VerifyCheck]; empty → verify returns an error
     mcp_servers: list[dict] = field(default_factory=list)
+    setup: str = ""         # shell command run (with network) whenever the sandbox container is created (#429)
 
 
 @dataclass
@@ -583,6 +584,7 @@ def _project_from_spec(name: str, spec: dict | None, *, owner_id: str = "owner",
         managed=managed,
         tool_output=spec.get("tool_output") if isinstance(spec.get("tool_output"), dict) else {},
         verify=_verify_checks(spec.get("verify")),
+        setup=str(spec.get("setup") or ""),
     )
 
 

@@ -1102,6 +1102,12 @@ class Database:
         return [_row(r) for r in rows]
 
     @_reads
+    def has_tool_result(self, sid: str) -> bool:
+        with self.lock:
+            return self.conn.execute("SELECT 1 FROM events WHERE session_id = ? AND type = 'tool_result' LIMIT 1",
+                                     (sid,)).fetchone() is not None
+
+    @_reads
     def pushed_heads(self, sid: str) -> list[str]:
         """The short heads a session's branch was pushed at, from its `review` events (issue #263)."""
         with self.lock:

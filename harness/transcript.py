@@ -157,6 +157,10 @@ def _r_gpu_resumed(at: str, d: dict, last_content: str) -> list[str]:
     return [f"> {at} · GPU free again after {d['seconds']} s; model reloading", ""]
 
 
+def _r_sandbox_setup(at: str, d: dict, last_content: str) -> list[str]:
+    return [f"> {at} · sandbox setup `{d['command']}` " + ("ok" if d["ok"] else f"failed: {d.get('detail', '')}"), ""]
+
+
 def _r_waiting_memory(at: str, d: dict, last_content: str) -> list[str]:
     return [f"> {at} · waiting for memory: {d['reason']} ({d.get('waiting_for', 'work')} held)", ""]
 
@@ -227,7 +231,7 @@ _RENDERERS = {
     "target_waiting": _r_target_waiting, "target_online": _r_target_online, "app_context": _r_app_context,
     "app_tool_call": _r_app_tool_call, "app_tool_result": _r_app_tool_result, "gpu_paused": _r_gpu_paused,
     "waiting_memory": _r_waiting_memory, "memory_recovered": _r_memory_recovered,
-    "gpu_resumed": _r_gpu_resumed, "workspace_ready": _r_workspace_ready, "branch_saved": _r_branch_saved,
+    "gpu_resumed": _r_gpu_resumed, "sandbox_setup": _r_sandbox_setup, "workspace_ready": _r_workspace_ready, "branch_saved": _r_branch_saved,
     "review": _r_review, "resumed": _r_resumed, "status": _r_status,
     "notes": _r_notes, "state": _r_state,
     "checkpoint": _r_checkpoint, "rewound": _r_rewound, "forked": _r_forked,

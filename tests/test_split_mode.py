@@ -106,7 +106,8 @@ def test_killed_hands_container_is_recreated_for_the_next_call(tmp_path, monkeyp
     box = sandbox_module.Sandbox("abc", tmp_path, SandboxConfig())
     assert asyncio.run(box.exec("echo one")) == (0, "ok")
     state["container"] = ""  # the hands container died mid-command
-    assert asyncio.run(box.exec("echo two")) == (0, "ok")
+    code, out = asyncio.run(box.exec("echo two"))
+    assert code == 0 and out.endswith("ok") and "environment recreated" in out  # the model is told (#429)
     assert state["created"] == 1 and commands == ["echo one", "echo two"]
 
 
