@@ -175,8 +175,33 @@ body.has-tabs { --tabbar-offset: calc(var(--tabbar-h) + env(safe-area-inset-bott
   color: var(--accent); text-decoration: none; cursor: pointer; min-width: 44px; min-height: 44px;
   display: inline-flex; align-items: center; justify-content: center;
 }
-.conn { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); opacity: .5; }
-.conn.live { background: var(--ok); opacity: 1; }
+/* Connection chip (#510): Live / Reconnecting / Offline in words. Inside a page (Back shown) a live connection shrinks to
+   its dot so the title keeps the room; any other state shows in full everywhere. */
+.conn {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px 0 9px; border-radius: 999px;
+  background: var(--panel-2); color: var(--muted); font-size: 0.75rem; font-weight: 600; white-space: nowrap;
+}
+.conn::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.conn[data-state="reconnecting"] { background: var(--warn-bg); color: var(--warn); }
+.conn[data-state="reconnecting"]::before { background: var(--warn); }
+.conn[data-state="offline"] { background: var(--bad-bg); color: var(--bad); }
+.conn[data-state="offline"]::before { background: var(--bad); }
+#bar.page .conn.live { gap: 0; padding: 0 6px; background: none; font-size: 0; }
+/* The same states inside an open session and on refreshing lists: a strip that says what is stale and since when. */
+.conn-strip, .stale-note {
+  display: flex; align-items: center; gap: 8px; min-height: 36px; margin: 8px 0 0; padding: 4px 4px 4px 12px;
+  border-radius: 10px; font-size: 0.8125rem; font-weight: 600;
+}
+.conn-strip { padding-right: 12px; background: var(--warn-bg); color: var(--warn); }
+.conn-strip::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.conn-strip.offline { background: var(--bad-bg); color: var(--bad); }
+.stale-note { margin-bottom: 8px; background: var(--panel-2); color: var(--muted); font-weight: 500; }
+.stale-note .stale-body { flex: 1 1 auto; min-width: 0; }
+.stale-note .stale-why { display: block; font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stale-note .stale-retry {
+  flex: none; min-width: 44px; min-height: 44px; padding: 0 10px; border: 0; border-radius: 8px; background: none;
+  color: var(--accent); font: inherit; font-weight: 600; cursor: pointer;
+}
 
 main { max-width: 760px; margin: 0 auto; padding: 12px 16px calc(120px + var(--tabbar-offset)); }
 

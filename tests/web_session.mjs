@@ -55,7 +55,9 @@ const find = (pred) => {
 };
 const chrome = find((n) => n.attrs?.class === "session-chrome")[0];
 assert.ok(chrome, "the sticky session chrome renders");
-assert.deepEqual(chrome.kids.map((k) => k.attrs.class), ["session-strip", "tabs session-tabs"]);
+// #510: the transcript adds a reconnecting strip (hidden until its stream drops) under the segmented control.
+assert.deepEqual(chrome.kids.map((k) => k.attrs.class), ["session-strip", "tabs session-tabs", "conn-strip"]);
+assert.equal(chrome.kids[2].attrs.hidden, true);
 assert.doesNotMatch(text(chrome), /Fix the bug/, "the title is not painted a second time");
 assert.match(text(chrome.kids[0]), /running .*scratch · local · m/);
 assert.deepEqual(chrome.kids[1].kids.map(text), ["Transcript", "Changes", "Info"]);
