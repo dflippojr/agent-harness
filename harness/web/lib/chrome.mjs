@@ -64,9 +64,23 @@ export function mountChrome({ els, browser, session }) {
     $fabHost.hidden = false;
   }
 
-  function toast(text, ms = 2600) {
+  // `action` ({ label, onClick }) adds a button such as Undo (#511); tapping it runs onClick and dismisses the toast.
+  function toast(text, ms = 2600, action = null) {
     const t = document.getElementById("toast");
     t.textContent = text;
+    t.classList.toggle("has-action", !!action);
+    if (action) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "toast-action";
+      btn.textContent = action.label;
+      btn.addEventListener("click", () => {
+        clearTimeout(toast.timer);
+        t.hidden = true;
+        action.onClick();
+      });
+      t.append(" ", btn);
+    }
     t.hidden = false;
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => { t.hidden = true; }, ms);

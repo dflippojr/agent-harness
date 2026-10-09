@@ -383,7 +383,29 @@ body:has(.approval-sheet) main { padding-bottom: calc(360px + var(--tabbar-offse
   position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(max(var(--tabbar-offset), env(safe-area-inset-bottom, 0px)) + 90px);
   background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; z-index: 20; max-width: 90vw; font-size: 0.875rem;
 }
+#toast.has-action { display: flex; align-items: center; gap: 12px; width: max-content; padding: 4px 4px 4px 16px; }
+.toast-action {
+  min-height: 44px; padding: 0 14px; margin: 0; border: 0; border-radius: 8px; background: none;
+  color: inherit; font: inherit; font-weight: 700; cursor: pointer;
+}
 .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+
+/* jobs list (#511): attention groups, rows with an inline Enabled switch */
+.job-section { display: flex; align-items: center; gap: 6px; }
+.job-section .count {
+  min-width: 18px; padding: 0 6px; border-radius: 999px; background: var(--panel-2); color: var(--text);
+  font-size: 0.6875rem; line-height: 18px; text-align: center; letter-spacing: 0;
+}
+.job-section .count.warn { background: var(--warn-bg); color: var(--warn); }
+.card.job-list { padding: 0; overflow: hidden; cursor: default; }
+.job-row { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 11px 6px 11px 14px; border-top: 1px solid var(--line); }
+.job-row:first-child { border-top: 0; }
+.job-main { flex: 1; min-width: 0; color: inherit; text-decoration: none; }
+.job-main h3 { margin: 0; font-size: 1rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-main .meta { margin-top: 4px; gap: 4px 7px; }
+.job-main .preview { margin-top: 4px; font-size: 0.8125rem; -webkit-line-clamp: 1; }
+.job-row.paused h3, .job-row.paused .meta { color: var(--muted); }
+.job-switch { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 59px; min-height: 44px; cursor: pointer; }
 
 /* progress bars: compaction, prompt reading, context meter */
 .progress { position: relative; height: 6px; border-radius: 3px; background: var(--line, rgba(127,127,127,.25)); overflow: hidden; margin: 6px 0 4px; }

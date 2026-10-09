@@ -1,6 +1,7 @@
 // Scheduled jobs pages (#258): list, create/edit form and recent runs. The shell (DOM builder, api, router, header)
 // is injected by app.js so this module imports under plain Node and never reaches into another page.
-import { JOB_NOTIFY, CRON_PRESETS, fmtWhen, whenText, cronLabel, newJobDefaults } from "../lib/jobs.mjs";
+import { JOB_NOTIFY, CRON_PRESETS, JOB_GROUPS, fmtWhen, whenText, cronLabel, newJobDefaults, jobGroup, shortWhen, lastRunPill,
+  lastRunText, jobBody } from "../lib/jobs.mjs";
 import { ago } from "../lib/format.mjs";
 
 export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toast, go, route, isGuest, confirmGpuQueue, badge, jobStatusBadge, location, confirm }) {
@@ -12,17 +13,58 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toas
       append($app, h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
       return;
     }
-    append($app, ...jobs.map((j) => {
-      const last = j.recent[0];
-      const lastJobBadge = last?.job_status ? jobStatusBadge(last.job_status) : null;
-      return h("a", { class: "card", href: `#/jobs/${j.id}` },
-        h("h3", {}, `${j.enabled ? "" : "⏸ "}${j.name}`),
-        h("div", { class: "meta" }, h("span", {}, cronLabel(j.cron)), h("span", {}, j.project),
-          j.enabled ? h("span", {}, `next ${whenText(j.next_run_at)}`) : h("span", {}, "paused")),
-        last ? h("div", { class: "meta", style: "margin-top:4px" }, h("span", {}, `last run ${ago(last.created_at)}`),
-          badge(last.status), lastJobBadge) : null,
-        j.last_error ? h("div", { class: "preview bad" }, `Couldn't start: ${j.last_error}`) : null);
+    const list = h("div", { class: "job-groups" });
+    // Job id -> the enabled state being saved. paint() rebuilds every row, so a row mid-save takes its state from here.
+    const saving = new Map();
+    // #511: grouped by attention, each row with an inline Enabled switch; the row body still opens the full form.
+    const paint = () => fill(list, JOB_GROUPS.flatMap(([key, label]) => {
+      const rows = jobs.filter((j) => jobGroup(j) === key);
+      if (!rows.length) return [];
+      return [h("p", { class: "section-label job-section" }, label, h("span", { class: `count${key === "attention" ? " warn" : ""}` }, String(rows.length))),
+        h("div", { class: "card job-list" }, rows.map(jobRow))];
     }));
+
+    function jobRow(j) {
+      const last = j.recent?.[0];
+      const pill = j.enabled ? lastRunPill(last) : ["", "Paused"];
+      const next = j.enabled && j.next_run_at ? `Next ${shortWhen(j.next_run_at)}` : null;
+      const toggle = h("input", { type: "checkbox", class: "switch", role: "switch", "aria-label": `${j.name} enabled`,
+        disabled: isGuest() || saving.has(j.id) });
+      toggle.checked = saving.has(j.id) ? saving.get(j.id) : !!j.enabled;
+      toggle.addEventListener("change", () => setEnabled(j, toggle.checked, true));
+      return h("div", { class: `job-row${j.enabled ? "" : " paused"}`, "data-job": j.id },
+        h("a", { class: "job-main", href: `#/jobs/${j.id}` },
+          h("h3", {}, j.name),
+          h("div", { class: "meta" }, h("span", {}, cronLabel(j.cron)), h("span", { "aria-hidden": "true" }, "·"), h("span", {}, j.project)),
+          pill || next ? h("div", { class: "meta" }, pill ? h("span", { class: `badge ${pill[0]}` }, pill[1]) : null,
+            last ? h("span", {}, lastRunText(last.created_at)) : null, next ? h("span", {}, next) : null) : null,
+          j.last_error ? h("div", { class: "preview bad" }, `Couldn't start: ${j.last_error}`) : null),
+        h("label", { class: "job-switch" }, toggle));
+    }
+
+    // PUT replaces the whole job, so re-read it first: an edit made elsewhere since the list loaded is kept.
+    async function setEnabled(j, enabled, undoable = false) {
+      if (saving.has(j.id)) return;
+      saving.set(j.id, enabled);
+      paint();
+      try {
+        const fresh = await api(`/jobs/${j.id}`);
+        if (fresh.enabled !== enabled) Object.assign(j, await api(`/jobs/${j.id}`, { method: "PUT", body: jobBody(fresh, { enabled }) }));
+        else Object.assign(j, fresh);
+      } catch (err) {
+        toast(err.message, 5000);
+        return;
+      } finally {
+        saving.delete(j.id);
+        paint();
+      }
+      if (undoable) list.querySelector(`[data-job="${j.id}"] .switch`)?.focus();  // keep keyboard focus on the row that moved
+      const said = `${j.name} ${enabled ? "resumed" : "paused"}`;
+      if (undoable) toast(said, 5000, { label: "Undo", onClick: () => setEnabled(j, !enabled) });
+      else toast(said);
+    }
+    paint();
+    append($app, list);
   }
 
   async function viewJob(id) {
@@ -84,7 +126,8 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toas
       [name, prompt, cron, preset, project, backend, model, notify, enabled].forEach((el) => { el.disabled = true; });
     }
     const body = () => ({ name: name.value, prompt: prompt.value, cron: cron.value, project: project.value,
-      backend: backend.value, model: backend.value === "local" ? model.value : "", notify: notify.value, enabled: enabled.checked });
+      backend: backend.value, model: backend.value === "local" ? model.value : "", notify: notify.value, enabled: enabled.checked,
+      ...(j.catch_up_minutes == null ? {} : { catch_up_minutes: j.catch_up_minutes }) });
     const save = h("button", { class: "btn primary", type: "submit" }, isNew ? "Create" : "Save");
     append($app, h("form", {
       onsubmit: async (e) => {
