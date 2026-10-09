@@ -10,7 +10,7 @@ The PWA manifest name and browser title are **Agent Harness Web**. Its short nam
 ## Navigation
 
 A bottom tab bar holds the primary sections: **Chat** (owner only), **Agents**, **Jobs**, **Images** and **Profile**.
-Household members see Agents and Profile only. The header shows the section title, the live-connection dot and a
+Household members see Agents and Profile only. The header shows the section title, the connection chip and a
 **Settings** gear (`#/settings`), which opens the Settings menu from any section. The owner's Actions (Resources,
 Accounts, Claude Remote Control, Disk) are listed at the end of that menu. Recent chats are listed on the Chat home.
 
@@ -21,6 +21,18 @@ left rail. Scheduled work is called **Jobs** everywhere; the old `#/tasks` links
 The Jobs list groups jobs as **Needs attention** (the last run ended ATTENTION, failed or waits on an approval),
 **Scheduled** and **Paused**. Each row has an **Enabled** switch that saves at once, through the same
 `PUT /api/admin/v1/jobs/{id}` the form uses, and offers Undo in the toast. Tapping the row opens the full form.
+
+## Connection state
+
+The header chip says **Live**, **Reconnecting** or **Offline**. It follows the app-wide event stream from Agent Harness
+Server: Reconnecting after the stream drops, Offline after four failed attempts in a row or as soon as the browser
+reports no network. The app keeps retrying in both states, with exponential backoff from 1 s up to 30 s and random
+jitter, and retries at once when the browser comes back online or the app returns to the foreground. Inside a page
+with Back, a live connection shrinks to its dot.
+
+An open session's transcript shows a strip under Transcript / Changes / Info while its own stream is down, with how long
+ago the last event arrived. When the Agents list or the recent chats fail to refresh, the list keeps what it shows and
+says **List may be stale**, when it last updated and why, with **Retry**.
 
 ## API boundary
 

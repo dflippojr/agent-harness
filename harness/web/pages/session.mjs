@@ -9,6 +9,7 @@ import { approvalDiffClass, diffLineClass } from "../lib/diff.mjs";
 import { md } from "../lib/markdown.mjs";
 import { withTaint } from "../lib/taint.mjs";
 import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
+import { sinceText } from "../lib/widgets.mjs";
 
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
@@ -44,7 +45,8 @@ async function viewSession(sid, tab, focusApproval) {
       onclick: () => go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true),
     }, name[0].toUpperCase() + name.slice(1))));
   const head = h("div", { class: "session-strip" });
-  append($app, h("div", { class: "session-chrome" }, head, tabs));
+  const sessionChrome = h("div", { class: "session-chrome" }, head, tabs);
+  append($app, sessionChrome);
   const jumps = bindSessionJumps();
   const pages = [];
   const fetchById = new Map();
@@ -104,6 +106,26 @@ async function viewSession(sid, tab, focusApproval) {
 
   const feed = h("div");
   append($app, feed);
+
+  // #510: while the transcript's stream is down, a strip under the segmented control says so and how long ago the last
+  // event arrived, instead of the old silent retry loop. It sits in the sticky chrome so it shows at any scroll position.
+  const connStrip = h("div", { class: "conn-strip", role: "status", hidden: true });
+  sessionChrome.append(connStrip);
+  let lastHeardAt = Date.now();
+  let streamState = "";
+  let connTick = null;
+  const paintConnStrip = () => {
+    const down = streamState === "reconnecting" || streamState === "offline";
+    connStrip.classList.toggle("offline", streamState === "offline");
+    connStrip.textContent = down ? `${streamState === "offline" ? "Offline" : "Reconnecting"} · last event ${sinceText(lastHeardAt)}` : "";
+    if (connStrip.hidden === down) {
+      connStrip.hidden = !down;
+      layoutBar();  // the sticky chrome changed height
+    }
+    if (down && !connTick) connTick = setInterval(paintConnStrip, 1000);
+    if (!down && connTick) { clearInterval(connTick); connTick = null; }
+  };
+  onLeave(() => clearInterval(connTick));
 
   // composer (owner only; guests may watch the live transcript)
   const input = h("textarea", { placeholder: "Message the agent…", rows: 1 });
@@ -584,6 +606,7 @@ async function viewSession(sid, tab, focusApproval) {
   const tracked = {};
   for (const type of SESSION_EVENT_TYPES) {
     tracked[type] = (e) => {
+      lastHeardAt = Date.now();
       const persisted = e.seq !== null && e.seq !== undefined;
       if (persisted) {
         if (e.seq <= lastSeq) return;
@@ -598,7 +621,7 @@ async function viewSession(sid, tab, focusApproval) {
   onLeave(openStream(() => (isGuest() && !agentHarnessWeb.token
     ? agentHarnessWeb.url(`/sessions/${encodeURIComponent(sid)}/events?after=${lastSeq}`, "legacy")
     : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked,
-    { authorized: !!agentHarnessWeb.token }));
+    { authorized: !!agentHarnessWeb.token, onState: (next) => { streamState = next; paintConnStrip(); } }));
   if (composer) onLeave(() => composer.remove());
   onLeave(() => { for (const a of approvals.values()) a.sheet.remove(); });
   onLeave(closeViewer);

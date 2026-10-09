@@ -98,6 +98,18 @@ assert.deepEqual(renamed.at(-1), ["agents", "New name", { page: true }]);
 assert.equal(title.hidden, false);
 assert.ok(input.removed);
 
+// A save that resolves after the page left leaves the shared #title to the next page's setHeader (review on #536).
+let active = true;
+ui.renameTitle(session, () => active);
+const late = title.next;
+late.value = "Later name";
+late.listeners.keydown({ key: "Enter", preventDefault() {} });
+active = false;
+title.hidden = true;  // the next page's setHeader hid it (a chat still loading)
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(title.hidden, true, "a late rename does not unhide the next page's title");
+title.hidden = false;
+
 leaves.forEach((fn) => fn());
 assert.ok(bar.kids[0].removed, "the menu leaves with the page");
 console.log("ok");
