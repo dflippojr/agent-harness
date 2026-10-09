@@ -79,11 +79,11 @@ def repo(tmp_path, monkeypatch):
     (tmp_path / "harness").mkdir()
     (tmp_path / "harness" / "fixture_routes.py").write_text(ROUTES, encoding="utf-8")
     (tmp_path / "docs" / "fragments").mkdir(parents=True)
-    readme = "x\n<!-- generated:begin readme-docs-index -->\nold\n<!-- generated:end readme-docs-index -->\n"
-    (tmp_path / "README.md").write_bytes(readme.encode())
-    for name, rel in FILES.items():
-        (tmp_path / rel).write_bytes(f"intro\n\n<!-- generated:begin {name} -->\nold\n<!-- generated:end {name} -->\n"
-                                     "\noutro\n".encode())
+    regions = {name: rel for name, rel in FILES.items()} | {n: t.file for n, t in build.TARGETS.items()}
+    for rel in sorted(set(regions.values())):
+        body = "".join(f"<!-- generated:begin {n} -->\nold\n<!-- generated:end {n} -->\n" for n, f in regions.items()
+                       if f == rel)
+        (tmp_path / rel).write_bytes(f"intro\n\n{body}\noutro\n".encode())
     monkeypatch.setattr(code_tables, "load_specs", lambda root: [spec()])
     return tmp_path
 

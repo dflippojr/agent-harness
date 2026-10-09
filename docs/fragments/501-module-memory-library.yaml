@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Memory library
+summary: personal memory tools, approved writes and frozen session profiles
+order: 70
+links:
+  - text: '`harness_modules/memory_library/`'
+    href: ../harness_modules/memory_library/

@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Homelab
+summary: allowlisted homelab tools
+order: 60
+links:
+  - text: '`harness_modules/homelab/`'
+    href: ../harness_modules/homelab/

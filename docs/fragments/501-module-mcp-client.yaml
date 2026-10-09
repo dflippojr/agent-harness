@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: MCP client
+summary: 'owner-pinned stdio MCP tools for the native loop (#260)'
+order: 130
+links:
+  - text: '`harness_modules/mcp_client/`'
+    href: ../harness_modules/mcp_client/
