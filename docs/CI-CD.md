@@ -129,6 +129,12 @@ conclusion follows the review verdict:
 | Every backend failed or gave no valid verdict, or the comment was not posted | `failure` | `Review did not complete` |
 | Run cancelled | `cancelled` | `Automated review cancelled` |
 
+The review has two parts under fixed headings. `## Findings` lists correctness bugs only; it alone sets the verdict, the
+check conclusion and the inline annotations. `## Style and structure (advisory)` lists at most five suggestions on naming,
+responsibilities, duplication, consistency with the neighbouring code and simplifications, judged against the repository's
+own lint and format configuration. It never changes the verdict or fails the check. Its items are written without the
+`path:line` form, and the annotation scanner also stops reading at this heading, so they cannot become annotations. A clean review can therefore still carry advisory suggestions.
+
 The check summary carries the posted comment, so findings are readable from the Checks tab. The workflow run itself
 stays green when the review merely has findings: a red run means the review machinery broke, a red check means the
 code has findings. The prompt requires the reviewer to end with exactly two lines, `REVIEW_VERDICT: CLEAN` or
@@ -141,7 +147,9 @@ commit carries the check again.
 The optional `backend` dispatch input accepts `auto`, `cursor`, `codex`, or `claude`. An explicit
 provider runs only that provider, which is useful for verification and deliberate quota steering. Omitting the input
 or selecting `auto` tries the comma-separated `REVIEW_BACKENDS` repository variable in order. If the variable is empty,
-the order defaults to `codex,claude,cursor`.
+the order defaults to `codex,claude`: GPT leads on purpose, because a reviewer from a different model family than the
+usual Claude author thinks differently about the code. Cursor stays a supported backend (list it explicitly) but is no
+longer in the default order.
 
 The runner falls through that ordered list when a CLI exits non-zero, returns no review, reports a recognizable
 rate-limit or quota error, or omits the required completion marker or verdict line after inspecting the diff. Both are
@@ -167,20 +175,44 @@ Set `REVIEW_BACKENDS` under repository **Settings > Secrets and variables > Acti
 `claude,codex,cursor` spends Claude quota first while retaining two fallbacks; changing the variable does not require a
 workflow edit.
 
+Resolution order is: an explicit `backend` input, then `REVIEW_BACKENDS` for `auto`, then the runner's
+`codex,claude` default. For each selected backend, its `REVIEW_MODEL_*` and `REVIEW_EFFORT_*` Actions variables
+override the workflow defaults. The runner validates those resolved environment values and passes them to the CLI;
+it does not replace them with another model or effort. Invoking the script directly without those environment
+values keeps the CLI's own model and effort defaults. A failed backend falls through to the next configured backend.
+
+For agent-harness PR #541, the earlier Sonnet review used these overrides. A read-only check on 2026-10-09 found
+all three variables below absent, so they no longer force the earlier choices. This PR does not change Actions
+variables; the owner controls them separately, and later changes take precedence over these defaults.
+The unset effects in the table describe this branch's workflow once it reaches `main`.
+
+| Variable | Earlier override and effect | Verified state on 2026-10-09 |
+| --- | --- | --- |
+| `REVIEW_BACKENDS` | `claude`: runs only Claude, with no Codex attempt or fallback | Unset: `auto` uses `codex,claude` |
+| `REVIEW_MODEL_CLAUDE` | `claude-sonnet-5`: pins Sonnet when Claude runs | Unset: workflow supplies `claude-opus-5-5` |
+| `REVIEW_MODEL_CODEX` | `gpt-6-luna`: pins Luna if Codex is selected | Unset: workflow supplies `gpt-6.1-sol` |
+
+Both effort variables were also absent at that check: the workflow supplies Codex `xhigh` and Claude `high`.
+These are this branch's workflow defaults; a dispatch before merge uses `main`'s workflow and review tooling.
+At that check, `main` still tried `codex,claude,cursor` and supplied no model or effort defaults, leaving those
+choices to the CLIs when the variables were unset.
+
 Optional `REVIEW_MODEL_CLAUDE`, `REVIEW_MODEL_CURSOR`, and `REVIEW_MODEL_CODEX` pin the model each backend CLI is asked
 to use (`--model` on `claude`, Cursor `agent`, and `codex exec`). When a variable is set, the runner passes that flag and
-the PR comment footer plus `model=` job output name it, for example `Automated review backend: **claude (claude-sonnet-5)**.`.
-When a variable is unset, that backend keeps the CLI default and the footer names only the backend. Values must match
+the PR comment footer plus `model=` job output name it, for example `Automated review backend: **claude (claude-opus-5-5)**.`.
+When a variable is unset, the workflow supplies a default model: `gpt-6.1-sol` for Codex and `claude-opus-5-5` for Claude
+(Cursor has none: it keeps the CLI default and the footer names only the backend). Values must match
 `[A-Za-z0-9][A-Za-z0-9._:+/\-]*`; anything else (spaces, quotes, leading dashes, shell metacharacters) fails closed
 before a backend runs.
 
 Optional `REVIEW_EFFORT_CLAUDE` and `REVIEW_EFFORT_CODEX` pin reasoning effort: `--effort <value>` on `claude`
 (`low`, `medium`, `high`, `xhigh`, `max`) and `-c model_reasoning_effort="<value>"` on `codex exec` (`low`, `medium`,
-`high`, `xhigh`). When set, the footer and a new `effort=` job output include it, for example
-`Automated review backend: **claude (claude-sonnet-5, medium)**.`. Unset or whitespace-only keeps the CLI default and the
-footer unchanged. Any other value fails closed before a backend runs, and all effort variables are validated up front
-even for backends not used. Cursor has no effort variable: choose effort through the model id (for example
-`cursor-grok-4.6-medium` in `REVIEW_MODEL_CURSOR`).
+`high`, `xhigh`, `max`). When set, the footer and a new `effort=` job output include it, for example
+`Automated review backend: **claude (claude-opus-5-5, high)**.`. Unset falls back to the workflow defaults, `xhigh` for
+Codex and `high` for Claude; a whitespace-only value keeps the CLI default and the footer unchanged. Any other value
+fails closed before a backend runs, and all effort variables are validated up front even for backends not used. Cursor
+has no effort variable: choose effort through the model id (for example `cursor-grok-4.6-medium` in
+`REVIEW_MODEL_CURSOR`).
 
 Optional `REVIEW_MAX_DIFF_BYTES` sets how many bytes of PR diff are embedded in the review prompt (default `204800`; accepted range `20480` to `2097152`, digits only). A larger cap covers more of a big PR but grows the prompt, so each review costs more tokens and risks exceeding the model's context; a smaller cap is cheaper but omits more. An invalid value fails closed before a backend runs. When the diff exceeds the cap, whole files are dropped by a fixed rule: source files are kept first, then tests, then docs, then lockfiles and generated or vendored output, in diff order within each tier; a file that does not fit is omitted even if a smaller later file still fits. The comment then opens with `PARTIAL REVIEW: reviewed N of M files (X of Y KB of diff). Not reviewed: <files>` instead of `Reviewed the full diff`, and the `<!-- agent-review: ... -->` marker is withheld so the next run reviews the whole PR instead of treating it as covered. A single file larger than the cap is always listed as not reviewed. Omitted files are not reviewed in additional passes; raise the cap to cover them.
 

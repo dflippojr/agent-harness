@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -56,7 +57,7 @@ $value | ConvertTo-Json -Compress
     assert result.returncode == 0, output(result)
     value = json.loads(result.stdout.strip())
     assert value == {
-        "default": ["codex", "claude", "cursor"],
+        "default": ["codex", "claude"],
         "configured": ["cursor", "codex", "claude"],
         "explicit": ["claude"],
     }
@@ -1226,9 +1227,11 @@ def test_workflow_exposes_backend_input_and_delegates_to_runner():
     assert "Review coverage (auto = incremental when safe)" in dispatch
     assert all(f"          - {name}" in dispatch.split("      mode:", 1)[1] for name in ("auto", "full"))
     assert "${{ vars.REVIEW_BACKENDS }}" in workflow
-    assert "${{ vars.REVIEW_MODEL_CLAUDE }}" in workflow
+    assert "${{ vars.REVIEW_MODEL_CLAUDE || 'claude-opus-5-5' }}" in workflow
     assert "${{ vars.REVIEW_MODEL_CURSOR }}" in workflow
-    assert "${{ vars.REVIEW_MODEL_CODEX }}" in workflow
+    assert "${{ vars.REVIEW_MODEL_CODEX || 'gpt-6.1-sol' }}" in workflow
+    assert "${{ vars.REVIEW_EFFORT_CLAUDE || 'high' }}" in workflow
+    assert "${{ vars.REVIEW_EFFORT_CODEX || 'xhigh' }}" in workflow
     assert "REVIEW_MODE: ${{ inputs.mode }}" in workflow
     assert ".\\.review-tooling\\ops\\review\\run-review.ps1" in workflow
     assert "-Mode $env:REVIEW_MODE" in workflow
@@ -1281,7 +1284,7 @@ def test_ci_docs_explain_backend_configuration_and_manual_verification():
     assert "`REVIEW_MODEL_CURSOR`" in docs
     assert "`REVIEW_MODEL_CODEX`" in docs
     assert "`--model`" in docs
-    assert "`codex,claude,cursor`" in docs
+    assert "`codex,claude`" in docs
     assert "`backend` dispatch input" in docs
     for backend in ("cursor", "codex", "claude"):
         assert f"gh workflow run review.yml -f pr_number=N -f backend={backend}" in docs
@@ -1350,7 +1353,7 @@ Write-ReviewResult -Result $result -OutputPath '{output_path}' -CoverageLine 'Re
 
     for backend, env_name, bad in (
         ("claude", "REVIEW_EFFORT_CLAUDE", "extreme"),
-        ("codex", "REVIEW_EFFORT_CODEX", "max"),
+        ("codex", "REVIEW_EFFORT_CODEX", "extreme"),
         ("codex", "REVIEW_EFFORT_CODEX", "high; x"),
     ):
         invalid = run_powershell(
@@ -1832,3 +1835,51 @@ Invoke-ReviewMain -Backend codex -ConfiguredBackends '' -Mode full -Workspace '{
     written = github_output.read_text(encoding="utf-8-sig")
     assert "backend=codex" in written
     assert "verdict=" in written
+
+
+def _review_prompt_text() -> str:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    block = workflow.split("REVIEW_PROMPT: |", 1)[1].split("        run: |", 1)[0]
+    return "\n".join(line.strip() for line in block.splitlines())
+
+
+def test_review_prompt_has_blocking_findings_and_advisory_style_sections():
+    prompt = _review_prompt_text()
+    assert "## Findings" in prompt
+    assert "## Style and structure (advisory)" in prompt
+    assert prompt.index("## Findings") < prompt.index("## Style and structure (advisory)")
+    assert "Correctness bugs only" in prompt
+    assert "This part sets the verdict" in prompt
+    assert "at most five suggestions" in prompt
+    assert "They never change the verdict or fail the check" in prompt
+    assert "never in the `path:line` form" in prompt
+    assert "advisory style and structure suggestions are never counted" in prompt
+    # The strict end-of-review contract is unchanged.
+    assert "`REVIEW_VERDICT: CLEAN`" in prompt
+    assert "`REVIEW_VERDICT: FINDINGS <n>`" in prompt
+    assert "`REVIEW_STATUS: COMPLETE`" in prompt
+
+
+def test_advisory_items_cannot_become_check_annotations():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    # The first `-match` in the scanner stops at the advisory heading; the second is the annotation pattern.
+    pattern = workflow.split("if ($line -match '", 2)[2].split("') {", 1)[0]
+    finding = "- `harness/web/app.js:42` The retry loop never stops when the server returns 500. Scenario: ..."
+    assert re.search(pattern, finding)
+    advisory = [
+        "- **Style** `harness/web/app.js` (near the new `load()` function): rename `d` to `delay_ms`.",
+        "**Structure** `harness/jobs.py` near line 42: the retry policy is duplicated in `harness/runner.py`.",
+        "1. **Style** `tests/test_x.py` (around line 7: the helper): prefer the shared fixture.",
+    ]
+    for line in advisory:
+        assert not re.search(pattern, line), line
+
+
+def test_annotation_scanner_stops_at_the_advisory_section():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    scanner = workflow.split("foreach ($line in (Get-Content -Encoding utf8 -LiteralPath 'review-output.md')) {", 1)[1]
+    stop = scanner.split("if ($line -match '", 1)[1].split("') { break }", 1)[0]
+    assert re.search(stop, "## Style and structure (advisory)")
+    assert re.search(stop, "### Style and structure")
+    assert not re.search(stop, "## Findings")
+    assert scanner.index("{ break }") < scanner.index("-match '^\s*(?:[-*+]|")

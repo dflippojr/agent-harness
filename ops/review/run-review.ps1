@@ -14,12 +14,12 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:KnownReviewBackends = @('cursor', 'codex', 'claude')
-$script:DefaultReviewBackends = @('codex', 'claude', 'cursor')
+$script:DefaultReviewBackends = @('codex', 'claude')
 $script:KnownReviewModes = @('auto', 'full')
 $script:ReviewModelPattern = '^[A-Za-z0-9][A-Za-z0-9._:+/\-]*$'
 $script:ReviewEffortValues = @{
     claude = @('low', 'medium', 'high', 'xhigh', 'max')
-    codex = @('low', 'medium', 'high', 'xhigh')
+    codex = @('low', 'medium', 'high', 'xhigh', 'max')
 }
 $script:DefaultMaxDiffBytes = 204800
 $script:MinMaxDiffBytes = 20480
