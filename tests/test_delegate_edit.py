@@ -362,7 +362,6 @@ def test_apply_is_decided_and_previewed_as_an_edit_of_each_file(tmp_path):
 
 
 def test_apply_rolls_back_earlier_files_and_raises_tool_error_when_a_write_fails(tmp_path, monkeypatch):
-    import builtins
     (tmp_path / "a.py").write_text("X = 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("Y = 1\n", encoding="utf-8")
     files = FileOps(tmp_path, 8000)
@@ -370,15 +369,15 @@ def test_apply_rolls_back_earlier_files_and_raises_tool_error_when_a_write_fails
     edits = [{"path": "a.py", "old_text": "X = 1", "new_text": "X = 2"},
              {"path": "b.py", "old_text": "Y = 1", "new_text": "Y = 2"}]
     _, proposal = delegate_edit.new_proposal(texts, edits, "k", "s")
-    real_open = builtins.open
+    real_write = files.write_replacing
 
-    def flaky(path, mode="r", *a, **kw):
-        if "w" in mode and Path(path).name == "b.py" and not flaky.failed:
+    def flaky(p, shown, data):
+        if Path(p).name == "b.py" and not flaky.failed:
             flaky.failed = True
             raise PermissionError("denied")
-        return real_open(path, mode, *a, **kw)
+        return real_write(p, shown, data)
     flaky.failed = False
-    monkeypatch.setattr(builtins, "open", flaky)
+    monkeypatch.setattr(files, "write_replacing", flaky)
     with pytest.raises(ToolError, match="rolled back"):
         delegate_edit.apply(files, proposal)
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "X = 1\n"
