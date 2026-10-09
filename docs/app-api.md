@@ -329,6 +329,29 @@ result = h.run("Read the context and save the three most important follow-ups as
 print(result.status, result.answer, notes)
 ```
 
+### Attach to an existing session
+
+A worker that restarts, or a second process that knows a session id, can pick up the current run instead of creating a
+new session:
+
+```python
+sid = h.create_session("Triage the inbox", tools=[save_note])["id"]   # save sid durably
+
+# later, possibly in another process
+result = Harness("http://127.0.0.1:8100", token="ha-...").attach(sid, tools=[save_note])
+print(result.status, result.answer)
+```
+
+`attach(sid, tools=None, on_event=None)` sends and creates nothing. It reads `last_event_seq` as its cursor, answers
+the calls still pending, streams events after that cursor and stops at the current run's `run_finished`, so an earlier
+run's finish is ignored. A session already `done`, `failed` or `cancelled` is returned immediately without running tools;
+call `send()` first for a follow-up. Replayed calls that were already answered are not executed. Supplying functions does
+not change the tool definitions the session froze at creation.
+
+Limits: only one App tool driver should own a session at a time. If a worker dies after an external side effect but
+before its result reaches the server, the call is still pending and runs again after attachment, so tools should be
+read-only or idempotent, or the App must reconcile its own side effects.
+
 `Harness.pair(url, code, origin)` redeems an owner-approved browser pairing code. `capabilities()` and `backends()`
 discover what Agent Harness Server can run; pass `backend="claude"`, `"codex"`, or `"cursor"` to `run()` / `create_session()`
 instead of the default `"local"`. `pending_approvals()` / `decide_approval()` expose native provider permission

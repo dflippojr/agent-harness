@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import httpx
 import pytest
@@ -107,3 +108,133 @@ def test_sdk_pair_binds_the_returned_client_to_the_approved_origin(monkeypatch):
     assert paired.origin == "https://app.example"
     assert made[0].headers == {"Origin": "https://app.example"}
     assert made[1].headers == {"Authorization": "Bearer ha-paired", "Origin": "https://app.example"}
+
+
+class FakeAttachServer:
+    """Synthetic session/tool/event responses for Harness.attach."""
+
+    def __init__(self, session, pending, events, results=None):
+        self.session = session
+        self.pending = pending
+        self.events = events
+        self.requests = []
+        self.results = results if results is not None else []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((request.method, request.url.path))
+        path = request.url.path
+        if path == "/api/v1/sessions/s1" and request.method == "GET":
+            return httpx.Response(200, json=self.session)
+        if path.endswith("/tool_calls") and request.method == "GET":
+            return httpx.Response(200, json=self.pending)
+        if "/tool_calls/" in path and request.method == "POST":
+            body = json.loads(request.content)
+            self.results.append((path.rsplit("/", 1)[1], body))
+            self.pending[:] = [c for c in self.pending if c["call_id"] != path.rsplit("/", 1)[1]]
+            return httpx.Response(200, json={})
+        if path.endswith("/events"):
+            after = int(request.url.params["after"])
+            body = "".join(f"data: {json.dumps(e)}\n\n" for e in self.events if e["seq"] > after)
+            return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+        return httpx.Response(404, json={"detail": "missing"})
+
+    def sdk(self):
+        sdk = Harness("https://daemon.example")
+        sdk.client.close()
+        sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(self.handler))
+        return sdk
+
+    def posts(self):
+        return [r for r in self.requests if r[0] == "POST"]
+
+
+def _call(call_id, name="echo", **args):
+    return {"call_id": call_id, "name": name, "args": args}
+
+
+def _attach_tools(log):
+    @sdk_module.tool("Echo", text={"type": "string"})
+    def echo(text: str) -> str:
+        log.append(text)
+        return f"echo {text}"
+
+    @sdk_module.tool("Boom")
+    def boom() -> str:
+        raise ValueError("bad")
+
+    return [echo, boom]
+
+
+def _active(seq=5):
+    return {"id": "s1", "status": "running", "last_event_seq": seq, "answer": ""}
+
+
+def test_attach_serves_pending_call_once_and_returns_final_session():
+    log = []
+    done = {"id": "s1", "status": "done", "last_event_seq": 8, "answer": "ok", "totals": {"prompt_tokens": 3}}
+    server = FakeAttachServer(_active(), [_call("c1", text="a")], [
+        {"seq": 4, "type": "run_finished", "data": {}},
+        {"seq": 6, "type": "app_tool_call", "data": _call("c1", text="a")},
+        {"seq": 7, "type": "app_tool_call", "data": _call("c2", "boom")},
+        {"seq": 8, "type": "run_finished", "data": {}},
+    ])
+    seen = []
+    with server.sdk() as sdk:
+        server.pending.append(_call("c2", "boom"))
+        original = server.handler
+
+        def handler(request):
+            if request.url.path.endswith("/events"):
+                server.session = done
+            return original(request)
+
+        sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(handler))
+        result = sdk.attach("s1", tools=_attach_tools(log), on_event=seen.append)
+    assert log == ["a"]
+    assert [r[0] for r in server.results] == ["c1", "c2"]
+    assert server.results[1][1]["ok"] is False and "ValueError" in server.results[1][1]["output"]
+    assert [e["seq"] for e in result.events] == [6, 7, 8] == [e["seq"] for e in seen]
+    assert result.answer == "ok" and result.usage == {"prompt_tokens": 3}
+    assert all("/messages" not in p and p != "/api/v1/sessions" for _, p in server.posts())
+
+
+def test_attach_skips_replayed_call_that_is_no_longer_pending_and_reports_unknown_tool():
+    log = []
+    server = FakeAttachServer(_active(), [_call("c2", "missing")], [
+        {"seq": 6, "type": "app_tool_call", "data": _call("c1", text="old")},
+        {"seq": 7, "type": "app_tool_call", "data": _call("c2", "missing")},
+        {"seq": 8, "type": "run_finished", "data": {}},
+    ])
+    with server.sdk() as sdk:
+        sdk.attach("s1", tools=_attach_tools(log))
+    assert log == []
+    assert [(r[0], r[1]["ok"]) for r in server.results] == [("c2", False)]
+    assert "unknown tool missing" in server.results[0][1]["output"]
+
+
+def test_attach_ignores_earlier_run_finish_and_returns_on_terminal_status_without_tools():
+    log = []
+    server = FakeAttachServer(_active(5), [], [
+        {"seq": 3, "type": "run_finished", "data": {}},
+        {"seq": 6, "type": "run_finished", "data": {}},
+    ])
+    with server.sdk() as sdk:
+        result = sdk.attach("s1", tools=_attach_tools(log))
+    assert [e["seq"] for e in result.events] == [6]
+
+    for status in ("done", "failed", "cancelled"):
+        server = FakeAttachServer({"id": "s1", "status": status, "last_event_seq": 2}, [_call("c1", text="x")], [])
+        with server.sdk() as sdk:
+            assert sdk.attach("s1", tools=_attach_tools(log)).status == status
+        assert server.requests == [("GET", "/api/v1/sessions/s1")] and log == []
+
+
+def test_attach_propagates_not_found_without_creating_anything():
+    server = FakeAttachServer(_active(), [], [])
+    server.session = None
+    with server.sdk() as sdk:
+        sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(
+            lambda r: httpx.Response(404, json={"detail": "nope"})))
+        with pytest.raises(HarnessError) as exc:
+            sdk.attach("s1")
+    assert exc.value.status == 404
