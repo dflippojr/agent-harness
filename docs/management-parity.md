@@ -1,9 +1,15 @@
 # Management parity: Agent Harness Web, the owner API and the CLI
 
-Agent Harness Web is an optional client (#334): every setting and management action it offers must also be
-possible from the [owner API](admin-api.md) (`/api/admin/v1`) and the Agent Harness CLI (`harness`, or
-`python -m harness.cli`). This page is the inventory. `tests/test_management_parity.py` reads it and fails when:
+**Every owner API route, and so every Hub action, has a CLI command.** The standalone Hub and Agent Harness Web
+administer the daemon only through the [owner API](admin-api.md) (`/api/admin/v1`), and installing either is
+optional, so an owner who declines them can still do everything from the Agent Harness CLI (`harness`, or
+`python -m harness.cli`). A new owner route ships with its row below and its CLI command (#544).
 
+Agent Harness Web is an optional client (#334): every setting and management action it offers is also an owner API
+operation with a CLI command. This page is the inventory. `tests/test_management_parity.py` reads it and fails when:
+
+- a route mounted under `/api/admin/v1` (core or an add-on module, including `Module.admin_paths`) has no row below,
+  or none of its rows has a CLI command that calls it, unless the test's short allowlist names it with a reason;
 - Web calls an endpoint (`api("…")` in `harness/web`) that no row below lists;
 - a row's endpoint is on the owner API but has no CLI command, or its CLI command calls something else;
 - a row with no CLI command names an owner API endpoint (only App API and browser sign-in routes may);
@@ -14,9 +20,10 @@ take more options than shown (`harness <command> --help`), and `--set key=value`
 field. The CLI authenticates like the rest of it: the paired client config's owner token, `HARNESS_TOKEN`, or the
 Tailscale/localhost owner identity. Commands print the API's JSON.
 
-Live streams aren't listed: `harness watch <ref>` follows a session's events (`/sessions/{ref}/events`); a chat
-reply can be read with `harness chats show <ref>` once it ends (Web streams `/chats/{ref}/events`); Web's global
-`/events` feed only refreshes its lists.
+The allowlist holds only the live streams Web uses to refresh and the older Web builds' `PUT` rename aliases: a chat
+reply can be read with `harness chats show <ref>` once it ends (Web streams `/chats/{ref}/events`), Web's global
+`/events` feed only refreshes its lists, and `PUT /sessions/{ref}` and `PUT /chats/{ref}` do what the `PATCH` the
+rename commands call does. `harness watch <ref>` follows a session's own event stream.
 
 ## Sessions and review
 
@@ -37,6 +44,7 @@ Pages: Sessions (`pages/sessions.mjs`), New task (`pages/new-task.mjs`), Session
 | Delete a template | DELETE | `/templates/{tid}` | `harness templates delete <tid>` |
 | Skills to include | GET | `/skills/enabled` | `harness skills enabled` |
 | Session view | GET | `/sessions/{ref}` | `harness show <ref>` |
+| Follow a session live | GET | `/sessions/{ref}/events` | `harness watch <ref>` |
 | Rename a session (PUT is the older servers' fallback) | PATCH, PUT | `/sessions/{ref}` | `harness sessions rename <ref> <title>` |
 | Send a follow-up | POST | `/sessions/{ref}/messages` | `harness send <ref> <message>` |
 | Cancel | POST | `/sessions/{ref}/cancel` | `harness cancel <ref>` |
@@ -224,9 +232,9 @@ Page: `pages/jobs.mjs`.
 | Run now | POST | `/jobs/{jid}/run` | `harness jobs run <jid>` |
 | Cron preview | GET | `/jobs/preview` | `harness jobs preview <cron>` |
 
-## Owner API operations with no Web page
+## Owner API operations (Hub and CLI)
 
-The CLI covers these as well.
+Web has no page for these; like every owner route, each has a CLI command.
 
 | Action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
