@@ -55,9 +55,9 @@ python scripts/docs/build.py --check --base origin/main   # what CI runs on a PR
    branch's fragments (always).
 
 So adding a fragment and leaving the region alone passes (region still equals main's output), a hand edit inside the
-markers fails, and running `build.py` yourself also passes. Without `--base` (on main, locally) only this tree's
-fragments count, so main stays in sync. The post-merge job (a separate issue) is what rewrites regions on main;
-PRs should add fragments only.
+markers fails, and running `build.py` yourself also passes. Without `--base` (locally) only this tree's
+fragments count. On main, CI runs `--check --fragments-only` (schema only) and `docs-regen.yml` rewrites the regions
+after each merge (see `docs/CI-CD.md`); PRs should add fragments only.
 
 ## Tables generated from code (#500)
 
@@ -79,6 +79,10 @@ installer-only, path-like, secret and per-backend defaults print `—`.
 `--check` lists each `TODO` as a `warning:` and still passes. It fails when a table disagrees with the code, with
 the same single-writer rule as fragments: on a **PR** (`--base`) a table may equal the base branch's committed text
 (the PR left it alone) or what the PR's code produces, so a code change does not have to touch the docs and parallel
-PRs do not conflict; a **hand edit** fails. On **main** (no `--base`, the post-merge run) the table must equal the
-code, so a stale table fails there and `python scripts/docs/build.py` fixes it. Prose around the tables stays
-hand-written.
+PRs do not conflict; a **hand edit** fails. On **main** CI runs `--check --fragments-only` (schema only), so a table
+that lags a just-merged code change never fails there; `docs-regen.yml` rewrites the regions after each merge. Locally,
+`python scripts/docs/build.py` regenerates them. Prose around the tables stays hand-written.
+
+The settings table imports the real registry, which needs only PyYAML for the import itself (the generator stubs
+`httpx`, which the config loader imports but this path never calls), so the regeneration job needs no extra
+dependency.

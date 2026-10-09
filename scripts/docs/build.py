@@ -220,12 +220,17 @@ def build(root: Path) -> list[str]:
     return changed
 
 
-def check(root: Path, base: str | None = None) -> list[str]:
-    """Return problems: invalid fragments, or a region that matches no allowed rendering."""
+def check(root: Path, base: str | None = None, fragments_only: bool = False) -> list[str]:
+    """Return problems: invalid fragments, or a region that matches no allowed rendering.
+
+    fragments_only skips the region comparison: on main the post-merge job owns regeneration, so a region that
+    lags a just-merged fragment is expected there and must not fail CI."""
     try:
         head = load_fragments(read_worktree_fragments(root))
     except DocsError as exc:
         return str(exc).splitlines()
+    if fragments_only:
+        return []
     allowed = [("this branch's fragments", render_regions(head))]
     if base:
         base_texts = read_ref_fragments(root, base)
@@ -300,13 +305,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="validate fragments and region contents, write nothing")
     parser.add_argument("--base", help="with --check: git ref of the PR base; regions may match its fragments")
+    parser.add_argument("--fragments-only", action="store_true",
+                        help="with --check: validate fragments only, skip the region comparison (used on main)")
     parser.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.base and not args.check:
         parser.error("--base only applies with --check")
+    if args.fragments_only and not args.check:
+        parser.error("--fragments-only only applies with --check")
     try:
         if args.check:
-            problems = check(args.root, args.base)
+            problems = check(args.root, args.base, args.fragments_only)
             for problem in problems:
                 print(problem, file=sys.stderr)
             if not problems:

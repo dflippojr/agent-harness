@@ -9,11 +9,13 @@ and `build.py --check` lists those as warnings.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import os
 import re
 import sys
 import tempfile
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -269,6 +271,10 @@ def route_warnings(routes: list[Route]) -> list[str]:
 
 def load_specs(root: Path) -> list:
     """The real registry's specs under the pinned docs profile."""
+    if importlib.util.find_spec("httpx") is None:
+        # The config loader imports httpx at module level but loading a config never calls it; the post-merge
+        # regeneration job installs only PyYAML, so give it an empty stand-in rather than a heavier install.
+        sys.modules.setdefault("httpx", types.ModuleType("httpx"))
     root_str = str(root)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)

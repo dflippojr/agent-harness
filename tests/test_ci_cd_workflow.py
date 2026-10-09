@@ -25,3 +25,23 @@ def test_jobs_keep_only_required_package_permissions():
     # A GITHUB_TOKEN login on the tower was rejected ("denied") and is not needed.
     assert "packages:" not in deploy
     assert "docker login" not in deploy
+
+
+def test_docs_regen_workflow_cannot_loop_or_deploy():
+    workflow = (ROOT / ".github" / "workflows" / "docs-regen.yml").read_text(encoding="utf-8")
+    # contents: write is scoped to the one job, never workflow-wide.
+    assert workflow.split("jobs:", 1)[0].count("contents: write") == 0
+    assert workflow.count("contents: write") == 1
+    # Default GITHUB_TOKEN only (its pushes start no workflow runs), and an explicit skip marker as a second guard.
+    assert "secrets." not in workflow and "token:" not in workflow
+    assert "[skip ci]" in workflow.split("git commit", 1)[1].splitlines()[0]
+    assert "contains(github.event.head_commit.message, '[skip ci]')" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "workflow_run" not in workflow
+    # The deploy workflow still reacts only to CI, which never runs for the bot commit.
+    assert "workflows: [CI]" in WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_main_ci_only_validates_fragments():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "build.py --check --fragments-only" in ci
