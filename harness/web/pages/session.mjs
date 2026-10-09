@@ -99,6 +99,11 @@ async function viewSession(sid, tab, focusApproval) {
     send.disabled = false;
   });
 
+  const cancelTask = async () => {
+    if (!confirm("Cancel this task?")) return;
+    try { session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) }; } catch (e) { toast(e.message); }
+  };
+
   const renderActions = () => {
     if (isGuest()) return;
     const active = !TERMINAL.has(session.status);
@@ -106,10 +111,7 @@ async function viewSession(sid, tab, focusApproval) {
     fill(actions,
       active ? h("button", {
         class: "btn small bad",
-        onclick: async () => {
-          if (!confirm("Cancel this task?")) return;
-          try { session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) }; } catch (e) { toast(e.message); }
-        },
+        onclick: cancelTask,
       }, "Cancel") : null,
       !active ? h("button", {
         class: "btn small",
@@ -251,6 +253,16 @@ async function viewSession(sid, tab, focusApproval) {
   // decision fills in. The composer yields while any sheet is open.
   const syncComposer = () => { if (composer) composer.hidden = pendingSheets.size > 0; };
   const pendingSheets = new Set();
+  const dismissSheets = () => {
+    for (const id of [...pendingSheets]) {
+      const a = approvals.get(id);
+      a.sheet.remove();
+      a.card.classList.add("decided");
+      fill(a.slotState, "No longer pending");
+    }
+    pendingSheets.clear();
+    syncComposer();
+  };
   const approvalCard = (a) => {
     const note = h("input", { type: "text", id: `approval-note-${a.id}`, placeholder: "Note for the agent (optional)", hidden: true });
     const noteToggle = h("button", { class: "approval-note-toggle", type: "button", "aria-expanded": "false", "aria-controls": note.id }, "Add a note for the agent");
@@ -303,7 +315,8 @@ async function viewSession(sid, tab, focusApproval) {
       summary ? h("p", { style: "margin:4px 0 8px" }, summary) : null,
       diffView || h("pre", {}, a.detail || what),
       a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args?.path || ""}`) : null,
-      noteToggle, note, buttons);
+      noteToggle, note, buttons,
+      isGuest() ? null : h("button", { class: "approval-cancel", type: "button", onclick: cancelTask }, "Cancel the whole task"));
     approvals.set(a.id, { card: slot, slotState, sheet, buttons, note });
     pendingSheets.add(a.id);
     document.body.append(sheet);
@@ -553,6 +566,8 @@ async function viewSession(sid, tab, focusApproval) {
     queue: (e) => { session.queue_position = e.data.position; renderHead(); },
     status: (e) => {
       session.status = e.data.status;
+      // The run moved on (cancelled elsewhere, finished): a sheet left open would offer a decision that no longer exists.
+      if (e.data.status !== "waiting_approval") dismissSheets();
       if (e.data.status !== "queued") session.queue_position = null;
       renderHead();
       renderActions();

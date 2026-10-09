@@ -71,6 +71,17 @@ streams[0].approval_decided({ seq: 4, data: { id: "ap1", status: "approved" } })
 assert.ok(removed, "deciding removes the sheet");
 assert.equal(composerEl.hidden, false, "the composer returns after the decision");
 
+// A run cancelled elsewhere never emits approval_decided; the status change must clear the sheet and bring the composer back.
+streams[0].approval_requested({ seq: 5, data: { id: "ap2", tool: "write_file", tool_call_id: "c2", reason: "Edit", detail: "x", args: {} } });
+const sheet2 = body.at(-1);
+assert.match(text(sheet2), /Cancel the whole task/);
+assert.equal(composerEl.hidden, true);
+let removed2 = false;
+sheet2.remove = () => { removed2 = true; };
+streams[0].status({ seq: 6, data: { status: "cancelled" } });
+assert.ok(removed2, "a status change clears the stale sheet");
+assert.equal(composerEl.hidden, false);
+
 rendered.length = 0;
 await page.viewSession("abc", "changes");
 const changesText = rendered.map(text).join(" ");

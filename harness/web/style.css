@@ -310,6 +310,7 @@ body.has-tabs .approval-sheet { padding-bottom: 12px; }
 .approval-what { margin: 0 0 8px; font-size: 0.875rem; color: var(--muted); overflow-wrap: anywhere; }
 .approval-sheet input { margin: 8px 0; width: 100%; min-height: 44px; box-sizing: border-box; }
 .approval-note-toggle { display: flex; align-items: center; min-height: 44px; width: 100%; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
+.approval-cancel { display: flex; align-items: center; justify-content: center; min-height: 44px; width: 100%; margin-top: 4px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 0.875rem; cursor: pointer; }
 .approval-actions { display: flex; gap: 10px; margin-top: 8px; }
 .approval-actions .btn { flex: 1; min-height: 50px; border-radius: 14px; font-weight: 650; font-size: 1rem; }
 .approval-deny { background: none; border: 1.5px solid var(--bad); color: var(--bad); }
