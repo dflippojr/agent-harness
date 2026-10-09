@@ -20,7 +20,7 @@
   (subpath (string-append (param "HOME") "/.npm")))
 ;; ~/.gradle, ~/.m2 and ~/.cache stay read-only: init scripts, wrapper distributions, jars and tool environments
 ;; there are run by later builds outside the sandbox. The runner points sandboxed Gradle, Maven and XDG caches at
-;; the session's TMPDIR, with the owner's Gradle and Maven downloads as read-only fallbacks.
+;; the session's TMPDIR, which starts with copy-on-write clones of the owner's Gradle and Maven downloads.
 
 ;; Credentials and personal data: neither readable nor writable. ~/.agent-harness holds the runner and client
 ;; tokens, the runner's code and its host-side git scratch space (runner/tmp); only the workspace is reopened below.
@@ -55,8 +55,9 @@
   (subpath (string-append (param "HOME") "/Library/Application Support/Firefox"))
   (subpath (string-append (param "HOME") "/Library/Application Support/BraveSoftware")))
 
-;; Other sessions' TMPDIRs (their Gradle homes and caches included) are off limits too.
-(deny file-read* file-write* (subpath (param "TMP_BASE")))
+;; Other sessions' workspaces and TMPDIRs (their Gradle and Maven homes included) are off limits too, wherever
+;; the workspaces directory is configured.
+(deny file-read* file-write* (subpath (param "WORKSPACES")) (subpath (param "TMP_BASE")))
 
 ;; This session's workspace and TMPDIR, plus stat (not listing) of their parent directories so path lookups resolve.
 (allow file-read* file-write* (subpath (param "WORKSPACE")) (subpath (param "SESSION_TMP")))

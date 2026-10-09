@@ -284,7 +284,7 @@ def test_profile_keeps_agent_harness_files_and_other_sessions_out_of_reach():
     deny_home = _last_rule(rules, "file-read*", f'(subpath {_home("/.agent-harness")})')
     assert deny_home.startswith("(deny file-read* file-write*")
     deny_tmp = _last_rule(rules, "file-read*", '(subpath (param "TMP_BASE"))')
-    assert deny_tmp.startswith("(deny file-read* file-write*")
+    assert deny_tmp.startswith("(deny file-read* file-write*") and '(subpath (param "WORKSPACES"))' in deny_tmp
     allow_ws = _last_rule(rules, "file-read*", '(subpath (param "WORKSPACE"))')
     assert allow_ws.startswith("(allow file-read* file-write*") and '(subpath (param "SESSION_TMP"))' in allow_ws
     assert rules.index(allow_ws) > max(rules.index(deny_home), rules.index(deny_tmp))
@@ -342,8 +342,8 @@ def test_sandboxed_builds_use_session_directories(tmp_path, monkeypatch):
     env = envs[0]
     assert Path(env["GRADLE_USER_HOME"]) == Path(env["TMPDIR"]) / "gradle"
     assert Path(env["GRADLE_RO_DEP_CACHE"]) == tmp_path / ".gradle" / "caches"
-    assert env["MAVEN_OPTS"] == (f"-Dmaven.repo.local={Path(env['TMPDIR']) / 'm2'} "
-                                 f"-Dmaven.repo.local.tail={tmp_path / '.m2' / 'repository'}")
+    assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={Path(env['TMPDIR']) / 'm2' / 'repository'}"
+    assert Path(env["MAVEN_USER_HOME"]) == Path(env["TMPDIR"]) / "m2"
     assert Path(env["XDG_CACHE_HOME"]) == Path(env["TMPDIR"]) / "cache"
 
 
@@ -357,8 +357,16 @@ def test_session_gradle_home_gets_its_own_copy_of_wrapper_distributions(tmp_path
     (dist / "gradle-9.0" / "lib" / "gradle.jar").write_text("original")
     (tmp_path / ".gradle" / "jdks" / "jdk-21").mkdir(parents=True)
     (tmp_path / ".gradle" / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2g\n")
+    jar = tmp_path / ".m2" / "repository" / "org" / "x" / "1.0" / "x-1.0.jar"
+    jar.parent.mkdir(parents=True)
+    jar.write_text("original")
+    (tmp_path / ".m2" / "wrapper" / "dists" / "apache-maven-3.8.8").mkdir(parents=True)
     ex = executor(tmp_path, [tmp_path])
     gradle_home = ex.tmpdir(SID) / "gradle"
+    m2 = gradle_home.parent / "m2"
+    assert (m2 / "wrapper" / "dists" / "apache-maven-3.8.8").is_dir()
+    (m2 / "repository" / "org" / "x" / "1.0" / "x-1.0.jar").write_text("session")
+    assert jar.read_text() == "original"
     copy = gradle_home / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123"
     assert (copy / "gradle-9.0-bin.zip.ok").exists()
     assert (gradle_home / "jdks" / "jdk-21").is_dir()
@@ -399,6 +407,7 @@ def test_missing_or_uncopyable_wrapper_distributions_do_not_fail_the_command(tmp
     other = "abcdef0123"
     assert ex.tmpdir(other).is_dir()
     assert "~/.gradle/wrapper/dists" in caplog.text
+    assert "~/.m2" not in caplog.text  # nothing to copy there
 
 
 def test_clone_tree_uses_copy_on_write_cp_on_macos(tmp_path, monkeypatch):

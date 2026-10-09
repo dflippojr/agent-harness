@@ -52,7 +52,9 @@ OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trim
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
 HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+")
 RID_OPS = frozenset({"shell", "git_clone"})  # the ops that need the request id
-GRADLE_SEED = ("wrapper/dists", "jdks", "gradle.properties")  # copied from ~/.gradle into a session's Gradle home
+# What a new session TMPDIR gets copied from the owner's read-only build tool homes: (home dir, entries, session dir).
+TOOL_SEEDS = ((".gradle", ("wrapper/dists", "jdks", "gradle.properties"), "gradle"),
+              (".m2", ("repository", "wrapper"), "m2"))
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 WORKSPACE = "/workspace"  # the sandbox path the daemon addresses tool paths by
 OFFLINE_RULES = """;; No network except localhost (tests that start a server); no DNS either, so nothing leaks through lookups.
@@ -121,7 +123,7 @@ class Executor:
     def tmpdir(self, sid: str) -> Path:
         """The session's own TMPDIR, <private base>/<session id>, created with mode 0700 so other users and sessions
         can't read it or plant files in it. It lasts until the workspace is discarded or cleaned up, across runner
-        restarts. A new one starts with the session's Gradle home seeded (see seed_gradle_home)."""
+        restarts. A new one starts with the session's Gradle and Maven homes seeded (see seed_tool_homes)."""
         if not SESSION_RE.match(sid or ""):
             raise OpError(f"bad session id {sid!r}")
         with self.lock:
@@ -133,7 +135,7 @@ class Executor:
                 created = False
             self.check_private(path)
             if created:
-                self.seed_gradle_home(path / "gradle")
+                self.seed_tool_homes(path)
             return path
 
     def drop_tmpdir(self, sid: str) -> None:
@@ -262,8 +264,7 @@ class Executor:
                # ~/.gradle, ~/.m2 and ~/.cache are read-only in the sandbox: builds write to the session's own
                # directories and reuse the owner's downloaded Gradle and Maven dependencies read-only.
                "GRADLE_USER_HOME": str(tmp / "gradle"), "GRADLE_RO_DEP_CACHE": str(self.home / ".gradle" / "caches"),
-               "MAVEN_OPTS": f"-Dmaven.repo.local={tmp / 'm2'} "
-                             f"-Dmaven.repo.local.tail={self.home / '.m2' / 'repository'}",
+               "MAVEN_OPTS": f"-Dmaven.repo.local={tmp / 'm2' / 'repository'}", "MAVEN_USER_HOME": str(tmp / "m2"),
                "XDG_CACHE_HOME": str(tmp / "cache")}
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
@@ -324,23 +325,25 @@ class Executor:
             except (ProcessLookupError, PermissionError):
                 pass
 
-    def seed_gradle_home(self, gradle_home: Path) -> None:
-        """Give a new session's Gradle home its own copy of the owner's wrapper distributions, provisioned JDKs and
-        gradle.properties, so ./gradlew works offline. Gradle writes lock files next to them, and the originals
-        stay read-only to the sandbox. Called only while the session TMPDIR is brand new, before any sandboxed
-        command could have put anything (a link, a file) where the runner writes."""
-        for rel in GRADLE_SEED:
-            src, dst = self.home / ".gradle" / rel, gradle_home / rel
-            if src.is_symlink() or not src.exists():
-                continue
-            try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if src.is_dir():
-                    clone_tree(src, dst)
-                else:
-                    shutil.copyfile(src, dst)
-            except (OSError, subprocess.SubprocessError) as e:
-                log.warning("couldn't copy ~/.gradle/%s into the session's Gradle home: %s", rel, e)
+    def seed_tool_homes(self, session_tmp: Path) -> None:
+        """Give a new session its own copy of the owner's Gradle wrapper distributions, provisioned JDKs and
+        gradle.properties, and Maven repository and wrapper distributions, so ./gradlew, mvn and ./mvnw work
+        offline with any version. The tools write lock and status files next to them, and the originals stay
+        read-only to the sandbox. Called only while the session TMPDIR is brand new, before any sandboxed command
+        could have put anything (a link, a file) where the runner writes."""
+        for home_dir, entries, session_dir in TOOL_SEEDS:
+            for rel in entries:
+                src, dst = self.home / home_dir / rel, session_tmp / session_dir / rel
+                if src.is_symlink() or not src.exists():
+                    continue
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if src.is_dir():
+                        clone_tree(src, dst)
+                    else:
+                        shutil.copyfile(src, dst)
+                except (OSError, subprocess.SubprocessError) as e:
+                    log.warning("couldn't copy ~/%s/%s into the session TMPDIR: %s", home_dir, rel, e)
 
     @staticmethod
     def end_group(proc: subprocess.Popen) -> None:
