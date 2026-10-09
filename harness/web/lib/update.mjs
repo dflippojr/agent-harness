@@ -8,7 +8,8 @@ import * as sheets from "./sheet.mjs";
 
 export const UPDATE_GUARD = "harness.webUpdateAttempt";
 
-export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser, confirmSheet = sheets.confirmSheet }) {
+export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser, confirmSheet = sheets.confirmSheet,
+  sheetOpen = sheets.sheetOpen }) {
   const { $app } = els;
   const { document } = browser;
   const { WEB_BUILD_ID, WEB_PROTOCOL } = build;
@@ -68,6 +69,7 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
     try { await (await browser.navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
     const promptKey = "harness.webUpdatePrompt";
     if (browser.sessionStorage.getItem(promptKey) === WEB_BUILD_ID || (foreground && hasUnsavedInput())) return;
+    if (sheetOpen()) return; // never replace a sheet being answered; the next check offers it
     browser.sessionStorage.setItem(promptKey, WEB_BUILD_ID);
     void confirmSheet({ title: "Update Agent Harness Web?", message: "A newer version is available. Updating reloads the app.",
       confirmLabel: "Update now", cancelLabel: "Later", dismissOnRoute: false }).then((yes) => (yes ? reloadAndUpdate({ checkInput: false }) : false))

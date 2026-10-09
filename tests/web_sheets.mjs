@@ -138,6 +138,12 @@ assert.equal(required("x")("y"), "");
     build: { WEB_BUILD_ID: "b1", WEB_PROTOCOL: 2 },
     browser: { document: { querySelectorAll: () => [dirty] }, window: {}, navigator: {}, sessionStorage, location: { reload() { reloads++; } } },
   });
+  const pending = confirmSheet({ title: "Delete the job “Nightly”?", confirmLabel: "Delete job", destructive: true });
+  assert.equal(await update.checkCompatibility(), true);
+  assert.match(text(only()), /Delete the job/, "the offer never replaces a sheet being answered");
+  assert.equal(sessionStorage.getItem("harness.webUpdatePrompt"), null, "so the next check still offers it");
+  pick(only(), "cancel").click();
+  assert.equal(await pending, false);
   assert.equal(await update.checkCompatibility(), true, "boot continues while the offer is open");
   const dialog = only();
   assert.match(text(dialog), /Update Agent Harness Web\?/);

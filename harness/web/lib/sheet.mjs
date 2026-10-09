@@ -74,6 +74,9 @@ function openSheet({ title, message, fields = [], confirmLabel, cancelLabel = "C
   });
 }
 
+// True while a sheet waits for an answer. An app-level offer checks it so it never replaces a sheet the person is answering.
+export const sheetOpen = () => current !== null;
+
 // Resolves true when the person picks confirmLabel, false otherwise. Name the action ("Delete job"), not "OK".
 // dismissOnRoute: false keeps an app-level sheet (the update offer) open across the boot redirect and later navigation.
 export async function confirmSheet({ title, message, confirmLabel = "OK", cancelLabel, destructive = false, dismissOnRoute }) {
