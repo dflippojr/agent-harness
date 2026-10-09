@@ -55,6 +55,6 @@ python scripts/docs/build.py --check --base origin/main   # what CI runs on a PR
    branch's fragments (always).
 
 So adding a fragment and leaving the region alone passes (region still equals main's output), a hand edit inside the
-markers fails, and running `build.py` yourself also passes. Without `--base` (on main, locally) only this tree's
-fragments count, so main stays in sync. The post-merge job (a separate issue) is what rewrites regions on main;
-PRs should add fragments only.
+markers fails, and running `build.py` yourself also passes. Without `--base` (locally) only this tree's
+fragments count. On main, CI runs `--check --fragments-only` (schema only) and `docs-regen.yml` rewrites the regions
+after each merge (see `docs/CI-CD.md`); PRs should add fragments only.
