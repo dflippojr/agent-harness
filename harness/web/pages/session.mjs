@@ -97,7 +97,7 @@ async function viewSession(sid, tab, focusApproval) {
     },
     download: () => downloadDaemonFile(`/sessions/${sid}/transcript`, `${sid}.md`),
   };
-  sessionMenu({ items: () => sessionMenuItems(session, { guest: isGuest(), terminal: TERMINAL }), run: (id) => menuActions[id]() });
+  if (!isGuest()) sessionMenu({ items: () => sessionMenuItems(session, { guest: false, terminal: TERMINAL }), run: (id) => menuActions[id]() });
 
   if (tab === "changes") { await viewChanges(session); jumps.updateJumps(); return; }
   if (tab === "info") { viewInfo(session); jumps.updateJumps(); return; }

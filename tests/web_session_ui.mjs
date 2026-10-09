@@ -46,11 +46,11 @@ const jumps = make(false).bindSessionJumps();
 assert.equal(typeof jumps.updateJumps, "function");
 assert.equal(jumps.pageHeight(), 2000);
 
-// The overflow menu (#514): entries follow status and taint; guests may only download.
+// The overflow menu (#514): entries follow status and taint; guests get none.
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 assert.deepEqual(sessionMenuItems({ status: "running" }, { guest: false, terminal: TERMINAL }), ["rename", "cancel", "download"]);
 assert.deepEqual(sessionMenuItems({ status: "done", taint: [{ origin: "x" }] }, { guest: false, terminal: TERMINAL }), ["rename", "rerun", "clear-taint", "download"]);
-assert.deepEqual(sessionMenuItems({ status: "running", taint: [{ origin: "x" }] }, { guest: true, terminal: TERMINAL }), ["download"]);
+assert.deepEqual(sessionMenuItems({ status: "running", taint: [{ origin: "x" }] }, { guest: true, terminal: TERMINAL }), [], "guests get no owner-only entries");
 for (const id of ["rename", "cancel", "rerun", "clear-taint", "download"]) assert.ok(SESSION_MENU_LABELS[id], id);
 
 // Rename lives in the menu now: picking it swaps the header title for an input; the title itself is not a button.

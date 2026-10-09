@@ -29,9 +29,10 @@ export function scrollPage(top, browser) {
   if (document.body) document.body.scrollTop = y;
 }
 
-// The session overflow menu's entries (#514), in order. Pure: the page supplies the actions. Guests may only download.
+// The session overflow menu's entries (#514), in order. Pure: the page supplies the actions. Guests get none: every entry,
+// the transcript download included, is an owner route that answers a guest with 404.
 export function sessionMenuItems(session, { guest, terminal }) {
-  if (guest) return ["download"];
+  if (guest) return [];
   const active = !terminal.has(session.status);
   return ["rename", active ? "cancel" : "rerun", (session.taint || []).length ? "clear-taint" : null, "download"].filter(Boolean);
 }
