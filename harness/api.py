@@ -25,6 +25,7 @@ from . import config as config_mod
 from . import efficiency
 from . import google_signin
 from . import local_owner
+from . import tailscale_peer
 from . import taint
 from . import telemetry
 from . import transcript
@@ -312,8 +313,29 @@ def _cross_site_refused(request: Request, m: Manager, info: _OriginInfo) -> bool
                 or request.headers.get("sec-fetch-site") == "cross-site")
 
 
+async def _identity_from_tailscaled(request: Request, m: Manager) -> None:
+    """Drop the Tailscale identity headers unless tailscaled sent them (harness/tailscale_peer.py). This runs before
+    anything reads a header, so a forged login can't select a member, a guest, or open owner mode."""
+    scope = request.scope
+    if not tailscale_peer.has_identity(scope):
+        return
+    check = m.tailscale_peer
+    if check.platform_ok():
+        client, server = scope.get("client"), scope.get("server")
+        if client and server and check.cached((str(client[0]), int(client[1]))) is None:
+            trusted = await asyncio.to_thread(check.verify, client, server)
+        else:
+            trusted = check.verify(client, server)
+    else:
+        trusted = m.cfg.trust_unverified_identity_headers
+    if not trusted:
+        tailscale_peer.strip_identity(scope)
+        request.__dict__.pop("_headers", None)
+
+
 async def guard(request: Request, call_next):
     m: Manager = request.app.state.manager
+    await _identity_from_tailscaled(request, m)
     public_path = request.scope.get("harness_original_path", request.url.path)
     info = _origin_info(request, m, public_path)
     # `tailscale serve` adds the caller's identity. A request without it reached the loopback listener directly, so

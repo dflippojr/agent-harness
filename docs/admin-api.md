@@ -22,7 +22,8 @@ remain a compatibility surface and keep Tailscale owner/guest rules.
 Two owner credentials are accepted:
 
 1. **Tailscale/localhost owner identity**, with no `Authorization` header. Same trust as bundled Agent Harness Web:
-   a listed `allowed_logins` entry is the owner. A request without `Tailscale-User-Login` reached the loopback
+   a listed `allowed_logins` entry is the owner. The `Tailscale-*` headers count only when tailscaled sent them
+   ([INSTALL](INSTALL.md#local-callers)). A request without `Tailscale-User-Login` reached the loopback
    listener directly and is the owner only when it carries the local owner token (`X-Agent-Harness-Local-Token`, see
    [INSTALL](INSTALL.md#local-callers)); otherwise it gets **401**. Guests (`guests:` in `harness.local.yaml`) are refused for every `/api/admin` path.
 2. **Owner bearer token.** `POST /keys` or `POST /api/admin/v1/keys` with

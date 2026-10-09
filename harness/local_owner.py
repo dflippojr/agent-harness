@@ -1,9 +1,10 @@
 """The local owner credential for callers on this machine.
 
-`tailscale serve` adds the caller's identity to every request it forwards. A request without that identity reached
-the loopback listener some other way, so it must say who it is: it carries the local owner token (a random secret the
-daemon keeps in data_dir), or a credential its route checks itself (an API token, an inference key, a runner token, or a
-stream ticket). Only the health and metrics endpoints answer without one.
+`tailscale serve` adds the caller's identity to every request it forwards; the daemon keeps it only when tailscaled is
+the connection's peer (harness/tailscale_peer.py). A request without that identity reached the loopback listener some
+other way, so it must say who it is: it carries the local owner token (a random secret the daemon keeps in data_dir),
+or a credential its route checks itself (an API token, an inference key, a runner token, or a stream ticket). Only the
+health and metrics endpoints answer without one.
 """
 
 from __future__ import annotations

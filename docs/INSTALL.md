@@ -387,8 +387,12 @@ install/uninstall.sh --remove-files  # also remove the install directory
 
 ### Local callers
 
-`tailscale serve` adds the caller's tailnet login to every request it forwards. A request without that login reached
-the daemon's loopback listener directly, so it must say who it is:
+`tailscale serve` adds the caller's tailnet login to every request it forwards. Any other program on the machine, or
+a container that reaches the host's loopback, can send the same `Tailscale-*` headers, so the daemon trusts them only
+when tailscaled is the other end of the connection: it looks the connection up in the OS connection table and checks
+that the owning process is `tailscaled.exe` in the Tailscale install directory (`%ProgramFiles%\Tailscale`). From any
+other process, or when the lookup fails, the daemon removes those headers before it reads them. A request without a
+login from tailscaled reached the daemon's loopback listener directly, so it must say who it is:
 
 - The owner's own tools send the **local owner token** in the `X-Agent-Harness-Local-Token` header. The daemon
   creates it on first start at `data_dir/local-owner.token` and keeps it across restarts; keep `data_dir` readable
@@ -401,3 +405,8 @@ the daemon's loopback listener directly, so it must say who it is:
 
 Everything else gets **401**. A browser on the server itself should use the tailnet URL rather than
 `http://127.0.0.1:8100`.
+
+The tailscaled check is implemented on Windows. On other platforms the daemon ignores the `Tailscale-*` headers, so
+tailnet devices get **401** unless you set `listen.trust_unverified_identity_headers: true` in `harness.local.yaml`.
+That setting is **unsafe**: it trusts those headers from every local process and every container that can reach the
+host's loopback, so set it only on a single-user machine that runs no agent sandboxes with network access.

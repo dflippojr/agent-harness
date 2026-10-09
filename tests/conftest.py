@@ -129,3 +129,27 @@ def local_owner_client():
     patcher.setattr(TestClient, "build_request", build_request, raising=False)
     yield
     patcher.undo()
+
+
+FAKE_TAILSCALE_DIR = Path("C:/Program Files/Tailscale")
+
+
+def fake_tailscaled_check(**overrides):
+    """A peer check whose connection table says every peer is tailscaled from the install directory."""
+    from harness import tailscale_peer
+    options = dict(owner=lambda client, server: 4242, exe=lambda pid: str(FAKE_TAILSCALE_DIR / "tailscaled.exe"),
+                   dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True)
+    options.update(overrides)
+    return tailscale_peer.PeerCheck(**options)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def tailscaled_peer():
+    """A test that sends Tailscale identity headers stands in for `tailscale serve`, so its peer is tailscaled.
+    Tests of other peers give the manager their own `tailscale_peer.PeerCheck`; none reads the live connection table."""
+    from harness import tailscale_peer
+
+    patcher = pytest.MonkeyPatch()  # session-wide, so module-scoped managers get it too
+    patcher.setattr(tailscale_peer, "default_check", fake_tailscaled_check)
+    yield
+    patcher.undo()
