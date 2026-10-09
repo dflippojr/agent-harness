@@ -18,6 +18,7 @@ const ASSETS = [
   "/lib/snippets.mjs",
   "/lib/taint.mjs",
   "/lib/targets.mjs",
+  "/lib/tool-row.mjs",
   "/lib/tools.mjs",
   "/pages/actions.mjs",
   "/pages/chat.mjs",

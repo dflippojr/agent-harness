@@ -3,7 +3,8 @@
 // session chrome helpers come from lib/session-ui.mjs, so this module imports under plain Node and never reaches into another page.
 import { TARGET_LABEL } from "../lib/targets.mjs";
 import { fmtElapsed, fmtTokens, readFraction, readingText, fmtSpan, pluralize } from "../lib/format.mjs";
-import { toolSummaryText, approvalWhat } from "../lib/tools.mjs";
+import { toolSummaryText, approvalWhat, toolKind, resultState } from "../lib/tools.mjs";
+import { createToolRows } from "../lib/tool-row.mjs";
 import { approvalDiffClass, diffLineClass } from "../lib/diff.mjs";
 import { md } from "../lib/markdown.mjs";
 import { withTaint } from "../lib/taint.mjs";
@@ -24,6 +25,7 @@ const { window, document, location, confirm, setInterval, clearInterval, setTime
 const { sessionTitle, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser });
 const pageMetrics = () => measurePage(browser);
 const scrollPage = (top) => scrollPageOf(top, browser);
+const { toolRow, closeViewer } = createToolRows({ h, fill, toast, browser });
 
 async function viewSession(sid, tab, focusApproval) {
   if (!validId(sid)) { go("#/agents", true); return; }
@@ -239,13 +241,9 @@ async function viewSession(sid, tab, focusApproval) {
     let args = {};
     try { args = JSON.parse(fn.arguments || "{}"); } catch (_) { args = { raw: fn.arguments }; }
     if (fn.name === "web_fetch" && args.url) rememberFetch(call.id, args.url, "");
-    const summaryText = toolSummaryText(fn, args);
-    const state = h("span", { class: "state" }, "…");
-    const body = h("div", { class: "body" }, h("pre", {}, JSON.stringify(args, null, 2)));
-    const el = h("details", { class: "tool" },
-      h("summary", {}, h("span", { class: "name" }, fn.name), h("span", { class: "args" }, summaryText || ""), state), body);
-    const slot = h("div", { class: "ev" }, el);
-    calls.set(call.id, { el, state, body, slot });
+    const row = toolRow({ name: fn.name, summary: toolSummaryText(fn, args), kind: toolKind(fn.name, args), args });
+    const slot = h("div", { class: "ev" }, row.el);
+    calls.set(call.id, Object.assign(row, { slot }));
     return slot;
   };
 
@@ -399,7 +397,8 @@ async function viewSession(sid, tab, focusApproval) {
     },
     tool_call: (e) => {
       const c = calls.get(e.data.id);
-      if (c && e.data.decision !== "allow") c.state.textContent = e.data.decision === "ask" ? "needs approval" : "blocked";
+      if (c && e.data.decision === "ask") c.setState("needs approval", "warn");
+      else if (c && e.data.decision !== "allow") c.setState("blocked", "err");
     },
     approval_requested: (e) => {
       const card = approvalCard(e.data);
@@ -412,7 +411,7 @@ async function viewSession(sid, tab, focusApproval) {
         `Auto-approved: the deterministic gate and smart reviewer both allowed this ${e.data.tool || "call"} (${e.data.reason || "routine workspace work"}).`);
       add(badge);
       const c = calls.get(e.data.tool_call_id);
-      if (c) c.state.textContent = "auto-approved";
+      if (c) c.setState("auto-approved", "ok");
     },
     smart_review: () => {},
     approval_decided: (e) => {
@@ -432,12 +431,14 @@ async function viewSession(sid, tab, focusApproval) {
         const fromOutput = (e.data.output.split("\n").find((line) => /^https?:\/\//i.test(line.trim())) || "").trim();
         rememberFetch(e.data.id, fetchById.get(e.data.id) || fromOutput, e.data.output);
       }
-      const c = calls.get(e.data.id);
-      const out = h("pre", {}, e.data.output);
-      if (!c) { add(h("details", { class: "tool ev" }, h("summary", {}, e.data.name), out)); return; }
-      c.state.textContent = `${e.data.ok ? "ok" : "error"} · ${e.data.seconds}s`;
-      c.state.className = `state ${e.data.ok ? "ok" : "err"}`;
-      c.body.append(out);
+      let c = calls.get(e.data.id);
+      if (!c) {
+        c = toolRow({ name: e.data.name, summary: "", kind: toolKind(e.data.name, null), args: null });
+        add(h("div", { class: "ev" }, c.el));
+      }
+      const done = resultState(e.data.ok, e.data.seconds);
+      c.setState(done.text, done.kind);
+      c.setOutput(e.data.output, e.data.output_chars);
     },
     compaction_started: (e) => {
       if (live && !live.thinkText.textContent && !live.content.textContent) { live.el.remove(); live = null; }
@@ -608,6 +609,7 @@ async function viewSession(sid, tab, focusApproval) {
     { authorized: !!agentHarnessWeb.token }));
   if (composer) onLeave(() => composer.remove());
   onLeave(() => { for (const a of approvals.values()) a.sheet.remove(); });
+  onLeave(closeViewer);
 }
 
 function reviewCard(s) {
