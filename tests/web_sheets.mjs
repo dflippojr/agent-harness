@@ -140,6 +140,8 @@ assert.equal(required("x")("y"), "");
   const dialog = only();
   assert.match(text(dialog), /Update Agent Harness Web\?/);
   assert.equal(text(pick(dialog, "confirm")), "Update now");
+  win.dispatchEvent({ type: "hashchange" });
+  assert.equal(sheets().length, 1, "the boot redirect to #/agents does not dismiss the update offer");
   assert.equal(await update.checkCompatibility(), true);
   assert.equal(sheets().length, 1, "offered once per bundle");
   submit(dialog);

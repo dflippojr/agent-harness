@@ -68,7 +68,7 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
     if (browser.sessionStorage.getItem(promptKey) === WEB_BUILD_ID || (foreground && hasUnsavedInput())) return;
     browser.sessionStorage.setItem(promptKey, WEB_BUILD_ID);
     void confirmSheet({ title: "Update Agent Harness Web?", message: "A newer version is available. Updating reloads the app.",
-      confirmLabel: "Update now", cancelLabel: "Later" }).then((yes) => (yes ? reloadAndUpdate() : false))
+      confirmLabel: "Update now", cancelLabel: "Later", dismissOnRoute: false }).then((yes) => (yes ? reloadAndUpdate() : false))
       .catch((e) => chrome.toast(e.message, 6000));
   }
 

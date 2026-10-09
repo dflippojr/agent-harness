@@ -7,7 +7,7 @@ import { h } from "./dom.mjs";
 let current = null; // the open sheet's close(), so a new sheet or a navigation dismisses it
 let serial = 0;
 
-function openSheet({ title, message, fields = [], confirmLabel, cancelLabel = "Cancel", destructive = false }) {
+function openSheet({ title, message, fields = [], confirmLabel, cancelLabel = "Cancel", destructive = false, dismissOnRoute = true }) {
   current?.(null);
   const doc = globalThis.document;
   const win = globalThis.window;
@@ -65,7 +65,7 @@ function openSheet({ title, message, fields = [], confirmLabel, cancelLabel = "C
     cancel.addEventListener("click", () => close(null));
     dialog.addEventListener("cancel", (ev) => { ev.preventDefault?.(); close(null); }); // Escape
     dialog.addEventListener("click", (ev) => { if (ev.target === dialog) close(null); }); // a tap on the backdrop
-    win?.addEventListener?.("hashchange", onRoute);
+    if (dismissOnRoute) win?.addEventListener?.("hashchange", onRoute);
 
     doc.body.append(dialog);
     if (dialog.showModal) dialog.showModal(); else dialog.setAttribute("open", "");
@@ -75,8 +75,9 @@ function openSheet({ title, message, fields = [], confirmLabel, cancelLabel = "C
 }
 
 // Resolves true when the person picks confirmLabel, false otherwise. Name the action ("Delete job"), not "OK".
-export async function confirmSheet({ title, message, confirmLabel = "OK", cancelLabel, destructive = false }) {
-  return (await openSheet({ title, message, confirmLabel, cancelLabel, destructive })) === true;
+// dismissOnRoute: false keeps an app-level sheet (the update offer) open across the boot redirect and later navigation.
+export async function confirmSheet({ title, message, confirmLabel = "OK", cancelLabel, destructive = false, dismissOnRoute }) {
+  return (await openSheet({ title, message, confirmLabel, cancelLabel, destructive, dismissOnRoute })) === true;
 }
 
 // Resolves the entered text, or null when dismissed. validate(value) returns an inline error message, or nothing.
