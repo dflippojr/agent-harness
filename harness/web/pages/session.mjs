@@ -566,8 +566,9 @@ async function viewSession(sid, tab, focusApproval) {
     queue: (e) => { session.queue_position = e.data.position; renderHead(); },
     status: (e) => {
       session.status = e.data.status;
-      // The run moved on (cancelled elsewhere, finished): a sheet left open would offer a decision that no longer exists.
-      if (e.data.status !== "waiting_approval") dismissSheets();
+      // The run ended (cancelled elsewhere, finished): a sheet left open would offer a decision that no longer exists.
+      // Not on waiting_target and the like: a pending approval survives those and is not replayed.
+      if (TERMINAL.has(e.data.status)) dismissSheets();
       if (e.data.status !== "queued") session.queue_position = null;
       renderHead();
       renderActions();
