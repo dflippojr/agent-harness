@@ -142,7 +142,16 @@ $out = Join-Path '{tmp_path}' 'review-output.md'
 Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
 $body = Get-Content -Raw -LiteralPath $out
 if ($body -notlike '*{known_path}:12*') {{ throw 'Known repository citation was lost' }}
-Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -CoverageLine 'PARTIAL REVIEW: Not reviewed: deleted/remote_control/folder_discovery.py' -OmittedPaths @('deleted/remote_control/folder_discovery.py')
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -CoverageLine 'PARTIAL REVIEW: Not reviewed: deleted/remote_control/folder_discovery.py' -DiffPaths @('deleted/remote_control/folder_discovery.py')
+git -C '{tmp_path}' rm --cached --quiet -- '{known_path}'
+if ($LASTEXITCODE -ne 0) {{ throw 'Synthetic deletion failed' }}
+$embedding = Get-ReviewDiffEmbedding -Diff "diff --git a/{known_path} b/{known_path}`ndeleted file mode 100644`n-old content"
+if (@($embedding.OmittedFiles).Count -ne 0) {{ throw 'The deletion should be reviewed, not omitted' }}
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
+foreach ($relative in @('docs/root-ca.md', 'docs/root/code.md', 'examples/home/reviewer/file.py', 'examples/Users/reviewer/file.py')) {{
+    $result.Output = $relative
+    Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
+}}
 foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), 'sk-synthetic12345678')) {{
     $result.Output = $unsafe
     $failure = ''

@@ -15,6 +15,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'C:/Users/reviewer/.codex/auth.json' }
         @{ Payload = '/Users/reviewer/.claude/credentials.json' }
         @{ Payload = '/home/reviewer/.codex/auth.json' }
+        @{ Payload = '/root/.codex/auth.json' }
+        @{ Payload = '/root' }
     ) {
         param($Payload)
         $fakeRunner = {

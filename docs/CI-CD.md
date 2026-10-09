@@ -226,7 +226,7 @@ add broader permissions or additional directories. This uses the [Claude permiss
 public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
 long tokens), plus Windows/macOS/Linux user-profile absolute paths. A match discards the whole body, removes any
 stale output and fails closed with `Review did not complete`; nothing is posted or copied into the check summary.
-Known repository paths (from the Git index or omitted diff files) are exempt only from the generic long-token
+Known repository paths (from the Git index or all diff files, including deletions) are exempt only from the generic long-token
 heuristic, so ordinary long file citations and partial-coverage lists remain publishable. The credential, provider-token
 and profile-path patterns still check the original text. Validated Git metadata in the coverage marker is added only
 after the scan. It fetches the pull
