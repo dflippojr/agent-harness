@@ -175,6 +175,28 @@ Set `REVIEW_BACKENDS` under repository **Settings > Secrets and variables > Acti
 `claude,codex,cursor` spends Claude quota first while retaining two fallbacks; changing the variable does not require a
 workflow edit.
 
+Resolution order is: an explicit `backend` input, then `REVIEW_BACKENDS` for `auto`, then the runner's
+`codex,claude` default. For each selected backend, its `REVIEW_MODEL_*` and `REVIEW_EFFORT_*` Actions variables
+override the workflow defaults. The runner validates those resolved environment values and passes them to the CLI;
+it does not replace them with another model or effort. Invoking the script directly without those environment
+values keeps the CLI's own model and effort defaults. A failed backend falls through to the next configured backend.
+
+For agent-harness PR #541, the earlier Sonnet review used these overrides. A read-only check on 2026-10-09 found
+all three variables below absent, so they no longer force the earlier choices. This PR does not change Actions
+variables; the owner controls them separately, and later changes take precedence over these defaults.
+The unset effects in the table describe this branch's workflow once it reaches `main`.
+
+| Variable | Earlier override and effect | Verified state on 2026-10-09 |
+| --- | --- | --- |
+| `REVIEW_BACKENDS` | `claude`: runs only Claude, with no Codex attempt or fallback | Unset: `auto` uses `codex,claude` |
+| `REVIEW_MODEL_CLAUDE` | `claude-sonnet-5`: pins Sonnet when Claude runs | Unset: workflow supplies `claude-opus-5-5` |
+| `REVIEW_MODEL_CODEX` | `gpt-6-luna`: pins Luna if Codex is selected | Unset: workflow supplies `gpt-6.1-sol` |
+
+Both effort variables were also absent at that check: the workflow supplies Codex `xhigh` and Claude `high`.
+These are this branch's workflow defaults; a dispatch before merge uses `main`'s workflow and review tooling.
+At that check, `main` still tried `codex,claude,cursor` and supplied no model or effort defaults, leaving those
+choices to the CLIs when the variables were unset.
+
 Optional `REVIEW_MODEL_CLAUDE`, `REVIEW_MODEL_CURSOR`, and `REVIEW_MODEL_CODEX` pin the model each backend CLI is asked
 to use (`--model` on `claude`, Cursor `agent`, and `codex exec`). When a variable is set, the runner passes that flag and
 the PR comment footer plus `model=` job output name it, for example `Automated review backend: **claude (claude-opus-5-5)**.`.
