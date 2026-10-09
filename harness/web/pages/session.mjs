@@ -247,9 +247,19 @@ async function viewSession(sid, tab, focusApproval) {
     return slot;
   };
 
+  // A pending approval is a bottom sheet pinned over the session (#507); the transcript keeps a one-line record that the
+  // decision fills in. The composer yields while any sheet is open.
+  const syncComposer = () => { if (composer) composer.hidden = pendingSheets.size > 0; };
+  const pendingSheets = new Set();
   const approvalCard = (a) => {
-    const note = h("input", { type: "text", placeholder: "Note for the agent (optional)" });
-    const buttons = h("div", { class: "row end" });
+    const note = h("input", { type: "text", id: `approval-note-${a.id}`, placeholder: "Note for the agent (optional)", hidden: true });
+    const noteToggle = h("button", { class: "approval-note-toggle", type: "button", "aria-expanded": "false", "aria-controls": note.id }, "Add a note for the agent");
+    noteToggle.addEventListener("click", () => {
+      note.hidden = false;
+      noteToggle.hidden = true;
+      if (note.focus) note.focus();
+    });
+    const buttons = h("div", { class: "approval-actions" });
     const decide = async (decision) => {
       buttons.querySelectorAll("button").forEach((b) => { b.disabled = true; });
       try {
@@ -260,17 +270,17 @@ async function viewSession(sid, tab, focusApproval) {
       }
     };
     if (isGuest()) {
-      append(buttons,h("p", { class: "muted small" }, "Demo access cannot approve or deny."));
+      append(buttons, h("p", { class: "muted small" }, "Demo access cannot approve or deny."));
     } else {
       append(buttons,
-        h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
-        h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
+        h("button", { class: "btn approval-deny", type: "button", onclick: () => decide("deny") }, "✕ Deny"),
+        h("button", { class: "btn approval-approve", type: "button", onclick: () => decide("approve") }, "✓ Approve"));
     }
     const what = approvalWhat(a);
     const reviewerReason = a.smart?.reason ? `: ${a.smart.reason}` : "";
     const rec = a.smart?.recommendation
       ? h("p", { class: "smart-rec" },
-          `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${reviewerReason}`)
+          `Reviewer: ${a.smart.recommendation} · ${Math.round((a.smart.confidence || 0) * 100)}%${reviewerReason}`)
       : null;
     // Memory library changes carry "summary\n\n<unified diff>"; file writes carry just the diff.
     const memory = a.tool === "memory_edit" || a.tool === "memory_write";
@@ -278,19 +288,31 @@ async function viewSession(sid, tab, focusApproval) {
     const diffView = /^@@ /m.test(diff) ? h("div", { class: "diff approval-diff" }, diff.split("\n")
       .filter((line) => !/^(---|\+\+\+) /.test(line))
       .map((line) => h("div", { class: approvalDiffClass(line) }, line))) : null;
-    const card = h("div", { class: "approval", id: `approval-${a.id}` },
-      h("h4", {}, `Approval needed: ${a.reason || a.tool}`),
+    const slotState = h("div", { class: "muted small" }, "Waiting for your decision");
+    const slot = h("div", { class: "approval approval-slot", id: `approval-${a.id}` },
+      h("strong", {}, `Approval needed: ${a.reason || a.tool}`), slotState);
+    const sheet = h("section", { class: "approval-sheet", role: "region", "aria-label": "Approval needed" },
+      h("div", { class: "approval-head" },
+        h("h4", {}, "Approval needed"),
+        h("a", { href: `#approval-${a.id}`, class: "approval-show", onclick: (ev) => {
+          ev.preventDefault();
+          if (slot.scrollIntoView) slot.scrollIntoView({ block: "center", behavior: "smooth" });
+        } }, "Show in transcript")),
+      h("p", { class: "approval-what" }, a.reason || a.tool),
       rec,
       summary ? h("p", { style: "margin:4px 0 8px" }, summary) : null,
       diffView || h("pre", {}, a.detail || what),
-      a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args.path || ""}`) : null,
-      note, buttons);
-    approvals.set(a.id, { card, buttons, note });
+      a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args?.path || ""}`) : null,
+      noteToggle, note, buttons);
+    approvals.set(a.id, { card: slot, slotState, sheet, buttons, note });
+    pendingSheets.add(a.id);
+    document.body.append(sheet);
+    syncComposer();
     if (focusApproval === a.id) {
-      card.classList.add("focus");
-      setTimeout(() => card.scrollIntoView({ block: "center", behavior: "smooth" }), 50);
+      slot.classList.add("focus");
+      setTimeout(() => slot.scrollIntoView({ block: "center", behavior: "smooth" }), 50);
     }
-    return card;
+    return slot;
   };
 
   const handlers = {
@@ -384,8 +406,10 @@ async function viewSession(sid, tab, focusApproval) {
       if (!a) return;
       a.card.classList.add("decided");
       a.card.classList.remove("focus");
-      a.note.remove();
-      fill(a.buttons, h("span", { class: `badge ${e.data.status === "approved" ? "done" : "failed"}` },
+      a.sheet.remove();
+      pendingSheets.delete(e.data.id);
+      syncComposer();
+      fill(a.slotState, h("span", { class: `badge ${e.data.status === "approved" ? "done" : "failed"}` },
         e.data.status + (e.data.note ? `: ${e.data.note}` : "")));
     },
     tool_result: (e) => {
@@ -566,6 +590,7 @@ async function viewSession(sid, tab, focusApproval) {
     : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked,
     { authorized: !!agentHarnessWeb.token }));
   if (composer) onLeave(() => composer.remove());
+  onLeave(() => { for (const a of approvals.values()) a.sheet.remove(); });
 }
 
 function reviewCard(s) {

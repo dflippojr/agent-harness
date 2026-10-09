@@ -48,6 +48,29 @@ assert.match(transcript, /please fix it/);
 assert.match(transcript, /done/);
 assert.ok(body.length, "the composer is attached to the body");
 
+// A pending approval is a sheet on the body, not an inline card; it needs Deny/Approve and yields the composer.
+const composerEl = body.find((n) => n.attrs?.class === "composer");
+const before = body.length;
+streams[0].approval_requested({ seq: 3, data: { id: "ap1", tool: "write_file", tool_call_id: "c1", reason: "Edit outside allowlist",
+  detail: "@@ -1 +1 @@\n-a\n+b", args: { path: "sw.js" }, smart: { recommendation: "approve", confidence: 0.92, reason: "routine" } } });
+assert.equal(body.length, before + 1, "the approval sheet is attached to the body");
+const sheet = body.at(-1);
+assert.equal(sheet.attrs.class, "approval-sheet");
+assert.equal(composerEl.hidden, true, "the composer yields while a decision is pending");
+const sheetText = text(sheet);
+// The stub append() collects the Deny/Approve row into `rendered`.
+const actionsText = rendered.map(text).join(" ");
+assert.match(actionsText, /Deny/);
+assert.match(actionsText, /Approve/);
+assert.match(sheetText, /Reviewer: approve · 92%/);
+assert.match(sheetText, /Add a note for the agent/);
+assert.match(sheetText, /Show in transcript/);
+let removed = false;
+sheet.remove = () => { removed = true; };
+streams[0].approval_decided({ seq: 4, data: { id: "ap1", status: "approved" } });
+assert.ok(removed, "deciding removes the sheet");
+assert.equal(composerEl.hidden, false, "the composer returns after the decision");
+
 rendered.length = 0;
 await page.viewSession("abc", "changes");
 const changesText = rendered.map(text).join(" ");
