@@ -35,6 +35,13 @@ assert.equal(lastRunPill(undefined), null);
 assert.match(lastRunText(now - 7 * 3600, now * 1000), /^Last run .+ · 7 h ago$/);
 assert.match(lastRunText(now - 2 * 86400, now * 1000), /^Last run \S+ .+ · 2 d ago$/);
 assert.ok(!shortWhen(now + 86400 * 2, now * 1000).includes(","), "short next-run text has no date clause");
+{
+  const far = now + 86400 * 20;
+  const date = new Date(far * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  assert.ok(shortWhen(far, now * 1000).startsWith(date), "a run weeks away shows its date, not a bare weekday");
+  const soon = now + 86400 * 2;
+  assert.ok(shortWhen(soon, now * 1000).startsWith(new Date(soon * 1000).toLocaleDateString(undefined, { weekday: "short" })));
+}
 const body = jobBody(job("a", "A", { recent: [{}], next_run_at: 1 }), { enabled: false });
 assert.deepEqual(Object.keys(body).sort(), [...JOB_FIELDS].sort(), "the switch sends every Job field and nothing else");
 assert.equal(body.enabled, false);

@@ -35,11 +35,14 @@ export function jobGroup(job) {
   return last && (last.job_status === "attention" || last.status === "failed" || last.status === "waiting_approval") ? "attention" : "scheduled";
 }
 
-// "Fri 8:00": weekday and time, short enough for the 13 px meta row; today's runs drop the weekday.
+// "Fri 8:00": weekday and time, short enough for the 13 px meta row; today's runs drop the weekday, and a run a week or
+// more away (a monthly job) shows its date, "Nov 1 9:00", since a bare weekday would read as this week's.
 export const shortWhen = (ts, now = Date.now()) => {
   const d = new Date(ts * 1000);
   const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  return d.toDateString() === new Date(now).toDateString() ? time : `${d.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
+  if (d.toDateString() === new Date(now).toDateString()) return time;
+  if (Math.abs(ts * 1000 - now) >= 6 * 86400 * 1000) return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
+  return `${d.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
 };
 
 // The last run's outcome as [badge class, label]: STATUS: OK/ATTENTION when the agent reported one, else the session status.
