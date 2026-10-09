@@ -284,6 +284,8 @@ jobs:
               $inDiff = @{}
               foreach ($f in $diffFiles) { if ($f) { $inDiff[([string]$f).Trim()] = $true } }
               foreach ($line in (Get-Content -Encoding utf8 -LiteralPath 'review-output.md')) {
+                # Only the Findings part can annotate: stop at the advisory section.
+                if ($line -match '^\s*#{1,6}\s*Style and structure') { break }
                 if ($line -match '^\s*(?:[-*+]|\d+[.)])?\s*[`*_]*([^\s:`*]+):(\d+)(?:-(\d+))?[`*_]*[:\s)-]*(.*)$') {
                   $path = ([string]$Matches[1]).Replace('\', '/')
                   if ($path.StartsWith('./')) { $path = $path.Substring(2) }

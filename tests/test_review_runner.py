@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -1860,10 +1861,9 @@ def test_review_prompt_has_blocking_findings_and_advisory_style_sections():
 
 
 def test_advisory_items_cannot_become_check_annotations():
-    import re
-
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    pattern = workflow.split("if ($line -match '", 1)[1].split("') {", 1)[0]
+    # The first `-match` in the scanner stops at the advisory heading; the second is the annotation pattern.
+    pattern = workflow.split("if ($line -match '", 2)[2].split("') {", 1)[0]
     finding = "- `harness/web/app.js:42` The retry loop never stops when the server returns 500. Scenario: ..."
     assert re.search(pattern, finding)
     advisory = [
@@ -1873,3 +1873,13 @@ def test_advisory_items_cannot_become_check_annotations():
     ]
     for line in advisory:
         assert not re.search(pattern, line), line
+
+
+def test_annotation_scanner_stops_at_the_advisory_section():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    scanner = workflow.split("foreach ($line in (Get-Content -Encoding utf8 -LiteralPath 'review-output.md')) {", 1)[1]
+    stop = scanner.split("if ($line -match '", 1)[1].split("') { break }", 1)[0]
+    assert re.search(stop, "## Style and structure (advisory)")
+    assert re.search(stop, "### Style and structure")
+    assert not re.search(stop, "## Findings")
+    assert scanner.index("{ break }") < scanner.index("-match '^\s*(?:[-*+]|")

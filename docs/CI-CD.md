@@ -132,8 +132,8 @@ conclusion follows the review verdict:
 The review has two parts under fixed headings. `## Findings` lists correctness bugs only; it alone sets the verdict, the
 check conclusion and the inline annotations. `## Style and structure (advisory)` lists at most five suggestions on naming,
 responsibilities, duplication, consistency with the neighbouring code and simplifications, judged against the repository's
-own lint and format configuration. It never changes the verdict or fails the check, and its items are written without the
-`path:line` form so they cannot become annotations. A clean review can therefore still carry advisory suggestions.
+own lint and format configuration. It never changes the verdict or fails the check. Its items are written without the
+`path:line` form, and the annotation scanner also stops reading at this heading, so they cannot become annotations. A clean review can therefore still carry advisory suggestions.
 
 The check summary carries the posted comment, so findings are readable from the Checks tab. The workflow run itself
 stays green when the review merely has findings: a red run means the review machinery broke, a red check means the
@@ -177,7 +177,7 @@ workflow edit.
 
 Optional `REVIEW_MODEL_CLAUDE`, `REVIEW_MODEL_CURSOR`, and `REVIEW_MODEL_CODEX` pin the model each backend CLI is asked
 to use (`--model` on `claude`, Cursor `agent`, and `codex exec`). When a variable is set, the runner passes that flag and
-the PR comment footer plus `model=` job output name it, for example `Automated review backend: **claude (claude-sonnet-5)**.`.
+the PR comment footer plus `model=` job output name it, for example `Automated review backend: **claude (claude-opus-5-5)**.`.
 When a variable is unset, the workflow supplies a default model: `gpt-6.1-sol` for Codex and `claude-opus-5-5` for Claude
 (Cursor has none: it keeps the CLI default and the footer names only the backend). Values must match
 `[A-Za-z0-9][A-Za-z0-9._:+/\-]*`; anything else (spaces, quotes, leading dashes, shell metacharacters) fails closed
@@ -186,10 +186,11 @@ before a backend runs.
 Optional `REVIEW_EFFORT_CLAUDE` and `REVIEW_EFFORT_CODEX` pin reasoning effort: `--effort <value>` on `claude`
 (`low`, `medium`, `high`, `xhigh`, `max`) and `-c model_reasoning_effort="<value>"` on `codex exec` (`low`, `medium`,
 `high`, `xhigh`, `max`). When set, the footer and a new `effort=` job output include it, for example
-`Automated review backend: **claude (claude-sonnet-5, medium)**.`. Unset falls back to the workflow defaults, `xhigh` for Codex and `high` for Claude; a whitespace-only value keeps the CLI
-default and the footer unchanged. Any other value fails closed before a backend runs, and all effort variables are validated up front
-even for backends not used. Cursor has no effort variable: choose effort through the model id (for example
-`cursor-grok-4.6-medium` in `REVIEW_MODEL_CURSOR`).
+`Automated review backend: **claude (claude-opus-5-5, high)**.`. Unset falls back to the workflow defaults, `xhigh` for
+Codex and `high` for Claude; a whitespace-only value keeps the CLI default and the footer unchanged. Any other value
+fails closed before a backend runs, and all effort variables are validated up front even for backends not used. Cursor
+has no effort variable: choose effort through the model id (for example `cursor-grok-4.6-medium` in
+`REVIEW_MODEL_CURSOR`).
 
 Optional `REVIEW_MAX_DIFF_BYTES` sets how many bytes of PR diff are embedded in the review prompt (default `204800`; accepted range `20480` to `2097152`, digits only). A larger cap covers more of a big PR but grows the prompt, so each review costs more tokens and risks exceeding the model's context; a smaller cap is cheaper but omits more. An invalid value fails closed before a backend runs. When the diff exceeds the cap, whole files are dropped by a fixed rule: source files are kept first, then tests, then docs, then lockfiles and generated or vendored output, in diff order within each tier; a file that does not fit is omitted even if a smaller later file still fits. The comment then opens with `PARTIAL REVIEW: reviewed N of M files (X of Y KB of diff). Not reviewed: <files>` instead of `Reviewed the full diff`, and the `<!-- agent-review: ... -->` marker is withheld so the next run reviews the whole PR instead of treating it as covered. A single file larger than the cap is always listed as not reviewed. Omitted files are not reviewed in additional passes; raise the cap to cover them.
 
