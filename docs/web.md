@@ -36,6 +36,11 @@ in-app sheet (`lib/sheet.mjs`) instead of the browser's native dialogs: a bottom
 on wide screens. The action button names the action and is red when it destroys something; input sheets show
 errors under the field. Escape, a tap outside the sheet or leaving the page dismisses it.
 
+The Agents list groups sessions into **Needs you** (a pending approval, or a run that failed in the last 24 hours),
+**Running** (running, queued or waiting) and **Recent** (finished). Empty groups are hidden, and each group is sorted
+by most recent activity. An approval row shows the pending command or tool on one line and opens straight at the
+approval. A session on a machine other than the tower shows a laptop icon and the machine's name.
+
 ## Connection state
 
 The header chip says **Live**, **Reconnecting** or **Offline**. It follows the app-wide event stream from Agent Harness
