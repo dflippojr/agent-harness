@@ -247,10 +247,17 @@ class Executor:
             raise OpError(str(exc)) from exc
 
     def run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
+        tmp = self.tmpdir(sid)
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
                "LOGNAME": os.environ.get("USER", ""), "SHELL": self.shell, "LANG": "en_US.UTF-8", "TERM": "dumb",
-               "TMPDIR": str(self.tmpdir(sid)), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
-               "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+               "TMPDIR": str(tmp), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
+               "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1",
+               # ~/.gradle, ~/.m2 and ~/.cache are read-only in the sandbox: builds write to the session's own
+               # directories and reuse the owner's downloaded Gradle and Maven dependencies read-only.
+               "GRADLE_USER_HOME": str(tmp / "gradle"), "GRADLE_RO_DEP_CACHE": str(self.home / ".gradle" / "caches"),
+               "MAVEN_OPTS": f"-Dmaven.repo.local={tmp / 'm2'} "
+                             f"-Dmaven.repo.local.tail={self.home / '.m2' / 'repository'}",
+               "XDG_CACHE_HOME": str(tmp / "cache")}
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
             profile = self.profile_template.replace("\n{{NETWORK}}", "\n" + ("" if network else OFFLINE_RULES))

@@ -306,11 +306,38 @@ def test_profile_blocks_launching_programs_outside_the_sandbox():
     assert "(allow appleevent-send" not in " ".join(rules)
 
 
-def test_profile_keeps_gradle_init_scripts_read_only():
+@pytest.mark.parametrize("build_dir", ["/.gradle", "/.m2", "/.cache"])
+def test_profile_keeps_build_tool_homes_read_only(build_dir):
     rules = _rules(PROFILE.read_text(encoding="utf-8"))
-    allow_gradle = _last_rule(rules, "file-write*", f'(subpath {_home("/.gradle")})')
-    assert allow_gradle.startswith("(allow file-write*")
-    for form in (f'(subpath {_home("/.gradle/init.d")})', f'(literal {_home("/.gradle/init.gradle")})',
-                 f'(literal {_home("/.gradle/init.gradle.kts")})', f'(literal {_home("/.gradle/gradle.properties")})'):
-        rule = _last_rule(rules, "file-write*", form)
-        assert rule.startswith("(deny file-write*") and rules.index(rule) > rules.index(allow_gradle)
+    writable = [r for r in rules if r.startswith("(allow") and "file-write*" in r.split("(", 2)[1]]
+    assert writable and not [r for r in writable if _home(build_dir) in r]
+    assert _last_rule(rules, "file-write*", f'(subpath {_home("/.npm")})').startswith("(allow file-write*")
+
+
+def test_sandboxed_builds_use_session_directories(tmp_path, monkeypatch):
+    envs = []
+
+    class FakeProc:
+        pid, returncode = 1, 0
+
+        def __init__(self, argv, env, **_kw):
+            envs.append(env)
+            self.stdout = io.BytesIO(b"")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    monkeypatch.setattr(harness_runner.subprocess, "Popen", FakeProc)
+    ex = executor(tmp_path, [tmp_path])
+    ex.handle("r", "shell", {"session": SID, "command": "true"})
+    env = envs[0]
+    assert Path(env["GRADLE_USER_HOME"]) == Path(env["TMPDIR"]) / "gradle"
+    assert Path(env["GRADLE_RO_DEP_CACHE"]) == tmp_path / ".gradle" / "caches"
+    assert env["MAVEN_OPTS"] == (f"-Dmaven.repo.local={Path(env['TMPDIR']) / 'm2'} "
+                                 f"-Dmaven.repo.local.tail={tmp_path / '.m2' / 'repository'}")
+    assert Path(env["XDG_CACHE_HOME"]) == Path(env["TMPDIR"]) / "cache"

@@ -16,17 +16,10 @@
   (regex #"^/dev/tty") (regex #"^/dev/fd/")
   (subpath (string-append (param "HOME") "/Library/Caches"))
   (subpath (string-append (param "HOME") "/Library/Developer/Xcode/DerivedData"))
-  (subpath (string-append (param "HOME") "/.cache"))
-  (subpath (string-append (param "HOME") "/.npm"))
-  (subpath (string-append (param "HOME") "/.m2"))
-  (subpath (string-append (param "HOME") "/.gradle")))
-
-;; Build settings that later Gradle runs outside the sandbox would execute.
-(deny file-write*
-  (subpath (string-append (param "HOME") "/.gradle/init.d"))
-  (literal (string-append (param "HOME") "/.gradle/init.gradle"))
-  (literal (string-append (param "HOME") "/.gradle/init.gradle.kts"))
-  (literal (string-append (param "HOME") "/.gradle/gradle.properties")))
+  (subpath (string-append (param "HOME") "/.npm")))
+;; ~/.gradle, ~/.m2 and ~/.cache stay read-only: init scripts, wrapper distributions, jars and tool environments
+;; there are run by later builds outside the sandbox. The runner points sandboxed Gradle, Maven and XDG caches at
+;; the session's TMPDIR, with the owner's Gradle and Maven downloads as read-only fallbacks.
 
 ;; Credentials and personal data: neither readable nor writable. ~/.agent-harness holds the runner and client
 ;; tokens, the runner's code and its host-side git scratch space (runner/tmp); only the workspace is reopened below.

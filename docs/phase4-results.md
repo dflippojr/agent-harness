@@ -81,8 +81,10 @@ the runner's PATH puts it first.)
 Base `(allow default)`, then:
 
 - `(deny file-write*)` except the workspace, `/private/tmp`, `/private/var/folders` (per-user TMPDIR), device
-  files, `~/Library/Caches`, `~/Library/Developer/Xcode/DerivedData`, `~/.cache`, `~/.npm`, `~/.m2`, `~/.gradle`
-  (but not `~/.gradle/init.d`, `init.gradle(.kts)` or `gradle.properties`, which later Gradle runs would execute).
+  files, `~/Library/Caches`, `~/Library/Developer/Xcode/DerivedData`, `~/.npm`. `~/.gradle`, `~/.m2` and `~/.cache`
+  are read-only, because later builds outside the sandbox run what is in them: sandboxed commands get
+  `GRADLE_USER_HOME`, a Maven local repository (`MAVEN_OPTS`) and `XDG_CACHE_HOME` under the session TMPDIR, with
+  `~/.gradle/caches` (`GRADLE_RO_DEP_CACHE`) and `~/.m2/repository` (`maven.repo.local.tail`) as read-only fallbacks.
 - Neither read nor write: all of `~/.agent-harness` except the session's own workspace (runner and client tokens,
   runner code, logs, other sessions' workspaces, and `runner/tmp`, where host-side git keeps its throwaway git
   dirs and hooks dirs; parent directories of the workspace can be stat'ed, not listed), `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`,
