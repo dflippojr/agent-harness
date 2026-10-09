@@ -169,6 +169,106 @@ Require a live app token (`ha-`) and the related scope. An app value may only na
 
 Owner, device, runner, guest, and anonymous credentials cannot impersonate app configuration.
 
+## Registered keys (generated)
+
+Every key of the registry with all modules present, read from `harness/settings_keys.py` by `scripts/docs/build.py` (do not edit between the markers). Defaults for installer-only, path-like, secret and per-backend keys are not shown. The tables above explain bounds and behaviour.
+
+<!-- generated:begin config-registry-keys -->
+| Key | Type | Default | Scope | Description |
+| --- | --- | --- | --- | --- |
+| `app.capabilities` | string_list | — | app | Subset of capabilities already granted by the token, installed by the daemon, and allowed by policy. |
+| `app.default_backend` | string | `""` | app | Used only when a session request omits backend. Cannot select an unassigned provider. |
+| `app.default_effort` | enum | `""` | app | Used only when a hosted-backend session request omits effort. |
+| `app.default_model` | string | `""` | app | Used only when a session request omits model. |
+| `app.notify.completion` | enum | `"inherit"` | app | inherit uses the owner channel; never silences this app's session-completion notifications. |
+| `app.sessions.max_completion_tokens` | int | — | app | Per-session completion-token cap, never higher than the owner limit. |
+| `app.sessions.max_turns` | int | — | app | Per-session turn cap, never higher than the owner limit. |
+| `backends.claude.effort` | enum | — | admin | Default effort for new claude sessions. Existing sessions keep the effort they started with. |
+| `backends.claude.model` | string | — | admin | Default model for new claude sessions. Existing sessions keep the model they started with. |
+| `backends.codex.effort` | enum | — | admin | Default effort for new codex sessions. Existing sessions keep the effort they started with. |
+| `backends.codex.model` | string | — | admin | Default model for new codex sessions. Existing sessions keep the model they started with. |
+| `backends.local.model` | enum | — | admin | Default local model for new sessions. Existing sessions keep the model they started with. |
+| `backup.at` | string | `"03:30"` | admin | Local time (HH:MM) for the nightly backup. |
+| `backup.dir` | string | — | admin | Where nightly backups are written. |
+| `backup.enabled` | bool | `false` | admin | Runtime enable for the nightly backup. Does not change the backup directory. |
+| `backup.keep_days` | int | `14` | admin | Delete dated backup folders older than this. |
+| `backup.member_key_dir` | string | — | admin | Separate key copies; keep apart from database backups off-site. Unset uses backup.dir/member-keys. |
+| `cleanup.container_idle_hours` | float | `24` | admin | Remove a finished session's stopped container after this many hours. |
+| `cleanup.interval_minutes` | int | `60` | admin | How often idle containers and old workspaces are swept. Applied live by rescheduling the cleanup task. |
+| `cleanup.min_free_gb` | float | `20` | admin | Refuse new sessions when the data drive has less free space than this. |
+| `cleanup.workspace_quota_mb` | int | `5000` | admin | Per-session workspace limit unless a project overrides it. |
+| `cleanup.workspace_retention_days` | float | `14` | admin | Delete a finished session's workspace after this many days. |
+| `compaction.elide_at` | float | `0.55` | admin | Fraction of context at which old tool outputs are shortened. |
+| `compaction.keep_recent` | float | `0.2` | admin | Fraction of context kept verbatim after a summary. Must be less than summarize_at. |
+| `compaction.reset_at` | float | `0.6` | admin | Fraction of context at which a round reset fires when valid state is saved. Must be greater than elide_at and less than summarize_at. |
+| `compaction.state_max_chars` | int | `8000` | admin | Maximum characters of the serialized update_state object. Saved state is re-injected on a round reset. |
+| `compaction.summarize_at` | float | `0.65` | admin | Fraction of context at which older turns are summarized. Must be greater than elide_at. |
+| `endpoint.agent_fair_seconds` | float | `90` | admin | After an agent turn waits this long, new endpoint requests queue behind it. |
+| `endpoint.enabled` | bool | `false` | admin | Runtime enable for the OpenAI/Anthropic-compatible endpoint. |
+| `endpoint.max_waiting` | int | `4` | admin | Inference requests waiting for the GPU before new ones get 429. |
+| `endpoint.request_timeout_seconds` | float | `1800` | admin | Give up on a hung inference request after this long. |
+| `gpu_guard.drain_timeout_seconds` | float | `300` | admin | Longest wait for the current model turn before the server is stopped. |
+| `gpu_guard.enabled` | bool | `false` | admin | Runtime enable for pausing the model while a game or Plex transcode needs the GPU. |
+| `gpu_guard.poll_seconds` | float | `10` | admin | How often the GPU guard looks for games or Plex transcodes. |
+| `gpu_guard.resume_after_seconds` | float | `180` | admin | The GPU must stay clear this long before the model is reloaded. |
+| `images.edit_enabled` | bool | `false` | admin | Runtime enable for the installed Qwen-Image-Edit component. Does not download model weights. |
+| `images.enabled` | bool | `false` | admin | Runtime enable for local image generation. |
+| `images.job_timeout_seconds` | float | `1200` | admin | How long a single image job may run. |
+| `images.max_pixels` | int | `20000000` | admin | Reject gallery edits and decoded uploads/masks above this pixel count (long side is also capped at 1664). |
+| `images.max_upload_bytes` | int | `20971520` | admin | Maximum source or mask upload size for owner-only masked editing. |
+| `images.start_timeout_seconds` | float | `180` | admin | How long to wait for ComfyUI to become ready. |
+| `install.profile` | string | — | admin | full or service. Chosen by the installer. |
+| `jobs.enabled` | bool | `false` | admin | Runtime enable for scheduled jobs. Does not install the jobs module. |
+| `jobs.poll_seconds` | float | `30` | admin | How often scheduled jobs are checked. |
+| `listen.host` | string | — | admin | Bind address for the daemon HTTP server. |
+| `listen.port` | string | — | admin | TCP port for the daemon HTTP server. |
+| `memory_library.enabled` | bool | `false` | admin | Runtime enable for personal memory tools. Does not install the memory library module. |
+| `modules.backup` | string | — | admin | backup installation/profile selection. Change this with the installer, not this registry. |
+| `modules.endpoint` | string | — | admin | endpoint installation/profile selection. Change this with the installer, not this registry. |
+| `modules.gpu_guard` | string | — | admin | gpu_guard installation/profile selection. Change this with the installer, not this registry. |
+| `modules.homelab` | string | — | admin | homelab installation/profile selection. Change this with the installer, not this registry. |
+| `modules.image_edit` | string | — | admin | image_edit installation/profile selection. Change this with the installer, not this registry. |
+| `modules.images` | string | — | admin | images installation/profile selection. Change this with the installer, not this registry. |
+| `modules.jobs` | string | — | admin | jobs installation/profile selection. Change this with the installer, not this registry. |
+| `modules.local_model` | string | — | admin | local_model installation/profile selection. Change this with the installer, not this registry. |
+| `modules.mcp_client` | string | — | admin | mcp_client installation/profile selection. Change this with the installer, not this registry. |
+| `modules.memory_library` | string | — | admin | memory_library installation/profile selection. Change this with the installer, not this registry. |
+| `modules.notifications` | string | — | admin | notifications installation/profile selection. Change this with the installer, not this registry. |
+| `modules.remote_control` | string | — | admin | remote_control installation/profile selection. Change this with the installer, not this registry. |
+| `modules.runners` | string | — | admin | runners installation/profile selection. Change this with the installer, not this registry. |
+| `modules.search` | string | — | admin | search installation/profile selection. Change this with the installer, not this registry. |
+| `modules.skills` | string | — | admin | skills installation/profile selection. Change this with the installer, not this registry. |
+| `modules.web` | string | — | admin | web installation/profile selection. Change this with the installer, not this registry. |
+| `notifications.enabled` | bool | `false` | admin | Runtime enable for ntfy notifications. Does not configure a server or topic. |
+| `notify.server` | string | — | admin | ntfy server URL. |
+| `notify.token_file` | string | — | admin | File holding the ntfy write token. |
+| `notify.topic` | string | — | admin | ntfy topic name. |
+| `paths.data_dir` | string | — | admin | SQLite database, workspaces, and transcripts. |
+| `paths.repos_dir` | string | — | admin | Host-side clones for local:<name> git_clone. |
+| `remote_control.discovery.enabled` | bool | `false` | admin | Windows owner-only, default-off metadata discovery. No file contents, trust or launch. Limits: 20,000 directories; 500 candidates; 30 seconds; 50 errors; one active scan; results expire after 15 minutes. Hidden/system entries, all reparse points (including OneDrive), credentials, caches and build folders are excluded. |
+| `remote_control.discovery.max_depth` | int | `3` | admin | Windows owner-only, default-off metadata discovery. No file contents, trust or launch. Limits: 20,000 directories; 500 candidates; 30 seconds; 50 errors; one active scan; results expire after 15 minutes. Hidden/system entries, all reparse points (including OneDrive), credentials, caches and build folders are excluded. |
+| `remote_control.discovery.roots` | discovery_root_list | `[]` | admin | Windows owner-only, default-off metadata discovery. No file contents, trust or launch. Limits: 20,000 directories; 500 candidates; 30 seconds; 50 errors; one active scan; results expire after 15 minutes. Hidden/system entries, all reparse points (including OneDrive), credentials, caches and build folders are excluded. |
+| `remote_control.enabled` | bool | `false` | admin | Runtime enable for Remote Control. Does not install the module. |
+| `search.enabled` | bool | `false` | admin | Runtime enable for session search. Does not install the search module. |
+| `sessions.max_completion_tokens` | int | — | admin | Per-run completion-token cap for new sessions. Changing this does not raise an active run's budget. |
+| `sessions.max_turns` | int | `80` | admin | Per-run turn cap for new sessions. Changing this does not raise an active run's budget. |
+| `skills.enabled` | bool | `false` | admin | Runtime enable for owner-approved instruction skills. Does not install the skills module. |
+| `smart_approvals.enabled` | bool | `false` | admin | Runtime enable for the hosted smart-approval reviewer. Does not configure a secret_ref. |
+| `smart_approvals.min_confidence` | float | `0.85` | admin | Hosted reviewer must meet this confidence before auto mode may approve. |
+| `smart_approvals.mode` | enum | `"shadow"` | admin | off, shadow, or auto. Last writer among this setting and PUT /smart-approvals wins; off means no reviewer calls. |
+| `smart_approvals.model` | string | `"gpt-4.1-mini"` | admin | Hosted reviewer model id. Existing in-flight reviews keep the model they started with. |
+| `smart_approvals.provider` | enum | `"openai"` | admin | Hosted reviewer provider. openai or anthropic. |
+| `smart_approvals.proxy` | string | — | admin | Optional explicit proxy for the hosted reviewer. Managed in local configuration. |
+| `smart_approvals.secret_ref` | string | — | admin | Opaque name of the hosted reviewer key file. Managed in local configuration. |
+| `smart_approvals.timeout_seconds` | float | `8` | admin | Give up on a hung reviewer request after this long. |
+| `web.enabled` | bool | `false` | admin | Runtime enable for web_search / web_fetch. Does not install the web module. |
+| `web.max_bytes` | int | `5242880` | admin | Refuse larger ordinary page downloads. |
+| `web.max_document_bytes` | int | `26214400` | admin | Refuse larger PDF or Word downloads. |
+| `web.page_chars` | int | `15000` | admin | Characters returned per web_fetch page. |
+| `web.quote_check` | bool | `true` | admin | Require quoted passages in final answers to appear in something the agent read. |
+| `web.timeout_seconds` | float | `20` | admin | Network timeout for search and fetch. |
+<!-- generated:end config-registry-keys -->
+
 ## APIs
 
 App: `GET/PATCH /api/v1/config`, `GET /api/v1/config/schema`.

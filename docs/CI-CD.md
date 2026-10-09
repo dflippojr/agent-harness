@@ -37,7 +37,7 @@ anonymously and does not sign in. The first production deployment showed why: `d
 
 ## Docs regeneration on main
 
-`.github/workflows/docs-regen.yml` runs on a push to `main` that touches `docs/fragments/**` or `scripts/docs/**`
+`.github/workflows/docs-regen.yml` runs on a push to `main` that touches `docs/fragments/**`, `scripts/docs/**`, `harness/**` or `harness_modules/**` (the code-derived tables read routes and settings from there)
 (and on `workflow_dispatch`). It runs `python scripts/docs/build.py` and, only if a generated region changed, commits
 `Docs: regenerate fragment regions [skip ci]` to `main` as `github-actions[bot]`. It is the single writer of generated
 regions; PRs add fragments only. It uses the default `GITHUB_TOKEN` with `contents: write` on that one job.

@@ -9,6 +9,10 @@ Output is deterministic (stable sort, no timestamps) and uses only stdlib plus P
     python scripts/docs/build.py --check --base origin/main
                                                   PR mode: a region may match the base branch's fragments or this
                                                   branch's fragments, so a hand edit fails and a new fragment passes
+
+Tables derived from code (API endpoints, settings registry; code_tables.py) are regions too. On a PR they may equal
+the base branch's committed text (the PR left them alone; the post-merge job regenerates) or what this branch's
+code produces; on main they must equal what the code produces. Missing summaries are warnings, never failures.
 """
 
 from __future__ import annotations
@@ -22,6 +26,9 @@ from pathlib import Path
 from typing import Callable, NoReturn
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import code_tables  # noqa: E402
 
 REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@~^-]*$")
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -219,6 +226,16 @@ def build(root: Path) -> list[str]:
             path.write_bytes(new.encode("utf-8"))
             if target.file not in changed:
                 changed.append(target.file)
+    for name, region in code_tables.CODE_REGIONS.items():
+        path = root / region.file
+        if not path.is_file():  # a tree without the API docs (the fragments tests) has no code tables to write
+            continue
+        text = path.read_bytes().decode("utf-8")
+        new = splice(region.file, text, name, region.render(root)[0])
+        if new != text:
+            path.write_bytes(new.encode("utf-8"))
+            if region.file not in changed:
+                changed.append(region.file)
     return changed
 
 
@@ -258,6 +275,48 @@ def check(root: Path, base: str | None = None, fragments_only: bool = False) -> 
                 f"{target.file}: generated region {name!r} was edited by hand or is stale. It must equal what "
                 f"{options} produce. Do not edit inside the markers; add a fragment under {FRAGMENTS_DIR}/ "
                 f"(see {FRAGMENTS_DIR}/README.md), or run `python scripts/docs/build.py` to regenerate.")
+    problems += check_code_regions(root, base)
+    return problems
+
+
+def _base_text(root: Path, ref: str, rel: str) -> str | None:
+    if not REF_RE.fullmatch(ref):
+        return None
+    try:
+        return subprocess.run(["git", "show", f"{ref}:{rel}"], cwd=root, check=True, capture_output=True,
+                              text=True, encoding="utf-8").stdout
+    except (subprocess.CalledProcessError, OSError):
+        return None
+
+
+def check_code_regions(root: Path, base: str | None = None) -> list[str]:
+    """Code-derived tables must match the code; on a PR they may instead be untouched since the base."""
+    problems = []
+    for name, region in code_tables.CODE_REGIONS.items():
+        if not (root / region.file).is_file():
+            continue
+        try:
+            want, warnings = region.render(root)
+            text = (root / region.file).read_bytes().decode("utf-8")
+            have = current_body(region.file, text, name)
+        except (DocsError, code_tables.CodeTableError) as exc:
+            problems.append(str(exc))
+            continue
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        if have == want:
+            continue
+        if base:
+            base_text = _base_text(root, base, region.file)
+            try:
+                if base_text is not None and current_body(region.file, base_text, name) == have:
+                    continue
+            except DocsError:
+                pass
+        problems.append(
+            f"{region.file}: generated region {name!r} is stale or was edited by hand; the code and the table "
+            f"disagree. Run `python scripts/docs/build.py` and commit the result (on a PR you may also leave the "
+            f"region alone: it is regenerated after merge).")
     return problems
 
 
@@ -282,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("docs fragments OK")
             return 1 if problems else 0
         changed = build(args.root)
-    except DocsError as exc:
+    except (DocsError, code_tables.CodeTableError) as exc:
         print(exc, file=sys.stderr)
         return 1
     print("updated: " + ", ".join(changed) if changed else "docs already up to date")
