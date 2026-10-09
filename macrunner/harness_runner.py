@@ -52,6 +52,7 @@ OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trim
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
 HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+")
 RID_OPS = frozenset({"shell", "git_clone"})  # the ops that need the request id
+STAGING_PREFIX, REMOVING_PREFIX = ".seeding-", ".removing-"  # session TMPDIRs on their way in and out
 # What a new session TMPDIR gets copied from the owner's read-only build tool homes: (home dir, entries, session dir).
 TOOL_SEEDS = ((".gradle", ("wrapper/dists", "jdks", "gradle.properties"), "gradle"),
               (".m2", ("repository", "wrapper"), "m2"))
@@ -125,31 +126,47 @@ class Executor:
     def tmpdir(self, sid: str) -> Path:
         """The session's own TMPDIR, <private base>/<session id>, created with mode 0700 so other users and sessions
         can't read it or plant files in it. It lasts until the workspace is discarded or cleaned up, across runner
-        restarts. A new one starts with the session's Gradle and Maven homes seeded (see seed_tool_homes)."""
+        restarts. A new one is seeded with the session's Gradle and Maven homes (see seed_tool_homes) in a staging
+        directory and only then moved into place, so an existing TMPDIR is always a fully seeded one."""
         if not SESSION_RE.match(sid or ""):
             raise OpError(f"bad session id {sid!r}")
         with self.lock:
-            path = self.tmp_base() / sid
-            try:
-                path.mkdir(mode=0o700)
-                created = True
-            except FileExistsError:
-                created = False
-            self.check_private(path)
-            if created:
-                self.seeding[sid] = threading.Event()
+            base = self.tmp_base()
+            path, staging = base / sid, None
             seeded = self.seeding.get(sid)
+            if seeded is None and not path.exists():
+                staging = base / f"{STAGING_PREFIX}{sid}-{uuid.uuid4().hex[:8]}"
+                staging.mkdir(mode=0o700)
+                seeded = self.seeding[sid] = threading.Event()
         # Seeding can take a while, so other sessions don't wait for it; this session's commands do.
-        if created:
+        if staging is not None:
             try:
-                self.seed_tool_homes(path)
+                self.seed_tool_homes(staging)
             finally:
                 with self.lock:
+                    try:
+                        staging.rename(path)
+                    except OSError as e:
+                        log.warning("couldn't move the seeded TMPDIR into place: %s", e)
+                        path.mkdir(mode=0o700, exist_ok=True)
                     self.seeding.pop(sid, None)
                 seeded.set()
-        elif seeded is not None:
+                if staging.exists():
+                    remove_tree(staging)
+            return path
+        if seeded is not None:
             seeded.wait()
+        with self.lock:
+            path.mkdir(mode=0o700, exist_ok=True)
+            self.check_private(path)
         return path
+
+    def sweep_tmp(self) -> None:
+        """Remove TMPDIRs a previous runner was still seeding or removing when it stopped."""
+        base = self.tmp_base()
+        for child in base.iterdir():
+            if child.name.startswith((STAGING_PREFIX, REMOVING_PREFIX)) and not child.is_symlink():
+                remove_tree(child)
 
     def drop_tmpdir(self, sid: str) -> None:
         if not SESSION_RE.match(sid or ""):
@@ -162,7 +179,7 @@ class Executor:
             path = self.tmp_base() / sid
             if not path.exists():
                 return
-            doomed = path.with_name(f".removing-{sid}-{uuid.uuid4().hex[:8]}")
+            doomed = path.with_name(f"{REMOVING_PREFIX}{sid}-{uuid.uuid4().hex[:8]}")
             path.rename(doomed)
         remove_tree(doomed)
 
@@ -684,6 +701,7 @@ def main() -> None:
         profile=None if cfg.get("sandbox") is False else APP_DIR / "sandbox.sb",
         home=home, min_free_gb=float(cfg.get("min_free_gb", 10)))
     executor.server = cfg["server"]
+    executor.sweep_tmp()
     projects.TEMP_ROOT = git_temp_root(home)
     runner = Runner(Client(cfg["server"], cfg.get("name", "macbook"), cfg["token"]), executor)
 

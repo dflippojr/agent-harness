@@ -440,6 +440,7 @@ def test_seeding_a_new_session_holds_up_only_that_session(tmp_path, monkeypatch)
     first = threading.Thread(target=lambda: results.setdefault("first", ex.tmpdir(SID)))
     first.start()
     assert started.wait(10)
+    assert not (ex.tmp_base() / SID).exists()  # it appears only once seeded
     second = threading.Thread(target=lambda: results.setdefault("second", ex.tmpdir(SID)))
     second.start()
     monkeypatch.setattr(harness_runner, "clone_tree", lambda src, dst: dst.mkdir())
@@ -535,6 +536,22 @@ def test_removing_a_session_tmpdir_does_not_hold_up_other_sessions(tmp_path, mon
     ex.drop_tmpdir(SID)  # already gone
     assert lock_free == [True]
     assert list(ex.tmp_base().iterdir()) == []
+
+
+def test_tmpdir_left_mid_seeding_by_a_stopped_runner_is_seeded_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    (tmp_path / ".gradle" / "jdks" / "jdk-21").mkdir(parents=True)
+    stopped = executor(tmp_path, [tmp_path])
+    base = stopped.tmp_base()
+    leftover = base / f"{harness_runner.STAGING_PREFIX}{SID}-0badc0de"
+    (leftover / "gradle" / "jdks").mkdir(parents=True)  # half seeded when the runner stopped
+    removing = base / f"{harness_runner.REMOVING_PREFIX}abcdef0123-0badc0de"
+    removing.mkdir()
+    restarted = executor(tmp_path, [tmp_path])
+    restarted.sweep_tmp()
+    assert sorted(p.name for p in base.iterdir()) == []
+    assert (restarted.tmpdir(SID) / "gradle" / "jdks" / "jdk-21").is_dir()
 
 
 def test_clone_tree_uses_copy_on_write_cp_on_macos(tmp_path, monkeypatch):
