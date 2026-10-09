@@ -18,6 +18,10 @@ Detail and editor pages (a session, a job, an image, New task) show Back and hid
 the bar sits above the home indicator (`env(safe-area-inset-bottom)`). At 960 px and wider the same links form a
 left rail. Scheduled work is called **Jobs** everywhere; the old `#/tasks` links redirect to `#/jobs`.
 
+The Jobs list groups jobs as **Needs attention** (the last run ended ATTENTION, failed or waits on an approval),
+**Scheduled** and **Paused**. Each row has an **Enabled** switch that saves at once, through the same
+`PUT /api/admin/v1/jobs/{id}` the form uses, and offers Undo in the toast. Tapping the row opens the full form.
+
 ## API boundary
 
 Agent Harness Web does not construct unversioned Server URLs for owner use:
