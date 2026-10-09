@@ -23,6 +23,7 @@ from typing import Callable, NoReturn
 
 import yaml
 
+REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@~^-]*$")
 ROOT = Path(__file__).resolve().parent.parent.parent
 FRAGMENTS_DIR = "docs/fragments"
 SCHEMA_VERSION = 1
@@ -144,6 +145,9 @@ def read_worktree_fragments(root: Path) -> dict[str, str]:
 
 def read_ref_fragments(root: Path, ref: str) -> dict[str, str] | None:
     """Fragments as committed at `ref`, or None when the ref cannot be read."""
+
+    if not REF_RE.fullmatch(ref):
+        return None
 
     def git(*args: str) -> str:
         return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True,

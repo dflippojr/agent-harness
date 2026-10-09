@@ -148,3 +148,7 @@ def test_missing_or_duplicate_markers_fail(repo):
 def test_repo_fragments_and_readme_are_in_sync():
     assert build.check(ROOT) == []
     assert len(list((ROOT / "docs" / "fragments").glob("*.yaml"))) == 7
+
+
+def test_option_like_ref_is_never_passed_to_git(repo):
+    assert build.read_ref_fragments(repo, "--output=x") is None
