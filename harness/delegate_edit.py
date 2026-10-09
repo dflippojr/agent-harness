@@ -85,8 +85,7 @@ def _read_strict(files: FileOps, path: str) -> tuple[str, Path, str]:
     if not p.is_file():
         raise ToolError(f"no such file: {path} (delegate_edit only edits existing files; use write_file to create)")
     try:
-        with open(p, encoding="utf-8") as f:  # universal newlines, as edit_file reads
-            text = f.read()
+        text = files.read_checked(p, path)  # universal newlines, as edit_file reads
     except UnicodeDecodeError:
         raise ToolError(f"binary file: {path} is not UTF-8 text") from None
     if "\x00" in text:
@@ -259,15 +258,13 @@ def apply(files: FileOps, proposal: dict) -> str:
     done: list[str] = []
     try:
         for path, new in new_texts.items():
-            with open(current[path][0], "w", encoding="utf-8", newline="") as f:  # as edit_file writes
-                done.append(path)  # opening truncates, so a failed write needs restoring too
-                f.write(new)
+            files.write_replacing(current[path][0], path, new.encode("utf-8"))  # as edit_file writes
+            done.append(path)  # a failed write replaces nothing, so only finished files need restoring
     except Exception as e:  # any write-time failure, not just OSError, must restore and surface as ToolError
         failed = []
         for path in done:
             try:
-                with open(current[path][0], "w", encoding="utf-8", newline="") as f:
-                    f.write(current[path][1])
+                files.write_replacing(current[path][0], path, current[path][1].encode("utf-8"))
             except Exception:
                 failed.append(path)
         note = f" Could not restore: {', '.join(failed)}." if failed else " Earlier writes were rolled back."

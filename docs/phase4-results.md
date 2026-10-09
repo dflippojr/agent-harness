@@ -70,8 +70,14 @@ the runner's PATH puts it first.)
   (so it can't be renamed and replaced). Otherwise the agent could make the runner execute code unsandboxed
   through a hook, `core.fsmonitor` or a filter driver.
 - File tools run in the runner, unsandboxed, confined to the workspace by path resolution. Symlinks that point out
-  of the workspace are refused (read/write) or skipped (list/search); verified on the Mac. `put_file` copies a
-  tower-generated binary (base64, 32 MB cap) into the session workspace the same way, used by `generate_image`.
+  of the workspace are refused (read/write) or skipped (list/search); verified on the Mac. `FileOps` (shared with
+  the tower) also opens the file it checked: a read opens without following a final symlink, then checks the open
+  descriptor (a regular file, a single hard link, its real path inside the workspace) before reading, and search
+  reads each listed file the same way. A write goes to a new file in the checked directory that then replaces the
+  target, so a link at the target is replaced rather than written through, and an existing file keeps its
+  permission bits. A file with other hard links is not read, since another name for it could be anywhere.
+  `put_file` copies a tower-generated binary (base64, 32 MB cap) into the session workspace the same way, used by
+  `generate_image`.
 - Changes and review requests fail fast with 503 while the Mac is offline instead of queueing.
 - Cleanup asks an online runner to delete finished workspaces after the usual 14 days, saving local branches first.
   Workspace quota on the Mac: 3 GB per session; new sessions are refused below 10 GB free.

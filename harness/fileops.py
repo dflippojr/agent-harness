@@ -5,12 +5,29 @@ Stdlib only and Python 3.9 compatible: the runner copies this file to the Mac, w
 
 from __future__ import annotations
 
+import contextlib
 import difflib
+import errno
+import functools
 import os
 import re
+import stat
+import sys
 from pathlib import Path
 
-from .atomic_io import write_atomic
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+
+_WINDOWS = sys.platform == "win32"
+_O_BINARY = getattr(os, "O_BINARY", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)  # opening a FIFO for reading must not wait for a writer
+_LINK_ERRNOS = {errno.ELOOP, errno.EMLINK}  # O_NOFOLLOW met a symlink (EMLINK on FreeBSD)
+_DIR_FD = {os.open, os.stat, os.rename, os.unlink} <= os.supports_dir_fd
+_KEEP_MODE = os.name == "posix"  # Windows has only a read-only flag, which a replace can't go through anyway
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 MAX_PUT_BYTES = 32 * 1024 * 1024  # binary files the daemon may send to a runner (ComfyUI PNGs are much smaller)
@@ -105,8 +122,152 @@ def resolve_path(p: Path) -> Path:
     return Path(text[4:]) if text.startswith("\\\\?\\") else resolved
 
 
+@functools.lru_cache(maxsize=None)
+def _final_path_by_handle():
+    import ctypes
+    from ctypes import wintypes
+    fn = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
+    fn.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+    fn.restype = wintypes.DWORD
+    return fn
+
+
+def _plain_windows_path(text: str) -> Path:
+    r"""`text` without the `\\?\` or `\\?\UNC\` prefix that Windows' final-path calls return."""
+    if text.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + text[8:])
+    return Path(text[4:]) if text.startswith("\\\\?\\") else Path(text)
+
+
+def _windows_final_path(fd: int) -> Path | None:
+    import ctypes
+    import msvcrt
+    try:
+        handle = msvcrt.get_osfhandle(fd)
+    except OSError:
+        return None
+    final_path = _final_path_by_handle()
+    size = final_path(handle, None, 0, 0)  # the length needed, terminator included; 0 on failure
+    buf = ctypes.create_unicode_buffer(max(size, 1))
+    # Success returns the length without the terminator; a path that grew in between returns a larger size.
+    return _plain_windows_path(buf.value) if size and 0 < final_path(handle, buf, size, 0) < size else None
+
+
+def _descriptor_path(fd: int) -> Path | None:
+    """The real path of the file or directory open on `fd`, or None where the platform can't say."""
+    if _WINDOWS:
+        return _windows_final_path(fd)
+    if fcntl is not None and hasattr(fcntl, "F_GETPATH"):  # macOS
+        try:
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+        except OSError:
+            return None
+        return Path(os.fsdecode(raw.split(b"\0", 1)[0]))
+    try:
+        target = os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return None
+    return Path(target) if target.startswith("/") else None
+
+
+def _within(root: Path, p: Path) -> bool:
+    r"""`p` is `root` or below it: by name, or else by the identity of `p` or one of its parents, which still
+    matches when the two are spelled differently (letter case on a case-insensitive disk, a `\\?\` prefix). A file
+    system without file ids (st_ino 0) can't be compared by identity."""
+    if p == root or p.is_relative_to(root):
+        return True
+    try:
+        want = os.lstat(root)
+        return bool(want.st_ino) and any(os.path.samestat(want, os.lstat(q)) for q in (p, *p.parents))
+    except OSError:
+        return False
+
+
+def _opened_inside(root: Path, fd: int, path: Path) -> bool:
+    """Whether what is open on `fd`, opened by the resolved `path`, is inside `root`. Uses the descriptor's own
+    path; where the platform has none, `path` must still resolve to itself and name the same file."""
+    real = _descriptor_path(fd)
+    if real is None:
+        try:
+            same = os.path.samestat(os.fstat(fd), os.lstat(path))
+        except OSError:
+            same = False
+        real = path if same and resolve_path(path) == path else None
+    return real is not None and _within(root, real)
+
+
+def _read_all(fd: int) -> bytes:
+    chunks = []
+    while True:
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def _open_dir(path: Path, refusal: str) -> int:
+    """A descriptor for the directory at `path`; a symlink there raises ToolError(`refusal`)."""
+    try:
+        return os.open(path, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    except OSError as e:
+        if e.errno in _LINK_ERRNOS or e.errno == errno.ENOTDIR:
+            raise ToolError(refusal) from None
+        raise
+
+
+def _mode_to_keep(name, at: dict) -> int | None:
+    """Permission bits of the regular file at `name` (relative to `at`'s dir_fd, if any), or None."""
+    try:
+        st = os.stat(name, follow_symlinks=False, **at)
+    except FileNotFoundError:
+        return None
+    return stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else None
+
+
+def _replace_within(root: Path, dest: Path, data: bytes, refusal: str) -> None:
+    """Replace the file at the resolved path `dest` (inside the resolved `root`) with `data`.
+
+    The bytes go to a new O_EXCL file beside `dest` that is then renamed over it, so a link at `dest` is replaced
+    rather than written through and a failed write leaves the old file whole. Before any bytes go in, the new
+    file's own descriptor must be inside `root`, which checks the directory it landed in. Where the platform
+    allows, that directory is opened once (refusing a symlink) and the new file and the rename both go through
+    that descriptor. An existing file keeps its permission bits. Raises ToolError(`refusal`) when the check fails.
+    """
+    tmp = f".{dest.name[:32]}.{os.getpid()}-{os.urandom(4).hex()}.tmp"  # dest's own name may be at the length limit
+    dfd = _open_dir(dest.parent, refusal) if _DIR_FD else None
+    at = {} if dfd is None else {"dir_fd": dfd}
+    new, old = (dest.parent / tmp, dest) if dfd is None else (tmp, dest.name)
+    try:
+        mode = _mode_to_keep(old, at) if _KEEP_MODE else None
+        fd = os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY, 0o666, **at)
+        try:
+            try:
+                if not _opened_inside(root, fd, dest.parent / tmp):
+                    raise ToolError(refusal)
+                if mode is not None:
+                    os.fchmod(fd, mode)
+                _write_all(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(new, old, **({} if dfd is None else {"src_dir_fd": dfd, "dst_dir_fd": dfd}))
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(new, **at)
+            raise
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+
+
 def write_text_within(root: Path, target: Path, text: str) -> Path:
-    """Replace the file `target` inside `root` with `text` (UTF-8) and return the resolved path written.
+    """Replace the file `target` inside `root` with `text` (UTF-8, platform line endings) and return the resolved
+    path written.
 
     `target` is resolved first and must land inside the resolved `root`, so neither `..` nor a symlink can move
     the write elsewhere. The text goes to a new file beside the target that then replaces it, so a hard link at
@@ -114,10 +275,12 @@ def write_text_within(root: Path, target: Path, text: str) -> Path:
     """
     root_r = resolve_path(root)
     dest = resolve_path(target)
+    refusal = f"{target} is outside {root}"
     if dest == root_r or not dest.is_relative_to(root_r):
-        raise ToolError(f"{target} is outside {root}")
+        raise ToolError(refusal)
+    data = text.replace("\n", os.linesep).encode("utf-8")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic(dest, text)
+    _replace_within(root_r, dest, data, refusal)
     return dest
 
 
@@ -195,6 +358,46 @@ class FileOps:
     def rel(self, p: Path) -> str:
         return p.relative_to(self.root).as_posix() or "."
 
+    def _open_checked(self, p: Path, shown: str) -> int:
+        """A read descriptor for the resolved path `p`, returned only once the file it opened is shown to be a
+        regular file inside the workspace with no other hard link (whose other name could be anywhere)."""
+        try:
+            fd = os.open(p, os.O_RDONLY | _O_BINARY | _O_NOFOLLOW | _O_NONBLOCK)
+        except OSError as e:
+            if e.errno in _LINK_ERRNOS:
+                raise ToolError(f"path escapes the workspace: {shown}") from None
+            if not p.is_file():
+                raise ToolError(f"no such file: {shown}") from None
+            raise
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise ToolError(f"no such file: {shown}")
+            if not _opened_inside(self.root, fd, p):
+                raise ToolError(f"path escapes the workspace: {shown}")
+            if st.st_nlink > 1:
+                raise ToolError(f"not opened: {shown} has other hard links")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def read_checked(self, p: Path, shown: str, errors: str = "strict") -> str:
+        """UTF-8 text (universal newlines) of the resolved path `p`, read through a checked descriptor."""
+        fd = self._open_checked(p, shown)
+        try:
+            data = _read_all(fd)
+        finally:
+            os.close(fd)
+        return data.decode("utf-8", errors).replace("\r\n", "\n").replace("\r", "\n")
+
+    def write_replacing(self, p: Path, shown: str, data: bytes) -> None:
+        """Replace the file at the resolved path `p` with `data`, creating its parent directories."""
+        if p == self.root:
+            raise ToolError(f"not a file: {shown}")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        _replace_within(self.root, p, data, f"path escapes the workspace: {shown}")
+
     def _inside(self, p: Path) -> bool:
         """For entries found while walking: a symlink pointing out of the workspace is skipped."""
         return not p.is_symlink() or self.contains(resolve_path(p))
@@ -218,9 +421,7 @@ class FileOps:
 
     def read_file(self, path: str, start_line: int = 1, end_line: int | None = None, max_lines=None) -> str:
         p = self.resolve(path)
-        if not p.is_file():
-            raise ToolError(f"no such file: {path}")
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = self.read_checked(p, path, errors="replace").splitlines()
         start = max(1, start_line)
         page = self._page_lines(max_lines)
         end = min(len(lines), end_line or len(lines), start + page - 1)
@@ -265,8 +466,8 @@ class FileOps:
         stopped = False
         for f in files:
             try:
-                text = f.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
+                text = self.read_checked(resolve_path(f) if f.is_symlink() else f, str(f))
+            except (UnicodeDecodeError, OSError, ToolError):
                 continue
             for n, line in enumerate(text.splitlines(), 1):
                 if not regex.search(line):
@@ -292,36 +493,30 @@ class FileOps:
 
     def write_file(self, path: str, content: str) -> str:
         p = self.resolve(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "w", encoding="utf-8", newline="") as f:
-            f.write(content)
+        self.write_replacing(p, path, content.encode("utf-8"))
         return f"wrote {len(content)} characters to {self.rel(p)}"
 
     def write_bytes(self, path: str, data: bytes) -> str:
         if len(data) > MAX_PUT_BYTES:
             raise ToolError(f"file is {len(data)} bytes; limit is {MAX_PUT_BYTES}")
         p = self.resolve(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
+        self.write_replacing(p, path, data)
         return f"wrote {len(data)} bytes to {self.rel(p)}"
 
     def edit_file(self, path: str, old_text: str, new_text: str) -> str:
         p = self.resolve(path)
-        if not p.is_file():
-            raise ToolError(f"no such file: {path}")
-        text = p.read_text(encoding="utf-8")
+        text = self.read_checked(p, path)
         count = text.count(old_text)
         if count != 1:
             raise ToolError(f"old_text must appear exactly once, found {count} occurrences")
-        with open(p, "w", encoding="utf-8", newline="") as f:
-            f.write(text.replace(old_text, new_text))
+        self.write_replacing(p, path, text.replace(old_text, new_text).encode("utf-8"))
         return f"edited {self.rel(p)}"
 
     def preview_diff(self, name: str, args: dict) -> str:
         """Unified diff of what a write/edit would change, for approval requests."""
         try:
             p = self.resolve(args.get("path"))
-            old = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+            old = self.read_checked(p, str(args.get("path")), errors="replace") if p.is_file() else ""
         except ToolError:
             return ""
         if name == "write_file":
