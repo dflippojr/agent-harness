@@ -130,6 +130,7 @@ def test_bare_source_merge_worktree_uses_the_private_root(tmp_path, shared_tmp, 
     assert result["merged"] is True
     assert made and all(p.is_relative_to(private_root) for p in made)
     assert list(shared_tmp.iterdir()) == []
+    assert list(private_root.iterdir()) == []  # the merge's scratch directory is removed too
 
 
 def test_temp_root_must_be_a_plain_directory(tmp_path, monkeypatch):
@@ -502,6 +503,27 @@ def test_removing_a_session_tmpdir_waits_for_its_seeding(tmp_path, monkeypatch):
     seeding.join(10)
     dropping.join(10)
     assert not (ex.tmp_base() / SID).exists()
+
+
+def test_removing_a_session_tmpdir_does_not_hold_up_other_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    ex = executor(tmp_path, [tmp_path])
+    (ex.tmpdir(SID) / "big").write_text("x")
+    lock_free = []
+    real_remove = harness_runner.remove_tree
+
+    def remove(path):
+        lock_free.append(ex.lock.acquire(blocking=False))
+        if lock_free[-1]:
+            ex.lock.release()
+        real_remove(path)
+
+    monkeypatch.setattr(harness_runner, "remove_tree", remove)
+    ex.drop_tmpdir(SID)
+    ex.drop_tmpdir(SID)  # already gone
+    assert lock_free == [True]
+    assert list(ex.tmp_base().iterdir()) == []
 
 
 def test_clone_tree_uses_copy_on_write_cp_on_macos(tmp_path, monkeypatch):

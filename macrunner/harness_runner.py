@@ -158,8 +158,13 @@ class Executor:
             seeded = self.seeding.get(sid)
         if seeded is not None:
             seeded.wait()
-        with self.lock:
-            remove_tree(self.tmp_base() / sid)
+        with self.lock:  # move it aside under the lock; deleting a large tree mustn't hold up other sessions
+            path = self.tmp_base() / sid
+            if not path.exists():
+                return
+            doomed = path.with_name(f".removing-{sid}-{uuid.uuid4().hex[:8]}")
+            path.rename(doomed)
+        remove_tree(doomed)
 
     def project(self, params: dict) -> Project:
         repo = params.get("repo") or ""

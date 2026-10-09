@@ -473,6 +473,7 @@ def merge(project: Project, workspace: Path, sid: str, branch: str, base_branch:
         finally:
             git(src, "worktree", "remove", "--force", str(worktree), check=False, trusted=True)
             git(src, "worktree", "prune", check=False, trusted=True)
+            shutil.rmtree(tmp, ignore_errors=True)
     else:
         current = git(src, "rev-parse", "--abbrev-ref", "HEAD", trusted=True).out.strip()
         if current != base_branch:
