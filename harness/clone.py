@@ -346,6 +346,15 @@ def _member_origin_allowed(origin: str, root: Path) -> bool:
         return False
 
 
+def _ref_state_size(git_dir: Path) -> int:
+    """Bytes in the refs, reflogs and ref files that `isolated_git_dir` copies back."""
+    from .fileops import dir_size
+    from .projects import _STATE_DIRS, _STATE_FILES
+
+    total = sum(dir_size(git_dir / name) for name in _STATE_DIRS if (git_dir / name).is_dir())
+    return total + sum((git_dir / name).stat().st_size for name in _STATE_FILES if (git_dir / name).is_file())
+
+
 def isolated_refresh_origin(workspace: Path, source: Path | str, root: Path, max_bytes: int | None = None) -> str:
     """Fetch the project's source into a member workspace without owner git helpers or credentials.
 
@@ -358,10 +367,16 @@ def isolated_refresh_origin(workspace: Path, source: Path | str, root: Path, max
     if not _member_origin_allowed(src, root):
         return "origin is not a public or account-local repository"
     try:
-        with isolated_git_dir(workspace, isolated_clone_env()) as (flags, env):
+        # A failed or over-quota fetch leaves the workspace refs as they were.
+        with isolated_git_dir(workspace, isolated_clone_env(), keep_on_error=False) as (flags, env, tmp):
             cmd = ["git", *_NO_HELPERS, *flags, "fetch", "--quiet", "--prune", "--", src,
                    "+refs/heads/*:refs/remotes/origin/*"]
             _run_clone(cmd, workspace, timeout=300, max_bytes=max_bytes, remove_on_fail=False, env=env)
+            # The fetched refs and reflogs are still in the temp git dir; count them before they are copied back.
+            if max_bytes is not None:
+                from .fileops import dir_size
+                if dir_size(workspace) - _ref_state_size(workspace / ".git") + _ref_state_size(tmp) > max_bytes:
+                    raise QuotaExceeded(max_bytes)
     except QuotaExceeded as e:
         return str(e)
     except GitError as e:

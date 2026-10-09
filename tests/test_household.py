@@ -663,7 +663,7 @@ def test_disable_member_cancelled_mid_write_still_cancels_all_its_work(tmp_path)
     asyncio.run(body())
 
 
-def test_isolated_refresh_origin_refuses_rewritten_origin(tmp_path):
+def test_isolated_refresh_origin_fetches_the_recorded_source(tmp_path):
     client, m = household(tmp_path)
     with client:
         alice = create_member(client, ALICE, "Alice")
@@ -768,6 +768,33 @@ def test_isolated_refresh_origin_stops_when_fetch_exceeds_max_bytes(tmp_path):
     assert "quota" in err.lower()
     assert dest.exists()
     assert (dest / "small.txt").exists()
+
+
+def test_isolated_refresh_origin_counts_fetched_refs_against_quota(tmp_path):
+    """#529: refs land in the temp git dir first; an over-quota fetch keeps the workspace refs unchanged."""
+    from harness.fileops import dir_size
+
+    root = tmp_path / "user"
+    src = root / "repos" / "notes"
+    src.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+    (src / "a.txt").write_text("a", encoding="utf-8")
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a"],
+                   check=True)
+    ws = root / "workspaces" / "sessrf04"
+    isolated_prepare(ws, src, "sessrf04", root / "workspaces")
+    for i in range(300):  # no new objects: only refs and reflogs grow
+        subprocess.run(["git", "-C", str(src), "branch", f"b{i:03d}"], check=True)
+    err = isolated_refresh_origin(ws, src, root, max_bytes=dir_size(ws) + 1_000)
+    assert "quota" in err.lower()
+    refs = subprocess.run(["git", "-C", str(ws), "for-each-ref", "refs/remotes/origin/"],
+                          capture_output=True, text=True).stdout
+    assert "b000" not in refs
+    assert isolated_refresh_origin(ws, src, root) == ""
+    refs = subprocess.run(["git", "-C", str(ws), "for-each-ref", "refs/remotes/origin/"],
+                          capture_output=True, text=True).stdout
+    assert "origin/b299" in refs
 
 
 def test_quota_ignores_links_and_cleanup_stays_contained(tmp_path):

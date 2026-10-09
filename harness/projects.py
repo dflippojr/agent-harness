@@ -301,7 +301,7 @@ def git(repo: Path | str | None, *args: str, timeout: float = 600, check: bool =
         return _run(cmd + list(args), timeout=timeout, check=check, input_=input_)
 
     try:
-        with isolated_git_dir(Path(repo), _isolate_env()) as (flags, env):
+        with isolated_git_dir(Path(repo), _isolate_env()) as (flags, env, _tmp):
             result = _run(flags + list(args), timeout=timeout, check=False, input_=input_, env=env)
     except GitError as e:
         if check:
@@ -313,13 +313,13 @@ def git(repo: Path | str | None, *args: str, timeout: float = 600, check: bool =
 
 
 @contextmanager
-def isolated_git_dir(repo: Path, base_env: dict):
-    """Yield (git flags, env) that run git on workspace `repo` through a throwaway GIT_DIR.
+def isolated_git_dir(repo: Path, base_env: dict, keep_on_error: bool = True):
+    """Yield (git flags, env, temp git dir) that run git on workspace `repo` through a throwaway GIT_DIR.
 
     The temp git dir gets an allowlisted copy of the workspace config and an empty hooks dir; objects and the index
-    stay shared, and refs are copied back on exit. `base_env` is the caller's environment: the owner's (global config
-    kept for reviewed push credentials) or a member's (no owner config at all). Raises GitError for a workspace whose
-    git dir escapes it.
+    stay shared, and refs are copied back on exit (on an exception too, unless `keep_on_error` is False). `base_env`
+    is the caller's environment: the owner's (global config kept for reviewed push credentials) or a member's (no
+    owner config at all). Raises GitError for a workspace whose git dir escapes it.
     """
     index_dir, metadata, work_tree = _resolve_workspace_git(repo)
     # Copy-in and copy-out are one transaction: concurrent readers also copy back
@@ -336,9 +336,12 @@ def isolated_git_dir(repo: Path, base_env: dict):
         env["GIT_OBJECT_DIRECTORY"] = str(metadata / "objects")
         (metadata / "objects").mkdir(parents=True, exist_ok=True)
         try:
-            yield _isolated_flags(work_tree, tmp, hooks), env
-        finally:
-            _copy_git_state(tmp, metadata)
+            yield _isolated_flags(work_tree, tmp, hooks), env, tmp
+        except BaseException:
+            if keep_on_error:
+                _copy_git_state(tmp, metadata)
+            raise
+        _copy_git_state(tmp, metadata)
 
 
 def is_url(repo: str) -> bool:
