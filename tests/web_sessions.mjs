@@ -67,6 +67,17 @@ failSessions = null;
 streams[0].opts.onState("live");
 await sleep(350);
 assert.equal(stale.hidden, true, "back to live refreshes the list");
-console.error = errors;
+// A refresh that fails after the page has left changes nothing and starts no tick (review on #536).
+streams[0].handlers.session_created({});
 for (const fn of left) fn();
+failSessions = new Error("late");
+const realSetInterval = globalThis.setInterval;
+let ticks = 0;
+globalThis.setInterval = (...a) => { ticks++; return realSetInterval(...a); };
+stale.kids[1].attrs.onclick();
+await sleep(20);
+globalThis.setInterval = realSetInterval;
+assert.equal(ticks, 0, "no interval after the page left");
+assert.notEqual(whyEl.textContent, "Couldn't refresh: late");
+console.error = errors;
 console.log("ok");

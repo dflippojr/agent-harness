@@ -34,16 +34,20 @@ export function staleNote({ make = h, place, onRetry, updatedAt = Date.now() }) 
   const retry = make("button", { type: "button", class: "stale-retry", onclick: () => onRetry() }, "Retry");
   const el = make("div", { class: "stale-note", role: "status", hidden: true }, make("span", { class: "stale-body" }, text, why), retry);
   let timer = null;
+  let stopped = false;
   const paint = () => { text.textContent = `List may be stale · last updated ${sinceText(updatedAt)}`; };
-  const stop = () => { clearInterval(timer); timer = null; };
+  const pause = () => { clearInterval(timer); timer = null; };
+  // stop() is final: a refresh still in flight when the page left must not start a tick nobody clears.
+  const stop = () => { stopped = true; pause(); };
   return {
     el,
     ok() {
       updatedAt = Date.now();
       el.hidden = true;
-      stop();
+      pause();
     },
     failed(err) {
+      if (stopped) return;
       if (!el.parentNode) place(el);
       why.textContent = `Couldn't refresh: ${err?.message || err}`;
       el.hidden = false;
