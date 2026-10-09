@@ -60,7 +60,7 @@ try { storage = browser.localStorage; } catch (_) { /* storage blocked */ }
 const session = createSession({ agentHarnessWeb, storage });
 const { api, fetchMe, ownerSurface, isGuest, isMember, isOwner, canChat } = session;
 const chrome = mountChrome({ els, browser, session });
-const { layoutBar, setHeader, showFab, toast, setConnState } = chrome;
+const { layoutBar, setHeader, showFab, toast, setConnState, onConnState } = chrome;
 const tabs = mountTabs({ els, session, browser });
 const stream = mountStream({ agentHarnessWeb, isBlocked: session.isBlocked, setConnState, ownerSurface, isGuest, browser });
 const { openStream } = stream;
@@ -74,10 +74,15 @@ const { go, route, onLeave } = mountRouter({ els, session, chrome, tabs, signin,
     viewJobs, viewJob, viewSession }) });
 const warmModel = createWarmModel({ api, session });
 
+// Mounted before the pages so Settings' version row can reload into a newer bundle (#512).
+const build = { WEB_BUILD_ID, WEB_PROTOCOL };
+const { checkCompatibility, reloadAndUpdate } = mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser });
+
 // ---------- pages ----------
 const { daemonSettingsCard } = mountDaemonSettings({ h, fill, append, api, toast, isGuest, location });
 const { viewProfile, copyBox, githubConnectionCard, readAppIcon, applyAppIcon, applyTheme, applyTextSize } = mountProfile({ $app, $conn, $profileIcon,
-  layoutBar, setHeader, h, fill, append, api, getWebAuth: session.getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route, daemonSettingsCard, browser });
+  layoutBar, setHeader, h, fill, append, api, getWebAuth: session.getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route, daemonSettingsCard,
+  build, reloadAndUpdate, onConnState, browser });
 applyTheme();
 applyTextSize();
 
@@ -97,8 +102,6 @@ const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, show
 const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });
 
 // ---------- boot ----------
-const { checkCompatibility } = mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build: { WEB_BUILD_ID, WEB_PROTOCOL }, browser });
-
 async function loadProfileIcon() {
   if (session.isBlocked()) return;
   try { $profileIcon.textContent = (await api("/profile")).emoji; } catch (_) { /* offline */ }

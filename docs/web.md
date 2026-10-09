@@ -11,8 +11,17 @@ The PWA manifest name and browser title are **Agent Harness Web**. Its short nam
 
 A bottom tab bar holds the primary sections: **Chat** (owner only), **Agents**, **Jobs**, **Images** and **Profile**.
 Household members see Agents and Profile only. The header shows the section title, the connection chip and a
-**Settings** gear (`#/settings`), which opens the Settings menu from any section. The owner's Actions (Resources,
-Accounts, Claude Remote Control, Disk) are listed at the end of that menu. Recent chats are listed on the Chat home.
+**Settings** gear (`#/settings`), which opens the Settings menu from any section. Recent chats are listed on the Chat
+home.
+
+The Settings menu is grouped into **This phone** (Appearance, Notifications, Connection, Install), **Agents**
+(Backends, Smart approvals, Skills, Memory), **Server** (Resources, Server settings, Accounts, Remote control, Disk) and
+**Integrations** (Apps, Inference endpoint). Each row shows its current value, such as `System · Default text` or
+`GPU held · 41 min`; a value that can't be read is left blank. Disk shows no value, because measuring it walks every
+workspace. The owner's former Actions pages are the Server rows, and only the owner sees them. At the end, a version
+row shows this bundle's build and protocol, whether it is up to date with the connected Server, and the Server's
+release and supported protocol range. **Check for update** asks the Server again and, when a newer bundle is offered,
+becomes **Reload and update** (see [compatibility](compatibility.md)).
 
 Detail and editor pages (a session, a job, an image, New task) show Back and hide the tab bar. In the installed app
 the bar sits above the home indicator (`env(safe-area-inset-bottom)`). At 960 px and wider the same links form a

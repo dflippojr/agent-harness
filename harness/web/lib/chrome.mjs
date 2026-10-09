@@ -94,7 +94,9 @@ export function mountChrome({ els, browser, session }) {
 
   // The header's connection chip (#510): Live, Reconnecting or Offline, in words rather than a bare 8 px dot. It stays
   // hidden until the daemon stream first reports, so boot never flashes a false state. The "live" class is what other
-  // pages read.
+  // pages read; a page that says the state in its own words (Settings' identity line, #512) follows it through
+  // onConnState instead of reading it once. onConnState returns the unsubscribe.
+  const connListeners = new Set();
   function setConnState(state) {
     const label = CONN_LABEL[state] || CONN_LABEL.offline;
     $conn.hidden = false;
@@ -102,6 +104,12 @@ export function mountChrome({ els, browser, session }) {
     $conn.classList.toggle("live", state === "live");
     $conn.textContent = label;
     $conn.title = CONN_TITLE[state] || CONN_TITLE.offline;
+    for (const fn of connListeners) fn($conn.dataset.state);
+  }
+
+  function onConnState(fn) {
+    connListeners.add(fn);
+    return () => connListeners.delete(fn);
   }
 
   function paintGuestChrome() {
@@ -132,5 +140,5 @@ export function mountChrome({ els, browser, session }) {
   window.addEventListener("pageshow", repaintPage);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintPage(); });
 
-  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnState, paintGuestChrome };
+  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnState, onConnState, paintGuestChrome };
 }

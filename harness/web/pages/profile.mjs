@@ -5,9 +5,13 @@ import { ago, pluralize } from "../lib/format.mjs";
 import { md } from "../lib/markdown.mjs";
 import { showSecretOnce as showSecret } from "../lib/secret.mjs";
 import * as sheets from "../lib/sheet.mjs";
+import { protocolMismatch } from "../lib/compat.mjs";
+import { backendsValue, smartApprovalsValue, skillsValue, memoryValue, notificationsValue, resourcesValue, serverSettingsValue,
+  accountsValue, remoteControlValue, appsValue, endpointValue, versionStatus, serverVersionText } from "../lib/settings-text.mjs";
 
 export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route,
-  daemonSettingsCard, browser, confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet }) {
+  daemonSettingsCard, build = {}, reloadAndUpdate = async () => false, onConnState = () => () => {}, browser, confirmSheet = sheets.confirmSheet,
+  promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { document, window, localStorage, location, navigator, history, getComputedStyle, requestAnimationFrame, open,
   setTimeout, clearTimeout, fetch } = browser;
@@ -38,13 +42,21 @@ const PROFILE_PAGES = {
   install: "Install",
   backends: "Backends",
   "smart-approvals": "Smart approvals",
-  daemon: "Server",
+  daemon: "Server settings",
   memory: "Memory",
   skills: "Skills",
   apps: "Apps",
   endpoint: "Inference endpoint",
 };
-const ACTION_PAGES = [["resources", "Resources"], ["accounts", "Accounts"], ["remote-control", "Claude Remote Control"], ["disk", "Disk"]];
+// The Settings menu (#512): four groups of rows, each row showing its current value. `action` rows are the owner's
+// Actions pages (#/actions/<id>), folded in under Server; the rest open #/profile/<id>.
+const SETTINGS_GROUPS = [
+  ["This phone", ["appearance", "notifications", "connection", "install"]],
+  ["Agents", ["backends", "smart-approvals", "skills", "memory"]],
+  ["Server", ["resources", "daemon", "accounts", "remote-control", "disk"]],
+  ["Integrations", ["apps", "endpoint"]],
+];
+const ACTION_PAGES = { resources: "Resources", accounts: "Accounts", "remote-control": "Remote control", disk: "Disk" };
 const THEMES = {
   auto: { label: "System", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
   light: { label: "Light", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
@@ -383,27 +395,124 @@ async function viewProfile(page, extra) {
   let hidden = new Set();
   if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
   else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
-  append($app, 
+  const shown = (id) => (Object.hasOwn(ACTION_PAGES, id) ? isOwner()
+    : (id !== "install" || !isStandalone()) && !hidden.has(id));
+  const values = {};
+  const groups = SETTINGS_GROUPS.map(([label, ids]) => {
+    const rows = ids.filter(shown).map((id) => {
+      values[id] = h("span", { class: "set-value" });
+      const href = Object.hasOwn(ACTION_PAGES, id) ? `#/actions/${id}` : `#/profile/${id}`;
+      return h("a", { class: "set-row", href, "data-setting": id },
+        h("span", { class: `set-icon ic-${id}`, "aria-hidden": "true" }),
+        h("span", { class: "set-label" }, ACTION_PAGES[id] || PROFILE_PAGES[id]),
+        values[id],
+        h("span", { class: "chevron", "aria-hidden": "true" }, "›"));
+    });
+    // A group whose rows are all hidden for this role (a member's Agents, say) gets no header either.
+    return rows.length ? [h("p", { class: "section-label" }, label), h("div", { class: "card settings-group" }, rows)] : null;
+  });
+  const identityNote = h("div", { class: "muted small" }, isMember() ? "Household member" : serverNote());
+  if (!isMember()) {
+    // Follows the header chip while Settings is open; the first change after the page is gone unsubscribes.
+    const stop = onConnState(() => {
+      if (identityNote.isConnected) identityNote.textContent = serverNote();
+      else stop();
+    });
+  }
+  append($app,
     h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
         h("span", { class: "identity-emoji" }, profile.emoji || "🙂"),
         h("div", { class: "spacer" },
           h("h3", {}, me.name || "You"),
-          h("div", { class: "muted small" }, isMember() ? "Household member" : "Account and connection")),
+          identityNote),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
     isMember() && me.usage ? h("div", { class: "card" },
       h("h3", {}, "Usage"),
       h("p", { class: "muted small" }, me.usage.disk_note || ""),
       h("p", { class: "muted small" }, `${me.usage.running || 0} running · ${me.usage.queued || 0} queued`)) : null,
-    h("p", { class: "section-label" }, "Settings"),
-    h("div", { class: "card settings-list" },
-      Object.entries(PROFILE_PAGES)
-        .filter(([id]) => (id !== "install" || !isStandalone()) && !hidden.has(id))
-        .map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
-    // The drawer's Actions entry moved here when the tab bar replaced it (#506).
-    isOwner() ? h("p", { class: "section-label" }, "Actions") : null,
-    isOwner() ? h("div", { class: "card settings-list" }, ACTION_PAGES.map(([id, label]) => h("a", { href: `#/actions/${id}` }, label))) : null,
-  );
+    groups.flat(),
+    versionRow());
+  fillSettingValues(values, me);
+}
+
+function serverLabel() {
+  if (!agentHarnessWeb.independent) return "Bundled server";
+  try { return new URL(agentHarnessWeb.baseUrl).host; } catch (_) { return agentHarnessWeb.baseUrl; }
+}
+
+// "Bundled server · live", in the header chip's state (#510). No state until the chip first shows, as the chip does.
+function serverNote() {
+  if ($conn.hidden) return serverLabel();
+  const state = $conn.dataset?.state || ($conn.classList.contains("live") ? "live" : "offline");
+  return `${serverLabel()} · ${state}`;
+}
+
+// Paints the menu first, then each row's value as its own request answers. A failed or slow request leaves that
+// row's value blank; it never toasts or holds up the others. Only the owner's rows read the owner API.
+function fillSettingValues(values, me) {
+  const paint = (id, value) => {
+    const el = values[id];
+    if (!el || !value) return;
+    el.textContent = value.text || "";
+    el.classList.toggle("warn", !!value.warn);
+  };
+  const theme = THEMES[readTheme()]?.label || "System";
+  paint("appearance", { text: `${theme} · ${TEXT_SIZES[readTextSize()].label} text` });
+  paint("connection", { text: serverLabel() });
+  paint("notifications", notificationsValue(me.notify));
+  paint("install", { text: "Add to Home Screen" });
+  if (!isOwner()) return;
+  let keys = null;
+  const readKeys = () => (keys ||= api("/keys"));
+  const loaders = {
+    backends: () => api("/backends?auth=skip").then(backendsValue),
+    "smart-approvals": () => api("/smart-approvals").then(smartApprovalsValue),
+    skills: () => api("/skills").then(skillsValue),
+    memory: () => api("/memory").then(memoryValue),
+    resources: () => api("/resources").then(resourcesValue),
+    daemon: () => api("/config").then(serverSettingsValue),
+    accounts: () => api("/accounts", { surface: "admin" }).then(accountsValue),
+    "remote-control": () => api("/remote-control").then(remoteControlValue),
+    apps: () => readKeys().then(appsValue),
+    endpoint: () => readKeys().then(endpointValue),
+    // Disk has no value here: /maintenance walks every workspace and asks Docker for container sizes, too slow to
+    // run on every visit to this menu. The Disk page measures it on open.
+  };
+  for (const [id, load] of Object.entries(loaders)) {
+    if (!values[id]) continue;
+    Promise.resolve().then(load).then((value) => paint(id, value)).catch((err) => console.debug(`settings value ${id}`, err));
+  }
+}
+
+// Version and update (#512): this bundle's build and protocol, and the connected server's view of it. Check for
+// update asks the server again; when a newer bundle is offered the button reloads into it.
+function versionRow() {
+  const { WEB_BUILD_ID = "", WEB_PROTOCOL = "" } = build;
+  const line = h("p", { class: "version-line" }, `Agent Harness Web ${WEB_BUILD_ID} · protocol ${WEB_PROTOCOL}`);
+  const server = h("p", { class: "version-line muted" });
+  const button = h("button", { class: "btn version-btn", type: "button" }, "Check for update");
+  let update = false;
+  const check = async () => {
+    button.disabled = true;
+    let meta = null;
+    try { meta = await agentHarnessWeb.compatibility(); } catch (err) { console.debug("compatibility check failed", err); }
+    const status = versionStatus(meta, WEB_BUILD_ID, WEB_PROTOCOL, protocolMismatch(meta?.protocols?.admin, WEB_PROTOCOL));
+    line.textContent = `Agent Harness Web ${WEB_BUILD_ID} · protocol ${WEB_PROTOCOL} · ${status.text}`;
+    line.classList.toggle("warn", !!status.warn);
+    server.textContent = serverVersionText(meta);
+    update = status.update;
+    button.textContent = update ? "Reload and update" : "Check for update";
+    button.disabled = false;
+    return status;
+  };
+  button.addEventListener("click", async () => {
+    if (update) { await reloadAndUpdate(); return; }
+    const status = await check();
+    toast(status.update ? "A newer Agent Harness Web is available" : `Agent Harness Web is ${status.text}`);
+  });
+  void check();
+  return h("div", { class: "version-row" }, line, server, button);
 }
 
 function connectionCard() {
