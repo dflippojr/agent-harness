@@ -71,6 +71,7 @@ function renameTitle(session, isActive) {
   const input = h("input", { class: "session-title-edit", type: "text", value: session.title, maxlength: "120", "aria-label": "Session title" });
   title.hidden = true;
   title.after(input);
+  layoutBar();
   input.focus();
   input.select();
   let done = false;

@@ -68,7 +68,7 @@ async function viewSession(sid, tab, focusApproval) {
     const tokens = `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`;
     const taint = session.taint || [];
     fill(head, badge(session.status),
-      session.queue_position > 0 ? h("span", { class: "badge" }, `#${session.queue_position} in queue`) : null,
+      session.queue_position > 0 ? h("span", { class: "badge" }, `#${session.queue_position} in GPU queue`) : null,
       taint.length ? h("span", { class: "badge warn", title: `Untrusted content read: ${taint.map((t) => t.origin).join(", ")}. Risky actions ask for approval until cleared.` }, "Tainted") : null,
       h("span", { class: "session-strip-meta", title: tokens }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`),
       pct === null ? null : h("span", { class: `ctx${pct >= 55 ? " high" : ""}`, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up. ${tokens}.` },
