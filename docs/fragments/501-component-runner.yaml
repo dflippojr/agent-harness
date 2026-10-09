@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: readme-components
+title: Agent Harness Runner
+summary: 'A remote execution worker, such as the Mac Runner'
+order: 40
+links:
+  - text: '`macrunner/`'
+    href: macrunner

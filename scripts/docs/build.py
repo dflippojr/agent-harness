@@ -48,11 +48,25 @@ class Fragment:
     order: int
 
 
+def _links(frag: Fragment) -> str:
+    return " · ".join(f"[{link['text']}]({link['href']})" for link in frag.links)
+
+
 def _render_doc_index(frags: list[Fragment]) -> str:
     lines = ["| Topic | Doc |", "| --- | --- |"]
     for frag in frags:
-        links = " · ".join(f"[{link['text']}]({link['href']})" for link in frag.links)
-        lines.append(f"| {frag.title} | {links} |")
+        lines.append(f"| {frag.title} | {_links(frag)} |")
+    return "\n".join(lines)
+
+
+def _render_module_list(frags: list[Fragment]) -> str:
+    return "\n".join(f"- **{f.title}** ({_links(f)}): {f.summary}" for f in frags)
+
+
+def _render_components(frags: list[Fragment]) -> str:
+    lines = ["| Component | What it is | Where it lives |", "| --- | --- | --- |"]
+    for f in frags:
+        lines.append(f"| **{f.title}** | {f.summary} | {_links(f)} |")
     return "\n".join(lines)
 
 
@@ -66,6 +80,8 @@ class Target:
 # target name -> where it renders and which fragment kind feeds it. Add a target here when a section is converted.
 TARGETS = {
     "readme-docs-index": Target("README.md", "doc-index", _render_doc_index),
+    "modules-list": Target("docs/modules.md", "module", _render_module_list),
+    "readme-components": Target("README.md", "module", _render_components),
 }
 
 
@@ -109,8 +125,10 @@ def parse_fragment(name: str, text: str) -> Fragment:
     links = data.get("links", [])
     if not isinstance(links, list):
         bad("links must be a list of {text, href}")
-    if kind == "doc-index" and not links:
-        bad("a doc-index fragment needs at least one link")
+    if kind in ("doc-index", "module") and not links:
+        bad(f"a {kind} fragment needs at least one link")
+    if kind == "module" and (not summary.strip() or "\n" in summary.strip() or "|" in summary):
+        bad("a module fragment needs a single-line summary without '|'")
     clean = []
     for i, link in enumerate(links):
         if not isinstance(link, dict) or set(link) != LINK_KEYS:
@@ -199,7 +217,8 @@ def build(root: Path) -> list[str]:
         new = splice(target.file, text, name, bodies[name])
         if new != text:
             path.write_bytes(new.encode("utf-8"))
-            changed.append(target.file)
+            if target.file not in changed:
+                changed.append(target.file)
     return changed
 
 

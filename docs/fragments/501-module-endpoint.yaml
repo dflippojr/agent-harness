@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Endpoint
+summary: OpenAI and Anthropic inference, request accounting and the embeddings proxy
+order: 100
+links:
+  - text: '`harness_modules/endpoint/`'
+    href: ../harness_modules/endpoint/

@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Instruction skills
+summary: owner-approved instructions
+order: 50
+links:
+  - text: '`harness_modules/skills/`'
+    href: ../harness_modules/skills/
