@@ -64,7 +64,11 @@ function openSheet({ title, message, fields = [], confirmLabel, cancelLabel = "C
     });
     cancel.addEventListener("click", () => close(null));
     dialog.addEventListener("cancel", (ev) => { ev.preventDefault?.(); close(null); }); // Escape
-    dialog.addEventListener("click", (ev) => { if (ev.target === dialog) close(null); }); // a tap on the backdrop
+    // A tap on the backdrop dismisses, but only when the press started there too: a text selection dragged out of the
+    // sheet also ends in a click on the dialog.
+    let pressedBackdrop = false;
+    dialog.addEventListener("pointerdown", (ev) => { pressedBackdrop = ev.target === dialog; });
+    dialog.addEventListener("click", (ev) => { if (ev.target === dialog && pressedBackdrop) close(null); });
     if (dismissOnRoute) win?.addEventListener?.("hashchange", onRoute);
 
     doc.body.append(dialog);
