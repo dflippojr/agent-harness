@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -408,6 +409,39 @@ def test_missing_or_uncopyable_wrapper_distributions_do_not_fail_the_command(tmp
     assert ex.tmpdir(other).is_dir()
     assert "~/.gradle/wrapper/dists" in caplog.text
     assert "~/.m2" not in caplog.text  # nothing to copy there
+
+
+def test_seeding_a_new_session_holds_up_only_that_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    (tmp_path / ".gradle" / "jdks").mkdir(parents=True)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_clone(src, dst):
+        started.set()
+        release.wait(10)
+        dst.mkdir()
+
+    monkeypatch.setattr(harness_runner, "clone_tree", slow_clone)
+    ex = executor(tmp_path, [tmp_path])
+    results = {}
+    first = threading.Thread(target=lambda: results.setdefault("first", ex.tmpdir(SID)))
+    first.start()
+    assert started.wait(10)
+    second = threading.Thread(target=lambda: results.setdefault("second", ex.tmpdir(SID)))
+    second.start()
+    monkeypatch.setattr(harness_runner, "clone_tree", lambda src, dst: dst.mkdir())
+    assert ex.tmpdir("abcdef0123").is_dir()  # another session isn't held up
+    assert ex.lock.acquire(timeout=1)
+    ex.lock.release()
+    second.join(0.3)
+    assert second.is_alive()  # the same session waits until its TMPDIR is seeded
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert results["first"] == results["second"]
+    assert (results["first"] / "gradle" / "jdks").is_dir()
+    assert ex.seeding == {}
 
 
 def test_clone_tree_uses_copy_on_write_cp_on_macos(tmp_path, monkeypatch):

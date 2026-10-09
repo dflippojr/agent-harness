@@ -93,6 +93,7 @@ class Executor:
         self.lock = threading.Lock()
         self.procs: dict = {}      # request id -> Popen
         self.proc_sessions: dict = {}  # request id -> session id
+        self.seeding: dict = {}    # session id -> Event set once its new TMPDIR is seeded
 
     # helpers
     def workspace(self, sid: str, create: bool = False) -> Path:
@@ -135,8 +136,19 @@ class Executor:
                 created = False
             self.check_private(path)
             if created:
+                self.seeding[sid] = threading.Event()
+            seeded = self.seeding.get(sid)
+        # Seeding can take a while, so other sessions don't wait for it; this session's commands do.
+        if created:
+            try:
                 self.seed_tool_homes(path)
-            return path
+            finally:
+                with self.lock:
+                    self.seeding.pop(sid, None)
+                seeded.set()
+        elif seeded is not None:
+            seeded.wait()
+        return path
 
     def drop_tmpdir(self, sid: str) -> None:
         if not SESSION_RE.match(sid or ""):
