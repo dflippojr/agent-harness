@@ -127,9 +127,12 @@ class _Consts:
                 return self.value(file, expr, depth + 1)
             origin = self.imports.get((file, node.id))
             if origin:
-                for other, exprs in self.local.items():
-                    if Path(other).stem == origin[0] and origin[1] in exprs:
-                        return self.value(other, exprs[origin[1]], depth + 1)
+                matches = [(other, exprs[origin[1]]) for other, exprs in self.local.items()
+                           if Path(other).stem == origin[0] and origin[1] in exprs]
+                if len(matches) > 1:  # several modules share the file name: which one was imported is a guess
+                    return None
+                if matches:
+                    return self.value(matches[0][0], matches[0][1], depth + 1)
             return self.shared.get(node.id)
         if isinstance(node, ast.Attribute):
             return self.shared.get(node.attr)
