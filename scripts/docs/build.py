@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("docs fragments OK")
             return 1 if problems else 0
         changed = build(args.root)
-    except DocsError as exc:
+    except (DocsError, code_tables.CodeTableError) as exc:
         print(exc, file=sys.stderr)
         return 1
     print("updated: " + ", ".join(changed) if changed else "docs already up to date")
