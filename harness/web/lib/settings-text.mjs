@@ -48,8 +48,9 @@ export function backendsValue(rows) {
   const first = ready.find((b) => b.name !== "local") || ready[0];
   if (!first) return { text: "None ready" };
   const name = BACKEND_TITLES[first.name] || first.name;
-  const more = ready.length > 1 ? ` +${ready.length - 1}` : "";
-  return { text: `${name}${first.effort && first.name !== "local" ? ` · ${first.effort}` : ""}${more}` };
+  const effort = first.name === "local" ? "" : first.effort;
+  const label = [name, effort].filter(Boolean).join(" · ");
+  return { text: ready.length > 1 ? `${label} +${ready.length - 1}` : label };
 }
 
 export function smartApprovalsValue(data) {
@@ -62,7 +63,7 @@ export function skillsValue(data) {
   if (!data.enabled) return { text: "Off" };
   const installed = (data.installed || []).length;
   const proposals = (data.proposals || []).length;
-  return { text: `${installed} installed${proposals ? ` · ${plural(proposals, "proposal")}` : ""}` };
+  return { text: [`${installed} installed`, proposals && plural(proposals, "proposal")].filter(Boolean).join(" · ") };
 }
 
 export function memoryValue(mem) {
@@ -114,7 +115,7 @@ export function appsValue(keys) {
   const live = keys.filter((k) => !k.revoked_at);
   const apps = live.filter((k) => k.kind === "app").length;
   const web = live.filter((k) => k.kind === "owner" && k.origins?.length).length;
-  return { text: `${plural(apps, "app")}${web ? ` · ${web} web` : ""}` };
+  return { text: [plural(apps, "app"), web && `${web} web`].filter(Boolean).join(" · ") };
 }
 
 export function endpointValue(keys) {
@@ -135,6 +136,7 @@ export function versionStatus(meta, buildId, protocol, mismatch) {
 export function serverVersionText(meta) {
   if (!meta) return "";
   const range = meta.protocols?.admin;
-  const supports = range ? ` · protocol ${range.min}–${range.max}` : "";
-  return `Server ${meta.release || "?"}${meta.build_id ? ` (${meta.build_id})` : ""}${supports}`;
+  const build = meta.build_id ? ` (${meta.build_id})` : "";
+  const supports = range ? `protocol ${range.min}–${range.max}` : "";
+  return [`Server ${meta.release || "?"}${build}`, supports].filter(Boolean).join(" · ");
 }
