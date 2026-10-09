@@ -204,3 +204,17 @@ def test_install_dirs_follow_program_files(monkeypatch):
     monkeypatch.setenv("ProgramFiles", "D:/Apps")
     monkeypatch.delenv("ProgramW6432", raising=False)
     assert tailscale_peer.install_dirs() == [Path("D:/Apps") / "Tailscale"]
+
+
+def test_the_daemon_keeps_the_real_tcp_peer_as_the_client(monkeypatch, tmp_path):
+    """uvicorn would take the client from X-Forwarded-For on loopback; the peer check needs the real socket."""
+    import harness.__main__ as daemon
+
+    seen = {}
+    monkeypatch.setattr(daemon.config_mod, "load", lambda *a: make_cfg(tmp_path))
+    monkeypatch.setattr(daemon, "create_app", lambda m: "app")
+    monkeypatch.setattr(daemon, "Manager", lambda cfg: None)
+    monkeypatch.setattr(daemon.uvicorn, "run", lambda app, **kw: seen.update(kw))
+    monkeypatch.setattr("sys.argv", ["harness"])
+    daemon.main()
+    assert seen["proxy_headers"] is False
