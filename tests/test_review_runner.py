@@ -183,6 +183,8 @@ $review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = "$path`:12:
 Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
 $tail = Get-ReviewDiagnosticTail -Stderr 'profile file:///h%6fme/reviewer/.codex/auth.json'
 if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Encoded profile URL was not redacted' }}
+$tail = Get-ReviewDiagnosticTail -Stderr '\\?\C:\Users\reviewer\.codex\auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Extended profile path was not redacted' }}
 'quoted deletion and profile URL verified'
 """,
     )

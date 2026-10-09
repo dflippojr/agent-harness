@@ -21,6 +21,15 @@ Describe 'Review publication safety' {
         @{ Payload = '[profile](file:///home/reviewer/.codex/auth.json)' }
         @{ Payload = 'file:///h%6fme/reviewer/.codex/auth.json' }
         @{ Payload = 'file:///C:/Users/reviewer/.codex/auth.json' }
+        @{ Payload = '\\?\C:\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\\.\C:\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\??\C:\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\\?\UNC\server\share\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\\server\share\Users\reviewer\.codex\auth.json' }
+        @{ Payload = 'file://server/share/Users/reviewer/.codex/auth.json' }
+        @{ Payload = '\\?\Volume{12345678-1234-1234-1234-123456789abc}\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\Device\HarddiskVolume1\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\\?\GLOBALROOT\Device\HarddiskVolume1\Users\reviewer\.codex\auth.json' }
     ) {
         param($Payload)
         $fakeRunner = {

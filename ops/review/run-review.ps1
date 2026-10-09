@@ -334,11 +334,11 @@ function Get-ReviewRedactionRules {
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
         [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
-        [pscustomobject]@{ Pattern = '(?i)(?<![A-Za-z0-9_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|/(?:Users|home)/[^/\s]+|/root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeFileUrls = $true }
+        [pscustomobject]@{ Pattern = '(?i)(?<![A-Za-z0-9_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|//[^/\s]+/+(?:[^/\s]+/+)*Users/+[^/\s]+|/(?:Users|home)/[^/\s]+|/root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeProfilePaths = $true }
     )
 }
 
-function Convert-ReviewProfileUrls {
+function Convert-ReviewProfilePathForms {
     param([string]$Text, [string]$Pattern)
 
     $normalize = {
@@ -346,11 +346,23 @@ function Convert-ReviewProfileUrls {
         $uri = $null
         if ([Uri]::TryCreate($match.Value, [UriKind]::Absolute, [ref]$uri) -and $uri.IsFile) {
             $path = [Uri]::UnescapeDataString($uri.AbsolutePath)
+            if ($uri.IsUnc -and $uri.Host -ne 'localhost') { $path = '//' + $uri.Host + $path }
             if ($path -match $Pattern) { return $path }
         }
         return $match.Value
     }.GetNewClosure()
-    return [regex]::Replace($Text, '(?i)\bfile:[^\s<>"`]+', $normalize)
+    $normalized = [regex]::Replace($Text, '(?i)\bfile:[^\s<>"`]+', $normalize)
+    $normalized = $normalized.Replace('\', '/')
+    # Volume GUID and native device aliases can address the same Users directory without a drive letter.
+    $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)Volume\{[0-9a-f-]+\}/+(?=Users/+)', ' C:/')
+    $normalized = [regex]::Replace($normalized, '(?i)(?<![A-Za-z0-9_./-])(?:/{2,}[?.]/+GLOBALROOT)?/+Device/[^/\s]+/+(?=Users/+)', ' C:/')
+    # Win32 extended/device prefixes and the NT DOS-device prefix designate absolute paths.
+    $namespace = {
+        param($match)
+        if ($match.Value -match '(?i)UNC/+$') { return ' //' }
+        return ' '
+    }
+    return [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)(?:(?=[A-Z]:/+)|UNC/+)', $namespace)
 }
 
 function ConvertFrom-ReviewGitQuotedPath {
@@ -392,8 +404,8 @@ function Assert-ReviewOutputSafe {
 
     foreach ($rule in (Get-ReviewRedactionRules)) {
         $scanText = $Text
-        if ($rule.PSObject.Properties['NormalizeFileUrls']) {
-            $scanText = Convert-ReviewProfileUrls -Text $scanText -Pattern $rule.Pattern
+        if ($rule.PSObject.Properties['NormalizeProfilePaths']) {
+            $scanText = Convert-ReviewProfilePathForms -Text $scanText -Pattern $rule.Pattern
         }
         if ($rule.PSObject.Properties['RepositoryPathsAllowed'] -and $Text -match $rule.Pattern -and $Workspace) {
             # Only the generic long-token heuristic exempts known repository paths.
@@ -430,8 +442,8 @@ function Get-ReviewDiagnosticTail {
     $lines = @($Stderr -split "`r?`n")
     $redacted = (($lines | Select-Object -Last $MaxLines) -join [Environment]::NewLine)
     foreach ($rule in (Get-ReviewRedactionRules)) {
-        if ($rule.PSObject.Properties['NormalizeFileUrls']) {
-            $redacted = Convert-ReviewProfileUrls -Text $redacted -Pattern $rule.Pattern
+        if ($rule.PSObject.Properties['NormalizeProfilePaths']) {
+            $redacted = Convert-ReviewProfilePathForms -Text $redacted -Pattern $rule.Pattern
         }
         $redacted = $redacted -replace $rule.Pattern, $rule.Replacement
     }
