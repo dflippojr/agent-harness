@@ -239,15 +239,17 @@ def test_runner_passes_the_workspace_directories_to_the_profile(tmp_path, monkey
             return 0
 
     monkeypatch.setattr(harness_runner.subprocess, "Popen", FakeProc)
-    monkeypatch.setattr(harness_runner.Executor, "tmpdir", lambda self, sid: tmp_path)
+    session_tmp = tmp_path / "tmp-base" / SID
+    monkeypatch.setattr(harness_runner.Executor, "tmpdir", lambda self, sid: session_tmp)
     ex = harness_runner.Executor(workspaces=tmp_path / "home" / ".agent-harness" / "workspaces", repo_roots=[],
                                  profile=PROFILE, home=tmp_path / "home", shell=bash() or "bash", min_free_gb=0)
     ex.handle("r", "shell", {"session": SID, "command": "true"})
     argv = argvs[0]
     params = {argv[i + 1].split("=", 1)[0]: argv[i + 1].split("=", 1)[1] for i, a in enumerate(argv) if a == "-D"}
     assert params == {"WORKSPACE": str(ex.workspace(SID)), "WORKSPACES": str(ex.workspaces),
+                      "SESSION_TMP": str(session_tmp.resolve()), "TMP_BASE": str((tmp_path / "tmp-base").resolve()),
                       "HOME": str(tmp_path / "home")}
-    used = set(re.findall(r'\(param "([A-Z]+)"\)', PROFILE.read_text(encoding="utf-8")))
+    used = set(re.findall(r'\(param "([A-Z_]+)"\)', PROFILE.read_text(encoding="utf-8")))
     assert used == set(params)
 
 
@@ -277,16 +279,18 @@ def _last_rule(rules: list[str], op: str, path_form: str) -> str:
     return matching[-1]
 
 
-def test_profile_keeps_agent_harness_files_unreadable_except_the_workspace():
+def test_profile_keeps_agent_harness_files_and_other_sessions_out_of_reach():
     rules = _rules(PROFILE.read_text(encoding="utf-8"))
     deny_home = _last_rule(rules, "file-read*", f'(subpath {_home("/.agent-harness")})')
     assert deny_home.startswith("(deny file-read* file-write*")
-    reopen = '(subpath (param "WORKSPACE"))'
-    allow_ws = _last_rule(rules, "file-read*", reopen)
-    assert allow_ws.startswith("(allow file-read* file-write*")
-    assert rules.index(allow_ws) > rules.index(deny_home)
+    deny_tmp = _last_rule(rules, "file-read*", '(subpath (param "TMP_BASE"))')
+    assert deny_tmp.startswith("(deny file-read* file-write*")
+    allow_ws = _last_rule(rules, "file-read*", '(subpath (param "WORKSPACE"))')
+    assert allow_ws.startswith("(allow file-read* file-write*") and '(subpath (param "SESSION_TMP"))' in allow_ws
+    assert rules.index(allow_ws) > max(rules.index(deny_home), rules.index(deny_tmp))
     metadata = _last_rule(rules, "file-read-metadata", f'(literal {_home("/.agent-harness")})')
-    assert metadata.startswith("(allow file-read-metadata") and '(literal (param "WORKSPACES"))' in metadata
+    assert metadata.startswith("(allow file-read-metadata")
+    assert '(literal (param "WORKSPACES"))' in metadata and '(literal (param "TMP_BASE"))' in metadata
     assert "subpath" not in metadata
     for git_path in ("/.git", "/.git/config", "/.git/objects/info/alternates"):
         rule = _last_rule(rules, "file-write*", f'(literal (string-append (param "WORKSPACE") "{git_path}"))')
@@ -351,11 +355,15 @@ def test_session_gradle_home_gets_its_own_copy_of_wrapper_distributions(tmp_path
     (dist / "gradle-9.0-bin.zip.ok").write_text("")
     (dist / "gradle-9.0" / "lib").mkdir(parents=True)
     (dist / "gradle-9.0" / "lib" / "gradle.jar").write_text("original")
+    (tmp_path / ".gradle" / "jdks" / "jdk-21").mkdir(parents=True)
+    (tmp_path / ".gradle" / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2g\n")
     ex = executor(tmp_path, [tmp_path])
     gradle_home = ex.tmpdir(SID) / "gradle"
     ex.seed_gradle_home(gradle_home)
     copy = gradle_home / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123"
     assert (copy / "gradle-9.0-bin.zip.ok").exists()
+    assert (gradle_home / "jdks" / "jdk-21").is_dir()
+    assert (gradle_home / "gradle.properties").read_text() == "org.gradle.jvmargs=-Xmx2g\n"
     (copy / "gradle-9.0" / "lib" / "gradle.jar").write_text("session")
     assert (dist / "gradle-9.0" / "lib" / "gradle.jar").read_text() == "original"
     (dist / "gradle-9.1-bin").mkdir()
@@ -377,7 +385,7 @@ def test_missing_or_uncopyable_wrapper_distributions_do_not_fail_the_command(tmp
     (tmp_path / ".gradle" / "wrapper" / "dists").mkdir(parents=True)
     monkeypatch.setattr(harness_runner, "clone_tree", fail)
     ex.seed_gradle_home(gradle_home)
-    assert "Gradle wrapper" in caplog.text
+    assert "~/.gradle/wrapper/dists" in caplog.text
 
 
 def test_clone_tree_uses_copy_on_write_cp_on_macos(tmp_path, monkeypatch):

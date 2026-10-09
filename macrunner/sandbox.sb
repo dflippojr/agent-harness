@@ -1,6 +1,7 @@
 ;; Sandbox for the agent's shell commands on the MacBook (sandbox-exec; deprecated by Apple but still enforced).
 ;; The runner replaces the network placeholder at the end and passes WORKSPACE (this session's workspace),
-;; WORKSPACES (the directory holding all workspaces) and HOME as parameters.
+;; WORKSPACES (the directory holding all workspaces), SESSION_TMP (this session's TMPDIR), TMP_BASE (the directory
+;; holding all session TMPDIRs) and HOME as parameters.
 ;; In SBPL the last matching rule wins, so the order below matters.
 (version 1)
 (allow default)
@@ -54,11 +55,15 @@
   (subpath (string-append (param "HOME") "/Library/Application Support/Firefox"))
   (subpath (string-append (param "HOME") "/Library/Application Support/BraveSoftware")))
 
-;; This session's workspace, plus stat (not listing) of its parent directories so path lookups resolve.
-(allow file-read* file-write* (subpath (param "WORKSPACE")))
+;; Other sessions' TMPDIRs (their Gradle homes and caches included) are off limits too.
+(deny file-read* file-write* (subpath (param "TMP_BASE")))
+
+;; This session's workspace and TMPDIR, plus stat (not listing) of their parent directories so path lookups resolve.
+(allow file-read* file-write* (subpath (param "WORKSPACE")) (subpath (param "SESSION_TMP")))
 (allow file-read-metadata
   (literal (string-append (param "HOME") "/.agent-harness"))
-  (literal (param "WORKSPACES")))
+  (literal (param "WORKSPACES"))
+  (literal (param "TMP_BASE")))
 
 ;; The runner commits, saves and merges the branch outside the sandbox. Git config and hooks decide what git
 ;; executes, so the agent may not change them (nor swap out the .git directory or its object alternates).

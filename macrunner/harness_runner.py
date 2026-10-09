@@ -52,6 +52,7 @@ OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trim
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
 HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+")
 RID_OPS = frozenset({"shell", "git_clone"})  # the ops that need the request id
+GRADLE_SEED = ("wrapper/dists", "jdks", "gradle.properties")  # copied from ~/.gradle into a session's Gradle home
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 WORKSPACE = "/workspace"  # the sandbox path the daemon addresses tool paths by
 OFFLINE_RULES = """;; No network except localhost (tests that start a server); no DNS either, so nothing leaks through lookups.
@@ -263,7 +264,9 @@ class Executor:
         if self.profile_template is not None:
             profile = self.profile_template.replace("\n{{NETWORK}}", "\n" + ("" if network else OFFLINE_RULES))
             argv = ["/usr/bin/sandbox-exec", "-p", profile, "-D", f"WORKSPACE={ws}",
-                    "-D", f"WORKSPACES={self.workspaces}", "-D", f"HOME={self.home}"] + argv
+                    "-D", f"WORKSPACES={self.workspaces}", "-D", f"SESSION_TMP={tmp.resolve()}",
+                    "-D", f"TMP_BASE={tmp.parent.resolve()}",
+                    "-D", f"HOME={self.home}"] + argv
         proc = subprocess.Popen(argv, cwd=str(ws), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, start_new_session=os.name == "posix")
         with self.lock:
@@ -317,17 +320,21 @@ class Executor:
                 pass
 
     def seed_gradle_home(self, gradle_home: Path) -> None:
-        """Give the session's Gradle home its own copy of the owner's wrapper distributions (once per session), so
-        ./gradlew works offline. The wrapper writes lock files next to a distribution, and the originals stay
-        read-only to the sandbox."""
-        src, dst = self.home / ".gradle" / "wrapper" / "dists", gradle_home / "wrapper" / "dists"
-        if dst.exists() or not src.is_dir() or src.is_symlink():
-            return
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            clone_tree(src, dst)
-        except (OSError, subprocess.SubprocessError) as e:
-            log.warning("couldn't copy the Gradle wrapper distributions: %s", e)
+        """Give the session's Gradle home its own copy of the owner's wrapper distributions, provisioned JDKs and
+        gradle.properties (each once per session), so ./gradlew works offline. Gradle writes lock files next to
+        them, and the originals stay read-only to the sandbox."""
+        for rel in GRADLE_SEED:
+            src, dst = self.home / ".gradle" / rel, gradle_home / rel
+            if dst.exists() or src.is_symlink() or not src.exists():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if src.is_dir():
+                    clone_tree(src, dst)
+                else:
+                    shutil.copyfile(src, dst)
+            except (OSError, subprocess.SubprocessError) as e:
+                log.warning("couldn't copy ~/.gradle/%s into the session's Gradle home: %s", rel, e)
 
     @staticmethod
     def end_group(proc: subprocess.Popen) -> None:
