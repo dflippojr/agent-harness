@@ -205,6 +205,7 @@ class Sandbox:
         if state is not None:
             code, out, err = await run_cmd(["docker", "start", self.name], timeout=60)
             if code == 0:
+                await self._network(False)  # a start keeps network attachments; egress is only ever per command
                 return "started"
             await run_cmd(["docker", "rm", "-f", self.name], timeout=30)
         await ensure_networks(self.cfg)
@@ -341,6 +342,7 @@ class Sandbox:
     async def restart(self) -> None:
         if await self._state() is not None:
             await run_cmd(["docker", "restart", "-t", "2", self.name], timeout=60)
+            await self._network(False)  # the interrupted command may have left egress attached
 
     async def remove(self) -> None:
         await run_cmd(["docker", "rm", "-f", self.name], timeout=60)

@@ -189,3 +189,10 @@ def test_cli_web_request_taints_only_once_allowed(tmp_path):
         assert m.db.get_session(s["id"])["taint"][-1]["origin"] == "allowed.example"
         await m.stop()
     asyncio.run(body())
+
+
+def test_a_remote_clone_is_asked_about_once_the_session_is_tainted():
+    clone = {"url": "https://github.com/example/repo"}
+    assert taint.escalate(Decision(ALLOW), "git_clone", clone, [], set()).action == ALLOW
+    assert taint.escalate(Decision(ALLOW), "git_clone", clone, SRC, set()).action == ASK
+    assert taint.escalate(Decision(ALLOW), "git_clone", {"url": "local:demo"}, SRC, set()).action == ALLOW
