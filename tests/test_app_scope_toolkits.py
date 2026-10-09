@@ -134,7 +134,7 @@ def test_base_only_clone_holds_just_the_base_branch(tmp_path):
     assert not _has_object(ws, other)
     # A workspace config asking for every branch doesn't widen the base-only refresh.
     sh(ws, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-    assert projects.refresh_origin(ws, "main") == ""
+    assert projects.refresh_origin(project, ws, "main") == ""
     assert "agent/other" not in sh(ws, "for-each-ref", "--format=%(refname)")
     assert not _has_object(ws, other)
 
@@ -195,7 +195,7 @@ def test_runner_base_only_prepare_and_refresh_hold_just_the_base_branch(tmp_path
     ws = ex.workspace(sid)
     assert not _has_object(ws, other)
     sh(ws, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-    assert ex.handle("r2", "refresh_origin", {"session": sid, "base_branch": "main"}) == ""
+    assert ex.handle("r2", "refresh_origin", {"session": sid, "repo": str(src), "base_branch": "main"}) == ""
     assert not _has_object(ws, other)
 
 

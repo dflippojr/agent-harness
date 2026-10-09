@@ -4,8 +4,10 @@ import { mountSession } from "../harness/web/pages/session.mjs";
 
 const el = (tag, attrs, ...kids) => {
   const node = { tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined),
-    value: "", hidden: false, dataset: {}, style: {}, classList: { add() {}, remove() {} }, addEventListener() {}, querySelector: () => null,
-    querySelectorAll: () => [], remove() {}, prepend() {} };
+    value: "", hidden: !!attrs?.hidden, dataset: {}, style: {}, classList: { add() {}, remove() {} }, listeners: {}, focus() {}, querySelector: () => null,
+    querySelectorAll: () => [], remove() {}, prepend() {}, setAttribute: (k, v) => { node.attrs[k] = v; }, replaceChildren: (...n) => { node.kids = n; } };
+  node.addEventListener = (t, fn) => { node.listeners[t] = fn; };
+  if (attrs?.onclick) node.onclick = attrs.onclick;
   node.append = (...more) => node.kids.push(...more.flat(Infinity));
   Object.defineProperty(node, "childNodes", { get: () => node.kids });
   return node;
@@ -26,20 +28,40 @@ const rendered = [];
 const headers = [];
 const streams = [];
 const body = [];
+const barKids = [];
+const downloads = [];
 const page = mountSession({
-  $app: "APP", h: el, fill: (_t, ...n) => rendered.push(...n.flat(Infinity)), append: (_t, ...n) => rendered.push(...n.flat(Infinity)), api,
+  $app: "APP", h: el, fill: (t, ...n) => { if (t && typeof t === "object") t.kids = n.flat(Infinity); rendered.push(...n.flat(Infinity)); }, append: (_t, ...n) => rendered.push(...n.flat(Infinity)), api,
   setHeader: (...a) => headers.push(a), toast() {}, go() {}, route() {}, validId: () => true, isGuest: () => false, isMember: () => false, isOwner: () => true,
   onLeave() {}, badge: (s) => el("badge", {}, s), reviewBadge: () => el("rb"), progressBar: () => el("bar"),
   openStream: (_url, handlers) => { streams.push(handlers); return () => {}; },
-  layoutBar() {}, viewInfo() {}, TERMINAL: new Set(["done", "failed", "cancelled"]), agentHarnessWeb: { url: (p) => p, token: "", sessionStreamUrl: (id, n) => `/s/${id}?${n}` },
+  layoutBar() {}, viewInfo() {}, downloadDaemonFile: (...a) => downloads.push(a), TERMINAL: new Set(["done", "failed", "cancelled"]), agentHarnessWeb: { url: (p) => p, token: "", sessionStreamUrl: (id, n) => `/s/${id}?${n}` },
   browser: { window: { addEventListener() {}, removeEventListener() {}, scrollTo() {} },
-    document: { body: { append: (...n) => body.push(...n) }, documentElement: {}, addEventListener() {}, removeEventListener() {} },
+    document: { body: { append: (...n) => body.push(...n) }, documentElement: {}, addEventListener() {}, removeEventListener() {},
+      getElementById: (id) => (id === "bar" ? { append: (...n) => barKids.push(...n) } : null), querySelector: () => null },
     requestAnimationFrame() {}, location: {}, confirm: () => true, setInterval: () => 0, clearInterval() {}, setTimeout: () => 0 },
 });
 assert.equal(typeof page.viewSession, "function");
 
 await page.viewSession("abc", "transcript");
-assert.deepEqual(headers.at(-1), ["agents", "Fix the bug"]);
+assert.deepEqual(headers.at(-1), ["agents", "Fix the bug", { page: true }]);
+// One compact header (#514): the title is painted once (in the bar), the ⋯ menu joins the bar, and the sticky block is a
+// status strip plus segmented tabs, with no title or usage row of its own.
+const find = (pred) => {
+  const found = [];
+  const walk = (n) => { if (!n || typeof n !== "object") return; if (pred(n)) found.push(n); (n.kids || []).forEach(walk); };
+  rendered.forEach(walk);
+  return found;
+};
+const chrome = find((n) => n.attrs?.class === "session-chrome")[0];
+assert.ok(chrome, "the sticky session chrome renders");
+// #510: the transcript adds a reconnecting strip (hidden until its stream drops) under the segmented control.
+assert.deepEqual(chrome.kids.map((k) => k.attrs.class), ["session-strip", "tabs session-tabs", "conn-strip"]);
+assert.equal(chrome.kids[2].attrs.hidden, true);
+assert.doesNotMatch(text(chrome), /Fix the bug/, "the title is not painted a second time");
+assert.match(text(chrome.kids[0]), /running .*scratch · local · m/);
+assert.deepEqual(chrome.kids[1].kids.map(text), ["Transcript", "Changes", "Info"]);
+assert.equal(barKids.length, 1, "the ⋯ menu is added to the header bar");
 assert.equal(streams.length, 1);
 streams[0].user_message({ seq: 1, data: { content: "please fix it" } });
 streams[0].status({ seq: 2, data: { status: "done", answer: "All fixed" } });
@@ -47,6 +69,8 @@ const transcript = rendered.map(text).join(" ");
 assert.match(transcript, /please fix it/);
 assert.match(transcript, /done/);
 assert.ok(body.length, "the composer is attached to the body");
+const composerText = text(body.find((n) => n.attrs?.class === "composer"));
+assert.doesNotMatch(composerText, /Changes|Cancel|Clear taint|Run again/, "the composer row no longer repeats the tabs or the menu");
 
 // A pending approval is a sheet on the body, not an inline card; it needs Deny/Approve and yields the composer.
 const composerEl = body.find((n) => n.attrs?.class === "composer");
@@ -117,8 +141,21 @@ assert.notEqual(orphan, toolRowEl);
 assert.equal(orphan.tag, "details", "a result without its call still gets a row");
 assert.equal(orphan.kids[0].kids[3].className, "tool-state err");
 
+// A taint shows as a pill in the strip, since Clear taint now sits in the menu.
+streams[0].taint_added({ seq: 30, data: { origin: "evil.example", kind: "web" } });
+assert.match(text(chrome.kids[0]), /Tainted/);
+
 rendered.length = 0;
 await page.viewSession("abc", "changes");
+// The menu works on every tab: Download transcript fetches the Markdown transcript.
+const menuWrap = barKids.at(-1);
+const menuEl = menuWrap.kids[1];
+assert.equal(menuEl.attrs.role, "menu");
+menuWrap.kids[0].listeners.click();
+const entries = menuEl.kids;
+assert.deepEqual(entries.map(text), ["Rename", "Run again as new session", "Download transcript"]);
+entries.find((b) => text(b) === "Download transcript").onclick();
+assert.deepEqual(downloads.at(-1), ["/sessions/abc/transcript", "abc.md"]);
 const changesText = rendered.map(text).join(" ");
 assert.match(changesText, /Review/);
 assert.match(changesText, /a\.py/);

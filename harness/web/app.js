@@ -60,9 +60,9 @@ try { storage = browser.localStorage; } catch (_) { /* storage blocked */ }
 const session = createSession({ agentHarnessWeb, storage });
 const { api, fetchMe, ownerSurface, isGuest, isMember, isOwner, canChat } = session;
 const chrome = mountChrome({ els, browser, session });
-const { layoutBar, setHeader, showFab, toast, setConnLive } = chrome;
+const { layoutBar, setHeader, showFab, toast, setConnState } = chrome;
 const tabs = mountTabs({ els, session, browser });
-const stream = mountStream({ agentHarnessWeb, isBlocked: session.isBlocked, setConnLive, ownerSurface, isGuest, browser });
+const stream = mountStream({ agentHarnessWeb, isBlocked: session.isBlocked, setConnState, ownerSurface, isGuest, browser });
 const { openStream } = stream;
 const { daemonImage, downloadDaemonFile } = mountDaemonFiles({ agentHarnessWeb, isBlocked: session.isBlocked, ownerSurface, toast, browser });
 const signin = mountSignIn({ els, api, getWebAuth: session.getWebAuth, toast, browser });
@@ -86,7 +86,7 @@ const { viewInfo } = mountSessionInfo({ $app, h, append, copyBox, downloadDaemon
 const { viewChat } = mountChat({ $app, h, fill, append, api, setHeader, toast, go, validId, canChat, onLeave, openStream, ownerSurface, badge,
   TERMINAL, agentHarnessWeb, browser });
 const { viewSession } = mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, layoutBar, viewInfo, TERMINAL, agentHarnessWeb, browser });
+  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser });
 const { viewNew, confirmGpuQueue } = mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave,
   githubConnectionCard, warmModel, browser });
 const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave,

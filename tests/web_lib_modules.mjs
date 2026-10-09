@@ -162,7 +162,17 @@ const session = imports.session.createSession({ agentHarnessWeb: client });
 
 // ---- stream ----
 {
-  const { safeStreamUrl, validId, mountStream } = imports.stream;
+  const { safeStreamUrl, validId, mountStream, retryDelay, RETRY_CAP_MS, OFFLINE_AFTER, GRACE_AFTER_MS } = imports.stream;
+  // #510: exponential backoff with equal jitter, capped, in place of a fixed 3 s.
+  assert.equal(retryDelay(0, () => 0), 500);
+  assert.equal(retryDelay(0, () => 1), 1000);
+  assert.equal(retryDelay(3, () => 0), 4000);
+  assert.equal(retryDelay(3, () => 1), 8000);
+  assert.equal(retryDelay(20, () => 1), RETRY_CAP_MS, "the delay is capped");
+  assert.equal(retryDelay(20, () => 0), RETRY_CAP_MS / 2, "half the delay is always random, even at the cap");
+  const spread = new Set(Array.from({ length: 20 }, () => retryDelay(2)));
+  assert.ok(spread.size > 1, "real retries are jittered");
+  for (const d of spread) assert.ok(d >= 2000 && d <= 4000);
   assert.ok(validId("abc-123_") && !validId("../x") && !validId(5) && !validId(""));
   assert.equal(safeStreamUrl("/api/v1/sessions/abc/events?after=3"), "/api/v1/sessions/abc/events?after=3");
   assert.equal(safeStreamUrl("https://h/api/v1/events", "https://h"), "https://h/api/v1/events");
@@ -180,30 +190,105 @@ const session = imports.session.createSession({ agentHarnessWeb: client });
   FakeEventSource.CLOSED = 2;
   const live = [];
   let blocked = false;
-  const sb = { ...browser, EventSource: FakeEventSource };
+  const sb = { ...browser, EventSource: FakeEventSource, navigator: { onLine: true } };
   const stream = mountStream({ agentHarnessWeb: { token: "", baseUrl: "", headers: () => ({}), url: (p) => `/api/v1${p}` },
-    isBlocked: () => blocked, setConnLive: (on) => live.push(on), ownerSurface: () => "app", isGuest: () => false, browser: sb });
+    isBlocked: () => blocked, setConnState: (state) => live.push(state), ownerSurface: () => "app", isGuest: () => false, browser: sb });
   const seen = [];
-  const stop = stream.openStream(async () => "/api/v1/events", { ping: (d) => seen.push(d) }, { indicate: true });
+  const states = [];
+  const stop = stream.openStream(async () => "/api/v1/events", { ping: (d) => seen.push(d) }, { indicate: true, onState: (s) => states.push(s) });
   await tick();
   assert.equal(sources.length, 1);
   sources[0].onopen();
   sources[0].emit("ping", { data: '{"n":1}' });
   sources[0].emit("ping", { data: undefined });
   assert.deepEqual(seen, [{ n: 1 }]);
-  assert.deepEqual(live, [true]);
+  assert.deepEqual(live, ["live"]);
+  // A dropped stream closes the EventSource (no browser auto-retry at a fixed interval) and says Reconnecting.
+  sources[0].onerror();
+  assert.ok(sources[0].closed, "an error closes the source; our backoff schedules the retry");
+  assert.deepEqual(states, ["live", "reconnecting"]);
+  // Each failed attempt in a row counts; after OFFLINE_AFTER of them the state is Offline (still retrying).
+  for (let i = 1; i < OFFLINE_AFTER; i++) {
+    win.dispatchEvent({ type: "online" });  // reconnect at once, as when the network comes back
+    await tick();
+    sources.at(-1).onerror();
+  }
+  assert.equal(sources.length, OFFLINE_AFTER);
+  assert.deepEqual(states, ["live", "reconnecting", "offline"]);
+  win.dispatchEvent({ type: "online" });
+  await tick();
+  sources.at(-1).onopen();
+  assert.deepEqual(states.at(-1), "live", "a successful open is Live again and resets the count");
+  sources.at(-1).onerror();
+  assert.equal(states.at(-1), "reconnecting");
+  // The browser saying it is offline drops the stream and goes straight to Offline.
+  win.dispatchEvent({ type: "online" });
+  await tick();
+  sources.at(-1).onopen();
+  sb.navigator.onLine = false;
+  win.dispatchEvent({ type: "offline" });
+  assert.ok(sources.at(-1).closed);
+  assert.equal(states.at(-1), "offline");
+  sb.navigator.onLine = true;
+  // A stream that was live a while and then ends reconnects once at once, quietly: no Reconnecting for a routine close.
+  win.dispatchEvent({ type: "online" });
+  await tick();
+  sources.at(-1).onopen();
+  const realNow = Date.now;
+  Date.now = () => realNow() + GRACE_AFTER_MS;
+  const quiet = states.length;
+  const opened = sources.length;
+  sources.at(-1).onerror();
+  await tick();
+  Date.now = realNow;
+  assert.equal(states.length, quiet, "the first close after a long live spell changes no state");
+  assert.equal(sources.length, opened + 1, "it reconnects at once");
+  sources.at(-1).onerror();
+  assert.equal(states.at(-1), "reconnecting", "if that reconnect fails too, say so");
+  // A stale source's late error (an earlier generation) changes nothing.
+  win.dispatchEvent({ type: "online" });
+  await tick();
+  sources.at(-1).onopen();
+  const before = states.length;
+  sources[0].onerror();
+  assert.equal(states.length, before, "an old source's error is ignored");
+  assert.deepEqual(live, states, "the indicating stream drives the header chip with the same states");
+  const count = sources.length;
   stop();
-  assert.ok(sources[0].closed);
-  assert.deepEqual(live, [true, false]);
+  assert.ok(sources.at(-1).closed);
+  assert.equal(live.length, before, "closing a stream says nothing: no false Offline when a page leaves");
+  win.dispatchEvent({ type: "online" });
+  await tick();
+  assert.equal(sources.length, count, "a closed stream stops listening for the network");
   blocked = true;
   stream.openStream(async () => "/api/v1/events", {})();
   await tick();
-  assert.equal(sources.length, 1, "a blocked app opens no stream");
+  assert.equal(sources.length, count, "a blocked app opens no stream");
   blocked = false;
   stream.watchDaemonConnection();
   stream.watchDaemonConnection();
   await tick();
-  assert.equal(sources.length, 2, "the daemon connection is watched once");
+  assert.equal(sources.length, count + 1, "the daemon connection is watched once");
+  // The daemon stream fails and waits out its backoff; a page stream reaching the server, or a route change, retries it now.
+  const daemonSource = sources.at(-1);
+  daemonSource.onopen();
+  daemonSource.onerror();
+  assert.equal(live.at(-1), "reconnecting");
+  const pageStop = stream.openStream(async () => "/api/v1/sessions/x/events", {});
+  await tick();
+  sources.at(-1).onopen();  // the page stream is live
+  await tick();
+  assert.equal(sources.length, count + 3, "a page stream going live nudges the daemon stream to retry at once");
+  sources.at(-1).onopen();
+  assert.equal(live.at(-1), "live");
+  stream.watchDaemonConnection();
+  await tick();
+  assert.equal(sources.length, count + 3, "a live daemon stream is left alone on a route change");
+  sources.at(-1).onerror();
+  stream.watchDaemonConnection();
+  await tick();
+  assert.equal(sources.length, count + 4, "a route change retries a failed daemon stream now");
+  pageStop();
 }
 
 // ---- chrome ----
@@ -225,8 +310,21 @@ const chrome = imports.chrome.mountChrome({ els: E, browser, session });
   undo.dispatchEvent({ type: "click" });
   assert.equal(undone, 1);
   assert.equal(doc.getElementById("toast").hidden, true, "tapping the action dismisses the toast");
-  chrome.setConnLive(true);
+  // #510: the header chip says Live / Reconnecting / Offline in words, with a matching data-state for its colours.
+  chrome.setConnState("live");
   assert.ok(E.$conn.set.has("live"));
+  assert.equal(E.$conn.hidden, false);
+  assert.equal(E.$conn.textContent, "Live");
+  assert.equal(E.$conn.dataset.state, "live");
+  chrome.setConnState("reconnecting");
+  assert.ok(!E.$conn.set.has("live"));
+  assert.equal(E.$conn.textContent, "Reconnecting");
+  assert.equal(E.$conn.dataset.state, "reconnecting");
+  chrome.setConnState("offline");
+  assert.equal(E.$conn.textContent, "Offline");
+  assert.equal(E.$conn.dataset.state, "offline");
+  assert.match(E.$conn.title, /retrying/);
+  chrome.setConnState("live");
   E.$back.hidden = true;
   chrome.setHeader("agents", "Title", { page: true });
   assert.equal(E.$title.textContent, "Title");

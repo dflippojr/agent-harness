@@ -1,4 +1,4 @@
-"""Header connection dot is app-owned and survives route changes (#83)."""
+"""Header connection chip is app-owned, survives route changes (#83) and says Live / Reconnecting / Offline (#510)."""
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,6 +19,16 @@ def test_connection_dot_stays_live_across_routes_and_reconnects():
     stream = (web / "lib/stream.mjs").read_text(encoding="utf-8")
     assert "function watchDaemonConnection()" in stream
     assert "indicate = false" in stream
+    # #510: backoff with jitter replaced the fixed 3 s retry.
+    assert "setTimeout(connect, 3000)" not in stream
+    assert "retryDelay(attempts - 1)" in stream
+    # The chip has words for its states and starts hidden; refresh failures are no longer swallowed.
+    html = (web / "index.html").read_text(encoding="utf-8")
+    assert '<span id="conn" class="conn" role="status"' in html and " hidden></span>" in html
+    sessions = (web / "pages/sessions.mjs").read_text(encoding="utf-8")
+    assert "render().catch(() => {})" not in sessions
+    chat = (web / "pages/chat.mjs").read_text(encoding="utf-8")
+    assert ".catch(() => {}); // offline" not in chat
     assert "stream.watchDaemonConnection();" in (web / "lib/router.mjs").read_text(encoding="utf-8")
     # Page stream cleanup must not own the header class directly.
     assert "$conn.classList.remove" not in app + stream

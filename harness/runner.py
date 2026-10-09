@@ -2078,7 +2078,7 @@ class Runner:
                 self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
             await self.db.for_session(s["id"]).awrite(workspace_ready)
         elif not s["run"].get("origin_refreshed"):
-            error = await self._refresh_origin(s, ws, remote, member)
+            error = await self._refresh_origin(s, project, ws, remote, member)
             if error:
                 await self.bus.aemit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
             run = self.db.get_session(s["id"])["run"]
@@ -2109,23 +2109,21 @@ class Runner:
             return await asyncio.to_thread(projects.prepare, project, ws, s["id"], base_only=True)
         return await asyncio.to_thread(projects.prepare, project, ws, s["id"])
 
-    async def _refresh_origin(self, s: dict, ws: Path, remote: bool, member: bool):
-        base = (s.get("base_branch") or "") if _app_base_only(s, self.project_for(s)) else ""
+    async def _refresh_origin(self, s: dict, project, ws: Path, remote: bool, member: bool):
+        base = (s.get("base_branch") or "") if _app_base_only(s, project) else ""
         if remote:
-            return await self.hub.call(s["target"], "refresh_origin", {"session": s["id"], "base_branch": base},
-                                       timeout=400)
+            params = {"session": s["id"], "repo": project.repo, "base_branch": base}
+            return await self.hub.call(s["target"], "refresh_origin", params, timeout=400)
         if member:
             from . import clone, storage
             from .fileops import dir_size
             uid = session_user_id(s)
-            project = self.project_for(s)
-            if project is not None:
-                await self._github_refresh(s, project)
+            await self._github_refresh(s, project)
             remaining = self._member_clone_budget(uid)
             cap = None if remaining is None else remaining + dir_size(ws)
             return await asyncio.to_thread(
                 clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, uid), cap)
-        return await asyncio.to_thread(projects.refresh_origin, ws, base)
+        return await asyncio.to_thread(projects.refresh_origin, project, ws, base)
 
     async def _github_refresh(self, s: dict, project) -> None:
         """Issue #63: update a member's managed copy from their private GitHub origin, host-side and credentialed.

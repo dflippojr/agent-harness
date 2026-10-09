@@ -3,6 +3,7 @@
 // under plain Node and never reaches into another page.
 import { SNIPPET_LANGUAGES, snippetLanguage } from "../lib/snippets.mjs";
 import { md } from "../lib/markdown.mjs";
+import { staleNote } from "../lib/widgets.mjs";
 
 export function mountChat({ $app, h, fill, append, api, setHeader, toast, go, validId, canChat, onLeave, openStream, ownerSurface, badge,
   TERMINAL, agentHarnessWeb, browser }) {
@@ -211,18 +212,32 @@ function chatComposer(options, session) {
 }
 
 // Recent chats on the Chat home (#506; they were in the navigation drawer). Shows the last known list at once, then
-// revalidates in the background (#152).
+// revalidates in the background (#152). A failed revalidation keeps what is shown and says it may be stale (#510); with
+// nothing shown yet there is nothing stale, and the page's own offline state speaks for the server.
 let recentChatsCache = null;
+let recentChatsAt = 0;
 function recentChats() {
+  const label = h("p", { class: "section-label" }, "Recent chats");
   const list = h("div", { class: "card settings-list recent-chats" });
-  const section = h("section", { class: "recent-chats-section", "aria-label": "Recent chats", hidden: true },
-    h("p", { class: "section-label" }, "Recent chats"), list);
+  const section = h("section", { class: "recent-chats-section", "aria-label": "Recent chats", hidden: true }, label, list);
   const render = (chats) => {
     section.hidden = !chats.length;
     fill(list, chats.map((c) => h("a", { href: `#/chat/${c.id}`, title: c.title }, c.title)));
   };
+  const load = () => api("/chats?limit=30").then((chats) => {
+    recentChatsCache = chats;
+    recentChatsAt = Date.now();
+    stale.ok();
+    render(chats);
+  }).catch((e) => {
+    console.error("recent chats refresh failed", e);
+    if (!recentChatsCache?.length) return;
+    stale.failed(e);
+  });
+  const stale = staleNote({ make: h, place: (el) => label.after(el), onRetry: load, updatedAt: recentChatsAt });
   if (recentChatsCache) render(recentChatsCache);
-  api("/chats?limit=30").then((chats) => { recentChatsCache = chats; render(chats); }).catch(() => {}); // offline: keep what is shown
+  onLeave(stale.stop);
+  void load();
   return section;
 }
 

@@ -332,7 +332,7 @@ class Executor:
                                 base_only=base_only)
 
     def op_refresh_origin(self, p: dict):
-        return projects.refresh_origin(self.workspace(p["session"]), p.get("base_branch") or "")
+        return projects.refresh_origin(self.project(p), self.workspace(p["session"]), p.get("base_branch") or "")
 
     def op_save_branch(self, p: dict):
         project, ws, sid = self.project(p), self.workspace(p["session"]), p["session"]

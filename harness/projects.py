@@ -24,7 +24,6 @@ pointers that escape the workspace are refused rather than followed.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -40,8 +39,6 @@ if TYPE_CHECKING:  # the MacBook runner imports this module without the daemon's
 AGENT_NAME = "Agent (agent-harness)"
 AGENT_EMAIL = "agent@agent-harness.local"
 
-# Remote-helper URLs (`ext::`, `foo::bar`) execute an arbitrary `git-remote-*` program. IPv6 (`[::1]`) is fine.
-_REMOTE_HELPER_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 _SAFE_CONFIG_KEYS = {
     "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
     "core.ignorecase", "core.precomposeunicode", "core.protectntfs", "core.protecthfs",
@@ -49,7 +46,9 @@ _SAFE_CONFIG_KEYS = {
     "extensions.objectformat", "extensions.preciousobjects", "extensions.partialclone",
     "user.name", "user.email",
 }
-_SAFE_REMOTE_KEYS = {"url", "pushurl", "fetch", "mirror", "prune", "tagopt", "promisor", "partialclonefilter"}
+# No url/pushurl/promisor: host fetch and push name the project's repository from the daemon's record, so a remote
+# URL written into the workspace config never decides where host-side git connects.
+_SAFE_REMOTE_KEYS = {"fetch", "mirror", "prune", "tagopt", "partialclonefilter"}
 _SAFE_BRANCH_KEYS = {"remote", "merge", "pushremote", "rebase", "description"}
 _STATE_FILES = ("HEAD", "packed-refs", "FETCH_HEAD", "ORIG_HEAD", "shallow")
 _STATE_DIRS = ("refs", "logs")
@@ -101,22 +100,13 @@ def _contained(path: Path, root: Path) -> bool:
         return False
 
 
-def _safe_git_url(url: str) -> bool:
-    text = url.strip()
-    if not text or any(ch in text for ch in "\r\n\x00") or text.startswith("-"):
-        return False
-    if _REMOTE_HELPER_URL.match(text) or "proxycommand" in text.lower():
-        return False
-    return True
-
-
-def _safe_config_key(key: str, value: str) -> bool:
+def _safe_config_key(key: str) -> bool:
     k = key.lower()
     if k in _SAFE_CONFIG_KEYS:
         return True
     parts = k.split(".")
     if len(parts) >= 3 and parts[0] == "remote" and parts[-1] in _SAFE_REMOTE_KEYS:
-        return parts[-1] not in {"url", "pushurl"} or _safe_git_url(value)
+        return True
     if len(parts) >= 3 and parts[0] == "branch" and parts[-1] in _SAFE_BRANCH_KEYS:
         return True
     return False
@@ -246,7 +236,7 @@ def _allowlisted_config(real_config: Path) -> list[tuple[str, str]]:
         if not item or "\n" not in item:
             continue
         key, value = item.split("\n", 1)
-        if _safe_config_key(key, value):
+        if _safe_config_key(key):
             entries.append((key, value))
     return entries
 
@@ -377,11 +367,15 @@ def prepare(project: Project, workspace: Path, sid: str, shared: bool = False, b
     return {"branch": branch, "base_branch": base_branch, "base_commit": base_commit}
 
 
-def refresh_origin(workspace: Path, base_branch: str = "") -> str:
+def refresh_origin(project: Project, workspace: Path, base_branch: str = "") -> str:
     """Fetch the source so `origin/<base>` is current when the agent starts a run. Returns an error or ''.
-    With `base_branch`, only that branch is fetched, whatever fetch refspec the workspace config names."""
-    refspec = [f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}"] if base_branch else []
-    result = git(workspace, "fetch", "--quiet", "--prune", "origin", *refspec, timeout=300, check=False)
+
+    Fetches from `project.repo`, not the workspace's `origin` URL, which the agent can rewrite. With `base_branch`,
+    only that branch is fetched.
+    """
+    refspec = (f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}" if base_branch
+               else "+refs/heads/*:refs/remotes/origin/*")
+    result = git(workspace, "fetch", "--quiet", "--prune", "--", project.repo, refspec, timeout=300, check=False)
     return "" if result.code == 0 else result.text[-500:]
 
 
@@ -420,13 +414,19 @@ def publish_local(project: Project, workspace: Path, branch: str, source_ref: st
 
 
 def push(project: Project, workspace: Path, branch: str, source_ref: str | None = None) -> str:
-    """Push the session branch to the URL source, with the daemon's (the user's) git credentials."""
+    """Push the session branch to the URL source, with the daemon's (the user's) git credentials.
+
+    Pushes to `project.repo`, not the workspace's `origin` URL, which the agent can rewrite.
+    """
     if not is_url(project.repo):
         raise GitError("push is for URL projects; local projects already have the branch", 400)
-    result = git(workspace, "push", "--quiet", "--no-verify", "origin", f"{source_ref or branch}:refs/heads/{branch}",
-                 timeout=300, check=False)
+    commit = git(workspace, "rev-parse", "--verify", f"{source_ref or branch}^{{commit}}").out.strip()
+    result = git(workspace, "push", "--quiet", "--no-verify", "--", project.repo,
+                 f"{commit}:refs/heads/{branch}", timeout=300, check=False)
     if result.code != 0:
         raise GitError(f"push failed: {result.text[-1500:]}")
+    # A push by URL updates no tracking ref; record it so cleanup and the secret scan see what was published.
+    git(workspace, "update-ref", f"refs/remotes/origin/{branch}", commit)
     return f"pushed {branch} to {project.repo}"
 
 

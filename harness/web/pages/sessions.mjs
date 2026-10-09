@@ -4,6 +4,7 @@
 import { ago, pluralize, gpuText } from "../lib/format.mjs";
 import { TARGET_LABEL, compareTargets } from "../lib/targets.mjs";
 import { escapeHtml } from "../lib/markdown.mjs";
+import { staleNote } from "../lib/widgets.mjs";
 
 export function mountSessions({ $app, h, fill, append, api, setHeader, showFab, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, openStream, ownerSurface, agentHarnessWeb, browser }) {
@@ -25,6 +26,8 @@ async function viewList() {
   const queueNote = h("p", { class: "note" });
   const search = h("input", { type: "search", placeholder: "Search", value: searchQuery, class: "search" });
   const targetSwitch = h("div", { class: "tabs", role: "group", "aria-label": "Filter sessions by machine" });
+  // #510: a failed refresh says so (when the list last updated, and why) instead of silently keeping the old list.
+  const stale = staleNote({ make: h, place: (el) => targetSwitch.after(el), onRetry: () => refreshNow() });
   append($app, h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
   showFab("#/new", "+ New task");
 
@@ -119,7 +122,12 @@ async function viewList() {
       waiting ? `${waiting} waiting for the GPU` : "");
     renderTargetSwitch();
     renderSessions();
+    stale.ok();
   };
+  const refreshNow = () => render().catch((e) => {
+    console.error("session list refresh failed", e);
+    stale.failed(e);
+  });
   await render();
   let timer = null;
   let holding = false;
@@ -128,7 +136,7 @@ async function viewList() {
     holding = false;
     if (pendingRefresh) {
       pendingRefresh = false;
-      render().catch(() => {});
+      void refreshNow();
     }
   };
   list.addEventListener("pointerdown", () => { holding = true; });
@@ -142,15 +150,23 @@ async function viewList() {
     clearTimeout(timer);
     timer = setTimeout(() => {
       if (holding) { pendingRefresh = true; return; }
-      render().catch(() => {});
+      void refreshNow();
     }, 300);
   };
   const handlers = {};
   for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
     handlers[type] = refresh;
   }
+  // Events missed while the stream was down are not replayed here, so reload the list when it comes back; and when it
+  // drops, refresh once so a server that is really gone shows as a stale list rather than a quiet one.
+  let streamState = "";
+  const onState = (next) => {
+    if (streamState && (next === "live" || streamState === "live")) refresh();
+    streamState = next;
+  };
   onLeave(openStream(() => agentHarnessWeb.url("/events", ownerSurface()), handlers,
-    { authorized: !(isGuest() && !agentHarnessWeb.token) }));
+    { authorized: !(isGuest() && !agentHarnessWeb.token), onState }));
+  onLeave(() => { clearTimeout(timer); stale.stop(); });
   const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
   document.addEventListener("visibilitychange", onVisible);
   onLeave(() => document.removeEventListener("visibilitychange", onVisible));
