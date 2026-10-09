@@ -359,32 +359,45 @@ def test_session_gradle_home_gets_its_own_copy_of_wrapper_distributions(tmp_path
     (tmp_path / ".gradle" / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2g\n")
     ex = executor(tmp_path, [tmp_path])
     gradle_home = ex.tmpdir(SID) / "gradle"
-    ex.seed_gradle_home(gradle_home)
     copy = gradle_home / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123"
     assert (copy / "gradle-9.0-bin.zip.ok").exists()
     assert (gradle_home / "jdks" / "jdk-21").is_dir()
     assert (gradle_home / "gradle.properties").read_text() == "org.gradle.jvmargs=-Xmx2g\n"
     (copy / "gradle-9.0" / "lib" / "gradle.jar").write_text("session")
     assert (dist / "gradle-9.0" / "lib" / "gradle.jar").read_text() == "original"
-    (dist / "gradle-9.1-bin").mkdir()
-    ex.seed_gradle_home(gradle_home)  # once per session
+    (dist.parent.parent / "gradle-9.1-bin").mkdir()
+    assert ex.tmpdir(SID) == gradle_home.parent  # an existing TMPDIR is not seeded again
     assert not (gradle_home / "wrapper" / "dists" / "gradle-9.1-bin").exists()
+
+
+def test_existing_session_tmpdir_is_never_seeded(tmp_path, monkeypatch):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(shared))
+    (tmp_path / ".gradle" / "jdks" / "jdk-21").mkdir(parents=True)
+    (tmp_path / ".gradle" / "gradle.properties").write_text("x=1\n")
+    ex = executor(tmp_path, [tmp_path])
+    session = ex.tmp_base() / SID
+    session.mkdir()
+    (session / "gradle").write_text("not a directory")  # whatever a command left there stays as it was
+    assert ex.tmpdir(SID) == session
+    assert (session / "gradle").read_text() == "not a directory"
+    assert ex.handle("r", "cleanup_workspace", {"session": SID}) == {"removed": True}
 
 
 def test_missing_or_uncopyable_wrapper_distributions_do_not_fail_the_command(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
     (tmp_path / "shared").mkdir()
     ex = executor(tmp_path, [tmp_path])
-    gradle_home = ex.tmpdir(SID) / "gradle"
-    ex.seed_gradle_home(gradle_home)
-    assert not gradle_home.exists()
+    assert not (ex.tmpdir(SID) / "gradle").exists()
 
     def fail(src, dst):
         raise OSError("no space")
 
     (tmp_path / ".gradle" / "wrapper" / "dists").mkdir(parents=True)
     monkeypatch.setattr(harness_runner, "clone_tree", fail)
-    ex.seed_gradle_home(gradle_home)
+    other = "abcdef0123"
+    assert ex.tmpdir(other).is_dir()
     assert "~/.gradle/wrapper/dists" in caplog.text
 
 

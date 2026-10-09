@@ -121,13 +121,19 @@ class Executor:
     def tmpdir(self, sid: str) -> Path:
         """The session's own TMPDIR, <private base>/<session id>, created with mode 0700 so other users and sessions
         can't read it or plant files in it. It lasts until the workspace is discarded or cleaned up, across runner
-        restarts."""
+        restarts. A new one starts with the session's Gradle home seeded (see seed_gradle_home)."""
         if not SESSION_RE.match(sid or ""):
             raise OpError(f"bad session id {sid!r}")
         with self.lock:
             path = self.tmp_base() / sid
-            path.mkdir(mode=0o700, exist_ok=True)
+            try:
+                path.mkdir(mode=0o700)
+                created = True
+            except FileExistsError:
+                created = False
             self.check_private(path)
+            if created:
+                self.seed_gradle_home(path / "gradle")
             return path
 
     def drop_tmpdir(self, sid: str) -> None:
@@ -259,7 +265,6 @@ class Executor:
                "MAVEN_OPTS": f"-Dmaven.repo.local={tmp / 'm2'} "
                              f"-Dmaven.repo.local.tail={self.home / '.m2' / 'repository'}",
                "XDG_CACHE_HOME": str(tmp / "cache")}
-        self.seed_gradle_home(tmp / "gradle")
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
             profile = self.profile_template.replace("\n{{NETWORK}}", "\n" + ("" if network else OFFLINE_RULES))
@@ -320,15 +325,16 @@ class Executor:
                 pass
 
     def seed_gradle_home(self, gradle_home: Path) -> None:
-        """Give the session's Gradle home its own copy of the owner's wrapper distributions, provisioned JDKs and
-        gradle.properties (each once per session), so ./gradlew works offline. Gradle writes lock files next to
-        them, and the originals stay read-only to the sandbox."""
+        """Give a new session's Gradle home its own copy of the owner's wrapper distributions, provisioned JDKs and
+        gradle.properties, so ./gradlew works offline. Gradle writes lock files next to them, and the originals
+        stay read-only to the sandbox. Called only while the session TMPDIR is brand new, before any sandboxed
+        command could have put anything (a link, a file) where the runner writes."""
         for rel in GRADLE_SEED:
             src, dst = self.home / ".gradle" / rel, gradle_home / rel
-            if dst.exists() or src.is_symlink() or not src.exists():
+            if src.is_symlink() or not src.exists():
                 continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
             try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
                 if src.is_dir():
                     clone_tree(src, dst)
                 else:
