@@ -130,11 +130,13 @@ assert.equal(required("x")("y"), "");
   const session = { blocked: false, isBlocked() { return this.blocked; }, setBlocked(v) { this.blocked = v; } };
   const sessionStorage = storage();
   let reloads = 0;
+  // The page routed under the offer filled a field from code, so it reads as unsaved though nobody typed.
+  const dirty = { tagName: "TEXTAREA", type: "", value: "Check the homelab", defaultValue: "" };
   const update = mountUpdate({
     els: { $app: new El("main") }, session, chrome: { toast() {}, setHeader() {} }, tabs: { paint() {} }, route: async () => {},
     agentHarnessWeb: { compatibility: async () => ({ protocols: { admin: { min: 2, max: 2 } }, update_hint: { web: { build_id: "b2" } } }) },
     build: { WEB_BUILD_ID: "b1", WEB_PROTOCOL: 2 },
-    browser: { document: doc, window: {}, navigator: {}, sessionStorage, location: { reload() { reloads++; } } },
+    browser: { document: { querySelectorAll: () => [dirty] }, window: {}, navigator: {}, sessionStorage, location: { reload() { reloads++; } } },
   });
   assert.equal(await update.checkCompatibility(), true, "boot continues while the offer is open");
   const dialog = only();
@@ -146,6 +148,7 @@ assert.equal(required("x")("y"), "");
   assert.equal(sheets().length, 1, "offered once per bundle");
   submit(dialog);
   await tick(); await tick();
-  assert.equal(reloads, 1, "Update now reloads into the new bundle");
+  assert.equal(reloads, 1, "Update now reloads even over a page that filled its fields from code");
+  assert.equal(update.hasUnsavedInput(), true);
 }
 console.log("ok: in-app sheets confirm, prompt, validate and dismiss");

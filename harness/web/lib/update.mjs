@@ -21,8 +21,10 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
     });
   }
 
-  async function reloadAndUpdate() {
-    if (hasUnsavedInput()) {
+  // checkInput: false when the caller already checked, as the update offer does before it opens: the sheet is modal, and
+  // the page routed underneath it may fill fields from code (a job's prompt, a restored draft), which reads as unsaved.
+  async function reloadAndUpdate({ checkInput = true } = {}) {
+    if (checkInput && hasUnsavedInput()) {
       chrome.toast("Save or discard your form changes before reloading the app.", 6000);
       return false;
     }
@@ -68,7 +70,7 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
     if (browser.sessionStorage.getItem(promptKey) === WEB_BUILD_ID || (foreground && hasUnsavedInput())) return;
     browser.sessionStorage.setItem(promptKey, WEB_BUILD_ID);
     void confirmSheet({ title: "Update Agent Harness Web?", message: "A newer version is available. Updating reloads the app.",
-      confirmLabel: "Update now", cancelLabel: "Later", dismissOnRoute: false }).then((yes) => (yes ? reloadAndUpdate() : false))
+      confirmLabel: "Update now", cancelLabel: "Later", dismissOnRoute: false }).then((yes) => (yes ? reloadAndUpdate({ checkInput: false }) : false))
       .catch((e) => chrome.toast(e.message, 6000));
   }
 
