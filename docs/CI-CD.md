@@ -129,6 +129,12 @@ conclusion follows the review verdict:
 | Every backend failed or gave no valid verdict, or the comment was not posted | `failure` | `Review did not complete` |
 | Run cancelled | `cancelled` | `Automated review cancelled` |
 
+The review has two parts under fixed headings. `## Findings` lists correctness bugs only; it alone sets the verdict, the
+check conclusion and the inline annotations. `## Style and structure (advisory)` lists at most five suggestions on naming,
+responsibilities, duplication, consistency with the neighbouring code and simplifications, judged against the repository's
+own lint and format configuration. It never changes the verdict or fails the check, and its items are written without the
+`path:line` form so they cannot become annotations. A clean review can therefore still carry advisory suggestions.
+
 The check summary carries the posted comment, so findings are readable from the Checks tab. The workflow run itself
 stays green when the review merely has findings: a red run means the review machinery broke, a red check means the
 code has findings. The prompt requires the reviewer to end with exactly two lines, `REVIEW_VERDICT: CLEAN` or
@@ -141,7 +147,9 @@ commit carries the check again.
 The optional `backend` dispatch input accepts `auto`, `cursor`, `codex`, or `claude`. An explicit
 provider runs only that provider, which is useful for verification and deliberate quota steering. Omitting the input
 or selecting `auto` tries the comma-separated `REVIEW_BACKENDS` repository variable in order. If the variable is empty,
-the order defaults to `codex,claude,cursor`.
+the order defaults to `codex,claude`: GPT leads on purpose, because a reviewer from a different model family than the
+usual Claude author thinks differently about the code. Cursor stays a supported backend (list it explicitly) but is no
+longer in the default order.
 
 The runner falls through that ordered list when a CLI exits non-zero, returns no review, reports a recognizable
 rate-limit or quota error, or omits the required completion marker or verdict line after inspecting the diff. Both are
@@ -170,15 +178,16 @@ workflow edit.
 Optional `REVIEW_MODEL_CLAUDE`, `REVIEW_MODEL_CURSOR`, and `REVIEW_MODEL_CODEX` pin the model each backend CLI is asked
 to use (`--model` on `claude`, Cursor `agent`, and `codex exec`). When a variable is set, the runner passes that flag and
 the PR comment footer plus `model=` job output name it, for example `Automated review backend: **claude (claude-sonnet-5)**.`.
-When a variable is unset, that backend keeps the CLI default and the footer names only the backend. Values must match
+When a variable is unset, the workflow supplies a default model: `gpt-6.1-sol` for Codex and `claude-opus-5-5` for Claude
+(Cursor has none: it keeps the CLI default and the footer names only the backend). Values must match
 `[A-Za-z0-9][A-Za-z0-9._:+/\-]*`; anything else (spaces, quotes, leading dashes, shell metacharacters) fails closed
 before a backend runs.
 
 Optional `REVIEW_EFFORT_CLAUDE` and `REVIEW_EFFORT_CODEX` pin reasoning effort: `--effort <value>` on `claude`
 (`low`, `medium`, `high`, `xhigh`, `max`) and `-c model_reasoning_effort="<value>"` on `codex exec` (`low`, `medium`,
-`high`, `xhigh`). When set, the footer and a new `effort=` job output include it, for example
-`Automated review backend: **claude (claude-sonnet-5, medium)**.`. Unset or whitespace-only keeps the CLI default and the
-footer unchanged. Any other value fails closed before a backend runs, and all effort variables are validated up front
+`high`, `xhigh`, `max`). When set, the footer and a new `effort=` job output include it, for example
+`Automated review backend: **claude (claude-sonnet-5, medium)**.`. Unset falls back to the workflow defaults, `xhigh` for Codex and `high` for Claude; a whitespace-only value keeps the CLI
+default and the footer unchanged. Any other value fails closed before a backend runs, and all effort variables are validated up front
 even for backends not used. Cursor has no effort variable: choose effort through the model id (for example
 `cursor-grok-4.6-medium` in `REVIEW_MODEL_CURSOR`).
 

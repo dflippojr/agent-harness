@@ -7,7 +7,12 @@ name: Automated Code Review
 # docs/CI-CD.md). It runs on a self-hosted review runner so it can reuse the
 # runner service user's already-authenticated Codex, Claude, and Cursor CLIs.
 # The backend input can select one backend; auto uses the ordered
-# REVIEW_BACKENDS repository variable, then codex,claude,cursor by default.
+# REVIEW_BACKENDS repository variable, then codex,claude by default. Codex (GPT)
+# leads on purpose: a reviewer from a different model family than the usual
+# Claude author thinks differently about the code. Defaults when the repository
+# variables are unset: Codex gpt-6.1-sol at xhigh, Claude claude-opus-5-5 at high.
+# The review has two parts: correctness findings, which set the verdict and the
+# check, and advisory style and structure suggestions, which never do.
 # The optional mode input is auto (incremental when a prior review marker
 # makes that safe) or full. Pre-merge reviews should dispatch mode=full.
 #
@@ -180,18 +185,24 @@ jobs:
           REQUESTED_BACKEND: ${{ inputs.backend }}
           REVIEW_MODE: ${{ inputs.mode }}
           REVIEW_BACKENDS: ${{ vars.REVIEW_BACKENDS }}
-          REVIEW_MODEL_CLAUDE: ${{ vars.REVIEW_MODEL_CLAUDE }}
+          REVIEW_MODEL_CLAUDE: ${{ vars.REVIEW_MODEL_CLAUDE || 'claude-opus-5-5' }}
           REVIEW_MODEL_CURSOR: ${{ vars.REVIEW_MODEL_CURSOR }}
-          REVIEW_MODEL_CODEX: ${{ vars.REVIEW_MODEL_CODEX }}
-          REVIEW_EFFORT_CLAUDE: ${{ vars.REVIEW_EFFORT_CLAUDE }}
-          REVIEW_EFFORT_CODEX: ${{ vars.REVIEW_EFFORT_CODEX }}
+          REVIEW_MODEL_CODEX: ${{ vars.REVIEW_MODEL_CODEX || 'gpt-6.1-sol' }}
+          REVIEW_EFFORT_CLAUDE: ${{ vars.REVIEW_EFFORT_CLAUDE || 'high' }}
+          REVIEW_EFFORT_CODEX: ${{ vars.REVIEW_EFFORT_CODEX || 'xhigh' }}
           REVIEW_MAX_DIFF_BYTES: ${{ inputs.max_diff_bytes || vars.REVIEW_MAX_DIFF_BYTES }}
           REVIEW_PROMPT: |
-            Review the pull request diff embedded in this prompt for correctness bugs only (not style or simplification). Report only high-confidence findings as a short Markdown list, one item per finding, each starting with `path/to/file:line` (repo-relative path, a single line number), then the defect, and a concrete failure scenario that would trigger it. If you find nothing significant, reply with exactly one line saying so.
+            Review the pull request diff embedded in this prompt in two parts, under these exact Markdown headings.
+
+            ## Findings
+            Correctness bugs only. Report only high-confidence findings as a short Markdown list, one item per finding, each starting with `path/to/file:line` (repo-relative path, a single line number), then the defect, and a concrete failure scenario that would trigger it. This part sets the verdict. If you find nothing significant, write exactly one line saying so.
+
+            ## Style and structure (advisory)
+            Give at most five suggestions about code style and structure, ordered by value. They never change the verdict or fail the check. Judge against the surrounding code and the repository's own lint, format, and type-check configuration, not personal taste, and skip anything a formatter or linter already enforces. Look for unclear or misleading names, functions or modules doing more than one job, logic duplicated where the neighbouring code shares it, responsibilities placed in the wrong layer, inconsistencies with how the nearby code and tests are organised, awkward public API shapes, and simplifications that remove code without changing behaviour. Start each suggestion with **Style** or **Structure**, then the file in backticks and where in words (for example, near the new `load()` function), never in the `path:line` form, which is reserved for the Findings list. Then give the concrete improvement in one or two sentences. If nothing is worth a human's time, write exactly one line saying so.
 
             The embedded diff is authoritative for what changed. The workspace is the pull request head and is available only for surrounding code, history, and blame context.
 
-            Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts it as the PR comment. Only after you have actually inspected the embedded diff and reported findings or no significant findings, end with exactly two lines. First a verdict line: `REVIEW_VERDICT: CLEAN` if you reported no findings, or `REVIEW_VERDICT: FINDINGS <n>` where <n> is the number of findings you listed. Then a final line exactly `REVIEW_STATUS: COMPLETE`. Do not print either line if you could not inspect the diff.
+            Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts it as the PR comment. Only after you have actually inspected the embedded diff and reported findings or no significant findings, end with exactly two lines. First a verdict line: `REVIEW_VERDICT: CLEAN` if you reported no findings, or `REVIEW_VERDICT: FINDINGS <n>` where <n> is the number of items you listed under Findings (advisory style and structure suggestions are never counted). Then a final line exactly `REVIEW_STATUS: COMPLETE`. Do not print either line if you could not inspect the diff.
         run: |
           & .\.review-tooling\ops\review\run-review.ps1 `
             -Backend $env:REQUESTED_BACKEND `
