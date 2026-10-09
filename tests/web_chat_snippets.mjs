@@ -8,7 +8,7 @@ import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./w
 
 const fail = (msg) => { throw new Error(msg); };
 
-const { byId, doc } = createDocument({ features: [], feature: "chat", focusables: false });
+const { byId, doc } = createDocument();
 doc.addEventListener = () => {};
 
 const CHAT = "chatab12cd";

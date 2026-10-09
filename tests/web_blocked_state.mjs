@@ -1,11 +1,11 @@
 // UI harness: load app.js in a stub DOM, enter protocol-blocked state, and prove
-// hashchange / feature-nav / visibility / online / SW messages cannot dismiss the
+// hashchange / tab bar / visibility / online / SW messages cannot dismiss the
 // update card or start /api/v1 traffic.
 import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
 import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
-const { byId, make, doc, feature } = createDocument();
+const { byId, make, doc } = createDocument();
 
 const loc = {
   href: "http://localhost/",
@@ -130,11 +130,7 @@ loc.hash = "#/profile";
 win.dispatchEvent({ type: "hashchange" });
 await new Promise((r) => setTimeout(r, 50));
 
-feature.value = "jobs";
-feature.dispatchEvent({ type: "change" });
-if (loc.hash !== "#/profile" && loc.hash !== "#/jobs") {
-  // go() may rewrite the hash; the card must still stay.
-}
+if (!byId["tab-bar"].hidden) throw new Error("a blocked app must not offer the tab bar");
 win.dispatchEvent({ type: "hashchange" });
 await new Promise((r) => setTimeout(r, 50));
 

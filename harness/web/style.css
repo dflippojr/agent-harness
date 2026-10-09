@@ -20,6 +20,9 @@
   --add: #dcfce7;
   --del: #fee2e2;
   --radius: 12px;
+  --tabbar-h: 56px;  /* bottom tab bar, safe-area inset excluded (#506) */
+  --rail-w: 88px;    /* the same bar as a left rail on wide screens */
+  --tabbar-offset: 0px; /* what fixed bottom controls clear; set while the tab bar shows */
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --text-scale: 1;
   color-scheme: light dark;
@@ -129,13 +132,40 @@ main.paint-refresh { -webkit-transform: translate3d(0, 0, .001px); transform: tr
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted);
 }
 #bar.page h1 { color: var(--text); font-weight: 650; font-size: 1.0625rem; }
-#feature-nav {
-  flex: 1 1 auto; width: auto; min-width: 0; max-width: 12em; min-height: 40px;
-  padding: 7px 32px 7px 11px; border: 0;
-  background-color: var(--panel-2); font-weight: 650; cursor: pointer;
+#bar.top h1 { color: var(--text); font-weight: 700; font-size: 1.5rem; letter-spacing: -.01em; }
+#conn, #settings-btn, #back { flex: 0 0 auto; }
+#conn { margin-left: auto; }
+#settings-btn { color: var(--text); }
+.tab-icon { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Bottom tab bar (#506): the primary sections, above the home indicator in standalone mode. */
+body.has-tabs { --tabbar-offset: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)); padding-bottom: 0; }
+#tab-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  display: flex; justify-content: center;
+  padding: 0 max(8px, env(safe-area-inset-right, 0px)) env(safe-area-inset-bottom, 0px) max(8px, env(safe-area-inset-left, 0px));
+  background: var(--panel); border-top: 1px solid var(--line);
 }
-.profile-icon { font-size: 1.5rem; border-radius: 50%; background: var(--panel-2); padding: 0; margin: 0; }
-#profile-icon, #conn, #menu-btn, #back { flex: 0 0 auto; }
+#tab-bar .tab {
+  flex: 1 1 0; max-width: 128px; min-width: 44px; min-height: var(--tabbar-h);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  color: var(--muted); font-size: 0.6875rem; font-weight: 600; text-decoration: none;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+#tab-bar .tab[aria-current="page"] { color: var(--accent); font-weight: 700; }
+#tab-bar .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: var(--radius); }
+.tab-avatar { width: 24px; height: 24px; font-size: 1.25rem; line-height: 24px; text-align: center; }
+/* Wide screens: the same links as a left rail, so desktop keeps one-click sections without a bottom bar. */
+@media (min-width: 960px) {
+  body.has-tabs { --tabbar-offset: 0px; padding-left: var(--rail-w); }
+  #tab-bar {
+    top: 0; right: auto; width: var(--rail-w); flex-direction: column; justify-content: flex-start; gap: 4px;
+    padding: calc(env(safe-area-inset-top, 0px) + 16px) 8px 16px max(8px, env(safe-area-inset-left, 0px));
+    border-top: 0; border-right: 1px solid var(--line);
+  }
+  #tab-bar .tab { flex: 0 0 auto; max-width: none; min-height: 64px; border-radius: var(--radius); }
+  #tab-bar .tab:hover { background: var(--panel-2); }
+}
 @media (max-width: 420px) {
   #bar { gap: 6px; }
 }
@@ -147,7 +177,7 @@ main.paint-refresh { -webkit-transform: translate3d(0, 0, .001px); transform: tr
 .conn { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); opacity: .5; }
 .conn.live { background: var(--ok); opacity: 1; }
 
-main { max-width: 760px; margin: 0 auto; padding: 12px 16px 120px; }
+main { max-width: 760px; margin: 0 auto; padding: 12px 16px calc(120px + var(--tabbar-offset)); }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
@@ -191,7 +221,7 @@ main { max-width: 760px; margin: 0 auto; padding: 12px 16px 120px; }
 #fab-host {
   position: fixed; inset: 0; z-index: 5; pointer-events: none; box-sizing: border-box;
   display: flex; justify-content: flex-end; align-items: flex-end;
-  padding: 0 max(16px, env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) 0;
+  padding: 0 max(16px, env(safe-area-inset-right, 0px)) calc(20px + max(var(--tabbar-offset), env(safe-area-inset-bottom, 0px))) 0;
 }
 .fab {
   position: static; pointer-events: auto; flex: 0 0 auto;
@@ -303,7 +333,7 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .secret-actions input { flex: 1; min-width: 0; }
 
 #toast {
-  position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom) + 90px);
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(max(var(--tabbar-offset), env(safe-area-inset-bottom, 0px)) + 90px);
   background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; z-index: 20; max-width: 90vw; font-size: 0.875rem;
 }
 .empty { text-align: center; color: var(--muted); padding: 40px 0; }
@@ -323,7 +353,7 @@ details.tool pre { margin: 6px 0; background: var(--code-bg); padding: 8px; bord
 .reading .progress { max-width: 260px; }
 .jump { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); z-index: 30; box-shadow: 0 2px 10px rgba(0,0,0,.25); min-width: 44px; pointer-events: auto; }
 .jump-top { top: calc(var(--bar-h, 52px) + var(--session-chrome-h, 0px) + 8px); bottom: auto; }
-.jump-bottom { bottom: calc(120px + env(safe-area-inset-bottom, 0px)); }
+.jump-bottom { bottom: calc(120px + max(var(--tabbar-offset), env(safe-area-inset-bottom, 0px))); }
 .elapsed { white-space: nowrap; flex: none; margin-left: 6px; font-variant-numeric: tabular-nums; color: var(--muted, #888); font-size: 0.8125rem; }
 .row.between { justify-content: space-between; flex-wrap: nowrap; }
 
@@ -537,32 +567,6 @@ a.quote-source { text-decoration: underline; text-decoration-style: dotted; text
   .config-row input:not(.switch), .config-row select { max-width: none; width: 100%; }
 }
 
-/* navigation drawer */
-#drawer-scrim { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, .45); }
-#nav-drawer {
-  position: fixed; top: 0; bottom: 0; left: 0; z-index: 41;
-  width: min(320px, 86vw); display: flex; flex-direction: column; gap: 8px;
-  background: var(--panel); border-right: 1px solid var(--line); box-shadow: 4px 0 24px rgba(0, 0, 0, .3);
-  padding: calc(env(safe-area-inset-top, 0px) + 18px) 12px calc(env(safe-area-inset-bottom, 0px) + 12px)
-    max(12px, env(safe-area-inset-left, 0px));
-  overflow-y: auto; overscroll-behavior: contain;
-}
-#nav-drawer[hidden], #drawer-scrim[hidden] { display: none; }
-body.drawer-open { overflow: hidden; }
-#nav-drawer a {
-  display: block; min-height: 44px; line-height: 44px; padding: 0 12px; border-radius: 10px;
-  color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-#nav-drawer a:hover, #nav-drawer a:focus-visible { background: var(--panel-2); }
-#nav-drawer a[aria-current="page"], #nav-drawer a.on { background: var(--panel-2); font-weight: 650; }
-#nav-drawer .drawer-links a { font-weight: 600; font-size: 1.0625rem; }
-#nav-drawer .drawer-recent { flex: 1 1 auto; min-height: 0; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 8px; }
-#nav-drawer .drawer-recent h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 4px 12px; }
-#nav-drawer .drawer-recent a { min-height: 40px; line-height: 40px; font-weight: 400; }
-#nav-drawer .drawer-foot { border-top: 1px solid var(--line); padding-top: 8px; }
-#nav-drawer .drawer-foot a { display: flex; align-items: center; gap: 10px; }
-#menu-btn { color: var(--text); }
-
 /* chat */
 .chat-wrap { min-height: calc(100dvh - var(--bar-h, 52px) - 200px); display: flex; flex-direction: column; }
 .chat-welcome {
@@ -594,7 +598,10 @@ body.drawer-open { overflow: hidden; }
 .chat-composer .chat-pickers select.chat-effort { flex: 0 0 auto; max-width: 8em; }
 .chat-composer .chat-notice { margin: 0 0 6px; }
 .chat-composer textarea { font-size: 1rem; } /* 16px+ keeps iOS from zooming on focus */
-body.chat-page main { padding-bottom: calc(190px + env(safe-area-inset-bottom, 0px)); }
+body.chat-page main { padding-bottom: calc(190px + max(var(--tabbar-offset), env(safe-area-inset-bottom, 0px))); }
+body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
+.recent-chats-section { margin-top: 24px; text-align: left; }
+.recent-chats a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .discovery-roots { width: 100%; min-width: 0; font-size: 1rem; }
 .folder-discovery { margin-top: 20px; }
 .discovery-path { overflow-wrap: anywhere; }

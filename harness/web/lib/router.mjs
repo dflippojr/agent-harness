@@ -6,8 +6,9 @@ import { validId } from "./stream.mjs";
 import { GOOGLE_FAILED } from "./signin.mjs";
 
 export const hashParts = (hash) => hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-export const isTopLevel = (parts) => parts.length === 0 || parts[0] === "chat" || parts[0] === "actions"
-  || (parts.length === 1 && (parts[0] === "agents" || parts[0] === "jobs" || parts[0] === "images"));
+// The tab bar's sections (#506). Settings and its pages, Actions included, are nested under the gear and show Back.
+export const isTopLevel = (parts) => parts.length === 0 || parts[0] === "chat"
+  || (parts.length === 1 && ["agents", "jobs", "images", "profile"].includes(parts[0]));
 
 export const normalizeHash = (hash) => {
   if (!hash || hash === "#" || hash === "#/") return "#/";
@@ -16,7 +17,6 @@ export const normalizeHash = (hash) => {
 
 export const isProfileRoute = (parts) => parts[0] === "profile" || parts[0] === "settings";
 const MEMBER_HIDDEN_PROFILE = new Set(["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"]);
-export const FEATURE_ROUTES = { jobs: "#/jobs", images: "#/images", chat: "#/chat" };
 
 // Where a guest or member who asked for a page they may not see should land instead (null = allowed).
 export function blockedRedirect(parts, role) {
@@ -32,8 +32,8 @@ export function blockedRedirect(parts, role) {
 }
 
 // `views` is a function returning the page views, read at route time because the pages are mounted after the router.
-export function mountRouter({ els, session, chrome, signin, stream, views, toast, browser }) {
-  const { $app, $back, $menu, $feature, $fabHost } = els;
+export function mountRouter({ els, session, chrome, tabs, signin, stream, views, toast, browser }) {
+  const { $app, $back, $fabHost } = els;
   const { document, window } = browser;
   const { api, fetchMe, loadWebAuth, isGuest, isMember, isOwner, canChat } = session;
   let cleanup = [];
@@ -80,6 +80,7 @@ export function mountRouter({ els, session, chrome, signin, stream, views, toast
     else if (isProfileRoute(parts)) await routeProfile(v, parts);
     else if (parts[0] === "images") await routeImages(v, parts);
     else if (parts[0] === "jobs") await (parts[1] ? v.viewJob(parts[1]) : v.viewJobs());
+    else if (parts[0] === "tasks") go(["#", "jobs", ...parts.slice(1)].join("/"), true); // scheduled work was once labelled Tasks
     else if (parts[0] === "s" && parts[1]) await v.viewSession(parts[1], parts[2] || "transcript", parts[3]);
     else if (parts[0] === "signin" && parts[1] === "failed") {
       toast(GOOGLE_FAILED, 6000);
@@ -92,7 +93,7 @@ export function mountRouter({ els, session, chrome, signin, stream, views, toast
   // Retry re-runs route(), which asks /me again.
   function viewOffline() {
     $back.hidden = true;
-    $menu.hidden = false;
+    tabs.paint(hashParts(browser.location.hash), { show: true });
     chrome.setHeader("agents", "Offline", { page: true });
     append($app, h("div", { class: "card" },
       h("h2", {}, "Can't reach Agent Harness Server"),
@@ -119,6 +120,7 @@ export function mountRouter({ els, session, chrome, signin, stream, views, toast
     const parts = hashParts(browser.location.hash);
     if (session.needsSignIn()) {
       $back.hidden = true;
+      tabs.paint(parts, { hidden: true });
       signin.viewSignIn(parts[0] === "signin" && parts[1] === "failed");
       chrome.repaintPage();
       return;
@@ -136,7 +138,7 @@ export function mountRouter({ els, session, chrome, signin, stream, views, toast
     }
     route.onImages = images;
     $back.hidden = isTopLevel(parts);
-    $menu.hidden = !$back.hidden;
+    tabs.paint(parts);
     const redirect = blockedRedirect(parts, session.getMe().role);
     if (redirect) { go(redirect, true); return; }
     try {
@@ -155,10 +157,6 @@ export function mountRouter({ els, session, chrome, signin, stream, views, toast
     // An approval deep-link is a real subpage of the transcript.
     if (parts[0] === "s" && parts[2] === "approval") go(`#/s/${parts[1]}`, true);
     else browser.history.back();
-  });
-  $feature.addEventListener("change", () => {
-    if (session.isBlocked()) return;
-    go(FEATURE_ROUTES[$feature.value] || "#/agents", true);
   });
   window.addEventListener("hashchange", route);
   // Connectivity is back: re-run the identity check if the last one could not reach the server (#368).

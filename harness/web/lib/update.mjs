@@ -7,14 +7,13 @@ import { h, fill } from "./dom.mjs";
 
 export const UPDATE_GUARD = "harness.webUpdateAttempt";
 
-export function mountUpdate({ els, agentHarnessWeb, session, chrome, route, build, browser }) {
+export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser }) {
   const { $app } = els;
   const { document } = browser;
   const { WEB_BUILD_ID, WEB_PROTOCOL } = build;
 
   function hasUnsavedInput() {
     return [...document.querySelectorAll("input, textarea, select")].some((el) => {
-      if (el.id === "feature-nav") return false;
       if (el.type === "checkbox" || el.type === "radio") return el.checked !== el.defaultChecked;
       if (el.tagName === "SELECT") return [...el.options].some((option) => option.selected !== option.defaultSelected);
       return el.value !== el.defaultValue;
@@ -48,6 +47,7 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, route, buil
 
   function blockingUpdate(meta, state) {
     session.setBlocked(true);
+    tabs.paint([], { hidden: true }); // a blocked app offers no navigation
     chrome.setHeader("agents", "Update required", { page: true });
     const daemonIsOld = state === "daemon_update_required";
     fill($app, h("div", { class: "card" },

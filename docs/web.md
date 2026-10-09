@@ -7,6 +7,17 @@ PWA installs continue to work. The same directory can also be hosted at a separa
 The PWA manifest name and browser title are **Agent Harness Web**. Its short name and Apple standalone title are
 **Harness**. Functional navigation labels such as Agents, Jobs, Images, Profile, and Settings remain task-oriented.
 
+## Navigation
+
+A bottom tab bar holds the primary sections: **Chat** (owner only), **Agents**, **Jobs**, **Images** and **Profile**.
+Household members see Agents and Profile only. The header shows the section title, the live-connection dot and a
+**Settings** gear (`#/settings`), which opens the Settings menu from any section. The owner's Actions (Resources,
+Accounts, Claude Remote Control, Disk) are listed at the end of that menu. Recent chats are listed on the Chat home.
+
+Detail and editor pages (a session, a job, an image, New task) show Back and hide the tab bar. In the installed app
+the bar sits above the home indicator (`env(safe-area-inset-bottom)`). At 960 px and wider the same links form a
+left rail. Scheduled work is called **Jobs** everywhere; the old `#/tasks` links redirect to `#/jobs`.
+
 ## API boundary
 
 Agent Harness Web does not construct unversioned Server URLs for owner use:

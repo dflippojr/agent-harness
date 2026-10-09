@@ -4,10 +4,8 @@ import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
 import { El, Emitter, Node, createDocument, storage } from "./web_stub_dom.mjs";
 
-const { byId, make, doc } = createDocument({ features: ["agents", "chat", "jobs", "images"], feature: "chat", focusables: false });
+const { byId, make, doc } = createDocument();
 doc.addEventListener = () => {};
-const drawer = byId["nav-drawer"];
-drawer._drawerRecent = new El("div", { class: "drawer-recent" });
 
 const loc = {
   href: "http://localhost/#/agents",
@@ -148,7 +146,7 @@ if (scenario.startsWith("offline")) {
   // Never guest: no guest banner, navigation kept, and an offline state painted.
   const text = byId.app.textContent;
   if (!byId["guest-banner"].hidden) fail("offline boot adopted the guest role");
-  if (byId["menu-btn"].hidden) fail("offline boot hid the navigation");
+  if (byId["tab-bar"].hidden) fail("offline boot hid the navigation");
   if (!/Can't reach Agent Harness Server/.test(text)) fail(`no offline state shown: ${text}`);
   if (scenario === "offline") {
     if (!/Retry/.test(text)) fail("the offline card needs a Retry button");

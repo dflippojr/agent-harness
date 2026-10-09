@@ -131,27 +131,28 @@ def test_chat_owner_only(tmp_path):
         assert client.get("/sessions", headers=gh).json() == []
 
 
-def test_web_shell_has_chat_home_and_drawer(tmp_path):
+def test_web_shell_has_chat_home_and_tab_bar(tmp_path):
     client, _, _ = make_client(tmp_path, [Completion(content="ok")])
     with client:
         html = client.get("/").text
         js = client.get("/static/lib/router.mjs").text
-        drawer_js = client.get("/static/lib/drawer.mjs").text
+        tabs_js = client.get("/static/lib/tabs.mjs").text
         chat_js = client.get("/static/pages/chat.mjs").text
         css = client.get("/static/style.css").text
-    order = [html.index(f'data-nav="{n}"') for n in ("chat", "agents", "jobs", "images", "actions")]
+    order = [html.index(f'data-tab="{n}"') for n in ("chat", "agents", "jobs", "images", "profile")]
     assert order == sorted(order)
-    assert ">Tasks</a>" in html
-    assert 'id="menu-btn"' in html
-    assert 'aria-label="Open navigation menu"' in html
-    assert html.index('id="drawer-profile"') > html.index('id="drawer-chats"')
+    assert ">Tasks<" not in html
+    assert 'id="menu-btn"' not in html
+    assert 'id="settings-btn"' in html
     assert 'go(canChat() ? "#/chat" : "#/agents", true)' in js
     assert 'parts[0] === "chat"' in js
-    assert 'event.key === "Escape"' in drawer_js
+    assert 'tab === "chat" && !canChat' in tabs_js
+    assert 'api("/chats?limit=30")' in chat_js  # recent chats moved from the drawer to the Chat home
     assert "visualViewport" in chat_js
     assert "`/chats/${encodeURIComponent(id)}/events?after=${lastSeq}`" in chat_js
     assert "safe-area-inset-bottom" in css
-    assert "#nav-drawer" in css
+    assert "#tab-bar" in css
+    assert "#nav-drawer" not in css
     assert ".chat-welcome" in css
 
 

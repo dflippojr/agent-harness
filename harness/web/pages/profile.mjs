@@ -5,7 +5,7 @@ import { ago, pluralize } from "../lib/format.mjs";
 import { md } from "../lib/markdown.mjs";
 import { showSecretOnce as showSecret } from "../lib/secret.mjs";
 
-export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, toast, go, route,
+export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route,
   daemonSettingsCard, browser }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { document, window, localStorage, location, navigator, history, getComputedStyle, requestAnimationFrame, confirm, prompt, open,
@@ -43,6 +43,7 @@ const PROFILE_PAGES = {
   apps: "Apps",
   endpoint: "Inference endpoint",
 };
+const ACTION_PAGES = [["resources", "Resources"], ["accounts", "Accounts"], ["remote-control", "Claude Remote Control"], ["disk", "Disk"]];
 const THEMES = {
   auto: { label: "System", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
   light: { label: "Light", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
@@ -369,7 +370,9 @@ async function viewProfile(page, extra) {
   const titles = { account: "Account", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
-  setHeader("agents", titles[page] || "Profile", { page: true });
+  // The header's Settings gear (#/settings, #506) opens this same menu under its own name.
+  const home = location.hash.startsWith("#/settings") ? "Settings" : "Profile";
+  setHeader("agents", titles[page] || home, { page: true });
   if (page === "connection") return append($app, connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
   if (Object.hasOwn(PROFILE_CARDS, page)) return append($app, await PROFILE_CARDS[page](me, profile, extra));
@@ -393,6 +396,9 @@ async function viewProfile(page, extra) {
       Object.entries(PROFILE_PAGES)
         .filter(([id]) => (id !== "install" || !isStandalone()) && !hidden.has(id))
         .map(([id, label]) => h("a", { href: `#/profile/${id}` }, label))),
+    // The drawer's Actions entry moved here when the tab bar replaced it (#506).
+    isOwner() ? h("p", { class: "section-label" }, "Actions") : null,
+    isOwner() ? h("div", { class: "card settings-list" }, ACTION_PAGES.map(([id, label]) => h("a", { href: `#/actions/${id}` }, label))) : null,
   );
 }
 

@@ -22,41 +22,13 @@ class El extends BaseEl {
   }
 }
 
-const { byId, make, doc, feature } = createDocument({ ElClass: El });
-byId["nav-drawer"].hidden = true;
-const drawerRecent = new El("div", { class: "drawer-recent" });
-drawerRecent.className = "drawer-recent";
-const indexHtml = readFileSync(join(root, "harness/web/index.html"), "utf8");
-const actionsHrefMatch = indexHtml.match(/<a href="(#[^"]*)" data-nav="actions">/);
-if (!actionsHrefMatch) throw new Error("missing Actions drawer link in index.html");
-const actionsHref = actionsHrefMatch[1];
-const actionsNav = new El("a", { href: actionsHref, "data-nav": "actions" });
-actionsNav.href = actionsHref;
-actionsNav.dataset.nav = "actions";
-const descendants = (root) => {
-  const out = [];
-  const walk = (n) => {
-    for (const c of n.childNodes || []) {
-      if (c instanceof El) { out.push(c); walk(c); }
-    }
-  };
-  walk(root);
-  return out;
-};
-byId["nav-drawer"].querySelectorAll = function queryAll(sel) {
-  return descendants(this).filter((el) => {
-    if (sel === "a[data-nav]") return el.tagName === "A" && !!el.dataset.nav;
-    if (sel === "a[href], button") return (el.tagName === "A" && el.href) || el.tagName === "BUTTON";
-    return false;
-  });
-};
-byId["nav-drawer"].querySelector = function queryOne(sel) {
-  if (sel === ".drawer-recent") {
-    return descendants(this).find((el) => String(el.className).split(/\s+/).includes("drawer-recent")) || null;
-  }
-  return this.querySelectorAll(sel)[0] || null;
-};
-byId["nav-drawer"].append(actionsNav, drawerRecent);
+const { byId, make, doc } = createDocument({ ElClass: El });
+// Settings links to Actions now that the drawer is gone (#506).
+const actionsHref = "#/actions/resources";
+if (!readFileSync(join(root, "harness/web/pages/profile.mjs"), "utf8").includes("`#/actions/${id}`")) {
+  throw new Error("missing the Actions links in the Settings menu");
+}
+const profileTab = byId["tab-bar"].querySelectorAll("a[data-tab]").find((a) => a.dataset.tab === "profile");
 
 const historyStack = ["#/"];
 const loc = {
@@ -423,14 +395,14 @@ const selected = (root) => {
 };
 if (selected(byId.app).join("|") !== "Resources") throw new Error(`expected Resources selected, got ${selected(byId.app)}`);
 
-const followDrawerActions = async () => {
+const followActionsLink = async () => {
   if (loc.hash === actionsHref) return;
   loc.hash = actionsHref;
   win.dispatchEvent({ type: "hashchange" });
   await sleep(40);
 };
-await followDrawerActions();
-await waitFor(() => loc.hash === "#/actions/resources", "drawer Actions stays on Resources");
+await followActionsLink();
+await waitFor(() => loc.hash === "#/actions/resources", "the Actions link stays on Resources");
 win.history.back();
 await sleep(40);
 if (loc.hash !== "#/agents") {
@@ -463,9 +435,8 @@ clickTab("Accounts");
 if (loc.hash !== "#/actions/accounts") throw new Error(`accounts tab hash ${loc.hash}`);
 win.dispatchEvent({ type: "hashchange" });
 await waitFor(() => /No household members yet|New member/.test(byId.app.textContent), "accounts tab");
-byId["menu-btn"].click();
-if (actionsNav.attributes["aria-current"] !== "page") {
-  throw new Error(`Actions drawer not current on ${loc.hash}`);
+if (profileTab.attributes["aria-current"] !== "page") {
+  throw new Error(`Profile tab not current on ${loc.hash}`);
 }
 clickTab("Disk");
 win.dispatchEvent({ type: "hashchange" });
