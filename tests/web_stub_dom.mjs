@@ -114,10 +114,7 @@ export class El extends Node {
   select() {}
   blur() {}
   closest() { return null; }
-  querySelector(sel) {
-    if (sel === ".drawer-recent") return this._drawerRecent || null;
-    return null;
-  }
+  querySelector() { return null; }
   querySelectorAll() { return []; }
   getContext() {
     return { fillRect() {}, fillText() {}, fillStyle: "", font: "", textAlign: "", textBaseline: "" };
@@ -179,23 +176,16 @@ export function fakeEventSource(sources) {
   return FakeEventSource;
 }
 
-// The document plus the elements app.js looks up by id. `focusables` makes "input, textarea, select" return the
-// feature select; a harness overrides further hooks on the returned `doc` or `byId` entries.
-export function createDocument({ ElClass = El, features = ["agents", "jobs", "images"], feature: current = features[0],
-  focusables = true } = {}) {
+// The document plus the elements app.js looks up by id, including the tab bar's links (#506) so harnesses can read which
+// tabs show and which is current. A harness overrides further hooks on the returned `doc` or `byId` entries.
+export const TABS = ["chat", "agents", "jobs", "images", "profile"];
+export function createDocument({ ElClass = El } = {}) {
   const byId = {};
   const make = (tag, id, extra = {}) => {
     const el = new ElClass(tag, { id, ...extra });
     if (id) byId[id] = el;
     return el;
   };
-  const select = make("select", "feature-nav");
-  for (const value of features) {
-    const opt = new ElClass("option", { value });
-    opt.value = value;
-    select.options.push(opt);
-  }
-  select.value = current;
 
   const doc = new Emitter();
   doc.documentElement = new ElClass("html");
@@ -209,14 +199,20 @@ export function createDocument({ ElClass = El, features = ["agents", "jobs", "im
     if (sel === "#app") return byId.app;
     return null;
   };
-  doc.querySelectorAll = (sel) => (focusables && sel === "input, textarea, select" ? [select] : []);
+  doc.querySelectorAll = () => [];
   doc.createElement = (tag) => new ElClass(tag);
   doc.createTextNode = (t) => String(t);
   doc.addEventListener = (...a) => Emitter.prototype.addEventListener.call(doc, ...a);
 
-  for (const [tag, id] of [["main", "app"], ["h1", "title"], ["button", "back"], ["span", "conn"], ["a", "profile-icon"],
-    ["button", "menu-btn"], ["nav", "nav-drawer"], ["div", "drawer-scrim"], ["div", "drawer-chats"],
-    ["span", "drawer-profile-icon"], ["div", "fab-host"], ["a", "fab"], ["header", "bar"], ["div", "guest-banner"],
+  for (const [tag, id] of [["main", "app"], ["h1", "title"], ["button", "back"], ["span", "conn"], ["a", "settings-btn"],
+    ["nav", "tab-bar"], ["span", "profile-icon"], ["div", "fab-host"], ["a", "fab"], ["header", "bar"], ["div", "guest-banner"],
     ["div", "toast"]]) make(tag, id);
-  return { byId, make, doc, feature: select };
+  const tabLinks = TABS.map((tab) => {
+    const a = new ElClass("a", { href: `#/${tab}` });
+    a.dataset.tab = tab;
+    return a;
+  });
+  byId["tab-bar"].append(...tabLinks);
+  byId["tab-bar"].querySelectorAll = (sel) => (sel === "a[data-tab]" ? tabLinks : []);
+  return { byId, make, doc };
 }

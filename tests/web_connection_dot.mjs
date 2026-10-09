@@ -4,7 +4,7 @@ import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
 import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
-const { byId, make, doc, feature } = createDocument();
+const { byId, make, doc } = createDocument();
 
 const loc = {
   href: "http://localhost/#/",

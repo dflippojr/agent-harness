@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 
 // ---- stub DOM (installed only after the imports below, to prove the modules need none at import time) ----
 const imports = {};
-for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "drawer", "update", "boot", "warm-model", "secret"]) {
+for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "secret"]) {
   imports[name] = await import(`../harness/web/lib/${name}.mjs`);
 }
 const { h, fill, append, kids } = imports.dom;
@@ -207,12 +207,12 @@ const session = imports.session.createSession({ agentHarnessWeb: client });
 }
 
 // ---- chrome ----
-const els = Object.fromEntries(["app", "title", "back", "conn", "feature-nav", "profile-icon", "fab-host", "fab", "menu-btn", "nav-drawer", "drawer-scrim", "drawer-chats"]
+const els = Object.fromEntries(["app", "title", "back", "conn", "profile-icon", "fab-host", "fab", "tab-bar", "settings-btn"]
   .map((id) => [id, doc.getElementById(id)]));
-const E = { $app: els.app, $title: els.title, $back: els.back, $conn: els.conn, $feature: els["feature-nav"], $profileIcon: els["profile-icon"],
-  $fabHost: els["fab-host"], $fab: els.fab, $menu: els["menu-btn"], $drawer: els["nav-drawer"], $scrim: els["drawer-scrim"], $drawerChats: els["drawer-chats"] };
-E.$feature.options = [{ value: "agents" }, { value: "jobs" }];
-E.$feature.value = "jobs";
+const E = { $app: els.app, $title: els.title, $back: els.back, $conn: els.conn, $profileIcon: els["profile-icon"],
+  $fabHost: els["fab-host"], $fab: els.fab, $tabBar: els["tab-bar"], $settings: els["settings-btn"] };
+const tabLinks = ["chat", "agents", "jobs", "images", "profile"].map((tab) => Object.assign(new El("a"), { dataset: { tab } }));
+E.$tabBar.querySelectorAll = (sel) => (sel === "a[data-tab]" ? tabLinks : []);
 const chrome = imports.chrome.mountChrome({ els: E, browser, session });
 {
   chrome.toast("hello", 10);
@@ -223,8 +223,15 @@ const chrome = imports.chrome.mountChrome({ els: E, browser, session });
   E.$back.hidden = true;
   chrome.setHeader("agents", "Title", { page: true });
   assert.equal(E.$title.textContent, "Title");
-  assert.equal(E.$feature.value, "agents");
   assert.ok(doc.getElementById("bar").set.has("page"));
+  assert.ok(doc.getElementById("bar").set.has("top"), "a section's own screen gets the large title");
+  chrome.setHeader("chat", "");
+  assert.equal(E.$title.textContent, "Chat", "the section name stands in until the page knows its title");
+  E.$back.hidden = false;
+  chrome.setHeader("jobs", "");
+  assert.equal(E.$title.hidden, true);
+  assert.ok(!doc.getElementById("bar").set.has("top"));
+  E.$back.hidden = true;
   chrome.showFab("#/new", "Go");
   assert.equal(E.$fab.href, "#/new");
   assert.equal(E.$fabHost.hidden, false);
@@ -235,7 +242,6 @@ const chrome = imports.chrome.mountChrome({ els: E, browser, session });
   chrome.paintGuestChrome();
   assert.ok(doc.documentElement.set.has("guest"));
   assert.match(doc.getElementById("guest-banner").textContent, /^Demo access/);
-  assert.equal(E.$feature.options[1].hidden, true);
   session.setMe({ role: "owner" });
   chrome.paintGuestChrome();
   assert.equal(doc.getElementById("guest-banner").hidden, true);
@@ -281,10 +287,12 @@ const visited = [];
 const viewsFor = () => new Proxy({}, { get: (_, name) => async (...args) => { visited.push([name, ...args]); } });
 let router;
 {
-  const { hashParts, isTopLevel, normalizeHash, isProfileRoute, blockedRedirect, FEATURE_ROUTES } = imports.router;
+  const { hashParts, isTopLevel, normalizeHash, isProfileRoute, blockedRedirect } = imports.router;
   assert.deepEqual(hashParts("#/s/abc/info"), ["s", "abc", "info"]);
   assert.deepEqual(hashParts(""), []);
   assert.ok(isTopLevel([]) && isTopLevel(["chat", "x"]) && isTopLevel(["agents"]) && !isTopLevel(["agents", "x"]) && !isTopLevel(["s", "a"]));
+  assert.ok(isTopLevel(["profile"]) && !isTopLevel(["profile", "appearance"]) && !isTopLevel(["settings"]) && !isTopLevel(["actions", "disk"]),
+    "Profile is a tab; Settings and Actions sit under the gear with Back (#506)");
   assert.equal(normalizeHash("#"), "#/");
   assert.equal(normalizeHash("agents"), "#/agents");
   assert.equal(normalizeHash("#/jobs"), "#/jobs");
@@ -296,11 +304,11 @@ let router;
   assert.equal(blockedRedirect(["profile", "disk"], "member"), "#/profile");
   assert.equal(blockedRedirect(["profile", "account"], "member"), null);
   assert.equal(blockedRedirect(["jobs", "new"], "owner"), null);
-  assert.equal(FEATURE_ROUTES.chat, "#/chat");
 
   const signin = { viewSignIn: (failed) => visited.push(["signin", failed]) };
   const stream = { watchDaemonConnection: () => visited.push(["watch"]) };
-  router = imports.router.mountRouter({ els: E, session, chrome, signin, stream, views: viewsFor, toast: () => {}, browser });
+  const tabs = imports.tabs.mountTabs({ els: E, session, browser });
+  router = imports.router.mountRouter({ els: E, session, chrome, tabs, signin, stream, views: viewsFor, toast: () => {}, browser });
   const run = async (hash, role = "owner") => {
     visited.length = 0;
     browser.location.hash = hash;
@@ -310,20 +318,33 @@ let router;
   };
   assert.deepEqual(await run("#/agents"), [["viewList"]]);
   assert.equal(E.$back.hidden, true);
-  assert.equal(E.$menu.hidden, false);
+  assert.equal(E.$tabBar.hidden, false);
+  assert.equal(E.$settings.hidden, false);
+  assert.equal(tabLinks[1].attrs["aria-current"], "page");
   assert.deepEqual(await run("#/s/abc/changes"), [["viewSession", "abc", "changes", undefined]]);
   assert.equal(E.$back.hidden, false);
+  assert.equal(E.$tabBar.hidden, true, "a session has its own bottom controls");
+  assert.equal(E.$settings.hidden, true);
   assert.deepEqual(await run("#/images/abc/edit"), [["viewImageEdit", "abc"]]);
   assert.deepEqual(await run("#/jobs/j1"), [["viewJob", "j1"]]);
   assert.deepEqual(await run("#/profile/account"), [["viewProfile", "account", undefined]]);
+  assert.equal(E.$tabBar.hidden, false, "Settings pages keep the tab bar");
+  assert.equal(tabLinks[4].attrs["aria-current"], "page");
+  assert.deepEqual(await run("#/tasks"), []);
+  assert.equal(browser.location.hash, "#/jobs", "old Tasks links land on Jobs");
+  assert.deepEqual(await run("#/tasks/j1"), []);
+  assert.equal(browser.location.hash, "#/jobs/j1");
   assert.deepEqual(await run("#/actions/disk"), [["viewActions", "disk"]]);
   assert.deepEqual(await run("#/chat/c1"), [["viewChat", "c1"]]);
   assert.deepEqual(await run("#/profile/disk"), []);
   assert.equal(browser.location.hash, "#/actions/disk", "owner bookmarks redirect to Actions");
   assert.deepEqual(await run("#/jobs", "member"), []);
   assert.equal(browser.location.hash, "#/agents");
+  assert.equal(tabLinks[2].hidden, true, "members have no Jobs tab");
+  assert.equal(tabLinks[0].hidden, true, "members have no Chat tab");
   assert.deepEqual(await run("#/agents", "signin"), [["signin", false]]);
   assert.equal(E.$back.hidden, true);
+  assert.equal(E.$tabBar.hidden, true, "sign-in offers no navigation");
   let cleaned = 0;
   router.onLeave(() => { cleaned++; });
   await run("#/agents");
@@ -332,9 +353,6 @@ let router;
   router.go("#/jobs");
   assert.equal(browser.location.hash, "#/agents", "a blocked app does not navigate");
   session.setBlocked(false);
-  E.$feature.value = "images";
-  E.$feature.emit("change");
-  assert.equal(browser.location.hash, "#/images");
   browser.location.hash = "#/s/abc/approval/z";
   E.$back.emit("click");
   assert.equal(browser.location.hash, "#/s/abc");
@@ -343,37 +361,22 @@ let router;
   assert.equal(browser.history.backed, 1);
 }
 
-// ---- drawer ----
+// ---- tabs ----
 {
-  const { currentSection, mountDrawer } = imports.drawer;
-  assert.equal(currentSection(["s", "a"]), "agents");
-  assert.equal(currentSection(["new"]), "agents");
-  assert.equal(currentSection(["actions", "disk"]), "actions");
-  assert.equal(currentSection(["jobs"]), "jobs");
-  assert.equal(currentSection([]), "");
-  E.$drawer.hidden = true;
-  E.$scrim.hidden = true;
-  const recent = new El("section");
-  recent.className = "drawer-recent";
-  recent.append(E.$drawerChats);
-  E.$drawer.append(recent);
-  E.$drawer.querySelector = (selector) => selector === ".drawer-recent" ? recent : null;
-  doc.body.classList = new El().classList;
-  const drawer = mountDrawer({ els: E, session: { ...session, api: async () => [{ id: "c1", title: "One" }] }, browser });
-  drawer.openDrawer();
-  assert.equal(E.$drawer.hidden, false);
-  assert.equal(E.$menu.attrs["aria-expanded"], "true");
-  await tick();
-  assert.equal(recent.hidden, false);
-  assert.equal(E.$drawerChats.children[0].attrs.href, "#/chat/c1");
-  assert.equal(E.$drawerChats.text, "One");
-  drawer.closeDrawer({ restoreFocus: false });
-  assert.equal(E.$drawer.hidden, true);
-  assert.equal(E.$menu.attrs["aria-expanded"], "false");
-  E.$menu.emit("click");
-  assert.equal(E.$drawer.hidden, false);
-  doc.emit("keydown", { key: "Escape", preventDefault() {} });
-  assert.equal(E.$drawer.hidden, true);
+  const { currentTab, tabBarHidden, tabHidden } = imports.tabs;
+  for (const [hash, tab, hidden] of [
+    ["#/chat", "chat", false], ["#/chat/c1", "chat", false], ["#/agents", "agents", false], ["#/jobs", "jobs", false],
+    ["#/images", "images", false], ["#/profile", "profile", false], ["#/settings", "profile", false],
+    ["#/profile/appearance", "profile", false], ["#/actions/disk", "profile", false], ["#/", "", false],
+    ["#/s/a", "agents", true], ["#/new", "agents", true], ["#/jobs/j1", "jobs", true], ["#/images/i/edit", "images", true],
+  ]) {
+    const parts = imports.router.hashParts(hash);
+    assert.equal(currentTab(parts), tab, `tab for ${hash}`);
+    assert.equal(tabBarHidden(parts), hidden, `tab bar on ${hash}`);
+  }
+  assert.ok(tabHidden("chat", { canChat: false, member: false }) && !tabHidden("chat", { canChat: true, member: false }));
+  assert.ok(tabHidden("images", { canChat: true, member: true }) && !tabHidden("agents", { canChat: false, member: true }));
+  assert.ok(!tabHidden("profile", { canChat: false, member: true }));
 }
 
 // ---- update ----
@@ -381,7 +384,8 @@ let router;
   const meta = { protocols: { admin: { min: 2, max: 2 } }, update_hint: {} };
   const web = { compatibility: async () => meta };
   let routes = 0;
-  const update = imports.update.mountUpdate({ els: E, agentHarnessWeb: web, session, chrome, route: async () => { routes++; },
+  const tabs = imports.tabs.mountTabs({ els: E, session, browser });
+  const update = imports.update.mountUpdate({ els: E, agentHarnessWeb: web, session, chrome, tabs, route: async () => { routes++; },
     build: { WEB_BUILD_ID: "b1", WEB_PROTOCOL: 2 }, browser: { ...browser, window: { caches: null }, confirm: () => false, navigator: {} } });
   assert.equal(update.hasUnsavedInput(), false);
   assert.equal(await update.checkCompatibility(), true);
@@ -389,6 +393,7 @@ let router;
   assert.equal(await update.checkCompatibility(), false);
   assert.ok(session.isBlocked());
   assert.match(E.$app.text, /Update required|Update Agent Harness Web/);
+  assert.equal(E.$tabBar.hidden, true, "a blocked app offers no navigation");
   meta.protocols.admin = { min: 2, max: 2 };
   assert.equal(await update.checkCompatibility(), true);
   assert.equal(routes, 1, "recovering from a blocked state re-routes");

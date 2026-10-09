@@ -1,11 +1,12 @@
 // The app's persistent chrome (#258): header bar, floating action button, toast, connection dot, guest banner and the
 // repaint hooks for the installed iOS app. mountChrome() takes the shell elements and browser globals as arguments and
 // registers the window/document listeners when called, so importing this module touches nothing and works under plain Node.
-import { profileIconHidden } from "./layout.mjs";
 import { pageMetrics, scrollPage } from "./session-ui.mjs";
 
+const SECTION_TITLES = { chat: "Chat", agents: "Agents", jobs: "Jobs", images: "Images" };
+
 export function mountChrome({ els, browser, session }) {
-  const { $app, $title, $back, $conn, $feature, $profileIcon, $fabHost, $fab } = els;
+  const { $app, $title, $back, $conn, $fabHost, $fab } = els;
   const { window, document } = browser;
   const { isGuest, isMember } = session;
   let barPaintFrame = 0;
@@ -43,13 +44,16 @@ export function mountChrome({ els, browser, session }) {
     });
   }
 
+  // A section's own screen (no Back) gets the large title; until a page knows its title (a chat still loading) the
+  // section's name stands in.
   function setHeader(feature, pageTitle = "", { page = false } = {}) {
-    if ([...$feature.options].some((o) => o.value === feature)) $feature.value = feature;
-    $feature.hidden = true;
-    $profileIcon.hidden = profileIconHidden($back.hidden, page);
-    $title.textContent = pageTitle;
-    $title.hidden = !pageTitle;
-    document.getElementById("bar").classList.toggle("page", page);
+    const top = $back.hidden;
+    const title = pageTitle || (top ? SECTION_TITLES[feature] || "" : "");
+    $title.textContent = title;
+    $title.hidden = !title;
+    const bar = document.getElementById("bar");
+    bar.classList.toggle("page", page);
+    bar.classList.toggle("top", top);
     repaintBar();
   }
 
@@ -78,12 +82,6 @@ export function mountChrome({ els, browser, session }) {
     const member = isMember();
     document.documentElement.classList.toggle("guest", guest);
     document.documentElement.classList.toggle("member", member);
-    if ($feature) {
-      for (const opt of $feature.options) {
-        if (opt.value === "jobs" || opt.value === "images") opt.hidden = member || guest;
-      }
-      if (member && ($feature.value === "jobs" || $feature.value === "images")) $feature.value = "agents";
-    }
     if (!banner) return;
     if (!guest) {
       banner.hidden = true;

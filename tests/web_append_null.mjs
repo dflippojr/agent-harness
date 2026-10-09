@@ -47,9 +47,7 @@ class El extends BaseEl {
   }
 }
 
-const { byId, make, doc, feature } = createDocument({ ElClass: El });
-byId["nav-drawer"].hidden = true;
-byId["nav-drawer"].querySelector = (sel) => (sel === ".drawer-recent" ? new El("div", { class: "drawer-recent" }) : null);
+const { byId, make, doc } = createDocument({ ElClass: El });
 
 const loc = {
   href: "http://localhost/#/profile",

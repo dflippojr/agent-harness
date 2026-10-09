@@ -1,40 +1,32 @@
-// UI harness: top-bar #profile-icon visibility by feature / nested page (#187).
+// UI harness: the bottom tab bar and Settings gear on each route (#506; it replaced the drawer and the #187 profile icon).
+// Boots the real app and checks which routes show the bar, which tab is current, and the role rules.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createContext } from "node:vm";
-import { profileIconHidden } from "../harness/web/lib/layout.mjs";
 import { runApp } from "./web_app_loader.mjs";
 import { El as BaseEl, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cssSrc = readFileSync(join(root, "harness/web/style.css"), "utf8");
+const indexHtml = readFileSync(join(root, "harness/web/index.html"), "utf8");
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
 
-const visibility = [
-  ["chat", true, false, false],
-  ["agents", true, false, false],
-  ["jobs", true, false, false],
-  ["images", true, false, false],
-  ["actions", true, false, false],
-  ["profile", false, true, true],
-  ["agents nested", false, false, true],
-  ["jobs nested", false, true, true],
-  ["images nested", false, true, true],
-  ["new task", false, true, true],
-];
-for (const [label, topLevel, page, hidden] of visibility) {
-  const got = profileIconHidden(topLevel, page);
-  assert(got === hidden, `${label}: expected hidden=${hidden}, got ${got}`);
+// Static shell: no drawer, one name for scheduled work, and a bar that respects the home indicator.
+assert(!/nav-drawer|menu-btn|feature-nav/.test(indexHtml), "the drawer and its menu button are retired");
+assert(!/>Tasks</.test(indexHtml), "scheduled work is called Jobs everywhere");
+for (const tab of ["Chat", "Agents", "Jobs", "Images", "Profile"]) {
+  assert(new RegExp(`<span>${tab}</span>`).test(indexHtml), `tab bar is missing ${tab}`);
 }
-
-assert(/#profile-icon/.test(cssSrc) && /flex:\s*0 0 auto/.test(cssSrc),
-  "phone-width top bar must keep #profile-icon from flex-growing into the title");
+assert(/id="settings-btn"[^>]*aria-label="Settings"/.test(indexHtml), "the header has a labelled Settings gear");
+assert(/#tab-bar \{[^}]*env\(safe-area-inset-bottom/.test(cssSrc), "the tab bar pads for the home indicator in standalone mode");
+assert(/--tabbar-h: (4[4-9]|[5-9]\d)px/.test(cssSrc), "tabs are at least 44 px tall");
+assert(/@media \(min-width: 960px\)[\s\S]*?#tab-bar \{[^}]*width: var\(--rail-w\)/.test(cssSrc), "wide screens get a left rail");
 assert(/@media \(max-width: 420px\)/.test(cssSrc) && /#bar \{ gap: 6px; \}/.test(cssSrc),
-  "phone-width bar gap must stay tight so the icon does not crowd the title");
+  "phone-width bar gap stays tight so the gear does not crowd the title");
 
 class El extends BaseEl {
   constructor(tag, attrs) {
@@ -43,13 +35,9 @@ class El extends BaseEl {
   }
 }
 
-const { byId, make, doc, feature } = createDocument({ ElClass: El, features: ["chat", "agents", "jobs", "images"], feature: "chat", focusables: false });
-const drawer = byId["nav-drawer"];
-drawer._drawerRecent = new El("div", { class: "drawer-recent" });
-drawer.hidden = true;
-const profileIcon = byId["profile-icon"];
-profileIcon.href = "#/profile";
-profileIcon.hidden = true;
+const { byId, make, doc } = createDocument({ ElClass: El });
+const tabLinks = byId["tab-bar"].querySelectorAll("a[data-tab]");
+const tab = (name) => tabLinks.find((a) => a.dataset.tab === name);
 
 const loc = {
   href: "http://localhost/#/",
@@ -224,62 +212,87 @@ const go = async (hash) => {
   await sleep(40);
 };
 
-const assertIcon = (route, visible) => {
-  if (byId["profile-icon"].hidden === visible) {
-    throw new Error(`#profile-icon hidden=${byId["profile-icon"].hidden} on ${route}, expected visible=${visible}`);
-  }
-  if (visible && byId["profile-icon"].href !== "#/profile") {
-    throw new Error(`#profile-icon href is ${byId["profile-icon"].href} on ${route}`);
-  }
+// `current` is the tab marked aria-current, or null when the bar is hidden.
+const assertNav = (route, current, { settings = current !== null && current !== "profile" } = {}) => {
+  const bar = byId["tab-bar"];
+  if (bar.hidden !== (current === null)) throw new Error(`#tab-bar hidden=${bar.hidden} on ${route}, expected ${current === null}`);
+  if (doc.body.classList.contains("has-tabs") === bar.hidden) throw new Error(`body.has-tabs out of step with the bar on ${route}`);
+  const on = tabLinks.filter((a) => a.attributes["aria-current"] === "page").map((a) => a.dataset.tab);
+  if (current && on.join() !== current) throw new Error(`current tab on ${route} is ${on}, expected ${current}`);
+  if (byId["settings-btn"].hidden === settings) throw new Error(`Settings gear hidden=${byId["settings-btn"].hidden} on ${route}`);
 };
 
 await go("#/chat");
 await waitFor(() => /Chat/.test(byId.title.textContent), "chat title");
-assertIcon("#/chat", true);
-assert(byId.back.hidden, "chat is top-level; Back must stay hidden so the icon does not sit next to it");
+assertNav("#/chat", "chat");
+assert(byId.back.hidden, "chat is top-level; no Back");
+assert(byId.bar.classList.contains("top"), "a section's own screen gets the large title");
 
 await go("#/agents");
 await waitFor(() => /Agents/.test(byId.title.textContent), "agents title");
-assertIcon("#/agents", true);
+assertNav("#/agents", "agents");
 
 await go("#/jobs");
 await waitFor(() => /Jobs/.test(byId.title.textContent), "jobs title");
-assertIcon("#/jobs", true);
+assertNav("#/jobs", "jobs");
+
+await go("#/tasks");
+await waitFor(() => loc.hash === "#/jobs", "old Tasks link redirects to Jobs");
 
 await go("#/images");
 await waitFor(() => /Images/.test(byId.title.textContent), "images title");
-assertIcon("#/images", true);
-
-await go("#/actions");
-await waitFor(() => loc.hash === "#/actions/gpu" || /Actions/.test(byId.title.textContent), "actions");
-assertIcon("#/actions", true);
+assertNav("#/images", "images");
 
 await go("#/profile");
 await waitFor(() => /Profile/.test(byId.title.textContent), "profile title");
-assertIcon("#/profile", false);
+assertNav("#/profile", "profile", { settings: true });
+assert(byId.back.hidden, "Profile is a tab; no Back");
+
+await go("#/settings");
+await waitFor(() => /Settings/.test(byId.title.textContent), "settings title");
+assertNav("#/settings", "profile", { settings: false });
+assert(!byId.back.hidden, "Settings opens from the gear and has Back");
+
+await go("#/profile/appearance");
+await waitFor(() => /Appearance/.test(byId.title.textContent), "appearance title");
+assertNav("#/profile/appearance", "profile", { settings: false });
+
+await go("#/actions/resources");
+await waitFor(() => /Actions/.test(byId.title.textContent), "actions");
+assertNav("#/actions/resources", "profile", { settings: false });
+assert(!byId.back.hidden, "Actions sit under Settings and have Back");
 
 await go("#/new");
 await waitFor(() => /New task/.test(byId.title.textContent), "new task");
-assertIcon("#/new", false);
-assert(!byId.back.hidden, "nested New task shows Back instead of duplicating the profile icon");
+assertNav("#/new", null);
+assert(!byId.back.hidden, "nested New task shows Back");
 
 await go("#/jobs/job1");
 await waitFor(() => /Job/.test(byId.title.textContent), "job detail");
-assertIcon("#/jobs/job1", false);
-assert(!byId.back.hidden, "job detail Back is visible; profile icon stays off");
+assertNav("#/jobs/job1", null);
 
 await go("#/images/img1");
 await waitFor(() => /Image/.test(byId.title.textContent), "image detail");
-assertIcon("#/images/img1", false);
+assertNav("#/images/img1", null);
 
 await go("#/s/sess1");
 await waitFor(() => /Demo session/.test(byId.title.textContent), "session");
-assertIcon("#/s/sess1", false);
-assert(!byId.back.hidden, "session Back plus inline rename must not share the bar with the profile icon at phone width");
+assertNav("#/s/sess1", null);
+assert(!byId.back.hidden, "a session has Back and its own composer instead of the tab bar");
+
+assert(!tab("chat").hidden && !tab("jobs").hidden && !tab("images").hidden, "the owner sees every tab");
+
+meRole = "member";
+await go("#/agents");
+await waitFor(() => /Agents/.test(byId.title.textContent), "member agents");
+assertNav("#/agents (member)", "agents");
+assert(tab("chat").hidden && tab("jobs").hidden && tab("images").hidden, "members get no Chat, Jobs or Images tabs");
+assert(!tab("profile").hidden, "members keep Profile");
 
 meRole = "guest";
-await go("#/agents");
-await waitFor(() => /Agents/.test(byId.title.textContent), "guest agents");
-assertIcon("#/agents (guest)", true);
+await go("#/jobs");
+await waitFor(() => /Jobs/.test(byId.title.textContent), "guest jobs");
+assertNav("#/jobs (guest)", "jobs");
+assert(tab("chat").hidden && !tab("jobs").hidden, "guests look around Jobs but cannot chat");
 
 console.log("ok");

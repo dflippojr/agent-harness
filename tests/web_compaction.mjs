@@ -14,7 +14,7 @@ class El extends BaseEl {
   }
 }
 
-const { byId, make, doc, feature } = createDocument({ ElClass: El, features: ["agents", "chat", "jobs", "images"] });
+const { byId, make, doc } = createDocument({ ElClass: El });
 doc.documentElement.clientHeight = 800;
 doc.documentElement.scrollTop = 0;
 doc.body = make("body");
@@ -32,7 +32,6 @@ doc.querySelector = (sel) => {
 };
 doc.querySelectorAll = (sel) => {
   if (sel === ".jump") return walk(doc.body, (n) => n.classList.contains("jump"));
-  if (sel === "input, textarea, select") return [feature];
   if (sel.startsWith(".")) {
     const cls = sel.slice(1);
     return [...walk(doc.body, (n) => n.classList.contains(cls)), ...walk(byId.app, (n) => n.classList.contains(cls))];

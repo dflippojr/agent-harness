@@ -142,8 +142,10 @@ function readChatChoice() {
 function trackKeyboard(composer) {
   const vv = window.visualViewport;
   if (!vv) return () => {};
+  // With the keyboard closed the stylesheet places the composer (above the tab bar, #506); open, it sits on the keyboard.
   const update = () => {
-    composer.style.bottom = `${Math.max(0, window.innerHeight - vv.height - vv.offsetTop)}px`;
+    const keyboard = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    composer.style.bottom = keyboard ? `${keyboard}px` : "";
   };
   vv.addEventListener("resize", update);
   vv.addEventListener("scroll", update);
@@ -208,6 +210,22 @@ function chatComposer(options, session) {
   return { el, input, send, cancel, effortSelect, selected, remember };
 }
 
+// Recent chats on the Chat home (#506; they were in the navigation drawer). Shows the last known list at once, then
+// revalidates in the background (#152).
+let recentChatsCache = null;
+function recentChats() {
+  const list = h("div", { class: "card settings-list recent-chats" });
+  const section = h("section", { class: "recent-chats-section", "aria-label": "Recent chats", hidden: true },
+    h("p", { class: "section-label" }, "Recent chats"), list);
+  const render = (chats) => {
+    section.hidden = !chats.length;
+    fill(list, chats.map((c) => h("a", { href: `#/chat/${c.id}`, title: c.title }, c.title)));
+  };
+  if (recentChatsCache) render(recentChatsCache);
+  api("/chats?limit=30").then((chats) => { recentChatsCache = chats; render(chats); }).catch(() => {}); // offline: keep what is shown
+  return section;
+}
+
 async function viewChat(id) {
   if (!canChat()) { go("#/agents", true); return; }
   if (id && !validId(id)) { go("#/chat", true); return; }
@@ -231,7 +249,7 @@ async function viewChat(id) {
         ui.input.value = text;
         ui.input.focus();
       },
-    }, text))));
+    }, text))), recentChats());
   const wrap = h("div", { class: "chat-wrap" }, welcome, feed);
   append($app, wrap);
 

@@ -58,7 +58,7 @@ Pages: Sessions (`pages/sessions.mjs`), New task (`pages/new-task.mjs`), Session
 
 ## Chat
 
-Pages: Chat (`pages/chat.mjs`), the drawer's recent chats (`lib/drawer.mjs`).
+Pages: Chat (`pages/chat.mjs`), including its recent chats list.
 
 | Web action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |

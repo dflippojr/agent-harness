@@ -91,7 +91,7 @@ def test_web_app_and_guard(tmp_path):
         js = client.get("/static/app.js").text
         chrome_js = client.get("/static/lib/chrome.mjs").text
         router_js = client.get("/static/lib/router.mjs").text
-        drawer_js = client.get("/static/lib/drawer.mjs").text
+        tabs_js = client.get("/static/lib/tabs.mjs").text
         warm_js = client.get("/static/lib/warm-model.mjs").text
         actions_js = client.get("/static/pages/actions.mjs").text
         profile_js = client.get("/static/pages/profile.mjs").text
@@ -119,7 +119,7 @@ def test_web_app_and_guard(tmp_path):
         assert "Only tower projects with a local folder appear" in actions_js
         assert 'id="guest-banner"' in client.get("/").text
         assert 'id="bar"' in client.get("/").text
-        assert 'id="feature-nav"' in client.get("/").text
+        assert 'id="tab-bar"' in client.get("/").text
         assert "harness.textSize" in client.get("/").text
         assert "paintGuestChrome" in chrome_js
         assert "isGuest()" in chrome_js
@@ -187,11 +187,10 @@ def test_web_app_and_guard(tmp_path):
         assert actions_js.index('["resources", "Resources"]') < actions_js.index('["accounts", "Accounts"]')
         assert actions_js.index('["accounts", "Accounts"]') < actions_js.index('["remote-control", "Claude Remote Control"]')
         assert actions_js.index('["remote-control", "Claude Remote Control"]') < actions_js.index('["disk", "Disk"]')
-        assert 'nav === "actions" && !isOwner()' in drawer_js
+        assert "member && (tab === \"jobs\" || tab === \"images\")" in tabs_js
         assert 'href: "#/profile/remote-control"' not in js
         assert 'href: "#/profile/disk"' not in js
-        assert 'data-nav="actions"' in client.get("/").text
-        assert 'href="#/actions/resources" data-nav="actions"' in client.get("/").text
+        assert "isOwner() ? h(\"div\", { class: \"card settings-list\" }, ACTION_PAGES" in profile_js
         view_profile_js = profile_js.split("async function viewProfile")[1].split("function connectionCard")[0]
         assert "gpuActionRow()" not in view_profile_js
         assert "Claude Remote Control" not in view_profile_js

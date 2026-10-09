@@ -4,10 +4,8 @@ import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
 import { El, Emitter, Node, createDocument, storage } from "./web_stub_dom.mjs";
 
-const { byId, make, doc } = createDocument({ features: ["agents", "chat", "jobs", "images"], feature: "chat", focusables: false });
+const { byId, make, doc } = createDocument();
 doc.addEventListener = () => {};
-const drawer = byId["nav-drawer"];
-drawer._drawerRecent = new El("div", { class: "drawer-recent" });
 
 const loc = {
   href: "http://localhost/#/",
