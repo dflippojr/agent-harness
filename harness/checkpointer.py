@@ -301,11 +301,8 @@ class Checkpointer:
     @staticmethod
     def _fork_clone(parent: dict, ckpt: dict, new_sid: str, workspace: Path) -> dict:
         parent_ws = Path(parent["workspace"])
-        origin = projects.git(parent_ws, "config", "--get", "remote.origin.url", check=False).out.strip()
         projects._run(["init", "-q", "-b", "main", str(workspace)], env=projects._isolate_env())
         projects.git(workspace, "config", "core.autocrlf", "false")
-        if origin:
-            projects.git(workspace, "remote", "add", "origin", origin)
         projects.git(workspace, "fetch", "-q", "--no-tags", str(parent_ws), ckpt["head"], timeout=900)
         branch = projects.branch_name(new_sid)
         projects.git(workspace, "checkout", "-q", "-b", branch, ckpt["head"])

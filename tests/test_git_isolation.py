@@ -457,3 +457,15 @@ def test_git_state_lock_released_after_command_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(projects, "_run", real_run)
     with ThreadPoolExecutor(max_workers=1) as pool:
         assert pool.submit(git, repo, "status", "--porcelain").result(timeout=10).code == 0
+
+
+def test_push_records_the_pushed_commit_as_the_origin_tracking_ref(tmp_path):
+    src = make_repo(tmp_path / "src")
+    workspace = tmp_path / "ws"
+    info = prepare(Project(name="proj", repo=str(src)), workspace, "push02")
+    (workspace / "app.py").write_text("VALUE = 5\n", encoding="utf-8")
+    assert snapshot(workspace, "work") is True
+    pushed = sh(workspace, "rev-parse", "HEAD").stdout.strip()
+    push(Project(name="proj", repo=src.resolve().as_uri()), workspace, info["branch"], source_ref=pushed)
+    assert sh(workspace, "rev-parse", f"origin/{info['branch']}").stdout.strip() == pushed
+    assert git(workspace, "log", "--oneline", f"origin/{info['branch']}..HEAD").out.strip() == ""

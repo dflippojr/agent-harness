@@ -414,10 +414,13 @@ def push(project: Project, workspace: Path, branch: str, source_ref: str | None 
     """
     if not is_url(project.repo):
         raise GitError("push is for URL projects; local projects already have the branch", 400)
+    commit = git(workspace, "rev-parse", "--verify", f"{source_ref or branch}^{{commit}}").out.strip()
     result = git(workspace, "push", "--quiet", "--no-verify", "--", project.repo,
-                 f"{source_ref or branch}:refs/heads/{branch}", timeout=300, check=False)
+                 f"{commit}:refs/heads/{branch}", timeout=300, check=False)
     if result.code != 0:
         raise GitError(f"push failed: {result.text[-1500:]}")
+    # A push by URL updates no tracking ref; record it so cleanup and the secret scan see what was published.
+    git(workspace, "update-ref", f"refs/remotes/origin/{branch}", commit)
     return f"pushed {branch} to {project.repo}"
 
 
