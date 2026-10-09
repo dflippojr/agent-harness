@@ -191,9 +191,14 @@ def test_background_children_end_when_the_command_times_out(tmp_path, shared_tmp
     assert _gone(int(pidfile.read_text().strip()))
 
 
-@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
-def test_finished_command_group_is_signalled_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("gone", [False, True])
+def test_finished_command_group_is_signalled_once(tmp_path, monkeypatch, gone):
     killed = []
+
+    def killpg(pid, sig):
+        killed.append((pid, sig))
+        if gone:
+            raise ProcessLookupError
 
     class FakeProc:
         pid, returncode = 4242, 0
@@ -207,12 +212,13 @@ def test_finished_command_group_is_signalled_once(tmp_path, monkeypatch):
         def poll(self):
             return 0
 
-    monkeypatch.setattr(harness_runner.os, "killpg", lambda pid, sig: killed.append((pid, sig)), raising=False)
+    monkeypatch.setattr(harness_runner.os, "killpg", killpg, raising=False)
+    monkeypatch.setattr(harness_runner.signal, "SIGKILL", 9, raising=False)
     monkeypatch.setattr(harness_runner.subprocess, "Popen", FakeProc)
     monkeypatch.setattr(harness_runner.Executor, "tmpdir", lambda self, sid: tmp_path)
     ex = executor(tmp_path, [tmp_path])
     assert ex.handle("r", "shell", {"session": SID, "command": "true"})["code"] == 0
-    assert killed == [(4242, harness_runner.signal.SIGKILL)]
+    assert killed == [(4242, 9)]
 
 
 # sandbox profile
