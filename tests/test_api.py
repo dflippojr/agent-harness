@@ -190,7 +190,9 @@ def test_web_app_and_guard(tmp_path):
         assert "member && (tab === \"jobs\" || tab === \"images\")" in tabs_js
         assert 'href: "#/profile/remote-control"' not in js
         assert 'href: "#/profile/disk"' not in js
-        assert "isOwner() ? h(\"div\", { class: \"card settings-list\" }, ACTION_PAGES" in profile_js
+        # Actions are the owner-only rows of Settings → Server (#512).
+        assert "Object.hasOwn(ACTION_PAGES, id) ? isOwner()" in profile_js
+        assert '["Server", ["resources", "daemon", "accounts", "remote-control", "disk"]]' in profile_js
         view_profile_js = profile_js.split("async function viewProfile")[1].split("function connectionCard")[0]
         assert "gpuActionRow()" not in view_profile_js
         assert "Claude Remote Control" not in view_profile_js
