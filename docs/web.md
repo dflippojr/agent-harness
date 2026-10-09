@@ -18,6 +18,11 @@ Detail and editor pages (a session, a job, an image, New task) show Back and hid
 the bar sits above the home indicator (`env(safe-area-inset-bottom)`). At 960 px and wider the same links form a
 left rail. Scheduled work is called **Jobs** everywhere; the old `#/tasks` links redirect to `#/jobs`.
 
+The Agents list groups sessions into **Needs you** (a pending approval, or a run that failed in the last 24 hours),
+**Running** (running, queued or waiting) and **Recent** (finished). Empty groups are hidden, and each group is sorted
+by most recent activity. An approval row shows the pending command or tool on one line and opens straight at the
+approval. A session on a machine other than the tower shows a laptop icon and the machine's name.
+
 ## API boundary
 
 Agent Harness Web does not construct unversioned Server URLs for owner use:
