@@ -206,3 +206,56 @@ def test_base_only_applies_to_app_sessions_on_local_sources():
     assert _app_base_only(app, Project(name="p", repo="D:/src/repo"))
     assert not _app_base_only(app, Project(name="p", repo="https://github.com/example/repo.git"))
     assert not _app_base_only(owner, Project(name="p", repo="D:/src/repo"))
+
+
+def test_erasing_an_app_session_on_a_runner_discards_its_branch_there(tmp_path, monkeypatch):
+    from harness.manager import HarnessError
+
+    m = Manager(project_cfg(tmp_path, "/Users/me/Projects/repo"))
+    calls = []
+
+    async def remote(s, op, params, timeout=300):
+        calls.append((s["id"], op, params["branch"]))
+        if s["id"] == "asleep":
+            raise HarnessError(503, "runner is asleep")
+        return {"head": ""}
+
+    monkeypatch.setattr(m, "remote", remote)
+    base = {"app_id": "ha-test", "branch": "agent/s1", "target": "mac", "project": "proj",
+            "base_branch": "main", "title": "t"}
+    asyncio.run(m._erase_remote_app_branch({**base, "id": "s1"}))
+    asyncio.run(m._erase_remote_app_branch({**base, "id": "asleep"}))  # a sleeping runner doesn't block the erase
+    asyncio.run(m._erase_remote_app_branch({**base, "id": "own", "app_id": ""}))
+    asyncio.run(m._erase_remote_app_branch({**base, "id": "tower", "target": "tower"}))
+    asyncio.run(m._erase_remote_app_branch({**base, "id": "noproj", "project": "missing"}))
+    assert calls == [("s1", "discard", "agent/s1"), ("asleep", "discard", "agent/s1")]
+
+
+def test_erase_continues_when_the_local_branch_cannot_be_deleted(tmp_path, monkeypatch):
+    src = make_repo(tmp_path / "src")
+    m = Manager(project_cfg(tmp_path, str(src)))
+
+    def fail(project, branch):
+        raise projects.GitError("locked")
+
+    monkeypatch.setattr(projects, "discard", fail)
+    m._erase_app_branch({"app_id": "ha-test", "branch": "agent/s1", "project": "proj", "target": "tower"})
+    m._erase_app_branch({"app_id": "ha-test", "branch": "agent/s1", "project": "missing", "target": "tower"})
+
+
+def test_app_session_on_a_runner_asks_for_a_base_only_clone(tmp_path):
+    from types import SimpleNamespace
+    from harness.runner import Runner
+
+    sent = []
+
+    class Hub:
+        async def call(self, target, op, params, timeout=0):
+            sent.append(params)
+            return {}
+
+    project = Project(name="p", repo="/Users/me/Projects/repo", base_branch="main")
+    for app_id in ("ha-test", ""):
+        s = {"id": "s1", "target": "mac", "app_id": app_id}
+        asyncio.run(Runner._first_prepare(SimpleNamespace(hub=Hub()), s, project, tmp_path, True, False))
+    assert [p["base_only"] for p in sent] == [True, False]
