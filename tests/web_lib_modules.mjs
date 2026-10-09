@@ -269,6 +269,26 @@ const session = imports.session.createSession({ agentHarnessWeb: client });
   stream.watchDaemonConnection();
   await tick();
   assert.equal(sources.length, count + 1, "the daemon connection is watched once");
+  // The daemon stream fails and waits out its backoff; a page stream reaching the server, or a route change, retries it now.
+  const daemonSource = sources.at(-1);
+  daemonSource.onopen();
+  daemonSource.onerror();
+  assert.equal(live.at(-1), "reconnecting");
+  const pageStop = stream.openStream(async () => "/api/v1/sessions/x/events", {});
+  await tick();
+  sources.at(-1).onopen();  // the page stream is live
+  await tick();
+  assert.equal(sources.length, count + 3, "a page stream going live nudges the daemon stream to retry at once");
+  sources.at(-1).onopen();
+  assert.equal(live.at(-1), "live");
+  stream.watchDaemonConnection();
+  await tick();
+  assert.equal(sources.length, count + 3, "a live daemon stream is left alone on a route change");
+  sources.at(-1).onerror();
+  stream.watchDaemonConnection();
+  await tick();
+  assert.equal(sources.length, count + 4, "a route change retries a failed daemon stream now");
+  pageStop();
 }
 
 // ---- chrome ----
