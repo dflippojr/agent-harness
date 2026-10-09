@@ -10,7 +10,8 @@ import { backendsValue, smartApprovalsValue, skillsValue, memoryValue, notificat
   accountsValue, remoteControlValue, appsValue, endpointValue, versionStatus, serverVersionText } from "../lib/settings-text.mjs";
 
 export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route,
-  daemonSettingsCard, build = {}, reloadAndUpdate = async () => false, browser, confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet }) {
+  daemonSettingsCard, build = {}, reloadAndUpdate = async () => false, onConnState = () => () => {}, browser, confirmSheet = sheets.confirmSheet,
+  promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { document, window, localStorage, location, navigator, history, getComputedStyle, requestAnimationFrame, open,
   setTimeout, clearTimeout, fetch } = browser;
@@ -410,14 +411,21 @@ async function viewProfile(page, extra) {
     // A group whose rows are all hidden for this role (a member's Agents, say) gets no header either.
     return rows.length ? [h("p", { class: "section-label" }, label), h("div", { class: "card settings-group" }, rows)] : null;
   });
-  const live = $conn.classList.contains("live");
+  const identityNote = h("div", { class: "muted small" }, isMember() ? "Household member" : serverNote());
+  if (!isMember()) {
+    // Follows the header chip while Settings is open; the first change after the page is gone unsubscribes.
+    const stop = onConnState(() => {
+      if (identityNote.isConnected) identityNote.textContent = serverNote();
+      else stop();
+    });
+  }
   append($app,
     h("a", { class: "card identity", href: "#/profile/account" },
       h("div", { class: "row" },
         h("span", { class: "identity-emoji" }, profile.emoji || "🙂"),
         h("div", { class: "spacer" },
           h("h3", {}, me.name || "You"),
-          h("div", { class: "muted small" }, isMember() ? "Household member" : `${serverLabel()} · ${live ? "live" : "offline"}`)),
+          identityNote),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
     isMember() && me.usage ? h("div", { class: "card" },
       h("h3", {}, "Usage"),
@@ -431,6 +439,13 @@ async function viewProfile(page, extra) {
 function serverLabel() {
   if (!agentHarnessWeb.independent) return "Bundled server";
   try { return new URL(agentHarnessWeb.baseUrl).host; } catch (_) { return agentHarnessWeb.baseUrl; }
+}
+
+// "Bundled server · live", in the header chip's state (#510). No state until the chip first shows, as the chip does.
+function serverNote() {
+  if ($conn.hidden) return serverLabel();
+  const state = $conn.dataset?.state || ($conn.classList.contains("live") ? "live" : "offline");
+  return `${serverLabel()} · ${state}`;
 }
 
 // Paints the menu first, then each row's value as its own request answers. A failed or slow request leaves that

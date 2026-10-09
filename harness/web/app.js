@@ -60,7 +60,7 @@ try { storage = browser.localStorage; } catch (_) { /* storage blocked */ }
 const session = createSession({ agentHarnessWeb, storage });
 const { api, fetchMe, ownerSurface, isGuest, isMember, isOwner, canChat } = session;
 const chrome = mountChrome({ els, browser, session });
-const { layoutBar, setHeader, showFab, toast, setConnState } = chrome;
+const { layoutBar, setHeader, showFab, toast, setConnState, onConnState } = chrome;
 const tabs = mountTabs({ els, session, browser });
 const stream = mountStream({ agentHarnessWeb, isBlocked: session.isBlocked, setConnState, ownerSurface, isGuest, browser });
 const { openStream } = stream;
@@ -82,7 +82,7 @@ const { checkCompatibility, reloadAndUpdate } = mountUpdate({ els, agentHarnessW
 const { daemonSettingsCard } = mountDaemonSettings({ h, fill, append, api, toast, isGuest, location });
 const { viewProfile, copyBox, githubConnectionCard, readAppIcon, applyAppIcon, applyTheme, applyTextSize } = mountProfile({ $app, $conn, $profileIcon,
   layoutBar, setHeader, h, fill, append, api, getWebAuth: session.getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route, daemonSettingsCard,
-  build, reloadAndUpdate, browser });
+  build, reloadAndUpdate, onConnState, browser });
 applyTheme();
 applyTextSize();
 

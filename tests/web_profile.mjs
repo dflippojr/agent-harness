@@ -34,8 +34,10 @@ const called = [];
 const appended = [];
 const gone = [];
 const headers = [];
+const conn = el("conn");
+const connListeners = new Set();
 const profile = mountProfile({
-  $app: "APP", $conn: el("conn"), $profileIcon: el("icon"), layoutBar() {}, setHeader: (...a) => headers.push(a), h: el, fill() {}, // Like lib/dom.mjs append(): one level of arrays is flattened, so a nested array would show up as a non-node.
+  $app: "APP", $conn: conn, $profileIcon: el("icon"), layoutBar() {}, setHeader: (...a) => headers.push(a), h: el, fill() {}, // Like lib/dom.mjs append(): one level of arrays is flattened, so a nested array would show up as a non-node.
   append: (_app, ...n) => appended.push(...n.flat().filter((k) => k != null)),
   api: async (path) => {
     called.push(path);
@@ -51,6 +53,7 @@ const profile = mountProfile({
     compatibility: async () => { if (failing) throw new Error("offline"); return { release: "0.9.0", protocols: { admin: { min: 1, max: 2 } }, update_hint: { web: { build_id: "B2" } } }; } },
   isGuest: () => false, isMember: () => member, isOwner: () => owner, toast() {}, go: (...a) => gone.push(a), route: async () => {},
   daemonSettingsCard: () => el("daemon"), build: { WEB_BUILD_ID: "B1", WEB_PROTOCOL: 2 }, reloadAndUpdate: async () => true, browser,
+  onConnState: (fn) => { connListeners.add(fn); return () => connListeners.delete(fn); },
 });
 for (const name of ["viewProfile", "copyBox", "githubConnectionCard", "readAppIcon", "applyAppIcon", "applyTheme", "applyTextSize"]) {
   assert.equal(typeof profile[name], "function", name);
@@ -136,4 +139,29 @@ for (const page of ["account", "notifications", "install", "backends", "smart-ap
 }
 await profile.viewProfile("nope");
 assert.deepEqual(gone.slice(-1), [["#/profile", true]]);
+
+// The identity line follows the header chip while Settings is open (#512, #510): no state before the chip first
+// shows, then each state the chip reports; the first report after the page is gone unsubscribes.
+owner = true;
+connListeners.clear();
+conn.hidden = true;
+appended.length = 0;
+await profile.viewProfile();
+const note = find(appended[0], (x) => x.attrs?.class === "muted small")[0];
+assert.equal(text(note).trim(), "Bundled server");
+assert.equal(connListeners.size, 1);
+note.isConnected = true;
+const report = (state) => {
+  conn.hidden = false;
+  conn.dataset = { state };
+  for (const fn of [...connListeners]) fn(state);
+};
+report("reconnecting");
+assert.equal(note.textContent, "Bundled server · reconnecting");
+report("live");
+assert.equal(note.textContent, "Bundled server · live");
+note.isConnected = false;
+report("offline");
+assert.equal(note.textContent, "Bundled server · live", "a line off the page is left alone");
+assert.equal(connListeners.size, 0, "and stops listening");
 console.log("ok");

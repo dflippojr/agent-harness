@@ -324,7 +324,13 @@ const chrome = imports.chrome.mountChrome({ els: E, browser, session });
   assert.equal(E.$conn.textContent, "Offline");
   assert.equal(E.$conn.dataset.state, "offline");
   assert.match(E.$conn.title, /retrying/);
+  // #512: a page can follow the chip; each report reaches it until it unsubscribes.
+  const followed = [];
+  const unfollow = chrome.onConnState((state) => followed.push(state));
+  chrome.setConnState("bogus");
+  unfollow();
   chrome.setConnState("live");
+  assert.deepEqual(followed, ["offline"], "an unknown state reaches followers as offline, and none after unsubscribing");
   E.$back.hidden = true;
   chrome.setHeader("agents", "Title", { page: true });
   assert.equal(E.$title.textContent, "Title");
