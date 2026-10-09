@@ -78,6 +78,7 @@ class SandboxConfig:
     pids: int = 512
     network: str = "harness-sandbox"
     egress_network: str = "harness-egress"
+    idle_stop_seconds: float = 0   # stop the container after this long without a command (0 = never, #428)
 
 
 @dataclass
