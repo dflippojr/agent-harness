@@ -10,6 +10,7 @@ import { md } from "../lib/markdown.mjs";
 import { withTaint } from "../lib/taint.mjs";
 import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
 import { sinceText } from "../lib/widgets.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
@@ -20,9 +21,10 @@ const SESSION_EVENT_TYPES = [
 ];
 
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser }) {
+  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser, confirmSheet = sheets.confirmSheet,
+  promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
-const { window, document, location, confirm, setInterval, clearInterval, setTimeout } = browser;
+const { window, document, location, setInterval, clearInterval, setTimeout } = browser;
 const { renameTitle, sessionMenu, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser });
 const pageMetrics = () => measurePage(browser);
 const scrollPage = (top) => scrollPageOf(top, browser);
@@ -81,7 +83,8 @@ async function viewSession(sid, tab, focusApproval) {
   // The overflow menu's actions work on every tab, so they live above the tab split. Changes and Info get no stream, so
   // each action repaints the strip itself.
   const cancelTask = async () => {
-    if (!confirm("Cancel this task?")) return;
+    if (!(await confirmSheet({ title: "Cancel this task?", confirmLabel: "Cancel task", cancelLabel: "Keep running",
+      destructive: true }))) return;
     try { session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) }; renderHead(); } catch (e) { toast(e.message); }
   };
   const menuActions = {
@@ -94,7 +97,8 @@ async function viewSession(sid, tab, focusApproval) {
       } catch (e) { toast(e.message); }
     },
     "clear-taint": async () => {
-      if (!confirm("Clear taint? Risky actions will follow the project rules again.")) return;
+      if (!(await confirmSheet({ title: "Clear taint?", message: "Risky actions will follow the project rules again.", confirmLabel: "Clear taint",
+        destructive: true }))) return;
       try { session = { ...session, ...(await api(`/sessions/${sid}/taint/clear`, { method: "POST" })) }; renderHead(); } catch (e) { toast(e.message); }
     },
     download: () => downloadDaemonFile(`/sessions/${sid}/transcript`, `${sid}.md`),
@@ -530,11 +534,20 @@ async function viewSession(sid, tab, focusApproval) {
       add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved `,
         local ? h("button", {
           class: "btn small", type: "button", title: "Restore the workspace and the agent's context to this point. Packages, processes and files outside the workspace are not undone.",
-          onclick: (ev) => confirm(`Rewind to checkpoint ${turn}? Later file changes are undone (the transcript keeps them).`) && void act(ev.target, "rewind"),
+          onclick: async (ev) => {
+            const btn = ev.currentTarget;
+            if (await confirmSheet({ title: `Rewind to checkpoint ${turn}?`, message: "Later file changes are undone (the transcript keeps them).",
+              confirmLabel: "Rewind", destructive: true })) void act(btn, "rewind");
+          },
         }, "Rewind here") : null, " ",
         h("button", {
           class: "btn small", type: "button", title: "Start a new session from this point, on its own branch",
-          onclick: (ev) => { const prompt = window.prompt("Instruction for the forked session"); if (prompt?.trim()) void act(ev.target, "fork", { prompt }); },
+          onclick: async (ev) => {
+            const btn = ev.currentTarget;
+            const prompt = await promptSheet({ title: `Fork from checkpoint ${turn}`, label: "Instruction for the forked session",
+              message: "Starts a new session from this point, on its own branch.", confirmLabel: "Fork", validate: sheets.required("an instruction") });
+            if (prompt?.trim()) void act(btn, "fork", { prompt });
+          },
         }, "Fork from here")));
     },
     rewound: (e) => add(h("p", { class: "note" }, `Rewound to checkpoint ${e.data.turn}: the workspace and context are as they were then; later turns above are kept for the record`)),
@@ -642,7 +655,8 @@ function reviewCard(s) {
     }
     const ask = h("button", { class: "btn primary" }, "Ask agent to resolve");
     ask.addEventListener("click", async () => {
-      if (!confirm(`Ask the agent to merge origin/${base} and resolve ${files.length} conflicting file${files.length === 1 ? "" : "s"}?`)) return;
+      if (!(await confirmSheet({ title: `Ask the agent to merge origin/${base} and resolve ${files.length} conflicting file${files.length === 1 ? "" : "s"}?`,
+        confirmLabel: "Ask agent" }))) return;
       ask.disabled = true;
       try {
         await api(`/sessions/${s.id}/messages`, { method: "POST", body: { content:
@@ -660,9 +674,9 @@ function reviewCard(s) {
       h("ul", { class: "small" }, files.map((file) => h("li", {}, h("code", {}, file)))),
       h("div", { class: "row end" }, ask));
   };
-  const act = (action, question) => async (ev) => {
-    if (question && !confirm(question)) return;
+  const act = (action, ask) => async (ev) => {
     const card = ev.target.closest(".card");
+    if (ask && !(await confirmSheet(ask))) return;
     card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
     try {
       const updated = await api(`/sessions/${s.id}/review/${action}`, { method: "POST" });
@@ -681,16 +695,18 @@ function reviewCard(s) {
   const buttons = [];
   if (!isGuest() && !busy && !s.workspace_removed && s.review !== "discarded") {
     if (s.repo_kind === "local") {
-      buttons.push(h("button", { class: "btn ok", onclick: act("merge", `Squash-merge ${s.branch} into ${base}?`) }, `Merge into ${base}`));
+      buttons.push(h("button", { class: "btn ok", onclick: act("merge", { title: `Squash-merge ${s.branch} into ${base}?`, confirmLabel: "Merge" }) },
+        `Merge into ${base}`));
       if (s.push_target) {
-        buttons.push(h("button", { class: "btn ok", onclick: act("push",
-          `Push branch ${s.branch} to GitHub repository ${s.push_target} (branch ${s.branch}) using your GitHub connection? `
-          + "GitHub records your account as the pusher; commit authors stay as they are.") }, "Push to GitHub"));
+        buttons.push(h("button", { class: "btn ok", onclick: act("push", {
+          title: `Push branch ${s.branch} to GitHub repository ${s.push_target} (branch ${s.branch}) using your GitHub connection?`,
+          message: "GitHub records your account as the pusher; commit authors stay as they are.", confirmLabel: "Push" }) }, "Push to GitHub"));
       }
     } else {
-      buttons.push(h("button", { class: "btn ok", onclick: act("push", `Push ${s.branch} to the remote?`) }, "Push branch"));
+      buttons.push(h("button", { class: "btn ok", onclick: act("push", { title: `Push ${s.branch} to the remote?`, confirmLabel: "Push" }) }, "Push branch"));
     }
-    buttons.push(h("button", { class: "btn bad solid", onclick: act("discard", "Discard this branch and delete the workspace? This can't be undone.") }, "Discard"));
+    buttons.push(h("button", { class: "btn bad solid", onclick: act("discard", { title: "Discard this branch and delete the workspace?",
+      message: "This can't be undone.", confirmLabel: "Discard", destructive: true }) }, "Discard"));
   }
   return h("section", { class: "card" },
     h("h3", {}, "Review"),

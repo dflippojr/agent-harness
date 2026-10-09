@@ -3,22 +3,24 @@
 // into another page.
 import { holdRemainingText } from "../lib/format.mjs";
 import { TARGET_LABEL, runnerStateText, pickDefaultBackend } from "../lib/targets.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
-export function mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave, githubConnectionCard, warmModel, browser }) {
+export function mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave, githubConnectionCard, warmModel, browser,
+  confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
-const { window, localStorage, location, confirm, setInterval, clearInterval } = browser;
+const { localStorage, location, setInterval, clearInterval } = browser;
 
 async function confirmGpuQueue(label) {
   if (isMember()) return true;
-  try {
-    const gpu = await api("/gpu");
-    if (!gpu.manual) return true;
-    const remaining = holdRemainingText(gpu.manual_remaining_seconds);
-    return confirm(`GPU hold is on ${remaining}. ${label} can be queued, but nothing will be sent to the local model until the hold ends. Queue it?`);
-  } catch (err) {
+  let gpu;
+  try { gpu = await api("/gpu"); } catch (err) {
     console.debug("GPU hold unreadable; not blocking the queue", err);
     return true;
   }
+  if (!gpu.manual) return true;
+  const remaining = holdRemainingText(gpu.manual_remaining_seconds);
+  return confirmSheet({ title: `GPU hold is on ${remaining}`,
+    message: `${label} can be queued, but nothing will be sent to the local model until the hold ends.`, confirmLabel: "Queue it" });
 }
 
 const MODEL_STATE = {
@@ -72,7 +74,8 @@ async function startSession(fields, draftKey, endpoint = "/sessions") {
 
 async function saveTemplate({ prompt, project, backend, model }) {
   if (!prompt.trim()) return toast("Write a prompt first");
-  const name = window.prompt("Template name");
+  const name = (await promptSheet({ title: "Save as template", label: "Template name", confirmLabel: "Save template",
+    validate: sheets.required("a template name") }))?.trim();
   if (!name) return;
   try {
     await api("/templates", { method: "POST", body: { name, project, backend, model, prompt } });
@@ -88,7 +91,7 @@ function templateManager(templates) {
         h("button", {
           class: "btn small bad",
           onclick: async () => {
-            if (!confirm(`Delete template “${t.name}”?`)) return;
+            if (!(await confirmSheet({ title: `Delete template “${t.name}”?`, confirmLabel: "Delete template", destructive: true }))) return;
             await api(`/templates/${t.id}`, { method: "DELETE" });
             void route();
           },

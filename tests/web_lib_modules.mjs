@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 
 // ---- stub DOM (installed only after the imports below, to prove the modules need none at import time) ----
 const imports = {};
-for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "secret"]) {
+for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "secret", "sheet"]) {
   imports[name] = await import(`../harness/web/lib/${name}.mjs`);
 }
 const { h, fill, append, kids } = imports.dom;
@@ -489,9 +489,10 @@ let router;
   const meta = { protocols: { admin: { min: 2, max: 2 } }, update_hint: {} };
   const web = { compatibility: async () => meta };
   let routes = 0;
+  const offers = [];
   const tabs = imports.tabs.mountTabs({ els: E, session, browser });
   const update = imports.update.mountUpdate({ els: E, agentHarnessWeb: web, session, chrome, tabs, route: async () => { routes++; },
-    build: { WEB_BUILD_ID: "b1", WEB_PROTOCOL: 2 }, browser: { ...browser, window: { caches: null }, confirm: () => false, navigator: {} } });
+    build: { WEB_BUILD_ID: "b1", WEB_PROTOCOL: 2 }, browser: { ...browser, window: { caches: null }, navigator: {} }, confirmSheet: async (ask) => { offers.push(ask.title); return false; } });
   assert.equal(update.hasUnsavedInput(), false);
   assert.equal(await update.checkCompatibility(), true);
   meta.protocols.admin = { min: 3, max: 4 };
@@ -505,6 +506,8 @@ let router;
   assert.ok(!session.isBlocked());
   meta.update_hint = { web: { build_id: "b2" } };
   assert.equal(await update.checkCompatibility(), true, "declining the newer bundle keeps the app running");
+  await tick();
+  assert.deepEqual(offers, ["Update Agent Harness Web?"], "the newer bundle is offered once");
   assert.equal(browser.sessionStorage.getItem("harness.webUpdatePrompt"), "b1");
   web.compatibility = async () => { throw new Error("offline"); };
   assert.equal(await update.checkCompatibility(), true);

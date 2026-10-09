@@ -73,10 +73,9 @@ const { go, route, onLeave } = mountRouter({ els, session, chrome, tabs, signin,
   views: () => ({ viewChat, viewList, viewNew, viewActions, viewProfile, viewImages, viewImage, viewImageEdit, viewImageFull,
     viewJobs, viewJob, viewSession }) });
 const warmModel = createWarmModel({ api, session });
-const confirmText = (m) => confirm(m);
 
 // ---------- pages ----------
-const { daemonSettingsCard } = mountDaemonSettings({ h, fill, append, api, toast, isGuest, location, confirm: confirmText });
+const { daemonSettingsCard } = mountDaemonSettings({ h, fill, append, api, toast, isGuest, location });
 const { viewProfile, copyBox, githubConnectionCard, readAppIcon, applyAppIcon, applyTheme, applyTextSize } = mountProfile({ $app, $conn, $profileIcon,
   layoutBar, setHeader, h, fill, append, api, getWebAuth: session.getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route, daemonSettingsCard, browser });
 applyTheme();
@@ -90,9 +89,9 @@ const { viewSession } = mountSession({ $app, h, fill, append, api, setHeader, to
 const { viewNew, confirmGpuQueue } = mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave,
   githubConnectionCard, warmModel, browser });
 const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave,
-  progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location, confirm: confirmText });
+  progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location });
 const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader, showFab, toast, go, route, isGuest,
-  confirmGpuQueue, badge, jobStatusBadge, location, confirm: confirmText });
+  confirmGpuQueue, badge, jobStatusBadge, location });
 const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, showFab, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, openStream, ownerSurface, agentHarnessWeb, browser });
 const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });

@@ -39,7 +39,8 @@ const page = mountSession({
   browser: { window: { addEventListener() {}, removeEventListener() {}, scrollTo() {} },
     document: { body: { append: (...n) => body.push(...n) }, documentElement: {}, addEventListener() {}, removeEventListener() {},
       getElementById: (id) => (id === "bar" ? { append: (...n) => barKids.push(...n) } : null), querySelector: () => null },
-    requestAnimationFrame() {}, location: {}, confirm: () => true, setInterval: () => 0, clearInterval() {}, setTimeout: () => 0 },
+    requestAnimationFrame() {}, location: {}, setInterval: () => 0, clearInterval() {}, setTimeout: () => 0 },
+  confirmSheet: async () => true,
 });
 assert.equal(typeof page.viewSession, "function");
 

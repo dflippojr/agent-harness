@@ -15,6 +15,7 @@ const ASSETS = [
   "/lib/setting-input.mjs",
   "/lib/session-ui.mjs",
   "/lib/settings-text.mjs",
+  "/lib/sheet.mjs",
   "/lib/snippets.mjs",
   "/lib/taint.mjs",
   "/lib/targets.mjs",

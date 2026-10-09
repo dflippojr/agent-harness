@@ -35,10 +35,11 @@ for (const width of [390, 1440]) {
   globalThis.setTimeout = (fn, ms) => { timers.push({fn, ms}); return timers.length; };
   globalThis.clearTimeout = () => {}; globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
   globalThis.window = { innerWidth: width };
-  globalThis.confirm = prompt => { confirms.push(prompt); return true; };
   const deps = {
     h, fill: (node, ...children) => { node.children = children.flat(Infinity).filter(x => x != null); },
     onLeave: fn => leave.push(fn), toast: () => {},
+    confirmSheet: async ask => { confirms.push(`${ask.title}
+${ask.message || ''}`); return true; },
     $app: null, append: () => {}, setHeader: () => {}, go: () => {}, copyBox: () => null, progressBar: () => null,
     isGuest: () => false, isMember: () => false,
     api: async (path, options = {}) => {

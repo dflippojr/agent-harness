@@ -75,7 +75,7 @@ const mount = (guest) => {
   const $app = new StrictEl("main");
   const page = mountJobs({ $app, h, fill, append, api, setHeader() {}, showFab() {},
     toast: (text, ms, action) => toasts.push({ text, ms, action }), go() {}, route() {}, isGuest: () => guest,
-    confirmGpuQueue: async () => true, badge: (s) => h("span", {}, s), jobStatusBadge: () => null, location: {}, confirm: () => true });
+    confirmGpuQueue: async () => true, badge: (s) => h("span", {}, s), jobStatusBadge: () => null, location: {}, confirmSheet: async () => true });
   return { $app, page };
 };
 const flush = () => new Promise((r) => setTimeout(r, 0));

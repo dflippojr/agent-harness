@@ -3,6 +3,7 @@
 // reaches into another page.
 
 import { ago } from "../lib/format.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
 export const IMAGE_PHASE = {
   idle: "", waiting: "Waiting for the GPU (a game or transcode is using it)", switching: "Unloading the language model",
@@ -12,7 +13,8 @@ export const IMAGE_PHASE = {
 };
 export const IMAGE_BUSY = new Set(["waiting", "switching", "waiting_memory", "starting", "generating", "restoring"]);
 
-export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave, progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location, confirm }) {
+export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave, progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location,
+  confirmSheet = sheets.confirmSheet }) {
   function imageCard(img) {
     const ready = img.status === "done";
     const kind = img.operation && img.operation !== "generate" ? img.operation : "";
@@ -281,14 +283,15 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
       !isGuest() && (img.status === "queued" || img.status === "running") ? h("button", {
         class: "btn",
         onclick: async () => {
-          if (!confirm("Cancel this image job?")) return;
+          if (!(await confirmSheet({ title: "Cancel this image job?", confirmLabel: "Cancel job", cancelLabel: "Keep", destructive: true }))) return;
           try { await api(`/images/${id}/cancel`, { method: "POST" }); } catch (e) { toast(e.message); }
         },
       }, "Cancel") : null,
       !isGuest() ? h("button", {
         class: "btn danger",
         onclick: async () => {
-          if (!confirm("Delete this image from the live gallery? Independent backups are not changed.")) return;
+          if (!(await confirmSheet({ title: "Delete this image from the live gallery?", message: "Independent backups are not changed.",
+            confirmLabel: "Delete image", destructive: true }))) return;
           try { await api(`/images/${id}`, { method: "DELETE" }); go("#/images", true); } catch (e) { toast(e.message); }
         },
       }, "Delete") : null,
