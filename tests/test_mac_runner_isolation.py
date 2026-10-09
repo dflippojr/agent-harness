@@ -402,13 +402,24 @@ def test_missing_or_uncopyable_wrapper_distributions_do_not_fail_the_command(tmp
     assert not (ex.tmpdir(SID) / "gradle").exists()
 
     def fail(src, dst):
+        (dst / "partial").mkdir(parents=True)
         raise OSError("no space")
 
     (tmp_path / ".gradle" / "wrapper" / "dists").mkdir(parents=True)
+    (tmp_path / ".gradle" / "gradle.properties").write_text("x=1\n")
+
+    def fail_file(src, dst):
+        Path(dst).write_text("x=")
+        raise OSError("no space")
+
     monkeypatch.setattr(harness_runner, "clone_tree", fail)
+    monkeypatch.setattr(harness_runner.shutil, "copyfile", fail_file)
     other = "abcdef0123"
-    assert ex.tmpdir(other).is_dir()
+    session = ex.tmpdir(other)
+    assert session.is_dir()
     assert "~/.gradle/wrapper/dists" in caplog.text
+    assert not (session / "gradle" / "wrapper" / "dists").exists()  # no half copy is left behind
+    assert not (session / "gradle" / "gradle.properties").exists()
     assert "~/.m2" not in caplog.text  # nothing to copy there
 
 

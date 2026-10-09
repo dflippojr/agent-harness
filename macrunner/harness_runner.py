@@ -376,6 +376,11 @@ class Executor:
                         shutil.copyfile(src, dst)
                 except (OSError, subprocess.SubprocessError) as e:
                     log.warning("couldn't copy ~/%s/%s into the session TMPDIR: %s", home_dir, rel, e)
+                    # No half copy: the tool then downloads what it needs instead of using a broken tree.
+                    if dst.is_dir() and not dst.is_symlink():
+                        remove_tree(dst)
+                    else:
+                        dst.unlink(missing_ok=True)
 
     @staticmethod
     def end_group(proc: subprocess.Popen) -> None:
