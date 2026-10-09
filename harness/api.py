@@ -24,6 +24,7 @@ from . import credential_audit
 from . import config as config_mod
 from . import efficiency
 from . import google_signin
+from . import local_owner
 from . import taint
 from . import telemetry
 from . import transcript
@@ -315,8 +316,11 @@ async def guard(request: Request, call_next):
     m: Manager = request.app.state.manager
     public_path = request.scope.get("harness_original_path", request.url.path)
     info = _origin_info(request, m, public_path)
-    # `tailscale serve` adds the caller's identity. Requests without it can only come from this machine.
-    login = request.headers.get("tailscale-user-login")
+    # `tailscale serve` adds the caller's identity. A request without it reached the loopback listener directly, so
+    # it must carry the local owner token or a credential its route checks (harness/local_owner.py).
+    login = request.headers.get("tailscale-user-login") or None
+    if login is None and not local_owner.admitted(request, m, public_path):
+        return JSONResponse({"detail": local_owner.REFUSED}, status_code=401, headers=info.cors_headers)
     # Issue #64: a linked Google session can select a member only on an admitted Serve login (precedence table in
     # docs/google-signin.md). With Google sign-in off this is exactly `resolve_access`.
     ident = m.google_signin.resolve(request, login)

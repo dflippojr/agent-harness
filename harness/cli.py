@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -33,6 +33,9 @@ DEFAULT_CONFIG = HARNESS_HOME / "client" / "config.json"
 DEFAULT_RUNNER_CONFIG = HARNESS_HOME / "runner" / "config.json"
 BASE = "http://127.0.0.1:8100"
 TOKEN = ""
+LOCAL_TOKEN = ""  # the daemon's local owner token, sent to a daemon on this machine (harness/local_owner.py)
+LOCAL_TOKEN_HEADER = "X-Agent-Harness-Local-Token"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 CONFIG_PATH = DEFAULT_CONFIG
 ADMIN_PREFIX = "/api/admin/v1"
 TERMINAL = ("done", "cancelled", "failed")
@@ -41,7 +44,7 @@ DIM, BOLD, YELLOW, GREEN, RED, CYAN, RESET = "\033[2m", "\033[1m", "\033[33m", "
 
 def configure(path: Path | str = DEFAULT_CONFIG) -> dict:
     """Load the paired native-client transport. Environment variables remain useful for development."""
-    global BASE, TOKEN, CONFIG_PATH
+    global BASE, TOKEN, LOCAL_TOKEN, CONFIG_PATH
     CONFIG_PATH = Path(path).expanduser()
     data = {}
     try:
@@ -52,13 +55,34 @@ def configure(path: Path | str = DEFAULT_CONFIG) -> dict:
         sys.exit(f"invalid client config {CONFIG_PATH}: {exc}")
     BASE = str(os.environ.get("HARNESS_URL") or data.get("server") or "http://127.0.0.1:8100").rstrip("/")
     TOKEN = str(os.environ.get("HARNESS_TOKEN") or data.get("token") or "").strip()
+    LOCAL_TOKEN = str(os.environ.get("HARNESS_LOCAL_TOKEN") or "").strip() or (
+        _local_owner_token() if _is_loopback(BASE) else "")
     return data
+
+
+def _is_loopback(base: str) -> bool:
+    return urlsplit(base).hostname in LOOPBACK_HOSTS
+
+
+def _local_owner_token() -> str:
+    """Read the daemon's local owner token from its data_dir. Only the daemon's account can read the file."""
+    try:
+        from .config import resolve_data_dir
+        from .local_owner import read_token
+    except ImportError:  # the native bundle has no daemon config next to it
+        return ""
+    try:
+        return read_token(resolve_data_dir())
+    except (OSError, ValueError):
+        return ""
 
 
 def _headers(extra: dict | None = None) -> dict:
     headers = {**(extra or {}), "X-Agent-Harness-Client": f"cli/{CLIENT_PROTOCOLS['cli']}"}
     if TOKEN:
         headers["Authorization"] = f"Bearer {TOKEN}"
+    if LOCAL_TOKEN:
+        headers[LOCAL_TOKEN_HEADER] = LOCAL_TOKEN
     return headers
 
 

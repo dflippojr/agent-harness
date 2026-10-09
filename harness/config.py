@@ -897,6 +897,12 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
     }
 
 
+def resolve_data_dir(config_dir: Path | None = None) -> Path:
+    """The data_dir `load` would use, without building the whole Config (the local CLI reads its token from here)."""
+    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+    return Path(os.environ.get("HARNESS_DATA_DIR") or _read_raw_config(config_dir).get("data_dir", ROOT / "data"))
+
+
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
     from .smart_approvals import load_smart_config
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
