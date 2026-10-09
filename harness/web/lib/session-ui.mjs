@@ -80,6 +80,7 @@ function renameTitle(session, isActive) {
     if (done) return;
     done = true;
     if (commit) await commitSessionTitle(session, input.value, isActive);
+    if (!isActive()) return;  // the page left mid-save: the next page's setHeader owns the shared #title now
     input.remove();
     title.hidden = false;
     layoutBar();
