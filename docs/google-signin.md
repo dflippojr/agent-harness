@@ -19,7 +19,8 @@ signs in with their linked Google account.
 ## Trust model
 
 - **Network admission is Tailscale.** The daemon listens on loopback only, and `tailscale serve` supplies
-  `Tailscale-User-Login`. A Google session is honoured only on a loopback peer that carries that header. Funnel,
+  `Tailscale-User-Login`. The daemon honours that header only when tailscaled is the connection's peer
+  ([INSTALL](INSTALL.md#local-callers)). A Google session is honoured only on a loopback peer that carries that header. Funnel,
   public internet, LAN HTTP, other reverse proxies, and separately hosted Web are not supported.
 - **Identity is Google's stable `sub`.** Email and name are display metadata that can change. They never authorize
   anything. Each member has at most one Google `sub`, and each `sub` belongs to at most one member.
@@ -36,7 +37,7 @@ add a Web session to a member who already authenticates with their own Tailscale
 
 | Tailscale login on the request | No Google session | Valid Google session for member M |
 | --- | --- | --- |
-| absent (localhost) | owner | **refused** (a cookie without Serve's login never becomes the localhost owner) |
+| absent (localhost) | owner with the local owner token, else refused | **refused** (a cookie without Serve's login never becomes the localhost owner) |
 | in `allowed_logins` (owner) | owner | owner (session ignored) |
 | mapped to member A | member A | member A if A = M; otherwise member A (session ignored, never switches) |
 | mapped to a disabled member | refused | refused |

@@ -103,3 +103,53 @@ def pinned_scanner(monkeypatch, gitleaks_tools):
     def no_download(url):
         raise RuntimeError("tests don't download; use the gitleaks_tools fixture")
     monkeypatch.setattr(secret_scan, "_download", no_download)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def local_owner_client():
+    """A test client speaks for the owner on this machine: it sends the daemon's local owner token, as the CLI does.
+    A test of a caller without it sets `client.local_owner = False`."""
+    from starlette.testclient import TestClient
+    from harness import local_owner
+
+    original = TestClient.build_request
+
+    def build_request(self, *args, **kwargs):
+        request = original(self, *args, **kwargs)
+        manager = getattr(getattr(self.app, "state", None), "manager", None)
+        token = getattr(manager, "local_owner_token", "")
+        # Like the CLI, it sends no local token with another credential; a browser preflight never carries one.
+        if (token and getattr(self, "local_owner", True) and local_owner.HEADER not in request.headers
+                and "authorization" not in request.headers and request.method != "OPTIONS"):
+            request.headers[local_owner.HEADER] = token
+        return request
+
+    # Its own patcher, so module-scoped clients get it and a test's `monkeypatch.undo()` keeps it.
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(TestClient, "build_request", build_request, raising=False)
+    yield
+    patcher.undo()
+
+
+FAKE_TAILSCALE_DIR = Path("C:/Program Files/Tailscale")
+
+
+def fake_tailscaled_check(**overrides):
+    """A peer check whose connection table says every peer is tailscaled from the install directory."""
+    from harness import tailscale_peer
+    options = dict(owner=lambda client, server: 4242, exe=lambda pid: str(FAKE_TAILSCALE_DIR / "tailscaled.exe"),
+                   dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True)
+    options.update(overrides)
+    return tailscale_peer.PeerCheck(**options)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def tailscaled_peer():
+    """A test that sends Tailscale identity headers stands in for `tailscale serve`, so its peer is tailscaled.
+    Tests of other peers give the manager their own `tailscale_peer.PeerCheck`; none reads the live connection table."""
+    from harness import tailscale_peer
+
+    patcher = pytest.MonkeyPatch()  # session-wide, so module-scoped managers get it too
+    patcher.setattr(tailscale_peer, "default_check", fake_tailscaled_check)
+    yield
+    patcher.undo()

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bus import EventBus
-from . import cli_domains, review_comments
+from . import cli_domains, local_owner, review_comments, tailscale_peer
 from . import review_comments
 from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
@@ -161,6 +161,8 @@ class Manager:
         # App sessions live in per-App stores under data_dir/apps (#330); everything else in the main store.
         self.db = db if isinstance(db, SessionStores) else SessionStores(db, Path(cfg.data_dir) / "apps")
         require_owner_allowlist(cfg, self.db.member_count())
+        self.local_owner_token = local_owner.ensure_token(cfg.data_dir)
+        self.tailscale_peer = tailscale_peer.default_check()
         self.bus = EventBus(self.db)
         self.scheduler = GpuScheduler(self._queue_changed, eligible=self._scheduler_eligible)
         self.stream_epoch: dict[str, int] = {}

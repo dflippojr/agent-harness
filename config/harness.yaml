@@ -4,6 +4,9 @@
 listen:
   host: 127.0.0.1        # published on the tailnet by `tailscale serve` (ops/tailscale/serve.ps1); never bind wider
   port: 8100
+  # Tailscale identity headers count only from tailscaled (checked on Windows; docs/INSTALL.md, Local callers).
+  # Unsafe elsewhere: true trusts them from any local process or container that reaches the loopback.
+  trust_unverified_identity_headers: false
 
 # Set these two in config/harness.local.yaml (untracked), which is merged over this file.
 # The phone reaches the daemon here. Used for notification links and to check the Origin of browser requests.

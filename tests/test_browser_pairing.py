@@ -152,7 +152,7 @@ def test_stream_tickets_resume_expire_and_follow_key_revocation(tmp_path):
         # Revoking the parent app credential immediately invalidates outstanding stream tickets too.
         assert client.delete(f"/keys/{kid}").status_code == 204
         assert client.get(fresh + "&follow=false", headers={"Origin": ORIGIN}).status_code == 401
-        assert client.post(f"/api/v1/sessions/{sid}/events/ticket", headers=headers).status_code == 403
+        assert client.post(f"/api/v1/sessions/{sid}/events/ticket", headers=headers).status_code == 401
         assert client.options("/api/v1/sessions", headers={
             "Origin": ORIGIN, "Access-Control-Request-Method": "POST",
             "Access-Control-Request-Headers": "authorization, content-type"}).status_code == 403

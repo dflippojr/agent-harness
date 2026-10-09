@@ -15,7 +15,9 @@ param(
     [string]$TokenFile = 'D:\Agents\harness\secrets\runner-macbook.token',
     [string]$RunnerName = 'macbook',
     [string[]]$RepoRoots = @('~/Projects'),
-    [double]$MinFreeGb = 10
+    [double]$MinFreeGb = 10,
+    # The daemon answers local callers only with its local owner token (docs/INSTALL.md, Local callers).
+    [string]$LocalOwnerTokenFile = 'D:\Agents\harness\local-owner.token'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Resolve-Path (Join-Path $PSScriptRoot '..\..')
@@ -75,7 +77,9 @@ try {
 foreach ($i in 1..15) {
     Start-Sleep -Seconds 2
     try {
-        $r = (Invoke-RestMethod http://127.0.0.1:8100/runners -TimeoutSec 5) | Where-Object { $_.name -eq $RunnerName }
+        $headers = @{}
+        if (Test-Path $LocalOwnerTokenFile) { $headers['X-Agent-Harness-Local-Token'] = (Get-Content -Raw $LocalOwnerTokenFile).Trim() }
+        $r = (Invoke-RestMethod http://127.0.0.1:8100/runners -Headers $headers -TimeoutSec 5) | Where-Object { $_.name -eq $RunnerName }
         if ($r.online) { Write-Host "runner $RunnerName online: $($r.info | ConvertTo-Json -Compress)"; exit 0 }
     } catch { }
 }
