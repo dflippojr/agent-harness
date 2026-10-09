@@ -65,11 +65,16 @@ CONST_LINE = re.compile(r"""^([A-Z_][A-Z0-9_]*)\s*=\s*(['"])([^'"\\\n]*)\2\s*(?:
 
 
 def _str_assignments(tree: ast.AST, deep: bool) -> dict[str, ast.expr]:
-    """Name = expr assignments, anywhere in the file (function-local `prefix = ...` included)."""
+    """Name = expr assignments, anywhere in the file (function-local `prefix = ...` included). A name bound to
+    different expressions maps to a non-string, so a route path built from it fails loudly instead of guessing."""
     found = {}
     for node in (ast.walk(tree) if deep else ast.iter_child_nodes(tree)):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            found.setdefault(node.targets[0].id, node.value)
+            name, prior = node.targets[0].id, found.get(node.targets[0].id)
+            if prior is None:
+                found[name] = node.value
+            elif ast.dump(prior) != ast.dump(node.value):
+                found[name] = ast.Constant(None)  # bound to different values in different scopes: do not guess
     return found
 
 

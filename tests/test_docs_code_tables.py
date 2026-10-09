@@ -180,6 +180,14 @@ def test_build_reports_an_unresolvable_route_instead_of_a_traceback(repo, capsys
     assert "harness/bad.py:1: cannot resolve the path" in capsys.readouterr().err
 
 
+def test_a_local_name_bound_differently_in_two_functions_is_not_guessed(repo):
+    src = ("def a(app):\n    prefix = '/api/v1/a'\n\n    @app.get(prefix + '/x')\n    def x():\n        pass\n\n\n"
+           "def b(app):\n    prefix = '/api/v1/b'\n\n    @app.get(prefix + '/y')\n    def y():\n        pass\n")
+    (repo / "harness" / "scoped.py").write_text(src, encoding="utf-8")
+    with pytest.raises(code_tables.CodeTableError, match=r"harness/scoped.py:\d+: cannot resolve the path"):
+        code_tables.collect_routes(repo)
+
+
 def test_an_unresolvable_route_path_names_the_file_and_line(repo):
     (repo / "harness" / "bad.py").write_text('@web_router.get(compute())\ndef f():\n    pass\n', encoding="utf-8")
     with pytest.raises(code_tables.CodeTableError, match=r"harness/bad.py:1: cannot resolve the path"):
