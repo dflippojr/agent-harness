@@ -188,6 +188,14 @@ def test_a_local_name_bound_differently_in_two_functions_is_not_guessed(repo):
         code_tables.collect_routes(repo)
 
 
+def test_a_constant_defined_twice_in_a_routeless_file_is_not_guessed(repo):
+    (repo / "harness" / "consts.py").write_text('BASE = "/api/v1/old"\nBASE = "/api/v1/new"\n', encoding="utf-8")
+    (repo / "harness" / "user.py").write_text(
+        "from .consts import BASE\n\n\n@app_routes.get(BASE + '/z')\ndef z():\n    pass\n", encoding="utf-8")
+    with pytest.raises(code_tables.CodeTableError, match=r"harness/user.py:4: cannot resolve the path"):
+        code_tables.collect_routes(repo)
+
+
 def test_an_unresolvable_route_path_names_the_file_and_line(repo):
     (repo / "harness" / "bad.py").write_text('@web_router.get(compute())\ndef f():\n    pass\n', encoding="utf-8")
     with pytest.raises(code_tables.CodeTableError, match=r"harness/bad.py:1: cannot resolve the path"):

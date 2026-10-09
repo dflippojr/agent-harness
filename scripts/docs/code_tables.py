@@ -84,7 +84,11 @@ class _Consts:
     def __init__(self, trees: dict[str, ast.AST], route_files: set[str], plain: dict[str, str]):
         self.local = {name: _str_assignments(tree, True) for name, tree in trees.items()}
         for name, source in plain.items():  # files with no routes are not parsed; only their constant lines matter
-            self.local[name] = {m[1]: ast.Constant(m[3]) for m in CONST_LINE.finditer(source)}
+            found: dict[str, ast.Constant] = {}
+            for m in CONST_LINE.finditer(source):
+                prior = found.get(m[1])
+                found[m[1]] = ast.Constant(m[3]) if prior is None or prior.value == m[3] else ast.Constant(None)
+            self.local[name] = found
         merged: dict[str, set] = {}
         for exprs in self.local.values():
             for name, expr in exprs.items():
