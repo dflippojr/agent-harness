@@ -1,5 +1,5 @@
-// Session chrome helpers (#258): the rename-in-place title, the scroll measurements and the jump buttons that the session
-// page uses and app.js's repaint hook reuses. Nothing here touches document/window at module top level, so it imports
+// Session chrome helpers (#258): the overflow menu and its rename (#514), the scroll measurements and the jump buttons that
+// the session page uses and app.js's repaint hook reuses. Nothing here touches document/window at module top level, so it imports
 // under plain Node; browser globals arrive through `browser` (globalThis in the app, a stub under Node).
 import { sessionJumpHidden } from "./layout.mjs";
 
@@ -29,6 +29,17 @@ export function scrollPage(top, browser) {
   if (document.body) document.body.scrollTop = y;
 }
 
+// The session overflow menu's entries (#514), in order. Pure: the page supplies the actions. Guests may only download.
+export function sessionMenuItems(session, { guest, terminal }) {
+  if (guest) return ["download"];
+  const active = !terminal.has(session.status);
+  return ["rename", active ? "cancel" : "rerun", (session.taint || []).length ? "clear-taint" : null, "download"].filter(Boolean);
+}
+
+export const SESSION_MENU_LABELS = {
+  rename: "Rename", cancel: "Cancel task", rerun: "Run again as new session", "clear-taint": "Clear taint", download: "Download transcript",
+};
+
 export function mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser }) {
 const { window, document } = browser;
 
@@ -49,35 +60,67 @@ async function commitSessionTitle(session, raw, isActive) {
   try {
     const updated = await putSessionTitle(session, next);
     session.title = updated.title;
-    if (isActive()) setHeader("agents", session.title || "Session");
+    if (isActive()) setHeader("agents", session.title || "Session", { page: true });
   } catch (e) { toast(e.message); }
 }
 
-function sessionTitle(session, isActive) {
-  if (isGuest()) return h("h2", { class: "session-title" }, session.title);
-  const label = h("button", { class: "session-title", type: "button", title: "Rename session" }, session.title);
-  const startEdit = () => {
-    const input = h("input", { class: "session-title-edit", type: "text", value: session.title, maxlength: "120", "aria-label": "Session title" });
-    label.replaceWith(input);
-    input.focus();
-    input.select();
-    let done = false;
-    const finish = async (commit) => {
-      if (done) return;
-      done = true;
-      if (commit) await commitSessionTitle(session, input.value, isActive);
-      label.textContent = session.title;
-      if (input.isConnected) input.replaceWith(label);
-      layoutBar();
-    };
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); void finish(true); }
-      if (e.key === "Escape") { e.preventDefault(); void finish(false); }
-    });
-    input.addEventListener("blur", () => finish(true));
+// Rename edits the header title in place: the bar's h1 hides behind an input until Enter, Escape or blur.
+function renameTitle(session, isActive) {
+  const title = document.getElementById("title");
+  if (!title || title.hidden || document.querySelector(".session-title-edit")) return;
+  const input = h("input", { class: "session-title-edit", type: "text", value: session.title, maxlength: "120", "aria-label": "Session title" });
+  title.hidden = true;
+  title.after(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async (commit) => {
+    if (done) return;
+    done = true;
+    if (commit) await commitSessionTitle(session, input.value, isActive);
+    input.remove();
+    title.hidden = false;
+    layoutBar();
   };
-  label.addEventListener("click", startEdit);
-  return label;
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); void finish(true); }
+    if (e.key === "Escape") { e.preventDefault(); void finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  onLeave(() => { done = true; input.remove(); });
+}
+
+// The ⋯ button in the header bar and its menu (#514). `run(id)` runs an entry; `items()` is read on every open, so the
+// entries follow the session's status and taint. The button and menu leave with the page.
+function sessionMenu({ items, run }) {
+  const bar = document.getElementById("bar");
+  const button = h("button", { class: "icon session-menu-btn", type: "button", "aria-label": "Session menu", "aria-haspopup": "menu", "aria-expanded": "false" },
+    h("span", { class: "menu-dots", "aria-hidden": "true" }));
+  const menu = h("div", { class: "session-menu", role: "menu", "aria-label": "Session", hidden: true });
+  const wrap = h("div", { class: "session-menu-wrap" }, button, menu);
+  const close = () => {
+    menu.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", onOutside, true);
+  };
+  const onOutside = (e) => { if (!wrap.contains(e.target)) close(); };
+  const open = () => {
+    menu.replaceChildren(...items().map((id) => h("button", {
+      class: `session-menu-item${id === "cancel" ? " bad" : ""}`, type: "button", role: "menuitem",
+      onclick: () => { close(); button.focus(); run(id); },
+    }, SESSION_MENU_LABELS[id])));
+    menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", onOutside, true);
+    menu.querySelector("button")?.focus();
+  };
+  button.addEventListener("click", () => (menu.hidden ? open() : close()));
+  menu.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); close(); button.focus(); }
+  });
+  bar?.append(wrap);
+  onLeave(() => { close(); wrap.remove(); });
+  return { button, menu, open, close };
 }
 
 function bindSessionJumps() {
@@ -117,5 +160,5 @@ function bindSessionJumps() {
   return { updateJumps, pageHeight };
 }
 
-return { sessionTitle, bindSessionJumps };
+return { renameTitle, sessionMenu, bindSessionJumps };
 }
