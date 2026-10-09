@@ -169,6 +169,7 @@ agent-harness/
 
 ### Components
 
+<!-- generated:begin readme-components -->
 | Component | What it is | Where it lives |
 | --- | --- | --- |
 | **Agent Harness Server** | The host daemon and its APIs | [`harness/`](harness) |
@@ -178,6 +179,7 @@ agent-harness/
 | **Agent Harness SDK** | The supported Python client library | [`sdk/`](sdk) |
 | **Agent Harness App** | A third-party integration that uses the App API | [`docs/app-api.md`](docs/app-api.md) |
 | **Agent Harness for Mac** | The Mac distribution that installs the CLI and the Mac Runner together | [`docs/mac-client.md`](docs/mac-client.md) |
+<!-- generated:end readme-components -->
 
 ---
 

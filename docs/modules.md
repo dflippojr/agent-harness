@@ -1,14 +1,24 @@
 # Optional modules
 
 Issue #334 splits Agent Harness Server into a core and optional add-on modules. This page is the module
-interface ([`harness/modules.py`](../harness/modules.py)) and how to write a module. Images
-([`harness_modules/images/`](../harness_modules/images/)) is the first module behind it notifications
-([`harness_modules/notifications/`](../harness_modules/notifications/)) the second, session search
-([`harness_modules/search/`](../harness_modules/search/)) the third and the nightly backup
-([`harness_modules/backup/`](../harness_modules/backup/)) the fourth and instruction skills
-([`harness_modules/skills/`](../harness_modules/skills/)) the fifth, followed by homelab and the memory library
-([`harness_modules/memory_library/`](../harness_modules/memory_library/)); the other optional features move
-one module per PR in stage (c).
+interface ([`harness/modules.py`](../harness/modules.py)) and how to write a module. The modules so far, in the
+order they were extracted (the other optional features move one module per PR in stage (c)):
+
+<!-- generated:begin modules-list -->
+- **Images** ([`harness_modules/images/`](../harness_modules/images/)): image generation, edit, upscale and archive
+- **Notifications** ([`harness_modules/notifications/`](../harness_modules/notifications/)): ntfy phone notifications
+- **Session search** ([`harness_modules/search/`](../harness_modules/search/)): `/search`, `/api/v1/search` and the `session_search` and `session_read` tools
+- **Nightly backup** ([`harness_modules/backup/`](../harness_modules/backup/)): backup plus verify and restore (#374)
+- **Instruction skills** ([`harness_modules/skills/`](../harness_modules/skills/)): owner-approved instructions
+- **Homelab** ([`harness_modules/homelab/`](../harness_modules/homelab/)): allowlisted homelab tools
+- **Memory library** ([`harness_modules/memory_library/`](../harness_modules/memory_library/)): personal memory tools, approved writes and frozen session profiles
+- **Runners** ([`harness_modules/runners/`](../harness_modules/runners/)): remote transport, native pairing and the Mac bundle
+- **Remote control** ([`harness_modules/remote_control/`](../harness_modules/remote_control/)): Claude Remote Control and owner-only folder discovery
+- **Endpoint** ([`harness_modules/endpoint/`](../harness_modules/endpoint/)): OpenAI and Anthropic inference, request accounting and the embeddings proxy
+- **Local model** ([`harness_modules/local_model/`](../harness_modules/local_model/)): llama-server supervision, warm-up, GPU holds and RAM admission
+- **Jobs** ([`harness_modules/jobs/`](../harness_modules/jobs/)): scheduled jobs and templates
+- **MCP client** ([`harness_modules/mcp_client/`](../harness_modules/mcp_client/)): owner-pinned stdio MCP tools for the native loop (#260)
+<!-- generated:end modules-list -->
 
 ## Rules
 

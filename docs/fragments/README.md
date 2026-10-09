@@ -27,8 +27,10 @@ message.
 | Target | File | Kind |
 | --- | --- | --- |
 | `readme-docs-index` | `README.md`, the `## Documentation` table | `doc-index` |
+| `modules-list` | `docs/modules.md`, the optional module list (one fragment per module) | `module` |
+| `readme-components` | `README.md`, the `### Components` table | `module` |
 
-Other sections move over in follow-up issues; to convert one, wrap it in markers and add a `TARGETS` entry.
+The `module` kind needs a `summary` (single line, no `|`) and at least one link. For `modules-list` the summary follows the bold title in a bullet; for `readme-components` it is the "What it is" cell and the link is "Where it lives". Curated prose (Architecture, Engineering highlights, Benchmark results) stays hand-written. To convert another section, wrap it in markers and add a `TARGETS` entry.
 
 ## Generated regions
 

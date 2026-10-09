@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Jobs
+summary: scheduled jobs and templates
+order: 120
+links:
+  - text: '`harness_modules/jobs/`'
+    href: ../harness_modules/jobs/

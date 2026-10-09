@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Nightly backup
+summary: 'backup plus verify and restore (#374)'
+order: 40
+links:
+  - text: '`harness_modules/backup/`'
+    href: ../harness_modules/backup/

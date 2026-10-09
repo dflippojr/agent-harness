@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Remote control
+summary: Claude Remote Control and owner-only folder discovery
+order: 90
+links:
+  - text: '`harness_modules/remote_control/`'
+    href: ../harness_modules/remote_control/

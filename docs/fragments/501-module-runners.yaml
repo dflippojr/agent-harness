@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Runners
+summary: remote transport, native pairing and the Mac bundle
+order: 80
+links:
+  - text: '`harness_modules/runners/`'
+    href: ../harness_modules/runners/

@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: readme-components
+title: Agent Harness for Mac
+summary: 'The Mac distribution that installs the CLI and the Mac Runner together'
+order: 70
+links:
+  - text: '`docs/mac-client.md`'
+    href: docs/mac-client.md

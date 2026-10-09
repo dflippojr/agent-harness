@@ -9,7 +9,9 @@ import build  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BEGIN, END = "<!-- generated:begin readme-docs-index -->", "<!-- generated:end readme-docs-index -->"
-README = f"intro text\n\n## Documentation\n\n{BEGIN}\nold\n{END}\n\nafter text\n"
+COMP = "<!-- generated:begin readme-components -->\nold\n<!-- generated:end readme-components -->"
+README = f"intro text\n\n## Documentation\n\n{BEGIN}\nold\n{END}\n\n{COMP}\n\nafter text\n"
+MODULES = "# Modules\n\n<!-- generated:begin modules-list -->\nold\n<!-- generated:end modules-list -->\n"
 
 
 def frag(title="Topic", order=10, target="readme-docs-index", **extra):
@@ -23,6 +25,7 @@ def frag(title="Topic", order=10, target="readme-docs-index", **extra):
 def repo(tmp_path):
     (tmp_path / "docs" / "fragments").mkdir(parents=True)
     (tmp_path / "README.md").write_bytes(README.encode())
+    (tmp_path / "docs" / "modules.md").write_bytes(MODULES.encode())
     return tmp_path
 
 
@@ -42,7 +45,8 @@ def test_build_renders_sorted_rows_and_leaves_outside_text(repo):
     assert region(repo) == "| Topic | Doc |\n| --- | --- |\n| Alpha | [doc](docs/x.md) |\n| Beta | [doc](docs/x.md) |\n"
     text = (repo / "README.md").read_text(encoding="utf-8")
     assert text.startswith("intro text\n\n## Documentation\n\n" + BEGIN)
-    assert text.endswith(END + "\n\nafter text\n")
+    assert text.endswith("\n\nafter text\n")
+    assert "\n" + END + "\n\n" + COMP.split("\n")[0] in text
 
 
 def test_output_is_deterministic_and_equal_order_ties_break_on_file_name(repo):
@@ -160,9 +164,37 @@ def test_fragments_only_ignores_stale_region_but_still_rejects_bad_fragments(rep
 
 def test_build_twice_changes_nothing_the_second_time(repo):
     add(repo, "1-a.yaml", frag("Alpha"))
-    assert build.build(repo) == ["README.md"]
+    assert build.build(repo) == ["README.md", "docs/modules.md"]
     assert build.build(repo) == []
 
 
 def test_option_like_ref_is_never_passed_to_git(repo):
     assert build.read_ref_fragments(repo, "--output=x") is None
+
+
+MODULE = """schema_version: 1
+kind: module
+target: {target}
+title: Images
+summary: image generation
+order: 10
+links:
+  - text: '`harness_modules/images/`'
+    href: ../harness_modules/images/
+"""
+
+
+def test_module_fragments_render_list_and_components_table(repo):
+    add(repo, "1-a.yaml", MODULE.format(target="modules-list"))
+    add(repo, "2-b.yaml", MODULE.format(target="readme-components"))
+    build.build(repo)
+    modules = (repo / "docs" / "modules.md").read_text(encoding="utf-8")
+    assert "- **Images** ([`harness_modules/images/`](../harness_modules/images/)): image generation" in modules
+    readme = (repo / "README.md").read_text(encoding="utf-8")
+    assert "| **Images** | image generation | [`harness_modules/images/`](../harness_modules/images/) |" in readme
+
+
+@pytest.mark.parametrize("summary", ["", "a | b"])
+def test_module_fragment_needs_a_plain_summary(repo, summary):
+    add(repo, "1-a.yaml", MODULE.format(target="modules-list").replace("summary: image generation", f"summary: '{summary}'"))
+    assert build.main(["--root", str(repo), "--check", "--fragments-only"]) == 1
