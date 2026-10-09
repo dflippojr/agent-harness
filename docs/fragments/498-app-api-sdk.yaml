@@ -1,0 +1,10 @@
+schema_version: 1
+kind: doc-index
+target: readme-docs-index
+title: App API and SDK
+order: 20
+links:
+  - text: 'app-api'
+    href: docs/app-api.md
+  - text: '`sdk/`'
+    href: sdk

@@ -330,6 +330,7 @@ gives up the GPU.
 
 ## Documentation
 
+<!-- generated:begin readme-docs-index -->
 | Topic | Doc |
 | --- | --- |
 | Installation and profiles | [INSTALL](docs/INSTALL.md) · [service profile](docs/service-profile.md) |
@@ -339,6 +340,7 @@ gives up the GPU.
 | Web client deployment | [web](docs/web.md) |
 | Mac client and version compatibility | [mac-client](docs/mac-client.md) · [compatibility](docs/compatibility.md) |
 | CI/CD and trust boundaries | [CI-CD](docs/CI-CD.md) |
+<!-- generated:end readme-docs-index -->
 
 <details>
 <summary><b>Build history</b>: the project was built in phases, each with a written results doc</summary>

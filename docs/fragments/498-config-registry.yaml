@@ -1,0 +1,8 @@
+schema_version: 1
+kind: doc-index
+target: readme-docs-index
+title: Configuration registry
+order: 40
+links:
+  - text: 'config-registry'
+    href: docs/config-registry.md
