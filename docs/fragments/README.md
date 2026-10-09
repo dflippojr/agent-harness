@@ -58,3 +58,27 @@ So adding a fragment and leaving the region alone passes (region still equals ma
 markers fails, and running `build.py` yourself also passes. Without `--base` (on main, locally) only this tree's
 fragments count, so main stays in sync. The post-merge job (a separate issue) is what rewrites regions on main;
 PRs should add fragments only.
+
+## Tables generated from code (#500)
+
+Three regions need no fragment: `scripts/docs/code_tables.py` derives them from the code itself.
+
+| Region | File | Source |
+| --- | --- | --- |
+| `app-api-endpoints` | `docs/app-api.md` | every `/api/v1` route registration |
+| `admin-api-endpoints` | `docs/admin-api.md` | every `/api/admin/v1` registration, plus the unversioned owner routes named in `ADMIN_PATHS` and each module's `admin_paths` |
+| `config-registry-keys` | `docs/config-registry.md` | the settings registry (`build_registry`) under a pinned profile with every module present |
+
+Routes are read statically from the `RouteTable` decorators (`@x_router`, `@x_routes`, `route_table`, `@app`), so the
+daemon is not imported; the whole run takes well under a second. A route's summary is its `summary=` argument, else
+the first line of the handler's docstring, else `TODO`. Auth is only what the handler itself asks for (`require_owner`
+or `auth(request, "scope")`); `see source` means a helper decides. The source column is file and function name, not a
+line number, so unrelated edits do not make the table stale. Settings use `SettingSpec.help` as the description;
+installer-only, path-like, secret and per-backend defaults print `—`.
+
+`--check` lists each `TODO` as a `warning:` and still passes. It fails when a table disagrees with the code, with
+the same single-writer rule as fragments: on a **PR** (`--base`) a table may equal the base branch's committed text
+(the PR left it alone) or what the PR's code produces, so a code change does not have to touch the docs and parallel
+PRs do not conflict; a **hand edit** fails. On **main** (no `--base`, the post-merge run) the table must equal the
+code, so a stale table fails there and `python scripts/docs/build.py` fixes it. Prose around the tables stays
+hand-written.

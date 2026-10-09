@@ -359,6 +359,81 @@ requests, while `RunResult.usage`, `.limits`, `.billing_notices`, `.errors`, and
 
 ## Endpoints
 
+### Endpoint index
+
+Generated from the route registrations (`scripts/docs/build.py`; do not edit between the markers). Auth is what the handler itself asks for; `see source` means a helper decides. `TODO` marks a handler with no docstring. The sections below carry the contracts.
+
+<!-- generated:begin app-api-endpoints -->
+| Method | Path | Auth | Summary | Source |
+| --- | --- | --- | --- | --- |
+| GET | `/api/v1` | see source | TODO | `harness/apps.py` `api_root` |
+| GET | `/api/v1/audit` | scope `sessions` | TODO | `harness/apps.py` `scoped_audit` |
+| POST | `/api/v1/auth/google/start` | see source | TODO | `harness/google_signin_api.py` `google_start` |
+| POST | `/api/v1/auth/logout` | see source | TODO | `harness/google_signin_api.py` `logout` |
+| GET | `/api/v1/auth/session` | see source | TODO | `harness/google_signin_api.py` `auth_session` |
+| GET | `/api/v1/backends` | scope `sessions` | TODO | `harness/apps.py` `backends` |
+| GET | `/api/v1/config` | see source | TODO | `harness/config_api.py` `app_config` |
+| PATCH | `/api/v1/config` | see source | TODO | `harness/config_api.py` `app_patch` |
+| GET | `/api/v1/config/schema` | see source | TODO | `harness/config_api.py` `app_schema` |
+| DELETE | `/api/v1/end-users/{end_user}/logins/{backend}` | scope `sessions` | TODO | `harness/apps.py` `unlink_end_user_login` |
+| GET | `/api/v1/end-users/{end_user}/logins/{backend}` | see source | TODO | `harness/apps.py` `end_user_login_status` |
+| POST | `/api/v1/end-users/{end_user}/logins/{backend}` | scope `sessions` | Start the CLI's own sign-in for one of the App's end users (#365): `{verification_url, user_code?, needs_code, | `harness/apps.py` `start_end_user_login` |
+| POST | `/api/v1/end-users/{end_user}/logins/{backend}/{attempt_id}/code` | scope `sessions` | Pass the one-time code the person pasted into the popup (Claude) straight to the waiting login. The body is | `harness/apps.py` `submit_end_user_login_code` |
+| GET | `/api/v1/events` | scope `sessions` | TODO | `harness/apps.py` `api_events` |
+| POST | `/api/v1/images` | scope `images` | TODO | `harness_modules/images/routes.py` `app_image` |
+| GET | `/api/v1/images/{iid}` | scope `images` | TODO | `harness_modules/images/routes.py` `app_image_status` |
+| POST | `/api/v1/images/{iid}/upscale` | scope `images` | TODO | `harness_modules/images/routes.py` `app_image_upscale` |
+| GET | `/api/v1/me` | scope `sessions` | Authenticated principal. Unauthenticated callers receive 401 rather than a project list. | `harness/apps.py` `api_me` |
+| GET | `/api/v1/me/api-keys` | see source | #393: a member's own provider API keys: what is set (last four characters only), the billing note and usage. | `harness/apps.py` `api_member_keys` |
+| DELETE | `/api/v1/me/api-keys/{backend}` | see source | TODO | `harness/apps.py` `api_member_key_delete` |
+| PUT | `/api/v1/me/api-keys/{backend}` | see source | Store or replace the key. The body is read by hand, so a validation error can never echo the key back. | `harness/apps.py` `api_member_key_set` |
+| POST | `/api/v1/me/api-keys/{backend}/test` | see source | TODO | `harness/apps.py` `api_member_key_test` |
+| DELETE | `/api/v1/me/github-connection` | see source | TODO | `harness/apps.py` `api_github_disconnect` |
+| GET | `/api/v1/me/github-connection` | see source | TODO | `harness/apps.py` `api_github_connection` |
+| POST | `/api/v1/me/github-connection/cancel` | see source | TODO | `harness/apps.py` `api_github_cancel` |
+| POST | `/api/v1/me/github-connection/connect` | see source | TODO | `harness/apps.py` `api_github_connect` |
+| DELETE | `/api/v1/me/google` | see source | TODO | `harness/google_signin_api.py` `my_google_unlink` |
+| GET | `/api/v1/me/google` | see source | TODO | `harness/google_signin_api.py` `my_google` |
+| GET | `/api/v1/models` | scope `sessions` | TODO | `harness/apps.py` `api_models` |
+| GET | `/api/v1/models/status` | scope `sessions` | TODO | `harness_modules/local_model/routes.py` `api_models_status` |
+| POST | `/api/v1/models/warm` | scope `sessions` | TODO | `harness_modules/local_model/routes.py` `api_models_warm` |
+| POST | `/api/v1/pair` | see source | TODO | `harness/apps.py` `pair_browser` |
+| GET | `/api/v1/profile` | scope `sessions` | TODO | `harness/apps.py` `api_profile` |
+| GET | `/api/v1/projects` | scope `sessions` | TODO | `harness/apps.py` `api_projects` |
+| POST | `/api/v1/projects` | scope `sessions` | TODO | `harness/apps.py` `api_create_project` |
+| GET | `/api/v1/queue` | scope `sessions` | TODO | `harness/apps.py` `api_queue` |
+| GET | `/api/v1/remote-control` | scope `remote_control` | TODO | `harness_modules/remote_control/routes.py` `app_rc_status` |
+| POST | `/api/v1/remote-control/{project}` | scope `remote_control` | TODO | `harness_modules/remote_control/routes.py` `app_rc_launch` |
+| POST | `/api/v1/remote-control/{project}/stop` | scope `remote_control` | TODO | `harness_modules/remote_control/routes.py` `app_rc_stop` |
+| POST | `/api/v1/runner-pair` | see source | Redeem an owner-approved native Mac code without browser-origin authority. | `harness_modules/runners/routes.py` `pair_runner` |
+| GET | `/api/v1/search` | scope `sessions` | TODO | `harness_modules/search/routes.py` `api_search` |
+| GET | `/api/v1/sessions` | scope `sessions` | TODO | `harness/apps.py` `list_sessions` |
+| POST | `/api/v1/sessions` | scope `sessions` | TODO | `harness/apps.py` `create_session` |
+| DELETE | `/api/v1/sessions/{ref}` | scope `sessions` | Erase one of the calling App's sessions and everything tied to it (#330 decision 5). Only the App that started | `harness/apps.py` `delete_session` |
+| GET | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `get_session` |
+| PATCH | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `patch_session` |
+| PUT | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `patch_session` |
+| GET | `/api/v1/sessions/{ref}/approvals` | scope `sessions` | TODO | `harness/apps.py` `approvals` |
+| POST | `/api/v1/sessions/{ref}/approvals/{approval_id}` | scope `approvals` | TODO | `harness/apps.py` `decide` |
+| POST | `/api/v1/sessions/{ref}/cancel` | scope `sessions` | TODO | `harness/apps.py` `cancel` |
+| GET | `/api/v1/sessions/{ref}/changes` | scope `sessions` | TODO | `harness/apps.py` `api_changes` |
+| POST | `/api/v1/sessions/{ref}/context` | scope `sessions` | TODO | `harness/apps.py` `add_context` |
+| GET | `/api/v1/sessions/{ref}/events` | scope `sessions` | TODO | `harness/apps.py` `events` |
+| POST | `/api/v1/sessions/{ref}/events/ticket` | scope `sessions` | Mint a short-lived query credential so native EventSource need not receive a bearer token in its URL. | `harness/apps.py` `event_ticket` |
+| POST | `/api/v1/sessions/{ref}/messages` | scope `sessions` | TODO | `harness/apps.py` `send` |
+| POST | `/api/v1/sessions/{ref}/rerun` | scope `sessions` | TODO | `harness/apps.py` `rerun_session` |
+| GET | `/api/v1/sessions/{ref}/review-comments` | see source | TODO | `harness/apps.py` `api_review_comments` |
+| POST | `/api/v1/sessions/{ref}/review-comments` | see source | TODO | `harness/apps.py` `api_add_review_comment` |
+| POST | `/api/v1/sessions/{ref}/review-comments/send` | see source | TODO | `harness/apps.py` `api_send_review_comments` |
+| DELETE | `/api/v1/sessions/{ref}/review-comments/{comment_id}` | see source | TODO | `harness/apps.py` `api_delete_review_comment` |
+| POST | `/api/v1/sessions/{ref}/review/{action}` | scope `sessions` | TODO | `harness/apps.py` `api_review` |
+| POST | `/api/v1/sessions/{ref}/secret-findings/fix` | see source | TODO | `harness/apps.py` `api_secret_findings_fix` |
+| POST | `/api/v1/sessions/{ref}/secret-findings/{fingerprint}/dismiss` | scope `sessions` | Owner-only: members and app tokens can ask the agent to fix a finding but never dismiss one. | `harness/apps.py` `api_dismiss_secret_finding` |
+| GET | `/api/v1/sessions/{ref}/tool_calls` | scope `sessions` | TODO | `harness/apps.py` `tool_calls` |
+| POST | `/api/v1/sessions/{ref}/tool_calls/{call_id}` | scope `sessions` | TODO | `harness/apps.py` `tool_result` |
+| GET | `/api/v1/sessions/{ref}/transcript` | scope `sessions` | TODO | `harness/apps.py` `api_transcript` |
+<!-- generated:end app-api-endpoints -->
+
 ### `GET /api/v1`
 Server info: API version, scopes, projects, models, hosted backends, enabled features, `capabilities`, and
 `image_modes` (labels, availability, and setup text for optional Lightning `quality-fast` and FLUX `flux-fast`;
