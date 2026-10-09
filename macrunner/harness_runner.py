@@ -329,7 +329,7 @@ class Executor:
         return projects.prepare(project, ws, p["session"], shared=not projects.is_url(project.repo))
 
     def op_refresh_origin(self, p: dict):
-        return projects.refresh_origin(self.workspace(p["session"]))
+        return projects.refresh_origin(self.project(p), self.workspace(p["session"]))
 
     def op_save_branch(self, p: dict):
         project, ws, sid = self.project(p), self.workspace(p["session"]), p["session"]
