@@ -127,6 +127,36 @@ def test_ci_docs_describe_review_safety_boundaries():
     assert "fork-PR approval required for all outside contributors" in docs
 
 
+def test_publication_allows_known_paths_but_still_rejects_tokens(tmp_path):
+    known_path = "harness_modules/remote_control/folder_discovery.py"
+    target = tmp_path / known_path
+    target.parent.mkdir(parents=True)
+    target.write_text("# synthetic repository context\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", known_path], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        f"""
+$result = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = '- {known_path}:12: synthetic finding' }}
+$out = Join-Path '{tmp_path}' 'review-output.md'
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
+$body = Get-Content -Raw -LiteralPath $out
+if ($body -notlike '*{known_path}:12*') {{ throw 'Known repository citation was lost' }}
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -CoverageLine 'PARTIAL REVIEW: Not reviewed: deleted/remote_control/folder_discovery.py' -OmittedPaths @('deleted/remote_control/folder_discovery.py')
+foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), 'sk-synthetic12345678')) {{
+    $result.Output = $unsafe
+    $failure = ''
+    try {{ Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' }}
+    catch {{ $failure = $_.Exception.Message }}
+    if ($failure -notlike 'Review did not complete*' -or (Test-Path $out)) {{ throw 'Token was published' }}
+}}
+'safe paths, unsafe tokens'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "safe paths, unsafe tokens" in result.stdout
+
+
 LAST_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 HEAD_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 OTHER_SHA = "cccccccccccccccccccccccccccccccccccccccc"

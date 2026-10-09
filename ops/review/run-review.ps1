@@ -332,17 +332,38 @@ function Get-ReviewRedactionRules {
         [pscustomobject]@{ Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
-        [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]' }
+        [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
         [pscustomobject]@{ Pattern = '(?i)(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|/(?:Users|home)/[^/\s]+|/root)(?:[\\/]|\b)'; Replacement = '[REDACTED PROFILE PATH]' }
     )
 }
 
 function Assert-ReviewOutputSafe {
     [CmdletBinding()]
-    param([AllowEmptyString()][string]$Text)
+    param(
+        [AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string]$Workspace = '',
+        [string[]]$OmittedPaths = @()
+    )
 
     foreach ($rule in (Get-ReviewRedactionRules)) {
-        if ($Text -match $rule.Pattern) {
+        $scanText = $Text
+        if ($rule.PSObject.Properties['RepositoryPathsAllowed'] -and $Text -match $rule.Pattern -and $Workspace) {
+            # Only the generic long-token heuristic exempts known repository paths.
+            # Provider-token, credential and profile-path rules still scan the original text.
+            # Disable fsmonitor so reading the index cannot launch a configured hook.
+            $paths = @()
+            try {
+                $paths = @(& git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=false -C $Workspace ls-files --cached 2>$null)
+                if ($LASTEXITCODE -ne 0) { $paths = @() }
+            } catch { $paths = @() }
+            $paths += $OmittedPaths
+            foreach ($path in $paths) {
+                if (-not $path -or $path -match '(^[/\\]|^[A-Za-z]:|[\r\n]|(^|/)\.\.(/|$))') { continue }
+                $pattern = '(?<![A-Za-z0-9_./\\-])' + [regex]::Escape($path) + '(?![A-Za-z0-9_./\\-])'
+                $scanText = [regex]::Replace($scanText, $pattern, '[REPOSITORY PATH]')
+            }
+        }
+        if ($scanText -match $rule.Pattern) {
             throw 'Review did not complete: output failed the publication safety scan.'
         }
     }
@@ -1128,6 +1149,8 @@ function Write-ReviewResult {
         [AllowEmptyString()][string]$HeadSha = '',
         [AllowEmptyString()][string]$Mode = 'full',
         [AllowEmptyString()][string]$BaseRef = '',
+        [AllowEmptyString()][string]$Workspace = '',
+        [string[]]$OmittedPaths = @(),
         [bool]$PublishMarker = $true
     )
 
@@ -1154,7 +1177,7 @@ function Write-ReviewResult {
         $marker = "`r`n`r`n<!-- agent-review: $markerText -->"
     }
     $body = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**." -f $CoverageLine.Trim(), $Result.Output.Trim(), $label
-    Assert-ReviewOutputSafe -Text $body
+    Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -OmittedPaths $OmittedPaths
     # The marker contains validated Git metadata; its SHA intentionally resembles a long token.
     $body += $marker
     $body | Out-File -LiteralPath $OutputPath -Encoding utf8
@@ -1196,7 +1219,7 @@ function Invoke-ReviewMain {
     $publishMarker = (@($embedding.OmittedFiles).Count -eq 0)
     $coverageLine = $coverage.CoverageLine
     if (-not $publishMarker) { $coverageLine = Get-ReviewOmissionCoverageLine -Embedding $embedding }
-    Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -PublishMarker:$publishMarker
+    Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -Workspace $Workspace -OmittedPaths @($embedding.OmittedFiles) -PublishMarker:$publishMarker
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
