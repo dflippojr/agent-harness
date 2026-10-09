@@ -93,6 +93,30 @@ streams[0].status({ seq: 14, data: { status: "cancelled" } });
 assert.ok(removed2, "a status change clears the stale sheet");
 assert.equal(composerEl.hidden, false);
 
+// A tool call is a collapsed row whose status pill follows the call (#508); the output waits for the row to open.
+streams[0].assistant({ seq: 20, data: { content: "", tool_calls: [{ id: "t1", function: { name: "run_shell", arguments: '{"command":"pytest -x"}' } }] } });
+const toolRows = () => {
+  const found = [];
+  const walk = (n) => { if (!n || typeof n !== "object") return; if (n.tag === "details" && n.attrs.class === "tool") found.push(n); (n.kids || []).forEach(walk); };
+  rendered.forEach(walk);
+  return found;
+};
+const toolRowEl = toolRows().at(-1);
+const toolState = toolRowEl.kids[0].kids[3];
+assert.match(text(toolRowEl.kids[0]), /run_shell .*pytest -x/);
+streams[0].tool_call({ seq: 21, data: { id: "t1", decision: "ask" } });
+assert.equal(toolState.textContent, "needs approval");
+assert.equal(toolState.className, "tool-state warn");
+streams[0].tool_result({ seq: 22, data: { id: "t1", name: "run_shell", ok: true, seconds: 4.2, output: "1 passed", output_chars: 8 } });
+assert.equal(toolState.textContent, "ok · 4 s");
+assert.equal(toolState.className, "tool-state ok");
+assert.doesNotMatch(rendered.map(text).join(" "), /1 passed/, "output is not rendered while the row is closed");
+streams[0].tool_result({ seq: 23, data: { id: "orphan", name: "web_fetch", ok: false, seconds: 1, output: "boom", output_chars: 4 } });
+const orphan = toolRows().at(-1);
+assert.notEqual(orphan, toolRowEl);
+assert.equal(orphan.tag, "details", "a result without its call still gets a row");
+assert.equal(orphan.kids[0].kids[3].className, "tool-state err");
+
 rendered.length = 0;
 await page.viewSession("abc", "changes");
 const changesText = rendered.map(text).join(" ");
