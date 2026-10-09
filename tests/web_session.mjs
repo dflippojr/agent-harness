@@ -71,14 +71,25 @@ streams[0].approval_decided({ seq: 4, data: { id: "ap1", status: "approved" } })
 assert.ok(removed, "deciding removes the sheet");
 assert.equal(composerEl.hidden, false, "the composer returns after the decision");
 
+// A newer request supersedes an older orphaned one.
+streams[0].approval_requested({ seq: 10, data: { id: "ap3", tool: "write_file", tool_call_id: "c3", reason: "First", detail: "x", args: {} } });
+const stale = body.at(-1);
+let staleRemoved = false;
+stale.remove = () => { staleRemoved = true; };
+streams[0].approval_requested({ seq: 11, data: { id: "ap4", tool: "write_file", tool_call_id: "c4", reason: "Second", detail: "x", args: {} } });
+assert.ok(staleRemoved, "an older sheet is removed when a newer approval arrives");
+body.at(-1).remove = () => {};
+streams[0].approval_decided({ seq: 12, data: { id: "ap4", status: "denied" } });
+assert.equal(composerEl.hidden, false, "deciding the newest approval frees the composer even with an orphaned older one");
+
 // A run cancelled elsewhere never emits approval_decided; the status change must clear the sheet and bring the composer back.
-streams[0].approval_requested({ seq: 5, data: { id: "ap2", tool: "write_file", tool_call_id: "c2", reason: "Edit", detail: "x", args: {} } });
+streams[0].approval_requested({ seq: 13, data: { id: "ap2", tool: "write_file", tool_call_id: "c2", reason: "Edit", detail: "x", args: {} } });
 const sheet2 = body.at(-1);
 assert.match(text(sheet2), /Cancel the whole task/);
 assert.equal(composerEl.hidden, true);
 let removed2 = false;
 sheet2.remove = () => { removed2 = true; };
-streams[0].status({ seq: 6, data: { status: "cancelled" } });
+streams[0].status({ seq: 14, data: { status: "cancelled" } });
 assert.ok(removed2, "a status change clears the stale sheet");
 assert.equal(composerEl.hidden, false);
 

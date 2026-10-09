@@ -318,6 +318,7 @@ async function viewSession(sid, tab, focusApproval) {
       noteToggle, note, buttons,
       isGuest() ? null : h("button", { class: "approval-cancel", type: "button", onclick: cancelTask }, "Cancel the whole task"));
     approvals.set(a.id, { card: slot, slotState, sheet, buttons, note });
+    dismissSheets(); // one decision at a time: a newer request supersedes an orphaned older one, so nothing can hold the composer hidden
     pendingSheets.add(a.id);
     document.body.append(sheet);
     syncComposer();
