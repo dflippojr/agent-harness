@@ -55,8 +55,9 @@ def configure(path: Path | str = DEFAULT_CONFIG) -> dict:
         sys.exit(f"invalid client config {CONFIG_PATH}: {exc}")
     BASE = str(os.environ.get("HARNESS_URL") or data.get("server") or "http://127.0.0.1:8100").rstrip("/")
     TOKEN = str(os.environ.get("HARNESS_TOKEN") or data.get("token") or "").strip()
-    LOCAL_TOKEN = str(os.environ.get("HARNESS_LOCAL_TOKEN") or "").strip() or (
-        _local_owner_token() if _is_loopback(BASE) else "")
+    # Never sent off this machine, even when it comes from the environment.
+    LOCAL_TOKEN = (str(os.environ.get("HARNESS_LOCAL_TOKEN") or "").strip() or _local_owner_token()
+                   if _is_loopback(BASE) else "")
     return data
 
 

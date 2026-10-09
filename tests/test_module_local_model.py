@@ -179,6 +179,24 @@ def test_core_doctor_does_not_probe_absent_supervision(tmp_path, monkeypatch):
     m.db.close()
 
 
+def test_core_doctor_sends_the_local_owner_token_and_reports_a_refusal(tmp_path, monkeypatch):
+    from harness import doctor as core_doctor, local_owner
+    m = manager(tmp_path, packages=[])
+    m.cfg.modules.local_model = False
+    sent = []
+    def get(url, headers=None, **kwargs):
+        sent.append(headers.get(local_owner.HEADER))
+        if url.endswith('/health'):
+            return httpx.Response(200, json={'profile': m.cfg.profile})
+        return httpx.Response(401, json={'detail': local_owner.REFUSED})
+    monkeypatch.setattr(core_doctor.httpx, 'get', get)
+    report = core_doctor.Report()
+    core_doctor.check_daemon(report, m.cfg)
+    assert sent and set(sent) == {m.local_owner_token}
+    assert report.failed
+    m.db.close()
+
+
 @pytest.mark.parametrize('packages', [
     ['harness_modules.local_model', 'harness_modules.images'],
     ['harness_modules.images', 'harness_modules.local_model'],

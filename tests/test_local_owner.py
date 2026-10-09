@@ -151,4 +151,7 @@ def test_cli_sends_the_local_token_only_to_a_daemon_on_this_machine(tmp_path, mo
     monkeypatch.setenv("HARNESS_LOCAL_TOKEN", "from-env")
     cli.configure(tmp_path / "missing.json")
     assert cli._headers()[local_owner.HEADER] == "from-env"
+    monkeypatch.setenv("HARNESS_URL", "https://tower.example.ts.net")
+    cli.configure(tmp_path / "missing.json")
+    assert local_owner.HEADER not in cli._headers()
     assert cli.LOCAL_TOKEN_HEADER == local_owner.HEADER
