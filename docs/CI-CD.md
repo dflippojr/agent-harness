@@ -222,11 +222,18 @@ Windows ask mode is not an OS sandbox; keep Cursor opt-in rather than adding it 
 sandbox setting, disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.
 Claude exposes only Read/Grep/Glob, with `--allowedTools Read(./**)` anchored to the PR workspace as its working
 directory. No bare Read, Grep or Glob allow is passed, and `--setting-sources=` disables inherited settings that could
-add broader permissions or additional directories. This uses the [Claude permission rule syntax](https://code.claude.com/docs/en/permissions). The wrapper, rather than a model, writes the final comment file. Before writing `review-output.md`, it scans the
+add broader permissions or additional directories. `--restricted` explicitly fences built-in file tools to working
+directories, including otherwise implicitly permitted profile-side transcripts and memory; `--safe-mode` disables
+customizations and automatic memory, and `--no-session-persistence` avoids saving this review as a runner session.
+The CLI must support these flags (restricted mode requires v2.1.248 or later); an unsupported flag fails closed.
+See [Claude permission rules](https://code.claude.com/docs/en/permissions) and the [CLI flag reference](https://code.claude.com/docs/en/cli-reference).
+The wrapper, rather than a model, writes the final comment file. Before writing `review-output.md`, it scans the
 public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
 long tokens), plus Windows/macOS/Linux user-profile absolute paths. A match discards the whole body, removes any
 stale output and fails closed with `Review did not complete`; nothing is posted or copied into the check summary.
-Known repository paths (from the Git index or all diff files, including deletions) are exempt only from the generic long-token
+This is intentionally conservative: benign prose and examples matching a credential pattern are also rejected.
+Quote authentication scheme names in backticks (for example, `Bearer`) rather than printing a value-like sequence.
+Known repository paths (from the Git index or all diff files, including deletions and both rename sides) are exempt only from the generic long-token
 heuristic, so ordinary long file citations and partial-coverage lists remain publishable. The credential, provider-token
 and profile-path patterns still check the original text. Validated Git metadata in the coverage marker is added only
 after the scan. It fetches the pull

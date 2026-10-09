@@ -10,6 +10,7 @@ Describe 'Review publication safety' {
         @{ Payload = 'ghp_synthetic12345678' }
         @{ Payload = ('T' * 48) }
         @{ Payload = 'Bearer synthetic-value' }
+        @{ Payload = 'Bearer followed by a value' }
         @{ Payload = 'password=synthetic-value' }
         @{ Payload = 'C:\Users\reviewer\.claude\credentials.json' }
         @{ Payload = 'C:/Users/reviewer/.codex/auth.json' }

@@ -121,6 +121,7 @@ def test_ci_docs_describe_review_safety_boundaries():
     docs = CI_DOCS.read_text(encoding="utf-8")
     assert "flag is skipped on Windows" in docs
     assert "Read(./**)" in docs
+    assert "--restricted" in docs
     assert "--setting-sources=" in docs
     assert "Review did not complete" in docs
     assert "runner group" in docs
@@ -148,6 +149,9 @@ if ($LASTEXITCODE -ne 0) {{ throw 'Synthetic deletion failed' }}
 $embedding = Get-ReviewDiffEmbedding -Diff "diff --git a/{known_path} b/{known_path}`ndeleted file mode 100644`n-old content"
 if (@($embedding.OmittedFiles).Count -ne 0) {{ throw 'The deletion should be reviewed, not omitted' }}
 Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
+$rename = Get-ReviewDiffEmbedding -Diff "diff --git a/{known_path} b/short.py`nsimilarity index 100%`nrename from {known_path}`nrename to short.py"
+if (@($rename.FilePaths).Count -ne 2) {{ throw 'Both rename paths must be retained' }}
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -DiffPaths @($rename.FilePaths)
 foreach ($relative in @('docs/root-ca.md', 'docs/root/code.md', 'examples/home/reviewer/file.py', 'examples/Users/reviewer/file.py')) {{
     $result.Output = $relative
     Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
@@ -571,6 +575,9 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath,Workin
     assert "--strict-mcp-config" in claude_args
     assert claude_args[claude_args.index("--allowedTools") + 1] == "Read(./**)"
     assert "--setting-sources=" in claude_args
+    assert "--restricted" in claude_args
+    assert "--safe-mode" in claude_args
+    assert "--no-session-persistence" in claude_args
     assert "--setting-sources" not in claude_args
     assert commands["claude"]["WorkingDirectory"] == str(workspace)
     assert commands["claude"]["InputText"] == "prompt"

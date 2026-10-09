@@ -328,6 +328,7 @@ function Test-ReviewAttemptRateLimit {
 
 function Get-ReviewRedactionRules {
     # Shared by diagnostics and the publication gate. Never print a matching value.
+    # Publication deliberately rejects even benign examples matching these credential shapes.
     return @(
         [pscustomobject]@{ Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
@@ -607,7 +608,7 @@ function Get-ReviewBackendCommand {
                 FilePath = 'claude'
                 # Scope file reads to WorkingDirectory; no bare Grep/Glob allow rules.
                 # Disable settings sources so inherited allows/additional directories cannot widen access.
-                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read(./**)', '--setting-sources=', '--strict-mcp-config', '--disable-slash-commands') + $modelArgs + $effortArgs
+                Arguments = @('-p', '--restricted', '--safe-mode', '--no-session-persistence', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read(./**)', '--setting-sources=', '--strict-mcp-config', '--disable-slash-commands') + $modelArgs + $effortArgs
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $null
@@ -1036,12 +1037,17 @@ function Get-ReviewDiffEmbedding {
     $embeddedBytes = $totalBytes
     $fileStarts = @([regex]::Matches($Diff, '(?m)^diff --git .+$'))
     $totalFiles = $fileStarts.Count
-    # Keep every changed path, including reviewed deletions absent from the head index.
-    $filePaths = @($fileStarts | ForEach-Object {
-        if ($_.Value -match '^diff --git (?:"?a/.*?"?) (?:"?b/(.*)"?)$') {
-            $Matches[1].Trim().Trim('"')
-        } else { $_.Value }
+    # Parse once for both publication paths and diff-budget metadata. Retain both rename sides.
+    $fileMetadata = @($fileStarts | ForEach-Object {
+        $oldPath = $_.Value
+        $newPath = $_.Value
+        if ($_.Value -match '^diff --git ("?a/.*?"?) ("?b/.*"?)$') {
+            $oldPath = $Matches[1].Trim().Trim('"').Substring(2)
+            $newPath = $Matches[2].Trim().Trim('"').Substring(2)
+        }
+        [pscustomobject]@{ OldPath = $oldPath; NewPath = $newPath }
     })
+    $filePaths = @($fileMetadata | ForEach-Object { $_.OldPath; $_.NewPath } | Select-Object -Unique)
     $embeddedFileCount = $totalFiles
     $omittedFiles = New-Object System.Collections.Generic.List[string]
     if ($totalBytes -gt $MaxDiffBytes) {
@@ -1057,11 +1063,7 @@ function Get-ReviewDiffEmbedding {
             $start = $fileStarts[$index].Index
             $end = if ($index + 1 -lt $fileStarts.Count) { $fileStarts[$index + 1].Index } else { $Diff.Length }
             $section = $Diff.Substring($start, $end - $start)
-            $header = $fileStarts[$index].Value
-            $fileName = $header
-            if ($header -match '^diff --git (?:"?a/.*?"?) (?:"?b/(.*)"?)$') {
-                $fileName = $Matches[1].Trim().Trim('"')
-            }
+            $fileName = $fileMetadata[$index].NewPath
             $entries.Add([pscustomobject]@{
                 Index = $index
                 Name = $fileName
