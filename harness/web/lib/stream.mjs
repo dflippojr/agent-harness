@@ -35,6 +35,8 @@ export function retryDelay(attempt, random = Math.random) {
 // After this many failed attempts in a row (about 8–15 s with the schedule above) "Reconnecting" becomes "Offline". The
 // stream keeps retrying either way; the browser reporting no network goes straight to Offline.
 export const OFFLINE_AFTER = 4;
+// A stream live at least this long that then ends reconnects once at once, without showing Reconnecting.
+export const GRACE_AFTER_MS = 5000;
 
 export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSurface, isGuest, browser }) {
   // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
@@ -55,17 +57,25 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
       if (indicate) setConnState(next);
       onState?.(next);
     };
+    let liveSince = 0;
     const browserOffline = () => browser.navigator?.onLine === false;
     const live = () => {
       attempts = 0;
+      liveSince = Date.now();
       setState("live");
     };
-    // Every failure path ends here: say so, then retry on the backoff schedule.
+    // Every failure path ends here. A stream that had been live a while (a proxy or server restart closing it) gets one
+    // quiet reconnect first; otherwise say so and retry on the backoff schedule.
     const fail = (run) => {
       if (closed || run !== generation) return;
+      clearTimeout(retry);
+      if (state === "live" && liveSince && Date.now() - liveSince >= GRACE_AFTER_MS && !browserOffline()) {
+        liveSince = 0;
+        retry = setTimeout(connect, 0);
+        return;
+      }
       attempts += 1;
       setState(browserOffline() || attempts >= OFFLINE_AFTER ? "offline" : "reconnecting");
-      clearTimeout(retry);
       retry = setTimeout(connect, retryDelay(attempts - 1));
     };
     const dispatch = (block) => {
@@ -134,7 +144,14 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
     };
     const onVisible = () => { if (!isBlocked() && document.visibilityState === "visible") void connect(); };
     const onOnline = () => { if (!isBlocked()) void connect(); };
-    const onOffline = () => setState("offline");  // the stream errors soon anyway; say so now
+    // The browser says the network is gone: drop the stream and go through the retry path, so a wrong onLine (a VPN
+    // can leave it false) corrects itself when the next attempt connects.
+    const onOffline = () => {
+      const run = ++generation;
+      es?.close();
+      controller?.abort();
+      fail(run);
+    };
     document.addEventListener("visibilitychange", onVisible);
     browser.window?.addEventListener?.("online", onOnline);
     browser.window?.addEventListener?.("offline", onOffline);

@@ -162,7 +162,7 @@ const session = imports.session.createSession({ agentHarnessWeb: client });
 
 // ---- stream ----
 {
-  const { safeStreamUrl, validId, mountStream, retryDelay, RETRY_CAP_MS, OFFLINE_AFTER } = imports.stream;
+  const { safeStreamUrl, validId, mountStream, retryDelay, RETRY_CAP_MS, OFFLINE_AFTER, GRACE_AFTER_MS } = imports.stream;
   // #510: exponential backoff with equal jitter, capped, in place of a fixed 3 s.
   assert.equal(retryDelay(0, () => 0), 500);
   assert.equal(retryDelay(0, () => 1), 1000);
@@ -221,9 +221,30 @@ const session = imports.session.createSession({ agentHarnessWeb: client });
   assert.deepEqual(states.at(-1), "live", "a successful open is Live again and resets the count");
   sources.at(-1).onerror();
   assert.equal(states.at(-1), "reconnecting");
-  // The browser saying it is offline goes straight to Offline.
+  // The browser saying it is offline drops the stream and goes straight to Offline.
+  win.dispatchEvent({ type: "online" });
+  await tick();
+  sources.at(-1).onopen();
+  sb.navigator.onLine = false;
   win.dispatchEvent({ type: "offline" });
+  assert.ok(sources.at(-1).closed);
   assert.equal(states.at(-1), "offline");
+  sb.navigator.onLine = true;
+  // A stream that was live a while and then ends reconnects once at once, quietly: no Reconnecting for a routine close.
+  win.dispatchEvent({ type: "online" });
+  await tick();
+  sources.at(-1).onopen();
+  const realNow = Date.now;
+  Date.now = () => realNow() + GRACE_AFTER_MS;
+  const quiet = states.length;
+  const opened = sources.length;
+  sources.at(-1).onerror();
+  await tick();
+  Date.now = realNow;
+  assert.equal(states.length, quiet, "the first close after a long live spell changes no state");
+  assert.equal(sources.length, opened + 1, "it reconnects at once");
+  sources.at(-1).onerror();
+  assert.equal(states.at(-1), "reconnecting", "if that reconnect fails too, say so");
   // A stale source's late error (an earlier generation) changes nothing.
   win.dispatchEvent({ type: "online" });
   await tick();
