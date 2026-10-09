@@ -1,0 +1,8 @@
+schema_version: 1
+kind: doc-index
+target: readme-docs-index
+title: Web client deployment
+order: 50
+links:
+  - text: 'web'
+    href: docs/web.md

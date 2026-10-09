@@ -1,0 +1,8 @@
+schema_version: 1
+kind: doc-index
+target: readme-docs-index
+title: CI/CD and trust boundaries
+order: 70
+links:
+  - text: 'CI-CD'
+    href: docs/CI-CD.md

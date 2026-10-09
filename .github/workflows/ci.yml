@@ -92,6 +92,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt pytest-cov pytest-xdist
 
+      # Docs fragments (#498): PRs add docs/fragments/*.yaml and never edit a generated region. On a PR the region
+      # may match the base branch's fragments or this branch's; on main it must match main's own fragments.
+      - name: Check docs fragments
+        run: |
+          if ("${{ github.event_name }}" -eq "pull_request") {
+            git fetch --depth=1 origin "${{ github.base_ref }}"
+            if ($LASTEXITCODE -ne 0) { throw "git fetch of the PR base failed" }
+            python scripts/docs/build.py --check --base FETCH_HEAD
+          } else {
+            python scripts/docs/build.py --check
+          }
+
       # pytest-cov and pytest-xdist are CI extras (not in requirements.txt).
       # Fixed -n 4 --dist loadfile: hosted windows-latest has 4 vCPUs; do not
       # use pytest's auto worker count. NUMBER_OF_PROCESSORS is logged so run
