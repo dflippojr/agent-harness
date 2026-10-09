@@ -231,6 +231,7 @@ Every key of the registry with all modules present, read from `harness/settings_
 | `modules.images` | string | — | admin | images installation/profile selection. Change this with the installer, not this registry. |
 | `modules.jobs` | string | — | admin | jobs installation/profile selection. Change this with the installer, not this registry. |
 | `modules.local_model` | string | — | admin | local_model installation/profile selection. Change this with the installer, not this registry. |
+| `modules.mcp_client` | string | — | admin | mcp_client installation/profile selection. Change this with the installer, not this registry. |
 | `modules.memory_library` | string | — | admin | memory_library installation/profile selection. Change this with the installer, not this registry. |
 | `modules.notifications` | string | — | admin | notifications installation/profile selection. Change this with the installer, not this registry. |
 | `modules.remote_control` | string | — | admin | remote_control installation/profile selection. Change this with the installer, not this registry. |

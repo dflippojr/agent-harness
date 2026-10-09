@@ -86,10 +86,10 @@ class _Consts:
     def __init__(self, trees: dict[str, ast.AST], route_files: set[str], plain: dict[str, str]):
         self.local = {name: _str_assignments(tree, True) for name, tree in trees.items()}
         for name, source in plain.items():  # files with no routes are not parsed; only their constant lines matter
-            found: dict[str, ast.Constant] = {}
+            found: dict[str, ast.expr] = {}
             for m in CONST_LINE.finditer(source):
                 prior = found.get(m[1])
-                found[m[1]] = ast.Constant(m[3]) if prior is None or prior.value == m[3] else ast.Constant(None)
+                found[m[1]] = ast.Constant(m[3]) if prior is None or getattr(prior, "value", None) == m[3] else ast.Constant(None)
             self.local[name] = found
         merged: dict[str, set] = {}
         for exprs in self.local.values():
@@ -278,13 +278,14 @@ def load_specs(root: Path) -> list:
     root_str = str(root)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
-    from harness.config import load
+    from harness.config import OPT_IN_MODULES, load
     from harness.settings_keys import build_registry
     with tempfile.TemporaryDirectory() as tmp:
         cfg_dir, data_dir = Path(tmp, "config"), Path(tmp, "data")
         cfg_dir.mkdir()
         data_dir.mkdir()
-        (cfg_dir / "harness.yaml").write_text(DOCS_PROFILE, encoding="utf-8")
+        optional = ", ".join(f"{name}: true" for name in sorted(OPT_IN_MODULES))  # off by default, so name them
+        (cfg_dir / "harness.yaml").write_text(f"{DOCS_PROFILE}modules: {{{optional}}}\n", encoding="utf-8")
         env = {k: os.environ.pop(k) for k in ("HARNESS_CONFIG_DIR", "HARNESS_DATA_DIR") if k in os.environ}
         try:
             cfg = load(cfg_dir, data_dir)
