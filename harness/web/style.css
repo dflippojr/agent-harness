@@ -313,7 +313,7 @@ body.has-tabs .approval-sheet { padding-bottom: 12px; }
 .approval-actions { display: flex; gap: 10px; margin-top: 8px; }
 .approval-actions .btn { flex: 1; min-height: 50px; border-radius: 14px; font-weight: 650; font-size: 1rem; }
 .approval-deny { background: none; border: 1.5px solid var(--bad); color: var(--bad); }
-.approval-approve { background: var(--ok); border: 1.5px solid var(--ok); color: #fff; }
+.approval-approve { background: var(--ok); border: 1.5px solid var(--ok); color: var(--bg); }
 body:has(.approval-sheet) main { padding-bottom: calc(360px + var(--tabbar-offset)); }
 
 .note { font-size: 0.8125rem; color: var(--muted); text-align: center; margin: 12px 0; }
