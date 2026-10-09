@@ -207,6 +207,7 @@ export function createDocument({ ElClass = El } = {}) {
   for (const [tag, id] of [["main", "app"], ["h1", "title"], ["button", "back"], ["span", "conn"], ["a", "settings-btn"],
     ["nav", "tab-bar"], ["span", "profile-icon"], ["div", "fab-host"], ["a", "fab"], ["header", "bar"], ["div", "guest-banner"],
     ["div", "toast"]]) make(tag, id);
+  byId.bar.append(byId.back, byId.title, byId.conn, byId["settings-btn"]); // as in index.html, so in-place title edits work
   const tabLinks = TABS.map((tab) => {
     const a = new ElClass("a", { href: `#/${tab}` });
     a.dataset.tab = tab;

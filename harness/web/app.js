@@ -86,7 +86,7 @@ const { viewInfo } = mountSessionInfo({ $app, h, append, copyBox, downloadDaemon
 const { viewChat } = mountChat({ $app, h, fill, append, api, setHeader, toast, go, validId, canChat, onLeave, openStream, ownerSurface, badge,
   TERMINAL, agentHarnessWeb, browser });
 const { viewSession } = mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, layoutBar, viewInfo, TERMINAL, agentHarnessWeb, browser });
+  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser });
 const { viewNew, confirmGpuQueue } = mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave,
   githubConnectionCard, warmModel, browser });
 const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave,

@@ -8,7 +8,7 @@ import { createToolRows } from "../lib/tool-row.mjs";
 import { approvalDiffClass, diffLineClass } from "../lib/diff.mjs";
 import { md } from "../lib/markdown.mjs";
 import { withTaint } from "../lib/taint.mjs";
-import { mountSessionUi, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
+import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
 
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
@@ -19,10 +19,10 @@ const SESSION_EVENT_TYPES = [
 ];
 
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, layoutBar, viewInfo, TERMINAL, agentHarnessWeb, browser }) {
+  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, location, confirm, setInterval, clearInterval, setTimeout } = browser;
-const { sessionTitle, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser });
+const { renameTitle, sessionMenu, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser });
 const pageMetrics = () => measurePage(browser);
 const scrollPage = (top) => scrollPageOf(top, browser);
 const { toolRow, closeViewer } = createToolRows({ h, fill, toast, browser });
@@ -31,18 +31,20 @@ async function viewSession(sid, tab, focusApproval) {
   if (!validId(sid)) { go("#/agents", true); return; }
   let session = await api(`/sessions/${sid}`);
   sid = session.id;
-  setHeader("agents", session.title || "Session");
+  setHeader("agents", session.title || "Session", { page: true });
   let left = false;
   onLeave(() => { left = true; });
 
-  const tabs = h("div", { class: "tabs" },
+  // One compact header (#514): the bar carries back, the title and the ⋯ menu; below it sit a 32 px status strip and the
+  // segmented Transcript / Changes / Info control.
+  const tabs = h("div", { class: "tabs session-tabs", role: "group", "aria-label": "Session view" },
     ["transcript", "changes", "info"].map((name) => h("button", {
       class: (tab === name || (tab === "approval" && name === "transcript")) ? "on" : "",
+      type: "button",
       onclick: () => go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true),
     }, name[0].toUpperCase() + name.slice(1))));
-  const head = h("div", { class: "row small" });
-  const usage = h("div", { class: "row small usage" });
-  append($app, h("div", { class: "session-chrome" }, sessionTitle(session, () => !left)), head, usage, tabs);
+  const head = h("div", { class: "session-strip" });
+  append($app, h("div", { class: "session-chrome" }, head, tabs));
   const jumps = bindSessionJumps();
   const pages = [];
   const fetchById = new Map();
@@ -62,18 +64,40 @@ async function viewSession(sid, tab, focusApproval) {
     const backendUsage = session.backend && session.backend !== "local" && limits.utilization !== undefined
       ? ` · ${limitName} ${Math.round(limits.utilization * 100)}%` : "";
     const onTarget = session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : "";
-    fill(head, badge(session.status),
-      session.queue_position > 0 ? h("span", { class: "muted" }, `#${session.queue_position} in GPU queue`) : null,
-      h("span", { class: "muted" }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`));
     const pct = ctxLimit && ctxUsed ? Math.round((100 * ctxUsed) / ctxLimit) : null;
-    const ctxClass = `ctx${pct >= 55 ? " high" : ""}`;
-    fill(usage,
-      h("span", { class: "muted", title: "Cumulative tokens for this session (prompt tokens in, generated tokens out)" },
-        `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`),
-      pct === null ? null : h("span", { class: ctxClass, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up.` },
-        progressBar(pct / 100), `${pct}% context`));
+    const tokens = `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`;
+    const taint = session.taint || [];
+    fill(head, badge(session.status),
+      session.queue_position > 0 ? h("span", { class: "badge" }, `#${session.queue_position} in GPU queue`) : null,
+      taint.length ? h("span", { class: "badge warn", title: `Untrusted content read: ${taint.map((t) => t.origin).join(", ")}. Risky actions ask for approval until cleared.` }, "Tainted") : null,
+      h("span", { class: "session-strip-meta", title: tokens }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`),
+      pct === null ? null : h("span", { class: `ctx${pct >= 55 ? " high" : ""}`, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up. ${tokens}.` },
+        progressBar(pct / 100), `${pct}%`));
   };
   renderHead();
+
+  // The overflow menu's actions work on every tab, so they live above the tab split. Changes and Info get no stream, so
+  // each action repaints the strip itself.
+  const cancelTask = async () => {
+    if (!confirm("Cancel this task?")) return;
+    try { session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) }; renderHead(); } catch (e) { toast(e.message); }
+  };
+  const menuActions = {
+    rename: () => renameTitle(session, () => !left),
+    cancel: cancelTask,
+    rerun: async () => {
+      try {
+        const s = await api(`/sessions/${sid}/rerun`, { method: "POST" });
+        location.hash = `#/s/${s.id}`;
+      } catch (e) { toast(e.message); }
+    },
+    "clear-taint": async () => {
+      if (!confirm("Clear taint? Risky actions will follow the project rules again.")) return;
+      try { session = { ...session, ...(await api(`/sessions/${sid}/taint/clear`, { method: "POST" })) }; renderHead(); } catch (e) { toast(e.message); }
+    },
+    download: () => downloadDaemonFile(`/sessions/${sid}/transcript`, `${sid}.md`),
+  };
+  if (!isGuest()) sessionMenu({ items: () => sessionMenuItems(session, { guest: false, terminal: TERMINAL }), run: (id) => menuActions[id]() });
 
   if (tab === "changes") { await viewChanges(session); jumps.updateJumps(); return; }
   if (tab === "info") { viewInfo(session); jumps.updateJumps(); return; }
@@ -84,9 +108,8 @@ async function viewSession(sid, tab, focusApproval) {
   // composer (owner only; guests may watch the live transcript)
   const input = h("textarea", { placeholder: "Message the agent…", rows: 1 });
   const send = h("button", { class: "btn primary" }, "Send");
-  const actions = h("div", { class: "row", style: "margin-bottom:6px" });
   const composer = isGuest() ? null : h("div", { class: "composer" }, h("div", { class: "inner", style: "flex-direction:column;align-items:stretch" },
-    actions, h("div", { class: "row", style: "flex-wrap:nowrap;align-items:flex-end" }, input, send)));
+    h("div", { class: "row", style: "flex-wrap:nowrap;align-items:flex-end" }, input, send)));
   if (composer) document.body.append(composer);
   input.addEventListener("input", () => { input.style.height = "44px"; input.style.height = `${Math.min(160, input.scrollHeight)}px`; });
   send.addEventListener("click", async () => {
@@ -101,40 +124,9 @@ async function viewSession(sid, tab, focusApproval) {
     send.disabled = false;
   });
 
-  const cancelTask = async () => {
-    if (!confirm("Cancel this task?")) return;
-    try { session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) }; } catch (e) { toast(e.message); }
-  };
-
+  // Cancel, Run again and Clear taint moved to the ⋯ menu (#514); the composer keeps only its placeholder in step.
   const renderActions = () => {
-    if (isGuest()) return;
-    const active = !TERMINAL.has(session.status);
-    input.placeholder = active ? "Add guidance…" : "Continue this session…";
-    fill(actions,
-      active ? h("button", {
-        class: "btn small bad",
-        onclick: cancelTask,
-      }, "Cancel") : null,
-      !active ? h("button", {
-        class: "btn small",
-        onclick: async () => {
-          try {
-            const s = await api(`/sessions/${sid}/rerun`, { method: "POST" });
-            location.hash = `#/s/${s.id}`;
-          } catch (e) { toast(e.message); }
-        },
-      }, "Run again as new session") : null,
-      (session.taint || []).length ? h("button", {
-        class: "btn small",
-        type: "button",
-        title: `Untrusted content read: ${session.taint.map((t) => t.origin).join(", ")}. Risky actions ask for approval until cleared.`,
-        onclick: async () => {
-          if (!confirm("Clear taint? Risky actions will follow the project rules again.")) return;
-          try { session = { ...session, ...(await api(`/sessions/${sid}/taint/clear`, { method: "POST" })) }; renderActions(); } catch (e) { toast(e.message); }
-        },
-      }, "Clear taint") : null,
-      h("span", { class: "spacer" }),
-      h("button", { class: "btn small", type: "button", onclick: () => go(`#/s/${sid}/changes`, true) }, "Changes"));
+    input.placeholder = TERMINAL.has(session.status) ? "Continue this session…" : "Add guidance…";
   };
   renderActions();
 
@@ -332,12 +324,12 @@ async function viewSession(sid, tab, focusApproval) {
     app_context: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Context from the app"), h("div", { class: "text" }, e.data.content))),
     taint_added: (e) => {
       session = { ...session, taint: withTaint(session.taint, e.data) };
-      renderActions();
+      renderHead();
       add(h("p", { class: "note" }, `Session read untrusted content from ${e.data.origin}: risky actions now ask for approval`));
     },
     taint_cleared: () => {
       session = { ...session, taint: [] };
-      renderActions();
+      renderHead();
       add(h("p", { class: "note" }, "Taint cleared by the owner"));
     },
     app_tool_call: (e) => add(h("p", { class: "note" }, `Asked the app to run ${e.data.name}`)),
