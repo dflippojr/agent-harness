@@ -341,3 +341,49 @@ def test_sandboxed_builds_use_session_directories(tmp_path, monkeypatch):
     assert env["MAVEN_OPTS"] == (f"-Dmaven.repo.local={Path(env['TMPDIR']) / 'm2'} "
                                  f"-Dmaven.repo.local.tail={tmp_path / '.m2' / 'repository'}")
     assert Path(env["XDG_CACHE_HOME"]) == Path(env["TMPDIR"]) / "cache"
+
+
+def test_session_gradle_home_gets_its_own_copy_of_wrapper_distributions(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    dist = tmp_path / ".gradle" / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123"
+    dist.mkdir(parents=True)
+    (dist / "gradle-9.0-bin.zip.ok").write_text("")
+    (dist / "gradle-9.0" / "lib").mkdir(parents=True)
+    (dist / "gradle-9.0" / "lib" / "gradle.jar").write_text("original")
+    ex = executor(tmp_path, [tmp_path])
+    gradle_home = ex.tmpdir(SID) / "gradle"
+    ex.seed_gradle_home(gradle_home)
+    copy = gradle_home / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123"
+    assert (copy / "gradle-9.0-bin.zip.ok").exists()
+    (copy / "gradle-9.0" / "lib" / "gradle.jar").write_text("session")
+    assert (dist / "gradle-9.0" / "lib" / "gradle.jar").read_text() == "original"
+    (dist / "gradle-9.1-bin").mkdir()
+    ex.seed_gradle_home(gradle_home)  # once per session
+    assert not (gradle_home / "wrapper" / "dists" / "gradle-9.1-bin").exists()
+
+
+def test_missing_or_uncopyable_wrapper_distributions_do_not_fail_the_command(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    ex = executor(tmp_path, [tmp_path])
+    gradle_home = ex.tmpdir(SID) / "gradle"
+    ex.seed_gradle_home(gradle_home)
+    assert not gradle_home.exists()
+
+    def fail(src, dst):
+        raise OSError("no space")
+
+    (tmp_path / ".gradle" / "wrapper" / "dists").mkdir(parents=True)
+    monkeypatch.setattr(harness_runner, "clone_tree", fail)
+    ex.seed_gradle_home(gradle_home)
+    assert "Gradle wrapper" in caplog.text
+
+
+def test_clone_tree_uses_copy_on_write_cp_on_macos(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(harness_runner.sys, "platform", "darwin")
+    monkeypatch.setattr(harness_runner.subprocess, "run", lambda argv, **kw: calls.append((argv, kw)))
+    harness_runner.clone_tree(tmp_path / "a", tmp_path / "b")
+    assert calls == [(["/bin/cp", "-cR", str(tmp_path / "a"), str(tmp_path / "b")],
+                      {"check": True, "capture_output": True, "timeout": 300})]

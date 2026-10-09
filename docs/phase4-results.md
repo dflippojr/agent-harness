@@ -85,6 +85,8 @@ Base `(allow default)`, then:
   are read-only, because later builds outside the sandbox run what is in them: sandboxed commands get
   `GRADLE_USER_HOME`, a Maven local repository (`MAVEN_OPTS`) and `XDG_CACHE_HOME` under the session TMPDIR, with
   `~/.gradle/caches` (`GRADLE_RO_DEP_CACHE`) and `~/.m2/repository` (`maven.repo.local.tail`) as read-only fallbacks.
+  On a session's first command the runner gives the session Gradle home a copy-on-write clone (`cp -c`) of
+  `~/.gradle/wrapper/dists`, so `./gradlew` works offline.
 - Neither read nor write: all of `~/.agent-harness` except the session's own workspace (runner and client tokens,
   runner code, logs, other sessions' workspaces, and `runner/tmp`, where host-side git keeps its throwaway git
   dirs and hooks dirs; parent directories of the workspace can be stat'ed, not listed), `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`,

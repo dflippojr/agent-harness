@@ -258,6 +258,7 @@ class Executor:
                "MAVEN_OPTS": f"-Dmaven.repo.local={tmp / 'm2'} "
                              f"-Dmaven.repo.local.tail={self.home / '.m2' / 'repository'}",
                "XDG_CACHE_HOME": str(tmp / "cache")}
+        self.seed_gradle_home(tmp / "gradle")
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
             profile = self.profile_template.replace("\n{{NETWORK}}", "\n" + ("" if network else OFFLINE_RULES))
@@ -314,6 +315,19 @@ class Executor:
                 os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
             except (ProcessLookupError, PermissionError):
                 pass
+
+    def seed_gradle_home(self, gradle_home: Path) -> None:
+        """Give the session's Gradle home its own copy of the owner's wrapper distributions (once per session), so
+        ./gradlew works offline. The wrapper writes lock files next to a distribution, and the originals stay
+        read-only to the sandbox."""
+        src, dst = self.home / ".gradle" / "wrapper" / "dists", gradle_home / "wrapper" / "dists"
+        if dst.exists() or not src.is_dir() or src.is_symlink():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            clone_tree(src, dst)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("couldn't copy the Gradle wrapper distributions: %s", e)
 
     @staticmethod
     def end_group(proc: subprocess.Popen) -> None:
@@ -437,6 +451,15 @@ class Executor:
         remove_tree(ws)
         self.drop_tmpdir(sid)
         return {"removed": True}
+
+
+def clone_tree(src: Path, dst: Path) -> None:
+    """Copy a directory tree without following links. On macOS, `cp -c` makes APFS copy-on-write clones, so even
+    large trees cost no time or space, and changes to the copy never reach the original."""
+    if sys.platform == "darwin":
+        subprocess.run(["/bin/cp", "-cR", str(src), str(dst)], check=True, capture_output=True, timeout=300)
+    else:
+        shutil.copytree(src, dst, symlinks=True)
 
 
 def git_temp_root(home: Path) -> Path:
