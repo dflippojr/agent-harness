@@ -160,6 +160,12 @@ def _without_unstored_artifact(output: str, digest: str) -> str:
     return output.replace(digest, "")
 
 
+def _app_base_only(s: dict, project) -> bool:
+    """An App session on a local source sees only the base branch, not the agent/* branches other sessions published
+    there. URL sources keep the full clone, which push and cleanup's origin/<branch> check rely on."""
+    return bool(s.get("app_id")) and project is not None and not projects.is_url(project.repo)
+
+
 class Runner:
     def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat,
                  warmer=None, hub=None):
@@ -2083,7 +2089,7 @@ class Runner:
         if github_branch:
             from dataclasses import replace
             project = replace(project, base_branch=github_branch)
-        base_only = bool(s.get("app_id"))  # an App session sees only the base branch, not other agent/* branches
+        base_only = _app_base_only(s, project)
         if remote:
             return await self.hub.call(s["target"], "prepare", {"session": s["id"], "repo": project.repo,
                                                                 "base_branch": project.base_branch,
@@ -2104,7 +2110,7 @@ class Runner:
         return await asyncio.to_thread(projects.prepare, project, ws, s["id"])
 
     async def _refresh_origin(self, s: dict, ws: Path, remote: bool, member: bool):
-        base = (s.get("base_branch") or "") if s.get("app_id") else ""
+        base = (s.get("base_branch") or "") if _app_base_only(s, self.project_for(s)) else ""
         if remote:
             return await self.hub.call(s["target"], "refresh_origin", {"session": s["id"], "base_branch": base},
                                        timeout=400)

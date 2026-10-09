@@ -197,3 +197,12 @@ def test_runner_base_only_prepare_and_refresh_hold_just_the_base_branch(tmp_path
     sh(ws, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
     assert ex.handle("r2", "refresh_origin", {"session": sid, "base_branch": "main"}) == ""
     assert not _has_object(ws, other)
+
+
+def test_base_only_applies_to_app_sessions_on_local_sources():
+    from harness.runner import _app_base_only
+
+    app, owner = {"app_id": "ha-test"}, {"app_id": ""}
+    assert _app_base_only(app, Project(name="p", repo="D:/src/repo"))
+    assert not _app_base_only(app, Project(name="p", repo="https://github.com/example/repo.git"))
+    assert not _app_base_only(owner, Project(name="p", repo="D:/src/repo"))
