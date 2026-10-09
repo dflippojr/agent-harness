@@ -171,6 +171,12 @@ foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), 'sk-synthetic123
 
 
 def test_git_quoted_unicode_deletion_and_profile_url_redaction(tmp_path):
+    unicode_path = "caf\u00e9/" + "a" * 40 + ".py"
+    target = tmp_path / unicode_path
+    target.parent.mkdir(parents=True)
+    target.write_text("# synthetic context\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", unicode_path], check=True, capture_output=True)
     result = run_powershell(
         tmp_path,
         rf"""
@@ -180,6 +186,13 @@ $target = '"b/caf\303\251/' + ('a' * 40) + '.py"'
 $embedding = Get-ReviewDiffEmbedding -Diff ("diff --git $quoted $target`ndeleted file mode 100644`n-old content")
 if (@($embedding.FilePaths).Count -ne 1 -or $embedding.FilePaths[0] -ne $path) {{ throw 'Git UTF-8 octal path was not decoded' }}
 $review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = "$path`:12: deletion finding" }}
+$previousEncoding = [Console]::OutputEncoding
+try {{
+    [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(437)
+    Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}'
+}} finally {{ [Console]::OutputEncoding = $previousEncoding }}
+git -C '{tmp_path}' rm --cached --quiet -- $path
+if ($LASTEXITCODE -ne 0) {{ throw 'Synthetic Unicode deletion failed' }}
 Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
 $tail = Get-ReviewDiagnosticTail -Stderr 'profile file:///h%6fme/reviewer/.codex/auth.json'
 if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Encoded profile URL was not redacted' }}

@@ -309,6 +309,7 @@ jobs:
       backend: ${{ inputs.backend }}
       mode: ${{ inputs.mode }}
       runs_on: '["self-hosted","Windows","X64","financial-planner-review"]'
+      tooling_ref: review-v1
     secrets: inherit
 ```
 
@@ -333,8 +334,10 @@ This GitHub administration step cannot be enforced by this repository change; th
 `SonarSource/sonarqube-scan-action@*`) must also allow `dflippojr/agent-harness/.github/workflows/review.yml@*`
 (Settings -> Actions -> General -> "Allow or block specified actions and reusable workflows").
 
-**Version pin.** Consumers pin the moving tag `review-v1`, so a change on `main` does not reach every project at once.
-After a change has been verified here, the owner moves the tag deliberately:
+**Version pin.** The `@review-v1` reference selects the workflow definition. The script follows trusted `main` by
+default; pinning only the workflow does not stage script changes. For staged rollout, set `tooling_ref: review-v1`
+as in the caller above so both workflow and script follow the same maintainer-controlled tag. After a change has
+been verified here, the owner moves that tag deliberately:
 
 ```powershell
 git tag -f review-v1 <verified commit on main>

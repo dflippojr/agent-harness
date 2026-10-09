@@ -12,6 +12,9 @@ Describe 'Review publication safety' {
         @{ Payload = 'Bearer synthetic-value' }
         @{ Payload = 'Bearer followed by a value' }
         @{ Payload = 'password=synthetic-value' }
+        @{ Payload = ('{"api_key":"' + ('A' * 32) + '"}') }
+        @{ Payload = '{"password":"short"}' }
+        @{ Payload = "'password'='short'" }
         @{ Payload = 'C:\Users\reviewer\.claude\credentials.json' }
         @{ Payload = 'C:/Users/reviewer/.codex/auth.json' }
         @{ Payload = '/Users/reviewer/.claude/credentials.json' }

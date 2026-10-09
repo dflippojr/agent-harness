@@ -331,7 +331,7 @@ function Get-ReviewRedactionRules {
     # Publication deliberately rejects even benign examples matching these credential shapes.
     return @(
         [pscustomobject]@{ Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
-        [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
+        [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
         [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
         [pscustomobject]@{ Pattern = '(?i)(?<![A-Za-z0-9_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|//[^/\s]+/+(?:[^/\s]+/+)*Users/+[^/\s]+|/(?:Users|home)/[^/\s]+|/root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeProfilePaths = $true }
@@ -413,7 +413,8 @@ function Assert-ReviewOutputSafe {
             # Disable fsmonitor so reading the index cannot launch a configured hook.
             $paths = @()
             try {
-                $paths = @(& git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=false -C $Workspace ls-files --cached 2>$null)
+                # ASCII C-style quoting survives the original Windows console code page.
+                $paths = @(& git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=true -C $Workspace ls-files --cached 2>$null)
                 if ($LASTEXITCODE -ne 0) { $paths = @() }
             } catch { $paths = @() }
             $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
