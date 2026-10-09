@@ -94,6 +94,7 @@ class Executor:
         self.procs: dict = {}      # request id -> Popen
         self.proc_sessions: dict = {}  # request id -> session id
         self.seeding: dict = {}    # session id -> Event set once its new TMPDIR is seeded
+        self.cancelled: set = set()  # request ids cancelled before their process started
 
     # helpers
     def workspace(self, sid: str, create: bool = False) -> Path:
@@ -153,6 +154,10 @@ class Executor:
     def drop_tmpdir(self, sid: str) -> None:
         if not SESSION_RE.match(sid or ""):
             raise OpError(f"bad session id {sid!r}")
+        with self.lock:
+            seeded = self.seeding.get(sid)
+        if seeded is not None:
+            seeded.wait()
         with self.lock:
             remove_tree(self.tmp_base() / sid)
 
@@ -268,7 +273,18 @@ class Executor:
             raise OpError(str(exc)) from exc
 
     def run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
-        tmp = self.tmpdir(sid)
+        with self.lock:
+            self.proc_sessions[rid] = sid  # cancel and kill_session see the request before its process starts
+        try:
+            return self._run_sandboxed(rid, sid, ws, command, timeout, network)
+        finally:
+            with self.lock:
+                self.procs.pop(rid, None)
+                self.proc_sessions.pop(rid, None)
+                self.cancelled.discard(rid)
+
+    def _run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
+        tmp = self.tmpdir(sid)  # a new session's TMPDIR is seeded first, which can take a while
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
                "LOGNAME": os.environ.get("USER", ""), "SHELL": self.shell, "LANG": "en_US.UTF-8", "TERM": "dumb",
                "TMPDIR": str(tmp), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
@@ -285,10 +301,12 @@ class Executor:
                     "-D", f"WORKSPACES={self.workspaces}", "-D", f"SESSION_TMP={tmp.resolve()}",
                     "-D", f"TMP_BASE={tmp.parent.resolve()}",
                     "-D", f"HOME={self.home}"] + argv
-        proc = subprocess.Popen(argv, cwd=str(ws), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, start_new_session=os.name == "posix")
         with self.lock:
-            self.procs[rid], self.proc_sessions[rid] = proc, sid
+            if rid in self.cancelled:
+                return {"code": -signal.SIGTERM, "output": "[cancelled before it started]"}
+            proc = subprocess.Popen(argv, cwd=str(ws), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, start_new_session=os.name == "posix")
+            self.procs[rid] = proc
         chunks, size = [], [0]
 
         def pump() -> None:
@@ -307,9 +325,6 @@ class Executor:
             self.kill(proc)
         finally:
             self.end_group(proc)
-            with self.lock:
-                self.procs.pop(rid, None)
-                self.proc_sessions.pop(rid, None)
         reader.join(timeout=10)
         output = b"".join(chunks).decode("utf-8", errors="replace")
         output = cap_command_output(output, OUTPUT_CAP)
@@ -369,18 +384,24 @@ class Executor:
             pass
 
     def op_cancel(self, p: dict):
+        rid = p["request_id"]
         with self.lock:
-            proc = self.procs.get(p["request_id"])
+            proc = self.procs.get(rid)
+            pending = proc is None and rid in self.proc_sessions
+            if pending:
+                self.cancelled.add(rid)
         if proc:
             self.kill(proc)
-        return bool(proc)
+        return bool(proc) or pending
 
     def op_kill_session(self, p: dict):
         with self.lock:
-            procs = [self.procs[r] for r, s in self.proc_sessions.items() if s == p["session"]]
+            rids = [r for r, s in self.proc_sessions.items() if s == p["session"]]
+            procs = [self.procs[r] for r in rids if r in self.procs]
+            self.cancelled.update(r for r in rids if r not in self.procs)
         for proc in procs:
             self.kill(proc)
-        return len(procs)
+        return len(rids)
 
     # git projects (outside the sandbox, with the user's git setup)
     def op_prepare(self, p: dict):

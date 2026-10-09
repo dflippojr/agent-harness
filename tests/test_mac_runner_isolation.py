@@ -444,6 +444,66 @@ def test_seeding_a_new_session_holds_up_only_that_session(tmp_path, monkeypatch)
     assert ex.seeding == {}
 
 
+@pytest.mark.parametrize("op", ["cancel", "kill_session"])
+def test_command_cancelled_while_its_session_is_seeded_never_starts(tmp_path, monkeypatch, op):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    (tmp_path / ".gradle" / "jdks").mkdir(parents=True)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_clone(src, dst):
+        started.set()
+        release.wait(10)
+        dst.mkdir()
+
+    def no_popen(*_a, **_kw):
+        raise AssertionError("the command started")
+
+    monkeypatch.setattr(harness_runner, "clone_tree", slow_clone)
+    monkeypatch.setattr(harness_runner.subprocess, "Popen", no_popen)
+    ex = executor(tmp_path, [tmp_path])
+    results = {}
+    worker = threading.Thread(target=lambda: results.setdefault(
+        "out", ex.handle("r1", "shell", {"session": SID, "command": "true"})))
+    worker.start()
+    assert started.wait(10)
+    if op == "cancel":
+        assert ex.handle("x", "cancel", {"request_id": "r1"}) is True
+    else:
+        assert ex.handle("x", "kill_session", {"session": SID}) == 1
+    release.set()
+    worker.join(10)
+    assert "cancelled before it started" in results["out"]["output"]
+    assert ex.procs == {} and ex.proc_sessions == {} and ex.cancelled == set()
+    assert ex.handle("x", "cancel", {"request_id": "r1"}) is False
+
+
+def test_removing_a_session_tmpdir_waits_for_its_seeding(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
+    (tmp_path / "shared").mkdir()
+    (tmp_path / ".gradle" / "jdks").mkdir(parents=True)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_clone(src, dst):
+        started.set()
+        release.wait(10)
+        dst.mkdir()
+
+    monkeypatch.setattr(harness_runner, "clone_tree", slow_clone)
+    ex = executor(tmp_path, [tmp_path])
+    seeding = threading.Thread(target=ex.tmpdir, args=(SID,))
+    seeding.start()
+    assert started.wait(10)
+    dropping = threading.Thread(target=ex.drop_tmpdir, args=(SID,))
+    dropping.start()
+    dropping.join(0.3)
+    assert dropping.is_alive()
+    release.set()
+    seeding.join(10)
+    dropping.join(10)
+    assert not (ex.tmp_base() / SID).exists()
+
+
 def test_clone_tree_uses_copy_on_write_cp_on_macos(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(harness_runner.sys, "platform", "darwin")
