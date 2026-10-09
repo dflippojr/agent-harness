@@ -22,6 +22,11 @@ The Jobs list groups jobs as **Needs attention** (the last run ended ATTENTION, 
 **Scheduled** and **Paused**. Each row has an **Enabled** switch that saves at once, through the same
 `PUT /api/admin/v1/jobs/{id}` the form uses, and offers Undo in the toast. Tapping the row opens the full form.
 
+Confirmations and short inputs (delete, revoke, cancel, rewind, fork, renames, quotas, the update offer) open an
+in-app sheet (`lib/sheet.mjs`) instead of the browser's native dialogs: a bottom sheet on phones and a centred card
+on wide screens. The action button names the action and is red when it destroys something; input sheets show
+errors under the field. Escape, a tap outside the sheet or leaving the page dismisses it.
+
 ## Connection state
 
 The header chip says **Live**, **Reconnecting** or **Offline**. It follows the app-wide event stream from Agent Harness
