@@ -51,7 +51,9 @@
         "images",
         "inference",
         "remote_control",
-        "models:warm"
+        "models:warm",
+        "memory_library",
+        "homelab"
       ],
       "description": "Current harness.apps.SCOPES. admin is an owner scope and is not permitted here."
     },
