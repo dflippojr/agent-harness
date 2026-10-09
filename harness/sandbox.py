@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import hashlib
 import os
 import subprocess
 import threading
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from .config import SandboxConfig
 from .fileops import CappedStream
+from .principal import OWNER_USER_ID
 
 
 SETUP_TIMEOUT = 600
@@ -180,9 +182,10 @@ async def ensure_networks(cfg: SandboxConfig) -> None:
 
 class Sandbox:
     def __init__(self, session_id: str, workspace: Path, cfg: SandboxConfig, *, project: str = "", setup: str = "",
-                 known: bool = False, on_event=None):
+                 known: bool = False, on_event=None, user_id: str = OWNER_USER_ID):
         self.session_id = session_id
         self.project = project      # names the per-project pip/npm cache volumes (#429)
+        self.user_id = user_id      # with the project, so principals never share a writable cache (#529)
         self.setup = setup.strip()  # run (with network) each time a container is created
         self.known = known          # the session has run tools before, so a "created" container is a recreation
         self.on_event = on_event    # on_event(type, data): session events from here (setup result)
@@ -232,9 +235,12 @@ class Sandbox:
         """Named per-project volumes for the pip and npm caches, so a recreated container reinstalls from cache."""
         if not self.project:
             return []
+        # Member project slugs can equal the owner's, so a non-owner volume name carries a hash of the user id. The
+        # owner's names stay as they were, keeping existing caches.
+        suffix = "" if self.user_id == OWNER_USER_ID else             "-u" + hashlib.sha256(self.user_id.encode("utf-8")).hexdigest()[:16]
         out: list[str] = []
         for name, target in (("pip", "/root/.cache/pip"), ("npm", "/root/.npm")):
-            out += ["--mount", f"type=volume,source=harness-cache-{name}-{self.project},target={target}"]
+            out += ["--mount", f"type=volume,source=harness-cache-{name}-{self.project}{suffix},target={target}"]
         return out
 
     async def _network(self, attach: bool) -> None:

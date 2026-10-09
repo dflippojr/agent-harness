@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -299,14 +300,28 @@ def git(repo: Path | str | None, *args: str, timeout: float = 600, check: bool =
             cmd += ["-c", f"safe.directory={Path(repo).as_posix()}", "-C", str(repo)]
         return _run(cmd + list(args), timeout=timeout, check=check, input_=input_)
 
-    work = Path(repo)
     try:
-        index_dir, metadata, work_tree = _resolve_workspace_git(work)
+        with isolated_git_dir(Path(repo), _isolate_env()) as (flags, env):
+            result = _run(flags + list(args), timeout=timeout, check=False, input_=input_, env=env)
     except GitError as e:
         if check:
             raise
         return GitResult(1, "", str(e))
+    if check and result.code != 0:
+        raise GitError(f"git {' '.join(args[:3])} failed: {result.text[-1500:]}")
+    return result
 
+
+@contextmanager
+def isolated_git_dir(repo: Path, base_env: dict):
+    """Yield (git flags, env) that run git on workspace `repo` through a throwaway GIT_DIR.
+
+    The temp git dir gets an allowlisted copy of the workspace config and an empty hooks dir; objects and the index
+    stay shared, and refs are copied back on exit. `base_env` is the caller's environment: the owner's (global config
+    kept for reviewed push credentials) or a member's (no owner config at all). Raises GitError for a workspace whose
+    git dir escapes it.
+    """
+    index_dir, metadata, work_tree = _resolve_workspace_git(repo)
     # Copy-in and copy-out are one transaction: concurrent readers also copy back
     # stale refs and can collide with open files on Windows. Keep other repos independent.
     with _git_state_lock(metadata), tempfile.TemporaryDirectory(prefix="harness-git-", dir=_temp_dir()) as raw_tmp:
@@ -315,19 +330,15 @@ def git(repo: Path | str | None, *args: str, timeout: float = 600, check: bool =
         tmp.mkdir()
         _copy_git_state(metadata, tmp)
         _write_isolated_config(tmp / "config", hooks)
-        env = _isolate_env()
+        env = dict(base_env)
         _inject_config(env, _allowlisted_config(metadata / "config"))
         env["GIT_INDEX_FILE"] = str(index_dir / "index")
         env["GIT_OBJECT_DIRECTORY"] = str(metadata / "objects")
         (metadata / "objects").mkdir(parents=True, exist_ok=True)
         try:
-            result = _run(_isolated_flags(work_tree, tmp, hooks) + list(args),
-                          timeout=timeout, check=False, input_=input_, env=env)
+            yield _isolated_flags(work_tree, tmp, hooks), env
         finally:
             _copy_git_state(tmp, metadata)
-        if check and result.code != 0:
-            raise GitError(f"git {' '.join(args[:3])} failed: {result.text[-1500:]}")
-        return result
 
 
 def is_url(repo: str) -> bool:

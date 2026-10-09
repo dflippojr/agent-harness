@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from .principal import PUBLIC_CLONE_HOSTS
-from .projects import GitError, GitResult, git
+from .projects import GitError, GitResult, git, isolated_git_dir
 from .storage import ContainmentError, require_contained
 
 _LOCAL_SCHEME = re.compile(r"^(file|git|ssh|git\+ssh|rsync)$", re.I)
@@ -346,21 +346,22 @@ def _member_origin_allowed(origin: str, root: Path) -> bool:
         return False
 
 
-def isolated_refresh_origin(workspace: Path, root: Path, max_bytes: int | None = None) -> str:
-    """Fetch origin without owner git helpers or credentials. Returns an error or ''."""
+def isolated_refresh_origin(workspace: Path, source: Path | str, root: Path, max_bytes: int | None = None) -> str:
+    """Fetch the project's source into a member workspace without owner git helpers or credentials.
+
+    Returns an error or ''. Like the owner's `projects.refresh_origin`, the fetch names `source` from the daemon's
+    record, never the workspace's `origin` URL or remote config, and runs through a throwaway GIT_DIR (#529): the
+    workspace is agent-writable, so its hooks, fsmonitor, uploadpack and other config must not run on the host.
+    """
     require_contained(workspace, root)
-    try:
-        origin = _isolated_git(workspace, "remote", "get-url", "origin").strip()
-    except GitError as e:
-        return str(e)[-500:]
-    if not _member_origin_allowed(origin, root):
+    src = str(source)
+    if not _member_origin_allowed(src, root):
         return "origin is not a public or account-local repository"
-    cmd = [
-        "git", "-c", f"safe.directory={workspace.as_posix()}", *_NO_HELPERS,
-        "-C", str(workspace), "fetch", "--quiet", "--prune", "origin",
-    ]
     try:
-        _run_clone(cmd, workspace, timeout=300, max_bytes=max_bytes, remove_on_fail=False)
+        with isolated_git_dir(workspace, isolated_clone_env()) as (flags, env):
+            cmd = ["git", *_NO_HELPERS, *flags, "fetch", "--quiet", "--prune", "--", src,
+                   "+refs/heads/*:refs/remotes/origin/*"]
+            _run_clone(cmd, workspace, timeout=300, max_bytes=max_bytes, remove_on_fail=False, env=env)
     except QuotaExceeded as e:
         return str(e)
     except GitError as e:

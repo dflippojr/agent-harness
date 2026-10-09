@@ -678,12 +678,70 @@ def test_isolated_refresh_origin_refuses_rewritten_origin(tmp_path):
                        check=True)
         ws = workspaces_dir(m.cfg, uid) / "sessrf01"
         isolated_prepare(ws, src, "sessrf01", workspaces_dir(m.cfg, uid))
-        assert isolated_refresh_origin(ws, root) == ""
+        assert isolated_refresh_origin(ws, src, root) == ""
+        # The fetch names the daemon's source, so an origin the agent rewrote is never where host git connects.
         subprocess.run(["git", "-C", str(ws), "remote", "set-url", "origin", str(m.cfg.data_dir)], check=True)
-        assert "account-local" in isolated_refresh_origin(ws, root)
-        subprocess.run(["git", "-C", str(ws), "remote", "set-url", "origin",
-                        "git@github.com:octocat/Hello-World.git"], check=True)
-        assert "account-local" in isolated_refresh_origin(ws, root)
+        (src / "later.txt").write_text("y", encoding="utf-8")
+        subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+        subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "later"],
+                       check=True)
+        assert isolated_refresh_origin(ws, src, root) == ""
+        head = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+        fetched = subprocess.run(["git", "-C", str(ws), "rev-parse", "refs/remotes/origin/main"],
+                                 capture_output=True, text=True).stdout
+        assert fetched == head
+        # A source outside the account, or an SSH URL, is still refused.
+        assert "account-local" in isolated_refresh_origin(ws, m.cfg.data_dir, root)
+        assert "account-local" in isolated_refresh_origin(ws, "git@github.com:octocat/Hello-World.git", root)
+
+
+def test_isolated_refresh_origin_runs_nothing_from_the_workspace(tmp_path):
+    """#529: planted hooks, fsmonitor and remote config in a member workspace never run on the host."""
+    root = tmp_path / "user"
+    src = root / "repos" / "notes"
+    src.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+    (src / "a.txt").write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a"],
+                   check=True)
+    ws = root / "workspaces" / "sessrf03"
+    isolated_prepare(ws, src, "sessrf03", root / "workspaces")
+
+    marker = tmp_path / "marker"
+    script = tmp_path / "plant.sh"
+    script.write_text(f"#!/bin/sh\necho ran >> '{marker.as_posix()}'\n", encoding="utf-8")
+    script.chmod(0o755)
+    hooks = ws / ".git" / "hooks"
+    for name in ("reference-transaction", "post-checkout", "pre-auto-gc", "post-merge"):
+        (hooks / name).write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+        (hooks / name).chmod(0o755)
+    cmd = f"sh '{script.as_posix()}'"
+    other = tmp_path / "other-hooks"
+    other.mkdir()
+    (other / "reference-transaction").write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+    (other / "reference-transaction").chmod(0o755)
+    for key, value in (("core.fsmonitor", cmd), ("core.hooksPath", other.as_posix()),
+                       ("remote.origin.uploadpack", cmd), ("remote.origin.receivepack", cmd),
+                       ("core.sshCommand", cmd), ("credential.helper", f"!{cmd}"),
+                       (f"url.{src.as_posix()}.insteadOf", "nowhere")):
+        subprocess.run(["git", "-C", str(ws), "config", key, value], check=True)
+
+    # The planted config does fire for an unisolated fetch, so the test would notice a regression.
+    subprocess.run(["git", "-C", str(ws), "fetch", "-q", "origin"], capture_output=True)
+    assert marker.exists()
+    marker.unlink()
+
+    (src / "b.txt").write_text("b\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "b"],
+                   check=True)
+    assert isolated_refresh_origin(ws, src, root) == ""
+    assert not marker.exists()
+    head = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+    fetched = subprocess.run(["git", "-C", str(ws), "-c", "core.hooksPath=", "rev-parse", "refs/remotes/origin/main"],
+                             capture_output=True, text=True).stdout
+    assert fetched == head
 
 
 def test_isolated_refresh_origin_stops_when_fetch_exceeds_max_bytes(tmp_path):
@@ -705,7 +763,7 @@ def test_isolated_refresh_origin_stops_when_fetch_exceeds_max_bytes(tmp_path):
     subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "big"],
                    check=True)
-    err = isolated_refresh_origin(dest, root, max_bytes=before + 2_000)
+    err = isolated_refresh_origin(dest, src, root, max_bytes=before + 2_000)
     assert err, "uncapped fetch would grow the workspace by the new origin blob"
     assert "quota" in err.lower()
     assert dest.exists()
@@ -972,7 +1030,7 @@ def test_member_refresh_passes_remaining_quota_as_max_bytes(tmp_path):
         })
         seen = {}
 
-        def fake_refresh(workspace, root, max_bytes=None):
+        def fake_refresh(workspace, source, root, max_bytes=None):
             seen["max_bytes"] = max_bytes
             seen["workspace"] = workspace
             return ""

@@ -58,6 +58,20 @@ def test_cache_volumes_mounted_per_project(docker):
     assert "type=volume,source=harness-cache-npm-web,target=/root/.npm" in run
 
 
+def test_cache_volumes_distinct_per_principal():
+    """#529: a member's slug can equal the owner's; the volumes differ and the owner's names are unchanged."""
+    def volumes(**kw):
+        return [a for a in make(project="web", **kw)._cache_mounts() if a != "--mount"]
+
+    owner = volumes()
+    assert "type=volume,source=harness-cache-pip-web,target=/root/.cache/pip" in owner
+    assert volumes(user_id="owner") == owner
+    alice, bob = volumes(user_id="u-alice"), volumes(user_id="u-bob")
+    assert len({tuple(owner), tuple(alice), tuple(bob)}) == 3
+    assert all("source=harness-cache-" in v and "-web-u" in v for v in alice + bob)
+    assert "u-alice" not in " ".join(alice)
+
+
 def test_no_cache_volumes_without_project(docker):
     asyncio.run(make().exec("true"))
     run = next(c for c in docker.calls if c[1] == "run")
