@@ -81,13 +81,27 @@ the runner's PATH puts it first.)
 Base `(allow default)`, then:
 
 - `(deny file-write*)` except the workspace, `/private/tmp`, `/private/var/folders` (per-user TMPDIR), device
-  files, `~/Library/Caches`, `~/Library/Developer/Xcode/DerivedData`, `~/.cache`, `~/.npm`, `~/.m2`, `~/.gradle`.
-- Neither read nor write: `~/.agent-harness/runner` (token), `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`,
+  files, `~/Library/Caches`, `~/Library/Developer/Xcode/DerivedData`, `~/.npm`. `~/.gradle`, `~/.m2` and `~/.cache`
+  are read-only, because later builds outside the sandbox run what is in them: sandboxed commands get
+  `GRADLE_USER_HOME` and a Maven home (`MAVEN_USER_HOME`, local repository via `MAVEN_OPTS`) in a per-session
+  tools directory next to the session TMPDIR (`<session>.tools`), `XDG_CACHE_HOME` in the TMPDIR, and
+  `~/.gradle/caches` as a read-only dependency cache (`GRADLE_RO_DEP_CACHE`). When a session's TMPDIR is created
+  the runner fills the tools directory in the background: copy-on-write clones (`cp -c`) of
+  `~/.gradle/wrapper/dists`, `~/.gradle/jdks`, `~/.m2/repository` and `~/.m2/wrapper` and a copy of
+  `~/.gradle/gradle.properties`, made in a staging directory and renamed into place when complete, so `./gradlew`,
+  `mvn` and `./mvnw` work offline (a build in the first moments of a session may download instead). A command can
+  read and write only its own session's TMPDIR and tools directory, not other sessions'.
+- Neither read nor write: all of `~/.agent-harness` except the session's own workspace (runner and client tokens,
+  runner code, logs, other sessions' workspaces, and `runner/tmp`, where host-side git keeps its throwaway git
+  dirs and hooks dirs; parent directories of the workspace can be stat'ed, not listed), `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`,
   `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`, shell histories, Documents, Desktop,
   Downloads, Pictures, Keychains, Messages, Mail, Safari, Cookies, iCloud Drive, Group Containers, Containers, and
   Chrome/Edge/Firefox/Brave profiles.
 - `mach-lookup` of `com.apple.SecurityServer` / `com.apple.securityd.xpc` denied, so Keychain items (including git's
   osxkeychain credentials) can't be fetched.
+- Nothing that starts programs outside the profile: exec of `/bin/launchctl`, `/usr/bin/open` and
+  `/usr/bin/osascript`, `mach-lookup` of LaunchServices (`com.apple.coreservices.launchservicesd`) and
+  `com.apple.launchd*`, and Apple Events are denied.
 - Without approval: `(deny network*)` except binding/accepting on localhost and connecting to localhost. DNS is
   denied too (the mDNSResponder socket), so nothing leaks through lookups.
 - Gotcha found while testing: `(allow network* (local ip "localhost:*"))` also matched ordinary outbound
@@ -95,7 +109,8 @@ Base `(allow default)`, then:
   `network-bind`/`network-inbound` for the local side and `network-outbound (remote ip ...)` for the remote side.
 - Commands get a clean environment (PATH with Homebrew locations first, HOME, LANG, `GIT_TERMINAL_PROMPT=0`, and a
   TMPDIR private to the session, created with mode 0700 and named by session id under a private per-user base, so it survives runner restarts, and removed with the workspace) and run in their own process
-  group; timeout and cancel kill the group.
+  group; when the command ends (or times out, or is cancelled) the group is killed, so background and `nohup`
+  children don't outlive it. A dev server started with `&` therefore lasts only for the command that started it.
 
 ### Verified on the Mac (real profile, runner executor, 2026-09-14)
 

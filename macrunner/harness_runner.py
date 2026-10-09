@@ -7,10 +7,12 @@ sandbox-exec (see sandbox.sb), and git work on the user's source repositories ou
 
 Stdlib-only Agent Harness Runner, installed with Agent Harness for Mac (or legacy SSH deploy) as a launchd agent.
 Layout under ~/.agent-harness:
-    runner/config.json   server URL, runner name and bearer token (unreadable inside the sandbox)
+    runner/config.json   server URL, runner name and bearer token
+    runner/tmp/          host-side git's throwaway git dirs and hooks dirs
     runner/app/          this file, sandbox.sb, and the daemon's shared modules under harness/
     workspaces/<id>/     one per session: a clone of the project repo, or an empty scratch directory
     logs/runner.log      stdout/stderr (launchd)
+The sandbox can neither read nor write anything under ~/.agent-harness except the session's own workspace.
 """
 
 from __future__ import annotations
@@ -50,6 +52,11 @@ OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trim
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
 HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+")
 RID_OPS = frozenset({"shell", "git_clone"})  # the ops that need the request id
+STAGING_PREFIX, REMOVING_PREFIX = ".seeding-", ".removing-"  # session directories on their way in and out
+TOOLS_SUFFIX = ".tools"  # <tmp base>/<session id>.tools: the session's Gradle and Maven homes
+# What a session's tools directory gets copied from the owner's read-only build tool homes: (home dir, entries, dir).
+TOOL_SEEDS = ((".gradle", ("wrapper/dists", "jdks", "gradle.properties"), "gradle"),
+              (".m2", ("repository", "wrapper"), "m2"))
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 WORKSPACE = "/workspace"  # the sandbox path the daemon addresses tool paths by
 OFFLINE_RULES = """;; No network except localhost (tests that start a server); no DNS either, so nothing leaks through lookups.
@@ -88,6 +95,8 @@ class Executor:
         self.lock = threading.Lock()
         self.procs: dict = {}      # request id -> Popen
         self.proc_sessions: dict = {}  # request id -> session id
+        self.seeding: set = set()  # session ids whose tools directory this runner has started seeding
+        self.cancelled: set = set()  # request ids cancelled before their process started
 
     # helpers
     def workspace(self, sid: str, create: bool = False) -> Path:
@@ -118,20 +127,70 @@ class Executor:
     def tmpdir(self, sid: str) -> Path:
         """The session's own TMPDIR, <private base>/<session id>, created with mode 0700 so other users and sessions
         can't read it or plant files in it. It lasts until the workspace is discarded or cleaned up, across runner
-        restarts."""
+        restarts. The first call also starts seeding the session's tools directory in the background."""
         if not SESSION_RE.match(sid or ""):
             raise OpError(f"bad session id {sid!r}")
         with self.lock:
             path = self.tmp_base() / sid
             path.mkdir(mode=0o700, exist_ok=True)
             self.check_private(path)
-            return path
+            seed = sid not in self.seeding and not os.path.lexists(self.tools_dir(sid))
+            if seed:
+                self.seeding.add(sid)
+        if seed:
+            threading.Thread(target=self.seed_tools, args=(sid,), name=f"seed-{sid}", daemon=True).start()
+        return path
+
+    def tools_dir(self, sid: str) -> Path:
+        """The session's Gradle and Maven homes, next to its TMPDIR. Commands can use it but, like the TMPDIR, can't
+        replace it with a link: the directory holding both is off limits to the sandbox."""
+        return self.tmp_base() / f"{sid}{TOOLS_SUFFIX}"
+
+    def seed_tools(self, sid: str) -> None:
+        """Copy the owner's build tool downloads into a staging directory, then rename it to the session's tools
+        directory in one step (a rename never follows or replaces a link or a directory already there). It runs
+        in the background, so no command waits for it; a build in the first moments of a session may download
+        what it needs instead."""
+        base = self.tmp_base()
+        staging = base / f"{STAGING_PREFIX}{sid}-{uuid.uuid4().hex[:8]}"
+        try:
+            staging.mkdir(mode=0o700)
+            self.seed_tool_homes(staging)
+            with self.lock:
+                if sid not in self.seeding:  # the session was removed meanwhile
+                    return
+                staging.rename(self.tools_dir(sid))
+        except OSError as e:
+            log.info("session %s keeps its own Gradle and Maven homes: %s", sid, e)
+        finally:
+            if staging.exists():
+                remove_tree(staging)
+
+    def sweep_tmp(self) -> None:
+        """Remove what a previous runner left half done: staging and removal directories, and tools directories of
+        sessions whose TMPDIR is gone."""
+        base = self.tmp_base()
+        for child in base.iterdir():
+            name = child.name
+            orphan = name.endswith(TOOLS_SUFFIX) and not (base / name[:-len(TOOLS_SUFFIX)]).exists()
+            if (name.startswith((STAGING_PREFIX, REMOVING_PREFIX)) or orphan) and not child.is_symlink():
+                remove_tree(child)
 
     def drop_tmpdir(self, sid: str) -> None:
         if not SESSION_RE.match(sid or ""):
             raise OpError(f"bad session id {sid!r}")
-        with self.lock:
-            remove_tree(self.tmp_base() / sid)
+        doomed = []
+        with self.lock:  # move them aside under the lock; deleting large trees mustn't hold up other sessions
+            for path in (self.tmp_base() / sid, self.tools_dir(sid)):
+                if os.path.lexists(path):
+                    doomed.append(path.with_name(f"{REMOVING_PREFIX}{path.name}-{uuid.uuid4().hex[:8]}"))
+                    path.rename(doomed[-1])
+            self.seeding.discard(sid)
+        for path in doomed:
+            if path.is_symlink():
+                path.unlink()
+            else:
+                remove_tree(path)
 
     def project(self, params: dict) -> Project:
         repo = params.get("repo") or ""
@@ -245,18 +304,40 @@ class Executor:
             raise OpError(str(exc)) from exc
 
     def run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
+        with self.lock:
+            self.proc_sessions[rid] = sid  # cancel and kill_session see the request before its process starts
+        try:
+            return self._run_sandboxed(rid, sid, ws, command, timeout, network)
+        finally:
+            with self.lock:
+                self.procs.pop(rid, None)
+                self.proc_sessions.pop(rid, None)
+                self.cancelled.discard(rid)
+
+    def _run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
+        tmp, tools = self.tmpdir(sid), self.tools_dir(sid)
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
                "LOGNAME": os.environ.get("USER", ""), "SHELL": self.shell, "LANG": "en_US.UTF-8", "TERM": "dumb",
-               "TMPDIR": str(self.tmpdir(sid)), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
-               "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+               "TMPDIR": str(tmp), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
+               "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1",
+               # ~/.gradle, ~/.m2 and ~/.cache are read-only in the sandbox: builds write to the session's own
+               # directories, which start with copies of the owner's Gradle and Maven downloads.
+               "GRADLE_USER_HOME": str(tools / "gradle"), "GRADLE_RO_DEP_CACHE": str(self.home / ".gradle" / "caches"),
+               "MAVEN_OPTS": f"-Dmaven.repo.local={tools / 'm2' / 'repository'}", "MAVEN_USER_HOME": str(tools / "m2"),
+               "XDG_CACHE_HOME": str(tmp / "cache")}
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
             profile = self.profile_template.replace("\n{{NETWORK}}", "\n" + ("" if network else OFFLINE_RULES))
-            argv = ["/usr/bin/sandbox-exec", "-p", profile, "-D", f"WORKSPACE={ws}", "-D", f"HOME={self.home}"] + argv
-        proc = subprocess.Popen(argv, cwd=str(ws), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, start_new_session=os.name == "posix")
+            argv = ["/usr/bin/sandbox-exec", "-p", profile, "-D", f"WORKSPACE={ws}",
+                    "-D", f"WORKSPACES={self.workspaces}", "-D", f"SESSION_TMP={tmp.resolve()}",
+                    "-D", f"SESSION_TOOLS={tmp.parent.resolve() / tools.name}", "-D", f"TMP_BASE={tmp.parent.resolve()}",
+                    "-D", f"HOME={self.home}"] + argv
         with self.lock:
-            self.procs[rid], self.proc_sessions[rid] = proc, sid
+            if rid in self.cancelled:
+                return {"code": -signal.SIGTERM, "output": "[cancelled before it started]"}
+            proc = subprocess.Popen(argv, cwd=str(ws), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, start_new_session=os.name == "posix")
+            self.procs[rid] = proc
         chunks, size = [], [0]
 
         def pump() -> None:
@@ -274,9 +355,7 @@ class Executor:
             timed_out = True
             self.kill(proc)
         finally:
-            with self.lock:
-                self.procs.pop(rid, None)
-                self.proc_sessions.pop(rid, None)
+            self.end_group(proc)
         reader.join(timeout=10)
         output = b"".join(chunks).decode("utf-8", errors="replace")
         output = cap_command_output(output, OUTPUT_CAP)
@@ -304,19 +383,60 @@ class Executor:
             except (ProcessLookupError, PermissionError):
                 pass
 
+    def seed_tool_homes(self, staging: Path) -> None:
+        """Copy the owner's Gradle wrapper distributions, provisioned JDKs and gradle.properties, and Maven
+        repository and wrapper distributions into `staging` (which no sandboxed command can reach), so ./gradlew, mvn
+        and ./mvnw work offline with any version. The tools write lock and status files next to them, and the
+        originals stay read-only to the sandbox."""
+        for home_dir, entries, session_dir in TOOL_SEEDS:
+            for rel in entries:
+                src, dst = self.home / home_dir / rel, staging / session_dir / rel
+                if src.is_symlink() or not src.exists():
+                    continue
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if src.is_dir():
+                        clone_tree(src, dst)
+                    else:
+                        shutil.copyfile(src, dst)
+                except (OSError, subprocess.SubprocessError) as e:
+                    log.warning("couldn't copy ~/%s/%s for a session: %s", home_dir, rel, e)
+                    # No half copy: the tool then downloads what it needs instead of using a broken tree.
+                    if dst.is_dir() and not dst.is_symlink():
+                        remove_tree(dst)
+                    else:
+                        dst.unlink(missing_ok=True)
+
+    @staticmethod
+    def end_group(proc: subprocess.Popen) -> None:
+        """Stop whatever the command left running in its process group (background jobs, nohup children), so
+        nothing from one command keeps running into the next or into the runner's host-side git."""
+        if not hasattr(os, "killpg") or proc.poll() is None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     def op_cancel(self, p: dict):
+        rid = p["request_id"]
         with self.lock:
-            proc = self.procs.get(p["request_id"])
+            proc = self.procs.get(rid)
+            pending = proc is None and rid in self.proc_sessions
+            if pending:
+                self.cancelled.add(rid)
         if proc:
             self.kill(proc)
-        return bool(proc)
+        return bool(proc) or pending
 
     def op_kill_session(self, p: dict):
         with self.lock:
-            procs = [self.procs[r] for r, s in self.proc_sessions.items() if s == p["session"]]
+            rids = [r for r, s in self.proc_sessions.items() if s == p["session"]]
+            procs = [self.procs[r] for r in rids if r in self.procs]
+            self.cancelled.update(r for r in rids if r not in self.procs)
         for proc in procs:
             self.kill(proc)
-        return len(procs)
+        return len(rids)
 
     # git projects (outside the sandbox, with the user's git setup)
     def op_prepare(self, p: dict):
@@ -418,6 +538,21 @@ class Executor:
         remove_tree(ws)
         self.drop_tmpdir(sid)
         return {"removed": True}
+
+
+def clone_tree(src: Path, dst: Path) -> None:
+    """Copy a directory tree without following links. On macOS, `cp -c` makes APFS copy-on-write clones, so even
+    large trees cost no time or space, and changes to the copy never reach the original."""
+    if sys.platform == "darwin":
+        subprocess.run(["/bin/cp", "-cR", str(src), str(dst)], check=True, capture_output=True, timeout=300)
+    else:
+        shutil.copytree(src, dst, symlinks=True)
+
+
+def git_temp_root(home: Path) -> Path:
+    """Where host-side git keeps its isolation directories: under runner/, which the sandbox profile denies, so a
+    sandboxed command can't plant hooks or config in them."""
+    return home / ".agent-harness" / "runner" / "tmp"
 
 
 def remove_tree(path: Path) -> None:
@@ -577,6 +712,8 @@ def main() -> None:
         profile=None if cfg.get("sandbox") is False else APP_DIR / "sandbox.sb",
         home=home, min_free_gb=float(cfg.get("min_free_gb", 10)))
     executor.server = cfg["server"]
+    executor.sweep_tmp()
+    projects.TEMP_ROOT = git_temp_root(home)
     runner = Runner(Client(cfg["server"], cfg.get("name", "macbook"), cfg["token"]), executor)
 
     def stop(signum, frame):

@@ -56,6 +56,18 @@ _STATE_DIRS = ("refs", "logs")
 # https://docs.python.org/3.12/library/weakref.html
 _GIT_STATE_LOCKS: WeakValueDictionary = WeakValueDictionary()
 _GIT_STATE_LOCKS_GUARD = threading.Lock()
+# Where host-side git keeps its throwaway git dirs, hooks dirs and merge worktrees. None means the system temp
+# directory (the daemon). The Mac runner sets a private directory that its shell sandbox can't read or write.
+TEMP_ROOT: Path | None = None
+
+
+def _temp_dir() -> str | None:
+    if TEMP_ROOT is None:
+        return None
+    TEMP_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if TEMP_ROOT.is_symlink() or not TEMP_ROOT.is_dir():
+        raise GitError(f"{TEMP_ROOT} isn't a plain directory")
+    return str(TEMP_ROOT)
 
 
 def _git_state_lock(metadata: Path):
@@ -297,7 +309,7 @@ def git(repo: Path | str | None, *args: str, timeout: float = 600, check: bool =
 
     # Copy-in and copy-out are one transaction: concurrent readers also copy back
     # stale refs and can collide with open files on Windows. Keep other repos independent.
-    with _git_state_lock(metadata), tempfile.TemporaryDirectory(prefix="harness-git-") as raw_tmp:
+    with _git_state_lock(metadata), tempfile.TemporaryDirectory(prefix="harness-git-", dir=_temp_dir()) as raw_tmp:
         tmp, hooks = Path(raw_tmp) / "git", Path(raw_tmp) / "hooks"
         hooks.mkdir(parents=True)
         tmp.mkdir()
@@ -458,7 +470,7 @@ def merge(project: Project, workspace: Path, sid: str, branch: str, base_branch:
     message = f"{title}\n\nSquash-merged from {branch} (agent-harness session {sid}).\n\n{subjects}\n"
 
     if _is_bare(src):
-        tmp = Path(tempfile.mkdtemp(prefix="harness-merge-"))
+        tmp = Path(tempfile.mkdtemp(prefix="harness-merge-", dir=_temp_dir()))
         worktree = tmp / "wt"
         try:
             git(src, "worktree", "add", "-q", str(worktree), base_branch, trusted=True)
@@ -467,6 +479,7 @@ def merge(project: Project, workspace: Path, sid: str, branch: str, base_branch:
         finally:
             git(src, "worktree", "remove", "--force", str(worktree), check=False, trusted=True)
             git(src, "worktree", "prune", check=False, trusted=True)
+            shutil.rmtree(tmp, ignore_errors=True)
     else:
         current = git(src, "rev-parse", "--abbrev-ref", "HEAD", trusted=True).out.strip()
         if current != base_branch:
