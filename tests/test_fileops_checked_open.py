@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import sys
@@ -214,6 +215,87 @@ def test_containment_compares_identity_when_the_root_is_spelled_differently(tmp_
     assert str(spelled) != str(root)
     assert fileops._within(root, spelled / "a.txt")
     assert not fileops._within(root, tmp_path / "b.txt")
+    assert not fileops._within(root, tmp_path / "missing" / "a.txt")
+
+
+def test_windows_final_paths_lose_their_extended_prefix():
+    assert str(fileops._plain_windows_path("\\\\?\\C:\\ws\\a.txt")) == str(Path("C:\\ws\\a.txt"))
+    assert str(fileops._plain_windows_path("\\\\?\\UNC\\host\\share\\a.txt")) == str(Path("\\\\host\\share\\a.txt"))
+    assert str(fileops._plain_windows_path("C:\\ws\\a.txt")) == str(Path("C:\\ws\\a.txt"))
+
+
+def test_descriptor_paths_come_from_f_getpath_or_proc(monkeypatch):
+    class Fcntl:
+        F_GETPATH = 50
+
+        def __init__(self, raw):
+            self.raw = raw
+
+        def fcntl(self, fd, op, arg):
+            assert op == self.F_GETPATH and len(arg) == 1024
+            if isinstance(self.raw, OSError):
+                raise self.raw
+            return self.raw + b"\0" * (1024 - len(self.raw))
+    monkeypatch.setattr(fileops, "_WINDOWS", False)
+    monkeypatch.setattr(fileops, "fcntl", Fcntl(b"/Users/me/ws/a.txt"))
+    assert fileops._descriptor_path(5) == Path("/Users/me/ws/a.txt")
+    monkeypatch.setattr(fileops, "fcntl", Fcntl(OSError(errno.EBADF, "bad descriptor")))
+    assert fileops._descriptor_path(5) is None
+    monkeypatch.setattr(fileops, "fcntl", None)
+    links = {"/proc/self/fd/5": "/srv/ws/a.txt", "/proc/self/fd/6": "pipe:[1234]"}
+
+    def readlink(path):
+        if path not in links:
+            raise FileNotFoundError(path)
+        return links[path]
+    monkeypatch.setattr(os, "readlink", readlink)
+    assert fileops._descriptor_path(5) == Path("/srv/ws/a.txt")
+    assert fileops._descriptor_path(6) is None  # not a file on disk
+    assert fileops._descriptor_path(7) is None  # no /proc
+
+
+def _failing_open(monkeypatch, path: Path, err: OSError) -> None:
+    real_open = os.open
+
+    def fake(p, *args, **kwargs):
+        if Path(p) == path:
+            raise err
+        return real_open(p, *args, **kwargs)
+    monkeypatch.setattr(os, "open", fake)
+
+
+def test_an_open_that_meets_a_symlink_is_refused_and_other_errors_surface(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("x\n", encoding="utf-8")
+    files = FileOps(tmp_path, 8000)
+    _failing_open(monkeypatch, files.root / "a.txt", OSError(errno.ELOOP, "too many levels of symbolic links"))
+    with pytest.raises(ToolError, match="escapes the workspace"):
+        files.read_file("a.txt")
+    _failing_open(monkeypatch, files.root / "a.txt", PermissionError(errno.EACCES, "denied"))
+    with pytest.raises(PermissionError):
+        files.read_file("a.txt")
+
+
+def test_opening_the_target_directory_refuses_a_symlink_and_surfaces_other_errors(tmp_path, monkeypatch):
+    _failing_open(monkeypatch, tmp_path, OSError(errno.ELOOP, "too many levels of symbolic links"))
+    with pytest.raises(ToolError, match="refused"):
+        fileops._open_dir(tmp_path, "refused")
+    _failing_open(monkeypatch, tmp_path, OSError(errno.ENOTDIR, "not a directory"))
+    with pytest.raises(ToolError, match="refused"):
+        fileops._open_dir(tmp_path, "refused")
+    _failing_open(monkeypatch, tmp_path, PermissionError(errno.EACCES, "denied"))
+    with pytest.raises(PermissionError):
+        fileops._open_dir(tmp_path, "refused")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the whole path would pass Windows' 260-character limit")
+def test_a_file_whose_name_is_at_the_length_limit_can_still_be_replaced(tmp_path):
+    name = "n" * 251 + ".txt"
+    (tmp_path / name).write_text("one\n", encoding="utf-8")
+    files = FileOps(tmp_path, 8000)
+    files.write_file(name, "two\n")
+    files.edit_file(name, "two", "three")
+    assert (tmp_path / name).read_text(encoding="utf-8") == "three\n"
+    assert _names(tmp_path) == [name]
 
 
 def test_write_text_within_refuses_a_directory_swapped_after_the_check(layout, monkeypatch):

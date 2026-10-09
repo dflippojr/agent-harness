@@ -5,6 +5,7 @@ Stdlib only and Python 3.9 compatible: the runner copies this file to the Mac, w
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import errno
 import functools
@@ -19,12 +20,14 @@ try:
 except ImportError:  # Windows
     fcntl = None
 
+_WINDOWS = sys.platform == "win32"
 _O_BINARY = getattr(os, "O_BINARY", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)  # opening a FIFO for reading must not wait for a writer
 _LINK_ERRNOS = {errno.ELOOP, errno.EMLINK}  # O_NOFOLLOW met a symlink (EMLINK on FreeBSD)
 _DIR_FD = {os.open, os.stat, os.rename, os.unlink} <= os.supports_dir_fd
+_KEEP_MODE = os.name == "posix"  # Windows has only a read-only flag, which a replace can't go through anyway
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 MAX_PUT_BYTES = 32 * 1024 * 1024  # binary files the daemon may send to a runner (ComfyUI PNGs are much smaller)
@@ -129,6 +132,13 @@ def _final_path_by_handle():
     return fn
 
 
+def _plain_windows_path(text: str) -> Path:
+    r"""`text` without the `\\?\` or `\\?\UNC\` prefix that Windows' final-path calls return."""
+    if text.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + text[8:])
+    return Path(text[4:]) if text.startswith("\\\\?\\") else Path(text)
+
+
 def _windows_final_path(fd: int) -> Path | None:
     import ctypes
     import msvcrt
@@ -136,24 +146,16 @@ def _windows_final_path(fd: int) -> Path | None:
         handle = msvcrt.get_osfhandle(fd)
     except OSError:
         return None
-    size = 512
-    while True:
-        buf = ctypes.create_unicode_buffer(size)
-        n = _final_path_by_handle()(handle, buf, size, 0)
-        if n == 0:
-            return None
-        if n < size:
-            break
-        size = n  # too small: n is the size needed, terminator included
-    text = buf.value
-    if text.startswith("\\\\?\\UNC\\"):
-        return Path("\\\\" + text[8:])
-    return Path(text[4:]) if text.startswith("\\\\?\\") else Path(text)
+    final_path = _final_path_by_handle()
+    size = final_path(handle, None, 0, 0)  # the length needed, terminator included; 0 on failure
+    buf = ctypes.create_unicode_buffer(max(size, 1))
+    # Success returns the length without the terminator; a path that grew in between returns a larger size.
+    return _plain_windows_path(buf.value) if size and 0 < final_path(handle, buf, size, 0) < size else None
 
 
 def _descriptor_path(fd: int) -> Path | None:
     """The real path of the file or directory open on `fd`, or None where the platform can't say."""
-    if sys.platform == "win32":
+    if _WINDOWS:
         return _windows_final_path(fd)
     if fcntl is not None and hasattr(fcntl, "F_GETPATH"):  # macOS
         try:
@@ -169,24 +171,16 @@ def _descriptor_path(fd: int) -> Path | None:
 
 
 def _within(root: Path, p: Path) -> bool:
-    """`p` is `root` or below it: by name, or else by the identity of `p` or one of its parents, which still
-    matches when the two are spelled differently (letter case on a case-insensitive disk, a `\\\\?\\` prefix)."""
+    r"""`p` is `root` or below it: by name, or else by the identity of `p` or one of its parents, which still
+    matches when the two are spelled differently (letter case on a case-insensitive disk, a `\\?\` prefix). A file
+    system without file ids (st_ino 0) can't be compared by identity."""
     if p == root or p.is_relative_to(root):
         return True
     try:
         want = os.lstat(root)
+        return bool(want.st_ino) and any(os.path.samestat(want, os.lstat(q)) for q in (p, *p.parents))
     except OSError:
         return False
-    if not want.st_ino:  # a file system without file ids can't be compared this way
-        return False
-    for q in (p, *p.parents):
-        try:
-            st = os.lstat(q)
-        except OSError:
-            return False
-        if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
-            return True
-    return False
 
 
 def _opened_inside(root: Path, fd: int, path: Path) -> bool:
@@ -195,13 +189,11 @@ def _opened_inside(root: Path, fd: int, path: Path) -> bool:
     real = _descriptor_path(fd)
     if real is None:
         try:
-            opened, named = os.fstat(fd), os.lstat(path)
+            same = os.path.samestat(os.fstat(fd), os.lstat(path))
         except OSError:
-            return False
-        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) or resolve_path(path) != path:
-            return False
-        real = path
-    return _within(root, real)
+            same = False
+        real = path if same and resolve_path(path) == path else None
+    return real is not None and _within(root, real)
 
 
 def _read_all(fd: int) -> bytes:
@@ -219,62 +211,58 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view):]
 
 
-def _replace_within(root: Path, dest: Path, data: bytes, refusal: str) -> None:
-    """Replace the file at the resolved path `dest` (inside the resolved `root`) with `data`.
-
-    The bytes go to a new O_EXCL file beside `dest` that is then renamed over it, so a link at `dest` is replaced
-    rather than written through and a failed write leaves the old file whole. The directory the new file lands in
-    is checked to be inside `root` after it is opened: as a descriptor that the new file and the rename then go
-    through where the platform allows, else through the new file's own descriptor. An existing file keeps its
-    permission bits. Raises ToolError(`refusal`) when the check fails.
-    """
-    tmp = f".{dest.name}.{os.getpid()}-{os.urandom(4).hex()}.tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY
-    if not _DIR_FD:
-        path = dest.parent / tmp
-        fd = os.open(path, flags, 0o666)
-        try:
-            try:
-                if not _opened_inside(root, fd, path):
-                    raise ToolError(refusal)
-                _write_all(fd, data)
-            finally:
-                os.close(fd)
-            os.replace(path, dest)
-        except BaseException:
-            path.unlink(missing_ok=True)
-            raise
-        return
+def _open_dir(path: Path, refusal: str) -> int:
+    """A descriptor for the directory at `path`; a symlink there raises ToolError(`refusal`)."""
     try:
-        dfd = os.open(dest.parent, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+        return os.open(path, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     except OSError as e:
         if e.errno in _LINK_ERRNOS or e.errno == errno.ENOTDIR:
             raise ToolError(refusal) from None
         raise
+
+
+def _mode_to_keep(name, at: dict) -> int | None:
+    """Permission bits of the regular file at `name` (relative to `at`'s dir_fd, if any), or None."""
     try:
-        if not _opened_inside(root, dfd, dest.parent):
-            raise ToolError(refusal)
-        try:
-            old = os.stat(dest.name, dir_fd=dfd, follow_symlinks=False)
-        except FileNotFoundError:
-            old = None
-        fd = os.open(tmp, flags, 0o666, dir_fd=dfd)
+        st = os.stat(name, follow_symlinks=False, **at)
+    except FileNotFoundError:
+        return None
+    return stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else None
+
+
+def _replace_within(root: Path, dest: Path, data: bytes, refusal: str) -> None:
+    """Replace the file at the resolved path `dest` (inside the resolved `root`) with `data`.
+
+    The bytes go to a new O_EXCL file beside `dest` that is then renamed over it, so a link at `dest` is replaced
+    rather than written through and a failed write leaves the old file whole. Before any bytes go in, the new
+    file's own descriptor must be inside `root`, which checks the directory it landed in. Where the platform
+    allows, that directory is opened once (refusing a symlink) and the new file and the rename both go through
+    that descriptor. An existing file keeps its permission bits. Raises ToolError(`refusal`) when the check fails.
+    """
+    tmp = f".{dest.name[:32]}.{os.getpid()}-{os.urandom(4).hex()}.tmp"  # dest's own name may be at the length limit
+    dfd = _open_dir(dest.parent, refusal) if _DIR_FD else None
+    at = {} if dfd is None else {"dir_fd": dfd}
+    new, old = (dest.parent / tmp, dest) if dfd is None else (tmp, dest.name)
+    try:
+        mode = _mode_to_keep(old, at) if _KEEP_MODE else None
+        fd = os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY, 0o666, **at)
         try:
             try:
-                if old is not None and stat.S_ISREG(old.st_mode):
-                    os.fchmod(fd, stat.S_IMODE(old.st_mode))
+                if not _opened_inside(root, fd, dest.parent / tmp):
+                    raise ToolError(refusal)
+                if mode is not None:
+                    os.fchmod(fd, mode)
                 _write_all(fd, data)
             finally:
                 os.close(fd)
-            os.replace(tmp, dest.name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            os.replace(new, old, **({} if dfd is None else {"src_dir_fd": dfd, "dst_dir_fd": dfd}))
         except BaseException:
-            try:
-                os.unlink(tmp, dir_fd=dfd)
-            except FileNotFoundError:
-                pass
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(new, **at)
             raise
     finally:
-        os.close(dfd)
+        if dfd is not None:
+            os.close(dfd)
 
 
 def write_text_within(root: Path, target: Path, text: str) -> Path:
