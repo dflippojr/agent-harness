@@ -231,6 +231,8 @@ The wrapper, rather than a model, writes the final comment file. Before writing 
 public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
 long tokens), plus Windows/macOS/Linux user-profile absolute paths. A match discards the whole body, removes any
 stale output and fails closed with `Review did not complete`; nothing is posted or copied into the check summary.
+Profile checks also normalize file URLs and their percent escapes. Git-quoted paths are decoded as UTF-8 bytes before
+matching repository citations, including deleted or renamed non-ASCII filenames.
 This is intentionally conservative: benign prose and examples matching a credential pattern are also rejected.
 Quote authentication scheme names in backticks (for example, `Bearer`) rather than printing a value-like sequence.
 Known repository paths (from the Git index or all diff files, including deletions and both rename sides) are exempt only from the generic long-token

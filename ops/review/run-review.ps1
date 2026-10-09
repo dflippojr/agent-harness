@@ -334,8 +334,52 @@ function Get-ReviewRedactionRules {
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
         [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
-        [pscustomobject]@{ Pattern = '(?i)(?<![A-Za-z0-9_./\\-])(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|/(?:Users|home)/[^/\s]+|/root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]' }
+        [pscustomobject]@{ Pattern = '(?i)(?<![A-Za-z0-9_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|/(?:Users|home)/[^/\s]+|/root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeFileUrls = $true }
     )
+}
+
+function Convert-ReviewProfileUrls {
+    param([string]$Text, [string]$Pattern)
+
+    $normalize = {
+        param($match)
+        $uri = $null
+        if ([Uri]::TryCreate($match.Value, [UriKind]::Absolute, [ref]$uri) -and $uri.IsFile) {
+            $path = [Uri]::UnescapeDataString($uri.AbsolutePath)
+            if ($path -match $Pattern) { return $path }
+        }
+        return $match.Value
+    }.GetNewClosure()
+    return [regex]::Replace($Text, '(?i)\bfile:[^\s<>"`]+', $normalize)
+}
+
+function ConvertFrom-ReviewGitQuotedPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not $Path.StartsWith('"')) { return $Path }
+    if (-not $Path.EndsWith('"') -or $Path.Length -lt 2) { throw 'Invalid Git path quoting' }
+    # Git octal escapes encode UTF-8 bytes, not Unicode code points.
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $encoded = $utf8.GetBytes($Path.Substring(1, $Path.Length - 2))
+    $decoded = New-Object System.Collections.Generic.List[byte]
+    $escapes = @{ 97 = 7; 98 = 8; 116 = 9; 110 = 10; 118 = 11; 102 = 12; 114 = 13; 34 = 34; 92 = 92 }
+    for ($index = 0; $index -lt $encoded.Length; $index++) {
+        if ($encoded[$index] -ne 92) { $decoded.Add($encoded[$index]); continue }
+        $index++
+        if ($index -ge $encoded.Length) { throw 'Invalid Git path quoting' }
+        $next = [int]$encoded[$index]
+        if ($escapes.ContainsKey($next)) { $decoded.Add([byte]$escapes[$next]); continue }
+        if ($next -lt 48 -or $next -gt 55) { throw 'Invalid Git path quoting' }
+        $octal = [string][char]$next
+        for ($count = 1; $count -lt 3 -and $index + 1 -lt $encoded.Length; $count++) {
+            $digit = [int]$encoded[$index + 1]
+            if ($digit -lt 48 -or $digit -gt 55) { break }
+            $index++
+            $octal += [char]$digit
+        }
+        $decoded.Add([Convert]::ToByte($octal, 8))
+    }
+    return $utf8.GetString($decoded.ToArray())
 }
 
 function Assert-ReviewOutputSafe {
@@ -348,6 +392,9 @@ function Assert-ReviewOutputSafe {
 
     foreach ($rule in (Get-ReviewRedactionRules)) {
         $scanText = $Text
+        if ($rule.PSObject.Properties['NormalizeFileUrls']) {
+            $scanText = Convert-ReviewProfileUrls -Text $scanText -Pattern $rule.Pattern
+        }
         if ($rule.PSObject.Properties['RepositoryPathsAllowed'] -and $Text -match $rule.Pattern -and $Workspace) {
             # Only the generic long-token heuristic exempts known repository paths.
             # Provider-token, credential and profile-path rules still scan the original text.
@@ -357,6 +404,7 @@ function Assert-ReviewOutputSafe {
                 $paths = @(& git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=false -C $Workspace ls-files --cached 2>$null)
                 if ($LASTEXITCODE -ne 0) { $paths = @() }
             } catch { $paths = @() }
+            $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
             $paths += $DiffPaths
             foreach ($path in $paths) {
                 if (-not $path -or $path -match '(^[/\\]|^[A-Za-z]:|[\r\n]|(^|/)\.\.(/|$))') { continue }
@@ -382,6 +430,9 @@ function Get-ReviewDiagnosticTail {
     $lines = @($Stderr -split "`r?`n")
     $redacted = (($lines | Select-Object -Last $MaxLines) -join [Environment]::NewLine)
     foreach ($rule in (Get-ReviewRedactionRules)) {
+        if ($rule.PSObject.Properties['NormalizeFileUrls']) {
+            $redacted = Convert-ReviewProfileUrls -Text $redacted -Pattern $rule.Pattern
+        }
         $redacted = $redacted -replace $rule.Pattern, $rule.Replacement
     }
     if ($redacted.Length -gt $MaxCharacters) {
@@ -1041,9 +1092,9 @@ function Get-ReviewDiffEmbedding {
     $fileMetadata = @($fileStarts | ForEach-Object {
         $oldPath = $_.Value
         $newPath = $_.Value
-        if ($_.Value -match '^diff --git ("?a/.*?"?) ("?b/.*"?)$') {
-            $oldPath = $Matches[1].Trim().Trim('"').Substring(2)
-            $newPath = $Matches[2].Trim().Trim('"').Substring(2)
+        if ($_.Value -match '^diff --git ("(?:[^"\\]|\\.)*"|a/.*?) ("(?:[^"\\]|\\.)*"|b/.*)\r?$') {
+            $oldPath = (ConvertFrom-ReviewGitQuotedPath -Path $Matches[1].Trim()).Substring(2)
+            $newPath = (ConvertFrom-ReviewGitQuotedPath -Path $Matches[2].Trim()).Substring(2)
         }
         [pscustomobject]@{ OldPath = $oldPath; NewPath = $newPath }
     })
