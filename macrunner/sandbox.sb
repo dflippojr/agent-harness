@@ -1,5 +1,6 @@
 ;; Sandbox for the agent's shell commands on the MacBook (sandbox-exec; deprecated by Apple but still enforced).
-;; The runner replaces the network placeholder at the end and passes WORKSPACE and HOME as parameters.
+;; The runner replaces the network placeholder at the end and passes WORKSPACE (this session's workspace),
+;; WORKSPACES (the directory holding all workspaces) and HOME as parameters.
 ;; In SBPL the last matching rule wins, so the order below matters.
 (version 1)
 (allow default)
@@ -20,18 +21,17 @@
   (subpath (string-append (param "HOME") "/.m2"))
   (subpath (string-append (param "HOME") "/.gradle")))
 
-;; The runner commits, saves and merges the branch outside the sandbox. Git config and hooks decide what git
-;; executes, so the agent may not change them (nor swap out the .git directory or its object alternates).
+;; Build settings that later Gradle runs outside the sandbox would execute.
 (deny file-write*
-  (literal (string-append (param "WORKSPACE") "/.git"))
-  (literal (string-append (param "WORKSPACE") "/.git/config"))
-  (literal (string-append (param "WORKSPACE") "/.git/objects/info/alternates"))
-  (subpath (string-append (param "WORKSPACE") "/.git/hooks"))
-  (subpath (string-append (param "WORKSPACE") "/.git/info")))
+  (subpath (string-append (param "HOME") "/.gradle/init.d"))
+  (literal (string-append (param "HOME") "/.gradle/init.gradle"))
+  (literal (string-append (param "HOME") "/.gradle/init.gradle.kts"))
+  (literal (string-append (param "HOME") "/.gradle/gradle.properties")))
 
-;; Credentials and personal data: neither readable nor writable.
+;; Credentials and personal data: neither readable nor writable. ~/.agent-harness holds the runner and client
+;; tokens, the runner's code and its host-side git scratch space (runner/tmp); only the workspace is reopened below.
 (deny file-read* file-write*
-  (subpath (string-append (param "HOME") "/.agent-harness/runner"))
+  (subpath (string-append (param "HOME") "/.agent-harness"))
   (subpath (string-append (param "HOME") "/.ssh"))
   (subpath (string-append (param "HOME") "/.aws"))
   (subpath (string-append (param "HOME") "/.gnupg"))
@@ -61,7 +61,33 @@
   (subpath (string-append (param "HOME") "/Library/Application Support/Firefox"))
   (subpath (string-append (param "HOME") "/Library/Application Support/BraveSoftware")))
 
+;; This session's workspace, plus stat (not listing) of its parent directories so path lookups resolve.
+(allow file-read* file-write* (subpath (param "WORKSPACE")))
+(allow file-read-metadata
+  (literal (string-append (param "HOME") "/.agent-harness"))
+  (literal (param "WORKSPACES")))
+
+;; The runner commits, saves and merges the branch outside the sandbox. Git config and hooks decide what git
+;; executes, so the agent may not change them (nor swap out the .git directory or its object alternates).
+(deny file-write*
+  (literal (string-append (param "WORKSPACE") "/.git"))
+  (literal (string-append (param "WORKSPACE") "/.git/config"))
+  (literal (string-append (param "WORKSPACE") "/.git/objects/info/alternates"))
+  (subpath (string-append (param "WORKSPACE") "/.git/hooks"))
+  (subpath (string-append (param "WORKSPACE") "/.git/info")))
+
 ;; Keychain items (e.g. git's osxkeychain credentials) are served by securityd, not read from files.
 (deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc"))
+
+;; Programs started through launchd, LaunchServices or Apple Events run outside this profile, so commands may not
+;; ask for them: no launchctl/open/osascript, no LaunchServices or launchd job lookups, no Apple Events.
+(deny process-exec
+  (literal "/bin/launchctl")
+  (literal "/usr/bin/open")
+  (literal "/usr/bin/osascript"))
+(deny mach-lookup
+  (global-name "com.apple.coreservices.launchservicesd")
+  (global-name-regex #"^com\.apple\.launchd"))
+(deny appleevent-send)
 
 {{NETWORK}}

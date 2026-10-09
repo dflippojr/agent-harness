@@ -7,10 +7,12 @@ sandbox-exec (see sandbox.sb), and git work on the user's source repositories ou
 
 Stdlib-only Agent Harness Runner, installed with Agent Harness for Mac (or legacy SSH deploy) as a launchd agent.
 Layout under ~/.agent-harness:
-    runner/config.json   server URL, runner name and bearer token (unreadable inside the sandbox)
+    runner/config.json   server URL, runner name and bearer token
+    runner/tmp/          host-side git's throwaway git dirs and hooks dirs
     runner/app/          this file, sandbox.sb, and the daemon's shared modules under harness/
     workspaces/<id>/     one per session: a clone of the project repo, or an empty scratch directory
     logs/runner.log      stdout/stderr (launchd)
+The sandbox can neither read nor write anything under ~/.agent-harness except the session's own workspace.
 """
 
 from __future__ import annotations
@@ -252,7 +254,8 @@ class Executor:
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
             profile = self.profile_template.replace("\n{{NETWORK}}", "\n" + ("" if network else OFFLINE_RULES))
-            argv = ["/usr/bin/sandbox-exec", "-p", profile, "-D", f"WORKSPACE={ws}", "-D", f"HOME={self.home}"] + argv
+            argv = ["/usr/bin/sandbox-exec", "-p", profile, "-D", f"WORKSPACE={ws}",
+                    "-D", f"WORKSPACES={self.workspaces}", "-D", f"HOME={self.home}"] + argv
         proc = subprocess.Popen(argv, cwd=str(ws), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, start_new_session=os.name == "posix")
         with self.lock:
@@ -274,6 +277,7 @@ class Executor:
             timed_out = True
             self.kill(proc)
         finally:
+            self.end_group(proc)
             with self.lock:
                 self.procs.pop(rid, None)
                 self.proc_sessions.pop(rid, None)
@@ -303,6 +307,17 @@ class Executor:
                 os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
             except (ProcessLookupError, PermissionError):
                 pass
+
+    @staticmethod
+    def end_group(proc: subprocess.Popen) -> None:
+        """Stop whatever the command left running in its process group (background jobs, nohup children), so
+        nothing from one command keeps running into the next or into the runner's host-side git."""
+        if not hasattr(os, "killpg") or proc.poll() is None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
     def op_cancel(self, p: dict):
         with self.lock:
@@ -415,6 +430,12 @@ class Executor:
         remove_tree(ws)
         self.drop_tmpdir(sid)
         return {"removed": True}
+
+
+def git_temp_root(home: Path) -> Path:
+    """Where host-side git keeps its isolation directories: under runner/, which the sandbox profile denies, so a
+    sandboxed command can't plant hooks or config in them."""
+    return home / ".agent-harness" / "runner" / "tmp"
 
 
 def remove_tree(path: Path) -> None:
@@ -574,6 +595,7 @@ def main() -> None:
         profile=None if cfg.get("sandbox") is False else APP_DIR / "sandbox.sb",
         home=home, min_free_gb=float(cfg.get("min_free_gb", 10)))
     executor.server = cfg["server"]
+    projects.TEMP_ROOT = git_temp_root(home)
     runner = Runner(Client(cfg["server"], cfg.get("name", "macbook"), cfg["token"]), executor)
 
     def stop(signum, frame):
