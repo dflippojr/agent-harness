@@ -60,9 +60,9 @@ try { storage = browser.localStorage; } catch (_) { /* storage blocked */ }
 const session = createSession({ agentHarnessWeb, storage });
 const { api, fetchMe, ownerSurface, isGuest, isMember, isOwner, canChat } = session;
 const chrome = mountChrome({ els, browser, session });
-const { layoutBar, setHeader, showFab, toast, setConnLive } = chrome;
+const { layoutBar, setHeader, showFab, toast, setConnState, onConnState } = chrome;
 const tabs = mountTabs({ els, session, browser });
-const stream = mountStream({ agentHarnessWeb, isBlocked: session.isBlocked, setConnLive, ownerSurface, isGuest, browser });
+const stream = mountStream({ agentHarnessWeb, isBlocked: session.isBlocked, setConnState, ownerSurface, isGuest, browser });
 const { openStream } = stream;
 const { daemonImage, downloadDaemonFile } = mountDaemonFiles({ agentHarnessWeb, isBlocked: session.isBlocked, ownerSurface, toast, browser });
 const signin = mountSignIn({ els, api, getWebAuth: session.getWebAuth, toast, browser });
@@ -73,12 +73,16 @@ const { go, route, onLeave } = mountRouter({ els, session, chrome, tabs, signin,
   views: () => ({ viewChat, viewList, viewNew, viewActions, viewProfile, viewImages, viewImage, viewImageEdit, viewImageFull,
     viewJobs, viewJob, viewSession }) });
 const warmModel = createWarmModel({ api, session });
-const confirmText = (m) => confirm(m);
+
+// Mounted before the pages so Settings' version row can reload into a newer bundle (#512).
+const build = { WEB_BUILD_ID, WEB_PROTOCOL };
+const { checkCompatibility, reloadAndUpdate } = mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser });
 
 // ---------- pages ----------
-const { daemonSettingsCard } = mountDaemonSettings({ h, fill, append, api, toast, isGuest, location, confirm: confirmText });
+const { daemonSettingsCard } = mountDaemonSettings({ h, fill, append, api, toast, isGuest, location });
 const { viewProfile, copyBox, githubConnectionCard, readAppIcon, applyAppIcon, applyTheme, applyTextSize } = mountProfile({ $app, $conn, $profileIcon,
-  layoutBar, setHeader, h, fill, append, api, getWebAuth: session.getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route, daemonSettingsCard, browser });
+  layoutBar, setHeader, h, fill, append, api, getWebAuth: session.getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route, daemonSettingsCard,
+  build, reloadAndUpdate, onConnState, browser });
 applyTheme();
 applyTextSize();
 
@@ -86,20 +90,18 @@ const { viewInfo } = mountSessionInfo({ $app, h, append, copyBox, downloadDaemon
 const { viewChat } = mountChat({ $app, h, fill, append, api, setHeader, toast, go, validId, canChat, onLeave, openStream, ownerSurface, badge,
   TERMINAL, agentHarnessWeb, browser });
 const { viewSession } = mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, layoutBar, viewInfo, TERMINAL, agentHarnessWeb, browser });
+  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser });
 const { viewNew, confirmGpuQueue } = mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave,
   githubConnectionCard, warmModel, browser });
 const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave,
-  progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location, confirm: confirmText });
+  progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location });
 const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader, showFab, toast, go, route, isGuest,
-  confirmGpuQueue, badge, jobStatusBadge, location, confirm: confirmText });
+  confirmGpuQueue, badge, jobStatusBadge, location });
 const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, showFab, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, openStream, ownerSurface, agentHarnessWeb, browser });
 const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });
 
 // ---------- boot ----------
-const { checkCompatibility } = mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build: { WEB_BUILD_ID, WEB_PROTOCOL }, browser });
-
 async function loadProfileIcon() {
   if (session.isBlocked()) return;
   try { $profileIcon.textContent = (await api("/profile")).emoji; } catch (_) { /* offline */ }

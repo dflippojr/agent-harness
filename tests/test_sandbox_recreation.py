@@ -118,3 +118,17 @@ def test_recreation_without_setup_says_so(docker):
 def test_project_setup_field():
     assert _project_from_spec("p", {"setup": "make deps"}).setup == "make deps"
     assert _project_from_spec("p", {}).setup == ""
+
+
+def test_a_restarted_container_starts_without_egress(docker):
+    docker.state = "exited"
+    assert asyncio.run(make().ensure_running()) == "started"
+    assert ["docker", "network", "disconnect", "-f", SandboxConfig().egress_network, "harness-s1"] in docker.calls
+
+
+def test_restarting_after_an_interrupted_command_detaches_egress(docker):
+    docker.state = "running"
+    asyncio.run(make().restart())
+    verbs = docker.verbs()
+    assert verbs.index("restart") < verbs.index("network")
+    assert ["docker", "network", "disconnect", "-f", SandboxConfig().egress_network, "harness-s1"] in docker.calls

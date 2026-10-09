@@ -3,11 +3,14 @@
 // session chrome helpers come from lib/session-ui.mjs, so this module imports under plain Node and never reaches into another page.
 import { TARGET_LABEL } from "../lib/targets.mjs";
 import { fmtElapsed, fmtTokens, readFraction, readingText, fmtSpan, pluralize } from "../lib/format.mjs";
-import { toolSummaryText, approvalWhat } from "../lib/tools.mjs";
+import { toolSummaryText, approvalWhat, toolKind, resultState } from "../lib/tools.mjs";
+import { createToolRows } from "../lib/tool-row.mjs";
 import { approvalDiffClass, diffLineClass } from "../lib/diff.mjs";
 import { md } from "../lib/markdown.mjs";
 import { withTaint } from "../lib/taint.mjs";
-import { mountSessionUi, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
+import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
+import { sinceText } from "../lib/widgets.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
@@ -18,29 +21,34 @@ const SESSION_EVENT_TYPES = [
 ];
 
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, layoutBar, viewInfo, TERMINAL, agentHarnessWeb, browser }) {
+  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser, confirmSheet = sheets.confirmSheet,
+  promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
-const { window, document, location, confirm, setInterval, clearInterval, setTimeout } = browser;
-const { sessionTitle, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser });
+const { window, document, location, setInterval, clearInterval, setTimeout } = browser;
+const { renameTitle, sessionMenu, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser });
 const pageMetrics = () => measurePage(browser);
 const scrollPage = (top) => scrollPageOf(top, browser);
+const { toolRow, closeViewer } = createToolRows({ h, fill, toast, browser });
 
 async function viewSession(sid, tab, focusApproval) {
   if (!validId(sid)) { go("#/agents", true); return; }
   let session = await api(`/sessions/${sid}`);
   sid = session.id;
-  setHeader("agents", session.title || "Session");
+  setHeader("agents", session.title || "Session", { page: true });
   let left = false;
   onLeave(() => { left = true; });
 
-  const tabs = h("div", { class: "tabs" },
+  // One compact header (#514): the bar carries back, the title and the ⋯ menu; below it sit a 32 px status strip and the
+  // segmented Transcript / Changes / Info control.
+  const tabs = h("div", { class: "tabs session-tabs", role: "group", "aria-label": "Session view" },
     ["transcript", "changes", "info"].map((name) => h("button", {
       class: (tab === name || (tab === "approval" && name === "transcript")) ? "on" : "",
+      type: "button",
       onclick: () => go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true),
     }, name[0].toUpperCase() + name.slice(1))));
-  const head = h("div", { class: "row small" });
-  const usage = h("div", { class: "row small usage" });
-  append($app, h("div", { class: "session-chrome" }, sessionTitle(session, () => !left)), head, usage, tabs);
+  const head = h("div", { class: "session-strip" });
+  const sessionChrome = h("div", { class: "session-chrome" }, head, tabs);
+  append($app, sessionChrome);
   const jumps = bindSessionJumps();
   const pages = [];
   const fetchById = new Map();
@@ -60,18 +68,42 @@ async function viewSession(sid, tab, focusApproval) {
     const backendUsage = session.backend && session.backend !== "local" && limits.utilization !== undefined
       ? ` · ${limitName} ${Math.round(limits.utilization * 100)}%` : "";
     const onTarget = session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : "";
-    fill(head, badge(session.status),
-      session.queue_position > 0 ? h("span", { class: "muted" }, `#${session.queue_position} in GPU queue`) : null,
-      h("span", { class: "muted" }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`));
     const pct = ctxLimit && ctxUsed ? Math.round((100 * ctxUsed) / ctxLimit) : null;
-    const ctxClass = `ctx${pct >= 55 ? " high" : ""}`;
-    fill(usage,
-      h("span", { class: "muted", title: "Cumulative tokens for this session (prompt tokens in, generated tokens out)" },
-        `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`),
-      pct === null ? null : h("span", { class: ctxClass, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up.` },
-        progressBar(pct / 100), `${pct}% context`));
+    const tokens = `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`;
+    const taint = session.taint || [];
+    fill(head, badge(session.status),
+      session.queue_position > 0 ? h("span", { class: "badge" }, `#${session.queue_position} in GPU queue`) : null,
+      taint.length ? h("span", { class: "badge warn", title: `Untrusted content read: ${taint.map((t) => t.origin).join(", ")}. Risky actions ask for approval until cleared.` }, "Tainted") : null,
+      h("span", { class: "session-strip-meta", title: tokens }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`),
+      pct === null ? null : h("span", { class: `ctx${pct >= 55 ? " high" : ""}`, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up. ${tokens}.` },
+        progressBar(pct / 100), `${pct}%`));
   };
   renderHead();
+
+  // The overflow menu's actions work on every tab, so they live above the tab split. Changes and Info get no stream, so
+  // each action repaints the strip itself.
+  const cancelTask = async () => {
+    if (!(await confirmSheet({ title: "Cancel this task?", confirmLabel: "Cancel task", cancelLabel: "Keep running",
+      destructive: true }))) return;
+    try { session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) }; renderHead(); } catch (e) { toast(e.message); }
+  };
+  const menuActions = {
+    rename: () => renameTitle(session, () => !left),
+    cancel: cancelTask,
+    rerun: async () => {
+      try {
+        const s = await api(`/sessions/${sid}/rerun`, { method: "POST" });
+        location.hash = `#/s/${s.id}`;
+      } catch (e) { toast(e.message); }
+    },
+    "clear-taint": async () => {
+      if (!(await confirmSheet({ title: "Clear taint?", message: "Risky actions will follow the project rules again.", confirmLabel: "Clear taint",
+        destructive: true }))) return;
+      try { session = { ...session, ...(await api(`/sessions/${sid}/taint/clear`, { method: "POST" })) }; renderHead(); } catch (e) { toast(e.message); }
+    },
+    download: () => downloadDaemonFile(`/sessions/${sid}/transcript`, `${sid}.md`),
+  };
+  if (!isGuest()) sessionMenu({ items: () => sessionMenuItems(session, { guest: false, terminal: TERMINAL }), run: (id) => menuActions[id]() });
 
   if (tab === "changes") { await viewChanges(session); jumps.updateJumps(); return; }
   if (tab === "info") { viewInfo(session); jumps.updateJumps(); return; }
@@ -79,12 +111,31 @@ async function viewSession(sid, tab, focusApproval) {
   const feed = h("div");
   append($app, feed);
 
+  // #510: while the transcript's stream is down, a strip under the segmented control says so and how long ago the last
+  // event arrived, instead of the old silent retry loop. It sits in the sticky chrome so it shows at any scroll position.
+  const connStrip = h("div", { class: "conn-strip", role: "status", hidden: true });
+  sessionChrome.append(connStrip);
+  let lastHeardAt = Date.now();
+  let streamState = "";
+  let connTick = null;
+  const paintConnStrip = () => {
+    const down = streamState === "reconnecting" || streamState === "offline";
+    connStrip.classList.toggle("offline", streamState === "offline");
+    connStrip.textContent = down ? `${streamState === "offline" ? "Offline" : "Reconnecting"} · last event ${sinceText(lastHeardAt)}` : "";
+    if (connStrip.hidden === down) {
+      connStrip.hidden = !down;
+      layoutBar();  // the sticky chrome changed height
+    }
+    if (down && !connTick) connTick = setInterval(paintConnStrip, 1000);
+    if (!down && connTick) { clearInterval(connTick); connTick = null; }
+  };
+  onLeave(() => clearInterval(connTick));
+
   // composer (owner only; guests may watch the live transcript)
   const input = h("textarea", { placeholder: "Message the agent…", rows: 1 });
   const send = h("button", { class: "btn primary" }, "Send");
-  const actions = h("div", { class: "row", style: "margin-bottom:6px" });
   const composer = isGuest() ? null : h("div", { class: "composer" }, h("div", { class: "inner", style: "flex-direction:column;align-items:stretch" },
-    actions, h("div", { class: "row", style: "flex-wrap:nowrap;align-items:flex-end" }, input, send)));
+    h("div", { class: "row", style: "flex-wrap:nowrap;align-items:flex-end" }, input, send)));
   if (composer) document.body.append(composer);
   input.addEventListener("input", () => { input.style.height = "44px"; input.style.height = `${Math.min(160, input.scrollHeight)}px`; });
   send.addEventListener("click", async () => {
@@ -99,38 +150,9 @@ async function viewSession(sid, tab, focusApproval) {
     send.disabled = false;
   });
 
+  // Cancel, Run again and Clear taint moved to the ⋯ menu (#514); the composer keeps only its placeholder in step.
   const renderActions = () => {
-    if (isGuest()) return;
-    const active = !TERMINAL.has(session.status);
-    input.placeholder = active ? "Add guidance…" : "Continue this session…";
-    fill(actions,
-      active ? h("button", {
-        class: "btn small bad",
-        onclick: async () => {
-          if (!confirm("Cancel this task?")) return;
-          try { session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) }; } catch (e) { toast(e.message); }
-        },
-      }, "Cancel") : null,
-      !active ? h("button", {
-        class: "btn small",
-        onclick: async () => {
-          try {
-            const s = await api(`/sessions/${sid}/rerun`, { method: "POST" });
-            location.hash = `#/s/${s.id}`;
-          } catch (e) { toast(e.message); }
-        },
-      }, "Run again as new session") : null,
-      (session.taint || []).length ? h("button", {
-        class: "btn small",
-        type: "button",
-        title: `Untrusted content read: ${session.taint.map((t) => t.origin).join(", ")}. Risky actions ask for approval until cleared.`,
-        onclick: async () => {
-          if (!confirm("Clear taint? Risky actions will follow the project rules again.")) return;
-          try { session = { ...session, ...(await api(`/sessions/${sid}/taint/clear`, { method: "POST" })) }; renderActions(); } catch (e) { toast(e.message); }
-        },
-      }, "Clear taint") : null,
-      h("span", { class: "spacer" }),
-      h("button", { class: "btn small", type: "button", onclick: () => go(`#/s/${sid}/changes`, true) }, "Changes"));
+    input.placeholder = TERMINAL.has(session.status) ? "Continue this session…" : "Add guidance…";
   };
   renderActions();
 
@@ -237,19 +259,35 @@ async function viewSession(sid, tab, focusApproval) {
     let args = {};
     try { args = JSON.parse(fn.arguments || "{}"); } catch (_) { args = { raw: fn.arguments }; }
     if (fn.name === "web_fetch" && args.url) rememberFetch(call.id, args.url, "");
-    const summaryText = toolSummaryText(fn, args);
-    const state = h("span", { class: "state" }, "…");
-    const body = h("div", { class: "body" }, h("pre", {}, JSON.stringify(args, null, 2)));
-    const el = h("details", { class: "tool" },
-      h("summary", {}, h("span", { class: "name" }, fn.name), h("span", { class: "args" }, summaryText || ""), state), body);
-    const slot = h("div", { class: "ev" }, el);
-    calls.set(call.id, { el, state, body, slot });
+    const row = toolRow({ name: fn.name, summary: toolSummaryText(fn, args), kind: toolKind(fn.name, args), args });
+    const slot = h("div", { class: "ev" }, row.el);
+    calls.set(call.id, Object.assign(row, { slot }));
     return slot;
   };
 
+  // A pending approval is a bottom sheet pinned over the session (#507); the transcript keeps a one-line record that the
+  // decision fills in. The composer yields while any sheet is open.
+  const syncComposer = () => { if (composer) composer.hidden = pendingSheets.size > 0; };
+  const pendingSheets = new Set();
+  const dismissSheets = () => {
+    for (const id of [...pendingSheets]) {
+      const a = approvals.get(id);
+      a.sheet.remove();
+      a.card.classList.add("decided");
+      fill(a.slotState, "No longer pending");
+    }
+    pendingSheets.clear();
+    syncComposer();
+  };
   const approvalCard = (a) => {
-    const note = h("input", { type: "text", placeholder: "Note for the agent (optional)" });
-    const buttons = h("div", { class: "row end" });
+    const note = h("input", { type: "text", id: `approval-note-${a.id}`, placeholder: "Note for the agent (optional)", hidden: true });
+    const noteToggle = h("button", { class: "approval-note-toggle", type: "button", "aria-expanded": "false", "aria-controls": note.id }, "Add a note for the agent");
+    noteToggle.addEventListener("click", () => {
+      note.hidden = false;
+      noteToggle.hidden = true;
+      if (note.focus) note.focus();
+    });
+    const buttons = h("div", { class: "approval-actions" });
     const decide = async (decision) => {
       buttons.querySelectorAll("button").forEach((b) => { b.disabled = true; });
       try {
@@ -260,17 +298,17 @@ async function viewSession(sid, tab, focusApproval) {
       }
     };
     if (isGuest()) {
-      append(buttons,h("p", { class: "muted small" }, "Demo access cannot approve or deny."));
+      append(buttons, h("p", { class: "muted small" }, "Demo access cannot approve or deny."));
     } else {
       append(buttons,
-        h("button", { class: "btn bad solid", onclick: () => decide("deny") }, "Deny"),
-        h("button", { class: "btn ok", onclick: () => decide("approve") }, "Approve"));
+        h("button", { class: "btn approval-deny", type: "button", onclick: () => decide("deny") }, "✕ Deny"),
+        h("button", { class: "btn approval-approve", type: "button", onclick: () => decide("approve") }, "✓ Approve"));
     }
     const what = approvalWhat(a);
     const reviewerReason = a.smart?.reason ? `: ${a.smart.reason}` : "";
     const rec = a.smart?.recommendation
       ? h("p", { class: "smart-rec" },
-          `Reviewer ${a.smart.recommendation} (${Math.round((a.smart.confidence || 0) * 100)}%)${reviewerReason}`)
+          `Reviewer: ${a.smart.recommendation} · ${Math.round((a.smart.confidence || 0) * 100)}%${reviewerReason}`)
       : null;
     // Memory library changes carry "summary\n\n<unified diff>"; file writes carry just the diff.
     const memory = a.tool === "memory_edit" || a.tool === "memory_write";
@@ -278,19 +316,33 @@ async function viewSession(sid, tab, focusApproval) {
     const diffView = /^@@ /m.test(diff) ? h("div", { class: "diff approval-diff" }, diff.split("\n")
       .filter((line) => !/^(---|\+\+\+) /.test(line))
       .map((line) => h("div", { class: approvalDiffClass(line) }, line))) : null;
-    const card = h("div", { class: "approval", id: `approval-${a.id}` },
-      h("h4", {}, `Approval needed: ${a.reason || a.tool}`),
+    const slotState = h("div", { class: "muted small" }, "Waiting for your decision");
+    const slot = h("div", { class: "approval approval-slot", id: `approval-${a.id}` },
+      h("strong", {}, `Approval needed: ${a.reason || a.tool}`), slotState);
+    const sheet = h("section", { class: "approval-sheet", role: "region", "aria-label": "Approval needed" },
+      h("div", { class: "approval-head" },
+        h("h4", {}, "Approval needed"),
+        h("a", { href: `#approval-${a.id}`, class: "approval-show", onclick: (ev) => {
+          ev.preventDefault();
+          if (slot.scrollIntoView) slot.scrollIntoView({ block: "center", behavior: "smooth" });
+        } }, "Show in transcript")),
+      h("p", { class: "approval-what" }, a.reason || a.tool),
       rec,
       summary ? h("p", { style: "margin:4px 0 8px" }, summary) : null,
       diffView || h("pre", {}, a.detail || what),
-      a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args.path || ""}`) : null,
-      note, buttons);
-    approvals.set(a.id, { card, buttons, note });
+      a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args?.path || ""}`) : null,
+      noteToggle, note, buttons,
+      isGuest() ? null : h("button", { class: "approval-cancel", type: "button", onclick: cancelTask }, "Cancel the whole task"));
+    approvals.set(a.id, { card: slot, slotState, sheet, buttons, note });
+    dismissSheets(); // one decision at a time: a newer request supersedes an orphaned older one, so nothing can hold the composer hidden
+    pendingSheets.add(a.id);
+    document.body.append(sheet);
+    syncComposer();
     if (focusApproval === a.id) {
-      card.classList.add("focus");
-      setTimeout(() => card.scrollIntoView({ block: "center", behavior: "smooth" }), 50);
+      slot.classList.add("focus");
+      setTimeout(() => slot.scrollIntoView({ block: "center", behavior: "smooth" }), 50);
     }
-    return card;
+    return slot;
   };
 
   const handlers = {
@@ -298,12 +350,12 @@ async function viewSession(sid, tab, focusApproval) {
     app_context: (e) => add(h("details", { class: "thinking ev" }, h("summary", {}, "Context from the app"), h("div", { class: "text" }, e.data.content))),
     taint_added: (e) => {
       session = { ...session, taint: withTaint(session.taint, e.data) };
-      renderActions();
+      renderHead();
       add(h("p", { class: "note" }, `Session read untrusted content from ${e.data.origin}: risky actions now ask for approval`));
     },
     taint_cleared: () => {
       session = { ...session, taint: [] };
-      renderActions();
+      renderHead();
       add(h("p", { class: "note" }, "Taint cleared by the owner"));
     },
     app_tool_call: (e) => add(h("p", { class: "note" }, `Asked the app to run ${e.data.name}`)),
@@ -363,7 +415,8 @@ async function viewSession(sid, tab, focusApproval) {
     },
     tool_call: (e) => {
       const c = calls.get(e.data.id);
-      if (c && e.data.decision !== "allow") c.state.textContent = e.data.decision === "ask" ? "needs approval" : "blocked";
+      if (c && e.data.decision === "ask") c.setState("needs approval", "warn");
+      else if (c && e.data.decision !== "allow") c.setState("blocked", "err");
     },
     approval_requested: (e) => {
       const card = approvalCard(e.data);
@@ -376,7 +429,7 @@ async function viewSession(sid, tab, focusApproval) {
         `Auto-approved: the deterministic gate and smart reviewer both allowed this ${e.data.tool || "call"} (${e.data.reason || "routine workspace work"}).`);
       add(badge);
       const c = calls.get(e.data.tool_call_id);
-      if (c) c.state.textContent = "auto-approved";
+      if (c) c.setState("auto-approved", "ok");
     },
     smart_review: () => {},
     approval_decided: (e) => {
@@ -384,8 +437,10 @@ async function viewSession(sid, tab, focusApproval) {
       if (!a) return;
       a.card.classList.add("decided");
       a.card.classList.remove("focus");
-      a.note.remove();
-      fill(a.buttons, h("span", { class: `badge ${e.data.status === "approved" ? "done" : "failed"}` },
+      a.sheet.remove();
+      pendingSheets.delete(e.data.id);
+      syncComposer();
+      fill(a.slotState, h("span", { class: `badge ${e.data.status === "approved" ? "done" : "failed"}` },
         e.data.status + (e.data.note ? `: ${e.data.note}` : "")));
     },
     tool_result: (e) => {
@@ -394,12 +449,14 @@ async function viewSession(sid, tab, focusApproval) {
         const fromOutput = (e.data.output.split("\n").find((line) => /^https?:\/\//i.test(line.trim())) || "").trim();
         rememberFetch(e.data.id, fetchById.get(e.data.id) || fromOutput, e.data.output);
       }
-      const c = calls.get(e.data.id);
-      const out = h("pre", {}, e.data.output);
-      if (!c) { add(h("details", { class: "tool ev" }, h("summary", {}, e.data.name), out)); return; }
-      c.state.textContent = `${e.data.ok ? "ok" : "error"} · ${e.data.seconds}s`;
-      c.state.className = `state ${e.data.ok ? "ok" : "err"}`;
-      c.body.append(out);
+      let c = calls.get(e.data.id);
+      if (!c) {
+        c = toolRow({ name: e.data.name, summary: "", kind: toolKind(e.data.name, null), args: null });
+        add(h("div", { class: "ev" }, c.el));
+      }
+      const done = resultState(e.data.ok, e.data.seconds);
+      c.setState(done.text, done.kind);
+      c.setOutput(e.data.output, e.data.output_chars);
     },
     compaction_started: (e) => {
       if (live && !live.thinkText.textContent && !live.content.textContent) { live.el.remove(); live = null; }
@@ -477,11 +534,20 @@ async function viewSession(sid, tab, focusApproval) {
       add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved `,
         local ? h("button", {
           class: "btn small", type: "button", title: "Restore the workspace and the agent's context to this point. Packages, processes and files outside the workspace are not undone.",
-          onclick: (ev) => confirm(`Rewind to checkpoint ${turn}? Later file changes are undone (the transcript keeps them).`) && void act(ev.target, "rewind"),
+          onclick: async (ev) => {
+            const btn = ev.currentTarget;
+            if (await confirmSheet({ title: `Rewind to checkpoint ${turn}?`, message: "Later file changes are undone (the transcript keeps them).",
+              confirmLabel: "Rewind", destructive: true })) void act(btn, "rewind");
+          },
         }, "Rewind here") : null, " ",
         h("button", {
           class: "btn small", type: "button", title: "Start a new session from this point, on its own branch",
-          onclick: (ev) => { const prompt = window.prompt("Instruction for the forked session"); if (prompt?.trim()) void act(ev.target, "fork", { prompt }); },
+          onclick: async (ev) => {
+            const btn = ev.currentTarget;
+            const prompt = await promptSheet({ title: `Fork from checkpoint ${turn}`, label: "Instruction for the forked session",
+              message: "Starts a new session from this point, on its own branch.", confirmLabel: "Fork", validate: sheets.required("an instruction") });
+            if (prompt?.trim()) void act(btn, "fork", { prompt });
+          },
         }, "Fork from here")));
     },
     rewound: (e) => add(h("p", { class: "note" }, `Rewound to checkpoint ${e.data.turn}: the workspace and context are as they were then; later turns above are kept for the record`)),
@@ -529,6 +595,9 @@ async function viewSession(sid, tab, focusApproval) {
     queue: (e) => { session.queue_position = e.data.position; renderHead(); },
     status: (e) => {
       session.status = e.data.status;
+      // The run ended (cancelled elsewhere, finished): a sheet left open would offer a decision that no longer exists.
+      // Not on waiting_target and the like: a pending approval survives those and is not replayed.
+      if (TERMINAL.has(e.data.status)) dismissSheets();
       if (e.data.status !== "queued") session.queue_position = null;
       renderHead();
       renderActions();
@@ -550,6 +619,7 @@ async function viewSession(sid, tab, focusApproval) {
   const tracked = {};
   for (const type of SESSION_EVENT_TYPES) {
     tracked[type] = (e) => {
+      lastHeardAt = Date.now();
       const persisted = e.seq !== null && e.seq !== undefined;
       if (persisted) {
         if (e.seq <= lastSeq) return;
@@ -564,8 +634,10 @@ async function viewSession(sid, tab, focusApproval) {
   onLeave(openStream(() => (isGuest() && !agentHarnessWeb.token
     ? agentHarnessWeb.url(`/sessions/${encodeURIComponent(sid)}/events?after=${lastSeq}`, "legacy")
     : agentHarnessWeb.sessionStreamUrl(sid, lastSeq)), tracked,
-    { authorized: !!agentHarnessWeb.token }));
+    { authorized: !!agentHarnessWeb.token, onState: (next) => { streamState = next; paintConnStrip(); } }));
   if (composer) onLeave(() => composer.remove());
+  onLeave(() => { for (const a of approvals.values()) a.sheet.remove(); });
+  onLeave(closeViewer);
 }
 
 function reviewCard(s) {
@@ -583,7 +655,8 @@ function reviewCard(s) {
     }
     const ask = h("button", { class: "btn primary" }, "Ask agent to resolve");
     ask.addEventListener("click", async () => {
-      if (!confirm(`Ask the agent to merge origin/${base} and resolve ${files.length} conflicting file${files.length === 1 ? "" : "s"}?`)) return;
+      if (!(await confirmSheet({ title: `Ask the agent to merge origin/${base} and resolve ${files.length} conflicting file${files.length === 1 ? "" : "s"}?`,
+        confirmLabel: "Ask agent" }))) return;
       ask.disabled = true;
       try {
         await api(`/sessions/${s.id}/messages`, { method: "POST", body: { content:
@@ -601,9 +674,9 @@ function reviewCard(s) {
       h("ul", { class: "small" }, files.map((file) => h("li", {}, h("code", {}, file)))),
       h("div", { class: "row end" }, ask));
   };
-  const act = (action, question) => async (ev) => {
-    if (question && !confirm(question)) return;
+  const act = (action, ask) => async (ev) => {
     const card = ev.target.closest(".card");
+    if (ask && !(await confirmSheet(ask))) return;
     card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
     try {
       const updated = await api(`/sessions/${s.id}/review/${action}`, { method: "POST" });
@@ -622,16 +695,18 @@ function reviewCard(s) {
   const buttons = [];
   if (!isGuest() && !busy && !s.workspace_removed && s.review !== "discarded") {
     if (s.repo_kind === "local") {
-      buttons.push(h("button", { class: "btn ok", onclick: act("merge", `Squash-merge ${s.branch} into ${base}?`) }, `Merge into ${base}`));
+      buttons.push(h("button", { class: "btn ok", onclick: act("merge", { title: `Squash-merge ${s.branch} into ${base}?`, confirmLabel: "Merge" }) },
+        `Merge into ${base}`));
       if (s.push_target) {
-        buttons.push(h("button", { class: "btn ok", onclick: act("push",
-          `Push branch ${s.branch} to GitHub repository ${s.push_target} (branch ${s.branch}) using your GitHub connection? `
-          + "GitHub records your account as the pusher; commit authors stay as they are.") }, "Push to GitHub"));
+        buttons.push(h("button", { class: "btn ok", onclick: act("push", {
+          title: `Push branch ${s.branch} to GitHub repository ${s.push_target} (branch ${s.branch}) using your GitHub connection?`,
+          message: "GitHub records your account as the pusher; commit authors stay as they are.", confirmLabel: "Push" }) }, "Push to GitHub"));
       }
     } else {
-      buttons.push(h("button", { class: "btn ok", onclick: act("push", `Push ${s.branch} to the remote?`) }, "Push branch"));
+      buttons.push(h("button", { class: "btn ok", onclick: act("push", { title: `Push ${s.branch} to the remote?`, confirmLabel: "Push" }) }, "Push branch"));
     }
-    buttons.push(h("button", { class: "btn bad solid", onclick: act("discard", "Discard this branch and delete the workspace? This can't be undone.") }, "Discard"));
+    buttons.push(h("button", { class: "btn bad solid", onclick: act("discard", { title: "Discard this branch and delete the workspace?",
+      message: "This can't be undone.", confirmLabel: "Discard", destructive: true }) }, "Discard"));
   }
   return h("section", { class: "card" },
     h("h3", {}, "Review"),

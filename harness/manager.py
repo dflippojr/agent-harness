@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bus import EventBus
-from . import cli_domains, review_comments
+from . import cli_domains, local_owner, review_comments, tailscale_peer
 from . import review_comments
 from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
@@ -161,6 +161,8 @@ class Manager:
         # App sessions live in per-App stores under data_dir/apps (#330); everything else in the main store.
         self.db = db if isinstance(db, SessionStores) else SessionStores(db, Path(cfg.data_dir) / "apps")
         require_owner_allowlist(cfg, self.db.member_count())
+        self.local_owner_token = local_owner.ensure_token(cfg.data_dir)
+        self.tailscale_peer = tailscale_peer.default_check()
         self.bus = EventBus(self.db)
         self.scheduler = GpuScheduler(self._queue_changed, eligible=self._scheduler_eligible)
         self.stream_epoch: dict[str, int] = {}
@@ -1756,7 +1758,8 @@ class Manager:
 
     async def _erase_session(self, sid: str) -> bool:
         """Erase session `sid` and everything tied to it: stop it if it runs, remove its sandbox, its hosted CLI's own
-        copy of the conversation (#371), workspace, checkpoints and transcript, then its rows (events, tool calls and results, approvals, artifacts, checkpoints,
+        copy of the conversation (#371), workspace, checkpoints, transcript and (for an App session) its published
+        branch, then its rows (events, tool calls and results, approvals, artifacts, checkpoints,
         search entries). Rows go last; an interrupted private erasure retains its unresolved aggregate evidence
         and blocks automatic replay pending inspection. False when already erased."""
         s = self.db.get_session(sid)
@@ -1768,6 +1771,7 @@ class Manager:
         if sandbox is not None:
             await sandbox.remove()
         await self._erase_cli_history(s)
+        await self._erase_remote_app_branch(s)
         await asyncio.to_thread(self._erase_files, s)
         await asyncio.to_thread(self.db.delete_session, sid)
         log.info("session erasure completed")
@@ -1801,6 +1805,34 @@ class Manager:
                 log.warning("not removing a session workspace outside the workspaces root")
         remove_tree(dirs["checkpoints"] / s["id"])
         (dirs["transcripts"] / f"{s['id']}.md").unlink(missing_ok=True)
+        self._erase_app_branch(s)
+
+    async def _erase_remote_app_branch(self, s: dict) -> None:
+        """An App session on a runner: its branch and working directory there go with it (best effort: a runner that
+        is asleep keeps them until its own cleanup)."""
+        if not s.get("app_id") or not s.get("branch") or s["target"] == "tower":
+            return
+        project = self.project_for_session(s)
+        if project is None or not project.repo:
+            return
+        try:
+            await self.remote(s, "discard", {"repo": project.repo, "branch": s["branch"],
+                                             "base_branch": s["base_branch"], "title": s["title"]}, timeout=600)
+        except HarnessError:
+            log.warning("could not delete an erased App session's branch on its runner")
+
+    def _erase_app_branch(self, s: dict) -> None:
+        """An App session's published agent/<sid> branch in a local source goes with the session. Owner sessions'
+        branches are the owner's to keep or discard in review."""
+        if not s.get("app_id") or not s.get("branch"):
+            return
+        project = self.project_for_session(s)
+        if project is None or not project.repo:
+            return
+        try:
+            projects.discard(project, s["branch"])
+        except projects.GitError:
+            log.warning("could not delete an erased App session's branch from its local source")
 
     async def erase_app(self, app_id: str, *, context=None, reason="revoked_app") -> None:
         async with self.erase_locks.setdefault(app_id, asyncio.Lock()):

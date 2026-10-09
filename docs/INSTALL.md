@@ -371,7 +371,8 @@ install/uninstall.sh --remove-files  # also remove the install directory
 ## Security model, briefly
 
 - One owner per install, plus optional owner-provisioned household members and time-boxed guests. Agent Harness Web
-  and the APIs trust localhost as the owner; other devices need a tailnet login plus, for the inference endpoint and
+  and the APIs treat a local caller as the owner only when it sends the local owner token (see
+  [Local callers](#local-callers)); other devices need a tailnet login plus, for the inference endpoint and
   App API, a key or token. Members authenticate only with the exact `Tailscale-User-Login` the owner stored.
   Optional `guests:` entries grant time-boxed read-only Agent Harness Web access to a named tailnet login without
   owner or member powers. Member data lives under `data_dir/users/<opaque-id>/`. The machine owner remains
@@ -383,3 +384,29 @@ install/uninstall.sh --remove-files  # also remove the install directory
   unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first.
 - Web fetches refuse private, tailnet and metadata addresses. Agent Harness App-provided context and web pages are marked as
   information, not instructions.
+
+### Local callers
+
+`tailscale serve` adds the caller's tailnet login to every request it forwards. Any other program on the machine, or
+a container that reaches the host's loopback, can send the same `Tailscale-*` headers, so the daemon trusts them only
+when tailscaled is the other end of the connection: it looks the connection up in the OS connection table and checks
+that the owning process is `tailscaled.exe` in the Tailscale install directory (`%ProgramFiles%\Tailscale`). From any
+other process, or when the lookup fails, the daemon removes those headers before it reads them. A request without a
+login from tailscaled reached the daemon's loopback listener directly, so it must say who it is:
+
+- The owner's own tools send the **local owner token** in the `X-Agent-Harness-Local-Token` header. The daemon
+  creates it on first start at `data_dir/local-owner.token` and keeps it across restarts; keep `data_dir` readable
+  only by the daemon's account. `python -m harness.cli` reads it automatically when it talks to `127.0.0.1` or `localhost`; other
+  scripts can read the file or take it from `HARNESS_LOCAL_TOKEN`. Delete the file and restart the daemon to rotate it.
+- An App, device or owner API token (`Authorization: Bearer …`) on `/api/v1` and `/api/admin/v1`, an owner admin
+  token anywhere, an inference key on `/v1`, a runner token on the runner routes, or a stream ticket still works; its
+  route checks it as before.
+- `/health` and `/metrics` answer without a credential, so Prometheus and the restart scripts keep working.
+
+Everything else gets **401**. A browser on the server itself should use the tailnet URL rather than
+`http://127.0.0.1:8100`.
+
+The tailscaled check is implemented on Windows. On other platforms the daemon ignores the `Tailscale-*` headers, so
+tailnet devices get **401** unless you set `listen.trust_unverified_identity_headers: true` in `harness.local.yaml`.
+That setting is **unsafe**: it trusts those headers from every local process and every container that can reach the
+host's loopback, so set it only on a single-user machine that runs no agent sandboxes with network access.

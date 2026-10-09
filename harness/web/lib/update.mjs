@@ -4,10 +4,12 @@
 // this module works under plain Node.
 import { protocolMismatch } from "./compat.mjs";
 import { h, fill } from "./dom.mjs";
+import * as sheets from "./sheet.mjs";
 
 export const UPDATE_GUARD = "harness.webUpdateAttempt";
 
-export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser }) {
+export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser, confirmSheet = sheets.confirmSheet,
+  sheetOpen = sheets.sheetOpen }) {
   const { $app } = els;
   const { document } = browser;
   const { WEB_BUILD_ID, WEB_PROTOCOL } = build;
@@ -20,8 +22,10 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
     });
   }
 
-  async function reloadAndUpdate() {
-    if (hasUnsavedInput()) {
+  // checkInput: false when the caller already checked, as the update offer does before it opens: the sheet is modal, and
+  // the page routed underneath it may fill fields from code (a job's prompt, a restored draft), which reads as unsaved.
+  async function reloadAndUpdate({ checkInput = true } = {}) {
+    if (checkInput && hasUnsavedInput()) {
       chrome.toast("Save or discard your form changes before reloading the app.", 6000);
       return false;
     }
@@ -59,15 +63,17 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
       h("p", { class: "muted small" }, `Web protocol ${WEB_PROTOCOL}; server supports ${meta.protocols?.admin?.min}–${meta.protocols?.admin?.max}.`)));
   }
 
-  // Asks once per bundle whether to reload into the newer build; true when a reload was started.
+  // Offers once per bundle to reload into the newer build. The sheet does not hold up boot or routing: the app keeps
+  // running underneath, and Update reloads it.
   async function offerBundleUpdate(foreground) {
     try { await (await browser.navigator.serviceWorker?.getRegistration())?.update(); } catch (_) { /* try again on reload */ }
     const promptKey = "harness.webUpdatePrompt";
-    if (browser.sessionStorage.getItem(promptKey) === WEB_BUILD_ID || (foreground && hasUnsavedInput())) return false;
+    if (browser.sessionStorage.getItem(promptKey) === WEB_BUILD_ID || (foreground && hasUnsavedInput())) return;
+    if (sheetOpen()) return; // never replace a sheet being answered; the next check offers it
     browser.sessionStorage.setItem(promptKey, WEB_BUILD_ID);
-    if (!browser.confirm("A newer Agent Harness Web bundle is available. Reload and update now?")) return false;
-    await reloadAndUpdate();
-    return true;
+    void confirmSheet({ title: "Update Agent Harness Web?", message: "A newer version is available. Updating reloads the app.",
+      confirmLabel: "Update now", cancelLabel: "Later", dismissOnRoute: false }).then((yes) => (yes ? reloadAndUpdate({ checkInput: false }) : false))
+      .catch((e) => chrome.toast(e.message, 6000));
   }
 
   async function checkCompatibility({ foreground = false } = {}) {
@@ -83,7 +89,7 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
     session.setBlocked(false);
     const available = meta.update_hint?.web?.build_id;
     if (available && available !== WEB_BUILD_ID) {
-      if (await offerBundleUpdate(foreground)) return false;
+      await offerBundleUpdate(foreground);
     } else {
       browser.sessionStorage.removeItem(UPDATE_GUARD);
     }

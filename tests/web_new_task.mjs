@@ -8,9 +8,8 @@ const text = (n) => (n && typeof n === "object" ? [...(n.kids || [])].map(text).
 const store = new Map();
 const timers = [];
 const browser = {
-  window: { prompt: () => "" },
   localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
-  location: { hash: "" }, confirm: () => true,
+  location: { hash: "" },
   setInterval: (f) => { timers.push(f); return timers.length; }, clearInterval() {},
 };
 const calls = [];
@@ -25,12 +24,15 @@ const api = async (path) => {
   return [];
 };
 const appended = [];
+const asked = [];
+let answer = true;
 const headers = [];
 let leave = null;
 const page = mountNewTask({
   $app: "APP", h: el, fill() {}, append: (_app, ...n) => appended.push(...n), api, setHeader: (...a) => headers.push(a), toast() {},
   route: async () => {}, isMember: () => false, isOwner: () => true, onLeave: (f) => { leave = f; },
   githubConnectionCard: () => el("gh"), warmModel: async () => {}, browser,
+  confirmSheet: async (ask) => { asked.push(ask); return answer; },
 });
 for (const name of ["viewNew", "confirmGpuQueue"]) assert.equal(typeof page[name], "function", name);
 
@@ -43,4 +45,8 @@ assert.match(all, /Manage templates/);
 assert.match(all, /Save as template/);
 assert.equal(typeof leave, "function");
 assert.equal(await page.confirmGpuQueue("This task"), true);
+assert.match(asked.at(-1).title, /^GPU hold is on/);
+assert.equal(asked.at(-1).confirmLabel, "Queue it");
+answer = false;
+assert.equal(await page.confirmGpuQueue("This task"), false, "declining the GPU-hold sheet does not queue");
 console.log("ok");

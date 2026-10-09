@@ -482,6 +482,8 @@ class Config:
     backends: dict[str, BackendConfig] = field(default_factory=dict)
     public_url: str = ""               # how the phone reaches the daemon, e.g. https://host.tailnet.ts.net
     allowed_logins: list[str] = field(default_factory=list)  # Tailscale logins allowed through `tailscale serve`
+    # Unsafe: trust Tailscale identity headers from any local process where tailscaled can't be verified (non-Windows).
+    trust_unverified_identity_headers: bool = False
     guests: list[GuestAccess] = field(default_factory=list)  # read-only demo logins; ignored if allowed_logins is empty
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     homelab: HomelabConfig = field(default_factory=HomelabConfig)
@@ -897,6 +899,12 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
     }
 
 
+def resolve_data_dir(config_dir: Path | None = None) -> Path:
+    """The data_dir `load` would use, without building the whole Config (the local CLI reads its token from here)."""
+    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+    return Path(os.environ.get("HARNESS_DATA_DIR") or _read_raw_config(config_dir).get("data_dir", ROOT / "data"))
+
+
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
     from .smart_approvals import load_smart_config
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
@@ -947,6 +955,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         backends=backends,
         public_url=(raw.get("public_url") or "").rstrip("/"),
         allowed_logins=list(raw.get("allowed_logins") or []),
+        trust_unverified_identity_headers=bool(listen.get("trust_unverified_identity_headers", False)),
         guests=_load_guests(raw.get("guests")),
         notify=notify,
         homelab=homelab,

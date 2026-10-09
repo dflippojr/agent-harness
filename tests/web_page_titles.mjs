@@ -288,7 +288,7 @@ await go("#/s/sess1");
 await waitFor(() => /Demo session/.test(byId.title.textContent), "session transcript title");
 assertTitle("#/s/sess1", "Demo session");
 
-// Renaming the session via the inline title editor must update the topbar title too (#178).
+// Renaming the session from the ⋯ menu (#514) edits the topbar title in place and must update it (#178).
 const findByClass = (root, cls) => {
   if (!root) return null;
   if (root instanceof El && (root.className || "").split(/\s+/).includes(cls)) return root;
@@ -298,10 +298,17 @@ const findByClass = (root, cls) => {
   }
   return null;
 };
-const titleBtn = findByClass(byId.app, "session-title");
-if (!titleBtn) throw new Error("session title button not found");
-titleBtn.click();
-const titleInput = findByClass(byId.app, "session-title-edit");
+if (findByClass(byId.app, "session-title")) throw new Error("the session title must not be painted a second time (#514)");
+const pickRename = () => {
+  const menuBtn = findByClass(byId.bar, "session-menu-btn");
+  if (!menuBtn) throw new Error("session menu button not found in the bar");
+  menuBtn.click();
+  const rename = (findByClass(byId.bar, "session-menu")?.childNodes || []).find((b) => b.textContent === "Rename");
+  if (!rename) throw new Error("Rename entry not found in the session menu");
+  rename.click();
+};
+pickRename();
+const titleInput = findByClass(byId.bar, "session-title-edit");
 if (!titleInput) throw new Error("session title edit input not found");
 titleInput.value = "Renamed session";
 titleInput.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {} });
@@ -321,10 +328,8 @@ await waitFor(() => /Demo session/.test(byId.title.textContent), "session transc
 let releaseRename;
 pendingRenameGate = new Promise((r) => { releaseRename = r; });
 
-const titleBtn2 = findByClass(byId.app, "session-title");
-if (!titleBtn2) throw new Error("session title button not found (race test)");
-titleBtn2.click();
-const titleInput2 = findByClass(byId.app, "session-title-edit");
+pickRename();
+const titleInput2 = findByClass(byId.bar, "session-title-edit");
 if (!titleInput2) throw new Error("session title edit input not found (race test)");
 titleInput2.value = "Renamed while leaving";
 titleInput2.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {} });

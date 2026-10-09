@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
 import threading
@@ -12,7 +13,7 @@ import pytest
 
 from harness.changes import workspace_changes
 from harness.config import Project
-from harness.projects import GitError, _copy_git_state, git, prepare, publish_local, refresh_origin, snapshot
+from harness.projects import GitError, _copy_git_state, git, prepare, publish_local, push, refresh_origin, snapshot
 
 MARKER = "ISSUE104_GIT_EXEC_MARKER"
 
@@ -197,6 +198,68 @@ def test_remote_helper_url_is_not_copied_into_isolated_config(tmp_path):
     assert result.code != 0 or "ext::" not in result.out
 
 
+@pytest.mark.parametrize("key", ["url", "pushurl"])
+def test_workspace_remote_urls_are_not_copied_into_isolated_config(tmp_path, key):
+    repo = make_repo(tmp_path / "repo")
+    sh(repo, "config", f"remote.origin.{key}", "https://example.invalid/repo.git")
+    sh(repo, "config", "remote.origin.promisor", "true")
+    result = git(repo, "config", "--get-regexp", r"^remote\.", check=False)
+    assert "example.invalid" not in result.out
+    assert "promisor" not in result.out
+
+
+def _second_repo(tmp_path: Path) -> tuple[Path, str]:
+    other = make_repo(tmp_path / "other")
+    (other / "app.py").write_text("VALUE = other\n", encoding="utf-8")
+    sh(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "other")
+    return other, sh(other, "rev-parse", "HEAD").stdout.strip()
+
+
+def _workspace_remote_values(workspace: Path, other: Path) -> list[str]:
+    """Remote URLs a workspace config might hold: local path, file URL, relative path, other host."""
+    return [str(other), other.resolve().as_uri(), os.path.relpath(other, workspace).replace("\\", "/"),
+            "https://example.invalid/other.git"]
+
+
+def test_refresh_origin_fetches_from_the_project_repository(tmp_path):
+    src = make_repo(tmp_path / "src")
+    other, other_head = _second_repo(tmp_path)
+    project = Project(name="proj", repo=str(src))
+    workspace = tmp_path / "ws"
+    prepare(project, workspace, "refresh01")
+    (src / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+    sh(src, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "upstream")
+    src_head = sh(src, "rev-parse", "HEAD").stdout.strip()
+
+    for value in _workspace_remote_values(workspace, other):
+        sh(workspace, "config", "remote.origin.url", value)
+        assert refresh_origin(project, workspace) == ""
+        assert sh(workspace, "rev-parse", "origin/main").stdout.strip() == src_head
+        assert sh(workspace, "cat-file", "-e", other_head, check=False).returncode != 0
+
+
+def test_push_sends_the_branch_to_the_project_repository(tmp_path):
+    src = make_repo(tmp_path / "src")
+    sh(src, "config", "receive.denyCurrentBranch", "ignore")
+    other, _ = _second_repo(tmp_path)
+    workspace = tmp_path / "ws"
+    info = prepare(Project(name="proj", repo=str(src)), workspace, "push01")
+    (workspace / "app.py").write_text("VALUE = 4\n", encoding="utf-8")
+    assert snapshot(workspace, "work") is True
+    branch_head = sh(workspace, "rev-parse", "HEAD").stdout.strip()
+    # push() is for URL projects; a file URL to the same source keeps the test offline.
+    project = Project(name="proj", repo=src.resolve().as_uri())
+
+    for value in _workspace_remote_values(workspace, other):
+        sh(workspace, "config", "remote.origin.url", value)
+        sh(workspace, "config", "remote.origin.pushurl", value)
+        message = push(project, workspace, info["branch"])
+        assert message == f"pushed {info['branch']} to {project.repo}"
+        assert sh(src, "rev-parse", info["branch"]).stdout.strip() == branch_head
+        assert sh(other, "rev-parse", "--verify", "-q", info["branch"], check=False).returncode != 0
+        sh(src, "branch", "-D", info["branch"])
+
+
 def test_prepare_refresh_snapshot_and_publish_ignore_workspace_exec_config(tmp_path):
     src = make_repo(tmp_path / "src")
     workspace = tmp_path / "ws"
@@ -284,7 +347,7 @@ def test_fetch_prune_removes_loose_remote_tracking_ref(tmp_path):
     assert "origin/feature" in listed
 
     sh(src, "branch", "-D", "feature")
-    err = refresh_origin(workspace)
+    err = refresh_origin(Project(name="proj", repo=str(src)), workspace)
     assert err == ""
     result = git(workspace, "status", "--porcelain", check=False)
     assert not has_marker(result.out + result.err)
@@ -311,12 +374,11 @@ def test_isolated_call_spawns_at_most_two_git_processes(tmp_path, monkeypatch):
 
     repo = make_repo(tmp_path / "repo")
     sh(repo, "config", "branch.main.description", "kept")
-    sh(repo, "remote", "add", "origin", "https://example.com/x.git")
     calls = []
     real_run = projects._run
     monkeypatch.setattr(projects, "_run", lambda args, *a, **k: calls.append(args) or real_run(args, *a, **k))
-    result = git(repo, "config", "--get", "remote.origin.url")
-    assert result.out.strip() == "https://example.com/x.git"
+    result = git(repo, "config", "--get", "branch.main.description")
+    assert result.out.strip() == "kept"
     assert len(calls) <= 2, calls
 
 
@@ -395,3 +457,15 @@ def test_git_state_lock_released_after_command_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(projects, "_run", real_run)
     with ThreadPoolExecutor(max_workers=1) as pool:
         assert pool.submit(git, repo, "status", "--porcelain").result(timeout=10).code == 0
+
+
+def test_push_records_the_pushed_commit_as_the_origin_tracking_ref(tmp_path):
+    src = make_repo(tmp_path / "src")
+    workspace = tmp_path / "ws"
+    info = prepare(Project(name="proj", repo=str(src)), workspace, "push02")
+    (workspace / "app.py").write_text("VALUE = 5\n", encoding="utf-8")
+    assert snapshot(workspace, "work") is True
+    pushed = sh(workspace, "rev-parse", "HEAD").stdout.strip()
+    push(Project(name="proj", repo=src.resolve().as_uri()), workspace, info["branch"], source_ref=pushed)
+    assert sh(workspace, "rev-parse", f"origin/{info['branch']}").stdout.strip() == pushed
+    assert git(workspace, "log", "--oneline", f"origin/{info['branch']}..HEAD").out.strip() == ""

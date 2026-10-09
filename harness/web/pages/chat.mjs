@@ -3,11 +3,13 @@
 // under plain Node and never reaches into another page.
 import { SNIPPET_LANGUAGES, snippetLanguage } from "../lib/snippets.mjs";
 import { md } from "../lib/markdown.mjs";
+import { staleNote } from "../lib/widgets.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
 export function mountChat({ $app, h, fill, append, api, setHeader, toast, go, validId, canChat, onLeave, openStream, ownerSurface, badge,
-  TERMINAL, agentHarnessWeb, browser }) {
+  TERMINAL, agentHarnessWeb, browser, confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
-const { window, document, localStorage, confirm, prompt } = browser;
+const { window, document, localStorage } = browser;
 
 // ---------- chat snippets (#85) ----------
 const SNIPPET_STATUS = {
@@ -211,18 +213,32 @@ function chatComposer(options, session) {
 }
 
 // Recent chats on the Chat home (#506; they were in the navigation drawer). Shows the last known list at once, then
-// revalidates in the background (#152).
+// revalidates in the background (#152). A failed revalidation keeps what is shown and says it may be stale (#510); with
+// nothing shown yet there is nothing stale, and the page's own offline state speaks for the server.
 let recentChatsCache = null;
+let recentChatsAt = 0;
 function recentChats() {
+  const label = h("p", { class: "section-label" }, "Recent chats");
   const list = h("div", { class: "card settings-list recent-chats" });
-  const section = h("section", { class: "recent-chats-section", "aria-label": "Recent chats", hidden: true },
-    h("p", { class: "section-label" }, "Recent chats"), list);
+  const section = h("section", { class: "recent-chats-section", "aria-label": "Recent chats", hidden: true }, label, list);
   const render = (chats) => {
     section.hidden = !chats.length;
     fill(list, chats.map((c) => h("a", { href: `#/chat/${c.id}`, title: c.title }, c.title)));
   };
+  const load = () => api("/chats?limit=30").then((chats) => {
+    recentChatsCache = chats;
+    recentChatsAt = Date.now();
+    stale.ok();
+    render(chats);
+  }).catch((e) => {
+    console.error("recent chats refresh failed", e);
+    if (!recentChatsCache?.length) return;
+    stale.failed(e);
+  });
+  const stale = staleNote({ make: h, place: (el) => label.after(el), onRetry: load, updatedAt: recentChatsAt });
   if (recentChatsCache) render(recentChatsCache);
-  api("/chats?limit=30").then((chats) => { recentChatsCache = chats; render(chats); }).catch(() => {}); // offline: keep what is shown
+  onLeave(stale.stop);
+  void load();
   return section;
 }
 
@@ -320,13 +336,14 @@ async function viewChat(id) {
     h("span", { class: "muted" }, `${session.backend || "local"} · ${session.model}${effortSuffix}`),
     editorToggle,
     h("button", { class: "btn small", type: "button", onclick: async () => {
-      const title = prompt("Rename chat", session.title);
+      const title = await promptSheet({ title: "Rename chat", label: "Title", value: session.title, confirmLabel: "Rename",
+        validate: sheets.required("a title") });
       if (!title?.trim()) return;
       try { session = await api(`/chats/${id}`, { method: "PATCH", body: { title } }); setHeader("chat", session.title); }
       catch (e) { toast(e.message); }
     } }, "Rename"),
     h("button", { class: "btn small bad", type: "button", onclick: async () => {
-      if (!confirm("Delete this chat?")) return;
+      if (!(await confirmSheet({ title: "Delete this chat?", confirmLabel: "Delete chat", destructive: true }))) return;
       try { await api(`/chats/${id}`, { method: "DELETE" }); go("#/chat", true); } catch (e) { toast(e.message); }
     } }, "Delete")), editor.el);
 

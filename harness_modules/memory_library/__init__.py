@@ -30,6 +30,8 @@ MODULE = Module(
     runtime_enabled=_enabled,
     owner_routes=_routes,
     admin_paths=frozenset({"/memory", "/memory/profile"}),
+    app_scopes={"memory_library": "read the owner's memory library and propose edits to it in the app's sessions"},
+    app_capabilities={"memory_library": "memory_library"},
     tools=ToolGate(project_flag="memory_library", capability="memory_library"),
     tool_names=("memory_index", "memory_search", "memory_read", "memory_edit", "memory_write"),
     settings=_settings,

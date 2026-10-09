@@ -9,7 +9,17 @@ function Check($name, [scriptblock]$test) {
         Write-Host ("[FAIL] {0}  {1}" -f $name, $_.Exception.Message) -ForegroundColor Red
     }
 }
-function Get-Json($url) { Invoke-RestMethod -Uri $url -TimeoutSec 5 }
+# The daemon answers local callers only with its local owner token (docs/INSTALL.md, Local callers).
+$LocalOwnerToken = $env:HARNESS_LOCAL_TOKEN
+if (-not $LocalOwnerToken) {
+    $tokenFile = Join-Path $(if ($env:HARNESS_DATA_DIR) { $env:HARNESS_DATA_DIR } else { 'D:\Agents\harness' }) 'local-owner.token'
+    if (Test-Path $tokenFile) { $LocalOwnerToken = (Get-Content -Raw $tokenFile).Trim() }
+}
+function Get-Json($url) {
+    $headers = @{}
+    if ($LocalOwnerToken -and $url -like 'http://127.0.0.1:8100/*') { $headers['X-Agent-Harness-Local-Token'] = $LocalOwnerToken }
+    Invoke-RestMethod -Uri $url -Headers $headers -TimeoutSec 5
+}
 
 Check 'Memory speed (XMP)' {
     $speeds = Get-CimInstance Win32_PhysicalMemory | ForEach-Object { "$($_.ConfiguredClockSpeed)/$($_.Speed) MHz" }

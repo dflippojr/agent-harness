@@ -3,8 +3,9 @@
 // reaches into another page.
 import { settingValueText, settingMeta, recoveryNote } from "../lib/settings-text.mjs";
 import { settingInput } from "../lib/setting-input.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
-export function mountDaemonSettings({ h, fill, append, api, toast, isGuest, location, confirm }) {
+export function mountDaemonSettings({ h, fill, append, api, toast, isGuest, location, confirmSheet = sheets.confirmSheet }) {
   async function daemonSettingsCard() {
     let view;
     try { view = await api("/config"); }
@@ -48,9 +49,9 @@ export function mountDaemonSettings({ h, fill, append, api, toast, isGuest, loca
         const plan = await api("/config", { method: "PATCH", body: { revision: view.revision, dry_run: true, changes } });
         append(planBox, h("p", { class: "field-label" }, "Change plan"), configPlanList(plan));
         const enables = (plan.changes || []).filter((c) => c.to === true && String(c.key).endsWith(".enabled"));
-        if (enables.length && !confirm(`Enable ${enables.map((c) => c.key).join(", ")}?`)) return;
+        if (enables.length && !(await confirmSheet({ title: `Enable ${enables.map((c) => c.key).join(", ")}?`, confirmLabel: "Enable" }))) return;
         if (!(plan.changes || []).length) return;
-        if (!confirm("Apply these server settings?")) return;
+        if (!(await confirmSheet({ title: "Apply these server settings?", confirmLabel: "Apply" }))) return;
         const result = await api("/config", { method: "PATCH", body: { revision: view.revision, changes } });
         toast("Saved");
         if (result.restart_required || restart) {
@@ -92,7 +93,7 @@ export function mountDaemonSettings({ h, fill, append, api, toast, isGuest, loca
   }
 
   async function rollbackConfig(revision, status, errorBox) {
-    if (!confirm("Restore the previous confirmed server configuration?")) return;
+    if (!(await confirmSheet({ title: "Restore the previous confirmed server configuration?", confirmLabel: "Roll back", destructive: true }))) return;
     const result = await api("/config/rollback", { method: "POST", body: { revision, confirm: true } });
     toast("Rolled back");
     if (result.restart_required) {
@@ -101,7 +102,8 @@ export function mountDaemonSettings({ h, fill, append, api, toast, isGuest, loca
   }
 
   async function confirmRestart(targetRevision, status, errorBox) {
-    if (!confirm("Restart the daemon to apply pending settings?")) return;
+    if (!(await confirmSheet({ title: "Restart the daemon to apply pending settings?",
+      confirmLabel: "Restart", destructive: true }))) return;
     status.textContent = "Restarting… reconnecting to see whether the target revision became active.";
     try {
       await api("/config/restart", { method: "POST", body: { revision: targetRevision, confirm: true } });

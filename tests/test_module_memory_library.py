@@ -4,7 +4,7 @@ import asyncio
 import httpx
 import pytest
 
-from harness import cli
+from harness import cli, local_owner
 from harness.api import create_app
 from harness.config import Project
 from harness.manager import Manager
@@ -62,7 +62,8 @@ def test_presence_routes_settings_tools_and_prompts(tmp_path, selection):
     async def check():
         app = create_app(m)
         app.state.manager = m
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                                     headers={local_owner.HEADER: m.local_owner_token}) as c:
             for prefix in ("", "/api/admin/v1"):
                 response = await c.get(prefix + "/memory")
                 assert response.status_code == (200 if present else 404)
@@ -99,7 +100,8 @@ def test_profile_route_tool_error(tmp_path, monkeypatch):
     async def check():
         app = create_app(m)
         app.state.manager = m
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                                     headers={local_owner.HEADER: m.local_owner_token}) as c:
             response = await c.put("/api/admin/v1/memory/profile", json={"content": "x"})
             assert response.status_code == 400
             assert "write rejected" in response.text

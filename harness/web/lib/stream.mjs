@@ -23,17 +23,65 @@ export function safeStreamUrl(url, base = "") {
   return `${base}${path}${query}`;
 }
 
-export function mountStream({ agentHarnessWeb, isBlocked, setConnLive, ownerSurface, isGuest, browser }) {
+// Reconnect schedule (#510): exponential backoff from 1 s up to 30 s, with "equal jitter" (half fixed, half random) so many
+// tabs or phones that lost the server together do not all retry on the same tick. `attempt` counts failures since the
+// stream was last live, from 0.
+export const RETRY_BASE_MS = 1000;
+export const RETRY_CAP_MS = 30000;
+export function retryDelay(attempt, random = Math.random) {
+  const ceiling = Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempt));
+  return Math.round(ceiling / 2 + random() * (ceiling / 2));
+}
+// After this many failed attempts in a row (about 8–15 s with the schedule above) "Reconnecting" becomes "Offline". The
+// stream keeps retrying either way; the browser reporting no network goes straight to Offline.
+export const OFFLINE_AFTER = 4;
+// A stream live at least this long that then ends reconnects once at once, without showing Reconnecting.
+export const GRACE_AFTER_MS = 5000;
+
+export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSurface, isGuest, browser }) {
   // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
-  // Connection-dot updates are opt-in (`indicate`) so page streams can close without a false offline state.
-  function openStream(urlFor, handlers, { authorized = false, indicate = false } = {}) {
+  // Connection state ("live", "reconnecting", "offline") goes to `onState`; the header chip follows it only for the stream
+  // opened with `indicate`, so page streams can close without a false offline state.
+  function openStream(urlFor, handlers, { authorized = false, indicate = false, onState = null } = {}) {
     const { document } = browser;
     let es = null;
     let controller = null;
     let closed = false;
     let retry = null;
     let generation = 0;
-    const mark = (on) => { if (indicate) setConnLive(on); };
+    let attempts = 0;
+    let state = "";
+    const setState = (next) => {
+      if (closed || next === state) return;
+      state = next;
+      if (indicate) setConnState(next);
+      onState?.(next);
+    };
+    let liveSince = 0;
+    let pending = false;  // an attempt is in flight
+    const browserOffline = () => browser.navigator?.onLine === false;
+    const live = () => {
+      pending = false;
+      attempts = 0;
+      liveSince = Date.now();
+      setState("live");
+      if (!indicate) daemon?.nudge();  // the server answers again: the header need not wait out its own backoff
+    };
+    // Every failure path ends here. A stream that had been live a while (a proxy or server restart closing it) gets one
+    // quiet reconnect first; otherwise say so and retry on the backoff schedule.
+    const fail = (run) => {
+      if (closed || run !== generation) return;
+      pending = false;
+      clearTimeout(retry);
+      if (state === "live" && liveSince && Date.now() - liveSince >= GRACE_AFTER_MS && !browserOffline()) {
+        liveSince = 0;
+        retry = setTimeout(connect, 0);
+        return;
+      }
+      attempts += 1;
+      setState(browserOffline() || attempts >= OFFLINE_AFTER ? "offline" : "reconnecting");
+      retry = setTimeout(connect, retryDelay(attempts - 1));
+    };
     const dispatch = (block) => {
       let type = "message";
       const data = [];
@@ -50,7 +98,7 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnLive, ownerSurf
       controller = new AbortController();
       const resp = await browser.fetch(url, { headers: agentHarnessWeb.headers(), cache: "no-store", signal: controller.signal });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
-      mark(true);
+      live();
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -68,34 +116,29 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnLive, ownerSurf
     };
     const connect = async () => {
       if (closed || isBlocked()) return;
+      clearTimeout(retry);  // a resume or "online" event may come while a backoff retry is pending
       const run = ++generation;
+      pending = true;
       es?.close();
       controller?.abort();
       let url;
       try { url = await urlFor(); }
-      catch (_) {
-        mark(false);
-        if (!closed && run === generation) retry = setTimeout(connect, 3000);
-        return;
-      }
+      catch (_) { fail(run); return; }
       url = safeStreamUrl(url, agentHarnessWeb.baseUrl || "");
-      if (!url) { mark(false); return; }
+      if (!url) { pending = false; setState("offline"); return; }
       if (authorized && agentHarnessWeb.token) {
         try { await fetchStream(url); } catch (_) { /* retry below */ }
-        mark(false);
-        if (!closed && run === generation) retry = setTimeout(connect, 3000);
+        fail(run);
         return;
       }
       const { EventSource } = browser;
       const source = new EventSource(url);
       es = source;
-      source.onopen = () => mark(true);
+      source.onopen = () => { if (run === generation) live(); };
+      // Close on any error and follow our own backoff, rather than the browser's fixed retry interval.
       source.onerror = () => {
-        mark(false);
-        if (source.readyState === EventSource.CLOSED && run === generation) {
-          clearTimeout(retry);
-          retry = setTimeout(connect, 3000);
-        }
+        source.close();
+        fail(run);
       };
       for (const [type, fn] of Object.entries(handlers)) {
         source.addEventListener(type, (msg) => {
@@ -105,23 +148,39 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnLive, ownerSurf
       }
     };
     const onVisible = () => { if (!isBlocked() && document.visibilityState === "visible") void connect(); };
+    const onOnline = () => { if (!isBlocked()) void connect(); };
+    // The browser says the network is gone: drop the stream and go through the retry path, so a wrong onLine (a VPN
+    // can leave it false) corrects itself when the next attempt connects.
+    const onOffline = () => {
+      const run = ++generation;
+      es?.close();
+      controller?.abort();
+      fail(run);
+    };
     document.addEventListener("visibilitychange", onVisible);
+    browser.window?.addEventListener?.("online", onOnline);
+    browser.window?.addEventListener?.("offline", onOffline);
     void connect();
-    return () => {
+    const stop = () => {
       closed = true;
       clearTimeout(retry);
       es?.close();
       controller?.abort();
-      mark(false);
       document.removeEventListener("visibilitychange", onVisible);
+      browser.window?.removeEventListener?.("online", onOnline);
+      browser.window?.removeEventListener?.("offline", onOffline);
     };
+    // After a failure, retry now instead of at the next backoff step; a live stream or an attempt in flight is left alone.
+    stop.nudge = () => { if (!closed && !pending && state && state !== "live" && !isBlocked()) void connect(); };
+    return stop;
   }
 
-  let watching = false;
+  // The app-wide stream behind the header chip. Called on every route: the first call opens it, later ones nudge it to
+  // retry now if it is down, so navigating after the server is back does not leave a stale Offline.
+  let daemon = null;
   function watchDaemonConnection() {
-    if (watching) return;
-    watching = true;
-    openStream(() => agentHarnessWeb.url("/events", ownerSurface()), {}, {
+    if (daemon) { daemon.nudge(); return; }
+    daemon = openStream(() => agentHarnessWeb.url("/events", ownerSurface()), {}, {
       authorized: !(isGuest() && !agentHarnessWeb.token),
       indicate: true,
     });

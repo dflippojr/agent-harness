@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import audit_context, operation_audit
+from harness import audit_context, local_owner, operation_audit
 from harness.admin import PREFIX
 from harness.api import create_app
 from harness.db import Database
@@ -97,7 +97,7 @@ def test_legacy_stray_token_preserves_ambient_owner(manager, token_kind):
         key, secret = manager.db.create_api_key("test", "sessions", kind="app" if token_kind == "app" else "owner")
         if token_kind == "revoked":
             manager.db.revoke_api_key(key["id"])
-    headers = {"Authorization": "Bearer " + secret}
+    headers = {"Authorization": "Bearer " + secret, local_owner.HEADER: manager.local_owner_token}
     with TestClient(create_app(manager)) as client:
         # Admin authentication still rejects the token before attribution runs.
         rejected = client.post(PREFIX + "/sessions/session1/approvals/a-test",

@@ -4,7 +4,8 @@
 import { approvalDiffClass, diffLineClass } from "../harness/web/lib/diff.mjs";
 import { protocolMismatch } from "../harness/web/lib/compat.mjs";
 import { fmtBytes, fmtSpan, fmtTokens, gpuText, holdRemainingText, pluralize } from "../harness/web/lib/format.mjs";
-import { compatibilityText, lastSeenText, recoveryNote, settingValueText } from "../harness/web/lib/settings-text.mjs";
+import { compatibilityText, lastSeenText, recoveryNote, settingValueText, backendsValue, resourcesValue, serverSettingsValue,
+  remoteControlValue, skillsValue, versionStatus, serverVersionText } from "../harness/web/lib/settings-text.mjs";
 import { compareTargets, pickDefaultBackend, runnerStateText } from "../harness/web/lib/targets.mjs";
 import { CRON_PRESETS, cronLabel, newJobDefaults, whenText } from "../harness/web/lib/jobs.mjs";
 import { mountActions } from "../harness/web/pages/actions.mjs";
@@ -134,6 +135,27 @@ const eq = (label, got, want) => {
   eq("gpuText paused", gpuText({ state: "paused", reasons: [{ detail: "chat" }, { detail: "chat" }] }), "Paused for chat");
   eq("gpuText manual indefinite", gpuText({ manual: true, manual_remaining_seconds: null }), "Local models held until you turn this off");
   eq("actions page mounts without a DOM", Object.keys(mountActions({})).sort().join(), "folderDiscoveryPanel,remoteControlCard,viewActions");
+}
+
+{
+  // Settings row values (#512): short, never throwing on a missing or odd response.
+  eq("backends none", backendsValue([{ name: "claude", available: false }]).text, "None ready");
+  eq("backends local only", backendsValue([{ name: "local", available: true }]).text, "Qwen");
+  eq("backends bad", backendsValue({ detail: "x" }).text, "");
+  eq("resources held forever", resourcesValue({ enabled: true, manual: true, manual_remaining_seconds: null }), { text: "GPU held", warn: true });
+  eq("resources paused", resourcesValue({ enabled: true, state: "paused" }), { text: "Paused for GPU", warn: true });
+  eq("resources free", resourcesValue({ enabled: true, state: "clear" }), { text: "GPU free" });
+  eq("resources off", resourcesValue({ enabled: false }).text, "Guard off");
+  eq("server settings clean", serverSettingsValue({ revision: 3, settings: [{ apply: "live", pending: 1 }] }), { text: "Revision 3" });
+  eq("server restart", serverSettingsValue({ restart_required: true, settings: [] }), { text: "Restart pending" });
+  eq("remote control running", remoteControlValue({ enabled: true, projects: [{ running: true }, { running: false }] }).text, "1 running");
+  eq("skills off", skillsValue({ enabled: false }).text, "Off");
+  eq("version current", versionStatus({ update_hint: { web: { build_id: "A" } } }, "A", 2, null).text, "up to date");
+  eq("version old client", versionStatus({}, "A", 1, "client_update_required"), { text: "update required", update: true, warn: true });
+  eq("version old server", versionStatus({}, "A", 3, "daemon_update_required").update, false);
+  eq("version offline", versionStatus(null, "A", 2, null).text, "server not reachable");
+  eq("server version", serverVersionText({ release: "0.9.0", build_id: "b", protocols: { admin: { min: 1, max: 2 } } }),
+    "Server 0.9.0 (b) · protocol 1–2");
 }
 
 if (failures.length) {

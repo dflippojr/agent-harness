@@ -1,8 +1,9 @@
-// UI harness: load app.js and prove the header connection dot stays live across
+// UI harness: load app.js and prove the header connection chip stays live across
 // routes that have no page stream, and that a real disconnect/reconnect still works.
+// #510: the chip says Live / Reconnecting / Offline, and an open session shows a reconnecting strip.
 import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
-import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
+import { El, Emitter, Node, createDocument, fakeEventSource, storage, walk } from "./web_stub_dom.mjs";
 
 const { byId, make, doc } = createDocument();
 
@@ -72,6 +73,7 @@ const fakeFetch = async (url) => {
   if (path === "/gpu") return jsonResp({ manual: false, state: "clear" });
   if (path === "/projects") return jsonResp([{ name: "scratch", target: "tower" }]);
   if (path === "/jobs") return jsonResp([]);
+  if (path.startsWith("/chats?")) return jsonResp([]);
   if (path === "/jobs/job1") return jsonResp(jobDetail);
   if (path === "/images") return jsonResp(imagePayload);
   if (path === "/images/img1") return jsonResp(imageDetail);
@@ -180,6 +182,9 @@ const waitFor = async (pred, label, ms = 2000) => {
 
 await waitFor(() => live(), "initial connection");
 assertLive("Agents");
+if (byId.conn.hidden || byId.conn.textContent !== "Live" || byId.conn.dataset.state !== "live") {
+  throw new Error(`expected a visible Live chip; got ${byId.conn.textContent}/${byId.conn.dataset.state}`);
+}
 
 const go = async (hash, label) => {
   loc.hash = hash;
@@ -226,6 +231,19 @@ await go("#/s/sess1", "session transcript");
 await waitFor(() => /Demo session|Transcript/.test(byId.app.textContent), "session transcript");
 assertLive("session transcript painted");
 
+// #510: the transcript's own stream dropping shows a reconnecting strip with the last event's age; reconnecting hides it.
+const strip = () => walk(byId.app, (el) => el.classList.contains("conn-strip"))[0];
+if (!strip() || !strip().hidden) throw new Error("expected a hidden reconnecting strip in the session chrome");
+const sessionSource = () => sources.filter((s) => s.url.includes("/sessions/sess1/events")).at(-1);
+sessionSource().fail();
+await sleep(10);
+if (strip().hidden || !/^Reconnecting · last event \d+ s ago$/.test(strip().textContent)) {
+  throw new Error(`expected the reconnecting strip; got hidden=${strip().hidden} "${strip().textContent}"`);
+}
+assertLive("session strip is the page stream's; the header chip follows the daemon stream");
+win.dispatchEvent({ type: "online" });
+await waitFor(() => strip().hidden, "strip hides once the session stream is back");
+
 await go("#/s/sess1/info", "session info");
 await waitFor(() => /Workspace|Session/.test(byId.app.textContent), "session info");
 assertLive("session info painted");
@@ -254,6 +272,9 @@ if (!openSources().length) throw new Error("expected an app-level EventSource to
 for (const src of openSources()) src.fail();
 await sleep(20);
 if (live()) throw new Error("expected gray after genuine disconnect");
+if (byId.conn.textContent !== "Reconnecting" || byId.conn.dataset.state !== "reconnecting") {
+  throw new Error(`expected the Reconnecting chip after a disconnect; got ${byId.conn.textContent}`);
+}
 
 doc.hidden = true;
 doc.visibilityState = "hidden";

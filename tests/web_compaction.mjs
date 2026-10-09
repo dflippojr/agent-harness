@@ -134,7 +134,7 @@ const openSession = async () => {
   loc.hash = "#/s/sess1";
   loc.href = "http://localhost/#/s/sess1";
   win.dispatchEvent({ type: "hashchange" });
-  await waitFor(() => /Demo session/.test(byId.app.textContent) && sessionStream(), "session transcript");
+  await waitFor(() => /Demo session/.test(byId.title.textContent) && sessionStream(), "session transcript");
   return sessionStream();
 };
 
@@ -142,12 +142,12 @@ const text = () => byId.app.textContent;
 
 // mask with no summary note showing: a note appears, ctx meter stays at 90%, no failed-summary copy.
 let es = await openSession();
-if (!text().includes("90% context")) fail(`expected 90% context before mask: ${text()}`);
+if (!text().includes("90%")) fail(`expected 90% context before mask: ${text()}`);
 es.emit("compaction", { tier: "mask", tokens_saved: 4200, characters_saved: 12600 }, 1);
 await sleep(20);
 if (!text().includes(MASK)) fail(`mask with no note: ${text()}`);
 if (text().includes(FAILED) || text().includes("~0 → ~0")) fail(`mask with no note leaked summary copy: ${text()}`);
-if (!text().includes("90% context")) fail(`mask must not change ctxUsed: ${text()}`);
+if (!text().includes("90%")) fail(`mask must not change ctxUsed: ${text()}`);
 if (text().includes("Trimmed old tool output")) fail(`mask must not use the elide label: ${text()}`);
 
 // mask while a summary note is showing: add the mask line, leave the summary progress alone.
@@ -161,7 +161,7 @@ await sleep(20);
 if (!text().includes(MASK)) fail(`mask during summary: ${text()}`);
 if (!text().includes("Condensing older context")) fail(`mask must not finish the summary note: ${text()}`);
 if (text().includes(FAILED)) fail(`mask must not mark the summary as failed: ${text()}`);
-if (!text().includes("90% context")) fail(`mask during summary must not change ctxUsed: ${text()}`);
+if (!text().includes("90%")) fail(`mask during summary must not change ctxUsed: ${text()}`);
 if (!beforeMask.includes("Condensing older context")) fail("precondition");
 
 // mask then summary (the live _maybe_compact order): summary note still completes.
@@ -178,7 +178,7 @@ await sleep(20);
 if (!text().includes(MASK)) fail(`mask note lost after summary: ${text()}`);
 if (!text().includes(SUMMARY)) fail(`summary did not complete: ${text()}`);
 if (text().includes(FAILED) || text().includes("Condensing older context")) fail(`summary still in progress: ${text()}`);
-if (!text().includes("30% context")) fail(`summary should update ctxUsed: ${text()}`);
+if (!text().includes("30%")) fail(`summary should update ctxUsed: ${text()}`);
 if (!text().includes("Show summary") && !text().includes("handoff")) fail(`summary body missing: ${text()}`);
 
 // summary rendering without a preceding mask stays the same.
@@ -191,7 +191,7 @@ es.emit("compaction", {
 await sleep(20);
 if (!text().includes(SUMMARY)) fail(`summary-only: ${text()}`);
 if (text().includes(MASK) || text().includes(FAILED)) fail(`summary-only leaked mask copy: ${text()}`);
-if (!text().includes("30% context")) fail(`summary-only ctxUsed: ${text()}`);
+if (!text().includes("30%")) fail(`summary-only ctxUsed: ${text()}`);
 
 // elide rendering without a compact note stays the same.
 es = await openSession();
@@ -199,7 +199,7 @@ es.emit("compaction", { tier: "elide", tokens_before: 8000, tokens_after: 5000 }
 await sleep(20);
 if (!text().includes(ELIDE)) fail(`elide: ${text()}`);
 if (text().includes(MASK) || text().includes(FAILED) || text().includes("Context condensed")) fail(`elide leaked other copy: ${text()}`);
-if (!text().includes("50% context")) fail(`elide should update ctxUsed: ${text()}`);
+if (!text().includes("50%")) fail(`elide should update ctxUsed: ${text()}`);
 
 console.log("ok");
 process.exit(0);

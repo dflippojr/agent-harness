@@ -102,6 +102,8 @@ Create an Agent Harness App token in **Settings → Apps** (or `POST /keys` from
 | `inference` | use the OpenAI/Anthropic-compatible endpoint under `/v1` |
 | `remote_control` | start and stop Claude Code Remote Control servers in project folders |
 | `models:warm` | start loading the local model ahead of a chat (`POST /api/v1/models/warm`); request it at pairing |
+| `memory_library` | the memory library tools (`memory_*`) and guidance in the app's sessions, on projects that enable them |
+| `homelab` | the homelab tools (logs, service config, metrics, restart and rebuild requests) in homelab projects |
 
 Apps see only the sessions they created, unless they hold `sessions:all`. That scope expands reads only:
 sending messages, adding context, cancelling, and answering tool calls still require owning the session.
@@ -267,7 +269,8 @@ member. Device and runner tokens gain no member authority.
 | `/api/admin/v1`, `ho-` owner tokens | yes | 403 | 403 | 403 | 403 |
 | App-tools-only sessions (`tools_only`) | no | no | no | own only, never `sessions:all` | no |
 | Hosted backends, images, jobs, runners, Remote Control | yes | Claude and Codex on their own API key only; no images, jobs, runners or Remote Control | no | scopes for images/remote_control only | no |
-| Homelab, memory library, notifications, backups, keys | yes | no | no | no | no |
+| Homelab, memory library | yes | no | no | only with the `homelab` / `memory_library` scope | no |
+| Notifications, backups, keys | yes | no | no | no | no |
 | Member prompts, transcripts, diffs, repo contents | no (aggregate metadata only) | own only | no | no | no |
 
 The machine owner remains inside the host/OS trust boundary and can read local storage. This matrix is about
@@ -696,11 +699,13 @@ Requires owning the session (or an owner token, for the owner's own sessions); `
 Erases one of your App's sessions; `204` with no body. Only the App that started the session may: another App (with
 `sessions:all` too), the owner and members get a `404`, as if it didn't exist. A running session is cancelled first,
 and the response waits for its run to end, including a run that just reached `done` and is still saving its branch
-and transcript, so nothing of it is written after the erase. Then its sandbox container, working directory, checkpoint snapshots and transcript are removed, and last its rows:
+and transcript, so nothing of it is written after the erase. Then its sandbox container, working directory, checkpoint
+snapshots, transcript and its `agent/<session id>` branch in a local project's repository are removed, and last its rows:
 the session, its events, tool calls and results, approvals, artifacts, checkpoints, review drafts and search entries.
 It is idempotent: deleting a session that is already gone returns `204` again. Usage counters (tokens, cost) stay
 with the owner as metadata. Older nightly backups keep the session until they rotate out (see Backups above). A
-session that ran on a runner (the Mac) keeps its working directory there until that runner's own cleanup.
+session that ran on a runner (the Mac) has its branch and working directory there removed too when the runner is
+awake; otherwise they stay until that runner's own cleanup.
 
 ### `GET /api/v1/sessions/{id}/approvals`, `POST /api/v1/sessions/{id}/approvals/{approval_id}`  (scope `approvals` to decide)
 `{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name. The owner's Web doesn't
@@ -837,6 +842,7 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
 | 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
+| 1.21 | 2026-10-09 | `memory_library` and `homelab` scopes: an App session gets those tools only when its token holds the scope, and an unset `app.capabilities` means what the token's scopes allow. App sessions on a local project clone only its base branch, and erasing one deletes its `agent/<session id>` branch from a local project |
 | 1.19 | 2026-10-05 | End users' own subscription logins (#365): `end_user` on session create and `/api/v1/end-users/{id}/logins/{backend}` (start, code, status, unlink), for `claude` and `codex`. Members' own API keys (#393): `/api/v1/me/api-keys`, and a member's `backend` `claude` or `codex` runs on their own key; `member:` is reserved in `end_user` |
 | 1.18 | 2026-10-05 | `codex` runs App-tools-only sessions and is listed in `app_tools_only_backends`; hosted Codex sessions get the harness tools over MCP (#373) |
 | 1.16 | 2026-10-03 | `DELETE /api/v1/sessions/{id}` erases a session and everything tied to it; `retention_days` on create and an App default retention erase idle sessions; a revoked App's store and folder are erased after 7 days unless the owner undoes the revoke; App session files live in the App's folder (#330) |

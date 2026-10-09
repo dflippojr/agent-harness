@@ -229,9 +229,9 @@ const assertClean = (label) => {
   if (joined) throw new Error(`${label} rendered joined URL text: ${joined}`);
 };
 
-await waitFor(() => /Settings/.test(byId.app.textContent), "profile settings");
+await waitFor(() => /This phone/.test(byId.app.textContent), "profile settings");
 assertClean("profile");
-if (!/Account and connection/.test(byId.app.textContent)) {
+if (!/Bundled server · /.test(byId.app.textContent)) {
   throw new Error("profile missing identity card");
 }
 
@@ -251,7 +251,7 @@ jobDetail.recent = [
   { id: "run2", status: "done", created_at: 2, answer: "Second run ok", job_status: "ok" },
 ];
 await go("#/profile");
-await waitFor(() => /Settings/.test(byId.app.textContent), "back to profile");
+await waitFor(() => /This phone/.test(byId.app.textContent), "back to profile");
 await go("#/jobs/job1");
 await waitFor(() => /First run ok/.test(byId.app.textContent) && /Second run ok/.test(byId.app.textContent), "job with runs");
 assertClean("job details with runs");

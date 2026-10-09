@@ -160,6 +160,12 @@ def _without_unstored_artifact(output: str, digest: str) -> str:
     return output.replace(digest, "")
 
 
+def _app_base_only(s: dict, project) -> bool:
+    """An App session on a local source sees only the base branch, not the agent/* branches other sessions published
+    there. URL sources keep the full clone, which push and cleanup's origin/<branch> check rely on."""
+    return bool(s.get("app_id")) and project is not None and not projects.is_url(project.repo)
+
+
 class Runner:
     def __init__(self, cfg: Config, db: Database, bus: EventBus, scheduler: GpuScheduler, chat=llm.chat,
                  warmer=None, hub=None):
@@ -2072,7 +2078,7 @@ class Runner:
                 self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
             await self.db.for_session(s["id"]).awrite(workspace_ready)
         elif not s["run"].get("origin_refreshed"):
-            error = await self._refresh_origin(s, ws, remote, member)
+            error = await self._refresh_origin(s, project, ws, remote, member)
             if error:
                 await self.bus.aemit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
             run = self.db.get_session(s["id"])["run"]
@@ -2083,9 +2089,11 @@ class Runner:
         if github_branch:
             from dataclasses import replace
             project = replace(project, base_branch=github_branch)
+        base_only = _app_base_only(s, project)
         if remote:
             return await self.hub.call(s["target"], "prepare", {"session": s["id"], "repo": project.repo,
-                                                                "base_branch": project.base_branch}, timeout=900)
+                                                                "base_branch": project.base_branch,
+                                                                "base_only": base_only}, timeout=900)
         if member:
             from . import clone, storage
             uid = session_user_id(s)
@@ -2097,23 +2105,25 @@ class Runner:
                     self._member_clone_budget(uid))
             except clone.QuotaExceeded as e:
                 raise projects.GitError(str(e)) from e
+        if base_only:
+            return await asyncio.to_thread(projects.prepare, project, ws, s["id"], base_only=True)
         return await asyncio.to_thread(projects.prepare, project, ws, s["id"])
 
-    async def _refresh_origin(self, s: dict, ws: Path, remote: bool, member: bool):
+    async def _refresh_origin(self, s: dict, project, ws: Path, remote: bool, member: bool):
+        base = (s.get("base_branch") or "") if _app_base_only(s, project) else ""
         if remote:
-            return await self.hub.call(s["target"], "refresh_origin", {"session": s["id"]}, timeout=400)
+            params = {"session": s["id"], "repo": project.repo, "base_branch": base}
+            return await self.hub.call(s["target"], "refresh_origin", params, timeout=400)
         if member:
             from . import clone, storage
             from .fileops import dir_size
             uid = session_user_id(s)
-            project = self.project_for(s)
-            if project is not None:
-                await self._github_refresh(s, project)
+            await self._github_refresh(s, project)
             remaining = self._member_clone_budget(uid)
             cap = None if remaining is None else remaining + dir_size(ws)
             return await asyncio.to_thread(
                 clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, uid), cap)
-        return await asyncio.to_thread(projects.refresh_origin, ws)
+        return await asyncio.to_thread(projects.refresh_origin, project, ws, base)
 
     async def _github_refresh(self, s: dict, project) -> None:
         """Issue #63: update a member's managed copy from their private GitHub origin, host-side and credentialed.

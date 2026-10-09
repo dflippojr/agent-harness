@@ -10,18 +10,48 @@ The PWA manifest name and browser title are **Agent Harness Web**. Its short nam
 ## Navigation
 
 A bottom tab bar holds the primary sections: **Chat** (owner only), **Agents**, **Jobs**, **Images** and **Profile**.
-Household members see Agents and Profile only. The header shows the section title, the live-connection dot and a
-**Settings** gear (`#/settings`), which opens the Settings menu from any section. The owner's Actions (Resources,
-Accounts, Claude Remote Control, Disk) are listed at the end of that menu. Recent chats are listed on the Chat home.
+Household members see Agents and Profile only. The header shows the section title, the connection chip and a
+**Settings** gear (`#/settings`), which opens the Settings menu from any section. Recent chats are listed on the Chat
+home.
+
+The Settings menu is grouped into **This phone** (Appearance, Notifications, Connection, Install), **Agents**
+(Backends, Smart approvals, Skills, Memory), **Server** (Resources, Server settings, Accounts, Remote control, Disk) and
+**Integrations** (Apps, Inference endpoint). Each row shows its current value, such as `System · Default text` or
+`GPU held · 41 min`; a value that can't be read is left blank. Disk shows no value, because measuring it walks every
+workspace. The owner's former Actions pages are the Server rows, and only the owner sees them. At the end, a version
+row shows this bundle's build and protocol, whether it is up to date with the connected Server, and the Server's
+release and supported protocol range. **Check for update** asks the Server again and, when a newer bundle is offered,
+becomes **Reload and update** (see [compatibility](compatibility.md)).
 
 Detail and editor pages (a session, a job, an image, New task) show Back and hide the tab bar. In the installed app
 the bar sits above the home indicator (`env(safe-area-inset-bottom)`). At 960 px and wider the same links form a
 left rail. Scheduled work is called **Jobs** everywhere; the old `#/tasks` links redirect to `#/jobs`.
 
+The Jobs list groups jobs as **Needs attention** (the last run ended ATTENTION, failed or waits on an approval),
+**Scheduled** and **Paused**. Each row has an **Enabled** switch that saves at once, through the same
+`PUT /api/admin/v1/jobs/{id}` the form uses, and offers Undo in the toast. Tapping the row opens the full form.
+
+Confirmations and short inputs (delete, revoke, cancel, rewind, fork, renames, quotas, the update offer) open an
+in-app sheet (`lib/sheet.mjs`) instead of the browser's native dialogs: a bottom sheet on phones and a centred card
+on wide screens. The action button names the action and is red when it destroys something; input sheets show
+errors under the field. Escape, a tap outside the sheet or leaving the page dismisses it.
+
 The Agents list groups sessions into **Needs you** (a pending approval, or a run that failed in the last 24 hours),
 **Running** (running, queued or waiting) and **Recent** (finished). Empty groups are hidden, and each group is sorted
 by most recent activity. An approval row shows the pending command or tool on one line and opens straight at the
 approval. A session on a machine other than the tower shows a laptop icon and the machine's name.
+
+## Connection state
+
+The header chip says **Live**, **Reconnecting** or **Offline**. It follows the app-wide event stream from Agent Harness
+Server: Reconnecting after the stream drops, Offline after four failed attempts in a row or as soon as the browser
+reports no network. The app keeps retrying in both states, with exponential backoff from 1 s up to 30 s and random
+jitter, and retries at once when the browser comes back online or the app returns to the foreground. Inside a page
+with Back, a live connection shrinks to its dot.
+
+An open session's transcript shows a strip under Transcript / Changes / Info while its own stream is down, with how long
+ago the last event arrived. When the Agents list or the recent chats fail to refresh, the list keeps what it shows and
+says **List may be stale**, when it last updated and why, with **Retry**.
 
 ## API boundary
 

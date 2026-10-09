@@ -13,6 +13,8 @@ MODULE = Module(
     title="Homelab",
     docs=("docs/modules.md",),
     runtime=_runtime,
+    app_scopes={"homelab": "use the host homelab tools (logs, service config, metrics) in homelab projects"},
+    app_capabilities={"homelab": "homelab"},
     tool_names=("homelab_services", "container_logs", "read_service_config", "prometheus_query",
                 "restart_service", "rebuild_service"),
 )

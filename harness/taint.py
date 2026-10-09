@@ -1,8 +1,8 @@
 """Session taint: once a session has read untrusted content, risky actions that a rule would allow are asked about.
 
 The record is a capped JSON list of {kind, origin, first_seen} on the session row, deduplicated by origin. It is only
-cleared by the owner's explicit action. Known v1 gaps: web_fetch to an arbitrary URL, git_clone to allowlisted hosts,
-and network-less commands stay as the policy decides; Chat sessions and app context are not tracked.
+cleared by the owner's explicit action. Known v1 gaps: web_fetch to an arbitrary URL and network-less commands stay as
+the policy decides; Chat sessions and app context are not tracked.
 """
 from __future__ import annotations
 
@@ -47,6 +47,8 @@ def reason(taint: list) -> str:
 def is_risky(name: str, args: dict, app_tool_names: set[str]) -> bool:
     if name in SHELL_TOOLS:
         return bool(args.get("network")) or bool(re.search(r"\bgit\s+push\b", str(args.get("command", ""))))
+    if name == "git_clone":  # a remote clone runs with network access, like a network command
+        return not str(args.get("url") or "").startswith("local:")
     return name in ALWAYS_TAINT_ASK or name in app_tool_names
 
 

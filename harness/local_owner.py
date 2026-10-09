@@ -1,0 +1,75 @@
+"""The local owner credential for callers on this machine.
+
+`tailscale serve` adds the caller's identity to every request it forwards; the daemon keeps it only when tailscaled is
+the connection's peer (harness/tailscale_peer.py). A request without that identity reached the loopback listener some
+other way, so it must say who it is: it carries the local owner token (a random secret the daemon keeps in data_dir),
+or a credential its route checks itself (an API token, an inference key, a runner token, or a stream ticket). Only the
+health and metrics endpoints answer without one.
+"""
+
+from __future__ import annotations
+
+import hmac
+import secrets
+from pathlib import Path
+
+from .atomic_io import write_atomic
+
+TOKEN_FILE = "local-owner.token"
+HEADER = "X-Agent-Harness-Local-Token"
+OPEN_PATHS = frozenset({"/health", "/metrics"})
+API_PREFIXES = ("/api/v1", "/api/admin/v1")  # routes that check a bearer token's kind and scopes themselves
+REFUSED = "requests from this machine need the local owner token (see docs/INSTALL.md)"
+
+
+def token_path(data_dir: Path | str) -> Path:
+    return Path(data_dir) / TOKEN_FILE
+
+
+def read_token(data_dir: Path | str) -> str:
+    try:
+        return token_path(data_dir).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def ensure_token(data_dir: Path | str) -> str:
+    """The daemon's local owner token, created owner-only on first start and kept across restarts."""
+    token = read_token(data_dir)
+    if token:
+        return token
+    token = secrets.token_urlsafe(32)
+    path = token_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(path, token + "\n", private=True)
+    return token
+
+
+def _bearer(request) -> str:
+    header = request.headers.get("authorization") or ""
+    return header[7:].strip() if header.lower().startswith("bearer ") else ""
+
+
+def admitted(request, m, path: str) -> bool:
+    """Whether a request that carries no Tailscale identity may continue to its route."""
+    if path in OPEN_PATHS:
+        return True
+    api = path.startswith(API_PREFIXES)
+    if (request.method == "OPTIONS" and api and request.headers.get("origin")
+            and request.headers.get("access-control-request-method")):
+        return True  # a browser's CORS preflight never carries credentials; it returns no data
+    expected = getattr(m, "local_owner_token", "")
+    sent = request.headers.get(HEADER, "")
+    if expected and sent and hmac.compare_digest(sent.encode(), expected.encode()):
+        return True
+    token = _bearer(request)
+    if path.startswith("/v1/") and (token or request.headers.get("x-api-key")):
+        return True  # the inference endpoint checks its keys itself
+    key = m.db.api_key_by_secret(token) if token else None
+    if key is not None:
+        # The owner's admin token is the owner anywhere. Other tokens only reach the API routes that check them.
+        return api or (key.get("kind") == "owner" and "admin" in (key.get("scopes") or "").split())
+    if token and path.startswith("/runners/"):
+        return True  # runner routes check the runner token themselves
+    return bool(request.query_params.get("ticket") and path.startswith("/api/v1/sessions/")
+                and path.endswith("/events"))

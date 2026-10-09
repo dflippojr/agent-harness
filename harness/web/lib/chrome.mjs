@@ -1,9 +1,15 @@
-// The app's persistent chrome (#258): header bar, floating action button, toast, connection dot, guest banner and the
+// The app's persistent chrome (#258): header bar, floating action button, toast, connection chip, guest banner and the
 // repaint hooks for the installed iOS app. mountChrome() takes the shell elements and browser globals as arguments and
 // registers the window/document listeners when called, so importing this module touches nothing and works under plain Node.
 import { pageMetrics, scrollPage } from "./session-ui.mjs";
 
 const SECTION_TITLES = { chat: "Chat", agents: "Agents", jobs: "Jobs", images: "Images" };
+const CONN_LABEL = { live: "Live", reconnecting: "Reconnecting", offline: "Offline" };
+const CONN_TITLE = {
+  live: "Live connection to Agent Harness Server",
+  reconnecting: "Lost the live connection to Agent Harness Server; reconnecting",
+  offline: "Can't reach Agent Harness Server; still retrying",
+};
 
 export function mountChrome({ els, browser, session }) {
   const { $app, $title, $back, $conn, $fabHost, $fab } = els;
@@ -64,16 +70,46 @@ export function mountChrome({ els, browser, session }) {
     $fabHost.hidden = false;
   }
 
-  function toast(text, ms = 2600) {
+  // `action` ({ label, onClick }) adds a button such as Undo (#511); tapping it runs onClick and dismisses the toast.
+  function toast(text, ms = 2600, action = null) {
     const t = document.getElementById("toast");
     t.textContent = text;
+    t.classList.toggle("has-action", !!action);
+    if (action) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "toast-action";
+      btn.textContent = action.label;
+      btn.addEventListener("click", () => {
+        clearTimeout(toast.timer);
+        t.hidden = true;
+        action.onClick();
+      });
+      t.append(" ", btn);
+    }
     t.hidden = false;
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => { t.hidden = true; }, ms);
   }
 
-  function setConnLive(on) {
-    $conn.classList.toggle("live", !!on);
+  // The header's connection chip (#510): Live, Reconnecting or Offline, in words rather than a bare 8 px dot. It stays
+  // hidden until the daemon stream first reports, so boot never flashes a false state. The "live" class is what other
+  // pages read; a page that says the state in its own words (Settings' identity line, #512) follows it through
+  // onConnState instead of reading it once. onConnState returns the unsubscribe.
+  const connListeners = new Set();
+  function setConnState(state) {
+    const label = CONN_LABEL[state] || CONN_LABEL.offline;
+    $conn.hidden = false;
+    $conn.dataset.state = state in CONN_LABEL ? state : "offline";
+    $conn.classList.toggle("live", state === "live");
+    $conn.textContent = label;
+    $conn.title = CONN_TITLE[state] || CONN_TITLE.offline;
+    for (const fn of connListeners) fn($conn.dataset.state);
+  }
+
+  function onConnState(fn) {
+    connListeners.add(fn);
+    return () => connListeners.delete(fn);
   }
 
   function paintGuestChrome() {
@@ -104,5 +140,5 @@ export function mountChrome({ els, browser, session }) {
   window.addEventListener("pageshow", repaintPage);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintPage(); });
 
-  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnLive, paintGuestChrome };
+  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnState, onConnState, paintGuestChrome };
 }

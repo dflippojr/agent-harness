@@ -165,19 +165,28 @@ def check_docker(r: Report, cfg) -> None:
         check_provider_containers(r, cfg)
 
 
+def _get(cfg, url: str, timeout: float):
+    """GET from the local daemon as the owner: it answers local callers only with its local owner token."""
+    from . import local_owner
+    response = httpx.get(url, timeout=timeout, headers={local_owner.HEADER: local_owner.read_token(cfg.data_dir)})
+    if response.status_code >= 400:
+        raise ValueError(f"HTTP {response.status_code}")
+    return response.json()
+
+
 def check_daemon_profile(r: Report, cfg, base: str) -> None:
     """Health, plus model state or provider logins - whichever the profile runs."""
-    health = httpx.get(f"{base}/health", timeout=5).json()
+    health = _get(cfg, f"{base}/health", timeout=5)
     if health.get("profile") != cfg.profile:
         raise ValueError(f"daemon reports profile {health.get('profile')!r}, expected {cfg.profile!r}")
     if cfg.module_effective("local_model"):
-        state = httpx.get(f"{base}/models/status", timeout=10).json()[0]["state"]
+        state = _get(cfg, f"{base}/models/status", timeout=10)[0]["state"]
         r.ok("Daemon", f"{base} up; model state {state}")
         return
     r.ok("Daemon", f"{base} up; {cfg.profile} profile")
     if cfg.modules.local_model:
         return  # The core local backend can use a server supervised outside the harness.
-    backends = httpx.get(f"{base}/backends", timeout=100).json()
+    backends = _get(cfg, f"{base}/backends", timeout=100)
     logged_in = [backend["name"] for backend in backends if backend.get("logged_in")]
     (r.ok if logged_in else r.warn)(
         "Provider login", ", ".join(logged_in) if logged_in else
