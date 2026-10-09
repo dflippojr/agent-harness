@@ -175,10 +175,7 @@ def test_base_mode_accepts_an_untouched_table_but_not_a_hand_edit(repo):
 
 
 def test_build_reports_an_unresolvable_route_instead_of_a_traceback(repo, capsys):
-    (repo / "harness" / "bad.py").write_text('@web_router.get(compute())
-def f():
-    pass
-', encoding="utf-8")
+    (repo / "harness" / "bad.py").write_text("@web_router.get(compute())\ndef f():\n    pass\n", encoding="utf-8")
     assert build.main(["--root", str(repo)]) == 1
     assert "harness/bad.py:1: cannot resolve the path" in capsys.readouterr().err
 
