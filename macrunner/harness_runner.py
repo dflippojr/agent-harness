@@ -52,8 +52,9 @@ OUTPUT_CAP = 1_000_000      # characters of command output kept (the daemon trim
 SESSION_RE = re.compile(r"^[0-9a-f]{10}$")
 HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+(:\d+)?/[^\s'\"`$\\]+")
 RID_OPS = frozenset({"shell", "git_clone"})  # the ops that need the request id
-STAGING_PREFIX, REMOVING_PREFIX = ".seeding-", ".removing-"  # session TMPDIRs on their way in and out
-# What a new session TMPDIR gets copied from the owner's read-only build tool homes: (home dir, entries, session dir).
+STAGING_PREFIX, REMOVING_PREFIX = ".seeding-", ".removing-"  # session directories on their way in and out
+TOOLS_SUFFIX = ".tools"  # <tmp base>/<session id>.tools: the session's Gradle and Maven homes
+# What a session's tools directory gets copied from the owner's read-only build tool homes: (home dir, entries, dir).
 TOOL_SEEDS = ((".gradle", ("wrapper/dists", "jdks", "gradle.properties"), "gradle"),
               (".m2", ("repository", "wrapper"), "m2"))
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -94,7 +95,7 @@ class Executor:
         self.lock = threading.Lock()
         self.procs: dict = {}      # request id -> Popen
         self.proc_sessions: dict = {}  # request id -> session id
-        self.seeding: dict = {}    # session id -> Event set once its new TMPDIR is seeded
+        self.seeding: set = set()  # session ids whose tools directory this runner has started seeding
         self.cancelled: set = set()  # request ids cancelled before their process started
 
     # helpers
@@ -126,62 +127,70 @@ class Executor:
     def tmpdir(self, sid: str) -> Path:
         """The session's own TMPDIR, <private base>/<session id>, created with mode 0700 so other users and sessions
         can't read it or plant files in it. It lasts until the workspace is discarded or cleaned up, across runner
-        restarts. A new one is seeded with the session's Gradle and Maven homes (see seed_tool_homes) in a staging
-        directory and only then moved into place, so an existing TMPDIR is always a fully seeded one."""
+        restarts. The first call also starts seeding the session's tools directory in the background."""
         if not SESSION_RE.match(sid or ""):
             raise OpError(f"bad session id {sid!r}")
         with self.lock:
-            base = self.tmp_base()
-            path, staging = base / sid, None
-            seeded = self.seeding.get(sid)
-            if seeded is None and not path.exists():
-                staging = base / f"{STAGING_PREFIX}{sid}-{uuid.uuid4().hex[:8]}"
-                staging.mkdir(mode=0o700)
-                seeded = self.seeding[sid] = threading.Event()
-        # Seeding can take a while, so other sessions don't wait for it; this session's commands do.
-        if staging is not None:
-            try:
-                self.seed_tool_homes(staging)
-            finally:
-                with self.lock:
-                    try:
-                        staging.rename(path)
-                    except OSError as e:
-                        log.warning("couldn't move the seeded TMPDIR into place: %s", e)
-                        path.mkdir(mode=0o700, exist_ok=True)
-                    self.seeding.pop(sid, None)
-                seeded.set()
-                if staging.exists():
-                    remove_tree(staging)
-            return path
-        if seeded is not None:
-            seeded.wait()
-        with self.lock:
+            path = self.tmp_base() / sid
             path.mkdir(mode=0o700, exist_ok=True)
             self.check_private(path)
+            seed = sid not in self.seeding and not os.path.lexists(self.tools_dir(sid))
+            if seed:
+                self.seeding.add(sid)
+        if seed:
+            threading.Thread(target=self.seed_tools, args=(sid,), name=f"seed-{sid}", daemon=True).start()
         return path
 
+    def tools_dir(self, sid: str) -> Path:
+        """The session's Gradle and Maven homes, next to its TMPDIR. Commands can use it but, like the TMPDIR, can't
+        replace it with a link: the directory holding both is off limits to the sandbox."""
+        return self.tmp_base() / f"{sid}{TOOLS_SUFFIX}"
+
+    def seed_tools(self, sid: str) -> None:
+        """Copy the owner's build tool downloads into a staging directory, then rename it to the session's tools
+        directory in one step (a rename never follows or replaces a link or a directory already there). It runs
+        in the background, so no command waits for it; a build in the first moments of a session may download
+        what it needs instead."""
+        base = self.tmp_base()
+        staging = base / f"{STAGING_PREFIX}{sid}-{uuid.uuid4().hex[:8]}"
+        try:
+            staging.mkdir(mode=0o700)
+            self.seed_tool_homes(staging)
+            with self.lock:
+                if sid not in self.seeding:  # the session was removed meanwhile
+                    return
+                staging.rename(self.tools_dir(sid))
+        except OSError as e:
+            log.info("session %s keeps its own Gradle and Maven homes: %s", sid, e)
+        finally:
+            if staging.exists():
+                remove_tree(staging)
+
     def sweep_tmp(self) -> None:
-        """Remove TMPDIRs a previous runner was still seeding or removing when it stopped."""
+        """Remove what a previous runner left half done: staging and removal directories, and tools directories of
+        sessions whose TMPDIR is gone."""
         base = self.tmp_base()
         for child in base.iterdir():
-            if child.name.startswith((STAGING_PREFIX, REMOVING_PREFIX)) and not child.is_symlink():
+            name = child.name
+            orphan = name.endswith(TOOLS_SUFFIX) and not (base / name[:-len(TOOLS_SUFFIX)]).exists()
+            if (name.startswith((STAGING_PREFIX, REMOVING_PREFIX)) or orphan) and not child.is_symlink():
                 remove_tree(child)
 
     def drop_tmpdir(self, sid: str) -> None:
         if not SESSION_RE.match(sid or ""):
             raise OpError(f"bad session id {sid!r}")
-        with self.lock:
-            seeded = self.seeding.get(sid)
-        if seeded is not None:
-            seeded.wait()
-        with self.lock:  # move it aside under the lock; deleting a large tree mustn't hold up other sessions
-            path = self.tmp_base() / sid
-            if not path.exists():
-                return
-            doomed = path.with_name(f"{REMOVING_PREFIX}{sid}-{uuid.uuid4().hex[:8]}")
-            path.rename(doomed)
-        remove_tree(doomed)
+        doomed = []
+        with self.lock:  # move them aside under the lock; deleting large trees mustn't hold up other sessions
+            for path in (self.tmp_base() / sid, self.tools_dir(sid)):
+                if os.path.lexists(path):
+                    doomed.append(path.with_name(f"{REMOVING_PREFIX}{path.name}-{uuid.uuid4().hex[:8]}"))
+                    path.rename(doomed[-1])
+            self.seeding.discard(sid)
+        for path in doomed:
+            if path.is_symlink():
+                path.unlink()
+            else:
+                remove_tree(path)
 
     def project(self, params: dict) -> Project:
         repo = params.get("repo") or ""
@@ -306,22 +315,22 @@ class Executor:
                 self.cancelled.discard(rid)
 
     def _run_sandboxed(self, rid: str, sid: str, ws: Path, command: str, timeout: int, network: bool) -> dict:
-        tmp = self.tmpdir(sid)  # a new session's TMPDIR is seeded first, which can take a while
+        tmp, tools = self.tmpdir(sid), self.tools_dir(sid)
         env = {"PATH": PATH, "HOME": str(self.home), "USER": os.environ.get("USER", ""),
                "LOGNAME": os.environ.get("USER", ""), "SHELL": self.shell, "LANG": "en_US.UTF-8", "TERM": "dumb",
                "TMPDIR": str(tmp), "GIT_TERMINAL_PROMPT": "0", "HARNESS_SESSION": sid,
                "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PYTHONDONTWRITEBYTECODE": "1",
                # ~/.gradle, ~/.m2 and ~/.cache are read-only in the sandbox: builds write to the session's own
-               # directories and reuse the owner's downloaded Gradle and Maven dependencies read-only.
-               "GRADLE_USER_HOME": str(tmp / "gradle"), "GRADLE_RO_DEP_CACHE": str(self.home / ".gradle" / "caches"),
-               "MAVEN_OPTS": f"-Dmaven.repo.local={tmp / 'm2' / 'repository'}", "MAVEN_USER_HOME": str(tmp / "m2"),
+               # directories, which start with copies of the owner's Gradle and Maven downloads.
+               "GRADLE_USER_HOME": str(tools / "gradle"), "GRADLE_RO_DEP_CACHE": str(self.home / ".gradle" / "caches"),
+               "MAVEN_OPTS": f"-Dmaven.repo.local={tools / 'm2' / 'repository'}", "MAVEN_USER_HOME": str(tools / "m2"),
                "XDG_CACHE_HOME": str(tmp / "cache")}
         argv = [self.shell, "-c", command]
         if self.profile_template is not None:
             profile = self.profile_template.replace("\n{{NETWORK}}", "\n" + ("" if network else OFFLINE_RULES))
             argv = ["/usr/bin/sandbox-exec", "-p", profile, "-D", f"WORKSPACE={ws}",
                     "-D", f"WORKSPACES={self.workspaces}", "-D", f"SESSION_TMP={tmp.resolve()}",
-                    "-D", f"TMP_BASE={tmp.parent.resolve()}",
+                    "-D", f"SESSION_TOOLS={tmp.parent.resolve() / tools.name}", "-D", f"TMP_BASE={tmp.parent.resolve()}",
                     "-D", f"HOME={self.home}"] + argv
         with self.lock:
             if rid in self.cancelled:
@@ -374,15 +383,14 @@ class Executor:
             except (ProcessLookupError, PermissionError):
                 pass
 
-    def seed_tool_homes(self, session_tmp: Path) -> None:
-        """Give a new session its own copy of the owner's Gradle wrapper distributions, provisioned JDKs and
-        gradle.properties, and Maven repository and wrapper distributions, so ./gradlew, mvn and ./mvnw work
-        offline with any version. The tools write lock and status files next to them, and the originals stay
-        read-only to the sandbox. Called only while the session TMPDIR is brand new, before any sandboxed command
-        could have put anything (a link, a file) where the runner writes."""
+    def seed_tool_homes(self, staging: Path) -> None:
+        """Copy the owner's Gradle wrapper distributions, provisioned JDKs and gradle.properties, and Maven
+        repository and wrapper distributions into `staging` (which no sandboxed command can reach), so ./gradlew, mvn
+        and ./mvnw work offline with any version. The tools write lock and status files next to them, and the
+        originals stay read-only to the sandbox."""
         for home_dir, entries, session_dir in TOOL_SEEDS:
             for rel in entries:
-                src, dst = self.home / home_dir / rel, session_tmp / session_dir / rel
+                src, dst = self.home / home_dir / rel, staging / session_dir / rel
                 if src.is_symlink() or not src.exists():
                     continue
                 try:
@@ -392,7 +400,7 @@ class Executor:
                     else:
                         shutil.copyfile(src, dst)
                 except (OSError, subprocess.SubprocessError) as e:
-                    log.warning("couldn't copy ~/%s/%s into the session TMPDIR: %s", home_dir, rel, e)
+                    log.warning("couldn't copy ~/%s/%s for a session: %s", home_dir, rel, e)
                     # No half copy: the tool then downloads what it needs instead of using a broken tree.
                     if dst.is_dir() and not dst.is_symlink():
                         remove_tree(dst)

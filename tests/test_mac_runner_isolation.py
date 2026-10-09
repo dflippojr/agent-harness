@@ -243,6 +243,7 @@ def test_runner_passes_the_workspace_directories_to_the_profile(tmp_path, monkey
     monkeypatch.setattr(harness_runner.subprocess, "Popen", FakeProc)
     session_tmp = tmp_path / "tmp-base" / SID
     monkeypatch.setattr(harness_runner.Executor, "tmpdir", lambda self, sid: session_tmp)
+    monkeypatch.setattr(harness_runner.Executor, "tools_dir", lambda self, sid: session_tmp.with_name(sid + ".tools"))
     ex = harness_runner.Executor(workspaces=tmp_path / "home" / ".agent-harness" / "workspaces", repo_roots=[],
                                  profile=PROFILE, home=tmp_path / "home", shell=bash() or "bash", min_free_gb=0)
     ex.handle("r", "shell", {"session": SID, "command": "true"})
@@ -250,6 +251,7 @@ def test_runner_passes_the_workspace_directories_to_the_profile(tmp_path, monkey
     params = {argv[i + 1].split("=", 1)[0]: argv[i + 1].split("=", 1)[1] for i, a in enumerate(argv) if a == "-D"}
     assert params == {"WORKSPACE": str(ex.workspace(SID)), "WORKSPACES": str(ex.workspaces),
                       "SESSION_TMP": str(session_tmp.resolve()), "TMP_BASE": str((tmp_path / "tmp-base").resolve()),
+                      "SESSION_TOOLS": str((tmp_path / "tmp-base").resolve() / f"{SID}.tools"),
                       "HOME": str(tmp_path / "home")}
     used = set(re.findall(r'\(param "([A-Z_]+)"\)', PROFILE.read_text(encoding="utf-8")))
     assert used == set(params)
@@ -289,6 +291,7 @@ def test_profile_keeps_agent_harness_files_and_other_sessions_out_of_reach():
     assert deny_tmp.startswith("(deny file-read* file-write*") and '(subpath (param "WORKSPACES"))' in deny_tmp
     allow_ws = _last_rule(rules, "file-read*", '(subpath (param "WORKSPACE"))')
     assert allow_ws.startswith("(allow file-read* file-write*") and '(subpath (param "SESSION_TMP"))' in allow_ws
+    assert '(subpath (param "SESSION_TOOLS"))' in allow_ws
     assert rules.index(allow_ws) > max(rules.index(deny_home), rules.index(deny_tmp))
     metadata = _last_rule(rules, "file-read-metadata", f'(literal {_home("/.agent-harness")})')
     assert metadata.startswith("(allow file-read-metadata")
@@ -342,20 +345,30 @@ def test_sandboxed_builds_use_session_directories(tmp_path, monkeypatch):
     ex = executor(tmp_path, [tmp_path])
     ex.handle("r", "shell", {"session": SID, "command": "true"})
     env = envs[0]
-    assert Path(env["GRADLE_USER_HOME"]) == Path(env["TMPDIR"]) / "gradle"
+    tools = ex.tools_dir(SID)
+    assert tools.parent == Path(env["TMPDIR"]).parent
+    assert Path(env["GRADLE_USER_HOME"]) == tools / "gradle"
     assert Path(env["GRADLE_RO_DEP_CACHE"]) == tmp_path / ".gradle" / "caches"
-    assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={Path(env['TMPDIR']) / 'm2' / 'repository'}"
-    assert Path(env["MAVEN_USER_HOME"]) == Path(env["TMPDIR"]) / "m2"
+    assert env["MAVEN_OPTS"] == f"-Dmaven.repo.local={tools / 'm2' / 'repository'}"
+    assert Path(env["MAVEN_USER_HOME"]) == tools / "m2"
     assert Path(env["XDG_CACHE_HOME"]) == Path(env["TMPDIR"]) / "cache"
+    wait_seeded(SID)
 
 
-def test_session_gradle_home_gets_its_own_copy_of_wrapper_distributions(tmp_path, monkeypatch):
+def wait_seeded(sid: str) -> None:
+    for thread in threading.enumerate():
+        if thread.name == f"seed-{sid}":
+            thread.join(10)
+
+
+@pytest.fixture
+def seed_home(tmp_path, monkeypatch):
+    """An owner home with Gradle and Maven downloads, and the shared temp directory."""
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
     (tmp_path / "shared").mkdir()
     dist = tmp_path / ".gradle" / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123"
-    dist.mkdir(parents=True)
-    (dist / "gradle-9.0-bin.zip.ok").write_text("")
     (dist / "gradle-9.0" / "lib").mkdir(parents=True)
+    (dist / "gradle-9.0-bin.zip.ok").write_text("")
     (dist / "gradle-9.0" / "lib" / "gradle.jar").write_text("original")
     (tmp_path / ".gradle" / "jdks" / "jdk-21").mkdir(parents=True)
     (tmp_path / ".gradle" / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2g\n")
@@ -363,50 +376,67 @@ def test_session_gradle_home_gets_its_own_copy_of_wrapper_distributions(tmp_path
     jar.parent.mkdir(parents=True)
     jar.write_text("original")
     (tmp_path / ".m2" / "wrapper" / "dists" / "apache-maven-3.8.8").mkdir(parents=True)
-    ex = executor(tmp_path, [tmp_path])
-    gradle_home = ex.tmpdir(SID) / "gradle"
-    m2 = gradle_home.parent / "m2"
-    assert (m2 / "wrapper" / "dists" / "apache-maven-3.8.8").is_dir()
-    (m2 / "repository" / "org" / "x" / "1.0" / "x-1.0.jar").write_text("session")
-    assert jar.read_text() == "original"
-    copy = gradle_home / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123"
+    return tmp_path
+
+
+def test_session_tools_get_their_own_copy_of_the_owners_downloads(seed_home):
+    ex = executor(seed_home, [seed_home])
+    ex.tmpdir(SID)
+    wait_seeded(SID)
+    tools = ex.tools_dir(SID)
+    copy = tools / "gradle" / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123"
     assert (copy / "gradle-9.0-bin.zip.ok").exists()
-    assert (gradle_home / "jdks" / "jdk-21").is_dir()
-    assert (gradle_home / "gradle.properties").read_text() == "org.gradle.jvmargs=-Xmx2g\n"
+    assert (tools / "gradle" / "jdks" / "jdk-21").is_dir()
+    assert (tools / "gradle" / "gradle.properties").read_text() == "org.gradle.jvmargs=-Xmx2g\n"
+    assert (tools / "m2" / "wrapper" / "dists" / "apache-maven-3.8.8").is_dir()
     (copy / "gradle-9.0" / "lib" / "gradle.jar").write_text("session")
-    assert (dist / "gradle-9.0" / "lib" / "gradle.jar").read_text() == "original"
-    (dist.parent.parent / "gradle-9.1-bin").mkdir()
-    assert ex.tmpdir(SID) == gradle_home.parent  # an existing TMPDIR is not seeded again
-    assert not (gradle_home / "wrapper" / "dists" / "gradle-9.1-bin").exists()
+    (tools / "m2" / "repository" / "org" / "x" / "1.0" / "x-1.0.jar").write_text("session")
+    assert (seed_home / ".gradle" / "wrapper" / "dists" / "gradle-9.0-bin" / "abc123" / "gradle-9.0" / "lib" /
+            "gradle.jar").read_text() == "original"
+    assert (seed_home / ".m2" / "repository" / "org" / "x" / "1.0" / "x-1.0.jar").read_text() == "original"
+    (seed_home / ".gradle" / "jdks" / "jdk-22").mkdir()
+    ex.tmpdir(SID)
+    executor(seed_home, [seed_home]).tmpdir(SID)  # nor after a restart, once the tools directory exists
+    wait_seeded(SID)
+    assert not (tools / "gradle" / "jdks" / "jdk-22").exists()
+    assert sorted(p.name for p in ex.tmp_base().iterdir()) == [SID, f"{SID}.tools"]
 
 
-def test_existing_session_tmpdir_is_never_seeded(tmp_path, monkeypatch):
-    shared = tmp_path / "shared"
-    shared.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(shared))
-    (tmp_path / ".gradle" / "jdks" / "jdk-21").mkdir(parents=True)
-    (tmp_path / ".gradle" / "gradle.properties").write_text("x=1\n")
-    ex = executor(tmp_path, [tmp_path])
-    session = ex.tmp_base() / SID
-    session.mkdir()
-    (session / "gradle").write_text("not a directory")  # whatever a command left there stays as it was
-    assert ex.tmpdir(SID) == session
-    assert (session / "gradle").read_text() == "not a directory"
-    assert ex.handle("r", "cleanup_workspace", {"session": SID}) == {"removed": True}
+def test_something_already_at_the_tools_path_is_left_alone(seed_home):
+    ex = executor(seed_home, [seed_home])
+    ex.tmp_base().mkdir(exist_ok=True)
+    ex.tools_dir(SID).write_text("not a directory")
+    ex.tmpdir(SID)
+    wait_seeded(SID)
+    assert ex.tools_dir(SID).read_text() == "not a directory"
+    assert sorted(p.name for p in ex.tmp_base().iterdir()) == [SID, f"{SID}.tools"]
 
 
-def test_missing_or_uncopyable_wrapper_distributions_do_not_fail_the_command(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
-    (tmp_path / "shared").mkdir()
-    ex = executor(tmp_path, [tmp_path])
-    assert not (ex.tmpdir(SID) / "gradle").exists()
+def test_seeding_does_not_hold_up_commands(seed_home, monkeypatch):
+    started, release = threading.Event(), threading.Event()
 
+    def slow_clone(src, dst):
+        started.set()
+        release.wait(10)
+        dst.mkdir(parents=True)
+
+    monkeypatch.setattr(harness_runner, "clone_tree", slow_clone)
+    ex = executor(seed_home, [seed_home])
+    assert ex.tmpdir(SID).is_dir()
+    assert started.wait(10)
+    assert ex.tmpdir(SID).is_dir()  # the same session isn't held up either
+    assert ex.lock.acquire(timeout=1)
+    ex.lock.release()
+    assert not ex.tools_dir(SID).exists()  # it appears only once complete
+    release.set()
+    wait_seeded(SID)
+    assert (ex.tools_dir(SID) / "gradle" / "jdks").is_dir()
+
+
+def test_uncopyable_downloads_leave_no_half_copy(seed_home, monkeypatch, caplog):
     def fail(src, dst):
         (dst / "partial").mkdir(parents=True)
         raise OSError("no space")
-
-    (tmp_path / ".gradle" / "wrapper" / "dists").mkdir(parents=True)
-    (tmp_path / ".gradle" / "gradle.properties").write_text("x=1\n")
 
     def fail_file(src, dst):
         Path(dst).write_text("x=")
@@ -414,65 +444,42 @@ def test_missing_or_uncopyable_wrapper_distributions_do_not_fail_the_command(tmp
 
     monkeypatch.setattr(harness_runner, "clone_tree", fail)
     monkeypatch.setattr(harness_runner.shutil, "copyfile", fail_file)
-    other = "abcdef0123"
-    session = ex.tmpdir(other)
-    assert session.is_dir()
+    ex = executor(seed_home, [seed_home])
+    ex.tmpdir(SID)
+    wait_seeded(SID)
     assert "~/.gradle/wrapper/dists" in caplog.text
-    assert not (session / "gradle" / "wrapper" / "dists").exists()  # no half copy is left behind
-    assert not (session / "gradle" / "gradle.properties").exists()
-    assert "~/.m2" not in caplog.text  # nothing to copy there
+    tools = ex.tools_dir(SID)
+    assert not (tools / "gradle" / "wrapper" / "dists").exists()
+    assert not (tools / "gradle" / "gradle.properties").exists()
+    assert not (tools / "m2" / "repository").exists()
 
 
-def test_seeding_a_new_session_holds_up_only_that_session(tmp_path, monkeypatch):
+def test_no_owner_downloads_means_empty_session_tools(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
     (tmp_path / "shared").mkdir()
-    (tmp_path / ".gradle" / "jdks").mkdir(parents=True)
-    started, release = threading.Event(), threading.Event()
-
-    def slow_clone(src, dst):
-        started.set()
-        release.wait(10)
-        dst.mkdir()
-
-    monkeypatch.setattr(harness_runner, "clone_tree", slow_clone)
     ex = executor(tmp_path, [tmp_path])
-    results = {}
-    first = threading.Thread(target=lambda: results.setdefault("first", ex.tmpdir(SID)))
-    first.start()
-    assert started.wait(10)
-    assert not (ex.tmp_base() / SID).exists()  # it appears only once seeded
-    second = threading.Thread(target=lambda: results.setdefault("second", ex.tmpdir(SID)))
-    second.start()
-    monkeypatch.setattr(harness_runner, "clone_tree", lambda src, dst: dst.mkdir())
-    assert ex.tmpdir("abcdef0123").is_dir()  # another session isn't held up
-    assert ex.lock.acquire(timeout=1)
-    ex.lock.release()
-    second.join(0.3)
-    assert second.is_alive()  # the same session waits until its TMPDIR is seeded
-    release.set()
-    first.join(10)
-    second.join(10)
-    assert results["first"] == results["second"]
-    assert (results["first"] / "gradle" / "jdks").is_dir()
-    assert ex.seeding == {}
+    ex.tmpdir(SID)
+    wait_seeded(SID)
+    assert list(ex.tools_dir(SID).iterdir()) == []
+    assert "couldn't copy" not in caplog.text
 
 
 @pytest.mark.parametrize("op", ["cancel", "kill_session"])
-def test_command_cancelled_while_its_session_is_seeded_never_starts(tmp_path, monkeypatch, op):
+def test_command_cancelled_before_its_process_starts_never_starts(tmp_path, monkeypatch, op):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
     (tmp_path / "shared").mkdir()
-    (tmp_path / ".gradle" / "jdks").mkdir(parents=True)
     started, release = threading.Event(), threading.Event()
+    real_tmpdir = harness_runner.Executor.tmpdir
 
-    def slow_clone(src, dst):
+    def slow_tmpdir(self, sid):
         started.set()
         release.wait(10)
-        dst.mkdir()
+        return real_tmpdir(self, sid)
 
     def no_popen(*_a, **_kw):
         raise AssertionError("the command started")
 
-    monkeypatch.setattr(harness_runner, "clone_tree", slow_clone)
+    monkeypatch.setattr(harness_runner.Executor, "tmpdir", slow_tmpdir)
     monkeypatch.setattr(harness_runner.subprocess, "Popen", no_popen)
     ex = executor(tmp_path, [tmp_path])
     results = {}
@@ -486,42 +493,34 @@ def test_command_cancelled_while_its_session_is_seeded_never_starts(tmp_path, mo
         assert ex.handle("x", "kill_session", {"session": SID}) == 1
     release.set()
     worker.join(10)
+    wait_seeded(SID)
     assert "cancelled before it started" in results["out"]["output"]
     assert ex.procs == {} and ex.proc_sessions == {} and ex.cancelled == set()
     assert ex.handle("x", "cancel", {"request_id": "r1"}) is False
 
 
-def test_removing_a_session_tmpdir_waits_for_its_seeding(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
-    (tmp_path / "shared").mkdir()
-    (tmp_path / ".gradle" / "jdks").mkdir(parents=True)
+def test_session_removed_while_seeding_gets_no_tools_directory(seed_home, monkeypatch):
     started, release = threading.Event(), threading.Event()
 
     def slow_clone(src, dst):
         started.set()
         release.wait(10)
-        dst.mkdir()
+        dst.mkdir(parents=True)
 
     monkeypatch.setattr(harness_runner, "clone_tree", slow_clone)
-    ex = executor(tmp_path, [tmp_path])
-    seeding = threading.Thread(target=ex.tmpdir, args=(SID,))
-    seeding.start()
+    ex = executor(seed_home, [seed_home])
+    ex.tmpdir(SID)
     assert started.wait(10)
-    dropping = threading.Thread(target=ex.drop_tmpdir, args=(SID,))
-    dropping.start()
-    dropping.join(0.3)
-    assert dropping.is_alive()
+    ex.drop_tmpdir(SID)
     release.set()
-    seeding.join(10)
-    dropping.join(10)
-    assert not (ex.tmp_base() / SID).exists()
+    wait_seeded(SID)
+    assert list(ex.tmp_base().iterdir()) == []
 
 
-def test_removing_a_session_tmpdir_does_not_hold_up_other_sessions(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
-    (tmp_path / "shared").mkdir()
-    ex = executor(tmp_path, [tmp_path])
+def test_removing_a_session_tmpdir_does_not_hold_up_other_sessions(seed_home, monkeypatch):
+    ex = executor(seed_home, [seed_home])
     (ex.tmpdir(SID) / "big").write_text("x")
+    wait_seeded(SID)
     lock_free = []
     real_remove = harness_runner.remove_tree
 
@@ -534,24 +533,23 @@ def test_removing_a_session_tmpdir_does_not_hold_up_other_sessions(tmp_path, mon
     monkeypatch.setattr(harness_runner, "remove_tree", remove)
     ex.drop_tmpdir(SID)
     ex.drop_tmpdir(SID)  # already gone
-    assert lock_free == [True]
+    assert lock_free == [True, True]  # the TMPDIR and the tools directory
     assert list(ex.tmp_base().iterdir()) == []
 
 
-def test_tmpdir_left_mid_seeding_by_a_stopped_runner_is_seeded_again(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
-    (tmp_path / "shared").mkdir()
-    (tmp_path / ".gradle" / "jdks" / "jdk-21").mkdir(parents=True)
-    stopped = executor(tmp_path, [tmp_path])
+def test_restarted_runner_sweeps_half_done_directories_and_seeds_again(seed_home):
+    stopped = executor(seed_home, [seed_home])
     base = stopped.tmp_base()
-    leftover = base / f"{harness_runner.STAGING_PREFIX}{SID}-0badc0de"
-    (leftover / "gradle" / "jdks").mkdir(parents=True)  # half seeded when the runner stopped
-    removing = base / f"{harness_runner.REMOVING_PREFIX}abcdef0123-0badc0de"
-    removing.mkdir()
-    restarted = executor(tmp_path, [tmp_path])
+    (base / SID).mkdir()  # its seeding never finished
+    (base / f"{harness_runner.STAGING_PREFIX}{SID}-0badc0de" / "gradle" / "jdks").mkdir(parents=True)
+    (base / f"{harness_runner.REMOVING_PREFIX}abcdef0123-0badc0de").mkdir()
+    (base / "abcdef0123.tools").mkdir()  # its session is gone
+    restarted = executor(seed_home, [seed_home])
     restarted.sweep_tmp()
-    assert sorted(p.name for p in base.iterdir()) == []
-    assert (restarted.tmpdir(SID) / "gradle" / "jdks" / "jdk-21").is_dir()
+    assert sorted(p.name for p in base.iterdir()) == [SID]
+    restarted.tmpdir(SID)
+    wait_seeded(SID)
+    assert (restarted.tools_dir(SID) / "gradle" / "jdks" / "jdk-21").is_dir()
 
 
 def test_clone_tree_uses_copy_on_write_cp_on_macos(tmp_path, monkeypatch):

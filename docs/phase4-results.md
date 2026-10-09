@@ -83,11 +83,14 @@ Base `(allow default)`, then:
 - `(deny file-write*)` except the workspace, `/private/tmp`, `/private/var/folders` (per-user TMPDIR), device
   files, `~/Library/Caches`, `~/Library/Developer/Xcode/DerivedData`, `~/.npm`. `~/.gradle`, `~/.m2` and `~/.cache`
   are read-only, because later builds outside the sandbox run what is in them: sandboxed commands get
-  `GRADLE_USER_HOME`, a Maven home (`MAVEN_USER_HOME`, local repository via `MAVEN_OPTS`) and `XDG_CACHE_HOME` under
-  the session TMPDIR, with `~/.gradle/caches` as a read-only dependency cache (`GRADLE_RO_DEP_CACHE`).
-  When the runner creates a session's TMPDIR it gives the session Gradle home a copy-on-write clone (`cp -c`) of
+  `GRADLE_USER_HOME` and a Maven home (`MAVEN_USER_HOME`, local repository via `MAVEN_OPTS`) in a per-session
+  tools directory next to the session TMPDIR (`<session>.tools`), `XDG_CACHE_HOME` in the TMPDIR, and
+  `~/.gradle/caches` as a read-only dependency cache (`GRADLE_RO_DEP_CACHE`). When a session's TMPDIR is created
+  the runner fills the tools directory in the background: copy-on-write clones (`cp -c`) of
   `~/.gradle/wrapper/dists`, `~/.gradle/jdks`, `~/.m2/repository` and `~/.m2/wrapper` and a copy of
-  `~/.gradle/gradle.properties`, so `./gradlew`, `mvn` and `./mvnw` work offline. A command can read and write only its own session's TMPDIR, not other sessions' TMPDIRs.
+  `~/.gradle/gradle.properties`, made in a staging directory and renamed into place when complete, so `./gradlew`,
+  `mvn` and `./mvnw` work offline (a build in the first moments of a session may download instead). A command can
+  read and write only its own session's TMPDIR and tools directory, not other sessions'.
 - Neither read nor write: all of `~/.agent-harness` except the session's own workspace (runner and client tokens,
   runner code, logs, other sessions' workspaces, and `runner/tmp`, where host-side git keeps its throwaway git
   dirs and hooks dirs; parent directories of the workspace can be stat'ed, not listed), `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`,
